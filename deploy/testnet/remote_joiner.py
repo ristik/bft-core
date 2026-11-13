@@ -519,6 +519,14 @@ class Laptop:
         time.sleep(10)
         return {'started': True, 'shard': self.services_state().get(f'shard{j}'), 'head': self.ureth_head(), 'seeded': seeded}
 
+    def op_stop_validator(self):
+        """After the entity left the committee: its shard node, root and execution client stop, then its signing authority (its key is not needed any
+        more: the delegation ended with the retirement). Volumes stay: the wallet holds the withdrawal key for the claim. Never `compose down`."""
+        j = self.entity
+        for service in (f'shard{j}', f'root{j}', f'ureth{j}', f'authority{j}'):
+            self.dc('stop', service)
+        return {'stopped': self.services_state()}
+
     def op_restore_finish(self):
         j = self.entity
         (self.home / 'compose.restore.json').unlink(missing_ok=True)
@@ -579,9 +587,34 @@ class Laptop:
             self.save()
         return out
 
+    CUSTODY_CALLS = {'requestRetirement(uint64)': 'owner', 'mature(uint256[])': 'owner', 'claim(uint256,address)': 'withdrawal'}
+
+    def op_custody_tx(self, signature, args):
+        """A custody call signed HERE with this entity's owner or withdrawal key (cast in the node image, keys from the wallet volume, never printed): only
+        requestRetirement, mature and claim, only to the deployment's custody. Sent to every host execution client (their pools do not gossip)."""
+        if signature not in self.CUSTODY_CALLS:
+            raise Failure(f'{signature}: not a custody call this agent signs')
+        if not all(re.fullmatch(r'[0-9]+|0x[0-9a-fA-F]{40}|\[[0-9, ]*\]', str(a)) for a in args):
+            raise Failure('bad arguments')
+        custody = json.loads(self.vol_read('network', 'pos-deployment.json'))['custody']
+        signer = self.CUSTODY_CALLS[signature]
+        chain = json.loads(self.vol_read('network', 'genesis.json'))['config']['chainId']
+        urls = ' '.join(f'http://ureth{i}:8545' for i in remote_entity.GENESIS_ENTITIES)
+        quoted = ' '.join(shlex.quote(str(a)) for a in args)
+        script = (f'set -e; export ETH_PRIVATE_KEY="$(cat /wallet/{signer}.key)"; '
+                  f'raw=$(/tools/cast mktx --legacy --rpc-url http://ureth1:8545 --chain {chain} {custody} {shlex.quote(signature)} {quoted}); unset ETH_PRIVATE_KEY; '
+                  f'for u in {urls}; do /tools/cast publish --rpc-url $u "$raw" >/dev/null 2>&1 || true; done; '
+                  f'h=$(/tools/cast keccak "$raw"); echo "tx $h"; /tools/cast receipt --rpc-url http://ureth1:8545 --confirmations 1 "$h" status blockNumber')
+        done = self.one(self.node_image, ['-c', script], [f'{self.vol("wallet")}:/wallet:ro', f'{self.vol("tools")}:/tools:ro', f'{self.vol("network")}:/network:ro'],
+                        network=self.network(), entrypoint='sh', check=False)
+        out = (done.stdout + done.stderr).strip()
+        if done.returncode:
+            raise Failure(f'{signature}: exit {done.returncode}: {out[-400:]}')
+        return {'out': out[-400:], 'signer': signer, 'address': self.state['accounts'][signer]}
+
     OPS = {'status': 'op_status', 'root-post': 'op_root_post', 'logs': 'op_logs', 'put-network': 'op_put_network', 'trust-base-sign': 'op_trust_base_sign',
            'evm-pop': 'op_evm_pop', 'sign-pop': 'op_sign_pop', 'readiness': 'op_readiness', 'install-root': 'op_install_root', 'root-recover': 'op_root_recover',
-           'authority-status': 'op_authority_status', 'authority-step': 'op_authority_step', 'restore-start': 'op_restore_start', 'seed-archive': 'op_seed_archive', 'restore-finish': 'op_restore_finish', 'start-authority': 'op_start_authority', 'tx': 'op_tx'}
+           'authority-status': 'op_authority_status', 'authority-step': 'op_authority_step', 'restore-start': 'op_restore_start', 'seed-archive': 'op_seed_archive', 'restore-finish': 'op_restore_finish', 'start-authority': 'op_start_authority', 'tx': 'op_tx', 'custody-tx': 'op_custody_tx', 'stop-validator': 'op_stop_validator'}
     READS = frozenset(('status', 'root-post', 'logs', 'authority-status'))
 
     def dispatch(self, name, args):
@@ -684,6 +717,8 @@ def init(host, generation, home, mac_host, allow_dirty=False):
         lap.one(lap.rpc_image, ['-', 'identity', '/wallet', '/root/keys.json', f'/wallet/{out}', root_id, evm_id, *extra],
                 [f'{lap.vol("wallet")}:/wallet', f'{lap.vol("root")}:/root:ro'], entrypoint='python3', input=keys_py)
     lap.vol_write('tools', 'tunnel_relay.py', (HERE / 'tunnel_relay.py').read_bytes(), 0o644)
+    if not have('tools', 'cast'):   # Foundry's cast from the host (a public tool, no key): the custody calls (retirement, mature, claim) sign here with it
+        lap.vol_write('tools', 'cast', ssh(host, 'cat "$(command -v cast || echo $HOME/.foundry/bin/cast)"', text=False).stdout, 0o755)
     token_file = home / 'agent.token'
     if not token_file.is_file():
         fd = os.open(token_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -838,7 +873,7 @@ def join(lap, dry_run=False, stop_after=None, allow_dirty=False, funder=None, ac
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument('action', choices=('init', 'start', 'status', 'join', 'catch-up', 'agent', 'tunnel', 'background-stop', 'retire-plan'))
+    p.add_argument('action', choices=('init', 'start', 'status', 'join', 'catch-up', 'retire', 'agent', 'tunnel', 'background-stop', 'retire-plan'))
     p.add_argument('--home', help='this entity\'s directory on the laptop (default ~/unicity-joiner/<generation>)')
     p.add_argument('--host')
     p.add_argument('--generation')
@@ -871,6 +906,8 @@ def main(argv=None):
                 print(f'{name}: ' + (f'pid {pid.read_text().strip()}' if pid.is_file() else 'not started'))
         elif a.action == 'join':
             return join(lap, a.dry_run, a.stop_after, a.allow_dirty, a.funder)
+        elif a.action == 'retire':   # requestRetirement (owner key, here), the handoff that leaves it out, the clean stop
+            return join(lap, allow_dirty=a.allow_dirty, action='retire', funder=a.funder)
         elif a.action == 'catch-up':   # the follower to the current epoch (root install restart, shard restore): no chain transaction, the timer keeps driving
             return join(lap, allow_dirty=a.allow_dirty, action='catch-up')
         elif a.action == 'agent':

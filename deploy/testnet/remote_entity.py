@@ -55,7 +55,7 @@ PORTS = {
     'agent': 28700,         # Mac 127.0.0.1:28700 (remote_joiner.py agent)               <-ssh -R- <sock-dir>/agent.sock
 }
 GENESIS_ENTITIES = (1, 2, 3, 4)
-STATES = ('follower', 'registered', 'bonded', 'prepared', 'member', 'retiring')   # follower: known to the host, keeping up, not joining (the timer does not stand down)
+STATES = ('follower', 'registered', 'bonded', 'prepared', 'member', 'retiring', 'retired')   # follower: known to the host, keeping up, not joining (the timer does not stand down)
 BOND_UNIT = 100 * 10 ** 18
 GAS = 2 * 10 ** 18
 NAME = re.compile(r'^handoff/[A-Za-z0-9][A-Za-z0-9._-]*$')
@@ -266,6 +266,9 @@ class RemoteEntity:
 
     def restore_finish(self):
         return self.client.op('restore-finish', timeout=300)
+
+    def custody_tx(self, signature, *args):
+        return self.client.op('custody-tx', timeout=300, signature=signature, args=[str(a) for a in args])
 
     def root_recover(self, epoch):
         """An interrupted install of `epoch` (issue #1028: the restart's recovery runs before the record fetcher exists and crash-loops): the root's store
@@ -548,6 +551,41 @@ class Join:
         say(f'DONE: entity {self.entity} (the laptop) is a member')
         return 0
 
+    def retire(self):
+        """The laptop entity leaves: its owner (on the laptop) requests the retirement, the next result that elects the committee without it is driven
+        (--allow-unrehearsed-retirement; a result still naming it, reserved before the request, is driven as a no-change first), then its validator
+        services stop cleanly (volumes and keys kept: the withdrawal key claims the bond once mature). The timer stands down while 'retiring'."""
+        d, r = self.d, self.r
+        ident = int(r.info['stakingId'])
+        if r.state == 'member':
+            out = r.custody_tx('requestRetirement(uint64)', ident)
+            say(f'requestRetirement({ident}) by the owner {out.get("address")}: {out.get("out", "")[-200:]}')
+            self.save(state='retiring', retirementRequestedAt=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))
+        elif r.state != 'retiring':
+            raise RuntimeError(f'entity {self.entity} is {r.state}, not a member or retiring')
+        started = time.monotonic()
+        while True:
+            unfinished = self.hd.Journal(self.gen / 'handoff' / 'log.jsonl').last_drive()
+            result = unfinished[0] if unfinished else d.wait('the election reserves a result', lambda: d.open_result(), 1200)
+            members = self.members_of(result)
+            say(f'result {result} elects {members}' + (' (an unfinished drive, resumed)' if unfinished else ''))
+            if ident in members:
+                say('it still names the retiring laptop (reserved before the request): driven as a no-change, the next one excludes it')
+                rc = self.drive(None if unfinished else result)
+                if rc != 0:
+                    raise RuntimeError(f'the drive stopped (exit {rc}): rerun the same command')
+                continue
+            rc = self.drive(None if unfinished else result, '--allow-unrehearsed-retirement')
+            if rc != 0:
+                raise RuntimeError(f'the retirement drive stopped (exit {rc}): rerun the same command (it resumes)')
+            break
+        self.save(state='retired', retiredAt=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))
+        say(f'entity {self.entity} left the committee in {time.monotonic() - started:.0f} s; stopping its validator services (keys and volumes kept)')
+        say(f'  {r.client.op("stop-validator", timeout=300)}')
+        say('next: custody.mature([lot]) once the holds pass (holdRetirement 2000 rounds, timeFloor 3600 s, evidence holds), then claim(amount, to) by the '
+            'withdrawal key: `remote_entity.py claim` (not run automatically)')
+        return 0
+
     def catch_up(self):
         """Bring the laptop entity to the CURRENT epoch without joining (it stays a follower, nothing is registered on chain): its root install-restarted to
         the epoch, its shard node restored at it (archive seeded from a host survivor first). A later join then only replays the blocks since."""
@@ -629,7 +667,7 @@ def retire_plan(generation, entity):
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest='action', required=True)
-    for name in ('relay-up', 'relay-status', 'register', 'status', 'join', 'catch-up', 'retire-plan', 'archive-tar'):
+    for name in ('relay-up', 'relay-status', 'register', 'status', 'join', 'catch-up', 'retire', 'retire-plan', 'archive-tar'):
         s = sub.add_parser(name)
         s.add_argument('generation', type=Path)
         if name not in ('relay-status', 'archive-tar'):
@@ -641,7 +679,7 @@ def main(argv=None):
         if name == 'relay-up':
             s.add_argument('--script', type=Path, default=Path(__file__).resolve().parent / 'tunnel_relay.py')
             s.add_argument('--uid', type=int, default=int(os.environ.get('SUDO_UID', os.getuid())))
-        if name in ('join', 'catch-up'):
+        if name in ('join', 'catch-up', 'retire'):
             s.add_argument('--ubft', type=Path, required=True)
             s.add_argument('--restore-pin', type=Path, required=True)
             s.add_argument('--cast', default='cast')
@@ -668,7 +706,7 @@ def main(argv=None):
         archive_tar(a.generation, a.source)
     elif a.action == 'retire-plan':
         print('\n'.join(retire_plan(a.generation, a.entity)))
-    elif a.action in ('join', 'catch-up'):
+    elif a.action in ('join', 'catch-up', 'retire'):
         if os.geteuid() != 0:
             p.error('run as root (the generation directory is uid 10001, mode 0700)')
         here = Path(__file__).resolve().parent
@@ -681,7 +719,7 @@ def main(argv=None):
             return 3
         try:
             j = Join(a.generation, a.entity, a.ubft, a.restore_pin, a.cast, a.dry_run, stop_after=a.stop_after, funder=a.funder, busy_wait=a.busy_wait)
-            return j.catch_up() if a.action == 'catch-up' else j.run()
+            return {'catch-up': j.catch_up, 'retire': j.retire}.get(a.action, j.run)()
         except Exception as error:
             say(f'STOPPED: {error}')
             return 1
