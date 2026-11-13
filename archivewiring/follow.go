@@ -37,6 +37,10 @@ type HeadFollower struct {
 	// Accepted reports whether the node durably holds a certificate at or past the given one (Node.Holds). An offered head that is not
 	// accepted (its admission failed, say, on a transient missing dependency) is offered again after Retry; nil never re-offers.
 	Accepted func(*types.UnicityCertificate) bool
+	// NeedsBootstrap reports whether the node's journal still lacks its bootstrap certificate (a fresh journal must begin with it). While it
+	// does, the follower first offers the bootstrap certificate taken from its sources' first certified record, instead of asking a root
+	// quorum for it (#1050). Nil: the journal is never fresh here.
+	NeedsBootstrap func() bool
 	// Retry is the wait before re-offering an unaccepted head; zero is five seconds.
 	Retry time.Duration
 	// Interval is the pause between polls; zero is 500 ms.
@@ -97,6 +101,9 @@ func (f *HeadFollower) Run(ctx context.Context) error {
 // Poll asks every source once and offers the newest verified certificate that is newer than the last one offered. It reports whether
 // one was offered.
 func (f *HeadFollower) Poll(ctx context.Context) bool {
+	if f.NeedsBootstrap != nil && f.NeedsBootstrap() {
+		return f.bootstrap(ctx)
+	}
 	var best *types.UnicityCertificate
 	var bestTR *certification.TechnicalRecord
 	for _, id := range f.Sources() {
@@ -121,7 +128,54 @@ func (f *HeadFollower) Poll(ctx context.Context) bool {
 		return false
 	}
 	f.offered, f.offeredAt = best, f.clock()
+	if f.Log != nil {
+		f.Log.InfoContext(ctx, "archive head offered", "rootEpoch", best.GetRootEpoch(), "rootRound", best.GetRootRoundNumber(), "round", best.GetRoundNumber())
+	}
 	return true
+}
+
+// maxBootstrapRound bounds the search for the first certified record (its first block is certified in one of the first rounds).
+const maxBootstrapRound = 16
+
+// bootstrap offers the shard's bootstrap certificate: the authorizing certificate of block 1, taken from a source's first certified
+// record and verified with it (CertifiedBinding authenticates both certificates against the node's verified history and binds the block
+// to them). The journal then admits it only as the configured bootstrap certificate: a fresh journal refuses anything else. It reports
+// whether one was offered.
+func (f *HeadFollower) bootstrap(ctx context.Context) bool {
+	for _, id := range f.Sources() {
+		for round := uint64(1); round <= maxBootstrapRound; round++ {
+			q, rec, err := FetchLatest(ctx, f.Host, id, archive.RoundRequest{Context: f.Binding.Subject, Round: round}, f.Limits)
+			if err != nil {
+				continue
+			}
+			original, originalTR, result, _, err := decodeRestorePairs(rec)
+			if err != nil {
+				break
+			}
+			var header gethtypes.Header
+			if rlp.DecodeBytes(rec.Header, &header) != nil || header.Number == nil || header.Number.Uint64() != 1 {
+				break // the source's first record is not the first block: it holds no bootstrap evidence for this node
+			}
+			r := frontier.Record{Height: 1, Epoch: result.GetRootEpoch(), Round: result.GetRootRoundNumber(), StateRoot: [32]byte(header.Root), Subject: q}
+			if err := f.Binding.VerifyCertified(r, rec); err != nil {
+				if f.Log != nil {
+					f.Log.WarnContext(ctx, "follow source bootstrap record not verified", "source", id.String(), "error", err)
+				}
+				break
+			}
+			if f.Offer(original, originalTR) {
+				if f.Log != nil {
+					f.Log.InfoContext(ctx, "bootstrap certificate offered from a follow source", "source", id.String(), "rootRound", original.GetRootRoundNumber())
+				}
+				return true
+			}
+			return false
+		}
+	}
+	if f.Log != nil {
+		f.Log.WarnContext(ctx, "no follow source served a verified first record: the journal still lacks its bootstrap certificate")
+	}
+	return false
 }
 
 // head is one source's newest certified record, verified.
