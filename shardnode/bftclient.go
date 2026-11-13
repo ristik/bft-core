@@ -220,6 +220,10 @@ type BFTClient struct {
 	// wasFollower is Run's memory of the last role it saw: a promotion handshakes at once (RoleChanged, else the next heartbeat).
 	wasFollower bool
 	roleWake    chan struct{}
+	// heldTR is the technical record of the held certificate luc (set with it), for the UC relay.
+	heldTR *certification.TechnicalRecord
+	// relay asks active peers for a newer verified pair when the roots have given no useful progress (see SetRelay).
+	relay *ucRelayClient
 }
 
 // RoleChanged tells Run that the follower predicate may have changed (a verified activation installed or retired this node), so that a
@@ -541,6 +545,12 @@ func (c *BFTClient) Run(ctx context.Context) error {
 
 	heartbeat := time.NewTicker(c.opts.HeartbeatInterval)
 	defer heartbeat.Stop()
+	var relayC <-chan time.Time
+	if c.relay != nil {
+		relay := time.NewTicker(max(c.relay.after/4, 10*time.Millisecond))
+		defer relay.Stop()
+		relayC = relay.C
+	}
 
 	// Until the first certificate arrives, re-send the handshake early (see StartupHandshakeInterval).
 	var startupC <-chan time.Time
@@ -628,6 +638,10 @@ func (c *BFTClient) Run(ctx context.Context) error {
 			startup.Reset(startupHandshakeDelay(c.opts.StartupHandshakeInterval, c.opts.InactivityTimeout, startupAttempt))
 		case <-c.roleWake:
 			c.checkRole(ctx)
+		case now := <-relayC:
+			if c.relayDue(now) {
+				c.relayFetch(ctx, now)
+			}
 		case <-heartbeat.C:
 			c.checkRole(ctx)
 			c.reportPending(ctx)
@@ -1193,7 +1207,7 @@ func (c *BFTClient) deliverConfigured(ctx context.Context, uc *types.UnicityCert
 	if err != nil {
 		return err
 	}
-	cursor, _, err := ownConfiguredPair(uc, tr)
+	cursor, cursorTR, err := ownConfiguredPair(uc, tr)
 	if err != nil {
 		return err
 	}
@@ -1225,7 +1239,7 @@ func (c *BFTClient) deliverConfigured(ctx context.Context, uc *types.UnicityCert
 		return fmt.Errorf("%w: durable delivery regressed configured LUC", ErrAdmissionMode)
 	}
 	if class != UCDuplicate {
-		c.luc = cursor
+		c.luc, c.heldTR = cursor, cursorTR
 		c.noteAdoptedLocked(class) // a retry of a failed apply is a duplicate: it adopts nothing and counts nothing
 	}
 	sink := c.admissionSink
@@ -1429,6 +1443,8 @@ func (c *BFTClient) handleCertificationResponse(ctx context.Context, cr *certifi
 		return nil
 	}
 	c.luc = &cr.UC
+	tr := cr.Technical
+	c.heldTR = &tr
 	c.noteAdoptedLocked(class)
 	metrics := c.metrics
 	health := c.health

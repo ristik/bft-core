@@ -322,7 +322,8 @@ type shardNodeRunFlags struct {
 	JournalBytes         int64
 	ArchiveStore         string
 	ArchiveReplicas      []string
-	ArchivePublicReads   bool     // serve archive reads to non-validators under a separate budget
+	ArchivePublicReads   bool // serve archive reads to non-validators under a separate budget
+	UCRelayAfter         time.Duration
 	FollowSources        []string // non-root bootstrap peers; set, roots are refused while this node is not active
 	ArchivePrune         bool
 	TrustHistoryProfile2 bool
@@ -446,6 +447,8 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 		"maximum retained hot journal bytes with --execution-journal; pruning requires --archive-prune")
 	cmd.Flags().StringVar(&flags.ArchiveStore, "archive-store", "",
 		"local certified archive directory; requires --execution-journal. Replicas are derived from the shard's validators (the next three after this node in peer-ID order, any two sufficing) unless exactly two --archive-replica peer IDs are given")
+	cmd.Flags().DurationVar(&flags.UCRelayAfter, "uc-relay-after", time.Second,
+		"with no adopted certificate for this long, ask two active shard peers for the certificate they hold (verified like a root's response); 0 disables")
 	cmd.Flags().BoolVar(&flags.ArchivePublicReads, "archive-public-reads", false,
 		"serve archive reads (never writes) to peers that are not validators, such as root-free followers, under a separate bounded budget")
 	cmd.Flags().StringSliceVar(&flags.FollowSources, "follow-source", nil,
@@ -931,6 +934,12 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	)
 	if err != nil {
 		return fmt.Errorf("creating shard node: %w", err)
+	}
+	// the UC relay (phase 2): this node serves the pair it holds to its shard peers, and when the roots give no useful progress for
+	// --uc-relay-after it asks two active peers for theirs; a relayed pair is verified and admitted exactly like a root's response
+	peer.RegisterProtocolHandler(shardnode.UCRelayProtocol, shardnode.NewUCRelayServer(node.HeldPair, activePeers.Allowed).Handler)
+	if flags.UCRelayAfter > 0 {
+		node.SetRelay(peer, activePeers.Peers, flags.UCRelayAfter)
 	}
 	if follower.enabled {
 		// a root-free follower: while this node is not a validator of the installed assignment it takes certificates from its follow
