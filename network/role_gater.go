@@ -1,6 +1,8 @@
 package network
 
 import (
+	"errors"
+
 	"github.com/libp2p/go-libp2p/core/control"
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -11,6 +13,9 @@ import (
 // node (a joiner before its activation, a syncing replica, an external follower) uses it to keep root connections closed at the transport
 // boundary: it takes certificates and activation evidence from blocks, archives and mirrors only, never from roots. Deny is consulted on
 // every connection, so a promotion that makes the node active opens the roots without a restart. A nil Deny refuses nothing.
+// ErrGated refuses a stream to a peer the role gater denies.
+var ErrGated = errors.New("network: peer refused by the role gater")
+
 type RoleGater struct {
 	Deny func(peer.ID) bool
 }
