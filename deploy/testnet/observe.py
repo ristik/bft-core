@@ -5,14 +5,18 @@ One sample per --interval, for --duration (or --samples): every root's certified
 sidecar the handoff wrapper uses), the public gateway's /healthz and block number, the faucet guard's /healthz, every service's state, health and restart count, the
 containers' memory and the disk use of the generation's filesystem. Each sample is one line of JSONL; the summary lists every ALERT and the exit code is 1 if there is
 any (a failure is recorded as a failure). Alerts follow the README's notification rules: certified heads stopped for --stall seconds (no root's round moved), a
-service not running or unhealthy, a restart count that went up, disk above --disk-limit percent, the gateway or faucet not answering 200.
+service not running or unhealthy, a restart count that went up, disk above --disk-limit percent, the gateway or faucet not answering 200; and, to see a starving
+shard before it stalls (#1018): a container's memory above --mem-limit percent of its limit (the limit also counts the kernel cache of a growing archive), and
+the chain's block rate over the last --rate-window seconds below --rate-drop of the best such rate seen.
 
 It only reads: no key, no credential, no signing method. The faucet's budget and balance are in its /healthz body, kept as text in the sample for the operator to
 compare with the reserve; this tool does not interpret them. It measures the package where it runs, nothing about a host unless it runs on that host.
 """
 import argparse
+import collections
 import http.client
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -88,16 +92,33 @@ def collect(generation, transport, now=time.time, faucet=True):
     return sample
 
 
-class Watch:
-    """The state the alerts compare a sample with: the best round seen and when it last moved, and the restart counts."""
+UNITS = {'B': 1, 'KiB': 1 << 10, 'MiB': 1 << 20, 'GiB': 1 << 30, 'TiB': 1 << 40, 'kB': 10 ** 3, 'KB': 10 ** 3, 'MB': 10 ** 6, 'GB': 10 ** 9, 'TB': 10 ** 12}
 
-    def __init__(self, stall=120, disk_limit=80):
-        self.stall, self.disk_limit = stall, disk_limit
+
+def memory_use(text):
+    """(used, limit) in bytes from a `docker stats` MemUsage such as '1.5GiB / 2GiB', or None if it does not read as one."""
+    sizes = []
+    for part in text.split('/'):
+        m = re.fullmatch(r'\s*([0-9]+(?:\.[0-9]+)?)\s*([A-Za-z]+)\s*', part)
+        if not m or m.group(2) not in UNITS:
+            return None
+        sizes.append(float(m.group(1)) * UNITS[m.group(2)])
+    return tuple(sizes) if len(sizes) == 2 else None
+
+
+class Watch:
+    """The state the alerts compare a sample with: the best round seen and when it last moved, the restart counts, and the gateway's blocks over the
+    last rate window with the best block rate seen."""
+
+    def __init__(self, stall=120, disk_limit=80, mem_limit=90, rate_window=3600, rate_drop=0.5):
+        self.stall, self.disk_limit, self.mem_limit, self.rate_window, self.rate_drop = stall, disk_limit, mem_limit, rate_window, rate_drop
         self.best = None
         self.moved_at = None
         self.best_block = None
         self.block_moved_at = None
         self.restarts = {}
+        self.blocks = collections.deque()   # (at, block), from the newest sample at least rate_window old
+        self.best_rate = None
 
     def step(self, sample, at):
         """The alerts this sample raises. `at` is the sample's time in seconds (any monotonic origin)."""
@@ -122,6 +143,22 @@ class Watch:
             self.block_moved_at = at
         if at - self.block_moved_at >= self.stall:
             alerts.append(f'the execution chain stopped: no block past {self.best_block} for {int(at - self.block_moved_at)} s')
+        # a falling block rate comes hours before a stall (#1018: 2800/h fell to 350/h over four hours of a starving shard)
+        if block is not None:
+            self.blocks.append((at, block))
+            while len(self.blocks) > 1 and self.blocks[1][0] <= at - self.rate_window:
+                self.blocks.popleft()
+            since, first = self.blocks[0]
+            if at - since >= self.rate_window:
+                rate = (block - first) * 3600 / (at - since)
+                if self.best_rate is None or rate > self.best_rate:
+                    self.best_rate = rate
+                elif self.best_rate > 0 and rate < self.rate_drop * self.best_rate:
+                    alerts.append(f'the block rate fell to {rate:.0f}/h over the last {int(at - since)} s, below {self.rate_drop:.0%} of the best {self.best_rate:.0f}/h')
+        for name, usage in sorted(sample.get('memory', {}).items()):
+            use = memory_use(usage)
+            if use and use[1] > 0 and 100 * use[0] / use[1] > self.mem_limit:
+                alerts.append(f'{name} memory {usage.strip()} is above {self.mem_limit:g}% of its limit')
         for name in sample.get('missing', []):
             alerts.append(f'{name} has no container')
         for name, s in sorted(sample['services'].items()):
@@ -153,11 +190,14 @@ def main():
     g.add_argument('--samples', type=int)
     p.add_argument('--stall', type=float, default=120, help='seconds without any root moving before the heads count as stopped')
     p.add_argument('--disk-limit', type=float, default=80)
+    p.add_argument('--mem-limit', type=float, default=90, help='percent of a container\'s memory limit above which its use is an alert (default 90)')
+    p.add_argument('--rate-window', type=float, default=3600, help='seconds over which the block rate is measured (default 3600)')
+    p.add_argument('--rate-drop', type=float, default=0.5, help='a block rate below this fraction of the best rate seen is an alert (default 0.5)')
     p.add_argument('--no-faucet', action='store_true', help='do not sample the faucet guard (its /healthz needs the signer, which a rehearsal does not start)')
     a = p.parse_args()
     a.out.mkdir(parents=True, exist_ok=True)
     transport = handoff_ops.DockerTransport(a.generation)
-    watch, alerts, start, n = Watch(a.stall, a.disk_limit), [], time.monotonic(), 0
+    watch, alerts, start, n = Watch(a.stall, a.disk_limit, a.mem_limit, a.rate_window, a.rate_drop), [], time.monotonic(), 0
     with (a.out / 'samples.jsonl').open('a') as out:
         while True:
             at = time.monotonic() - start

@@ -1924,6 +1924,25 @@ class Observe(unittest.TestCase):
     def test_the_faucet_can_be_left_out(self):
         s=self.sample([1]);del s['faucet']
         self.assertEqual(observe.Watch().step(s,0),[])
+    def test_a_container_near_its_memory_limit_is_an_alert(self):
+        self.assertEqual(observe.memory_use('1.5GiB / 2GiB'),(1.5*2**30,2*2**30))
+        self.assertEqual(observe.memory_use('511.6MiB / 512MiB'),(511.6*2**20,512*2**20))
+        self.assertIsNone(observe.memory_use('--'),'a stopped container has no usage')
+        mem={'p-shard1-1':'1.9GiB / 2GiB','p-root1-1':'100MiB / 384MiB','p-pod1-1':'--'}
+        alerts=observe.Watch().step(self.sample([1],memory=mem),0)
+        self.assertEqual([a for a in alerts if 'memory' in a],['p-shard1-1 memory 1.9GiB / 2GiB is above 90% of its limit'])
+        self.assertEqual(observe.Watch(mem_limit=96).step(self.sample([1],memory=mem),0),[])
+    def test_a_falling_block_rate_is_an_alert_before_the_chain_stops(self):
+        w=observe.Watch(stall=120,rate_window=3600,rate_drop=0.5)
+        # 2800 blocks/h for two hours, then 1000/h: the chain never stops, the rate falls
+        at,block,alerts=0,0,[]
+        for minute in range(4*60):
+            block+=(2800 if minute<120 else 1000)/60
+            alerts+=[a for a in w.step(self.sample([minute+1]*4,gateway={'healthz':200,'block':int(block)}),at) if 'block rate' in a]
+            if minute==150: self.assertEqual(alerts,[],'half an hour into the decline the hour-long rate is still above half')
+            at+=60
+        self.assertTrue(alerts and 'fell to 10' in alerts[-1] and 'best 28' in alerts[-1],alerts[-1:])
+        self.assertFalse(any('execution chain stopped' in a for a in alerts))
 
 class PosSample(unittest.TestCase):
     def pos(self,**kw):
