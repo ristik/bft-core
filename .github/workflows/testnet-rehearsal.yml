@@ -5,10 +5,10 @@ name: testnet-rehearsal
 on:
   pull_request:
     # Opt-in: it takes over an hour, so it runs only on a PR labelled `rehearse` (add the label to start it; later pushes rerun it while the label stays).
-    # Use it when a PR changes what it runs: generate.py, compose/images, pins.json, rehearse.py, or the node code it boots. Tooling with unit tests
-    # (handoff_drive, remote_joiner, ...) is covered by testnet-package. A change to the package's paths alone no longer starts it.
-    types: [labeled, synchronize, reopened]
-    paths: ['deploy/testnet/**', '.github/workflows/testnet-rehearsal.yml']
+    # Use it when a PR changes what it runs: generate.py, compose/images, pins.json, rehearse.py, or the node code it boots (no paths filter, so any PR can
+    # opt in). Tooling with unit tests (handoff_drive, remote_joiner, ...) is covered by testnet-package. Removing the label does not stop a run in progress:
+    # cancel it by hand. Adding an unrelated label neither starts nor cancels a run (the job-level concurrency group is only taken by a run that rehearses).
+    types: [opened, labeled, synchronize, reopened]
   workflow_dispatch:
     inputs:
       stages:
@@ -33,13 +33,13 @@ on:
         default: '24,16'
 permissions:
   contents: read
-concurrency:
-  group: testnet-rehearsal-${{ github.ref }}
-  # a newer push supersedes the run in progress on the same PR
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   rehearse:
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'rehearse')
+    if: github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'rehearse') && (github.event.action != 'labeled' || github.event.label.name == 'rehearse'))
+    concurrency:
+      # job level: a run whose job is skipped never takes the group, so it cannot cancel a rehearsal; a newer push supersedes the PR run in progress
+      group: testnet-rehearsal-${{ github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     # ubuntu-22.04 (glibc 2.35), not -latest (2.39): a binary needs a glibc no newer than the runtime image's (bookworm, 2.36). The first run built on 2.39 and
     # build-images.py's own --help check in the runtime image refused it, as the package README says (build on Debian 12 or older).
     runs-on: ubuntu-22.04
