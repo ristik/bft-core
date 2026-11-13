@@ -289,8 +289,13 @@ class Drive(rehearse.Rehearsal):
         return out
 
     def pending_remote(self):
-        """Remote entities prepared for a join (their delegation admitted, their authority at the successor scope) but not yet members."""
-        return {i for i, r in self.remote.items() if r.state in ('preparing', 'prepared')}   # preparing: its authority may already run at the successor scope
+        """Remote entities prepared for a join (their delegation admitted, their authority at the successor scope) but not yet members, read from the
+        registry NOW (a join's prepare may have changed it since this drive started). A record that cannot be read refuses the drive (fail closed)."""
+        try:
+            states = remote_entity.fresh_states(self.gen)
+        except remote_entity.RegistryError as error:
+            raise Refused(f'the remote joiners\' registry cannot be read: {error}; a result that leaves a prepared joiner out cannot be ruled out') from None
+        return {i for i, state in states.items() if state in ('preparing', 'prepared')}   # preparing: its authority may already run at the successor scope
 
     def root_info(self, i):
         status, body = self.transport.post(i, '/api/v1/q3/signers', b'{}')

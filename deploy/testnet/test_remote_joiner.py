@@ -277,6 +277,8 @@ class DriveGuard(unittest.TestCase):
         d.joiner_map = {'5': 5}
         d.election = '0xelection'
         d.net = Path(tempfile.mkdtemp())
+        d.gen = d.net
+        write_record(d.gen, 5, state)   # the guard reads the registry, not the drive's copy
         (d.net / 'pos-plan.json').write_text(json.dumps({'identities': [{'stakingId': k} for k in range(1, 5)]}))
         d.running = lambda: {f'root{i}' for i in range(1, 6)}
         d.root_info = lambda i: {'epoch': 3 if i < 5 else 1}
@@ -734,19 +736,46 @@ class RegistryWrites(unittest.TestCase):
 
 
 class JoinExclusion(unittest.TestCase):
-    """astra #1029 finding 2: a joiner whose authority may run at the successor scope blocks every result that leaves it out."""
+    """astra #1029 finding 2: a joiner whose authority may run at the successor scope blocks every result that leaves it out. The drive's guard reads
+    the registry now, not the copy it loaded at its start, and refuses when a record cannot be read."""
 
-    def test_preparing_and_prepared_are_pending(self):
+    def drive(self, gen, cached):
         d = hd.Drive.__new__(hd.Drive)
 
         class R:
             def __init__(self, state):
                 self.state = state
-        d.remote = {5: R('preparing'), 6: R('prepared'), 7: R('bonded'), 8: R('member'), 9: R('follower')}
-        self.assertEqual(d.pending_remote(), {5, 6})
+        d.gen, d.remote = gen, {i: R(state) for i, state in cached.items()}
+        return d
+
+    def test_preparing_and_prepared_are_pending(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gen = Path(tmp)
+            for i, state in {5: 'preparing', 6: 'prepared', 7: 'bonded', 8: 'member', 9: 'follower'}.items():
+                write_record(gen, i, state)
+            self.assertEqual(self.drive(gen, {}).pending_remote(), {5, 6})
         import handoff_auto
         self.assertIn('preparing', handoff_auto.JOINING, 'the timer stands down too')
         self.assertIn('preparing', re_.STATES)
+
+    def test_the_guard_reads_fresh_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gen = Path(tmp)
+            write_record(gen, 5, 'bonded')
+            d = self.drive(gen, {5: 'bonded'})
+            write_record(gen, 5, 'prepared')   # a join prepared after this drive loaded the registry
+            write_record(gen, 6, 'preparing')  # and one registered after it
+            self.assertEqual(d.pending_remote(), {5, 6})
+
+    def test_an_unreadable_record_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gen = Path(tmp)
+            write_record(gen, 5, 'bonded')
+            d = self.drive(gen, {5: 'bonded'})
+            for bad in ('', '{"entity": 5', json.dumps({'entity': 6, 'state': 'bonded'}), json.dumps({'entity': 5, 'state': 'weird'})):
+                (re_.info_dir(gen) / '5.json').write_text(bad)
+                with self.assertRaises(hd.Refused, msg=repr(bad)):
+                    d.pending_remote()
 
 
 
