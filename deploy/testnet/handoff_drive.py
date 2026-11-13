@@ -291,7 +291,7 @@ class Drive(rehearse.Rehearsal):
 
     def pending_remote(self):
         """Remote entities prepared for a join (their delegation admitted, their authority at the successor scope) but not yet members."""
-        return {i for i, r in self.remote.items() if r.state == 'prepared'}
+        return {i for i, r in self.remote.items() if r.state in ('preparing', 'prepared')}   # preparing: its authority may already run at the successor scope
 
     def root_info(self, i):
         status, body = self.transport.post(i, '/api/v1/q3/signers', b'{}')
@@ -473,7 +473,9 @@ class Drive(rehearse.Rehearsal):
         self.exec_in('root1', 'ubft', 'root', 'handoff', 'evm-context', '--root-rpc', self.root_rpc, '--out', '/tmp/context.json')
         context = work / f'{tag}-context.json'
         context.write_text(self.exec_in('root1', 'cat', '/tmp/context.json'))
-        ids = {i: (self.root_node_id(i), self.evm_node_id(i)) for i in self.new}
+        # the relayer resolves the incumbent committee's node ids too (a retiring member is in K but not elected): every entity of old and new is named,
+        # the possession proofs below are made by the elected ones only
+        ids = {i: (self.root_node_id(i), self.evm_node_id(i)) for i in sorted(set(self.old) | set(self.new))}
         subprocess.run(['chown', '-R', '10001:10001', str(work)], check=True)
         args = ['pos-relayer', 'proposal', *(['--reserved'] if reserved else []), '--eth-rpc', 'http://ureth1:8545', '--pos-deployment', '/deployment.json',
                 '--context', f'/work/{tag}-context.json', '--result-id', result, '--node-ids', ','.join(f'{r},{e}' for r, e in ids.values()),
@@ -484,7 +486,7 @@ class Drive(rehearse.Rehearsal):
         self.expect(run.returncode == 0, f'{tag}: pos-relayer proposal', run.stderr.strip()[-500:])
         proposal = work / f'{tag}-proposal'
         pops = []
-        for i, (_, evm) in ids.items():
+        for i, (_, evm) in ((i, ids[i]) for i in self.new):
             if i in self.remote:
                 (work / f'{tag}-pop-{i}.json').write_text(self.remote[i].evm_pop(context, proposal / 'validators.json', proposal / 'identities.json'))
                 pops.append(str(work / f'{tag}-pop-{i}.json'))
@@ -569,9 +571,13 @@ class Drive(rehearse.Rehearsal):
         code = {k.lower().removeprefix('0x'): v for k, v in spec.items()}[self.REGISTRY.lower().removeprefix('0x')]['code']
         code_hash = hashlib.sha256(bytes.fromhex(code.removeprefix('0x'))).hexdigest()
         receipts = []
-        for i in sorted(self.joiners & set(self.remote)):
-            self.catch_up_remote(i)
-        for i in self.new:
+        # the host entities' receipts first: each readiness stages the candidate in that entity's shard node, whose archive server then admits the
+        # joiner the candidate names (activePeers.Stage, shard_node_run.go). Only then can a remote joiner's shard node restore from those replicas
+        # (before, they refuse a non-member: run of 2026-11-13 00:35, "unavailable from both replicas"); its catch-up comes next, then its receipt
+        late = sorted(self.joiners & set(self.remote))
+        for i in [j for j in self.new if j not in late] + late:
+            if i in late:
+                self.catch_up_remote(i)
             if i in self.remote:
                 (work / f'receipt-{i}.json').write_text(self.remote[i].readiness(work / 'candidate.cbor', genesis, code_hash))
                 receipts.append(str(work / f'receipt-{i}.json'))
@@ -583,7 +589,7 @@ class Drive(rehearse.Rehearsal):
             receipts.append(str(work / f'receipt-{i}.json'))
         return receipts
 
-    def catch_up_remote(self, i):
+    def catch_up_remote(self, i, root=True):
         """A remote joiner's root started at the genesis trust base and, as a non-member, receives no consensus traffic: on a network past its first handoff it
         stays at epoch 1, and its readiness is refused ("the candidate is not the next epoch of this chain"). Its install restart to the CURRENT epoch makes it
         fetch and verify every activation bundle from the incumbents (installQ3Epochs; it stays a follower), so that the candidate is its next epoch."""
@@ -591,11 +597,19 @@ class Drive(rehearse.Rehearsal):
         epoch = self.follower_epoch(i)
         if epoch is not None and epoch > current:
             raise Refused(f'the joiner\'s root {i} is at epoch {epoch}, past the epoch {current} being left')
-        if epoch != current:
+        if epoch != current and not root:
+            self.say(f'  remote joiner {i}: its root is at epoch {epoch}: left to the join drive (a follower root fetches the records an install needs only '
+                     'once a staged candidate names it, after q3-candidate)')
+        elif epoch != current:
             self.say(f'  remote joiner {i}: its root is at epoch {epoch}; install restart to epoch {current} (activation bundles from the incumbents)')
             self.remote[i].install_root(current)
             self.wait(f'the joiner\'s root {i} installed epoch {current}', lambda: self.follower_epoch(i) == current, 300)
-        if current >= 3 and self.remote[i].info.get('shardCaughtUp') != current:
+        shard_epoch = self.remote[i].status().get('shardActivatedEpoch')
+        if current >= 3 and shard_epoch == current:
+            self.say(f'  remote joiner {i}: its shard node has activated epoch {current} by itself: no restore needed')
+            self.remote[i].info['shardCaughtUp'] = current
+            self.remote[i].save()
+        elif current >= 3 and self.remote[i].info.get('shardCaughtUp') != current:
             # the shard node's own follower installs epoch 2 and then needs the terminal records of the previous EVM configuration, which a staging-only node
             # has in neither journal nor archive: its verified history stays at epoch 2 and its stage of the candidate is refused. Restored from a survivor's
             # pin of the CURRENT epoch, its history tip is that epoch (the restore after its enrollment repeats this at the new epoch).
@@ -612,6 +626,14 @@ class Drive(rehearse.Rehearsal):
                 self.follow_joiner(i, current, promoted=False)   # before the election: following the current epoch, not active
             self.remote[i].info['shardCaughtUp'] = current
             self.remote[i].save()
+        if current >= 3:
+            # a restoring node opens its operator listener only after its archive fetch and replay: the readiness needs it (also on a resumed drive)
+            def serving():
+                st = self.remote[i].status()
+                self.say(f'  remote joiner {i}: shard activated epoch {st.get("shardActivatedEpoch")}, operator RPC {"up" if st.get("shardRpc") else "not yet"}, '
+                         f'execution client {st.get("urethHead")}')
+                return st.get('shardRpc') and st.get('shardActivatedEpoch') == current
+            self.wait(f'the joiner\'s shard node {i} serves its operator RPC at epoch {current}', serving, 4 * 3600)
 
     def follower_epoch(self, i):
         """The installed epoch of a root that holds no quorum certificate (a follower: q3/signers answers 422), from q3/status."""
@@ -675,8 +697,10 @@ class Drive(rehearse.Rehearsal):
                 journal.run('install', lambda i=i: self.remote[i].install_root(self.target), sub=f'root{i}')
                 continue
             journal.run('install', lambda i=i: self.install_root(i, files, base), sub=f'root{i}')
-        for i in roots:
+        for i in sorted(self.new):
             self.wait(f'root {i} certifies at epoch {self.target}', lambda i=i: self.root_epoch(i, self.transport) == self.target, 300)
+        for i in sorted(set(roots) - set(self.new)):   # a leaver installs the epoch (it holds the commit) but certifies nothing in it: it is a follower there
+            self.wait(f'the leaving root {i} installed epoch {self.target}', lambda i=i: self.follower_epoch(i) == self.target or self.root_epoch(i, self.transport) == self.target, 300)
         self.exec_in('root1', 'ubft', 'root', 'handoff', 'q3-activation', '--root-rpc', self.root_rpc, '--epoch', str(self.target), '--out', '/tmp/activation.json')
         record = json.loads(self.exec_in('root1', 'cat', '/tmp/activation.json'))
         (self.evh() / f'activation-record-{self.target}.json').write_text(json.dumps(record, indent=1) + '\n')
@@ -853,15 +877,62 @@ class Drive(rehearse.Rehearsal):
         self.wait(f'the joiner {i} is {what} and certified at the head (no restore)', ready, 3600)
 
     def restore_remote(self, i, follow=True):
-        """rehearse.restore_joiner for an entity on another machine: the pin (the latest certified record of the new epoch, its technical record, the trust
-        history's body id) is read HERE from a survivor's archive and shipped; the laptop empties its shard node's and execution client's state, restores, catches up."""
+        """rehearse.restore_joiner for an entity on another machine. The pin (the latest certified record of the epoch, its technical record, the trust history's
+        body id) is read HERE from a survivor's archive and shipped; the laptop empties its shard node's and execution client's state and starts `shard-node restore`.
+
+        follow=False (before the joiner's readiness, catch_up_remote): return as soon as the restoring node has activated the pinned epoch (its verified history's
+        tip, which the readiness checks): the archive fetch and replay go on in the background, so a long chain cannot outlast the result's window.
+        follow=True (after the Commit): a restore already running from the pin of the epoch just left is KEPT (no second wipe and replay; option (1) of
+        briefs/laptop-join-2026-11-12.md): wait for its replay, seed the archive, run the node as an ordinary member, follow the head. Any other state gets a
+        full restore at the new epoch (the fallback)."""
         self.expect(bool(self.restore_pin), 'the joiner\'s restore needs --restore-pin (scripts/h4-restore-pin of the pinned source)')
+        remote = self.remote[i]
+        status = remote.status()
+        kept = False
         if follow:
-            status = self.remote[i].status()
             head, chain = status.get('urethHead'), int(self.ureth(1, 'eth_blockNumber'), 16)
             if not status.get('restoring') and status.get('services', {}).get(f'shard{i}') == 'running' and head and head + 5 >= chain:
                 self.say(f'  remote entity {i}: its shard node already runs at the head ({head} of {chain}): restored earlier')   # a resumed drive does not wipe it
                 return
+            # a restore still running is kept (no second wipe) when it is the pin of the epoch left, or when it already follows the head (as a member it
+            # receives certificates, so a restore started after the Commit replays to the head and keeps up: b-generation join, 2026-11-13 04:12)
+            kept = bool(status.get('restoring')) and (remote.info.get('shardCaughtUp') == self.target - 1 or (head is not None and head + 5 >= chain))
+        if kept:
+            self.say(f'  remote entity {i}: its restore from the epoch-{self.target - 1} pin is kept (no wipe): waiting for its replay, then it runs as a member')
+        else:
+            self.start_remote_restore(i)
+        if not follow:
+            def activated():
+                st = remote.status()
+                self.say(f'  remote entity {i}: shard {st.get("services", {}).get(f"shard{i}")}, activated epoch {st.get("shardActivatedEpoch")} '
+                         f'(want {self.target}), execution client {st.get("urethHead")}')
+                return st.get('services', {}).get(f'shard{i}') == 'running' and st.get('shardActivatedEpoch') == self.target and st.get('shardRpc')
+            # the restoring node activates the pinned epoch at once, but opens its operator listener (which the readiness stages the candidate on) only
+            # once its archive fetch and replay are done: ~N/7.5 s + N/replay-rate for N blocks through the tunnel (2026-11-13). The result's window bounds it
+            self.wait(f'the laptop\'s restoring shard node {i} activated epoch {self.target} and serves its operator RPC', activated, 4 * 3600)
+            return
+        seen = []
+        def replayed():
+            head = remote.status().get('urethHead')
+            seen.append(head)
+            chain = int(self.ureth(1, 'eth_blockNumber'), 16)
+            self.say(f'  remote entity {i}: execution client at {head} of {chain} (restoring)')
+            # done when it stands still at its pin (a non-member) or when it has reached the head and follows it (a member gets certificates)
+            return head and ((len(seen) >= 10 and len(set(seen[-10:])) == 1) or head + 5 >= chain)
+        self.wait(f'the laptop\'s execution client {i} replays to the pin', replayed, 4 * 3600)
+        # restore mode stops at the pin (it asks its archive for nothing later): it then runs as an ordinary node, which walks its seeded archive and
+        # follows the certificates it now receives as a member
+        remote.seed_archive()
+        finished = remote.restore_finish()
+        self.expect(finished.get('running') is True, f'the laptop\'s shard node {i} runs as an ordinary node', str(finished)[:300])
+        def caught_up():
+            head = remote.status().get('urethHead')
+            target = int(self.ureth(1, 'eth_blockNumber'), 16)
+            self.say(f'  remote entity {i}: execution client at {head}, validator 1 at {target}')
+            return head is not None and head + 5 >= target
+        self.wait(f'the laptop\'s execution client {i} catches up with validator 1', caught_up, 3600)
+
+    def start_remote_restore(self, i):
         bodies = self.restore_body_ids()
         self.expect(bool(bodies), 'an activation record names the V3 body id the restore is anchored to')
         env = dict(os.environ, H4_RESTORE_BODY_IDS=bodies)
@@ -885,29 +956,6 @@ class Drive(rehearse.Rehearsal):
             self.say(f'  remote entity {i}: restore started: {started}')
         finally:
             shutil.rmtree(out, ignore_errors=True)
-        seen = []
-        def replayed():
-            head = self.remote[i].status().get('urethHead')
-            seen.append(head)
-            self.say(f'  remote entity {i}: execution client at {head} (replaying to the pin)')
-            return head and len(seen) >= 5 and len(set(seen[-5:])) == 1
-        if not follow:
-            # before its Commit the node is no member: it gets no certificate and never follows the head. Its replay to the pin is all it can do, and enough:
-            # the pin's record is its verified history's tip (what its readiness needs)
-            self.wait(f'the laptop\'s execution client {i} replays to the pin', replayed, 7200)
-            return
-        # restore mode stops at the pin (it asks its archive for nothing later): once replayed, it runs as an ordinary node, which walks its seeded archive
-        # and follows the certificates it now receives as a member
-        self.wait(f'the laptop\'s execution client {i} replays to the pin', replayed, 7200)
-        self.remote[i].seed_archive()   # the records certified during the replay
-        finished = self.remote[i].restore_finish()
-        self.expect(finished.get('running') is True, f'the laptop\'s shard node {i} runs as an ordinary node', str(finished)[:300])
-        def caught_up():
-            head = self.remote[i].status().get('urethHead')
-            target = int(self.ureth(1, 'eth_blockNumber'), 16)
-            self.say(f'  remote entity {i}: execution client at {head}, validator 1 at {target}')
-            return head is not None and head + 5 >= target
-        self.wait(f'the laptop\'s execution client {i} catches up with validator 1', caught_up, 3600)
 
     def step_lockproof(self, mode):
         overlay = self.gen / BRIDGE_OVERRIDE

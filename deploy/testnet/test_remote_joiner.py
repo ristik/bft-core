@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -190,7 +191,10 @@ class Registry(unittest.TestCase):
             self.assertEqual(os.stat(gen / 'handoff' / 'remote-joiners' / '5.json').st_mode & 0o777, 0o600)
             loaded = re_.load(gen)
             self.assertEqual(list(loaded), [5], 'the node-info file beside it is not an entity')
-            self.assertEqual((loaded[5].root_node_id, loaded[5].state, loaded[5].client.sock), ('R5', 'registered', '/s/agent.sock'))
+            self.assertEqual((loaded[5].root_node_id, loaded[5].state, loaded[5].client.sock), ('R5', 'follower', '/s/agent.sock'),
+                             'a registered laptop is a follower until its join starts')
+            import handoff_auto
+            self.assertNotIn('follower', handoff_auto.JOINING, 'the unattended timer keeps driving while the laptop only follows')
             with self.assertRaises(ValueError):
                 re_.register(gen, 5, '/s', dict(public, rootNodeId='OTHER', nodeInfo={'nodeId': 'OTHER'}))
             with self.assertRaises(ValueError):
@@ -461,6 +465,8 @@ class SourceCheck(unittest.TestCase):
             digest = self.deployed(d)
             self.assertIsNone(re_.source_check(d, digest, False))
             self.assertEqual(re_.tree_digest(d), digest, 'SOURCE.json itself is not part of the digest')
+            (Path(d) / '._a.py').write_bytes(b'appledouble')
+            self.assertEqual(re_.tree_digest(d), digest, 'macOS tar\'s AppleDouble ._*.py files are not part of the digest')
 
     def test_dirty_edited_mismatched_or_unrecorded_copies_are_refused_unless_allowed(self):
         with tempfile.TemporaryDirectory() as d:
@@ -529,6 +535,125 @@ class JoinAndTimer(unittest.TestCase):
                 unittest.mock.patch.object(rj.subprocess, 'run', return_value=unittest.mock.Mock(returncode=0)) as run, unittest.mock.patch.object(rj, 'say'):
             rj.join(lap, funder='/srv/tn-x/operator-secrets')
         self.assertIn('--funder /srv/tn-x/operator-secrets', run.call_args.args[0][-1])
+
+
+class RemoteRestore(unittest.TestCase):
+    """handoff_drive.restore_remote: before the readiness it returns once the pinned epoch is activated; after the Commit a restore from the left epoch's
+    pin is kept (no second wipe), anything else gets a full restore."""
+
+    def drive(self, status, caught_up=None):
+        d = hd.Drive.__new__(hd.Drive)
+        test = self
+        self.calls = []
+        states = iter(status) if isinstance(status, list) else None
+
+        class Remote:
+            info = {'shardCaughtUp': caught_up} if caught_up is not None else {}
+
+            def status(self):
+                return dict(next(states)) if states else dict(status)
+
+            def seed_archive(self):
+                test.calls.append('seed')
+
+            def restore_finish(self):
+                test.calls.append('finish')
+                return {'running': True}
+        d.remote, d.target, d.restore_pin = {5: Remote()}, 30, Path('/bin/true')
+        d.say = lambda text: None
+        d.expect = lambda ok, what, detail='': None if ok else (_ for _ in ()).throw(AssertionError(what))
+        d.ureth = lambda i, method: hex(1000)
+        d.wait = lambda what, probe, seconds: [probe() for _ in range(12)][-1] or (_ for _ in ()).throw(AssertionError(what))
+        d.start_remote_restore = lambda i: self.calls.append('restore')
+        return d
+
+    def test_before_the_readiness_it_returns_once_the_pinned_epoch_is_activated(self):
+        d = self.drive({'services': {'shard5': 'running'}, 'shardActivatedEpoch': 30, 'shardRpc': True, 'urethHead': 0, 'restoring': True})
+        d.restore_remote(5, follow=False)
+        self.assertEqual(self.calls, ['restore'], 'no replay is awaited before the readiness')
+
+    def test_after_the_commit_a_restore_from_the_left_epochs_pin_is_kept(self):
+        d = self.drive({'services': {'shard5': 'running'}, 'urethHead': 1000, 'restoring': True}, caught_up=29)
+        d.restore_remote(5)
+        self.assertEqual(self.calls, ['seed', 'finish'], 'no second wipe and restore: replay, seed, ordinary run')
+
+    def test_a_restore_that_already_follows_the_head_is_kept(self):
+        d = self.drive({'services': {'shard5': 'running'}, 'urethHead': 998, 'restoring': True})
+        d.restore_remote(5)
+        self.assertEqual(self.calls, ['seed', 'finish'], 'a member restoring after the Commit reaches the head: kept, finished, no wipe')
+
+    def test_any_other_state_gets_the_full_restore(self):
+        d = self.drive({'services': {'shard5': 'running'}, 'urethHead': 400, 'restoring': True}, caught_up=12)
+        d.ureth = lambda i, method: hex(1000)
+        calls = self.calls
+        try:
+            d.restore_remote(5)
+        except AssertionError:
+            pass   # the fake replay never reaches the head: only the decision matters here
+        self.assertEqual(calls[:1], ['restore'], 'a pin of another epoch, far behind the head, is not kept')
+        d = self.drive({'services': {'shard5': 'running'}, 'urethHead': 1000, 'restoring': False}, caught_up=29)
+        d.restore_remote(5)
+        self.assertEqual(self.calls, [], 'a node already running at the head is left alone')
+
+
+class RootRecoverGuard(unittest.TestCase):
+    """astra #1029 finding 1: a root that may have signed is never rolled back to a pre-install backup."""
+
+    def laptop(self, state, follower=True):
+        lap = rj.Laptop.__new__(rj.Laptop)
+        lap.state, lap.entity, lap.project = dict(state, rootNodeId='R5'), 5, 'p'
+        lap.calls = []
+        lap.save = lambda: None
+        lap.vol = lambda name: f'p_{name}'
+        lap.services_state = lambda: {'root5': 'running'}
+        lap.root_post = lambda path, body=b'{}': (200, json.dumps({'follower': follower}).encode())
+        lap.dc = lambda *a, **k: lap.calls.append(('dc',) + a)
+        lap.one = lambda *a, **k: lap.calls.append(('one',))
+        return lap
+
+    def recover(self, lap):
+        original = rj.run
+        rj.run = lambda cmd, check=True, **k: subprocess.CompletedProcess(cmd, 0, '', '')
+        try:
+            return lap.op_root_recover(31)
+        finally:
+            rj.run = original
+
+    def test_a_root_that_was_ever_a_member_is_refused(self):
+        lap = self.laptop({'rootEverMember': '2026-11-13T01:31:59Z', 'rootBackups': {'p_root-pre-epoch-31': {'neverMember': True}}})
+        with self.assertRaises(rj.Failure):
+            self.recover(lap)
+        self.assertEqual(lap.calls, [], 'nothing stopped or overwritten')
+
+    def test_a_backup_not_taken_as_a_follower_is_refused(self):
+        lap = self.laptop({'rootBackups': {'p_root-pre-epoch-31': {'neverMember': False}}})
+        with self.assertRaises(rj.Failure):
+            self.recover(lap)
+        lap = self.laptop({})
+        with self.assertRaises(rj.Failure):
+            self.recover(lap)
+
+    def test_a_root_reporting_membership_now_is_refused_and_remembered(self):
+        lap = self.laptop({'rootBackups': {'p_root-pre-epoch-31': {'neverMember': True}}}, follower=False)
+        with self.assertRaises(rj.Failure):
+            self.recover(lap)
+        self.assertTrue(lap.state.get('rootEverMember'))
+
+
+class JoinExclusion(unittest.TestCase):
+    """astra #1029 finding 2: a joiner whose authority may run at the successor scope blocks every result that leaves it out."""
+
+    def test_preparing_and_prepared_are_pending(self):
+        d = hd.Drive.__new__(hd.Drive)
+
+        class R:
+            def __init__(self, state):
+                self.state = state
+        d.remote = {5: R('preparing'), 6: R('prepared'), 7: R('bonded'), 8: R('member'), 9: R('follower')}
+        self.assertEqual(d.pending_remote(), {5, 6})
+        import handoff_auto
+        self.assertIn('preparing', handoff_auto.JOINING, 'the timer stands down too')
+        self.assertIn('preparing', re_.STATES)
 
 
 if __name__ == '__main__':

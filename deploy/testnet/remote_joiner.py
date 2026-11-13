@@ -58,7 +58,11 @@ VOLUMES = ('root', 'evm', 'auth', 'ureth', 'archive', 'jwt', 'network', 'wallet'
 PRIVATE = ('root', 'evm', 'auth', 'ureth', 'archive', 'jwt', 'wallet', 'work')
 ROOT_POSTS = ('/api/v1/q3/signers', '/api/v1/q3/status', '/api/v1/handoff/plan', '/api/v1/handoff/intent', '/api/v1/handoff/endorse',
               '/api/v1/handoff/evm-assignment/context')
-SUBNET = '10.231.5.0/24'   # the laptop's validators network: not one of the host's 172.x container networks (their announced addresses are not dialable here)
+def subnet(project):
+    """The laptop's validators network: 10.231.<n>.0/24 with n from the project name (two generations' joiner projects may exist side by side, one stopped),
+    never one of the host's 172.x container networks (their announced addresses are not dialable here)."""
+    import hashlib
+    return f'10.231.{16 + hashlib.sha256(project.encode()).digest()[0] % 224}.0/24'
 OPERATOR = ['--operator-socket', '/authority/operator.sock', '--operator-credential', '/authority/operator.cred']
 
 
@@ -158,7 +162,7 @@ def laptop_compose(host_compose, entity, root_id, evm_id, project, mac_host='hos
             'restart': 'unless-stopped', 'mem_limit': '64m', 'cpus': 0.2, 'pids_limit': 64, 'read_only': True, 'cap_drop': ['ALL'],
             'security_opt': ['no-new-privileges:true'], 'logging': {'driver': 'json-file', 'options': {'max-size': '10m', 'max-file': '3'}}}
     used = sorted({m.split(':')[0] for svc in services.values() for m in svc.get('volumes', [])})
-    return {'name': project, 'services': services, 'networks': {'validators': {'ipam': {'config': [{'subnet': SUBNET}]}}},
+    return {'name': project, 'services': services, 'networks': {'validators': {'ipam': {'config': [{'subnet': subnet(project)}]}}},
             'volumes': {v: {'external': True, 'name': f'{project}_{v}'} for v in used}}
 
 
@@ -175,9 +179,19 @@ def restore_entry(entry, body_id):
     return entry + ['--tip-uc', '/state/tip.uc.cbor', '--tip-tr', '/state/tip.tr.cbor', '--trust-body-id', body_id]
 
 
-def tunnel_command(host, entity, sock_dir):
+def forward_bind(mac_host):
+    """Where the tunnel's -L listeners bind: the --mac-host address when it is an IP literal (a Linux docker host: the bridge gateway, e.g. 172.17.0.1,
+    which the peer stubs dial), else loopback (colima maps host.docker.internal to the Mac's loopback)."""
+    import ipaddress
+    try:
+        return str(ipaddress.ip_address(mac_host))
+    except ValueError:
+        return '127.0.0.1'
+
+
+def tunnel_command(host, entity, sock_dir, mac_host='host.docker.internal'):
     return ['ssh', '-N', '-o', 'ExitOnForwardFailure=yes', '-o', 'ServerAliveInterval=10', '-o', 'ServerAliveCountMax=3', '-o', 'ConnectTimeout=15',
-            '-o', 'BatchMode=yes', *remote_entity.ssh_forwards(entity, sock_dir), host]
+            '-o', 'BatchMode=yes', *remote_entity.ssh_forwards(entity, sock_dir, bind=forward_bind(mac_host)), host]
 
 
 class Laptop:
@@ -295,6 +309,41 @@ class Laptop:
         done = self.one(self.rpc_image, ['-c', code], network=self.network(), entrypoint='python3', check=False)
         return int(done.stdout.strip()) if done.returncode == 0 and done.stdout.strip().isdigit() else None
 
+    def shard_rpc_up(self):
+        """Whether the shard node's operator listener accepts connections (a restoring node opens it only once its restore is done; its readiness needs it)."""
+        host, _, port = self.urls()[1].removeprefix('http://').partition(':')
+        code = f'import socket;socket.create_connection(("{host}",{int(port)}),3);print("up")'
+        try:
+            done = run(['docker', 'run', '--rm', '--network', f'container:{self.pod_id()}', '--read-only', '--cap-drop', 'ALL', '--user', '10001:10001',
+                        '--entrypoint', 'python3', self.rpc_image, '-c', code], check=False, timeout=60)
+        except (Failure, subprocess.TimeoutExpired):
+            return False
+        return done.returncode == 0 and 'up' in done.stdout
+
+    def shard_activated_epoch(self):
+        """The latest root epoch the shard node logged as activated ("handoff activated"): its verified history's tip, which the join's readiness needs at
+        the epoch being left. A restore logs its activations at its start and then thousands of replay lines: the whole log of the running container is
+        scanned, and the last epoch found is kept per container start (the json-file log rotates)."""
+        cid = self.dc('ps', '-q', f'shard{self.entity}').strip()
+        if not cid:
+            return None
+        started = run(['docker', 'inspect', '--format', '{{.State.StartedAt}}', cid], check=False).stdout.strip()
+        logs = run(['docker', 'logs', '--since', started, cid], check=False) if started else None
+        found = re.findall(r'"message":"handoff activated","rootEpoch":(\d+)', (logs.stdout + logs.stderr) if logs else '')
+        cache = self.state.get('shardActivated') or {}
+        if found:
+            cache = {'started': started, 'epoch': int(found[-1])}
+            self.state['shardActivated'] = cache
+            self.save()
+            return cache['epoch']
+        return cache.get('epoch') if cache.get('started') == started else None
+
+    def note_member(self):
+        """Once this root has been a member (it may have voted), its store is never rolled back (op_root_recover refuses)."""
+        if not self.state.get('rootEverMember'):
+            self.state['rootEverMember'] = now()
+            self.save()
+
     def status(self):
         services = self.services_state()
         out = {'entity': self.entity, 'services': services, 'restoring': (self.home / 'compose.restore.json').is_file(), 'rootNodeId': self.state['rootNodeId'], 'evmNodeId': self.state['evmNodeId'],
@@ -311,11 +360,17 @@ class Laptop:
                     out[key] = data.get('follower') if key == 'follower' and data else data
                 except (Failure, ValueError, subprocess.TimeoutExpired):
                     out[key] = None
+            if out.get('follower') is False or (isinstance(out.get('signers'), dict) and self.state['rootNodeId'] in
+                                                [x.get('nodeId') for x in out['signers'].get('signers') or []]):
+                self.note_member()
             if isinstance(out.get('signers'), dict):
                 out['epoch'], out['round'] = out['signers'].get('epoch'), out['signers'].get('round')
                 out['signers'] = len(out['signers'].get('signers') or [])
         if services.get(f'ureth{self.entity}') == 'running':
             out['urethHead'] = self.ureth_head()
+        if services.get(f'shard{self.entity}') == 'running':
+            out['shardActivatedEpoch'] = self.shard_activated_epoch()
+            out['shardRpc'] = self.shard_rpc_up()
         return out
 
     # --- the agent's operations (the host's drive asks; the outputs are public) ---
@@ -406,11 +461,48 @@ class Laptop:
         self.dc('stop', f'root{j}')
         backup = self.vol(f'root-pre-epoch-{epoch}')
         if run(['docker', 'volume', 'inspect', backup], check=False).returncode:
+            try:
+                code, body = self.root_post('/api/v1/q3/status')
+                follower = code == 200 and json.loads(body).get('follower') is True and not self.state.get('rootEverMember')
+            except (Failure, ValueError, subprocess.TimeoutExpired):
+                follower = False   # unknown: counted as a possible member (never recoverable from this backup)
+            if not follower:
+                self.note_member()
+            self.state.setdefault('rootBackups', {})[backup] = {'at': now(), 'neverMember': follower}
+            self.save()
             run(['docker', 'volume', 'create', backup])
             self.one(self.node_image, ['-c', 'cp -a /state/. /backup/'], [f'{self.vol("root")}:/state:ro', f'{backup}:/backup'], user='0:0', entrypoint='sh')
         self.dc('up', '-d', '--no-deps', '--force-recreate', f'root{j}', extra=[override])
-        self.wait(f'root {j} listens again', lambda: self.root_post('/api/v1/q3/signers')[0] in (200, 400, 409, 422, 503), 120)
+        # an install of many epochs fetches every activation bundle through the tunnel before the operator listener starts
+        self.wait(f'root {j} listens again', lambda: self.root_post('/api/v1/q3/signers')[0] in (200, 400, 409, 422, 503), 900)
         return {'backup': backup}
+
+    def op_root_recover(self, epoch):
+        """Issue #1028: after an interrupted install of `epoch` every restart fails in the Q3 recovery (it runs before the record fetcher is installed). The
+        store goes back to its pre-install backup (volume <project>_root-pre-epoch-N) and the root runs again without the install flag."""
+        j, epoch = self.entity, int(epoch)
+        backup = self.vol(f'root-pre-epoch-{epoch}')
+        if run(['docker', 'volume', 'inspect', backup], check=False).returncode:
+            raise Failure(f'no backup volume {backup}')
+        # astra's review of #1029, finding 1: the store holds the safety module's record of what the root key signed; rolling it back could let the key
+        # vote twice. Only a root that was never a member (it never signed) is recovered, from a backup taken while it was a follower
+        if self.state.get('rootEverMember'):
+            raise Failure(f'refused: this root has been a member since {self.state["rootEverMember"]} (it may have voted); its store is never rolled back')
+        if not (self.state.get('rootBackups') or {}).get(backup, {}).get('neverMember'):
+            raise Failure(f'refused: {backup} is not recorded as taken while this root was a follower that never signed')
+        code, body = self.root_post('/api/v1/q3/status') if self.services_state().get(f'root{j}') == 'running' else (0, b'')
+        if code == 200 and json.loads(body).get('follower') is False:
+            self.note_member()
+            raise Failure('refused: the root reports itself a member now')
+        self.dc('stop', f'root{j}')
+        self.one(self.node_image, ['-c', 'find /state -mindepth 1 -maxdepth 1 -exec rm -rf {} + && cp -a /backup/. /state/'],
+                 [f'{self.vol("root")}:/state', f'{backup}:/backup:ro'], user='0:0', entrypoint='sh')
+        override = self.home / f'compose.install-epoch-{epoch}.json'
+        if override.exists():
+            override.rename(self.home / 'run' / f'{override.name}.failed-{int(time.time())}')
+        self.dc('up', '-d', '--no-deps', '--force-recreate', f'root{j}')
+        self.wait(f'root {j} listens again', lambda: self.root_post('/api/v1/q3/status')[0] == 200, 180)
+        return {'recovered': backup, 'epoch': self.root_epoch()}
 
     def op_authority_status(self):
         return json.loads(self.exec(f'authority{self.entity}', 'ubft', 'signing-authority', 'status', *OPERATOR).stdout)
@@ -469,7 +561,7 @@ class Laptop:
         wipe = ('find /evm -mindepth 1 -maxdepth 1 ! -name keys.json ! -name node-info.json -exec rm -rf {} + && '
                 'find /archive -mindepth 1 -maxdepth 1 -exec rm -rf {} + && find /ureth -mindepth 1 -maxdepth 1 -exec rm -rf {} +')
         self.one(self.node_image, ['-c', wipe], [f'{self.vol("evm")}:/evm', f'{self.vol("archive")}:/archive', f'{self.vol("ureth")}:/ureth'], entrypoint='sh')
-        seeded = self.seed_archive()   # before the restore: its fetch from the pinned tip to genesis then finds every record locally
+        seeded = None   # NOT seeded here: `shard-node restore` refuses an archive directory that is not empty (it fetches every record itself, from peers)
         self.dc('up', '-d', '--no-deps', f'ureth{j}')
         self.wait(f'the execution client {j} answers', lambda: self.ureth_head() is not None, 180)
         self.vol_write('evm', 'tip.uc.cbor', base64.b64decode(uc_b64), 0o600)
@@ -479,6 +571,14 @@ class Laptop:
         self.dc('up', '-d', '--no-deps', '--force-recreate', f'shard{j}')
         time.sleep(10)
         return {'started': True, 'shard': self.services_state().get(f'shard{j}'), 'head': self.ureth_head(), 'seeded': seeded}
+
+    def op_stop_validator(self):
+        """After the entity left the committee: its shard node, root and execution client stop, then its signing authority (its key is not needed any
+        more: the delegation ended with the retirement). Volumes stay: the wallet holds the withdrawal key for the claim. Never `compose down`."""
+        j = self.entity
+        for service in (f'shard{j}', f'root{j}', f'ureth{j}', f'authority{j}'):
+            self.dc('stop', service)
+        return {'stopped': self.services_state()}
 
     def op_restore_finish(self):
         j = self.entity
@@ -540,9 +640,34 @@ class Laptop:
             self.save()
         return out
 
+    CUSTODY_CALLS = {'requestRetirement(uint64)': 'owner', 'mature(uint256[])': 'owner', 'claim(uint256,address)': 'withdrawal'}
+
+    def op_custody_tx(self, signature, args):
+        """A custody call signed HERE with this entity's owner or withdrawal key (cast in the node image, keys from the wallet volume, never printed): only
+        requestRetirement, mature and claim, only to the deployment's custody. Sent to every host execution client (their pools do not gossip)."""
+        if signature not in self.CUSTODY_CALLS:
+            raise Failure(f'{signature}: not a custody call this agent signs')
+        if not all(re.fullmatch(r'[0-9]+|0x[0-9a-fA-F]{40}|\[[0-9, ]*\]', str(a)) for a in args):
+            raise Failure('bad arguments')
+        custody = json.loads(self.vol_read('network', 'pos-deployment.json'))['custody']
+        signer = self.CUSTODY_CALLS[signature]
+        chain = json.loads(self.vol_read('network', 'genesis.json'))['config']['chainId']
+        urls = ' '.join(f'http://ureth{i}:8545' for i in remote_entity.GENESIS_ENTITIES)
+        quoted = ' '.join(shlex.quote(str(a)) for a in args)
+        script = (f'set -e; '   # cast mktx ignores ETH_PRIVATE_KEY: the key goes as an argument inside this one-shot container only
+                  f'raw=$(/tools/cast mktx --legacy --rpc-url http://ureth1:8545 --chain {chain} --private-key "$(cat /wallet/{signer}.key)" {custody} {shlex.quote(signature)} {quoted}); '
+                  f'for u in {urls}; do /tools/cast publish --rpc-url $u "$raw" >/dev/null 2>&1 || true; done; '
+                  f'h=$(/tools/cast keccak "$raw"); echo "tx $h"; /tools/cast receipt --rpc-url http://ureth1:8545 --confirmations 1 --json "$h" | tr -d "\\n" | grep -oE "\\"(status|blockNumber)\\":\\"0x[0-9a-f]+\\""')
+        done = self.one(self.node_image, ['-c', script], [f'{self.vol("wallet")}:/wallet:ro', f'{self.vol("tools")}:/tools:ro', f'{self.vol("network")}:/network:ro'],
+                        network=self.network(), entrypoint='sh', check=False)
+        out = (done.stdout + done.stderr).strip()
+        if done.returncode:
+            raise Failure(f'{signature}: exit {done.returncode}: {out[-400:]}')
+        return {'out': out[-400:], 'signer': signer, 'address': self.state['accounts'][signer]}
+
     OPS = {'status': 'op_status', 'root-post': 'op_root_post', 'logs': 'op_logs', 'put-network': 'op_put_network', 'trust-base-sign': 'op_trust_base_sign',
-           'evm-pop': 'op_evm_pop', 'sign-pop': 'op_sign_pop', 'readiness': 'op_readiness', 'install-root': 'op_install_root',
-           'authority-status': 'op_authority_status', 'authority-step': 'op_authority_step', 'restore-start': 'op_restore_start', 'seed-archive': 'op_seed_archive', 'restore-finish': 'op_restore_finish', 'start-authority': 'op_start_authority', 'tx': 'op_tx'}
+           'evm-pop': 'op_evm_pop', 'sign-pop': 'op_sign_pop', 'readiness': 'op_readiness', 'install-root': 'op_install_root', 'root-recover': 'op_root_recover',
+           'authority-status': 'op_authority_status', 'authority-step': 'op_authority_step', 'restore-start': 'op_restore_start', 'seed-archive': 'op_seed_archive', 'restore-finish': 'op_restore_finish', 'start-authority': 'op_start_authority', 'tx': 'op_tx', 'custody-tx': 'op_custody_tx', 'stop-validator': 'op_stop_validator'}
     READS = frozenset(('status', 'root-post', 'logs', 'authority-status'))
 
     def dispatch(self, name, args):
@@ -595,7 +720,8 @@ def init(host, generation, home, mac_host, allow_dirty=False):
     if entities != list(remote_entity.GENESIS_ENTITIES):
         raise Failure(f'the host generation has entities {entities}; this tool joins a fifth to the four genesis entities')
     entity = max(entities) + 1
-    project = f'{generation}-joiner{entity}'
+    project = (json.loads((home / 'state.json').read_text()).get('project') if (home / 'state.json').is_file() else None) or f'{generation}-joiner{entity}'
+    # a second identity for the same entity (after a retirement) needs its own project: state.json may name it before init
     images = {'node': host_compose['services'][f'root{entities[0]}']['image'], 'rpc': host_compose['services']['rpc']['image']}
     ensure_images(host, list(images.values()))
     state_path = home / 'state.json'
@@ -624,7 +750,7 @@ def init(host, generation, home, mac_host, allow_dirty=False):
     extract = 'import io,sys,tarfile;t=tarfile.open(fileobj=io.BytesIO(sys.stdin.buffer.read()));t.extractall("/network",filter="data")'
     lap.one(lap.rpc_image, ['-c', extract], [f'{lap.vol("network")}:/network'], entrypoint='python3', input=tar, text=False)
     lap.one(lap.node_image, ['-c', 'chmod -R a+rX /network'], [f'{lap.vol("network")}:/network'], entrypoint='sh')
-    (home / 'network-files.txt').write_text(lap.one(lap.node_image, ['-c', 'cd /network && ls -la . handoff'], [f'{lap.vol("network")}:/network:ro'], entrypoint='sh').stdout)
+    (home / 'network-files.txt').write_text(lap.one(lap.node_image, ['-c', 'cd /network && ls -la . $(test -d handoff && echo handoff)'], [f'{lap.vol("network")}:/network:ro'], entrypoint='sh').stdout)
     # the keys, made where they stay
     have = lambda volume, rel: lap.one(lap.node_image, ['-c', f'test -e /v/{rel}'], [f'{lap.vol(volume)}:/v:ro'], entrypoint='sh', check=False).returncode == 0
     if not have('root', 'keys.json'):
@@ -645,6 +771,8 @@ def init(host, generation, home, mac_host, allow_dirty=False):
         lap.one(lap.rpc_image, ['-', 'identity', '/wallet', '/root/keys.json', f'/wallet/{out}', root_id, evm_id, *extra],
                 [f'{lap.vol("wallet")}:/wallet', f'{lap.vol("root")}:/root:ro'], entrypoint='python3', input=keys_py)
     lap.vol_write('tools', 'tunnel_relay.py', (HERE / 'tunnel_relay.py').read_bytes(), 0o644)
+    if not have('tools', 'cast'):   # Foundry's cast from the host (a public tool, no key): the custody calls (retirement, mature, claim) sign here with it
+        lap.vol_write('tools', 'cast', ssh(host, 'cat "$(command -v cast || echo $HOME/.foundry/bin/cast)"', text=False).stdout, 0o755)
     token_file = home / 'agent.token'
     if not token_file.is_file():
         fd = os.open(token_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -660,8 +788,9 @@ def init(host, generation, home, mac_host, allow_dirty=False):
     version = source_version()
     if (version['dirty'] or not version['commit']) and not allow_dirty:
         raise Failure(f'{HERE} is dirty or not a git checkout (commit {version["commit"]}): the host runs this code with sudo; commit it, or pass --allow-dirty')
-    sources = sorted(p.name for p in HERE.glob('*.py'))
-    tarball = run(['tar', '--no-xattrs', '-C', str(HERE), '-cf', '-', *sources], text=False).stdout
+    sources = sorted(p.name for p in HERE.glob('*.py') if not p.name.startswith('.'))
+    tarball = subprocess.run(['tar', '--no-xattrs', '-C', str(HERE), '-cf', '-', *sources], capture_output=True, check=True,
+                             env=dict(os.environ, COPYFILE_DISABLE='1')).stdout   # no AppleDouble ._* members (macOS tar)
     ssh(host, f'mkdir -p {host_dir}/testnet && tar -C {host_dir}/testnet -xf -', input=tarball, text=False)
     record = dict(version, deployedAt=now(), deployedFrom=str(HERE))
     ssh(host, f'cat > {host_dir}/testnet/SOURCE.json', input=json.dumps(record, indent=1, sort_keys=True) + '\n')
@@ -715,7 +844,7 @@ def serve_agent(lap, port=PORTS['agent']):
 
 def tunnel_loop(lap):
     host, sock, j = lap.state['host'], lap.state['sockDir'], lap.entity
-    cmd = tunnel_command(host, j, sock)
+    cmd = tunnel_command(host, j, sock, lap.state.get('macHost', 'host.docker.internal'))
     while True:
         # sshd has StreamLocalBindUnlink no: the -R sockets of the previous connection must go first, or the forwards fail
         ssh(host, f'rm -f {sock}/root{j}.sock {sock}/shard{j}.sock {sock}/agent.sock', check=False)
@@ -776,7 +905,7 @@ def start(lap):
     say(json.dumps(lap.status(), sort_keys=True))
 
 
-def join(lap, dry_run=False, stop_after=None, allow_dirty=False, funder=None):
+def join(lap, dry_run=False, stop_after=None, allow_dirty=False, funder=None, action='join'):
     """remote_entity.py join on the host, as a transient `systemd-run --user` unit (a dropped ssh session of this laptop must not kill a drive half way), its log
     followed here until it ends. Rerunning resumes: the host's state is in handoff/remote-joiners/<J>.json and the drive's journal."""
     s = lap.state
@@ -784,10 +913,10 @@ def join(lap, dry_run=False, stop_after=None, allow_dirty=False, funder=None):
     if (version['dirty'] or not version['commit']) and not allow_dirty:
         raise Failure(f'{HERE} is dirty or not a git checkout (commit {version["commit"]}): commit and redeploy (init), or pass --allow-dirty')
     say(f'laptop checkout {HERE}: commit {version["commit"]}, dirty {version["dirty"]}, digest {version["digest"][:16]} (the host refuses a different deployed copy)')
-    cmd = (f'sudo env PATH="$PATH:$(dirname {shlex.quote(s["hostCast"])})" python3 -u {s["hostDir"]}/testnet/remote_entity.py join {s["hostGeneration"]} '
+    cmd = (f'sudo env PATH="$PATH:$(dirname {shlex.quote(s["hostCast"])})" python3 -u {s["hostDir"]}/testnet/remote_entity.py {action} {s["hostGeneration"]} '
            f'--entity {lap.entity} --ubft {s["hostUbft"]} --restore-pin {s["hostRestorePin"]} --cast {s["hostCast"]}' + (' --dry-run' if dry_run else '') + (f' --stop-after {stop_after}' if stop_after else '')
            + f' --source-digest {version["digest"]}' + (' --allow-dirty' if allow_dirty else '') + (f' --funder {shlex.quote(funder)}' if funder else ''))
-    unit = f'laptop-join-{int(time.time())}'
+    unit = f'laptop-{action}-{int(time.time())}'
     log = f'{s["hostDir"]}/{unit}.log'
     script = (f'systemd-run --user --quiet --collect --unit={unit} bash -c {shlex.quote(f"{cmd} > {log} 2>&1; echo EXIT=$? >> {log}")} && '
               f'touch {log} && (tail -n +1 -F {log} 2>/dev/null & t=$!; while systemctl --user is-active -q {unit}; do sleep 2; done; sleep 1; kill $t) && '
@@ -798,14 +927,14 @@ def join(lap, dry_run=False, stop_after=None, allow_dirty=False, funder=None):
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument('action', choices=('init', 'start', 'status', 'join', 'agent', 'tunnel', 'background-stop', 'retire-plan'))
+    p.add_argument('action', choices=('init', 'start', 'status', 'join', 'catch-up', 'retire', 'claim', 'agent', 'tunnel', 'background-stop', 'retire-plan'))
     p.add_argument('--home', help='this entity\'s directory on the laptop (default ~/unicity-joiner/<generation>)')
     p.add_argument('--host')
     p.add_argument('--generation')
     p.add_argument('--mac-host', default='host.docker.internal', help='how a container of the docker VM reaches the Mac\'s loopback (colima: host.docker.internal)')
     p.add_argument('--dry-run', action='store_true')
     p.add_argument('--allow-dirty', action='store_true', help='init/join: deploy or run a dirty, uncommitted or mismatched copy of deploy/testnet on the host')
-    p.add_argument('--stop-after', choices=('bonded', 'caught-up'), help='join: stop after the bond, or after the result names the joiner and its nodes caught up')
+    p.add_argument('--stop-after', choices=('bonded',), help='join: stop after the bond')
     p.add_argument('--funder', help='join: a directory ON THE HOST with keystore.json and password, the operator account that pays the owner\'s 100 UCT bond and gas '
                    '(default: the faucet account)')
     a = p.parse_args(argv)
@@ -831,6 +960,12 @@ def main(argv=None):
                 print(f'{name}: ' + (f'pid {pid.read_text().strip()}' if pid.is_file() else 'not started'))
         elif a.action == 'join':
             return join(lap, a.dry_run, a.stop_after, a.allow_dirty, a.funder)
+        elif a.action == 'retire':   # requestRetirement (owner key, here), the handoff that leaves it out, the clean stop
+            return join(lap, allow_dirty=a.allow_dirty, action='retire', funder=a.funder)
+        elif a.action == 'claim':   # mature (owner key) and claim (withdrawal key) after the retirement, once the holds pass
+            return join(lap, allow_dirty=a.allow_dirty, action='claim', funder=a.funder)
+        elif a.action == 'catch-up':   # the follower to the current epoch (root install restart, shard restore): no chain transaction, the timer keeps driving
+            return join(lap, allow_dirty=a.allow_dirty, action='catch-up')
         elif a.action == 'agent':
             serve_agent(lap)
         elif a.action == 'tunnel':
