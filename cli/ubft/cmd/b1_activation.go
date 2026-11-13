@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	libp2pnetwork "github.com/libp2p/go-libp2p/core/network"
 	libp2ppeer "github.com/libp2p/go-libp2p/core/peer"
 	"os"
 	"sort"
@@ -628,16 +629,36 @@ func newB1PairConfig(p b1state.Profile, rt *q3active.Runtime, ethURL string, tim
 	return &b1paired.Config{Profile: p, Authority: rt.B1Authority(), Proofs: b1ProofFetcher(registrywitness.NewHTTPCaller(ethURL, timeout))}, nil
 }
 
-// attachRecordsFeed gives the pair its authenticated route to the root's record log: one remote per root the node knows, asked in turn.
-// What a root serves is believed only after it verified against the unicity tree root of the certificate the pair holds, so the roots
-// are not trusted and any of them will do.
-func attachRecordsFeed(cfg *b1paired.Config, host recordsfeed.Libp2p, roots []libp2ppeer.AddrInfo) {
-	remotes := make([]recordsfeed.Remote, 0, len(roots))
+// attachRecordsFeed gives the pair its authenticated route to the root's record log: one remote per root the node knows, asked in turn,
+// then the mirrors (shard nodes serving the cuts and records they verified). A root-free follower that is not active asks the mirrors only.
+// What any source serves is believed only after it verified against the unicity tree root of the certificate the pair holds, so no source
+// is trusted and any of them will do.
+func attachRecordsFeed(cfg *b1paired.Config, host recordsfeed.Libp2p, roots []libp2ppeer.AddrInfo, role *rootFreeRole) {
+	opener := recordsfeed.FromLibp2p(host)
+	remotes := make([]recordsfeed.Remote, 0, len(roots)+recordsMirrorSlots)
 	for _, r := range roots {
-		remotes = append(remotes, recordsfeed.P2PRemote{Opener: recordsfeed.FromLibp2p(host), Roots: []libp2ppeer.ID{r.ID}})
+		remotes = append(remotes, recordsfeed.RoleRemote{Opener: opener, Roots: []libp2ppeer.ID{r.ID}, NonActive: role.nonActive})
 	}
-	cfg.Records = recordsfeed.NewSource(remotes...)
+	for i := range recordsMirrorSlots {
+		remotes = append(remotes, recordsfeed.RoleRemote{Opener: opener, Mirrors: func() []libp2ppeer.ID {
+			if m := role.mirrorPeers(); i < len(m) {
+				return m[i : i+1]
+			}
+			return nil
+		}})
+	}
+	source := recordsfeed.NewSource(remotes...)
+	cfg.Records = source
+	if host, ok := host.(interface {
+		RegisterProtocolHandler(string, libp2pnetwork.StreamHandler)
+	}); ok {
+		// this node mirrors what it verified to followers; the server bounds streams in total and per peer
+		host.RegisterProtocolHandler(recordsfeed.ProtocolID, recordsfeed.NewServer(source, func(libp2ppeer.ID) bool { return true }).Handler)
+	}
 }
+
+// recordsMirrorSlots is how many mirrors a records lookup tries, each as its own remote so that one serving a wrong chain is skipped.
+const recordsMirrorSlots = 6
 
 // b1IdentitiesFile is the genesis tool's identity document the vault deployment is checked against
 // (unicity-pos-contracts script/BridgeGenesisBinding.sol): every hash 0x-prefixed.

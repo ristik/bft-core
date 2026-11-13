@@ -779,7 +779,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			if verifierContext.B1, jErr = newB1PairConfig(b1Profile, b1rt, flags.EthURL, 10*time.Second); jErr != nil {
 				return jErr
 			}
-			attachRecordsFeed(verifierContext.B1, peer, bootNodes)
+			attachRecordsFeed(verifierContext.B1, peer, bootNodes, follower)
 			// The execution client is the paired ureth: every build and import carries the pair binding its own gate compares.
 			if q3Admit, jErr = wireQ3Pair(executor, b1rt, uint64(shardConf.NetworkID), origin.Valid(), [32]byte(origin.BlockHash())); jErr != nil {
 				return jErr
@@ -813,7 +813,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				if verifierContext.B1, jErr = newB1PairConfig(b1Profile, q3rt, flags.EthURL, 10*time.Second); jErr != nil {
 					return jErr
 				}
-				attachRecordsFeed(verifierContext.B1, peer, bootNodes)
+				attachRecordsFeed(verifierContext.B1, peer, bootNodes, follower)
 			}
 		}
 	}
@@ -832,6 +832,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		return fmt.Errorf("deriving the shard peers: %w", err)
 	}
 	follower.setRole(activePeers.Member)
+	follower.setMirrors(q3MirrorPeers(activePeers, followSourceIDs(followSources)))
 	var headFollower *archivewiring.HeadFollower
 	// Every shard-membership consumer (block dissemination, the archive and journal servers, the journal suffix and evidence providers)
 	// follows this set: the genesis validators until a verified assignment step is installed, then the active assignment's.

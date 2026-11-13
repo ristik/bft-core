@@ -369,3 +369,37 @@ func TestACutKeyNeedsATreeRootOfTheRightWidth(t *testing.T) {
 	_, err := KeyOf(evmroot.RootOriginV2{RootRound: 1, UnicityTreeRoot: []byte{1}})
 	require.ErrorIs(t, err, ErrAuth)
 }
+
+// A source mirrors exactly what it verified: a follower whose only remote is that mirror (a Source as ServerSource) reaches the same
+// cursor and log without any root, and an unverified cut is never served.
+func TestAVerifiedSourceMirrorsItsCutsAndRecordsToAFollower(t *testing.T) {
+	c := buildChain(t, 300)
+	cut, origin := c.cutOf(t, 500, 9_000)
+	mirror := NewSource(&fakeRemote{cut: cut, records: c.records})
+	key, err := KeyOf(origin)
+	require.NoError(t, err)
+	_, err = mirror.ControlCut(key)
+	require.ErrorIs(t, err, ErrUnavailable, "nothing unverified is mirrored")
+	want, err := mirror.Cursor(context.Background(), origin)
+	require.NoError(t, err)
+
+	follower := NewSource(mirrorRemote{mirror})
+	got, err := follower.Cursor(context.Background(), origin)
+	require.NoError(t, err)
+	require.Equal(t, want, got)
+	for i := range c.records {
+		r, err := follower.Record(uint64(i))
+		require.NoError(t, err)
+		require.Equal(t, c.records[i], r)
+	}
+	_, err = mirror.Records(uint64(len(c.records))+1, 4)
+	require.ErrorIs(t, err, ErrUnavailable)
+}
+
+// mirrorRemote serves a ServerSource as a Remote, as the libp2p server and client do between two nodes.
+type mirrorRemote struct{ s ServerSource }
+
+func (m mirrorRemote) Cut(_ context.Context, key CutKey) (Cut, error) { return m.s.ControlCut(key) }
+func (m mirrorRemote) Records(_ context.Context, from uint64, max int) ([]rootrecords.Record, error) {
+	return m.s.Records(from, max)
+}

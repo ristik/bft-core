@@ -20,9 +20,35 @@ func (noHost) CreateStream(context.Context, libp2ppeer.ID, string) (network.Stre
 
 func TestThePairIsGivenAnAuthenticatedRecordsRouteThroughEveryRootItKnows(t *testing.T) {
 	cfg := &b1paired.Config{}
-	attachRecordsFeed(cfg, noHost{}, []libp2ppeer.AddrInfo{{ID: "root-a"}, {ID: "root-b"}})
+	attachRecordsFeed(cfg, noHost{}, []libp2ppeer.AddrInfo{{ID: "root-a"}, {ID: "root-b"}}, newRootFreeRole(false, nil, nil))
 	require.NotNil(t, cfg.Records)
 	// no root reachable: unavailable, never an empty feed
 	_, err := cfg.Records.Cursor(context.Background(), evmroot.RootOriginV2{RootRound: 3})
 	require.Error(t, err)
+}
+
+type dialRecorder struct{ dialled []libp2ppeer.ID }
+
+func (d *dialRecorder) CreateStream(_ context.Context, to libp2ppeer.ID, _ string) (network.Stream, error) {
+	d.dialled = append(d.dialled, to)
+	return nil, context.Canceled
+}
+
+// A root-free follower that is not active asks the mirrors for root records and never a root; once active it asks its roots first.
+func TestARootFreeFollowerAsksMirrorsNotRootsForRecords(t *testing.T) {
+	cfg := &b1paired.Config{}
+	host := &dialRecorder{}
+	roots := []libp2ppeer.AddrInfo{{ID: "root-a"}, {ID: "root-b"}}
+	role := newRootFreeRole(true, roots, nil)
+	role.setMirrors(func() []libp2ppeer.ID { return []libp2ppeer.ID{"mirror-1", "mirror-2"} })
+	member := false
+	role.setRole(func() bool { return member })
+	attachRecordsFeed(cfg, host, roots, role)
+	_, err := cfg.Records.Cursor(context.Background(), evmroot.RootOriginV2{RootRound: 3, UnicityTreeRoot: make([]byte, 32)})
+	require.Error(t, err)
+	require.Equal(t, []libp2ppeer.ID{"mirror-1", "mirror-2"}, host.dialled, "a non-active follower dials no root")
+
+	member, host.dialled = true, nil
+	_, _ = cfg.Records.Cursor(context.Background(), evmroot.RootOriginV2{RootRound: 3, UnicityTreeRoot: make([]byte, 32)})
+	require.Equal(t, []libp2ppeer.ID{"root-a", "root-b", "mirror-1", "mirror-2"}, host.dialled, "active: roots first, mirrors as backup")
 }

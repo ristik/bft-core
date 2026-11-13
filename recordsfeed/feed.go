@@ -113,6 +113,53 @@ type Source struct {
 
 	mu  sync.Mutex
 	log []rootrecords.Record
+	// cuts retains the cuts this source verified, bounded (oldest dropped first), so that the node can mirror them to non-active
+	// followers (ServerSource) without their asking a root.
+	cuts     map[CutKey]Cut
+	cutOrder []CutKey
+}
+
+// maxMirroredCuts bounds the verified cuts a source retains for mirroring.
+const maxMirroredCuts = 4096
+
+// ControlCut serves a cut this source has verified (ServerSource). An unverified cut is unavailable: a mirror never relays unchecked bytes,
+// and the follower verifies it again against its own origin.
+func (s *Source) ControlCut(key CutKey) (Cut, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cut, ok := s.cuts[key]
+	if !ok {
+		return Cut{}, fmt.Errorf("%w: cut not verified here", ErrUnavailable)
+	}
+	return cut, nil
+}
+
+// Records serves the verified log (ServerSource).
+func (s *Source) Records(from uint64, max int) ([]rootrecords.Record, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if from >= uint64(len(s.log)) || max <= 0 {
+		return nil, fmt.Errorf("%w: record %d", ErrUnavailable, from)
+	}
+	end := min(uint64(len(s.log)), from+uint64(max))
+	return append([]rootrecords.Record(nil), s.log[from:end]...), nil
+}
+
+func (s *Source) retainCut(key CutKey, cut Cut) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cuts == nil {
+		s.cuts = map[CutKey]Cut{}
+	}
+	if _, ok := s.cuts[key]; ok {
+		return
+	}
+	s.cuts[key] = cut
+	s.cutOrder = append(s.cutOrder, key)
+	if len(s.cutOrder) > maxMirroredCuts {
+		delete(s.cuts, s.cutOrder[0])
+		s.cutOrder = s.cutOrder[1:]
+	}
 }
 
 // NewSource returns a source that fetches from the remotes in order and retains every record it has verified.
@@ -155,6 +202,7 @@ func (s *Source) cursorFrom(ctx context.Context, remote Remote, origin evmroot.R
 	if err := s.extend(ctx, remote, state); err != nil {
 		return rootrecords.Cursor{}, err
 	}
+	s.retainCut(key, cut)
 	return cursor, nil
 }
 

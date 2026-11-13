@@ -17,6 +17,25 @@ type rootFreeRole struct {
 	mu      sync.RWMutex
 	roots   map[libp2ppeer.ID]struct{}
 	member  atomic.Pointer[func() bool]
+	mirrors atomic.Pointer[func() []libp2ppeer.ID]
+}
+
+// nonActive reports whether the node is a root-free follower that is not active now: it must not ask roots for anything.
+func (r *rootFreeRole) nonActive() bool { return r != nil && r.enabled && !r.active() }
+
+// setMirrors installs the non-root evidence holders (follow sources, archive replicas, installed validators).
+func (r *rootFreeRole) setMirrors(m func() []libp2ppeer.ID) { r.mirrors.Store(&m) }
+
+// mirrorPeers is the current mirror list; empty before setMirrors.
+func (r *rootFreeRole) mirrorPeers() []libp2ppeer.ID {
+	if r == nil {
+		return nil
+	}
+	m := r.mirrors.Load()
+	if m == nil {
+		return nil
+	}
+	return (*m)()
 }
 
 func newRootFreeRole(enabled bool, boot []libp2ppeer.AddrInfo, trust []*types.RootTrustBaseV1) *rootFreeRole {
