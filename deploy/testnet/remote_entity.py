@@ -104,12 +104,13 @@ def relay_forwards(entity, genesis=GENESIS_ENTITIES):
     return out
 
 
-def ssh_forwards(entity, sock_dir, genesis=GENESIS_ENTITIES):
-    """The -L and -R arguments of the laptop's one `ssh -N` (ports in PORTS)."""
+def ssh_forwards(entity, sock_dir, genesis=GENESIS_ENTITIES, bind='127.0.0.1'):
+    """The -L and -R arguments of the laptop's one `ssh -N` (ports in PORTS). The -L listeners bind `bind`: loopback on a Mac (colima reaches it as
+    host.docker.internal), the docker bridge gateway on a Linux docker host (a container cannot reach the host's loopback)."""
     out = []
     for i in genesis:
-        out += ['-L', f'127.0.0.1:{PORTS["root_local"] + i}:{sock_dir}/root{i}.sock', '-L', f'127.0.0.1:{PORTS["shard_local"] + i}:{sock_dir}/shard{i}.sock',
-                '-L', f'127.0.0.1:{PORTS["ureth_local"] + i}:{sock_dir}/ureth{i}.sock']
+        out += ['-L', f'{bind}:{PORTS["root_local"] + i}:{sock_dir}/root{i}.sock', '-L', f'{bind}:{PORTS["shard_local"] + i}:{sock_dir}/shard{i}.sock',
+                '-L', f'{bind}:{PORTS["ureth_local"] + i}:{sock_dir}/ureth{i}.sock']
     out += ['-R', f'{sock_dir}/root{entity}.sock:127.0.0.1:{PORTS["root_remote"]}', '-R', f'{sock_dir}/shard{entity}.sock:127.0.0.1:{PORTS["shard_remote"]}',
             '-R', f'{sock_dir}/agent.sock:127.0.0.1:{PORTS["agent"]}']
     return out
@@ -403,6 +404,7 @@ def say(text):
 BUSY = 5             # handoff_drive.py's exit when another drive holds handoff/drive.lock (a timer pass, handoff_auto.py, or an operator)
 BUSY_WAIT = 600      # how long a join waits for that drive to finish before it gives up (a drive takes ~2 min)
 BUSY_POLL = 10
+ARCHIVE_WAIT = 3600
 
 
 class Join:
@@ -579,10 +581,10 @@ class Join:
             out = r.custody_tx('requestRetirement(uint64)', ident)
             say(f'requestRetirement({ident}) by the owner {out.get("address")}: {out.get("out", "")[-200:]}')
             self.save(state='retiring', retirementRequestedAt=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))
-        elif r.state != 'retiring':
-            raise RuntimeError(f'entity {self.entity} is {r.state}, not a member or retiring')
+        elif r.state not in ('retiring', 'retired'):
+            raise RuntimeError(f'entity {self.entity} is {r.state}, not a member, retiring or retired')
         started = time.monotonic()
-        while True:
+        while r.state != 'retired':
             unfinished = self.hd.Journal(self.gen / 'handoff' / 'log.jsonl').last_drive()
             result = unfinished[0] if unfinished else d.wait('the election reserves a result', lambda: d.open_result(), 1200)
             members = self.members_of(result)
@@ -597,12 +599,48 @@ class Join:
             if rc != 0:
                 raise RuntimeError(f'the retirement drive stopped (exit {rc}): rerun the same command (it resumes)')
             break
-        self.save(state='retired', retiredAt=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))
-        say(f'entity {self.entity} left the committee in {time.monotonic() - started:.0f} s; stopping its validator services (keys and volumes kept)')
+        if r.state != 'retired':
+            self.save(state='retired', retiredAt=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))
+        say(f'entity {self.entity} left the committee in {time.monotonic() - started:.0f} s')
+        self.wait_archive_migration()
+        say('stopping its validator services (keys and volumes kept)')
         say(f'  {r.client.op("stop-validator", timeout=300)}')
         say('next: custody.mature([lot]) once the holds pass (holdRetirement 2000 rounds, timeFloor 3600 s, evidence holds), then claim(amount, to) by the '
             'withdrawal key: `remote_entity.py claim` (not run automatically)')
         return 0
+
+    def archive_policies(self):
+        """Every host writer's archivePolicy section (`ubft shard-node status` inside its shard container; bft-core#1034)."""
+        out = {}
+        for i in GENESIS_ENTITIES:
+            p = docker('exec', f'{self.gen.name}-shard{i}-1', 'ubft', 'shard-node', 'status', '--url', 'http://127.0.0.1:9101', '--timeout', '30s', check=False)
+            try:
+                out[i] = json.loads(p.stdout).get('archivePolicy')
+            except ValueError:
+                out[i] = {'error': (p.stderr or p.stdout).strip()[-200:]}
+        return out
+
+    def wait_archive_migration(self, seconds=ARCHIVE_WAIT):
+        """Before the retired validator stops: every remaining writer must report migrationComplete and no retained holder naming it
+        (docs/operations/m2-runbook.md, bft-core#1034). Until then the retired shard still holds copies the network depends on."""
+        evm = self.r.evm_node_id
+        started = time.monotonic()
+        last = None
+        while True:
+            pol = self.archive_policies()
+            view = {i: (p or {}).get('error') or (f"v{p.get('version')} e{p.get('shardEpoch')} retained={len(p.get('retained') or [])}"
+                                                   f"{'(names it)' if evm in (p.get('retained') or []) else ''} backlog={p.get('migrationBacklog')} "
+                                                   f"complete={p.get('migrationComplete')}" if p else 'no archivePolicy') for i, p in pol.items()}
+            if view != last:
+                say(f'archive policy after {time.monotonic() - started:.0f} s: {json.dumps(view)}')
+                last = view
+            done = all(p and not p.get('error') and p.get('migrationComplete') and evm not in (p.get('retained') or []) for p in pol.values())
+            if done:
+                say(f'archive migration complete on every host writer in {time.monotonic() - started:.0f} s: {json.dumps(pol)}')
+                return
+            if time.monotonic() - started > seconds:
+                raise RuntimeError(f'the archive migration is not complete after {seconds} s: the retired validator is NOT stopped; rerun retire later')
+            time.sleep(10)
 
     def claim(self):
         """After the retirement: custody.mature(lots) once its gates pass (signed by the laptop's owner key), then claim(credit, withdrawal) by the

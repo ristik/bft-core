@@ -179,9 +179,19 @@ def restore_entry(entry, body_id):
     return entry + ['--tip-uc', '/state/tip.uc.cbor', '--tip-tr', '/state/tip.tr.cbor', '--trust-body-id', body_id]
 
 
-def tunnel_command(host, entity, sock_dir):
+def forward_bind(mac_host):
+    """Where the tunnel's -L listeners bind: the --mac-host address when it is an IP literal (a Linux docker host: the bridge gateway, e.g. 172.17.0.1,
+    which the peer stubs dial), else loopback (colima maps host.docker.internal to the Mac's loopback)."""
+    import ipaddress
+    try:
+        return str(ipaddress.ip_address(mac_host))
+    except ValueError:
+        return '127.0.0.1'
+
+
+def tunnel_command(host, entity, sock_dir, mac_host='host.docker.internal'):
     return ['ssh', '-N', '-o', 'ExitOnForwardFailure=yes', '-o', 'ServerAliveInterval=10', '-o', 'ServerAliveCountMax=3', '-o', 'ConnectTimeout=15',
-            '-o', 'BatchMode=yes', *remote_entity.ssh_forwards(entity, sock_dir), host]
+            '-o', 'BatchMode=yes', *remote_entity.ssh_forwards(entity, sock_dir, bind=forward_bind(mac_host)), host]
 
 
 class Laptop:
@@ -819,7 +829,7 @@ def serve_agent(lap, port=PORTS['agent']):
 
 def tunnel_loop(lap):
     host, sock, j = lap.state['host'], lap.state['sockDir'], lap.entity
-    cmd = tunnel_command(host, j, sock)
+    cmd = tunnel_command(host, j, sock, lap.state.get('macHost', 'host.docker.internal'))
     while True:
         # sshd has StreamLocalBindUnlink no: the -R sockets of the previous connection must go first, or the forwards fail
         ssh(host, f'rm -f {sock}/root{j}.sock {sock}/shard{j}.sock {sock}/agent.sock', check=False)
