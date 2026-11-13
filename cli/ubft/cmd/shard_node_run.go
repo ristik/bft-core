@@ -630,15 +630,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	// A root-free follower bootstraps from its follow sources only and keeps every known root closed while it is not active (the role is
 	// read on each connection: activation opens the roots without a restart). The roots' addresses are still learned, for that moment.
 	follower := newRootFreeRole(len(followSources) != 0, trustBases)
-	// verified root-record cuts are retained durably next to the execution journal: this node mirrors every cut it verified
-	var recordCuts recordsfeed.CutStore
-	if flags.ExecutionJournal != "" {
-		cutDB, cutErr := boltdb.New(flags.ExecutionJournal + ".cuts")
-		if cutErr != nil {
-			return fmt.Errorf("opening the record cut store: %w", cutErr)
-		}
-		recordCuts = recordsfeed.KVCutStore{DB: cutDB}
-	}
+
 	peerBoot := bootNodes
 	if follower.enabled {
 		peerBoot = followSources
@@ -801,7 +793,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			if verifierContext.B1, jErr = newB1PairConfig(b1Profile, b1rt, flags.EthURL, 10*time.Second); jErr != nil {
 				return jErr
 			}
-			attachRecordsFeed(verifierContext.B1, peer, bootNodes, follower, recordCuts)
+			attachRecordsFeed(verifierContext.B1, peer, bootNodes, follower, openRecordCuts(flags.ExecutionJournal))
 			// The execution client is the paired ureth: every build and import carries the pair binding its own gate compares.
 			if q3Admit, jErr = wireQ3Pair(executor, b1rt, uint64(shardConf.NetworkID), origin.Valid(), [32]byte(origin.BlockHash())); jErr != nil {
 				return jErr
@@ -835,7 +827,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				if verifierContext.B1, jErr = newB1PairConfig(b1Profile, q3rt, flags.EthURL, 10*time.Second); jErr != nil {
 					return jErr
 				}
-				attachRecordsFeed(verifierContext.B1, peer, bootNodes, follower, recordCuts)
+				attachRecordsFeed(verifierContext.B1, peer, bootNodes, follower, openRecordCuts(flags.ExecutionJournal))
 			}
 		}
 	}
@@ -2264,4 +2256,18 @@ func knownRoots(anchor uint64, active func() uint64, trust func(context.Context,
 func shardQ3Follower(rt q3shard.Q3Activator, anchor uint64, bootLocators []libp2ppeer.ID, mirrors func() []libp2ppeer.ID, nonActive func() bool,
 	isRoot func(libp2ppeer.ID) bool, fetch func(context.Context, libp2ppeer.ID, uint64) (q3active.Bundle, error)) *q3shard.Q3Follower {
 	return &q3shard.Q3Follower{Runtime: rt, AnchorEpoch: anchor, CurrentRoots: bootLocators, Mirrors: mirrors, NonActive: nonActive, IsRoot: isRoot, Fetch: fetch}
+}
+
+// openRecordCuts opens the durable store of verified root-record cuts next to the execution journal (nil without a journal, or when it
+// cannot be opened: the node then mirrors only its in-memory cuts). It is opened where the records feed is attached, after the restore
+// checks, so that nothing is written before them.
+func openRecordCuts(journal string) recordsfeed.CutStore {
+	if journal == "" {
+		return nil
+	}
+	db, err := boltdb.New(journal + ".cuts")
+	if err != nil {
+		return nil
+	}
+	return recordsfeed.KVCutStore{DB: db}
 }
