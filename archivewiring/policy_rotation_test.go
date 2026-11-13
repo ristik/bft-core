@@ -582,10 +582,11 @@ func TestMigrationWaitsForActivationBundles(t *testing.T) {
 		_, err := s.PutBundle(q, raw, nil)
 		require.NoError(t, err)
 	}
+	x.bundles[2].Store(false) // from the start: the first policy's own verification (on A and B) must not copy it to C either
+	x.bundles[3].Store(false)
 	x.start(t, []int{0, 1, 2}, "p0")
 	require.NoError(t, x.worker.Pass(context.Background()))
-	x.bundles[2].Store(false)
-	x.bundles[3].Store(false)
+	require.True(t, x.migration(t).Complete(), "the first policy has the bundle on two of its replicas")
 	x.switchTo(t, []int{0, 2, 3}, "p1", 2)
 	for i := 0; i < 4; i++ {
 		_ = x.worker.Pass(context.Background())
@@ -614,6 +615,7 @@ func TestRestoreSourcesAndUntrackedPolicy(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, p.Snapshot().Readable(), 5)
 	require.True(t, validSources(p.Snapshot().Readable()))
+	require.True(t, validSources(testpeer.GeneratePeerIDs(t, 40)), "no upper bound below what a policy can retain")
 	untracked, err := NewReplicaPolicy([]peer.ID{a, b, c}, [32]byte{1}, []byte{1}, 0)
 	require.NoError(t, err)
 	untracked.Untracked()
@@ -629,4 +631,62 @@ func mustCertified(t *testing.T, q archive.Request, rec *archive.Record) frontie
 	r, err := certifiedRecordOf(q, rec)
 	require.NoError(t, err)
 	return r
+}
+
+// A restore reads from every source the persisted policy can produce (astra round 2 of #1034): successive unfinished migrations keep
+// every retained holder, so the list may be long. A restore with eighteen sources, sixteen of them gone and the two that serve last,
+// completes; nothing is dropped and the configuration is not refused.
+func TestArchiveRestoreReadsFromEveryRetainedSource(t *testing.T) {
+	t.Parallel()
+	fx := newRetryRestoreFixture(t, 0, FetchRetry{Initial: time.Millisecond, Max: 5 * time.Millisecond, Total: 20 * time.Second})
+	dead := testpeer.GeneratePeerIDs(t, 16)
+	fx.restore.Replicas = append(dead, fx.restore.Replicas...)
+	require.True(t, validSources(fx.restore.Replicas))
+	require.NoError(t, fx.restore.Restore(context.Background()))
+	require.EqualValues(t, 5, fx.executor.head.Number)
+}
+
+// The upgrade path of astra round 2 of #1034, inverted: a journal from before policies were persisted, whose durable block coverage names
+// A and B, restarts under A/B/D. Both block acknowledgers stay current, so no holder is retained, yet the retained activation bundle is on
+// B (and the retiring C) only. The migration is not complete until two current replicas read it back; then A or D holds it as well.
+func TestUpgradeVerifiesBundlesWhenBlockAcknowledgersStay(t *testing.T) {
+	ctx := context.Background()
+	x := newRotationNet(t, 7, 4, []bool{true, true, true, false})
+	old := x.ids([]int{0, 1, 2})
+	oldDigest, _ := derive("startup")
+	require.NoError(t, x.f.store.EnableFrontier(ctx, x.f.context, x.f.limits, frontier.Policy{Context: x.f.subject, Eligible: names(old), PolicyDigest: oldDigest,
+		Binding: CertifiedBinding{Context: x.f.context, Subject: x.f.subject}, Availability: ReplicaAvailability{Context: ctx, Host: x.sender, Replicas: old, Limits: DefaultLimits()}}))
+	legacy := &FrontierWorker{Journal: x.f.store, Context: x.f.context, Limits: x.f.limits, Archive: x.local, Subject: x.f.subject, Replicas: old, PolicyDigest: oldDigest, Host: x.sender, TransportLimits: DefaultLimits()}
+	require.NoError(t, legacy.Pass(ctx))
+	require.ElementsMatch(t, names(x.ids([]int{0, 1})), names2(x.frontier(t).Anchor))
+	q := archive.BundleRequest{Context: x.f.subject, Epoch: 2}
+	raw := []byte("an activation bundle")
+	for _, s := range []*archive.Store{x.local, x.stores[1], x.stores[2]} {
+		_, err := s.PutBundle(q, raw, nil)
+		require.NoError(t, err)
+	}
+
+	require.NoError(t, x.f.store.Close())
+	reopened, err := configuredprogress.OpenConfiguredV2(x.f.path, configuredprogress.Settings{Retain: 16})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = reopened.Close() })
+	require.NoError(t, reopened.EnableJournal(ctx, x.f.context, x.f.limits))
+	x.journal.Store(reopened)
+	x.bundles[0].Store(false)
+	x.bundles[3].Store(false)
+	x.start(t, []int{0, 1, 3}, "p1")
+	m := x.migration(t)
+	require.Empty(t, m.Retained, "both block acknowledgers stay current")
+	require.False(t, m.Complete(), "the bundles are not verified yet")
+	for i := 0; i < 3; i++ {
+		_ = x.worker.Pass(ctx)
+	}
+	require.False(t, x.migration(t).Complete(), "one current replica (B) holds the bundle")
+	require.False(t, PolicyReportOf(x.policy.Snapshot()).MigrationDone)
+	x.bundles[3].Store(true)
+	x.passUntil(t, "a second current replica holds the bundle", x.complete(t))
+	got, err := FetchBundle(ctx, x.sender, x.peers[3], q, DefaultLimits())
+	require.NoError(t, err)
+	require.Equal(t, raw, got)
+	require.True(t, PolicyReportOf(x.policy.Snapshot()).MigrationDone)
 }

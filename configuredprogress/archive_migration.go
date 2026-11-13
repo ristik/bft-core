@@ -34,6 +34,7 @@ type archiveMigrationWire struct {
 	Retained   []string
 	Since      uint64
 	Through    uint64
+	Bundles    bool
 }
 
 // ArchiveMigration is the durable state of the archive policy in force.
@@ -45,11 +46,15 @@ type ArchiveMigration struct {
 	Retained []string // earlier replicas still counted as holders of what this writer promised; empty once complete
 	Since    uint64   // the frontier height when the policy was adopted: every later coverage record is acknowledged under it
 	Through  uint64   // every promised position at or below this height has two verified copies on Replicas (or is below the coverage base)
+	// Bundles: every activation bundle this node retains was read back from two of Replicas. It is tracked apart from Retained, which
+	// is derived from the block coverage alone: a policy whose earlier block acknowledgers all stay current may still have a bundle
+	// on fewer than two of its replicas (a node that ran before policies were persisted never verified that).
+	Bundles bool
 }
 
-// Complete reports whether no earlier replica is still a holder: every block position promised before the switch, and every retained
-// activation bundle, was verified on two current replicas (or nothing earlier was retained at all).
-func (m ArchiveMigration) Complete() bool { return len(m.Retained) == 0 }
+// Complete reports whether the migration is done: no earlier replica is still a holder of a promised block position, and every retained
+// activation bundle was verified on two current replicas.
+func (m ArchiveMigration) Complete() bool { return len(m.Retained) == 0 && m.Bundles }
 
 // Backlog is the number of promised block positions still to verify on the current replicas.
 func (m ArchiveMigration) Backlog() uint64 {
@@ -70,7 +75,7 @@ func namesValid(names []string) bool {
 
 func encodeArchiveMigration(dd [32]byte, m ArchiveMigration) ([]byte, error) {
 	p, err := marshal(archiveMigrationWire{Version: journalVersion, Descriptor: dd[:], Policy: m.Policy, Replicas: m.Replicas, Lineage: m.Lineage,
-		Retained: m.Retained, Since: m.Since, Through: m.Through})
+		Retained: m.Retained, Since: m.Since, Through: m.Through, Bundles: m.Bundles})
 	if err != nil {
 		return nil, err
 	}
@@ -94,7 +99,7 @@ func readArchiveMigration(b *bolt.Bucket, dd [32]byte) (ArchiveMigration, bool, 
 		!namesValid(w.Replicas) || !namesValid(w.Lineage) || !namesValid(w.Retained) || w.Through > w.Since {
 		return ArchiveMigration{}, false, fmt.Errorf("%w: archive policy migration record", ErrContext)
 	}
-	m := ArchiveMigration{Policy: w.Policy, Digest: sha256.Sum256(w.Policy), Replicas: w.Replicas, Lineage: w.Lineage, Retained: w.Retained, Since: w.Since, Through: w.Through}
+	m := ArchiveMigration{Policy: w.Policy, Digest: sha256.Sum256(w.Policy), Replicas: w.Replicas, Lineage: w.Lineage, Retained: w.Retained, Since: w.Since, Through: w.Through, Bundles: w.Bundles}
 	return m, true, nil
 }
 
@@ -249,6 +254,8 @@ func (s *Store) AdoptArchivePolicy(ctx context.Context, c Context, limits Journa
 		}
 		if len(next.Retained) == 0 {
 			next.Retained, next.Through = nil, next.Since
+			// every previous replica stays current: what they were verified to hold, they still hold. Nothing else carries over.
+			next.Bundles = found && previous.Bundles
 		}
 		raw, err := encodeArchiveMigration(dd, next)
 		if err != nil {
@@ -297,12 +304,13 @@ func (s *Store) AdvanceArchiveMigration(ctx context.Context, c Context, limits J
 			through = m.Since
 		}
 		if m.Complete() || through < m.Through || through == m.Through && !(release && through >= m.Since) {
+			// nothing new to record
 			out = m
 			return nil
 		}
 		m.Through = through
 		if release && m.Through >= m.Since {
-			m.Retained = nil
+			m.Retained, m.Bundles = nil, true
 		}
 		raw, err := encodeArchiveMigration(dd, m)
 		if err != nil {

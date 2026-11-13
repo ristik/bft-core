@@ -145,14 +145,55 @@ func TestArchiveMigrationStartsAtTheCoverageBase(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, anchor.Height, m.Through)
 	require.Equal(t, anchor.Height, m.Since)
-	require.True(t, m.Complete(), "nothing earlier to retain")
+	require.Empty(t, m.Retained, "nothing earlier to retain")
+	require.False(t, m.Complete(), "a first adoption has not verified the bundles")
+	m, err = s.AdvanceArchiveMigration(ctx, c, limits, m.Digest, []string{"a", "b", "c"}, m.Since, true)
+	require.NoError(t, err)
+	require.True(t, m.Complete())
+	again, err := s.AdoptArchivePolicy(ctx, c, limits, []byte("p1b"), []string{"a", "b", "c", "e"}[1:])
+	require.NoError(t, err)
+	require.False(t, again.Complete(), "a dropped replica (a) is retained")
 	p2 := []string{"a", "b", "d"}
 	m, err = s.AdoptArchivePolicy(ctx, c, limits, []byte("p2"), p2)
 	require.NoError(t, err)
 	require.Zero(t, m.Backlog(), "a restored writer has no block promise below its base")
-	require.Equal(t, []string{"c"}, m.Retained)
+	require.Equal(t, []string{"c", "e"}, m.Retained)
 	require.False(t, m.Complete())
 	m, err = s.AdvanceArchiveMigration(ctx, c, limits, m.Digest, p2, m.Since, true)
 	require.NoError(t, err)
 	require.True(t, m.Complete())
+}
+
+// The bundle verification is tracked apart from the retained holders (astra round 2 of #1034): a journal from before policies were
+// persisted whose block acknowledgers all stay current retains nobody, yet is not complete until its bundles are verified; a later
+// superset keeps a verified state, and nothing else carries it over.
+func TestArchiveMigrationTracksBundlesApartFromRetainedHolders(t *testing.T) {
+	ctx := context.Background()
+	j := newRotationJournal(t, true)
+	s, err := j.reopen(t, [2]string{"first", "second"}, &namedAvailability{}, nil)
+	require.NoError(t, err)
+	p1 := []string{"first", "second", "third"}
+	m, err := s.AdoptArchivePolicy(ctx, j.c, j.limits, []byte("p1"), p1)
+	require.NoError(t, err)
+	require.Empty(t, m.Retained, "both block acknowledgers stay current")
+	require.False(t, m.Bundles)
+	require.False(t, m.Complete(), "the upgrade has not verified the bundles")
+	m, err = s.AdvanceArchiveMigration(ctx, j.c, j.limits, m.Digest, p1, m.Since, false)
+	require.NoError(t, err)
+	require.False(t, m.Complete())
+	m, err = s.AdvanceArchiveMigration(ctx, j.c, j.limits, m.Digest, p1, m.Since, true)
+	require.NoError(t, err)
+	require.True(t, m.Complete())
+	require.NoError(t, s.Close())
+	r, err := OpenConfiguredV2(j.path, Settings{Retain: 3})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = r.Close() })
+	require.NoError(t, r.EnableJournal(ctx, j.c, j.limits))
+	got, _, err := r.LoadArchiveMigration(ctx, j.c, j.limits)
+	require.NoError(t, err)
+	require.True(t, got.Bundles, "persisted")
+	superset := []string{"first", "second", "third"}
+	m, err = r.AdoptArchivePolicy(ctx, j.c, j.limits, []byte("p1 again"), superset)
+	require.NoError(t, err)
+	require.True(t, m.Complete(), "the same replicas keep the verified state")
 }

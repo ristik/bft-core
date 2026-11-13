@@ -39,10 +39,11 @@ func (a ackSet) count() int {
 	return n
 }
 
-// validSources reports whether r is a usable list of archive sources to read from: two or more distinct, non-empty peer IDs (bounded).
-// Reading is not the durability policy: a policy's replicas plus the retained holders of earlier policies may be more than three.
+// validSources reports whether r is a usable list of archive sources to read from: two or more distinct, non-empty peer IDs. Reading is
+// not the durability policy: a policy's replicas plus the retained holders of earlier policies may be any number (successive unfinished
+// migrations keep every holder), and a restore tries them in order, so no source that may hold the needed history is dropped.
 func validSources(r []peer.ID) bool {
-	if len(r) < replicaCopies || len(r) > 16 {
+	if len(r) < replicaCopies {
 		return false
 	}
 	for i, id := range r {
