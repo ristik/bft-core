@@ -81,7 +81,8 @@ func (a *ActivePeers) Install(epoch uint64, validators []*types.NodeInfo) error 
 	case epoch < a.epoch:
 		return nil
 	case epoch == a.epoch:
-		if !sameSet(a.set, set) {
+		// the self-membership bit is part of the set: {self,B} and {B} at one epoch are different assignments
+		if !sameSet(a.set, set) || a.member != names(a.self, validators) {
 			return fmt.Errorf("%w: shard epoch %d", ErrActivePeersConflict, epoch)
 		}
 		return nil

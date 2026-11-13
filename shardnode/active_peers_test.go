@@ -137,3 +137,21 @@ func TestActivePeersMemberFollowsTheInstalledAssignment(t *testing.T) {
 	require.NoError(t, joiner.Install(2, validatorsOf(v2, v3, v4)))
 	require.False(t, joiner.Member(), "retired by the successor assignment")
 }
+
+// The same epoch installed again with or without this node is a different assignment, not a repeat: both orders are refused and the
+// role stays as first installed.
+func TestActivePeersSameEpochDifferingOnlyInSelfIsAConflict(t *testing.T) {
+	self, b := newPeerID(t), newPeerID(t)
+	withSelf, err := NewActivePeers(self, validatorsOf(b))
+	require.NoError(t, err)
+	require.NoError(t, withSelf.Install(1, validatorsOf(self, b)))
+	require.ErrorIs(t, withSelf.Install(1, validatorsOf(b)), ErrActivePeersConflict)
+	require.True(t, withSelf.Member())
+
+	without, err := NewActivePeers(self, validatorsOf(b))
+	require.NoError(t, err)
+	require.NoError(t, without.Install(1, validatorsOf(b)))
+	require.ErrorIs(t, without.Install(1, validatorsOf(self, b)), ErrActivePeersConflict)
+	require.False(t, without.Member())
+	require.NoError(t, without.Install(1, validatorsOf(b)), "the same assignment again is a no-op")
+}
