@@ -765,7 +765,7 @@ def start(lap):
     say(json.dumps(lap.status(), sort_keys=True))
 
 
-def join(lap, dry_run=False, stop_after=None, allow_dirty=False, funder=None):
+def join(lap, dry_run=False, stop_after=None, allow_dirty=False, funder=None, action='join'):
     """remote_entity.py join on the host, as a transient `systemd-run --user` unit (a dropped ssh session of this laptop must not kill a drive half way), its log
     followed here until it ends. Rerunning resumes: the host's state is in handoff/remote-joiners/<J>.json and the drive's journal."""
     s = lap.state
@@ -773,10 +773,10 @@ def join(lap, dry_run=False, stop_after=None, allow_dirty=False, funder=None):
     if (version['dirty'] or not version['commit']) and not allow_dirty:
         raise Failure(f'{HERE} is dirty or not a git checkout (commit {version["commit"]}): commit and redeploy (init), or pass --allow-dirty')
     say(f'laptop checkout {HERE}: commit {version["commit"]}, dirty {version["dirty"]}, digest {version["digest"][:16]} (the host refuses a different deployed copy)')
-    cmd = (f'sudo env PATH="$PATH:$(dirname {shlex.quote(s["hostCast"])})" python3 -u {s["hostDir"]}/testnet/remote_entity.py join {s["hostGeneration"]} '
+    cmd = (f'sudo env PATH="$PATH:$(dirname {shlex.quote(s["hostCast"])})" python3 -u {s["hostDir"]}/testnet/remote_entity.py {action} {s["hostGeneration"]} '
            f'--entity {lap.entity} --ubft {s["hostUbft"]} --restore-pin {s["hostRestorePin"]} --cast {s["hostCast"]}' + (' --dry-run' if dry_run else '') + (f' --stop-after {stop_after}' if stop_after else '')
            + f' --source-digest {version["digest"]}' + (' --allow-dirty' if allow_dirty else '') + (f' --funder {shlex.quote(funder)}' if funder else ''))
-    unit = f'laptop-join-{int(time.time())}'
+    unit = f'laptop-{action}-{int(time.time())}'
     log = f'{s["hostDir"]}/{unit}.log'
     script = (f'systemd-run --user --quiet --collect --unit={unit} bash -c {shlex.quote(f"{cmd} > {log} 2>&1; echo EXIT=$? >> {log}")} && '
               f'touch {log} && (tail -n +1 -F {log} 2>/dev/null & t=$!; while systemctl --user is-active -q {unit}; do sleep 2; done; sleep 1; kill $t) && '
@@ -787,7 +787,7 @@ def join(lap, dry_run=False, stop_after=None, allow_dirty=False, funder=None):
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument('action', choices=('init', 'start', 'status', 'join', 'agent', 'tunnel', 'background-stop', 'retire-plan'))
+    p.add_argument('action', choices=('init', 'start', 'status', 'join', 'catch-up', 'agent', 'tunnel', 'background-stop', 'retire-plan'))
     p.add_argument('--home', help='this entity\'s directory on the laptop (default ~/unicity-joiner/<generation>)')
     p.add_argument('--host')
     p.add_argument('--generation')
@@ -820,6 +820,8 @@ def main(argv=None):
                 print(f'{name}: ' + (f'pid {pid.read_text().strip()}' if pid.is_file() else 'not started'))
         elif a.action == 'join':
             return join(lap, a.dry_run, a.stop_after, a.allow_dirty, a.funder)
+        elif a.action == 'catch-up':   # the follower to the current epoch (root install restart, shard restore): no chain transaction, the timer keeps driving
+            return join(lap, allow_dirty=a.allow_dirty, action='catch-up')
         elif a.action == 'agent':
             serve_agent(lap)
         elif a.action == 'tunnel':

@@ -548,6 +548,22 @@ class Join:
         say(f'DONE: entity {self.entity} (the laptop) is a member')
         return 0
 
+    def catch_up(self):
+        """Bring the laptop entity to the CURRENT epoch without joining (it stays a follower, nothing is registered on chain): its root install-restarted to
+        the epoch, its shard node restored at it (archive seeded from a host survivor first). A later join then only replays the blocks since."""
+        d = self.d
+        epochs = {i: d.root_info(i).get('epoch') for i in certifying_entities(d)}
+        if len(set(epochs.values())) != 1:
+            raise RuntimeError(f'the committee\'s roots are at different epochs {epochs}: a handoff is running, try again in a few minutes')
+        current = next(iter(epochs.values()))
+        d.target, d.new, d.joiners = current + 1, sorted(set(certifying_entities(d)) | {self.entity}), {self.entity}
+        started = time.monotonic()
+        d.catch_up_remote(self.entity)
+        st = self.r.status()
+        say(f'caught up to epoch {current} in {time.monotonic() - started:.0f} s: root activeEpoch {st.get("activeEpoch")}, execution client {st.get("urethHead")}, '
+            f'chain {int(d.ureth(1, "eth_blockNumber"), 16)}')
+        return 0
+
     def prepare(self, ident):
         """The trust base of E+1 over the current committee and the joiner (signed by every member, the joiner on the laptop), the joiner's authority started at
         that scope (and its shard node staging-only), then admitDelegation (the laptop's owner key and the authority's EVM key sign it)."""
@@ -613,7 +629,7 @@ def retire_plan(generation, entity):
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest='action', required=True)
-    for name in ('relay-up', 'relay-status', 'register', 'status', 'join', 'retire-plan', 'archive-tar'):
+    for name in ('relay-up', 'relay-status', 'register', 'status', 'join', 'catch-up', 'retire-plan', 'archive-tar'):
         s = sub.add_parser(name)
         s.add_argument('generation', type=Path)
         if name not in ('relay-status', 'archive-tar'):
@@ -625,7 +641,7 @@ def main(argv=None):
         if name == 'relay-up':
             s.add_argument('--script', type=Path, default=Path(__file__).resolve().parent / 'tunnel_relay.py')
             s.add_argument('--uid', type=int, default=int(os.environ.get('SUDO_UID', os.getuid())))
-        if name == 'join':
+        if name in ('join', 'catch-up'):
             s.add_argument('--ubft', type=Path, required=True)
             s.add_argument('--restore-pin', type=Path, required=True)
             s.add_argument('--cast', default='cast')
@@ -653,7 +669,7 @@ def main(argv=None):
         archive_tar(a.generation, a.source)
     elif a.action == 'retire-plan':
         print('\n'.join(retire_plan(a.generation, a.entity)))
-    elif a.action == 'join':
+    elif a.action in ('join', 'catch-up'):
         if os.geteuid() != 0:
             p.error('run as root (the generation directory is uid 10001, mode 0700)')
         here = Path(__file__).resolve().parent
@@ -665,7 +681,8 @@ def main(argv=None):
             say(f'REFUSED: {refusal}')
             return 3
         try:
-            return Join(a.generation, a.entity, a.ubft, a.restore_pin, a.cast, a.dry_run, stop_after=a.stop_after, funder=a.funder, busy_wait=a.busy_wait).run()
+            j = Join(a.generation, a.entity, a.ubft, a.restore_pin, a.cast, a.dry_run, stop_after=a.stop_after, funder=a.funder, busy_wait=a.busy_wait)
+            return j.catch_up() if a.action == 'catch-up' else j.run()
         except Exception as error:
             say(f'STOPPED: {error}')
             return 1
