@@ -340,7 +340,8 @@ func (s *Server) serveFrame(ctx context.Context, rw io.ReadWriter, frame []byte)
 		if err := s.verify(ctx, q, rec); err != nil {
 			return fmt.Errorf("%w: %w: %w", ErrVerifier, ErrReplica, err)
 		}
-		if err := s.store.Put(q, rec); err != nil {
+		// a verified representation other than the one held is stored next to it, never in its place (bft-core#876, #1030)
+		if err := putExact(s.store, q, rec); err != nil {
 			return fmt.Errorf("%w: %w", ErrHandler, err)
 		}
 		return typedHandlerError(writeFrame(rw, []byte{1}))

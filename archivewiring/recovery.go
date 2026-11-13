@@ -32,11 +32,13 @@ var (
 // then configured archive replicas. Certificate, header, body, state root and
 // archive context are checked before entries are returned to journal recovery.
 type RecoverySource struct {
-	Context   configuredprogress.Context
-	Subject   archive.Context
-	Local     *archive.Store
-	Host      shardnode.EvidenceHost
-	Replicas  []peer.ID
+	Context  configuredprogress.Context
+	Subject  archive.Context
+	Local    *archive.Store
+	Host     shardnode.EvidenceHost
+	Replicas []peer.ID
+	// Policy, when set, replaces Replicas with its current snapshot's readable replicas (the current ones, then the retained holders).
+	Policy    *ReplicaPolicy
 	Limits    Limits
 	MaxBlocks int
 	Log       *slog.Logger
@@ -114,7 +116,11 @@ func (s *RecoverySource) fetchVerifiedRecord(ctx context.Context, q archive.Requ
 			s.Log.WarnContext(ctx, "archive recovery source rejected", "source", "local", "block", fmt.Sprintf("%x", q.BlockHash), "error", err)
 		}
 	}
-	for _, id := range s.Replicas {
+	replicas := s.Replicas
+	if s.Policy != nil {
+		replicas = s.Policy.Snapshot().Readable()
+	}
+	for _, id := range replicas {
 		if id == "" || s.Host == nil {
 			continue
 		}

@@ -577,9 +577,38 @@ see Gaps for the remaining product and live-rehearsal limits.
 ### Derived archive replicas (the default)
 
 Without `--archive-replica` the node derives its replicas from the shard's validators: the next three validators after it in circular peer-ID order, and any two
-acknowledgements make a block durable. A dead replica therefore no longer stops pruning while the other two stay up, and a validator-set change moves the
-replicas with it, so there is nothing to reconfigure. The testnet package passes no `--archive-replica` (the package test asserts it). Give the flag only as
-exactly one explicit pair, which keeps the older two-of-two behaviour; any other count is refused at startup. The rules below apply to that explicit pair only.
+acknowledgements make a block durable. A dead replica therefore no longer stops pruning while the other two stay up. The testnet package passes no
+`--archive-replica` (the package test asserts it). Give the flag only as exactly one explicit pair, which keeps the older two-of-two behaviour and never
+moves with the validator set; any other count is refused at startup. The rules in the next section apply to that explicit pair only.
+
+How the derived replicas follow validator-set changes (bft-core#1030). The replicas are re-derived from the authenticated **installed** assignment after the
+startup replay (catch-up on restore) and after every activated handoff, not from genesis. A change of the replica set is a policy switch, and nothing
+durable is rewritten or deleted:
+
+- The frontier worker adopts the switch durably in the journal (`journal/archive-migration`) before it covers anything under it. New blocks need two
+  verified copies on the **new** replicas; K is never lowered. Coverage written under the old policy stays as historical evidence.
+- Every earlier replica that may still hold copies this writer promised becomes a **retained holder**. It counts towards the two copies of the promised
+  history, is read from (never published to), and keeps this node's archive service (not journal, evidence or consensus access) until it is released.
+  A retired validator's signing stops at the activation boundary regardless.
+- The worker then verifies the promised history, from the coverage base up to the switch height, on the new replicas, rewriting missing copies, at most 64
+  positions per pass (a cadence ceiling, not a measured drain rate). It also requires two current, read-back copies of every activation bundle this node
+  retains. Only then is the migration complete and are the retained holders released. Positions below a writer's restore base are not its promise.
+- A replacement restored from the archive holds the history its restore authenticated from its pin, possibly in another valid representation than the
+  writer promised. It accepts the writer's exact representation by the verified historical import: only for a block it already holds, with identical
+  header and body, and with certificates that verify under its own trust base. Ordinary publication is unchanged.
+- A restart keeps the persisted policy and its migration progress; it does not restart the migration. A configured replica that retired no longer
+  refuses a restart of a derived-policy node. Without `--archive-prune` nothing tracks storage obligations, and no retired peer keeps archive access.
+
+What `migrationComplete` covers: this writer's promised block records (header, body, receipts, companion and certificates, in the promised
+representation) and the activation bundles it retains. It does **not** cover UTB/Q3 history, record proofs or other evidence held outside the
+archive, nor history below the coverage base of every surviving writer. It is a necessary condition for powering off a retired validator, not a
+sufficient one.
+
+Before powering off a retired validator, check `ubft shard-node status --url <shard-RPC>` on **every** remaining writer: `archivePolicy.retained` must not name
+the retired peer and `archivePolicy.migrationComplete` must be true. Also confirm that the evidence outside that scope is held elsewhere. Until then the
+retired machine still holds copies the network depends on: keep its identity, archive directory and shard process running (it may stay a follower).
+`migrationBacklog` is the number of promised block positions still to verify. A migration waits, with `archive policy migration waiting` in the log,
+while fewer than two current replicas can take the history or a bundle.
 
 ### Replacing a configured archive replica (`--archive-replica`)
 

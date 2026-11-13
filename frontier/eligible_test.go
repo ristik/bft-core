@@ -322,3 +322,41 @@ func TestEligibleValidRefusesZeroPolicyDigest(t *testing.T) {
 	_, err := Encode(good, q)
 	require(t, err, ErrContext)
 }
+
+// A record whose acknowledgers are both outside the current policy is accepted as historical evidence when they are in the writer's
+// durable policy lineage (bft-core#1030: a membership change that replaces both acknowledgers), never as current, and never encoded anew.
+func TestEligibleHistoricalRecordsOfTheLineage(t *testing.T) {
+	base, p := eligibleFixture()
+	older := p
+	older.Eligible = []string{"replica-y", "replica-z"}
+	older.PolicyDigest = [32]byte{6}
+	r, _ := pairRecord(base, older, 0, 1)
+	raw, err := Encode(r, older)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = DecodeMigrating(raw, p)
+	require(t, err, ErrContext)
+	for _, lineage := range []Policy{{Historical: []string{"replica-z"}}, {Retained: []string{"replica-y"}}} {
+		q := p
+		q.Historical, q.Retained = lineage.Historical, lineage.Retained
+		got, err := DecodeMigrating(raw, q)
+		if err != nil || !got.Historical {
+			t.Fatalf("lineage %+v: %+v %v", lineage, got, err)
+		}
+		_, err = Decode(raw, q)
+		require(t, err, ErrContext)
+		if _, err := Encode(r, q); !errors.Is(err, ErrContext) {
+			t.Fatalf("a lineage acknowledger cannot acknowledge anew: %v", err)
+		}
+	}
+	bad := p
+	bad.Historical = []string{""}
+	if bad.ReplicasValid() {
+		t.Fatal("an empty lineage name is invalid")
+	}
+	legacy := Policy{Replicas: [2]string{"a", "b"}, Historical: []string{"c"}}
+	if legacy.ReplicasValid() {
+		t.Fatal("a legacy pair has no lineage")
+	}
+}

@@ -97,7 +97,7 @@ type restoredBlock struct {
 
 func (r *ArchiveRestore) Restore(ctx context.Context) error {
 	if r == nil || r.Journal == nil || r.Archive == nil || r.Adapter == nil || r.Host == nil ||
-		!validReplicas(r.Replicas) ||
+		!validSources(r.Replicas) ||
 		r.TipUC == nil || r.TipTR == nil || r.TipUC.InputRecord == nil || len(r.Genesis.Hash) != 32 || !r.Limits.valid() {
 		return fmt.Errorf("%w: incomplete restore configuration", ErrRestore)
 	}
