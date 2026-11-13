@@ -117,21 +117,39 @@ type Source struct {
 	// followers (ServerSource) without their asking a root.
 	cuts     map[CutKey]Cut
 	cutOrder []CutKey
+	// store, when set, retains every verified cut durably, so that this node can serve a historical cut long after it left the bounded
+	// in-memory cache and across restarts: the mirror's retention guarantee for root-free historical recovery is "every cut it verified".
+	store CutStore
 }
 
-// maxMirroredCuts bounds the verified cuts a source retains for mirroring.
-const maxMirroredCuts = 4096
+// CutStore durably retains verified cuts by key.
+type CutStore interface {
+	PutCut(key CutKey, cut Cut) error
+	GetCut(key CutKey) (Cut, bool, error)
+}
+
+// SetCutStore attaches durable cut retention. Call before use.
+func (s *Source) SetCutStore(store CutStore) { s.store = store }
+
+// maxMirroredCuts bounds the verified cuts a source keeps in memory; older ones are served from the durable store (SetCutStore).
+var maxMirroredCuts = 4096
 
 // ControlCut serves a cut this source has verified (ServerSource). An unverified cut is unavailable: a mirror never relays unchecked bytes,
 // and the follower verifies it again against its own origin.
 func (s *Source) ControlCut(key CutKey) (Cut, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	cut, ok := s.cuts[key]
-	if !ok {
-		return Cut{}, fmt.Errorf("%w: cut not verified here", ErrUnavailable)
+	store := s.store
+	s.mu.Unlock()
+	if ok {
+		return cut, nil
 	}
-	return cut, nil
+	if store != nil {
+		if cut, ok, err := store.GetCut(key); err == nil && ok {
+			return cut, nil
+		}
+	}
+	return Cut{}, fmt.Errorf("%w: cut not verified here", ErrUnavailable)
 }
 
 // Records serves the verified log (ServerSource).
@@ -146,6 +164,9 @@ func (s *Source) Records(from uint64, max int) ([]rootrecords.Record, error) {
 }
 
 func (s *Source) retainCut(key CutKey, cut Cut) {
+	if s.store != nil {
+		_ = s.store.PutCut(key, cut) // best effort: a failed write only loses this node's ability to mirror the cut later
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.cuts == nil {

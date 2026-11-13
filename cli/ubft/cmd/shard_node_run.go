@@ -53,6 +53,7 @@ import (
 	"github.com/unicitynetwork/bft-core/q3delivery"
 	"github.com/unicitynetwork/bft-core/q3format"
 	"github.com/unicitynetwork/bft-core/q3shard"
+	"github.com/unicitynetwork/bft-core/recordsfeed"
 	"github.com/unicitynetwork/bft-core/registrygenesis"
 	"github.com/unicitynetwork/bft-core/registryproof"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
@@ -629,6 +630,15 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	// A root-free follower bootstraps from its follow sources only and keeps every known root closed while it is not active (the role is
 	// read on each connection: activation opens the roots without a restart). The roots' addresses are still learned, for that moment.
 	follower := newRootFreeRole(len(followSources) != 0, trustBases)
+	// verified root-record cuts are retained durably next to the execution journal: this node mirrors every cut it verified
+	var recordCuts recordsfeed.CutStore
+	if flags.ExecutionJournal != "" {
+		cutDB, cutErr := boltdb.New(flags.ExecutionJournal + ".cuts")
+		if cutErr != nil {
+			return fmt.Errorf("opening the record cut store: %w", cutErr)
+		}
+		recordCuts = recordsfeed.KVCutStore{DB: cutDB}
+	}
 	peerBoot := bootNodes
 	if follower.enabled {
 		peerBoot = followSources
@@ -791,7 +801,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			if verifierContext.B1, jErr = newB1PairConfig(b1Profile, b1rt, flags.EthURL, 10*time.Second); jErr != nil {
 				return jErr
 			}
-			attachRecordsFeed(verifierContext.B1, peer, bootNodes, follower)
+			attachRecordsFeed(verifierContext.B1, peer, bootNodes, follower, recordCuts)
 			// The execution client is the paired ureth: every build and import carries the pair binding its own gate compares.
 			if q3Admit, jErr = wireQ3Pair(executor, b1rt, uint64(shardConf.NetworkID), origin.Valid(), [32]byte(origin.BlockHash())); jErr != nil {
 				return jErr
@@ -825,7 +835,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				if verifierContext.B1, jErr = newB1PairConfig(b1Profile, q3rt, flags.EthURL, 10*time.Second); jErr != nil {
 					return jErr
 				}
-				attachRecordsFeed(verifierContext.B1, peer, bootNodes, follower)
+				attachRecordsFeed(verifierContext.B1, peer, bootNodes, follower, recordCuts)
 			}
 		}
 	}

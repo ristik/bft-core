@@ -12,6 +12,7 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/bft-core/evmroot"
+	"github.com/unicitynetwork/bft-core/keyvaluedb/memorydb"
 	"github.com/unicitynetwork/bft-core/rootinput"
 	"github.com/unicitynetwork/bft-core/rootrecords"
 )
@@ -402,4 +403,54 @@ type mirrorRemote struct{ s ServerSource }
 func (m mirrorRemote) Cut(_ context.Context, key CutKey) (Cut, error) { return m.s.ControlCut(key) }
 func (m mirrorRemote) Records(_ context.Context, from uint64, max int) ([]rootrecords.Record, error) {
 	return m.s.Records(from, max)
+}
+
+// Historical root-free recovery does not depend on the bounded in-memory cache: a mirror that verified more origins than the cache holds,
+// then restarted (its derived caches wiped, its durable store kept), still serves every historical cut, and a follower catching up from
+// the first origin verifies all of them through that mirror alone.
+func TestHistoricalCutsOutliveTheCacheAndARestart(t *testing.T) {
+	defer func(n int) { maxMirroredCuts = n }(maxMirroredCuts)
+	maxMirroredCuts = 4 // the bound is an optimization; the test exceeds it many times over
+	store := KVCutStore{DB: memorydb.New()}
+	type origin struct {
+		cut    Cut
+		origin evmroot.RootOriginV2
+		chain  chain
+	}
+	var origins []origin
+	mirror := NewSource()
+	mirror.SetCutStore(store)
+	for i := 0; i < 40; i++ {
+		c := buildChain(t, 3+i)
+		cut, o := c.cutOf(t, uint64(500+10*i), uint64(9_000+i))
+		mirror.remotes = []Remote{&fakeRemote{cut: cut, records: c.records}}
+		_, err := mirror.Cursor(context.Background(), o)
+		require.NoError(t, err)
+		origins = append(origins, origin{cut, o, c})
+	}
+	restarted := NewSource() // a restart: nothing in memory
+	restarted.SetCutStore(store)
+	last := origins[len(origins)-1].chain
+	restarted.log = append(restarted.log, last.records...) // its verified log (retained with the archive)
+	follower := NewSource(mirrorRemote{restarted})
+	for i, o := range origins {
+		_, err := follower.Cursor(context.Background(), o.origin)
+		require.NoError(t, err, "origin %d", i)
+	}
+	// the control: the cache alone has lost the early cuts
+	_, err := mirror.cutsOnly(origins[0].origin)
+	require.ErrorIs(t, err, ErrUnavailable, "the in-memory cache no longer holds the first origin's cut")
+}
+
+func (s *Source) cutsOnly(o evmroot.RootOriginV2) (Cut, error) {
+	key, err := KeyOf(o)
+	if err != nil {
+		return Cut{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if cut, ok := s.cuts[key]; ok {
+		return cut, nil
+	}
+	return Cut{}, ErrUnavailable
 }

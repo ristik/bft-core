@@ -20,7 +20,7 @@ func (noHost) CreateStream(context.Context, libp2ppeer.ID, string) (network.Stre
 
 func TestThePairIsGivenAnAuthenticatedRecordsRouteThroughEveryRootItKnows(t *testing.T) {
 	cfg := &b1paired.Config{}
-	attachRecordsFeed(cfg, noHost{}, []libp2ppeer.AddrInfo{{ID: "root-a"}, {ID: "root-b"}}, newRootFreeRole(false, nil))
+	attachRecordsFeed(cfg, noHost{}, []libp2ppeer.AddrInfo{{ID: "root-a"}, {ID: "root-b"}}, newRootFreeRole(false, nil), nil)
 	require.NotNil(t, cfg.Records)
 	// no root reachable: unavailable, never an empty feed
 	_, err := cfg.Records.Cursor(context.Background(), evmroot.RootOriginV2{RootRound: 3})
@@ -43,7 +43,7 @@ func TestARootFreeFollowerAsksMirrorsNotRootsForRecords(t *testing.T) {
 	role.setMirrors(func() []libp2ppeer.ID { return []libp2ppeer.ID{"mirror-1", "mirror-2"} })
 	member := false
 	role.setRole(func() bool { return member })
-	attachRecordsFeed(cfg, host, roots, role)
+	attachRecordsFeed(cfg, host, roots, role, nil)
 	_, err := cfg.Records.Cursor(context.Background(), evmroot.RootOriginV2{RootRound: 3, UnicityTreeRoot: make([]byte, 32)})
 	require.Error(t, err)
 	require.Equal(t, []libp2ppeer.ID{"mirror-1", "mirror-2"}, host.dialled, "a non-active follower dials no root")

@@ -633,7 +633,7 @@ func newB1PairConfig(p b1state.Profile, rt *q3active.Runtime, ethURL string, tim
 // then the mirrors (shard nodes serving the cuts and records they verified). A root-free follower that is not active asks the mirrors only.
 // What any source serves is believed only after it verified against the unicity tree root of the certificate the pair holds, so no source
 // is trusted and any of them will do.
-func attachRecordsFeed(cfg *b1paired.Config, host recordsfeed.Libp2p, roots []libp2ppeer.AddrInfo, role *rootFreeRole) {
+func attachRecordsFeed(cfg *b1paired.Config, host recordsfeed.Libp2p, roots []libp2ppeer.AddrInfo, role *rootFreeRole, cuts recordsfeed.CutStore) {
 	opener := recordsfeed.FromLibp2p(host)
 	remotes := make([]recordsfeed.Remote, 0, len(roots)+recordsMirrorSlots)
 	for _, r := range roots {
@@ -648,6 +648,9 @@ func attachRecordsFeed(cfg *b1paired.Config, host recordsfeed.Libp2p, roots []li
 		}})
 	}
 	source := recordsfeed.NewSource(remotes...)
+	if cuts != nil {
+		source.SetCutStore(cuts) // every verified cut is kept durably, for followers' historical recovery
+	}
 	cfg.Records = source
 	if host, ok := host.(interface {
 		RegisterProtocolHandler(string, libp2pnetwork.StreamHandler)
