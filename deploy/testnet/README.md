@@ -10,6 +10,9 @@ Each validator entity is a **four-container pod**: root, paired ureth, shard,
 signing authority. Separate containers give each process bounded resources,
 observable logs and independent restarts without a custom process supervisor.
 Each pod has separate root/shard/authority keys, Engine JWT, journals and archive.
+The shard archive keeps one file per block under `archive/records/<hh>/` since #1049; a node migrates the directory-per-block
+layout of an earlier binary by itself, records readable throughout. **Do not roll a migrated archive back to a binary (or an
+`h4-restore-pin`) from before #1049**: it reads only the directory layout, so every packed record is missing to it.
 Only its shard and authority share the authority directory/Unix sockets. Operator
 credentials are privileged host material; these pods are not a hostile-container
 security boundary. Never mount one validator's private directory into another.
@@ -33,8 +36,10 @@ engine protocol are supplied by the pinned BFT/ureth builds.
 The generated `compose.yaml` is JSON (valid YAML), default N=4, configurable N=3..16 (the registry's committee ceiling; a PoS generation is further limited to the election cap, 6).
 All services have CPU/memory/PID limits, explicit restart policies, read-only root filesystems
 and bounded Docker JSON logs (30 MiB/service). Each pod caps memory at about 4.2 GiB (4.125 GiB of its four services, of which the shard node's 2 GiB also covers the kernel cache of its archive tree, #1018:
-measured at 13 inodes and about 20 KB of slab per archived block, so at about 2800 blocks/h the archive slab can fill the 2 GiB in about 1.5 to 2.7 days if the kernel does not reclaim it;
-the observer's memory alert below is the early warning, and #1049 packs a record into one file,
+a record is one file since #1049, measured at 1.05 inodes and about 3 KB of slab per archived block (13 inodes and about 20 KB in the
+directory layout before it), so at about 2800 blocks/h the archive slab reaches 1.4 GB after 7 days if the kernel never reclaims it; a node
+started on an archive an earlier binary wrote migrates it in the background, giving back about 17 KB per block;
+the observer's memory alert below is the early warning,
 plus a 16 MiB namespace holder and a 64 MiB metrics relay); shared services cap another 2.375 GiB, approximately **19.2 GiB for N=4** and
 **15.0 GiB for N=3**, plus Docker/OS/page cache/build overhead. Plan at least 24 GiB
 server RAM, 8 cores, 100 GiB initial SSD and off-host backup space; these are initial
