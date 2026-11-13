@@ -73,8 +73,8 @@ type (
 		zkRegistry       *zkverifier.Registry
 		offers           EntryOffers    // nil: the legacy certificate protocol only
 		early            *earlyRequests // near-future requests held until the committed context advances (#1032)
-		fenceMu          sync.Mutex
-		fenced           map[types.PartitionShardID]uint64 // shards counting a replayed request: the root epoch it was held in
+		afterCount       func()         // tests only: called between counting a request and handing its outcome over
+		epochMu          sync.Mutex
 		seenEpoch        uint64
 		seenEpochSet     bool
 
@@ -116,7 +116,6 @@ func New(
 		consensusManager: cm,
 		zkRegistry:       zkverifier.NewRegistry(),
 		early:            newEarlyRequests(),
-		fenced:           make(map[types.PartitionShardID]uint64),
 		log:              observe.Logger(),
 		tracer:           observe.Tracer("rootchain.node"),
 	}
@@ -406,8 +405,7 @@ func (v *Node) admitRequest(ctx context.Context, req *certification.BlockCertifi
 	if err := v.subscription.Subscribe(req.PartitionID, req.ShardID, req.NodeID); err != nil {
 		return fmt.Errorf("subscribing the sender: %w", err)
 	}
-	v.noteCounted(req, origin)
-	return v.countRequest(ctx, req, si, false)
+	return v.countRequest(ctx, req, si, false, snapshot)
 }
 
 // legacyNearFuture reports whether a request refused under the committed ShardInfo is the authentic request of the round right after
@@ -495,51 +493,21 @@ func viewAuthority(view requestAdmission) []byte {
 	return nil
 }
 
-// noteCounted records that a replayed request is counted for its shard: every certification request handed over for the shard, until
-// its buffer is cleared, names the root epoch the replayed request was held in, and the consensus manager refuses it under another.
-func (v *Node) noteCounted(req *certification.BlockCertificationRequest, origin *heldOrigin) {
-	if !origin.replay {
-		return
-	}
-	v.fenceMu.Lock()
-	defer v.fenceMu.Unlock()
-	v.fenced[types.PartitionShardID{PartitionID: req.PartitionID, ShardID: req.ShardID.Key()}] = origin.epoch
-}
-
-// fencedEpoch is the root epoch every hand-over of the shard must be certified in, or 0.
-func (v *Node) fencedEpoch(partition types.PartitionID, shard types.ShardID) uint64 {
-	v.fenceMu.Lock()
-	defer v.fenceMu.Unlock()
-	return v.fenced[types.PartitionShardID{PartitionID: partition, ShardID: shard.Key()}]
-}
-
-// clearShard clears the shard's counted requests and with them its fence.
+// clearShard clears the shard's counted requests.
 func (v *Node) clearShard(ctx context.Context, partition types.PartitionID, shard types.ShardID) {
 	v.incomingRequests.Clear(ctx, partition, shard)
-	v.fenceMu.Lock()
-	delete(v.fenced, types.PartitionShardID{PartitionID: partition, ShardID: shard.Key()})
-	v.fenceMu.Unlock()
 }
 
-// observeEpoch is the installed root epoch; when it changed since the last admission, every request counted under a replay of the
-// previous epoch is cleared and every held request dropped, before anything is admitted in the new one.
-func (v *Node) observeEpoch(ctx context.Context) uint64 {
+// observeEpoch is the installed root epoch; when it changed since the last admission, every held request is dropped before anything is
+// admitted in the new one. Counted requests need no sweep: every tally is counted under its epoch (epochQuorum), so a tally of the
+// previous epoch is retired, never completed, by the first request counted in the new one.
+func (v *Node) observeEpoch(_ context.Context) uint64 {
 	now := v.rootEpoch()
-	v.fenceMu.Lock()
+	v.epochMu.Lock()
 	changed := v.seenEpochSet && v.seenEpoch != now
 	v.seenEpoch, v.seenEpochSet = now, true
-	var stale []types.PartitionShardID
+	v.epochMu.Unlock()
 	if changed {
-		for k := range v.fenced {
-			stale = append(stale, k)
-		}
-		clear(v.fenced)
-	}
-	v.fenceMu.Unlock()
-	if changed {
-		for _, k := range stale {
-			v.incomingRequests.ClearKey(ctx, k)
-		}
 		v.early.dropAll()
 	}
 	return now
@@ -557,6 +525,28 @@ func (v *Node) rootEpoch() uint64 {
 func (v *Node) signalReplay(partition types.PartitionID, shard types.ShardID) {
 	v.early.markReady(partition, shard)
 }
+
+// epochQuorum is a QuorumInfo whose tallies are also keyed by the root epoch they are counted in (#1032): the buffer keys a tally by
+// Identity, so requests admitted in different root epochs are never counted together, a tally of another epoch is retired by the next
+// request, and a decided tally of another epoch is never redelivered.
+type epochQuorum struct {
+	QuorumInfo
+	epoch uint64
+}
+
+func withEpoch(q QuorumInfo, epoch uint64) QuorumInfo {
+	if epoch == 0 {
+		return q // a manager that installs no root epoch: nothing to key by
+	}
+	return epochQuorum{QuorumInfo: q, epoch: epoch}
+}
+
+func (q epochQuorum) Identity() string {
+	return fmt.Sprintf("%s@root-epoch-%d", q.QuorumInfo.Identity(), q.epoch)
+}
+
+// RoundTag keeps the wrapped view's shard-round tag (tagOf).
+func (q epochQuorum) RoundTag() string { return tagOf(q.QuorumInfo) }
 
 // requestAdmission is what collector admission uses of a resolved request view; *storage.RequestRoundView is the one
 // implementation (it is an interface so that the collection-only branch can be driven without a committed successor).
@@ -634,8 +624,7 @@ func (v *Node) collectUnderView(ctx context.Context, req *certification.BlockCer
 	if err := v.subscription.Subscribe(req.PartitionID, req.ShardID, req.NodeID); err != nil {
 		return fmt.Errorf("subscribing the sender: %w", err)
 	}
-	v.noteCounted(req, origin)
-	return v.countRequest(ctx, req, view, view.CollectionOnly())
+	return v.countRequest(ctx, req, view, view.CollectionOnly(), snapshot)
 }
 
 // countRequest counts an admitted request under tb and asks for certification when a quorum, or the impossibility of one, is
@@ -644,7 +633,12 @@ func (v *Node) collectUnderView(ctx context.Context, req *certification.BlockCer
 // redeliverMinInterval bounds, per shard, how often a repeated request hands its decided outcome to the consensus manager again.
 var redeliverMinInterval = 2 * time.Second
 
-func (v *Node) countRequest(ctx context.Context, req *certification.BlockCertificationRequest, tb QuorumInfo, collectionOnly bool) (rErr error) {
+// epoch is the root epoch the request was admitted in. The tally is counted under it (epochQuorum): requests of different epochs are never
+// one tally, and the epoch every proof is handed over with is the one its requests were counted in, bound to the proof by the tally that
+// produced it, not looked up afterwards from state a concurrent Clear can change. The consensus manager refuses the proof under any other
+// installed epoch (and a zero one).
+func (v *Node) countRequest(ctx context.Context, req *certification.BlockCertificationRequest, view QuorumInfo, collectionOnly bool, epoch uint64) (rErr error) {
+	tb := withEpoch(view, epoch)
 	// requests counted for an earlier shard round, anchor or assignment are retired, never counted again
 	v.incomingRequests.Retire(req.PartitionID, req.ShardID, tb)
 	// check if consensus is already achieved
@@ -660,7 +654,7 @@ func (v *Node) countRequest(ctx context.Context, req *certification.BlockCertifi
 				v.log.DebugContext(ctx, fmt.Sprintf("partition %s repeated request of a decided, uncertified outcome (%s), handing it over again", req.PartitionID, status),
 					logger.Shard(req.PartitionID, req.ShardID))
 				return v.consensusManager.RequestCertification(ctx, consensus.IRChangeRequest{
-					Partition: req.PartitionID, Shard: req.ShardID, Reason: reason, Requests: requests, RootEpoch: v.fencedEpoch(req.PartitionID, req.ShardID)})
+					Partition: req.PartitionID, Shard: req.ShardID, Reason: reason, Requests: requests, RootEpoch: epoch})
 			}
 		}
 		v.log.DebugContext(ctx, fmt.Sprintf("dropping stale block certification request (%s) for partition %s", res, req.PartitionID), logger.Shard(req.PartitionID, req.ShardID))
@@ -670,6 +664,9 @@ func (v *Node) countRequest(ctx context.Context, req *certification.BlockCertifi
 	res, requests, err := v.incomingRequests.Add(ctx, req, tb)
 	if err != nil {
 		return fmt.Errorf("storing request: %w", err)
+	}
+	if v.afterCount != nil {
+		v.afterCount() // tests: what may run concurrently between the count and the hand-over
 	}
 	if collectionOnly && res != QuorumInProgress {
 		v.log.DebugContext(ctx, "collection-only view: the outcome is not certified before the activation round", logger.Shard(req.PartitionID, req.ShardID))
@@ -705,7 +702,7 @@ func (v *Node) countRequest(ctx context.Context, req *certification.BlockCertifi
 			Shard:     req.ShardID,
 			Reason:    reason,
 			Requests:  requests,
-			RootEpoch: v.fencedEpoch(req.PartitionID, req.ShardID),
+			RootEpoch: epoch,
 		}); err != nil {
 		v.clearShard(ctx, req.PartitionID, req.ShardID)
 		return fmt.Errorf("requesting certification: %w", err)

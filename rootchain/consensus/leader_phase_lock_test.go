@@ -54,7 +54,7 @@ func phaseLockProof(t *testing.T, c *q4bLive, r *q3Replica, hash []byte) *IRChan
 	tr := view.ExpectedTR()
 	prev, err := view.PreviousUC()
 	require.NoError(t, err)
-	out := &IRChangeRequest{Partition: q3fixture.PartitionID, Shard: types.ShardID{}, Reason: Quorum}
+	out := &IRChangeRequest{RootEpoch: r.manager.InstalledRootEpoch(), Partition: q3fixture.PartitionID, Shard: types.ShardID{}, Reason: Quorum}
 	for _, id := range view.Context().NodeIDs() {
 		bcr := &certification.BlockCertificationRequest{PartitionID: q3fixture.PartitionID, ShardID: types.ShardID{}, NodeID: id, InputRecord: &types.InputRecord{
 			Version: 1, Epoch: tr.Epoch, RoundNumber: tr.Round, PreviousHash: view.PreviousStateHash(), Hash: hash, BlockHash: bytes.Repeat([]byte{0x82}, 32),

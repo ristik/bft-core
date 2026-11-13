@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	libp2pNetwork "github.com/libp2p/go-libp2p/core/network"
@@ -98,6 +99,10 @@ type LibP2PNetwork struct {
 	ingress   []*IngressBudget
 	outOnce   sync.Once
 	out       <-chan any
+	// done is closed by Close: the forwarder stops, and everything queued or received afterwards is dropped with its reservation released
+	done       chan struct{}
+	closeOnce  sync.Once
+	forwarding atomic.Bool // the forwarder runs (it drains on Close); otherwise Close drains
 
 	// streamReadTimeout, when set (tests), replaces defaultStreamReadTimeout. Set before the first stream arrives, never changed afterwards.
 	streamReadTimeout time.Duration
@@ -124,6 +129,7 @@ func NewLibP2PNetwork(self *Peer, capacity uint, obs Observability) (*LibP2PNetw
 		self:          self,
 		sendProtocols: make(map[reflect.Type]*sendProtocolData),
 		receivedMsgs:  make(chan any, capacity),
+		done:          make(chan struct{}),
 		tracer:        obs.Tracer("LibP2PNetwork"),
 		log:           obs.Logger(),
 	}
@@ -143,13 +149,8 @@ func (n *LibP2PNetwork) ReceivedChannel() <-chan any {
 		}
 		out := make(chan any)
 		n.out = out
-		go func() {
-			for msg := range n.receivedMsgs {
-				out <- msg
-				n.Delivered(msg)
-			}
-			close(out)
-		}()
+		n.forwarding.Store(true)
+		go n.forward(out)
 	})
 	return n.out
 }
@@ -302,6 +303,51 @@ streamHandlerForProtocol returns libp2p stream handler for given protocolID.
 The "ctor" is constructor which returns pointer to a data struct into which
 incoming message can be stored.
 */
+// forward hands each queued message to the consumer and releases its reservation once taken. On Close it stops: the message it holds
+// and everything still queued are dropped and released, each exactly once (Delivered forgets a message it released).
+func (n *LibP2PNetwork) forward(out chan<- any) {
+	defer close(out)
+	for {
+		select {
+		case <-n.done:
+			n.drain()
+			return
+		case msg := <-n.receivedMsgs:
+			select {
+			case out <- msg:
+				n.Delivered(msg)
+			case <-n.done:
+				n.Delivered(msg)
+				n.drain()
+				return
+			}
+		}
+	}
+}
+
+// drain drops every queued message, releasing its reservation.
+func (n *LibP2PNetwork) drain() {
+	for {
+		select {
+		case msg := <-n.receivedMsgs:
+			n.Delivered(msg)
+		default:
+			return
+		}
+	}
+}
+
+// Close stops the delivery of received messages: the ingress forwarder exits, and every message queued now or received later is dropped
+// with its reservation released. It is idempotent. The consumer's channel is closed once the forwarder has stopped.
+func (n *LibP2PNetwork) Close() {
+	n.closeOnce.Do(func() {
+		close(n.done)
+		if !n.forwarding.Load() {
+			n.drain()
+		}
+	})
+}
+
 // Delivered releases the ingress reservation of a message taken from the receive queue (a no-op for other messages).
 func (n *LibP2PNetwork) Delivered(msg any) {
 	n.ingressMu.Lock()
@@ -402,9 +448,19 @@ func (n *LibP2PNetwork) streamHandlerForProtocol(protocolID string, ctor func() 
 
 func (n *LibP2PNetwork) receivedMsg(from peer.ID, protocolID string, msg any) error {
 	select {
+	case <-n.done:
+		return fmt.Errorf("dropping %s message from %s: the network is closed", protocolID, from)
+	default:
+	}
+	select {
 	case n.receivedMsgs <- msg:
 	default:
 		return fmt.Errorf("dropping %s message from %s because of slow consumer", protocolID, from)
+	}
+	select {
+	case <-n.done: // closed while this message was being enqueued: whoever drained before it arrived missed it
+		n.drain()
+	default:
 	}
 	return nil
 }

@@ -83,3 +83,41 @@ func TestIngressBudgetOnAProtocol(t *testing.T) {
 	}
 	require.Eventually(t, func() bool { return budget.Used() == 0 }, time.Second, 5*time.Millisecond, "released once taken")
 }
+
+// Close stops the forwarder even while the consumer has stopped reading: the message it holds and everything still queued are dropped,
+// each reservation released exactly once, the consumer's channel is closed, and later frames are not queued.
+func TestCloseReleasesForwardedAndQueuedReservations(t *testing.T) {
+	obs := observability.Default(t)
+	p := createPeer(t)
+	t.Cleanup(func() { _ = p.Close() })
+	nw, err := NewLibP2PNetwork(p, 8, obs)
+	require.NoError(t, err)
+	budget := NewIngressBudget(1<<20, 1<<20)
+	require.NoError(t, nw.registerReceiveProtocol(ReceiveProtocolDescription{
+		ProtocolID: "test/c", TypeFn: func() any { return &testStrMsg{} }, MaxFrameSize: 1 << 10, Ingress: budget,
+	}))
+	out := nw.ReceivedChannel()
+	from := peer.ID("sender")
+	for i := range 3 { // the forwarder takes the first and blocks handing it over; two stay queued
+		msg := &testStrMsg{Info: string(rune('a' + i))}
+		require.True(t, budget.reserve(from, 10))
+		budget.queue(msg, from, 10)
+		require.NoError(t, nw.receivedMsg(from, "test/c", msg))
+	}
+	require.EqualValues(t, 30, budget.Used())
+	nw.Close()
+	require.Eventually(t, func() bool { return budget.Used() == 0 }, time.Second, 5*time.Millisecond, "every reservation released")
+	select {
+	case _, ok := <-out:
+		require.False(t, ok, "the consumer's channel is closed")
+	case <-time.After(time.Second):
+		t.Fatal("the consumer's channel was not closed")
+	}
+	late := &testStrMsg{Info: "late"}
+	require.True(t, budget.reserve(from, 10))
+	budget.queue(late, from, 10)
+	require.Error(t, nw.receivedMsg(from, "test/c", late), "nothing is queued after Close")
+	budget.delivered(late) // the stream handler's release on a refused enqueue
+	require.Zero(t, budget.Used())
+	nw.Close() // idempotent
+}

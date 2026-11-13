@@ -156,7 +156,7 @@ func TestSignedFrontierInitialAndOrdinaryPairsFromRealLoop(t *testing.T) {
 		h.start(t)
 		si, err := h.cm.ShardInfo(partitionID, shardID)
 		require.NoError(t, err)
-		require.NoError(t, h.cm.RequestCertification(context.Background(), IRChangeRequest{Partition: partitionID, Shard: shardID, Reason: Quorum, Requests: buildBlockCertificationRequest(t, h.shardNodes, si.LastCR)}))
+		require.NoError(t, h.cm.RequestCertification(context.Background(), IRChangeRequest{RootEpoch: h.cm.InstalledRootEpoch(), Partition: partitionID, Shard: shardID, Reason: Quorum, Requests: buildBlockCertificationRequest(t, h.shardNodes, si.LastCR)}))
 		h.commitRoundTwo(t)
 		response, err := h.cm.SampleSignedFrontier(context.Background(), signedRequest(t, h, 0x22))
 		require.NoError(t, err)
@@ -532,7 +532,7 @@ func TestSignedFrontierRepliesFormClientQuorumEndToEnd(t *testing.T) {
 	// when it arrives from an author already counted for the initial pair.
 	si, err := cms[0].ShardInfo(partitionID, shardID)
 	require.NoError(t, err)
-	require.NoError(t, cms[0].RequestCertification(context.Background(), IRChangeRequest{Partition: partitionID, Shard: shardID, Reason: Quorum, Requests: buildBlockCertificationRequest(t, shardNodes, si.LastCR)}))
+	require.NoError(t, cms[0].RequestCertification(context.Background(), IRChangeRequest{RootEpoch: cms[0].InstalledRootEpoch(), Partition: partitionID, Shard: shardID, Reason: Quorum, Requests: buildBlockCertificationRequest(t, shardNodes, si.LastCR)}))
 	var ordinary *SignedFrontierResponse
 	require.Eventually(t, func() bool {
 		ordinary, err = cms[0].SampleSignedFrontier(context.Background(), request)
@@ -634,7 +634,7 @@ func TestFrontierClientRetainsOrdinaryDespiteInvalidOuterAndIgnoresUnknownSealSi
 	request := signedRequest(t, h, 0x79)
 	si, err := h.cm.ShardInfo(partitionID, shardID)
 	require.NoError(t, err)
-	require.NoError(t, h.cm.RequestCertification(context.Background(), IRChangeRequest{Partition: partitionID, Shard: shardID, Reason: Quorum, Requests: buildBlockCertificationRequest(t, h.shardNodes, si.LastCR)}))
+	require.NoError(t, h.cm.RequestCertification(context.Background(), IRChangeRequest{RootEpoch: h.cm.InstalledRootEpoch(), Partition: partitionID, Shard: shardID, Reason: Quorum, Requests: buildBlockCertificationRequest(t, h.shardNodes, si.LastCR)}))
 	h.commitRoundTwo(t)
 	ordinary, err := h.cm.SampleSignedFrontier(context.Background(), request)
 	require.NoError(t, err)

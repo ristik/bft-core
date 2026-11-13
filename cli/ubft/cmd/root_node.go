@@ -228,6 +228,8 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 	if err != nil {
 		return fmt.Errorf("partition network initialization failed: %w", err)
 	}
+	// the ingress forwarder stops with the node, releasing whatever is still queued
+	defer libp2pPartitionNet.Close()
 	// a build without the q4shim tag returns the network itself
 	partitionNet, stopShardGate, err := wrapPartitionNet(ctx, libp2pPartitionNet, host.ID(), log)
 	if err != nil {

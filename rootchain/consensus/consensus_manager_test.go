@@ -191,7 +191,7 @@ func Test_ConsensusManager_onPartitionIRChangeReq(t *testing.T) {
 	si, err := cm.ShardInfo(partitionID, shardID)
 	require.NoError(t, err)
 
-	req := &IRChangeRequest{
+	req := &IRChangeRequest{RootEpoch: cm.InstalledRootEpoch(),
 		Partition: partitionID,
 		Reason:    Quorum,
 		Requests:  buildBlockCertificationRequest(t, shardNodes, si.LastCR),
@@ -839,7 +839,7 @@ func Test_ConsensusManager_messages(t *testing.T) {
 		require.NoError(t, err)
 
 		// simulate root validator node sending IRCR to consensus manager
-		irCReq := IRChangeRequest{
+		irCReq := IRChangeRequest{RootEpoch: cms[0].InstalledRootEpoch(),
 			Partition: partitionID,
 			Reason:    Quorum,
 			Requests:  buildBlockCertificationRequest(t, shardNodes, si.LastCR),
@@ -887,7 +887,7 @@ func Test_ConsensusManager_messages(t *testing.T) {
 		// simulate partition request sent to non-leader node
 		si, err := nonLeaderNode.ShardInfo(partitionID, types.ShardID{})
 		require.NoError(t, err)
-		irCReq := IRChangeRequest{
+		irCReq := IRChangeRequest{RootEpoch: nonLeaderNode.InstalledRootEpoch(),
 			Partition: partitionID,
 			Reason:    Quorum,
 			Requests:  buildBlockCertificationRequest(t, shardNodes, si.LastCR),
@@ -2137,6 +2137,8 @@ func Test_ConsensusManager_refusesAChangeOfAnotherRootEpoch(t *testing.T) {
 		RootEpoch: cm.InstalledRootEpoch() + 1}
 	require.ErrorIs(t, cm.onPartitionIRChangeReq(context.Background(), req), ErrChangeOfAnotherRootEpoch)
 	require.False(t, cm.irReqBuffer.IsChangeInBuffer(partitionID, shardID))
+	req.RootEpoch = 0
+	require.ErrorIs(t, cm.onPartitionIRChangeReq(context.Background(), req), ErrChangeOfAnotherRootEpoch, "no epoch: fail closed")
 	req.RootEpoch = cm.InstalledRootEpoch()
 	require.NoError(t, cm.onPartitionIRChangeReq(context.Background(), req))
 	require.True(t, cm.irReqBuffer.IsChangeInBuffer(partitionID, shardID))

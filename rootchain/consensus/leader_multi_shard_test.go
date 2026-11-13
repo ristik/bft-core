@@ -130,7 +130,7 @@ func shardRequest(t *testing.T, r *q3Replica, s liveShard, first, tamper bool) *
 func signedShardRequest(t *testing.T, r *q3Replica, s liveShard, view *storage.RequestRoundView, hash, proof []byte, reference uint64) *IRChangeRequest {
 	t.Helper()
 	tr := view.ExpectedTR()
-	out := &IRChangeRequest{Partition: s.partition, Shard: s.shard, Reason: Quorum}
+	out := &IRChangeRequest{RootEpoch: r.manager.InstalledRootEpoch(), Partition: s.partition, Shard: s.shard, Reason: Quorum}
 	for _, id := range view.Context().NodeIDs() {
 		signer := r.f.EVMSigners[id]
 		if s.partition != q3fixture.PartitionID {

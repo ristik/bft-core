@@ -622,8 +622,7 @@ func TestActivationDuringResolutionHoldsNothing(t *testing.T) {
 	require.Zero(t, ff.node.early.len())
 }
 
-// A replayed request counted into a shard's buffer fences every hand-over of the shard to its epoch; the shard's buffer and fence clear
-// with its certificate.
+// A replayed quorum is handed over with the root epoch it was counted in.
 func TestAReplayedQuorumIsHandedOverWithItsRootEpoch(t *testing.T) {
 	ff := newFencedFixture(t)
 	ff.held(t)
@@ -632,8 +631,49 @@ func TestAReplayedQuorumIsHandedOverWithItsRootEpoch(t *testing.T) {
 	certs := ff.certs()
 	require.Len(t, certs, 1)
 	require.EqualValues(t, 3, certs[0].RootEpoch)
-	ff.node.clearShard(context.Background(), 1, types.ShardID{})
-	require.Zero(t, ff.node.fencedEpoch(1, types.ShardID{}))
+}
+
+// The certificate delivery clears the shard, and an activation installs the next epoch, after the quorum was counted and before it is
+// handed over (r3): the proof keeps the epoch it was counted in, so the consensus manager refuses it under the new one; it is never handed
+// over without an epoch.
+func TestAClearBetweenProofAndHandoverKeepsTheProofsEpoch(t *testing.T) {
+	ff := newFencedFixture(t)
+	ff.held(t)
+	ff.advance(t)
+	cleared := false
+	ff.node.afterCount = func() {
+		if !cleared && ff.counted() == 3 { // the third request completed the quorum
+			cleared = true
+			ff.node.clearShard(context.Background(), 1, types.ShardID{})
+			ff.cm.epoch = 4
+		}
+	}
+	ff.replay()
+	require.True(t, cleared, "premise: the clear ran between the count and the hand-over")
+	certs := ff.certs()
+	require.Len(t, certs, 1)
+	require.EqualValues(t, 3, certs[0].RootEpoch, "the proof's own epoch, never zero, never the new one")
+	require.Len(t, certs[0].Requests, 3)
+}
+
+// Requests counted in different root epochs are never one tally: a request of the next epoch retires the previous epoch's tally.
+func TestTalliesAreKeyedByRootEpoch(t *testing.T) {
+	f := newFixture(t, fxOpts{}) // unit: quorum 3 of 4
+	cm := &epochCM{viewCM: f.cm, epoch: 3}
+	f.node.consensusManager = cm
+	v := f.view()
+	require.NoError(t, f.submit(f.request(0, v, 9, nil)))
+	require.NoError(t, f.submit(f.request(1, v, 9, nil)))
+	require.Equal(t, 2, f.counted())
+	cm.epoch = 4
+	require.NoError(t, f.submit(f.request(2, v, 9, nil)))
+	require.Equal(t, 1, f.counted(), "the epoch-3 tally was retired, not completed")
+	require.Empty(t, f.certs())
+	require.NoError(t, f.submit(f.request(0, v, 9, nil)))
+	require.NoError(t, f.submit(f.request(1, v, 9, nil)))
+	certs := f.certs()
+	require.Len(t, certs, 1)
+	require.EqualValues(t, 4, certs[0].RootEpoch)
 }
 
 // Reservations are conserved across take, re-hold, admission and refusal.
