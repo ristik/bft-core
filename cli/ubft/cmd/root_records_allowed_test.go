@@ -122,3 +122,42 @@ func TestServeRootRecordsAuthorizesThroughRecordsServerAllowed(t *testing.T) {
 	})
 	require.True(t, wired, "serveRootRecords builds the records server from recordsServerAllowed(allowed, shardConfs, cm)")
 }
+
+// #1048: the prefix fetch asks the installed committee, then the newest committee this root holds, then the bootstrap peers and the
+// configured shard validators (record mirrors), each once and never this root: locators only, every record verified against the checkpoint.
+func TestTheRecordFetcherAsksEveryLocatorOnceInOrder(t *testing.T) {
+	got := recordSources("self", []peer.ID{"a", "self", "b"}, []peer.ID{"b", "c"}, []peer.ID{"boot", "a", ""}, []peer.ID{"shard1", "c"})
+	require.Equal(t, []peer.ID{"a", "b", "c", "boot", "shard1"}, got)
+	require.Empty(t, recordSources("self", []peer.ID{"self"}))
+}
+
+// The public record reads are on by default: a root that no committee member authorizes any more is served the records it lacks. The
+// server wires them only from the flag, after the authorized peers' rule.
+func TestPublicRecordReadsAreOnByDefaultAndWiredInTheServer(t *testing.T) {
+	cmd := newRootNodeCmd(&baseFlags{})
+	run, _, err := cmd.Find([]string{"run"})
+	require.NoError(t, err)
+	flag := run.Flags().Lookup("records-public-reads")
+	require.NotNil(t, flag)
+	require.Equal(t, "true", flag.DefValue)
+
+	file, err := parser.ParseFile(token.NewFileSet(), "root_node.go", nil, 0)
+	require.NoError(t, err)
+	var public bool
+	ast.Inspect(file, func(n ast.Node) bool {
+		fn, ok := n.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != "serveRootRecords" {
+			return true
+		}
+		ast.Inspect(fn.Body, func(m ast.Node) bool {
+			if call, ok := m.(*ast.CallExpr); ok {
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "SetPublicRecords" {
+					public = true
+				}
+			}
+			return true
+		})
+		return false
+	})
+	require.True(t, public, "serveRootRecords enables the bounded public record reads")
+}
