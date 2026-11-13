@@ -26,6 +26,7 @@ type Store struct {
 	disk          *diskOps // nil: the real operations (see diskOps)
 	rounds        map[string]map[uint64][]Request
 	receiptRounds map[string]map[uint64][]Request
+	legacyBundles []string // bundle file names in the store directory itself (the layout before bundleDir), listed once; nil until then
 }
 
 func Open(dir string) (*Store, error) {
