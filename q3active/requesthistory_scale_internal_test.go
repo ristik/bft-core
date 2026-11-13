@@ -16,7 +16,9 @@ import (
 
 type requestScaleCandidates map[string][]byte
 
-func (c requestScaleCandidates) HandoffCandidate(id []byte) ([]byte, error) { return c[string(id)], nil }
+func (c requestScaleCandidates) HandoffCandidate(id []byte) ([]byte, error) {
+	return c[string(id)], nil
+}
 
 // requestScaleRuntime is a runtime whose verified history holds a coupled first activation followed by root-only ones, epochs in all, every
 // one admitted. The history is the fixtures' own verified one: an install envelope carries at most q3format.MaxLinks links, so a chain
