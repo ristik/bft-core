@@ -288,6 +288,17 @@ class Laptop:
         done = self.one(self.rpc_image, ['-c', code], network=self.network(), entrypoint='python3', check=False)
         return int(done.stdout.strip()) if done.returncode == 0 and done.stdout.strip().isdigit() else None
 
+    def shard_rpc_up(self):
+        """Whether the shard node's operator listener accepts connections (a restoring node opens it only once its restore is done; its readiness needs it)."""
+        host, _, port = self.urls()[1].removeprefix('http://').partition(':')
+        code = f'import socket;socket.create_connection(("{host}",{int(port)}),3);print("up")'
+        try:
+            done = run(['docker', 'run', '--rm', '--network', f'container:{self.pod_id()}', '--read-only', '--cap-drop', 'ALL', '--user', '10001:10001',
+                        '--entrypoint', 'python3', self.rpc_image, '-c', code], check=False, timeout=60)
+        except (Failure, subprocess.TimeoutExpired):
+            return False
+        return done.returncode == 0 and 'up' in done.stdout
+
     def shard_activated_epoch(self):
         """The latest root epoch the shard node logged as activated ("handoff activated"): its verified history's tip, which the join's readiness needs at
         the epoch being left. None while it logged none in its recent output."""
@@ -316,6 +327,7 @@ class Laptop:
             out['urethHead'] = self.ureth_head()
         if services.get(f'shard{self.entity}') == 'running':
             out['shardActivatedEpoch'] = self.shard_activated_epoch()
+            out['shardRpc'] = self.shard_rpc_up()
         return out
 
     # --- the agent's operations (the host's drive asks; the outputs are public) ---

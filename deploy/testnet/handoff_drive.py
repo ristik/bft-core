@@ -600,6 +600,14 @@ class Drive(rehearse.Rehearsal):
                 self.target = target
             self.remote[i].info['shardCaughtUp'] = current
             self.remote[i].save()
+        if current >= 3:
+            # a restoring node opens its operator listener only after its archive fetch and replay: the readiness needs it (also on a resumed drive)
+            def serving():
+                st = self.remote[i].status()
+                self.say(f'  remote joiner {i}: shard activated epoch {st.get("shardActivatedEpoch")}, operator RPC {"up" if st.get("shardRpc") else "not yet"}, '
+                         f'execution client {st.get("urethHead")}')
+                return st.get('shardRpc') and st.get('shardActivatedEpoch') == current
+            self.wait(f'the joiner\'s shard node {i} serves its operator RPC at epoch {current}', serving, 4 * 3600)
 
     def follower_epoch(self, i):
         """The installed epoch of a root that holds no quorum certificate (a follower: q3/signers answers 422), from q3/status."""
@@ -834,8 +842,10 @@ class Drive(rehearse.Rehearsal):
                 st = remote.status()
                 self.say(f'  remote entity {i}: shard {st.get("services", {}).get(f"shard{i}")}, activated epoch {st.get("shardActivatedEpoch")} '
                          f'(want {self.target}), execution client {st.get("urethHead")}')
-                return st.get('services', {}).get(f'shard{i}') == 'running' and st.get('shardActivatedEpoch') == self.target
-            self.wait(f'the laptop\'s restoring shard node {i} activated epoch {self.target}', activated, 600)
+                return st.get('services', {}).get(f'shard{i}') == 'running' and st.get('shardActivatedEpoch') == self.target and st.get('shardRpc')
+            # the restoring node activates the pinned epoch at once, but opens its operator listener (which the readiness stages the candidate on) only
+            # once its archive fetch and replay are done: ~N/7.5 s + N/replay-rate for N blocks through the tunnel (2026-11-13). The result's window bounds it
+            self.wait(f'the laptop\'s restoring shard node {i} activated epoch {self.target} and serves its operator RPC', activated, 4 * 3600)
             return
         seen = []
         def replayed():

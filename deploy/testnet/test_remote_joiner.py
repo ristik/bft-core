@@ -499,7 +499,7 @@ class RemoteRestore(unittest.TestCase):
         return d
 
     def test_before_the_readiness_it_returns_once_the_pinned_epoch_is_activated(self):
-        d = self.drive({'services': {'shard5': 'running'}, 'shardActivatedEpoch': 30, 'urethHead': 0, 'restoring': True})
+        d = self.drive({'services': {'shard5': 'running'}, 'shardActivatedEpoch': 30, 'shardRpc': True, 'urethHead': 0, 'restoring': True})
         d.restore_remote(5, follow=False)
         self.assertEqual(self.calls, ['restore'], 'no replay is awaited before the readiness')
 
