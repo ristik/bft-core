@@ -33,7 +33,9 @@ type Submitter interface {
 // protocol knowledge beyond the certification/types packages — those live
 // in BFTClient.
 type Round struct {
-	follower    atomic.Pointer[func() bool] // see SetFollowerRole
+	role atomic.Pointer[roleHolder] // see SetRole
+	// leaseToken is the role lease the current certificate's handling started under (HandleCertificate holds r.mu).
+	leaseToken  uint64
 	nodeID      string
 	partitionID types.PartitionID
 	shardID     types.ShardID
@@ -321,11 +323,23 @@ func NewRound(nodeID string, partitionID types.PartitionID, shardID types.ShardI
 // well before the root chain would time the round out anyway.
 // SetFollowerRole installs the non-active predicate: while it is true the round observes, recovers and commits what is certified, then
 // stops. It never builds, verifies a proposal, disseminates, reserves a signature or sends a request. Call before the first certificate.
-func (r *Round) SetFollowerRole(nonActive func() bool) { r.follower.Store(&nonActive) }
+func (r *Round) SetFollowerRole(nonActive func() bool) { r.SetRole(funcRole{nonActive}) }
 
-func (r *Round) isFollower() bool {
-	f := r.follower.Load()
-	return f != nil && (*f)()
+// SetRole installs the published role lease (see RoleLease). Call before the first certificate.
+func (r *Round) SetRole(l RoleLease) { r.role.Store(&roleHolder{lease: l}) }
+
+// takeLease reads the role for one certificate's handling and reports whether this node may act in it.
+func (r *Round) takeLease() bool {
+	token, active := r.role.Load().current()
+	r.leaseToken = token
+	return active
+}
+
+// leaseLost reports whether the role this certificate's handling started under has ended (retired, or re-published) since takeLease. It
+// is checked immediately before every irreversible action.
+func (r *Round) leaseLost() bool {
+	token, active := r.role.Load().current()
+	return !active || token != r.leaseToken
 }
 
 // nonVotingFollower is the health reason of a non-active follower.
@@ -656,7 +670,7 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 		return fmt.Errorf("shardnode: executor identity changed immediately after journal recovery: got %d/%x, certified %d/%x", head.Number, head.Hash, recoveredHead.Number, recoveredHead.Hash)
 	}
 	// THE FOLLOWER BOUNDARY. A non-active node has now observed and executed what is certified; it produces nothing for the next round.
-	if r.isFollower() {
+	if !r.takeLease() {
 		r.health.updateVoting(false, nonVotingFollower)
 		return nil
 	}
@@ -812,6 +826,10 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 		return fmt.Errorf("shardnode: execution journal stopped before block production: %s", r.health.Snapshot().ExecutionRecoveryDetail)
 	}
 	ph.mark("before-produce")
+	if r.leaseLost() {
+		r.health.updateVoting(false, nonVotingFollower)
+		return nil
+	}
 	block, params, err := r.produceBlock(ctx, head, exp, sealHash, leader, uc, tr, readinessTicket)
 	if err != nil {
 		if errors.Is(err, errReadinessRevoked) {
@@ -1010,6 +1028,10 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 	if r.journalRecovery != nil && r.health.Snapshot().ExecutionRecovery == "stopped" {
 		return fmt.Errorf("shardnode: execution journal stopped before signature: %s", r.health.Snapshot().ExecutionRecoveryDetail)
 	}
+	if r.leaseLost() { // retired (or re-published) while this round built or verified: no signature
+		r.health.updateVoting(false, nonVotingFollower)
+		return nil
+	}
 	signed, err := r.certSigner.Sign(ctx, uc, tr, req)
 	if err != nil {
 		reason := signingDeclinedReason(err)
@@ -1075,7 +1097,7 @@ const submitRetries = 2
 const submitRetryInterval = 100 * time.Millisecond
 
 func (r *Round) send(ctx context.Context, req *certification.BlockCertificationRequest, round uint64) error {
-	if r.isFollower() {
+	if r.leaseLost() {
 		return ErrFollower
 	}
 	var err error

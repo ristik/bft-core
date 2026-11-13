@@ -179,9 +179,12 @@ func resumeFrom(client *BFTClient, round *Round, luc *types.UnicityCertificate) 
 // does to a validator whose leader has gone quiet.
 // SetFollowerRole makes the node a non-active follower while nonActive reports true: its client sends nothing to the roots and takes
 // certificates from FollowCertificate, and its round executes what is certified but never builds or signs. Call before Run.
-func (n *Node) SetFollowerRole(nonActive func() bool) {
-	n.client.SetFollowerRole(nonActive)
-	n.round.SetFollowerRole(nonActive)
+func (n *Node) SetFollowerRole(nonActive func() bool) { n.SetRole(funcRole{nonActive}) }
+
+// SetRole installs the published role lease (see RoleLease) on the client and the round. Call before Run.
+func (n *Node) SetRole(l RoleLease) {
+	n.client.SetRole(l)
+	n.round.SetRole(l)
 }
 
 // RoleChanged tells the node that its follower predicate may have changed (see BFTClient.RoleChanged).

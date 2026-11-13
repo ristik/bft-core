@@ -209,3 +209,48 @@ func TestRound_FollowerNeverBuildsOrSignsUntilPromoted(t *testing.T) {
 	req := sub.last(t)
 	require.Equal(t, uint64(1), req.InputRecord.RoundNumber, "promoted, it takes part from the next certificate")
 }
+
+// flippingExecutor retires the node while the round is building its block.
+type flippingExecutor struct {
+	shardnode.Executor
+	during func()
+}
+
+func (e flippingExecutor) Build(ctx context.Context, p shardnode.RoundParams) (shardnode.BuildID, error) {
+	e.during()
+	return e.Executor.Build(ctx, p)
+}
+
+type leaseRole struct {
+	token  atomic.Uint64
+	active atomic.Bool
+}
+
+func (l *leaseRole) Lease() (uint64, bool) { return l.token.Load(), l.active.Load() }
+
+// A retirement while the round is building (after its role check) withholds the signature and the request: the lease is checked again
+// immediately before signing. A re-publication (same active bit, a new token) is treated the same way: work begun under the old lease ends.
+func TestRound_RetirementWhileBuildingWithholdsTheSignature(t *testing.T) {
+	ctx := context.Background()
+	role := &leaseRole{}
+	role.active.Store(true)
+	for name, tc := range map[string]struct {
+		flip func()
+		sent bool
+	}{
+		"unchanged (control)": {func() {}, true},
+		"retired":             {func() { role.active.Store(false) }, false},
+		"re-published":        {func() { role.token.Add(1) }, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			role.active.Store(true)
+			sub := &recordingSubmitter{}
+			r, nodeID := newTestRound(t, flippingExecutor{Executor: executortest.New(), during: tc.flip}, sub)
+			r.SetRole(role)
+			require.NoError(t, r.HandleCertificate(ctx, genesisUC(1000), tr(1, 0, nodeID)))
+			sub.mu.Lock()
+			defer sub.mu.Unlock()
+			require.Equal(t, tc.sent, len(sub.got) == 1, "a request only while the lease held through the round")
+		})
+	}
+}

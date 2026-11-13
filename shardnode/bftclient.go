@@ -214,7 +214,7 @@ type BFTClient struct {
 
 	// follower, when set and true, makes this client a non-active follower: it sends nothing to the roots (no handshake, no request) and
 	// takes certificates only from FollowCertificate. Read on every use, so a promotion takes effect at the next one.
-	follower atomic.Pointer[func() bool]
+	role atomic.Pointer[roleHolder]
 	// followed carries certificates from a non-root follow source into Run, where they are handled exactly as a root's response.
 	followed chan *certification.CertificationResponse
 	// wasFollower is Run's memory of the last role it saw: a promotion handshakes at once (RoleChanged, else the next heartbeat).
@@ -253,11 +253,14 @@ func (c *BFTClient) checkRole(ctx context.Context) {
 var ErrFollower = errors.New("shardnode: non-active follower: no root traffic")
 
 // SetFollowerRole installs the non-active predicate (see BFTClient.follower). Call before Run.
-func (c *BFTClient) SetFollowerRole(nonActive func() bool) { c.follower.Store(&nonActive) }
+func (c *BFTClient) SetFollowerRole(nonActive func() bool) { c.SetRole(funcRole{nonActive}) }
+
+// SetRole installs the published role lease. Call before Run.
+func (c *BFTClient) SetRole(l RoleLease) { c.role.Store(&roleHolder{lease: l}) }
 
 func (c *BFTClient) isFollower() bool {
-	f := c.follower.Load()
-	return f != nil && (*f)()
+	_, active := c.role.Load().current()
+	return !active
 }
 
 // FollowCertificate hands Run a certificate obtained from a non-root source (an archive record's resulting pair). It is untrusted until Run
@@ -1503,6 +1506,9 @@ func (c *BFTClient) sendRequest(ctx context.Context, req *certification.BlockCer
 	rootIDs, err := rootNodesSelector(luc, tb, c.opts.CertNodes)
 	if err != nil {
 		return fmt.Errorf("selecting root nodes for certification: %w", err)
+	}
+	if c.isFollower() { // the final check, immediately before the request leaves
+		return ErrFollower
 	}
 	return c.net.Send(ctx, req, rootIDs...)
 }
