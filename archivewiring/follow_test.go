@@ -145,3 +145,31 @@ func TestHeadFollowerFollowsIncrementallyFromRetainedState(t *testing.T) {
 	require.Equal(t, []uint64{10, 17, total}, finalized, "the finalized head only moves forward")
 	require.False(t, h.Poll(context.Background()), "nothing newer: nothing offered")
 }
+
+// An offered head is suppressed only once the node durably holds it: when its admission fails (a transient missing dependency) and the
+// source head stays where it is, the same head is offered again after the retry wait, and not before; once held, never again.
+func TestHeadFollowerReoffersAnUnacceptedHead(t *testing.T) {
+	t.Parallel()
+	f := newWiringFixture(t, 2)
+	follower := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
+	var records []followRecord
+	for i := range f.entries {
+		q, rec := f.record(t, i)
+		records = append(records, followRecord{q, rec})
+	}
+	source := followSource(t, follower, f, records)
+	offers, held := 0, false
+	now := time.Unix(1000, 0)
+	h := &HeadFollower{Binding: CertifiedBinding{Context: f.context, Subject: f.subject}, Host: follower, Limits: DefaultLimits(),
+		Sources: func() []peer.ID { return []peer.ID{source} }, Retry: 5 * time.Second, now: func() time.Time { return now },
+		Offer:    func(*types.UnicityCertificate, *certification.TechnicalRecord) bool { offers++; return true }, // queued, then admission fails
+		Accepted: func(*types.UnicityCertificate) bool { return held }}
+	require.True(t, h.Poll(context.Background()))
+	require.False(t, h.Poll(context.Background()), "not again before the retry wait")
+	now = now.Add(5 * time.Second)
+	require.True(t, h.Poll(context.Background()), "the dependency is back: the unchanged head is offered again")
+	held = true
+	now = now.Add(time.Minute)
+	require.False(t, h.Poll(context.Background()), "held: never offered again")
+	require.Equal(t, 2, offers)
+}

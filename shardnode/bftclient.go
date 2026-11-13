@@ -263,6 +263,21 @@ func (c *BFTClient) isFollower() bool {
 	return !active
 }
 
+// Holds reports whether this client's held certificate (adopted after durable admission) is at or past uc: the acknowledgement a follow
+// source uses to stop re-offering a certificate.
+func (c *BFTClient) Holds(uc *types.UnicityCertificate) bool {
+	c.mu.Lock()
+	luc := c.luc
+	c.mu.Unlock()
+	if luc == nil || uc == nil {
+		return false
+	}
+	if luc.GetRootEpoch() != uc.GetRootEpoch() {
+		return luc.GetRootEpoch() > uc.GetRootEpoch()
+	}
+	return luc.GetRootRoundNumber() >= uc.GetRootRoundNumber()
+}
+
 // FollowCertificate hands Run a certificate obtained from a non-root source (an archive record's resulting pair). It is untrusted until Run
 // verifies it through the same admission as a root's response. It never blocks: with the queue full the newest offer is dropped, and the
 // follow source offers again. It reports whether the offer was queued.

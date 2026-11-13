@@ -53,12 +53,14 @@ func TestFollowerClientSendsNothingToRootsAndDeliversFollowedCertificates(t *tes
 	require.Zero(t, net.handshakes, "a follower never handshakes with a root")
 	net.mu.Unlock()
 
+	require.False(t, client.Holds(&good.UC), "nothing admitted yet: the follow source must offer again")
 	require.True(t, client.FollowCertificate(&good.UC, &good.Technical))
 	select {
 	case <-driver.got:
 	case <-time.After(5 * time.Second):
 		t.Fatal("a followed certificate was not delivered")
 	}
+	require.Eventually(t, func() bool { return client.Holds(&good.UC) }, 5*time.Second, 10*time.Millisecond, "held once admitted: the acknowledgement")
 
 	follower <- false
 	client.RoleChanged()

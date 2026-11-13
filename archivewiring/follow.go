@@ -34,11 +34,37 @@ type HeadFollower struct {
 	Active func() bool
 	// Offer hands a verified certificate to the node (Node.FollowCertificate) and reports whether it was queued.
 	Offer func(*types.UnicityCertificate, *certification.TechnicalRecord) bool
+	// Accepted reports whether the node durably holds a certificate at or past the given one (Node.Holds). An offered head that is not
+	// accepted (its admission failed, say, on a transient missing dependency) is offered again after Retry; nil never re-offers.
+	Accepted func(*types.UnicityCertificate) bool
+	// Retry is the wait before re-offering an unaccepted head; zero is five seconds.
+	Retry time.Duration
 	// Interval is the pause between polls; zero is 500 ms.
 	Interval time.Duration
 	Log      *slog.Logger
 
-	offered *types.UnicityCertificate
+	offered   *types.UnicityCertificate
+	offeredAt time.Time
+	now       func() time.Time
+}
+
+func (f *HeadFollower) clock() time.Time {
+	if f.now != nil {
+		return f.now()
+	}
+	return time.Now()
+}
+
+// due reports whether the offered head is unaccepted and its retry wait has passed.
+func (f *HeadFollower) due() bool {
+	if f.offered == nil || f.Accepted == nil || f.Accepted(f.offered) {
+		return false
+	}
+	retry := f.Retry
+	if retry <= 0 {
+		retry = 5 * time.Second
+	}
+	return f.clock().Sub(f.offeredAt) >= retry
 }
 
 // ErrFollowConfig is returned for a follower without its sources, host, binding or offer.
@@ -85,13 +111,16 @@ func (f *HeadFollower) Poll(ctx context.Context) bool {
 			best, bestTR = uc, tr
 		}
 	}
-	if best == nil || !newer(best, f.offered) {
+	if best == nil {
+		return false
+	}
+	if !newer(best, f.offered) && !(sameRound(best, f.offered) && f.due()) {
 		return false
 	}
 	if !f.Offer(best, bestTR) {
 		return false
 	}
-	f.offered = best
+	f.offered, f.offeredAt = best, f.clock()
 	return true
 }
 
@@ -114,6 +143,10 @@ func (f *HeadFollower) head(ctx context.Context, id peer.ID) (*types.UnicityCert
 		return nil, nil, err
 	}
 	return result, resultTR, nil
+}
+
+func sameRound(a, b *types.UnicityCertificate) bool {
+	return a != nil && b != nil && a.GetRootEpoch() == b.GetRootEpoch() && a.GetRootRoundNumber() == b.GetRootRoundNumber()
 }
 
 // newer orders certificates by root epoch, then root round.

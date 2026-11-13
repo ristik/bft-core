@@ -190,6 +190,9 @@ func (n *Node) SetRole(l RoleLease) {
 // RoleChanged tells the node that its follower predicate may have changed (see BFTClient.RoleChanged).
 func (n *Node) RoleChanged() { n.client.RoleChanged() }
 
+// Holds reports whether the node holds a durably admitted certificate at or past uc (see BFTClient.Holds).
+func (n *Node) Holds(uc *types.UnicityCertificate) bool { return n.client.Holds(uc) }
+
 // FollowCertificate offers a certificate from a non-root follow source (see BFTClient.FollowCertificate).
 func (n *Node) FollowCertificate(uc *types.UnicityCertificate, tr *certification.TechnicalRecord) bool {
 	return n.client.FollowCertificate(uc, tr)

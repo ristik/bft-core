@@ -1494,7 +1494,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				source.Followed = func() []libp2ppeer.ID { return follower.nonRoot(followSourceIDs(followSources)) }
 				// the root-free certificate source: the newest verified archive head, offered while this node is not active
 				headFollower = &archivewiring.HeadFollower{Binding: archivewiring.CertifiedBinding{Context: journalCtx, Subject: archiveSubject},
-					Host: archiveHost, Limits: archiveTransportLimits, Active: role.active, Offer: node.FollowCertificate, Log: flags.observe.Logger(),
+					Host: archiveHost, Limits: archiveTransportLimits, Active: role.active, Offer: node.FollowCertificate, Accepted: node.Holds, Log: flags.observe.Logger(),
 					Sources: func() []libp2ppeer.ID {
 						return follower.nonRoot(append(append(followSourceIDs(followSources), readableArchiveReplicas(replicaPolicy, archiveReplicas)...), activePeers.Peers()...))
 					}}
