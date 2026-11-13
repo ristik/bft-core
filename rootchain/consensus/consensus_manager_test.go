@@ -2121,3 +2121,23 @@ func (s *votedRoundStorage) SetHighestQcRound(qcRound, votedRound uint64) error 
 	s.round = max(s.round, votedRound)
 	return s.SafetyStorage.SetHighestQcRound(qcRound, votedRound)
 }
+
+// A change the collector counted from a request held in another root epoch is refused in this one, before it reaches the buffer
+// (#1032); the same change of the installed epoch is buffered.
+func Test_ConsensusManager_refusesAChangeOfAnotherRootEpoch(t *testing.T) {
+	mockNet := testnetwork.NewRootMockNetwork()
+	cm, _, shardNodes := initConsensusManager(t, mockNet)
+	ctx, ctxCancel := context.WithCancel(context.Background())
+	defer ctxCancel()
+	go func() { require.ErrorIs(t, cm.Run(ctx), context.Canceled) }()
+	require.Eventually(t, func() bool { return cm.pacemaker.GetCurrentRound() > 0 }, test.WaitDuration, test.WaitShortTick)
+	si, err := cm.ShardInfo(partitionID, shardID)
+	require.NoError(t, err)
+	req := &IRChangeRequest{Partition: partitionID, Reason: Quorum, Requests: buildBlockCertificationRequest(t, shardNodes, si.LastCR),
+		RootEpoch: cm.InstalledRootEpoch() + 1}
+	require.ErrorIs(t, cm.onPartitionIRChangeReq(context.Background(), req), ErrChangeOfAnotherRootEpoch)
+	require.False(t, cm.irReqBuffer.IsChangeInBuffer(partitionID, shardID))
+	req.RootEpoch = cm.InstalledRootEpoch()
+	require.NoError(t, cm.onPartitionIRChangeReq(context.Background(), req))
+	require.True(t, cm.irReqBuffer.IsChangeInBuffer(partitionID, shardID))
+}

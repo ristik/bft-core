@@ -877,6 +877,12 @@ func (x *ConsensusManager) onPartitionIRChangeReq(ctx context.Context, req *IRCh
 	if err := x.refuseFrozenIR(irReq); err != nil {
 		return err
 	}
+	// a change counted from a request held in another root epoch is never certified in this one (#1032). The installed epoch changes
+	// only on this loop (trust-base update) or while consensus is stopped (an activation installs before Run), so the check is
+	// serialized with activation.
+	if req.RootEpoch != 0 && req.RootEpoch != x.InstalledRootEpoch() {
+		return fmt.Errorf("%w: change counted in root epoch %d, root epoch %d is installed", ErrChangeOfAnotherRootEpoch, req.RootEpoch, x.InstalledRootEpoch())
+	}
 	switch req.Reason {
 	case Quorum:
 		irReq.CertReason = drctypes.Quorum
@@ -911,6 +917,9 @@ func (x *ConsensusManager) SelectRequestHistory(h storage.RequestHistory) error 
 	x.SetViewResolver(resolver)
 	return nil
 }
+
+// ErrChangeOfAnotherRootEpoch refuses a certification request whose collector counted it under another root epoch than the installed one.
+var ErrChangeOfAnotherRootEpoch = errors.New("certification request of another root epoch")
 
 // ErrNoRequestHistory is returned when the view-aware branch is selected without a request history.
 var ErrNoRequestHistory = errors.New("consensus: no request history to select")

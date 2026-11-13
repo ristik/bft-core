@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"sync/atomic"
 
 	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -20,6 +21,9 @@ type RequestChain struct {
 	shard     types.ShardID
 	acts      []*RequestActivation
 	base      []int // base[i]: the index of the real activation (or anchor) that entry i is, or continues
+	// extended is set by the first Extend of this chain: that one may append in place (the entries this chain sees are never
+	// written, only its capacity is used); every later Extend of the same chain copies, so two extensions never share storage
+	extended atomic.Bool
 }
 
 // RequestChainSource is the optional capability of a RequestHistory that serves the validated chain itself, maintained incrementally,
@@ -56,8 +60,12 @@ func (c *RequestChain) Extend(next ...*RequestActivation) (*RequestChain, error)
 }
 
 func (c *RequestChain) extend(next ...*RequestActivation) (*RequestChain, error) {
-	out := &RequestChain{network: c.network, partition: c.partition, shard: c.shard,
-		acts: slices.Grow(slices.Clone(c.acts), len(next)), base: slices.Grow(slices.Clone(c.base), len(next))}
+	acts, base := c.acts, c.base
+	if c.extended.Swap(true) {
+		acts, base = slices.Clone(acts), slices.Clone(base)
+	}
+	// appending to the first extension reuses spare capacity (amortised O(1) per entry); the receiver keeps its own length
+	out := &RequestChain{network: c.network, partition: c.partition, shard: c.shard, acts: slices.Grow(acts, len(next)), base: slices.Grow(base, len(next))}
 	for _, a := range next {
 		i := len(out.acts)
 		if a == nil || a.pdr.PartitionID != c.partition || !a.pdr.ShardID.Equal(c.shard) {

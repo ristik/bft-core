@@ -57,11 +57,22 @@ var (
 )
 
 type earlyEntry struct {
-	req      *certification.BlockCertificationRequest
-	epoch    uint64 // the root epoch installed when the request was first held: a replay never carries it into another one
-	digest   [sha256.Size]byte
-	size     int
-	deadline time.Time
+	req    *certification.BlockCertificationRequest
+	origin heldOrigin // where and until when the request was first held: carried unchanged through every replay and re-hold
+	digest [sha256.Size]byte
+	size   int // the encoded bytes reserved for the request, until it is released or expires
+}
+
+// heldOrigin is the authority a request was first held under: the root epoch installed at the validation that held it and the root
+// authority (epoch and body) of the view that judged it, with its first deadline. A replay admits the request only under the same
+// origin; a re-hold keeps it unchanged, so neither a later epoch nor a later deadline is ever stamped on an old request.
+type heldOrigin struct {
+	deadline  time.Time
+	epoch     uint64
+	authority []byte // nil under the legacy dispatch
+	replay    bool   // the request is being admitted again after it was taken from the buffer
+	reserved  int    // the bytes still reserved for a taken request: a re-hold transfers them, otherwise the caller releases them
+	reheld    bool   // set by a re-hold that took over the reservation
 }
 
 type earlyShard struct {
@@ -137,11 +148,13 @@ func (b *earlyRequests) expire() {
 // context. deadline zero is now+ttl; a replayed entry keeps its first deadline, so re-holding never extends it. The same bytes again
 // are idempotent; other bytes of the same node and round are a conflict and the first one stays. Nothing held is displaced.
 func (b *earlyRequests) hold(req *certification.BlockCertificationRequest, deadline time.Time) error {
-	return b.holdUnder(req, deadline, 0)
+	return b.holdOrigin(req, &heldOrigin{deadline: deadline})
 }
 
-// holdUnder is hold, recording the root epoch installed when the request is held.
-func (b *earlyRequests) holdUnder(req *certification.BlockCertificationRequest, deadline time.Time, epoch uint64) error {
+// holdOrigin is hold under the given origin. For a request taken from the buffer (o.replay) the bytes it still has reserved are
+// transferred to the new entry instead of being charged again, and o.reheld reports it; the caller releases them otherwise.
+func (b *earlyRequests) holdOrigin(req *certification.BlockCertificationRequest, o *heldOrigin) error {
+	deadline := o.deadline
 	raw, err := types.Cbor.Marshal(req)
 	if err != nil {
 		return fmt.Errorf("encoding the request: %w", err)
@@ -171,11 +184,14 @@ func (b *earlyRequests) holdUnder(req *certification.BlockCertificationRequest, 
 			return nil
 		}
 	}
-	if b.bytes+len(raw) > earlyRequestBudget {
-		return fmt.Errorf("%w: %d bytes held", errEarlyFull, b.bytes)
-	}
-	if b.signer[req.NodeID]+len(raw) > earlyRequestsPerSigner {
-		return fmt.Errorf("%w: %d bytes held for node %s", errEarlyFull, b.signer[req.NodeID], req.NodeID)
+	transfer := o.replay && o.reserved == len(raw)
+	if !transfer {
+		if b.bytes+len(raw) > earlyRequestBudget {
+			return fmt.Errorf("%w: %d bytes held", errEarlyFull, b.bytes)
+		}
+		if b.signer[req.NodeID]+len(raw) > earlyRequestsPerSigner {
+			return fmt.Errorf("%w: %d bytes held for node %s", errEarlyFull, b.signer[req.NodeID], req.NodeID)
+		}
 	}
 	if s == nil {
 		if len(b.shards) >= earlyRequestShards {
@@ -197,12 +213,19 @@ func (b *earlyRequests) holdUnder(req *certification.BlockCertificationRequest, 
 		set = make(map[string]earlyEntry)
 		s.rounds[round] = set
 	}
-	set[req.NodeID] = earlyEntry{req: req, epoch: epoch, digest: digest, size: len(raw), deadline: deadline}
-	b.charge(req.NodeID, len(raw))
+	kept := *o
+	kept.deadline, kept.replay, kept.reserved, kept.reheld = deadline, false, 0, false
+	set[req.NodeID] = earlyEntry{req: req, origin: kept, digest: digest, size: len(raw)}
+	if transfer {
+		o.reheld = true // the reservation moved to the new entry
+	} else {
+		b.charge(req.NodeID, len(raw))
+	}
 	return nil
 }
 
-// take removes and returns the unexpired requests held for the shard, every round, oldest round first.
+// take removes and returns the unexpired requests held for the shard, every round, oldest round first. Their bytes stay reserved: the
+// caller transfers each reservation to a re-hold or releases it (release) once the request is admitted or refused.
 func (b *earlyRequests) take(partition types.PartitionID, shard types.ShardID) []earlyEntry {
 	key := types.PartitionShardID{PartitionID: partition, ShardID: shard.Key()}
 	b.mu.Lock()
@@ -225,10 +248,31 @@ func (b *earlyRequests) take(partition types.PartitionID, shard types.ShardID) [
 	for _, r := range rounds {
 		for _, e := range s.rounds[r] {
 			out = append(out, e)
-			b.charge(e.req.NodeID, -e.size)
 		}
 	}
 	return out
+}
+
+// dropAll forgets every held request and its reservation (a root activation was observed).
+func (b *earlyRequests) dropAll() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, s := range b.shards {
+		for _, set := range s.rounds {
+			for id, e := range set {
+				b.charge(id, -e.size)
+			}
+		}
+	}
+	clear(b.shards)
+	clear(b.ready)
+}
+
+// release returns the bytes reserved for a taken request.
+func (b *earlyRequests) release(e earlyEntry) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.charge(e.req.NodeID, -e.size)
 }
 
 // shardRef names a shard with held requests.
@@ -273,7 +317,7 @@ func (b *earlyRequests) expireLocked(now time.Time) {
 	for k, s := range b.shards {
 		for r, set := range s.rounds {
 			for id, e := range set {
-				if !e.deadline.After(now) {
+				if !e.origin.deadline.After(now) {
 					delete(set, id)
 					b.charge(id, -e.size)
 				}

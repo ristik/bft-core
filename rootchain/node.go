@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -72,6 +73,10 @@ type (
 		zkRegistry       *zkverifier.Registry
 		offers           EntryOffers    // nil: the legacy certificate protocol only
 		early            *earlyRequests // near-future requests held until the committed context advances (#1032)
+		fenceMu          sync.Mutex
+		fenced           map[types.PartitionShardID]uint64 // shards counting a replayed request: the root epoch it was held in
+		seenEpoch        uint64
+		seenEpochSet     bool
 
 		log    *slog.Logger
 		tracer trace.Tracer
@@ -111,6 +116,7 @@ func New(
 		consensusManager: cm,
 		zkRegistry:       zkverifier.NewRegistry(),
 		early:            newEarlyRequests(),
+		fenced:           make(map[types.PartitionShardID]uint64),
 		log:              observe.Logger(),
 		tracer:           observe.Tracer("rootchain.node"),
 	}
@@ -318,12 +324,12 @@ onBlockCertificationRequest handles Certification Request from shard nodes.
 Shard nodes can only extend the stored/certified state.
 */
 func (v *Node) onBlockCertificationRequest(ctx context.Context, req *certification.BlockCertificationRequest) error {
-	return v.admitRequest(ctx, req, time.Time{})
+	return v.admitRequest(ctx, req, &heldOrigin{})
 }
 
-// admitRequest is onBlockCertificationRequest; held is the first deadline of a near-future request admitted again after it was
-// held, zero for a request just received.
-func (v *Node) admitRequest(ctx context.Context, req *certification.BlockCertificationRequest, held time.Time) (rErr error) {
+// admitRequest is onBlockCertificationRequest; origin is where a near-future request admitted again was first held (origin.replay),
+// zero for a request just received.
+func (v *Node) admitRequest(ctx context.Context, req *certification.BlockCertificationRequest, origin *heldOrigin) (rErr error) {
 	ctx, span := v.tracer.Start(ctx, "node.onBlockCertificationRequest")
 	defer span.End()
 	if profile, ok := v.consensusManager.(interface{ HandoffProfileEnabled() bool }); ok && profile.HandoffProfileEnabled() && req != nil && req.PartitionID == rctypes.ControlPartition {
@@ -332,6 +338,11 @@ func (v *Node) admitRequest(ctx context.Context, req *certification.BlockCertifi
 
 	if req == nil {
 		return fmt.Errorf("%w: %w", rctypes.ErrInvalidRequest, certification.ErrBlockCertificationRequestIsNil)
+	}
+	// the installed root epoch before anything is resolved or validated: a request is held, replayed and counted only under it
+	snapshot := v.observeEpoch(ctx)
+	if origin.replay && origin.epoch != snapshot {
+		return fmt.Errorf("%w: held in root epoch %d, root epoch %d is installed", errHeldAcrossActivation, origin.epoch, snapshot)
 	}
 
 	if src, ok := v.consensusManager.(RequestViewSource); ok {
@@ -347,7 +358,7 @@ func (v *Node) admitRequest(ctx context.Context, req *certification.BlockCertifi
 				}
 				return view, nil
 			}
-			return v.collectUnderView(ctx, req, view, resolve, held)
+			return v.collectUnderView(ctx, req, view, resolve, origin, snapshot)
 		}
 	}
 
@@ -358,7 +369,7 @@ func (v *Node) admitRequest(ctx context.Context, req *certification.BlockCertifi
 	// we got the shard info thus it's a valid partition/shard
 	if err := si.ValidRequest(req); err != nil {
 		if legacyNearFuture(si, req) {
-			herr := v.early.holdUnder(req, held, v.rootEpoch())
+			herr := v.holdNearFuture(req, origin, snapshot, nil)
 			if herr == nil {
 				v.log.DebugContext(ctx, fmt.Sprintf("holding the request of round %d until the commit of round %d applies", req.IRRound(), si.LastCR.Technical.Round),
 					logger.Shard(req.PartitionID, req.ShardID))
@@ -389,10 +400,13 @@ func (v *Node) admitRequest(ctx context.Context, req *certification.BlockCertifi
 		return fmt.Errorf("ZK proof verification failed: %w", err)
 	}
 
+	if err := v.fenceReplay(origin, snapshot, nil); err != nil {
+		return err
+	}
 	if err := v.subscription.Subscribe(req.PartitionID, req.ShardID, req.NodeID); err != nil {
 		return fmt.Errorf("subscribing the sender: %w", err)
 	}
-
+	v.noteCounted(req, origin)
 	return v.countRequest(ctx, req, si, false)
 }
 
@@ -417,23 +431,118 @@ func viewChanged(a, b requestAdmission) bool {
 	return ta.Round != tb.Round || ta.Epoch != tb.Epoch
 }
 
-// replayEarly admits again, from scratch, the requests held for a shard; one still ahead is held again under its first deadline.
+// replayEarly admits again, from scratch, the requests held for a shard; one still ahead is held again under its first origin.
 //
-// A request held under one root epoch is never admitted under another (#1032, T6): the shard built it on the certificate of the epoch it
-// was held in, and a root activation in between makes it a request of the closed epoch (without the transition the first block of the
-// new one carries). It is dropped; the shard builds the new epoch's request on the certificate of the activation.
+// A request held under one root authority is never admitted under another (#1032, T6): the shard built it on the certificate of the
+// epoch it was held in, and a root activation in between makes it a request of the closed epoch (without the transition the first block
+// of the new one carries). The fence is enforced per request against the epoch installed when its admission starts, against the epoch
+// and the view that judged it immediately before it is counted (fenceReplay), and once more by the consensus manager, serialized with
+// activation, for a quorum it contributes to (IRChangeRequest.RootEpoch). A dropped request costs the shard nothing it can use: it
+// builds the new epoch's request on the certificate of the activation.
 func (v *Node) replayEarly(ctx context.Context, ref shardRef) {
-	epoch := v.rootEpoch()
 	for _, e := range v.early.take(ref.partition, ref.shard) {
-		if e.epoch != epoch {
-			v.log.DebugContext(ctx, fmt.Sprintf("held near-future request of root epoch %d dropped: root epoch %d is installed", e.epoch, epoch),
-				logger.Shard(ref.partition, ref.shard))
-			continue
-		}
-		if err := v.admitRequest(ctx, e.req, e.deadline); err != nil {
+		origin := e.origin
+		origin.replay, origin.reserved = true, e.size
+		if err := v.admitRequest(ctx, e.req, &origin); err != nil {
 			v.log.DebugContext(ctx, "held near-future request refused", logger.Shard(ref.partition, ref.shard), logger.Error(err))
 		}
+		if !origin.reheld {
+			v.early.release(e)
+		}
 	}
+}
+
+// errHeldAcrossActivation refuses a held request whose origin is not the root authority in force when it would be counted.
+var errHeldAcrossActivation = errors.New("held near-future request crosses a root activation")
+
+// holdNearFuture holds an authentic request for the round after the expected one. A new hold takes its origin from the validation that
+// judged it: the epoch installed when the admission started (it must still be installed now) and the root authority of the view. A
+// re-hold of a replayed request keeps its first origin unchanged and must still match it.
+func (v *Node) holdNearFuture(req *certification.BlockCertificationRequest, origin *heldOrigin, snapshot uint64, authority []byte) error {
+	if now := v.rootEpoch(); now != snapshot {
+		return fmt.Errorf("%w: root epoch %d installed during the validation in epoch %d", errHeldAcrossActivation, now, snapshot)
+	}
+	if origin.replay {
+		if err := v.fenceReplay(origin, snapshot, authority); err != nil {
+			return err
+		}
+		return v.early.holdOrigin(req, origin)
+	}
+	fresh := &heldOrigin{deadline: origin.deadline, epoch: snapshot, authority: bytes.Clone(authority)}
+	return v.early.holdOrigin(req, fresh)
+}
+
+// fenceReplay refuses a replayed request unless the root epoch it was held in is installed now and was installed when its admission
+// started, and the view that judged it is of the root authority it was held under. A request just received passes.
+func (v *Node) fenceReplay(origin *heldOrigin, snapshot uint64, authority []byte) error {
+	if !origin.replay {
+		return nil
+	}
+	if now := v.rootEpoch(); now != origin.epoch || snapshot != origin.epoch {
+		return fmt.Errorf("%w: held in root epoch %d, epoch %d installed", errHeldAcrossActivation, origin.epoch, now)
+	}
+	if origin.authority != nil && !bytes.Equal(origin.authority, authority) {
+		return fmt.Errorf("%w: held under root authority %x, judged under %x", errHeldAcrossActivation, origin.authority, authority)
+	}
+	return nil
+}
+
+// viewAuthority is the root authority (epoch and body) of the view that judges a request, or nil when the view does not name one.
+func viewAuthority(view requestAdmission) []byte {
+	if a, ok := view.(interface{ RootAuthority() []byte }); ok {
+		return a.RootAuthority()
+	}
+	return nil
+}
+
+// noteCounted records that a replayed request is counted for its shard: every certification request handed over for the shard, until
+// its buffer is cleared, names the root epoch the replayed request was held in, and the consensus manager refuses it under another.
+func (v *Node) noteCounted(req *certification.BlockCertificationRequest, origin *heldOrigin) {
+	if !origin.replay {
+		return
+	}
+	v.fenceMu.Lock()
+	defer v.fenceMu.Unlock()
+	v.fenced[types.PartitionShardID{PartitionID: req.PartitionID, ShardID: req.ShardID.Key()}] = origin.epoch
+}
+
+// fencedEpoch is the root epoch every hand-over of the shard must be certified in, or 0.
+func (v *Node) fencedEpoch(partition types.PartitionID, shard types.ShardID) uint64 {
+	v.fenceMu.Lock()
+	defer v.fenceMu.Unlock()
+	return v.fenced[types.PartitionShardID{PartitionID: partition, ShardID: shard.Key()}]
+}
+
+// clearShard clears the shard's counted requests and with them its fence.
+func (v *Node) clearShard(ctx context.Context, partition types.PartitionID, shard types.ShardID) {
+	v.incomingRequests.Clear(ctx, partition, shard)
+	v.fenceMu.Lock()
+	delete(v.fenced, types.PartitionShardID{PartitionID: partition, ShardID: shard.Key()})
+	v.fenceMu.Unlock()
+}
+
+// observeEpoch is the installed root epoch; when it changed since the last admission, every request counted under a replay of the
+// previous epoch is cleared and every held request dropped, before anything is admitted in the new one.
+func (v *Node) observeEpoch(ctx context.Context) uint64 {
+	now := v.rootEpoch()
+	v.fenceMu.Lock()
+	changed := v.seenEpochSet && v.seenEpoch != now
+	v.seenEpoch, v.seenEpochSet = now, true
+	var stale []types.PartitionShardID
+	if changed {
+		for k := range v.fenced {
+			stale = append(stale, k)
+		}
+		clear(v.fenced)
+	}
+	v.fenceMu.Unlock()
+	if changed {
+		for _, k := range stale {
+			v.incomingRequests.ClearKey(ctx, k)
+		}
+		v.early.dropAll()
+	}
+	return now
 }
 
 // rootEpoch is the root epoch the consensus manager has installed, or 0 when it does not say.
@@ -472,7 +581,7 @@ var _ requestAdmission = (*storage.RequestRoundView)(nil)
 // rather than refused: it is admitted from scratch when the committed context advances. held is its first deadline when it is being
 // admitted again, else zero.
 func (v *Node) collectUnderView(ctx context.Context, req *certification.BlockCertificationRequest, view requestAdmission,
-	resolve func() (requestAdmission, error), held time.Time) error {
+	resolve func() (requestAdmission, error), origin *heldOrigin, snapshot uint64) error {
 	lastCR := func() *certification.CertificationResponse {
 		if si, err := v.consensusManager.ShardInfo(req.PartitionID, req.ShardID); err == nil && si != nil {
 			return si.LastCR
@@ -491,7 +600,7 @@ func (v *Node) collectUnderView(ctx context.Context, req *certification.BlockCer
 	if err != nil && errors.Is(err, storage.ErrStaleRequestContext) && req.IRRound() == view.ExpectedTR().Round+1 {
 		// ValidRequest compares the round only after membership, signature and shard passed under this view: the request is
 		// authentic and exactly one round ahead. It is counted for nothing until it is admitted under the committed context.
-		herr := v.early.holdUnder(req, held, v.rootEpoch())
+		herr := v.holdNearFuture(req, origin, snapshot, viewAuthority(view))
 		if herr == nil {
 			v.log.DebugContext(ctx, fmt.Sprintf("holding the request of round %d until the commit of round %d applies", req.IRRound(), view.ExpectedTR().Round),
 				logger.Shard(req.PartitionID, req.ShardID))
@@ -518,9 +627,14 @@ func (v *Node) collectUnderView(ctx context.Context, req *certification.BlockCer
 		}
 		return fmt.Errorf("ZK proof verification failed: %w", err)
 	}
+	// the fence is checked against the view that judged the request, after everything else, immediately before it is counted
+	if err := v.fenceReplay(origin, snapshot, viewAuthority(view)); err != nil {
+		return err
+	}
 	if err := v.subscription.Subscribe(req.PartitionID, req.ShardID, req.NodeID); err != nil {
 		return fmt.Errorf("subscribing the sender: %w", err)
 	}
+	v.noteCounted(req, origin)
 	return v.countRequest(ctx, req, view, view.CollectionOnly())
 }
 
@@ -546,7 +660,7 @@ func (v *Node) countRequest(ctx context.Context, req *certification.BlockCertifi
 				v.log.DebugContext(ctx, fmt.Sprintf("partition %s repeated request of a decided, uncertified outcome (%s), handing it over again", req.PartitionID, status),
 					logger.Shard(req.PartitionID, req.ShardID))
 				return v.consensusManager.RequestCertification(ctx, consensus.IRChangeRequest{
-					Partition: req.PartitionID, Shard: req.ShardID, Reason: reason, Requests: requests})
+					Partition: req.PartitionID, Shard: req.ShardID, Reason: reason, Requests: requests, RootEpoch: v.fencedEpoch(req.PartitionID, req.ShardID)})
 			}
 		}
 		v.log.DebugContext(ctx, fmt.Sprintf("dropping stale block certification request (%s) for partition %s", res, req.PartitionID), logger.Shard(req.PartitionID, req.ShardID))
@@ -559,7 +673,7 @@ func (v *Node) countRequest(ctx context.Context, req *certification.BlockCertifi
 	}
 	if collectionOnly && res != QuorumInProgress {
 		v.log.DebugContext(ctx, "collection-only view: the outcome is not certified before the activation round", logger.Shard(req.PartitionID, req.ShardID))
-		v.incomingRequests.Clear(ctx, req.PartitionID, req.ShardID)
+		v.clearShard(ctx, req.PartitionID, req.ShardID)
 		return nil
 	}
 	var reason consensus.CertReqReason
@@ -591,8 +705,9 @@ func (v *Node) countRequest(ctx context.Context, req *certification.BlockCertifi
 			Shard:     req.ShardID,
 			Reason:    reason,
 			Requests:  requests,
+			RootEpoch: v.fencedEpoch(req.PartitionID, req.ShardID),
 		}); err != nil {
-		v.incomingRequests.Clear(ctx, req.PartitionID, req.ShardID)
+		v.clearShard(ctx, req.PartitionID, req.ShardID)
 		return fmt.Errorf("requesting certification: %w", err)
 	}
 	return nil
@@ -624,7 +739,7 @@ func (v *Node) handleConsensus(ctx context.Context) error {
 				return fmt.Errorf("consensus channel closed")
 			}
 			v.subscription.Send(ctx, cr)
-			v.incomingRequests.Clear(ctx, cr.Partition, cr.Shard)
+			v.clearShard(ctx, cr.Partition, cr.Shard)
 			// the committed context of the shard advanced: requests held for the round after it are admitted again
 			v.signalReplay(cr.Partition, cr.Shard)
 		}

@@ -91,7 +91,8 @@ func TestRequestResolutionCostIsFlatInEpochs(t *testing.T) {
 	}
 	ns := map[int]int64{}
 	for _, epochs := range sizes {
-		rt, first := requestScaleRuntime(t, epochs)
+		rt, fixtures := requestScaleChain(t, epochs)
+		first := fixtures[0]
 		id := first.Body.Identity()
 		hist, err := rt.RequestHistory(RequestHistoryConfig{Candidates: requestScaleCandidates{string(id[:]): first.Candidate}, HashAlg: crypto.SHA256,
 			Network: q3fixture.Network, Version: 1, Anchor: requestScaleAnchor(first.ShardConf)})
@@ -123,6 +124,24 @@ func TestRequestResolutionCostIsFlatInEpochs(t *testing.T) {
 			}
 		})
 		t.Logf("epochs=%d: cold derivation %d ns/op, %d B/op, %d allocs/op", epochs, cold.NsPerOp(), cold.AllocedBytesPerOp(), cold.AllocsPerOp())
+		// every activation in turn: the history extended by one epoch, then a resolution (the activation path)
+		updates := testing.Benchmark(func(b *testing.B) {
+			for range b.N {
+				b.StopTimer()
+				rt.hist.Store(fixtures[0].History)
+				fresh, err := rt.RequestHistory(RequestHistoryConfig{Candidates: requestScaleCandidates{string(id[:]): first.Candidate}, HashAlg: crypto.SHA256,
+					Network: q3fixture.Network, Version: 1, Anchor: requestScaleAnchor(first.ShardConf)})
+				require.NoError(t, err)
+				b.StartTimer()
+				for _, f := range fixtures {
+					rt.hist.Store(f.History)
+					_, err = fresh.RequestChain(partition, types.ShardID{})
+					require.NoError(t, err)
+				}
+			}
+		})
+		rt.hist.Store(fixtures[len(fixtures)-1].History)
+		t.Logf("epochs=%d: all successive activation updates %d ns/op, %d B/op", epochs, updates.NsPerOp(), updates.AllocedBytesPerOp())
 	}
 	if os.Getenv("Q3_SCALE_EPOCHS") == "" {
 		require.Less(t, ns[34], 3*ns[2], "a resolution at 34 epochs costs about what it costs at 2")

@@ -58,6 +58,9 @@ type (
 		// when non-zero, frames with CBOR payload larger than this are rejected before
 		// allocation and the payload must be consumed exactly.
 		MaxFrameSize uint64
+		// Ingress, with MaxFrameSize, reserves each frame's declared bytes before its payload is read and keeps the reservation
+		// while the message is queued, until the consumer takes it from ReceivedChannel. Register it before ReceivedChannel is called.
+		Ingress *IngressBudget
 	}
 
 	sendProtocolData struct {
@@ -90,6 +93,12 @@ type LibP2PNetwork struct {
 	// framesHook, when set (tests), observes the per dispatch certification frames cache
 	framesHook func(*certificationFrames)
 
+	// ingress are the budgets of the protocols registered with one, released as the consumer takes a message (ReceivedChannel)
+	ingressMu sync.Mutex
+	ingress   []*IngressBudget
+	outOnce   sync.Once
+	out       <-chan any
+
 	// streamReadTimeout, when set (tests), replaces defaultStreamReadTimeout. Set before the first stream arrives, never changed afterwards.
 	streamReadTimeout time.Duration
 }
@@ -121,8 +130,28 @@ func NewLibP2PNetwork(self *Peer, capacity uint, obs Observability) (*LibP2PNetw
 	return n, nil
 }
 
+// ReceivedChannel is the channel of received messages. With an ingress budget registered, a message's reservation is released as the
+// consumer takes it, whoever the consumer is: a forwarder hands each queued message over and releases it once taken.
 func (n *LibP2PNetwork) ReceivedChannel() <-chan any {
-	return n.receivedMsgs
+	n.outOnce.Do(func() {
+		n.ingressMu.Lock()
+		budgets := n.ingress
+		n.ingressMu.Unlock()
+		if len(budgets) == 0 {
+			n.out = n.receivedMsgs
+			return
+		}
+		out := make(chan any)
+		n.out = out
+		go func() {
+			for msg := range n.receivedMsgs {
+				out <- msg
+				n.Delivered(msg)
+			}
+			close(out)
+		}()
+	})
+	return n.out
 }
 
 // Send - send a single message to one or more peers asynchronously
@@ -273,7 +302,19 @@ streamHandlerForProtocol returns libp2p stream handler for given protocolID.
 The "ctor" is constructor which returns pointer to a data struct into which
 incoming message can be stored.
 */
-func (n *LibP2PNetwork) streamHandlerForProtocol(protocolID string, ctor func() any, maxFrame uint64, admit, revalidate func(peer.ID) bool) libp2pNetwork.StreamHandler {
+// Delivered releases the ingress reservation of a message taken from the receive queue (a no-op for other messages).
+func (n *LibP2PNetwork) Delivered(msg any) {
+	n.ingressMu.Lock()
+	budgets := n.ingress
+	n.ingressMu.Unlock()
+	for _, b := range budgets {
+		if b.delivered(msg) {
+			return
+		}
+	}
+}
+
+func (n *LibP2PNetwork) streamHandlerForProtocol(protocolID string, ctor func() any, maxFrame uint64, admit, revalidate func(peer.ID) bool, ingress *IngressBudget) libp2pNetwork.StreamHandler {
 	return func(s libp2pNetwork.Stream) {
 		success := false
 		defer func() {
@@ -308,9 +349,23 @@ func (n *LibP2PNetwork) streamHandlerForProtocol(protocolID string, ctor func() 
 				return
 			}
 			msg := ctor()
-			if maxFrame > 0 {
+			var reserved int64
+			switch {
+			case ingress != nil:
+				var length uint64
+				if length, err = readFrameLength(reader, maxFrame); err == nil {
+					reserved = int64(length) /* #nosec G115 bounded by maxFrame */
+					if !ingress.reserve(remote, reserved) {
+						n.log.Warn(fmt.Sprintf("refusing a %d byte %q frame from %s: ingress budget exhausted", length, protocolID, remote))
+						return
+					}
+					if err = readFramePayload(reader, msg, length); err != nil {
+						ingress.release(remote, reserved)
+					}
+				}
+			case maxFrame > 0:
 				err = deserializeMsgLimited(reader, msg, maxFrame)
-			} else {
+			default:
 				err = deserializeMsg(reader, msg)
 			}
 			if err != nil {
@@ -323,10 +378,19 @@ func (n *LibP2PNetwork) streamHandlerForProtocol(protocolID string, ctor func() 
 			// the check above ran before a possibly long wait for this frame: the peer may have been
 			// revoked meanwhile, and a frame written after the revocation must not be delivered
 			if revalidate != nil && !revalidate(remote) {
+				if ingress != nil {
+					ingress.release(remote, reserved)
+				}
 				n.logRejectedPeer(protocolID, remote)
 				return
 			}
+			if ingress != nil {
+				ingress.queue(msg, remote, reserved) // before it is visible to the consumer, so Delivered always finds it
+			}
 			if err = n.receivedMsg(s.Conn().RemotePeer(), protocolID, msg); err != nil {
+				if ingress != nil {
+					ingress.delivered(msg) // dropped: released
+				}
 				// log error, but also reset the stream to signal that node is not able to consume more messages
 				n.log.Warn(fmt.Sprintf("failed to process message: %v", err))
 				return
@@ -394,7 +458,15 @@ func (n *LibP2PNetwork) registerReceiveProtocol(protoc ReceiveProtocolDescriptio
 		return fmt.Errorf("data struct constructor must return pointer to struct but returns %s", typ)
 	}
 
-	n.self.RegisterProtocolHandler(protoc.ProtocolID, n.streamHandlerForProtocol(protoc.ProtocolID, protoc.TypeFn, protoc.MaxFrameSize, protoc.AdmitPeer, protoc.RevalidatePeer))
+	if protoc.Ingress != nil {
+		if protoc.MaxFrameSize == 0 {
+			return errors.New("an ingress budget needs a frame limit")
+		}
+		n.ingressMu.Lock()
+		n.ingress = append(n.ingress, protoc.Ingress)
+		n.ingressMu.Unlock()
+	}
+	n.self.RegisterProtocolHandler(protoc.ProtocolID, n.streamHandlerForProtocol(protoc.ProtocolID, protoc.TypeFn, protoc.MaxFrameSize, protoc.AdmitPeer, protoc.RevalidatePeer, protoc.Ingress))
 	return nil
 }
 

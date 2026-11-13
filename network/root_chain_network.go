@@ -23,6 +23,14 @@ const (
 /*
 Logger (log) is assumed to already have node_id attribute added, won't be added by NW component!
 */
+// The ingress budget of block certification requests (#1032): bytes in flight and queued, over all peers and for one. One peer may have
+// one frame of the maximum size and some ordinary ones outstanding; the whole budget fits four maximum frames. A peer whose frames do
+// not fit is refused before its payload is read.
+const (
+	BlockCertificationIngressBytes   = 4 * certification.MaxBlockCertificationRequestFrame
+	BlockCertificationIngressPerPeer = certification.MaxBlockCertificationRequestFrame + 8<<20
+)
+
 func NewLibP2PRootChainNetwork(self *Peer, capacity uint, sendCertificateTimeout time.Duration, obs Observability) (*LibP2PNetwork, error) {
 	n, err := NewLibP2PNetwork(self, capacity, obs)
 	if err != nil {
@@ -42,6 +50,7 @@ func NewLibP2PRootChainNetwork(self *Peer, capacity uint, sendCertificateTimeout
 			ProtocolID:   ProtocolBlockCertification,
 			TypeFn:       func() any { return &certification.BlockCertificationRequest{} },
 			MaxFrameSize: certification.MaxBlockCertificationRequestFrame,
+			Ingress:      NewIngressBudget(BlockCertificationIngressBytes, BlockCertificationIngressPerPeer),
 		},
 		{
 			ProtocolID: ProtocolHandshake,

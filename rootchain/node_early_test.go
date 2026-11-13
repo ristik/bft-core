@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -224,12 +225,18 @@ func TestEarlyRequestBufferBoundsAndExpiry(t *testing.T) {
 	now = now.Add(earlyRequestTTL / 2)
 	taken := b.take(1, types.ShardID{})
 	require.Len(t, taken, earlyRequestsPerShard)
-	require.NoError(t, b.hold(taken[0].req, taken[0].deadline))
+	o := taken[0].origin
+	o.replay, o.reserved = true, taken[0].size
+	require.NoError(t, b.holdOrigin(taken[0].req, &o))
+	require.True(t, o.reheld)
+	for _, e := range taken[1:] {
+		b.release(e) // admitted or refused: released
+	}
 	now = now.Add(earlyRequestTTL/2 + time.Millisecond)
 	require.Zero(t, b.len(), "everything expired")
 	require.Zero(t, b.bytes, "and its bytes are released")
 	require.Empty(t, b.shardsHeld())
-	require.Error(t, b.hold(taken[0].req, taken[0].deadline), "an expired entry is never held again")
+	require.Error(t, b.hold(taken[0].req, taken[0].origin.deadline), "an expired entry is never held again")
 	require.NoError(t, b.hold(req(1, "a", 5), time.Time{}), "the buffer is usable after expiry")
 }
 
@@ -461,4 +468,203 @@ func (*switchingHistory) Network() uint64 { return fxNetwork }
 func (*switchingHistory) Version() uint64 { return fxVersion }
 func (*switchingHistory) RootIdentity(uint64) (uint64, []byte, error) {
 	return fxRootEp, fxBody, nil
+}
+
+// authorityHistory is the fixture's one-anchor history whose root authority (epoch and body) the test moves, as a root-only
+// continuation does: the assignment, keys and shard continuity stay, only the authorising root identity changes.
+type authorityHistory struct {
+	anchor *storage.RequestActivation
+	mu     sync.Mutex
+	epoch  uint64
+	body   []byte
+}
+
+func (h *authorityHistory) Chain(types.PartitionID, types.ShardID) ([]*storage.RequestActivation, error) {
+	return []*storage.RequestActivation{h.anchor}, nil
+}
+func (*authorityHistory) Network() uint64 { return fxNetwork }
+func (*authorityHistory) Version() uint64 { return fxVersion }
+func (h *authorityHistory) RootIdentity(uint64) (uint64, []byte, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.epoch, h.body, nil
+}
+
+// fencedFixture is the fixture under a manager with an installed root epoch, with a hook run on every parent read of a resolution
+// (the point where an activation can land between the replay's start and the count).
+type fencedFixture struct {
+	*fixture
+	cm      *epochCM
+	hist    *authorityHistory
+	onParse func(call int)
+	calls   int
+}
+
+func newFencedFixture(t *testing.T) *fencedFixture {
+	f := newFixture(t, fxOpts{})
+	ff := &fencedFixture{fixture: f, cm: &epochCM{viewCM: f.cm, epoch: 3}}
+	f.node.consensusManager = ff.cm
+	anchor, err := storage.NewRequestAnchor(f.pdr, crypto.SHA256, fxRootEp, fxBody, fxVersion)
+	require.NoError(t, err)
+	ff.hist = &authorityHistory{anchor: anchor, epoch: fxRootEp, body: fxBody}
+	ff.rewire(t)
+	return ff
+}
+
+// rewire resolves through the authority history over the fixture's current parent, calling the hook on every resolution.
+func (ff *fencedFixture) rewire(t *testing.T) {
+	parent := func(types.PartitionID, types.ShardID) (*storage.ShardInfo, []byte, *types.InputRecord, error) {
+		ff.calls++
+		if ff.onParse != nil {
+			ff.onParse(ff.calls)
+		}
+		return ff.si, ff.parentID, nil, nil
+	}
+	resolver, err := consensus.NewRequestViewResolver(ff.hist, crypto.SHA256, parent, nil)
+	require.NoError(t, err)
+	ff.fixture.cm.resolver = resolver
+}
+
+// advance commits the shard's round (the fixture's parent moves on) under the authority history.
+func (ff *fencedFixture) advance(t *testing.T) {
+	ff.setParent(1, ff.pdr)
+	ff.rewire(t)
+}
+
+func (ff *fencedFixture) held(t *testing.T) []*certification.BlockCertificationRequest {
+	_, _, reqs := ff.futureRequests(9, 0, 1, 2)
+	ff.rewire(t)
+	for _, r := range reqs {
+		require.NoError(t, ff.submit(r))
+	}
+	require.Equal(t, 3, ff.node.early.len())
+	return reqs
+}
+
+// An activation lands after the batch replay started and before the held requests are counted: none of them is counted or handed over,
+// and their reservations are released.
+func TestActivationDuringBatchReplayCountsNoHeldRequest(t *testing.T) {
+	ff := newFencedFixture(t)
+	ff.held(t)
+	ff.advance(t)
+	ff.calls = 0
+	ff.onParse = func(call int) {
+		if call == 1 {
+			ff.cm.epoch = 4 // the first replayed request's resolution races the activation
+		}
+	}
+	ff.replay()
+	require.Empty(t, ff.certs(), "no quorum of the closed epoch is handed over")
+	require.Zero(t, ff.counted())
+	require.Zero(t, ff.node.early.len())
+	require.Zero(t, ff.node.early.bytes, "every reservation released")
+}
+
+// A root-only continuation moves the root authority while the installed epoch, the assignment, keys and continuity stay: a held request
+// is not admitted under the continuation's view.
+func TestHeldRequestIsNotAdmittedUnderARootOnlyContinuation(t *testing.T) {
+	ff := newFencedFixture(t)
+	ff.held(t)
+	ff.advance(t)
+	ff.hist.mu.Lock()
+	ff.hist.epoch, ff.hist.body = fxRootEp+1, bytes.Repeat([]byte{0xA1}, 32)
+	ff.hist.mu.Unlock()
+	ff.replay()
+	require.Empty(t, ff.certs())
+	require.Zero(t, ff.counted(), "membership and continuity pass; the root authority does not")
+	require.Zero(t, ff.node.early.bytes)
+}
+
+// A replay without progress re-holds the requests under their first origin; an activation during that replay re-holds nothing (the
+// current epoch is never stamped on an old request), and a later replay cannot hand the old quorum over.
+func TestReholdWithoutProgressKeepsTheOriginAndAnActivationDropsIt(t *testing.T) {
+	ff := newFencedFixture(t)
+	ff.held(t)
+	ff.replay() // no commit: still one round ahead
+	require.Equal(t, 3, ff.node.early.len())
+	for _, s := range ff.node.early.shards {
+		for _, set := range s.rounds {
+			for _, e := range set {
+				require.EqualValues(t, 3, e.origin.epoch, "the first origin is kept")
+				require.NotNil(t, e.origin.authority)
+			}
+		}
+	}
+	bytesHeld := ff.node.early.bytes
+	require.Positive(t, bytesHeld)
+	ff.calls = 0
+	ff.onParse = func(call int) {
+		if call == 1 {
+			ff.cm.epoch = 4
+		}
+	}
+	ff.replay() // the activation lands during this replay, still without progress
+	require.Zero(t, ff.node.early.len(), "nothing re-held under epoch 4")
+	require.Zero(t, ff.node.early.bytes)
+	ff.onParse = nil
+	ff.advance(t)
+	ff.replay()
+	require.Empty(t, ff.certs())
+}
+
+// An activation during the resolution of a request just received: it is not held under either epoch.
+func TestActivationDuringResolutionHoldsNothing(t *testing.T) {
+	ff := newFencedFixture(t)
+	_, _, reqs := ff.futureRequests(9, 0)
+	ff.rewire(t)
+	ff.calls = 0
+	ff.onParse = func(call int) {
+		if call == 1 {
+			ff.cm.epoch = 4
+		}
+	}
+	require.ErrorIs(t, ff.submit(reqs[0]), errHeldAcrossActivation)
+	require.Zero(t, ff.node.early.len())
+}
+
+// A replayed request counted into a shard's buffer fences every hand-over of the shard to its epoch; the shard's buffer and fence clear
+// with its certificate.
+func TestAReplayedQuorumIsHandedOverWithItsRootEpoch(t *testing.T) {
+	ff := newFencedFixture(t)
+	ff.held(t)
+	ff.advance(t)
+	ff.replay()
+	certs := ff.certs()
+	require.Len(t, certs, 1)
+	require.EqualValues(t, 3, certs[0].RootEpoch)
+	ff.node.clearShard(context.Background(), 1, types.ShardID{})
+	require.Zero(t, ff.node.fencedEpoch(1, types.ShardID{}))
+}
+
+// Reservations are conserved across take, re-hold, admission and refusal.
+func TestEarlyReservationsAreConservedAcrossReplay(t *testing.T) {
+	nodes, _ := testutils.CreateTestNodes(t, 1)
+	b := newEarlyRequests()
+	r := &certification.BlockCertificationRequest{PartitionID: 1, NodeID: "a", InputRecord: &types.InputRecord{Version: 1, RoundNumber: 5,
+		PreviousHash: []byte{1}, Hash: []byte{2}, BlockHash: []byte{3}, SummaryValue: []byte{4}, Timestamp: 1}, ZkProof: make([]byte, earlyRequestMaxBytes-4096)}
+	require.NoError(t, r.Sign(nodes[0].Signer))
+	require.NoError(t, b.hold(r, time.Time{}))
+	size := b.bytes
+	taken := b.take(1, types.ShardID{})
+	require.Len(t, taken, 1)
+	require.Equal(t, size, b.bytes, "a taken request keeps its reservation")
+	// while the taken request is out, the signer's budget still counts it
+	other := *r
+	other.PartitionID = 2
+	require.NoError(t, other.Sign(nodes[0].Signer))
+	require.NoError(t, b.hold(&other, time.Time{}))
+	third := *r
+	third.PartitionID = 3
+	require.NoError(t, third.Sign(nodes[0].Signer))
+	require.ErrorIs(t, b.hold(&third, time.Time{}), errEarlyFull, "the signer budget counts the taken request")
+	// re-hold transfers the reservation
+	o := taken[0].origin
+	o.replay, o.reserved = true, taken[0].size
+	require.NoError(t, b.holdOrigin(taken[0].req, &o))
+	require.True(t, o.reheld)
+	require.Equal(t, 2*size, b.bytes)
+	// a refused replay releases it
+	again := b.take(1, types.ShardID{})
+	b.release(again[0])
+	require.Equal(t, size, b.bytes)
 }

@@ -325,6 +325,12 @@ func assignmentKey(a *RequestActivation, hashAlg crypto.Hash) []byte {
 func (v *RequestRoundView) AssignmentKey() []byte { return bytes.Clone(v.assignKey) }
 func (v *RequestRoundView) ViewKey() []byte       { return bytes.Clone(v.viewKey) }
 
+// RootAuthority is the root epoch and body identity that authorise the view's target round, encoded as one comparable value.
+func (v *RequestRoundView) RootAuthority() []byte {
+	out := binary.BigEndian.AppendUint64(nil, v.target.RootEpoch)
+	return append(out, v.target.RootBodyID...)
+}
+
 // Identity is the assignment identity the buffer tags tallies with: the AssignmentKey, never the shard epoch alone.
 func (v *RequestRoundView) Identity() string { return hex.EncodeToString(v.assignKey) }
 
