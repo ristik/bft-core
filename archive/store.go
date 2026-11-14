@@ -453,8 +453,10 @@ func (s *Store) Get(q Request) (*Record, error) {
 }
 
 // GetExact reads the stored representation of the request whose manifest digest is the given one: the base object of the request if it is that manifest, else the variant
-// object stored for it (PutVariant). The digest is a locator, not a verdict: what is returned is re-read, validated and its manifest digest recomputed and compared. A damaged
-// base object does not hide a sound variant; with neither, the result is ErrCorrupt if something was damaged and ErrUnavailable if nothing was stored.
+// object stored for it (PutVariant). The digest is a locator, not a verdict: what is returned is re-read, validated and its manifest digest recomputed and compared. An object
+// is passed over from its self-hashed manifest when that names another digest, without reading its chunks; so a damaged base object does not hide a sound variant, and damage
+// is found only where it matters. The result is ErrCorrupt when a manifest is damaged or the object of the requested digest is damaged, and ErrUnavailable when no object of
+// that digest is stored (damaged chunks of an object of another digest are not read, so they do not make it ErrCorrupt).
 func (s *Store) GetExact(q Request, digest [32]byte) (*Record, error) {
 	return s.getExact(q, digest, false)
 }
