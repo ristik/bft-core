@@ -112,7 +112,7 @@ func (s *timeoutScale) decode(t testing.TB, i int) *abdrc.TimeoutMsg {
 	return m
 }
 
-// countFirst delivers one first copy of the votes of members [from, to) of the round 3 stall.
+// countFirst delivers the given first copies of round 3 votes.
 func (s *timeoutScale) countFirst(t testing.TB, msgs []*abdrc.TimeoutMsg) {
 	for _, m := range msgs {
 		if err := s.receiver.onTimeoutMsg(context.Background(), m); err != nil {
@@ -202,11 +202,17 @@ func TestTimeoutVoteScaling(t *testing.T) {
 				_ = s.receiver.onTimeoutMsg(context.Background(), old)
 			}
 		})
+		// the network's decoding of one message (not the loop's: the stream handlers decode before the loop sees the message)
+		decode := testing.Benchmark(func(b *testing.B) {
+			for i := 0; i < b.N; i++ {
+				_ = s.decode(b, i%stalled)
+			}
+		})
 		perFirst := time.Duration(first.NsPerOp() / int64(stalled))
-		t.Logf("n=%d quorum=%d msg=%dB: first copy %v/msg (%d allocs/msg), round of %d first copies %v; retransmission %v/msg (%d allocs/msg); stale %v/msg",
+		t.Logf("n=%d quorum=%d msg=%dB: first copy %v/msg (%d allocs/msg), round of %d first copies %v; retransmission %v/msg (%d allocs/msg); stale %v/msg; network decode %v/msg",
 			n, s.quorum, len(s.wire[0]), perFirst, first.AllocsPerOp()/int64(stalled), stalled, time.Duration(first.NsPerOp()),
-			time.Duration(dup.NsPerOp()), dup.AllocsPerOp(), time.Duration(stale.NsPerOp()))
-		fmt.Printf("SCALE n=%d first_ns=%d dup_ns=%d stale_ns=%d first_allocs=%d dup_allocs=%d bytes=%d\n", n, int64(perFirst), dup.NsPerOp(),
-			stale.NsPerOp(), first.AllocsPerOp()/int64(stalled), dup.AllocsPerOp(), len(s.wire[0]))
+			time.Duration(dup.NsPerOp()), dup.AllocsPerOp(), time.Duration(stale.NsPerOp()), time.Duration(decode.NsPerOp()))
+		fmt.Printf("SCALE n=%d first_ns=%d dup_ns=%d stale_ns=%d decode_ns=%d first_allocs=%d dup_allocs=%d bytes=%d\n", n, int64(perFirst), dup.NsPerOp(),
+			stale.NsPerOp(), decode.NsPerOp(), first.AllocsPerOp()/int64(stalled), dup.AllocsPerOp(), len(s.wire[0]))
 	}
 }
