@@ -27,6 +27,11 @@ type TimeoutMsg struct {
 
 	// wire is the SHA-256 of the exact bytes the message was decoded from, set by UnmarshalCBOR and by nothing else; zero (hasWire false) for a
 	// message built in memory. It is not part of any encoding. See TakeWireDigest.
+	//
+	// OWNERSHIP INVARIANT: the digest describes the message only while nothing has changed it since decoding, and the consensus cache skips the
+	// verification of a message whose digest matches a verified one (#982). Nothing enforces this: the fields stay mutable. Any path that
+	// decodes a message and then edits it (a field, a nested certificate, a map) must first call TakeWireDigest to drop the digest, so that
+	// the edited message is encoded and verified as what it now is.
 	wire    [sha256.Size]byte
 	hasWire bool
 }

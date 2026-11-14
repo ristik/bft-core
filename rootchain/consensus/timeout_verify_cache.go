@@ -33,6 +33,9 @@ func (x *ConsensusManager) verifyTimeoutVote(vote *abdrc.TimeoutMsg) error {
 // deterministic and canonical, so an honest sender's bytes are the encoding of its message, and a hit means the bytes equal those of the
 // counted message (or its encoding), which is what the encoded digest established before: decoding them gives the same content. Bytes that are
 // not a canonical encoding match only themselves. A message built in memory (this node's own vote, looped back) is encoded as before.
+// This rests on an ownership invariant, not on the type: a decoded message reaches here unchanged (the stream handler decodes it and the
+// loop hands it over as it is). Any future path that decodes a timeout message and edits it before it is handled must drop the digest
+// (TakeWireDigest) when it edits, or a changed message would be taken for the verified one.
 func (x *ConsensusManager) timeoutCacheKey(vote *abdrc.TimeoutMsg) (digest [32]byte, ctx verifyContext, ok bool) {
 	start := time.Now()
 	defer func() { x.profile.digestTime += time.Since(start) }()
