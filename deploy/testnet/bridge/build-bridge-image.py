@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Build the bridge tools image (Dockerfile.tools) from checkouts verified against bridge/pins.json, and record its ID beside the node images.
 
-    build-bridge-image.py --contracts-source DIR --nbp-source DIR
+    build-bridge-image.py --bft-source DIR --contracts-source DIR --nbp-source DIR
 
-Each source must be a clean checkout at exactly its pinned commit (contracts with its submodules); dnb-tool comes from this package's own bft-core
-checkout, which must be clean in its tracked files, and its commit is recorded. dnb-tool (cgo), forge's build of the contracts and
+Each source must be a clean checkout at exactly its pinned commit (contracts with its submodules). dnb-tool is built from --bft-source, which must be
+the node images' pin (deploy/testnet/pins.json "bft", the same checkout build-images.py builds ubft from): the lock-proof endpoint reads the validators'
+archives, so it must speak the nodes' archive layout (bft-core#1075: a dnb-tool older than the packed archive of #1059 found no lock proof). The pin is
+recorded, and bridge/overlay.py refuses an image recorded for another one. dnb-tool (cgo), forge's build of the contracts and
 the plug-ins' `npm ci` all run inside the image build, on the image's own platform (linux/amd64).
 Writes artifacts/bridge-images.json.
 """
@@ -16,6 +18,7 @@ import subprocess
 
 HERE = pathlib.Path(__file__).resolve().parent
 PINS = json.loads((HERE / 'pins.json').read_text())
+NODE_PINS = json.loads((HERE.parent / 'pins.json').read_text())   # the node images' sources: dnb-tool shares their bft pin
 ARTIFACTS = HERE.parent / 'artifacts'
 TAG = 'tnops-bridge:verified'
 
@@ -26,8 +29,9 @@ def run(*args, **kw):
 
 def verified(name, src):
     src = src.resolve()
-    if name != 'bft' and run('git', '-C', str(src), 'rev-parse', 'HEAD') != PINS[name]:
-        raise SystemExit(f'{name} source pin mismatch: {src} is not at {PINS[name]}')
+    want = NODE_PINS['bft'] if name == 'bft' else PINS[name]
+    if run('git', '-C', str(src), 'rev-parse', 'HEAD') != want:
+        raise SystemExit(f'{name} source pin mismatch: {src} is not at {want}' + (' (deploy/testnet/pins.json: the node images\' bft pin)' if name == 'bft' else ''))
     if run('git', '-C', str(src), 'status', '--porcelain', '--untracked-files=no', '--ignore-submodules=none'):
         raise SystemExit(f'{name} dirty source: {src}')
     return src
@@ -43,10 +47,11 @@ def stage(src, dst):
 
 def main():
     p = argparse.ArgumentParser()
+    p.add_argument('--bft-source', required=True, type=pathlib.Path, help='bft-core at deploy/testnet/pins.json "bft" (the checkout build-images.py builds ubft from)')
     p.add_argument('--contracts-source', required=True, type=pathlib.Path)
     p.add_argument('--nbp-source', required=True, type=pathlib.Path)
     a = p.parse_args()
-    bft = verified('bft', pathlib.Path(run('git', '-C', str(HERE), 'rev-parse', '--show-toplevel')))
+    bft = verified('bft', a.bft_source)
     contracts = verified('contracts', a.contracts_source)
     nbp = verified('native-bridge-plugins', a.nbp_source)
 

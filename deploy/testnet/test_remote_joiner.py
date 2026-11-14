@@ -124,6 +124,87 @@ class Forwards(unittest.TestCase):
             self.assertEqual(total, 1)
 
 
+class BridgeIsolation(unittest.TestCase):
+    """start --isolate-bridge / --emulate-wan (bft-core#1075): on a shared Linux docker host the entity reaches only its own containers and the host's
+    published addresses, from before its first container starts; the rules are found and removed by their comment only."""
+
+    def lap(self, tmp, calls, listing=''):
+        home = Path(tmp)
+        (home / 'state.json').write_text(json.dumps({'project': 'tn-x-joiner5', 'entity': 5}))
+        lap = rj.Laptop.__new__(rj.Laptop)
+        lap.home, lap.state = home, json.loads((home / 'state.json').read_text())
+        lap.save = lambda: None
+
+        def run(cmd, check=True, **kw):
+            calls.append(cmd)
+            if cmd[:2] == ['docker', 'network']:
+                return subprocess.CompletedProcess(cmd, 0, 'f9cd10559d30aaaaaaaa\n', '')
+            if cmd[:3] == ['sudo', 'iptables', '-C']:
+                return subprocess.CompletedProcess(cmd, 1, '', 'no rule')
+            if cmd[:3] == ['sudo', 'iptables', '-S']:
+                return subprocess.CompletedProcess(cmd, 0, listing, '')
+            return subprocess.CompletedProcess(cmd, 0, '', '')
+        return lap, run
+
+    def test_the_rules_match_only_this_bridge_and_carry_the_project(self):
+        rules = rj.isolation_rules('br-f9cd10559d30', 'tn-x-joiner5')
+        self.assertEqual([r[-1] for r in rules], ['RETURN', 'DROP', 'DROP'])
+        self.assertEqual(rules[0][:4], ['-i', 'br-f9cd10559d30', '-o', 'br-f9cd10559d30'], 'its own containers talk to each other')
+        self.assertEqual(rules[1][:2], ['-i', 'br-f9cd10559d30'], 'nothing forwarded out of it: no other bridge, no private address')
+        self.assertEqual(rules[2][:2], ['-o', 'br-f9cd10559d30'], 'nothing forwarded into it')
+        for r in rules:
+            self.assertIn('unicity-joiner tn-x-joiner5', r)
+            self.assertTrue('br-f9cd10559d30' in r and r.count('-i') + r.count('-o') >= 1, 'every rule is about this bridge only')
+
+    def test_isolate_inserts_in_order_and_netem_applies(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            calls = []
+            lap, run = self.lap(tmp, calls)
+            with unittest.mock.patch.object(rj, 'run', run), unittest.mock.patch.object(rj, 'say', lambda t: None):
+                rj.isolate(lap, wan_ms=50)
+            inserts = [c for c in calls if c[:3] == ['sudo', 'iptables', '-I']]
+            self.assertEqual(len(inserts), 3)
+            self.assertTrue(all(c[3:5] == ['DOCKER-USER', '1'] for c in inserts))
+            self.assertEqual([c[-1] for c in inserts], ['DROP', 'DROP', 'RETURN'], 'inserted at the top in reverse, so RETURN ends first')
+            self.assertIn(['sudo', 'tc', 'qdisc', 'replace', 'dev', 'br-f9cd10559d30', 'root', 'netem', 'delay', '50ms', '5ms'], calls)
+            self.assertEqual(lap.state['isolation']['bridge'], 'br-f9cd10559d30')
+
+    def test_unisolate_removes_only_its_own_rules(self):
+        listing = ('-N DOCKER-USER\n-A DOCKER-USER -i br-f9cd10559d30 -o br-f9cd10559d30 -m comment --comment "unicity-joiner tn-x-joiner5" -j RETURN\n'
+                   '-A DOCKER-USER -i br-1111 -m comment --comment "unicity-joiner other" -j DROP\n-A DOCKER-USER -j RETURN\n')
+        with tempfile.TemporaryDirectory() as tmp:
+            calls = []
+            lap, run = self.lap(tmp, calls, listing)
+            lap.state['isolation'] = {'bridge': 'br-f9cd10559d30', 'wanMs': 50}
+            with unittest.mock.patch.object(rj, 'run', run), unittest.mock.patch.object(rj, 'say', lambda t: None):
+                rj.unisolate(lap)
+            deletes = [c for c in calls if c[:3] == ['sudo', 'iptables', '-D']]
+            self.assertEqual(deletes, [['sudo', 'iptables', '-D', 'DOCKER-USER', '-i', 'br-f9cd10559d30', '-o', 'br-f9cd10559d30', '-m', 'comment', '--comment',
+                                        'unicity-joiner tn-x-joiner5', '-j', 'RETURN']])
+            self.assertIn(['sudo', 'tc', 'qdisc', 'del', 'dev', 'br-f9cd10559d30', 'root'], calls)
+            self.assertNotIn('isolation', lap.state)
+
+    def test_start_isolates_before_any_container_runs(self):
+        order = []
+        lap = unittest.mock.Mock()
+        lap.entity = 5
+        lap.state = {'project': 'tn-x-joiner5'}
+        lap.services_state.return_value = {}
+        lap.dc.side_effect = lambda *a, **k: order.append(('dc',) + a)
+        lap.status.return_value = {'follower': True}
+        with unittest.mock.patch.object(rj, 'isolate', lambda l, w, rules: order.append(('isolate', w, rules))), \
+                unittest.mock.patch.object(rj, 'background', lambda *a: order.append(('background', a[1]))), unittest.mock.patch.object(rj, 'say', lambda t: None):
+            rj.start(lap, isolate_bridge=True, wan_ms=50)
+        self.assertEqual(order[0][:3], ('dc', 'up', '--no-start'))
+        self.assertEqual(order[1], ('isolate', 50, True))
+        self.assertTrue(all(o[0] != 'dc' or '-d' not in o for o in order[:2]), 'nothing started before the isolation')
+        order.clear()
+        with unittest.mock.patch.object(rj, 'isolate', lambda *a, **k: order.append('isolate')), \
+                unittest.mock.patch.object(rj, 'background', lambda *a: None), unittest.mock.patch.object(rj, 'say', lambda t: None):
+            rj.start(lap)
+        self.assertNotIn('isolate', order, 'opt-in only')
+
+
 class LaptopCompose(unittest.TestCase):
     def setUp(self):
         self.out = rj.laptop_compose(genesis_compose(), 5, '16Uiu2ROOT5', '16Uiu2EVM5', 'tn-test-joiner5')

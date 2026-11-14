@@ -37,6 +37,19 @@ def hardened(**svc):
     return base
 
 
+def bridge_image(record, node_pins):
+    """The verified bridge image of artifacts/bridge-images.json, refused unless its dnb-tool was built from the node images' bft pin: the lock-proof
+    endpoint reads the validators' archives, so it must speak their layout (bft-core#1075)."""
+    image = record.get('images', {}).get('bridge', '')
+    if not re.fullmatch(r'sha256:[0-9a-f]{64}', image):
+        raise SystemExit('artifacts/bridge-images.json has no verified bridge image (build-bridge-image.py)')
+    built = record.get('sources', {}).get('bft')
+    if built != node_pins['bft']:
+        raise SystemExit(f'artifacts/bridge-images.json: dnb-tool was built from bft {built}, but the node images are pinned at {node_pins["bft"]} '
+                         '(deploy/testnet/pins.json): rebuild it, build-bridge-image.py --bft-source <the pinned bft checkout>')
+    return image
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('generation', type=Path)
@@ -47,9 +60,7 @@ def main():
     n = manifest['validators']
     if not 1 <= a.archive_of <= n:
         raise SystemExit(f'--archive-of must be 1..{n}')
-    image = json.loads((HERE.parent / 'artifacts/bridge-images.json').read_text())['images']['bridge']
-    if not re.fullmatch(r'sha256:[0-9a-f]{64}', image):
-        raise SystemExit('artifacts/bridge-images.json has no verified bridge image (build-bridge-image.py)')
+    image = bridge_image(json.loads((HERE.parent / 'artifacts/bridge-images.json').read_text()), json.loads((HERE.parent / 'pins.json').read_text()))
     addr = json.loads((gen / 'bridge/bridge-addresses.json').read_text())
     i = a.archive_of
     services = {'lockproof': hardened(

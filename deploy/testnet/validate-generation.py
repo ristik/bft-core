@@ -8,6 +8,9 @@ import subprocess
 import sys
 import tempfile
 
+sys.path.insert(0,str(Path(__file__).resolve().parent))
+import ubft_flags   # noqa: E402  every flag a generated compose file passes ubft must be one the pinned ubft accepts (bft-core#1075)
+
 HERE=Path(__file__).resolve().parent
 p=argparse.ArgumentParser(description=__doc__)
 p.add_argument('--ubft',required=True,type=Path)
@@ -17,6 +20,9 @@ p.add_argument('--check-prometheus',action='store_true')
 p.add_argument('--pos-contracts',type=Path,help='a clean unicity-pos-contracts checkout at the pin (forge on PATH): also generate and probe the proof-of-stake profile')
 p.add_argument('--aggregator',type=Path,help='CI native nonempty-batch certification probe')
 a=p.parse_args()
+def flags_ok(generation):
+    errors=ubft_flags.check(a.ubft.resolve(),[json.loads((generation/'compose.yaml').read_text())])
+    assert not errors,'; '.join(errors)
 with tempfile.TemporaryDirectory(prefix='tnops-validation-',dir='/tmp') as tmp:
     base=Path(tmp)
     images=base/'images.json'
@@ -30,6 +36,7 @@ with tempfile.TemporaryDirectory(prefix='tnops-validation-',dir='/tmp') as tmp:
             '--ubft',str(a.ubft.resolve()),'--keygen',str(a.keygen.resolve()),'--b1genesis',str(a.b1genesis.resolve()),'--images',str(images),
             '--offline-validation','--captcha-sitekey','fixture','--captcha-secret-file',str(base/'captcha')],check=True,stdout=subprocess.DEVNULL)
         subprocess.run(['docker','compose','-f',str(generation/'compose.yaml'),'--profile','OFFLINE-VALIDATION-DO-NOT-START','config','--quiet'],check=True)
+        flags_ok(generation)
         if a.check_prometheus:
             subprocess.run(['docker','run','--rm','--user','0','--entrypoint','/bin/promtool',
                 '-v',str(generation/'monitoring')+':/etc/prometheus:ro',
@@ -82,6 +89,7 @@ with tempfile.TemporaryDirectory(prefix='tnops-validation-',dir='/tmp') as tmp:
             '--offline-validation','--captcha-sitekey','fixture','--captcha-secret-file',str(base/'captcha'),
             '--pos','--pos-contracts',str(a.pos_contracts.resolve())],check=True,stdout=subprocess.DEVNULL)
         subprocess.run(['docker','compose','-f',str(generation/'compose.yaml'),'--profile','OFFLINE-VALIDATION-DO-NOT-START','config','--quiet'],check=True)
+        flags_ok(generation)
         spec=importlib.util.spec_from_file_location('pos_probe',HERE/'validate-pos.py')
         probe=importlib.util.module_from_spec(spec);spec.loader.exec_module(probe)
         print(json.dumps(probe.validate(generation,a.ubft.resolve(),a.keygen.resolve()),indent=2))

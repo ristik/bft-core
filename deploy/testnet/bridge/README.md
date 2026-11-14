@@ -16,7 +16,7 @@ outstanding locks, retired-key forged histories, the proof refresh across rotati
 | file | what it does |
 |---|---|
 | `pins.json` | the bridge release's inputs: contracts and native-bridge-plugins commits, plus the Node, Go and Foundry images or releases by digest or sha256 |
-| `Dockerfile.tools`, `build-bridge-image.py` | `tnops-bridge:verified`: forge/cast, the built contracts, the plug-in driver, and dnb-tool from this checkout. The build refuses a source that is not at its pin or not clean, and records the image ID in `../artifacts/bridge-images.json`. |
+| `Dockerfile.tools`, `build-bridge-image.py` | `tnops-bridge:verified`: forge/cast, the built contracts, the plug-in driver, and dnb-tool built from the node images' bft pin (`--bft-source`, deploy/testnet/pins.json; `overlay.py` refuses an image recorded for another pin, #1075). The build refuses a source that is not at its pin or not clean, and records the image ID in `../artifacts/bridge-images.json`. |
 | `deploy_bridge.py` | an operator action on a running generation: the deployment document (`dnb-tool deployment`), then `BridgeDeploy.s.sol` signed with the generation's faucet keystore. The script refuses a vault whose genesis identities differ from the chain's. It also reads the vault's CFG and writes the trust bundle, the PDR, the driver configuration and the release manifest. Everything goes under `GENERATION/bridge/`. |
 | `release.py` | the bridge release manifest, `GENERATION/bridge/public/bridge-release.json` (below) |
 | `tester/index.html` | the tester page: the fake-value disclosure, the network's endpoints (read from `tester-config.json` beside it), the tester's steps and a read of the visitor's vault credit through their EVM wallet |
@@ -28,7 +28,7 @@ outstanding locks, retired-key forged histories, the proof refresh across rotati
 ## Operator steps
 
 ```
-python3 deploy/testnet/bridge/build-bridge-image.py --contracts-source <contracts at pin> --nbp-source <native-bridge-plugins at pin>
+python3 deploy/testnet/bridge/build-bridge-image.py --bft-source <bft at deploy/testnet/pins.json> --contracts-source <contracts at pin> --nbp-source <native-bridge-plugins at pin>
 # generation up as in ../README.md, then:
 sudo python3 deploy/testnet/bridge/deploy_bridge.py /srv/<generation> --agg-conf <aggregator shard conf(s)> --agg-url <aggregator URL(s)>
 sudo python3 deploy/testnet/bridge/overlay.py /srv/<generation>
