@@ -1064,7 +1064,7 @@ func (r *Round) send(ctx context.Context, uc *types.UnicityCertificate, req *cer
 		if err = r.submitter.Submit(ctx, req); err == nil {
 			return nil
 		}
-		if attempt >= submitRetries || ctx.Err() != nil || errors.Is(err, ErrRequestAcrossActivation) { // a closed epoch's request never becomes sendable
+		if attempt >= submitRetries || ctx.Err() != nil || neverPending(err) { // refused across an activation, or superseded: never becomes sendable
 			break
 		}
 		if r.log != nil {

@@ -19,15 +19,28 @@ import (
 type swallowingNet struct {
 	mu       sync.Mutex
 	requests []*certification.BlockCertificationRequest
+	wire     [][]byte // each request's encoding, taken when it was sent (what the network serializes then)
 }
 
 func (n *swallowingNet) Send(_ context.Context, msg any, _ ...peer.ID) error {
 	if req, ok := msg.(*certification.BlockCertificationRequest); ok {
+		raw, err := types.Cbor.Marshal(req)
+		if err != nil {
+			return err
+		}
 		n.mu.Lock()
 		n.requests = append(n.requests, req)
+		n.wire = append(n.wire, raw)
 		n.mu.Unlock()
 	}
 	return nil
+}
+
+// sentWire is the encoding of every request at the moment it was sent.
+func (n *swallowingNet) sentWire() [][]byte {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return append([][]byte(nil), n.wire...)
 }
 
 func (n *swallowingNet) ReceivedChannel() <-chan any { return nil }

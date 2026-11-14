@@ -59,14 +59,13 @@ func due(c *BFTClient) time.Time {
 	return c.outstanding.lastSent.Add(c.resendInterval()*3/2 + time.Millisecond)
 }
 
-func sameBytes(t *testing.T, want *certification.BlockCertificationRequest, sent []*certification.BlockCertificationRequest) {
+// sameBytes checks that every send carried exactly the first send's encoding, as the network serialized each one when it was sent.
+func sameBytes(t *testing.T, net *swallowingNet) {
 	t.Helper()
-	w, err := types.Cbor.Marshal(want)
-	require.NoError(t, err)
-	for i, s := range sent {
-		g, err := types.Cbor.Marshal(s)
-		require.NoError(t, err)
-		require.True(t, bytes.Equal(w, g), "send %d carries the signed bytes unchanged", i)
+	wire := net.sentWire()
+	require.NotEmpty(t, wire)
+	for i, w := range wire {
+		require.True(t, bytes.Equal(wire[0], w), "send %d carries the first send's bytes", i)
 	}
 }
 
@@ -89,7 +88,10 @@ func TestTheTimedResendSendsTheSameBytesWhenDueAndBounded(t *testing.T) {
 		c.resendStale(ctx, due(c))
 	}
 	require.Len(t, net.sent(), 1+3, "MaxResubmits bounds the timed re-sends")
-	sameBytes(t, req, net.sent())
+	sameBytes(t, net)
+	want, err := types.Cbor.Marshal(req)
+	require.NoError(t, err)
+	require.Equal(t, want, net.sentWire()[0], "the signed request as Submit got it")
 
 	_, c2, net2, _ := timedClient(t, BFTClientOptions{ResendInterval: -1})
 	require.NoError(t, c2.Submit(ctx, pendingRequest(f)))
@@ -176,7 +178,9 @@ func TestTheTimedResendCoversAFailedFirstSend(t *testing.T) {
 	require.Empty(t, net.sent())
 	c.resendStale(ctx, due(c))
 	require.Len(t, net.sent(), 1, "the timer delivered it")
-	sameBytes(t, req, net.sent())
+	want, err := types.Cbor.Marshal(req)
+	require.NoError(t, err)
+	require.Equal(t, want, net.sentWire()[0])
 
 	installed.Add(1)
 	c.mu.Lock()
@@ -268,4 +272,161 @@ func TestTheTimedResendWaitsForAStalledDelivery(t *testing.T) {
 	require.Len(t, net.sent(), 1, "delivery is not stalled for the interval yet")
 	c.resendStale(ctx, when.Add(c.resendInterval()))
 	require.Len(t, net.sent(), 2, "once it is, the attempt is re-sent")
+}
+
+// hookNet runs hook inside the first send it is asked for (after the client's final admission), then fails that send or not.
+type hookNet struct {
+	swallowingNet
+	mu   sync.Mutex
+	hook func()
+	fail bool
+}
+
+func (n *hookNet) Send(ctx context.Context, msg any, to ...peer.ID) error {
+	n.mu.Lock()
+	hook, fail := n.hook, n.fail
+	n.hook, n.fail = nil, false
+	n.mu.Unlock()
+	if hook != nil {
+		hook()
+		if fail {
+			return errors.New("stream reset")
+		}
+	}
+	return n.swallowingNet.Send(ctx, msg, to...)
+}
+
+// An assignment change installed while the first send is under way ends the attempt: whether it lands before the final admission (nothing
+// is sent) or during a write that then fails, the attempt is never re-stamped as current, the timer never sends it and Round does not retry it.
+func TestAnAssignmentChangeDuringTheFirstSendEndsTheAttempt(t *testing.T) {
+	ctx := context.Background()
+	t.Run("before the final admission", func(t *testing.T) {
+		f, c, net, _ := timedClient(t, BFTClientOptions{})
+		store := c.trustBaseStore.(epochTrustStore)
+		var once atomic.Bool
+		c.trustBaseStore = supersedingStore{epochTrustStore: store, hook: func() {
+			if once.CompareAndSwap(false, true) {
+				require.NoError(t, c.InstallShardConf(7, f.confOther))
+			}
+		}}
+		err := c.Submit(ctx, pendingRequest(f))
+		require.ErrorIs(t, err, errAttemptSuperseded)
+		require.True(t, neverPending(err), "Round does not retry it")
+		c.resendStale(ctx, time.Now().Add(time.Hour))
+		require.Empty(t, net.sent())
+	})
+	t.Run("during a failed write", func(t *testing.T) {
+		f, c, _, _ := timedClient(t, BFTClientOptions{})
+		net := &hookNet{fail: true}
+		net.hook = func() { require.NoError(t, c.InstallShardConf(7, f.confOther)) }
+		c.net = net
+		err := c.Submit(ctx, pendingRequest(f))
+		require.Error(t, err)
+		require.True(t, neverPending(err), "invalidated while it failed: Round does not retry it")
+		c.mu.Lock()
+		require.Nil(t, c.outstanding, "not kept pending under the new generation")
+		c.mu.Unlock()
+		c.resendStale(ctx, time.Now().Add(time.Hour))
+		require.Empty(t, net.sent(), "the timer never sends it")
+	})
+}
+
+// An older Submit that completes after a newer one never replaces it: the first send is admitted against its own attempt, and its completion
+// updates only that attempt while it is still the published one.
+func TestALateFirstSendNeverReplacesANewerAttempt(t *testing.T) {
+	ctx := context.Background()
+	newer := func(f *confBindingFixture) *certification.BlockCertificationRequest {
+		r := pendingRequest(f)
+		r.InputRecord.Hash = bytes.Repeat([]byte{7}, 32)
+		return r
+	}
+	t.Run("the newer one lands before the older one's admission", func(t *testing.T) {
+		f, c, net, _ := timedClient(t, BFTClientOptions{})
+		store := c.trustBaseStore.(epochTrustStore)
+		var once atomic.Bool
+		c.trustBaseStore = supersedingStore{epochTrustStore: store, hook: func() {
+			if once.CompareAndSwap(false, true) {
+				require.NoError(t, c.Submit(ctx, newer(f)))
+			}
+		}}
+		require.ErrorIs(t, c.Submit(ctx, pendingRequest(f)), errAttemptSuperseded)
+		require.Len(t, net.sent(), 1, "only the newer one left")
+		c.mu.Lock()
+		require.True(t, bytes.Equal(c.outstanding.req.InputRecord.Hash, newer(f).InputRecord.Hash), "the newer attempt is the pending one")
+		c.mu.Unlock()
+	})
+	t.Run("the newer one lands during the older one's failing write", func(t *testing.T) {
+		f, c, _, _ := timedClient(t, BFTClientOptions{})
+		net := &hookNet{fail: true}
+		net.hook = func() { require.NoError(t, c.Submit(ctx, newer(f))) }
+		c.net = net
+		require.Error(t, c.Submit(ctx, pendingRequest(f)))
+		c.mu.Lock()
+		o := c.outstanding
+		c.mu.Unlock()
+		require.NotNil(t, o)
+		require.True(t, bytes.Equal(o.req.InputRecord.Hash, newer(f).InputRecord.Hash), "the older completion left the newer attempt alone")
+		c.resendStale(ctx, due(c))
+		require.Len(t, net.sent(), 2, "the newer request's send and its timed re-send")
+		require.True(t, bytes.Equal(net.sentWire()[0], net.sentWire()[1]))
+	})
+}
+
+// The duplicate-triggered re-send has the timed one's admission: an attempt whose generation an assignment change ended is never re-sent on a
+// duplicate of the held certificate either.
+func TestTheDuplicateTriggerRespectsTheGeneration(t *testing.T) {
+	ctx := context.Background()
+	f, c, net, _ := timedClient(t, BFTClientOptions{ResubmitMinInterval: time.Millisecond, ResendInterval: -1})
+	require.NoError(t, c.Submit(ctx, pendingRequest(f)))
+	time.Sleep(3 * time.Millisecond)
+	require.NoError(t, c.handleCertificationResponse(ctx, f.respond(f.ucMine)))
+	require.Len(t, net.sent(), 2, "control: a duplicate re-sends the pending request")
+	require.NoError(t, c.InstallShardConf(7, f.confOther))
+	time.Sleep(3 * time.Millisecond)
+	require.NoError(t, c.handleCertificationResponse(ctx, f.respond(f.ucMine)))
+	require.Len(t, net.sent(), 2, "not after the assignment change")
+	c.mu.Lock()
+	require.Nil(t, c.outstanding)
+	c.mu.Unlock()
+}
+
+// The attempt owns its bytes: changing the caller's request after Submit changes nothing any later send puts on the wire, on either trigger.
+func TestTheAttemptOwnsItsSignedBytes(t *testing.T) {
+	ctx := context.Background()
+	f, c, net, _ := timedClient(t, BFTClientOptions{ResubmitMinInterval: time.Millisecond})
+	req := pendingRequest(f)
+	require.NoError(t, c.Submit(ctx, req))
+	first := net.sentWire()[0]
+	req.InputRecord.RoundNumber++
+	req.InputRecord.Hash = bytes.Repeat([]byte{9}, 32)
+	req.Signature = []byte("other")
+	time.Sleep(3 * time.Millisecond)
+	require.NoError(t, c.handleCertificationResponse(ctx, f.respond(f.ucMine)))
+	c.resendStale(ctx, due(c))
+	require.Len(t, net.sent(), 3, "the first send, a duplicate-triggered and a timed re-send")
+	for i, w := range net.sentWire() {
+		require.True(t, bytes.Equal(first, w), "send %d is the first send's bytes", i)
+	}
+}
+
+// Round's retries of the same signed request on the same certificate are the same logical attempt: it keeps its retry budget.
+func TestARepeatedSubmitKeepsTheAttemptAndItsBudget(t *testing.T) {
+	ctx := context.Background()
+	f, c, net, _ := timedClient(t, BFTClientOptions{MaxResubmits: 2})
+	req := pendingRequest(f)
+	require.NoError(t, c.Submit(ctx, req))
+	c.mu.Lock()
+	o := c.outstanding
+	c.mu.Unlock()
+	c.resendStale(ctx, due(c))
+	require.NoError(t, c.Submit(ctx, pendingRequest(f)), "Round's retry: the same bytes again")
+	c.mu.Lock()
+	require.Same(t, o, c.outstanding, "the same attempt")
+	require.Equal(t, 1, o.resent, "its budget is kept")
+	c.mu.Unlock()
+	for i := 0; i < 4; i++ {
+		c.resendStale(ctx, due(c))
+	}
+	require.Len(t, net.sent(), 1+1+1+1, "first send, one timed re-send, the retry's send, the last re-send of the budget")
+	sameBytes(t, net)
 }
