@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -612,4 +613,67 @@ func TestBothTriggersAdmitOnlyUnderTheAttemptsRole(t *testing.T) {
 			require.True(t, bytes.Equal(net.sentWire()[1], net.sentWire()[2]))
 		})
 	}
+}
+
+// Before any trigger has cleaned up: a later Submit through the request's handle, after its role ended, is refused for good even when the role
+// is active again under a new token (a retirement and re-promotion, or a token replacement while continuously active). The matching attempt is
+// dropped, nothing is sent, and the handle keeps pointing at the terminated attempt.
+func TestARoleChangeBeforeCleanupIsRefusedThroughTheHandle(t *testing.T) {
+	for name, change := range map[string]func(role *tokenRole){
+		"retired, then re-promoted under token 2": func(role *tokenRole) {
+			role.active.Store(false)
+			role.token.Store(2)
+			role.active.Store(true)
+		},
+		"token replaced while continuously active": func(role *tokenRole) { role.token.Store(2) },
+	} {
+		for _, under := range []uint64{1, 2} {
+			t.Run(fmt.Sprintf("%s, resubmitted under token %d", name, under), func(t *testing.T) {
+				f, c, net, role, bound := roleClient(t, BFTClientOptions{})
+				req := pendingRequest(f)
+				require.NoError(t, c.Submit(bound(1), req))
+				require.Len(t, net.sent(), 1)
+				c.mu.Lock()
+				first := c.outstanding
+				c.mu.Unlock()
+				h := attemptHandleOf(bound(1))
+				change(role) // no timer or duplicate trigger in between: the pointer is still published
+
+				err := c.Submit(bound(under), req)
+				require.ErrorIs(t, err, errAttemptSuperseded)
+				require.True(t, neverPending(err), "Round stops")
+				require.Len(t, net.sent(), 1, "nothing more is sent")
+				c.mu.Lock()
+				require.Nil(t, c.outstanding, "the matching attempt is dropped")
+				require.Same(t, first, h.o, "the handle keeps pointing at the terminated attempt")
+				c.mu.Unlock()
+				require.ErrorIs(t, c.Submit(bound(2), req), errAttemptSuperseded, "and stays refused under the current token")
+				require.Len(t, net.sent(), 1)
+			})
+		}
+	}
+}
+
+// Through a handle, a Submit is the bound attempt only: under another role binding, or for another request, it is refused instead of
+// replacing the attempt.
+func TestTheHandleIsNeverRebound(t *testing.T) {
+	f, c, net, _, bound := roleClient(t, BFTClientOptions{})
+	req := pendingRequest(f)
+	require.NoError(t, c.Submit(bound(1), req))
+	h := attemptHandleOf(bound(1))
+	c.mu.Lock()
+	first := h.o
+	c.mu.Unlock()
+
+	unbound := withAttemptHandle(context.Background(), h)
+	require.ErrorIs(t, c.Submit(unbound, req), errAttemptSuperseded, "a changed role binding")
+	other := pendingRequest(f)
+	other.InputRecord.Hash = bytes.Repeat([]byte{4}, 32)
+	require.ErrorIs(t, c.Submit(bound(1), other), errAttemptSuperseded, "another request through the handle")
+	require.NoError(t, c.Submit(bound(1), req), "the bound attempt itself is reused")
+	require.Len(t, net.sent(), 2)
+	c.mu.Lock()
+	require.Same(t, first, h.o)
+	require.Same(t, first, c.outstanding, "still the pending attempt, with its budget")
+	c.mu.Unlock()
 }

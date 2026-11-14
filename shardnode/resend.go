@@ -190,21 +190,50 @@ func attemptHandleOf(ctx context.Context) *attemptHandle {
 	return h
 }
 
-// submitAttemptLocked is Submit's attempt: the one its handle already holds while that is still current (the same logical attempt keeps its
-// budget), errAttemptSuperseded once that attempt was invalidated, and otherwise a new owned attempt bound to the handle. c.mu must be held.
+// submitAttemptLocked is Submit's attempt. Through a handle that already holds an attempt, it is that attempt or nothing: the attempt is
+// refused for good once its role ended (the matching attempt is dropped), once it is no longer the current one of its generation, or when the
+// Submit comes under another role binding or names another request; otherwise it is reused, keeping its budget. The handle is never rebound:
+// it keeps pointing at a terminated attempt, so every later Submit of the request is refused. Without a bound attempt it is a new owned
+// attempt, bound to the handle. c.mu must be held.
 func (c *BFTClient) submitAttemptLocked(ctx context.Context, req *certification.BlockCertificationRequest, luc *types.UnicityCertificate, origin uint64,
 	now time.Time) (*outstandingRequest, error) {
-	h := attemptHandleOf(ctx)
-	if h != nil && h.o != nil && !c.currentLocked(h.o) {
-		return nil, fmt.Errorf("%w: the attempt of this request was invalidated (generation %d, now %d)", errAttemptSuperseded, h.o.gen, c.attemptGen)
-	}
 	token, bound := roleTokenOf(ctx)
+	h := attemptHandleOf(ctx)
+	if h != nil && h.o != nil {
+		return c.boundAttemptLocked(h.o, req, luc, origin, token, bound)
+	}
 	o, err := c.beginAttemptLocked(req, luc, origin, token, bound, now)
 	if err != nil {
 		return nil, err
 	}
 	if h != nil {
 		h.o = o
+	}
+	return o, nil
+}
+
+// boundAttemptLocked admits a later Submit through a handle bound to o: o itself, validated, or a refusal for good. c.mu must be held.
+func (c *BFTClient) boundAttemptLocked(o *outstandingRequest, req *certification.BlockCertificationRequest, luc *types.UnicityCertificate, origin uint64,
+	token uint64, bound bool) (*outstandingRequest, error) {
+	if c.roleEndedLocked(o) {
+		if c.outstanding == o {
+			c.outstanding = nil // only the matching attempt
+		}
+		return nil, fmt.Errorf("%w: the role this request was produced under has ended (token %d)", errAttemptSuperseded, o.token)
+	}
+	if !c.currentLocked(o) {
+		return nil, fmt.Errorf("%w: the attempt of this request was invalidated (generation %d, now %d)", errAttemptSuperseded, o.gen, c.attemptGen)
+	}
+	if o.token != token || o.bound != bound {
+		return nil, fmt.Errorf("%w: the request's attempt is bound to role token %d, not %d", errAttemptSuperseded, o.token, token)
+	}
+	wire, err := freeze(req)
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(wire, o.wire) || o.rootEpoch != origin ||
+		o.on != (deliveryAttempt{partitionRound: luc.GetRoundNumber(), rootRound: luc.GetRootRoundNumber()}) {
+		return nil, fmt.Errorf("%w: another request, origin or certificate than the attempt it is bound to", errAttemptSuperseded)
 	}
 	return o, nil
 }
