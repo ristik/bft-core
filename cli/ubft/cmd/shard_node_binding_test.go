@@ -103,3 +103,30 @@ func TestShardNodeRunReportsTheLiveRoleAndBinding(t *testing.T) {
 	require.Zero(t, calls["UpdateRole"], "no snapshot of the role that a later lease change would not refresh")
 	require.Zero(t, calls["UpdateBinding"])
 }
+
+// astra's review of #1060 r2: an activation completed between the lease's sample and a separate read of the epoch must not pair the new epoch
+// with the old epoch's active bit. Deterministic interleaving: the runtime lookup inside Lease completes the next activation.
+func TestThePublishedRoleIsOneLeaseSample(t *testing.T) {
+	runtimeEpoch := uint64(4)
+	var role *shardRole
+	interleave := true
+	role = newShardRole(1, true, func() uint64 {
+		if interleave {
+			interleave = false
+			role.activationCompleted(5, true) // between the lease's sample and any later read
+		}
+		return runtimeEpoch
+	})
+	role.activationCompleted(4, true)
+	interleave = true
+	epoch, active := role.published()
+	require.Equal(t, uint64(4), epoch, "the epoch of the sampled lease")
+	require.True(t, active, "active at epoch 4, which the runtime has completed")
+	epoch, active = role.published()
+	require.Equal(t, uint64(5), epoch)
+	require.False(t, active, "epoch 5 is not active before the runtime completes it: never 'active at 5'")
+	runtimeEpoch = 5
+	epoch, active = role.published()
+	require.Equal(t, uint64(5), epoch)
+	require.True(t, active)
+}
