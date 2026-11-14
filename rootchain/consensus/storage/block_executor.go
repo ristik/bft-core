@@ -412,6 +412,14 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 		// a committed assignment handoff waits for this shard's certified acknowledgement: its IR epoch catches up with the installed one
 		awaiting := pos.pendingAck() && si.TR.Epoch != si.IR.Epoch
 
+		// the activation freshness rule, on every branch: no shard request of this root epoch is certified on a certificate of an earlier
+		// one (si.LastCR is the committed certificate, propagated to every descendant). A timeout carries no request and is not one.
+		if len(irChReq.Requests) > 0 {
+			if err := si.FreshInRootEpoch(newBlock.Epoch); err != nil {
+				return nil, fmt.Errorf("verifying change request: %w", err)
+			}
+		}
+
 		if vv := viewDispatch(verifier); vv != nil {
 			// View-aware branch: the request is judged under the view resolved from the state this block executes on and the
 			// committed history, so the committed anchor lagging behind the activation cannot select another assignment.

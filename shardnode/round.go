@@ -724,7 +724,7 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 			r.log.DebugContext(ctx, "re-delivery of an authorization already answered: re-sending the identical signed request",
 				slog.Uint64("round", exp.Round), slog.Uint64("partitionRound", uc.GetRoundNumber()))
 		}
-		return r.send(ctx, r.completed.req, exp.Round)
+		return r.send(ctx, uc, r.completed.req, exp.Round)
 	}
 
 	// RE-DELIVERY OF AN AUTHORIZATION THE SIGNER ALREADY REFUSED. Nothing was signed, so there is
@@ -1034,7 +1034,7 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 		r.log.InfoContext(ctx, "submitting block certification request",
 			slog.Uint64("round", exp.Round), slog.Bool("quiet", irQuiet), slog.Bool("leader", leader == r.nodeID))
 	}
-	return r.send(ctx, req, exp.Round)
+	return r.send(ctx, uc, req, exp.Round)
 }
 
 // ErrSubmissionFailed marks a failure to SEND an already-applied round's certification request.
@@ -1055,13 +1055,16 @@ const submitRetries = 2
 
 const submitRetryInterval = 100 * time.Millisecond
 
-func (r *Round) send(ctx context.Context, req *certification.BlockCertificationRequest, round uint64) error {
+// send submits req, authorised by uc. Every attempt carries uc's root epoch as the request's origin (withRequestOrigin): the client admits
+// each network send of it only while no later root epoch is installed (#1036).
+func (r *Round) send(ctx context.Context, uc *types.UnicityCertificate, req *certification.BlockCertificationRequest, round uint64) error {
+	ctx = withRequestOrigin(ctx, uc.GetRootEpoch())
 	var err error
 	for attempt := 0; ; attempt++ {
 		if err = r.submitter.Submit(ctx, req); err == nil {
 			return nil
 		}
-		if attempt >= submitRetries || ctx.Err() != nil {
+		if attempt >= submitRetries || ctx.Err() != nil || errors.Is(err, ErrRequestAcrossActivation) { // a closed epoch's request never becomes sendable
 			break
 		}
 		if r.log != nil {

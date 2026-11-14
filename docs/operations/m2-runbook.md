@@ -607,6 +607,10 @@ sufficient one.
 Before powering off a retired validator, check `ubft shard-node status --url <shard-RPC>` on **every** remaining writer: `archivePolicy.retained` must not name
 the retired peer and `archivePolicy.migrationComplete` must be true. Also confirm that the evidence outside that scope is held elsewhere. Until then the
 retired machine still holds copies the network depends on: keep its identity, archive directory and shard process running (it may stay a follower).
+To see that a writer follows the installed assignment, compare `archivePolicy.checkedShardEpoch` between writers: it is the latest installed
+shard epoch the writer re-derived its replicas at. `archivePolicy.shardEpoch` is the epoch the policy in force was derived from, and it stays put
+while later assignments derive the same replicas. A writer whose selection never changed can therefore report an older `shardEpoch` than the others
+(bft-core#1044). `archivePolicy.version` is a per-node counter and is not comparable between writers.
 `migrationBacklog` is the number of promised block positions still to verify. A migration waits, with `archive policy migration waiting` in the log,
 while fewer than two current replicas can take the history or a bundle.
 
