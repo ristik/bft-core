@@ -84,6 +84,10 @@ type Server struct {
 	public        *Limits
 	publicPending int
 	publicByPeer  map[peer.ID]int
+	// publicBudget bounds the public reads' sustained work and bytes (PublicBudget); installed with the public reads.
+	publicBudget *publicBudget
+	// chainBytes is the chain read's soft byte bound; zero is chainResponseBytes (tests lower it).
+	chainBytes int
 }
 
 // SetPublicReads admits reads (get, get-exact, get-latest, bundle-get) from any peer, bounded by limits.Pending concurrent public
@@ -93,6 +97,16 @@ func (s *Server) SetPublicReads(limits Limits) error {
 		return archive.ErrInvalid
 	}
 	s.public, s.publicByPeer = &limits, map[peer.ID]int{}
+	s.publicBudget = newPublicBudget(DefaultPublicBudget(), time.Now)
+	return nil
+}
+
+// SetPublicBudget replaces the public reads' work and byte budget (DefaultPublicBudget). Call after SetPublicReads, before Register.
+func (s *Server) SetPublicBudget(b PublicBudget) error {
+	if s.public == nil || !b.valid(s.public.Pending) {
+		return ErrPublicBudget
+	}
+	s.publicBudget = newPublicBudget(b, time.Now)
 	return nil
 }
 
@@ -155,6 +169,11 @@ func (s *Server) handlePublic(stream libp2pnetwork.Stream, id peer.ID) {
 		return
 	}
 	defer s.leavePublic(id)
+	if !s.publicBudget.begin(id) {
+		s.rejectNamed(stream, id, ErrPendingLimit) // the budget table is full of depleted or busy peers: a busy replica, for now
+		return
+	}
+	defer s.publicBudget.end(id)
 	// the socket deadline is the public budget's (a peer withholding its request blocks in readFrame, which no context interrupts)
 	_ = stream.SetDeadline(time.Now().Add(s.public.Deadline))
 	ctx, cancel := context.WithTimeout(s.ctx, s.public.Deadline)
@@ -172,7 +191,7 @@ func (s *Server) handlePublic(stream libp2pnetwork.Stream, id peer.ID) {
 		s.reject(stream, id, operation, ErrPeerNotAllowed, true)
 		return
 	}
-	if err := s.serveFrame(ctx, stream, frame); err != nil {
+	if err := s.serveFrame(ctx, stream, frame, &readMeter{budget: s.publicBudget, id: id}); err != nil {
 		s.reject(stream, id, operation, typedHandlerError(err), true)
 	}
 }
@@ -314,7 +333,7 @@ func (s *Server) handle(stream libp2pnetwork.Stream) {
 	}
 	reserved = false
 	defer s.leave(id)
-	if err := s.serveFrame(ctx, stream, frame); err != nil {
+	if err := s.serveFrame(ctx, stream, frame, nil); err != nil {
 		err = typedHandlerError(err)
 		s.reject(stream, id, operation, err, true)
 	}
@@ -355,26 +374,38 @@ func (s *Server) Serve(ctx context.Context, rw io.ReadWriter) error {
 	if err != nil || len(frame) < 2 {
 		return fmt.Errorf("%w: %w", ErrHandler, ErrTransport)
 	}
-	return s.serveFrame(ctx, rw, frame)
+	return s.serveFrame(ctx, rw, frame, nil)
 }
 
-func (s *Server) serveFrame(ctx context.Context, rw io.ReadWriter, frame []byte) error {
+// errBudget refuses a public read whose peer's (or all public readers') budget is spent: it reaches the reader as the per-peer limit, which
+// exchange retries after a backoff.
+var errBudget = fmt.Errorf("%w: public read budget spent", ErrPeerLimit)
+
+// serveFrame serves one request. meter charges a public reader's reads (nil for an authorized peer): one work token before each record read,
+// then the bytes read.
+func (s *Server) serveFrame(ctx context.Context, rw io.ReadWriter, frame []byte, meter *readMeter) error {
 	if len(frame) < 2 {
 		return fmt.Errorf("%w: %w", ErrHandler, archive.ErrInvalid)
 	}
 	op := frame[0]
 	if op == 4 || op == 5 {
-		return typedHandlerError(s.serveBundle(ctx, rw, op, frame[1:]))
+		return typedHandlerError(s.serveBundle(ctx, rw, op, frame[1:], meter))
 	}
 	if op == opChain {
-		return typedHandlerError(s.serveChain(ctx, rw, frame[1:]))
+		return typedHandlerError(s.serveChain(ctx, rw, frame[1:], meter))
 	}
 	if op == 3 {
 		query, err := archive.DecodeRoundRequest(frame[1:])
 		if err != nil || !sameArchiveContext(query.Context, s.subject) {
 			return fmt.Errorf("%w: %w", ErrHandler, archive.ErrInvalid)
 		}
+		if !meter.take() {
+			return errBudget
+		}
 		found, record, err := s.store.GetLatest(query)
+		if record != nil {
+			meter.charge(recordBytes(record))
+		}
 		if err != nil {
 			return writeFrame(rw, []byte{byte(archive.Unavailable)})
 		}
@@ -403,6 +434,9 @@ func (s *Server) serveFrame(ctx context.Context, rw io.ReadWriter, frame []byte)
 			}
 			return typedHandlerError(writeFrame(rw, encoded))
 		}
+		if !meter.take() {
+			return errBudget
+		}
 		answer := archive.Response{Request: eq, Outcome: archive.Unavailable}
 		if rec, err := s.store.GetExact(eq, digest); err == nil {
 			answer = archive.Response{Request: eq, Outcome: archive.OK, Record: rec}
@@ -411,6 +445,7 @@ func (s *Server) serveFrame(ctx context.Context, rw io.ReadWriter, frame []byte)
 		if err != nil {
 			return err
 		}
+		meter.charge(len(encoded))
 		return typedHandlerError(writeFrame(rw, encoded))
 	}
 	var q archive.Request
@@ -452,29 +487,46 @@ func (s *Server) serveFrame(ctx context.Context, rw io.ReadWriter, frame []byte)
 		}
 		return typedHandlerError(writeFrame(rw, []byte{1}))
 	}
+	if !meter.take() {
+		return errBudget
+	}
 	encoded, err := archive.EncodeResponse(s.serveDefault(q))
 	if err != nil {
 		return err
 	}
+	meter.charge(len(encoded))
 	return typedHandlerError(writeFrame(rw, encoded))
 }
 
-// serveDefault is the default read (op 2) of a request in this replica's subject.
+// recordBytes is the size of a record's fields: what reading it cost.
+func recordBytes(rec *archive.Record) int {
+	n := len(rec.Header) + len(rec.Body) + len(rec.CanonicalRootInput) + len(rec.OriginalUC) + len(rec.OriginalTR) + len(rec.ResultingUC) +
+		len(rec.ResultingTR) + len(rec.Companion) + len(rec.ParentAccounting)
+	for k, v := range rec.Extensions {
+		n += len(k) + len(v)
+	}
+	return n
+}
+
+// serveDefault is the default read (op 2) of a request in this replica's subject: one store read, of the representation the journal selected
+// for the block when it selected one, else of the block's own record.
 func (s *Server) serveDefault(q archive.Request) archive.Response {
-	answer := s.store.Serve(q)
 	if s.defaultDigest != nil {
 		if digest, selected := s.defaultDigest(q); selected {
-			answer = archive.Response{Request: q, Outcome: archive.Unavailable}
+			answer := archive.Response{Request: q, Outcome: archive.Unavailable}
 			if rec, err := s.store.GetExact(q, digest); err == nil {
 				answer = archive.Response{Request: q, Outcome: archive.OK, Record: rec}
 			}
+			return answer
 		}
 	}
-	return answer
+	return s.store.Serve(q)
 }
 
 // serveChain answers a chain read (opChain). A request outside this replica's subject is answered Invalid, as op 2 does.
-func (s *Server) serveChain(ctx context.Context, rw io.ReadWriter, payload []byte) error {
+// A public reader's chain read takes one work token before each record read and is charged every record it read, including one dropped at
+// the byte bound; when its budget runs out the records read so far are the answer.
+func (s *Server) serveChain(ctx context.Context, rw io.ReadWriter, payload []byte, meter *readMeter) error {
 	if len(payload) < 2+32+2 {
 		return fmt.Errorf("%w: %w", ErrHandler, archive.ErrInvalid)
 	}
@@ -494,8 +546,17 @@ func (s *Server) serveChain(ctx context.Context, rw io.ReadWriter, payload []byt
 		return writeFrame(rw, chainAnswer([][]byte{encoded}))
 	}
 	var answers [][]byte
-	size := 1
+	size, bound := 1, s.chainBytes
+	if bound <= 0 {
+		bound = chainResponseBytes
+	}
 	for len(answers) < count && ctx.Err() == nil {
+		if !meter.take() {
+			if len(answers) == 0 {
+				return errBudget
+			}
+			break // a usable prefix: the reader asks again, at the budget's rate
+		}
 		answer := s.serveDefault(q)
 		if answer.Outcome != archive.OK && len(answers) > 0 {
 			break // the chain this replica holds ends here: the caller asks again (elsewhere) from this block
@@ -504,7 +565,8 @@ func (s *Server) serveChain(ctx context.Context, rw io.ReadWriter, payload []byt
 		if err != nil {
 			return err
 		}
-		if len(answers) > 0 && size+4+len(encoded) > chainResponseBytes {
+		meter.charge(len(encoded))
+		if len(answers) > 0 && size+4+len(encoded) > bound {
 			break
 		}
 		answers, size = append(answers, encoded), size+4+len(encoded)
@@ -537,13 +599,17 @@ func chainAnswer(answers [][]byte) []byte {
 	return out
 }
 
-func (s *Server) serveBundle(ctx context.Context, rw io.ReadWriter, op byte, payload []byte) error {
+func (s *Server) serveBundle(ctx context.Context, rw io.ReadWriter, op byte, payload []byte, meter *readMeter) error {
 	if op == 4 {
 		q, err := archive.DecodeBundleRequest(payload)
 		if err != nil || !sameArchiveContext(q.Context, s.subject) {
 			return fmt.Errorf("%w: %w", ErrHandler, archive.ErrInvalid)
 		}
+		if !meter.take() {
+			return errBudget
+		}
 		raw, err := s.store.GetBundle(q)
+		meter.charge(len(raw))
 		if errors.Is(err, archive.ErrUnavailable) {
 			return writeFrame(rw, []byte{0})
 		}

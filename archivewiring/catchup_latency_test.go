@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -24,13 +25,17 @@ import (
 )
 
 // latencyHost delays a client's archive exchanges in process, as a WAN link would: one round trip to open a stream (protocol negotiation)
-// and one from the request to the first byte of its answer. Bandwidth is not limited.
+// and one from the request to the first byte of its answer. Bandwidth is not limited. exchanges counts the archive streams opened.
 type latencyHost struct {
 	shardnode.EvidenceHost
-	rtt time.Duration
+	rtt       time.Duration
+	exchanges *atomic.Int64
 }
 
 func (h latencyHost) CreateStream(ctx context.Context, id peer.ID, protocolID string) (libp2pnetwork.Stream, error) {
+	if protocolID == ProtocolArchive && h.exchanges != nil {
+		h.exchanges.Add(1)
+	}
 	if err := sleepCtx(ctx, h.rtt); err != nil {
 		return nil, err
 	}
@@ -103,6 +108,11 @@ type latencyFixture struct {
 }
 
 func newLatencyFixture(t *testing.T, n int) *latencyFixture {
+	return newLatencyFixtureBudget(t, n, nil)
+}
+
+// newLatencyFixtureBudget serves under budget instead of DefaultPublicBudget when it is set.
+func newLatencyFixtureBudget(t *testing.T, n int, budget *PublicBudget) *latencyFixture {
 	t.Helper()
 	f := newWiringFixtureWithLimits(t, n, configuredprogress.JournalLimits{Candidates: n + 16, Observations: 2*n + 32, Bytes: 128 << 20})
 	sort.Slice(f.entries, func(i, j int) bool { return f.entries[i].Candidate.Number < f.entries[j].Candidate.Number })
@@ -119,6 +129,9 @@ func newLatencyFixture(t *testing.T, n int) *latencyFixture {
 	require.NoError(t, err)
 	// the production public budget (shard_node_run: --archive-public-reads)
 	require.NoError(t, server.SetPublicReads(Limits{Deadline: DefaultLimits().Deadline, Pending: 4, PerPeer: 2}))
+	if budget != nil {
+		require.NoError(t, server.SetPublicBudget(*budget))
+	}
 	server.Register(context.Background(), host)
 	first := f.entries[0].Candidate
 	return &latencyFixture{f: f, sender: sender, replica: host.ID(),
@@ -126,13 +139,20 @@ func newLatencyFixture(t *testing.T, n int) *latencyFixture {
 }
 
 func (l *latencyFixture) source(t *testing.T, rtt time.Duration) *RecoverySource {
+	source, _ := l.countedSource(t, rtt)
+	return source
+}
+
+// countedSource is source with the count of its archive exchanges.
+func (l *latencyFixture) countedSource(t *testing.T, rtt time.Duration) (*RecoverySource, *atomic.Int64) {
 	t.Helper()
-	gated, err := NewPeerGatedHost(latencyHost{EvidenceHost: l.sender, rtt: rtt}, DefaultLimits().PerPeer)
+	exchanges := new(atomic.Int64)
+	gated, err := NewPeerGatedHost(latencyHost{EvidenceHost: l.sender, rtt: rtt, exchanges: exchanges}, DefaultLimits().PerPeer)
 	require.NoError(t, err)
 	local, err := archive.Open(t.TempDir())
 	require.NoError(t, err)
 	return &RecoverySource{Context: l.f.context, Subject: l.f.subject, Local: local, Host: gated, Replicas: []peer.ID{l.replica},
-		Limits: DefaultLimits(), MaxBlocks: 64}
+		Limits: DefaultLimits(), MaxBlocks: 64}, exchanges
 }
 
 // catchUp runs the archive catch-up as the coordinator does: walks bounded by a time budget, resumed until the plan joins the anchor, then
@@ -170,25 +190,88 @@ func (l *latencyFixture) catchUp(t *testing.T, source *RecoverySource, budget, l
 	return float64(n) / time.Since(started).Seconds(), errs
 }
 
-// TestArchiveCatchUpThroughputUnderLatency is bft-core#1066: a late joiner walked the archive one record per exchange, so at 50 ms RTT its
-// catch-up was round-trip bound, and a walk whose time budget ran out mid-read reported a failure instead of its progress. With the chain
-// read the walk takes one exchange per MaxChainRecords blocks: the rate at 50 ms stays close to the loopback rate, and no walk fails.
-func TestArchiveCatchUpThroughputUnderLatency(t *testing.T) {
-	const blocks = 192
+// TestArchiveCatchUpExchangesUnderLatency is bft-core#1066: a late joiner walked the archive one record per exchange (two round trips each),
+// so at 50 ms RTT its catch-up was round-trip bound, and a walk whose time budget ran out mid-read reported a failure instead of its
+// progress. With the chain read the walk takes one exchange per MaxChainRecords blocks, which is asserted exactly (the speed itself
+// depends on the machine: TestArchiveCatchUpRateProfile measures it), and a walk cut by its budget is not a failure.
+func TestArchiveCatchUpExchangesUnderLatency(t *testing.T) {
+	const blocks = 3 * MaxChainRecords
 	l := newLatencyFixture(t, blocks)
-	rates := map[time.Duration]float64{}
-	for _, rtt := range []time.Duration{0, 50 * time.Millisecond} {
-		source := l.source(t, rtt)
-		// a short walk budget (production: a third of the recovery call) so that budgets run out mid-read
-		rate, errs := l.catchUp(t, source, 700*time.Millisecond, 60*time.Second)
-		rates[rtt] = rate
-		t.Logf("rtt %s: %d blocks caught up at %.1f blocks/s, %d walk errors", rtt, blocks, rate, len(errs))
-		require.Empty(t, errs, "a spent walk budget is progress, not a failure (rtt %s)", rtt)
+
+	// one walk with time to spare: exactly one exchange per MaxChainRecords blocks (one per block before the chain read)
+	source, exchanges := l.countedSource(t, 50*time.Millisecond)
+	_, errs := l.catchUp(t, source, time.Minute, time.Minute)
+	require.Empty(t, errs)
+	require.EqualValues(t, blocks/MaxChainRecords, exchanges.Load(), "round trips per block: one exchange per chain read of %d records", MaxChainRecords)
+
+	// short walk budgets (production: a third of the recovery call) that run out mid-read: each costs at most the exchange it cut
+	source, exchanges = l.countedSource(t, 50*time.Millisecond)
+	walks := 0
+	top := l.f.entries[blocks-1].Candidate.Hash
+	c := &CatchUp{Source: source}
+	for joined := false; !joined; walks++ {
+		require.Less(t, walks, 200, "the walk stalls")
+		var err error
+		joined, _, err = c.Walk(context.Background(), l.genesis, top, time.Now().Add(120*time.Millisecond))
+		require.NoError(t, err, "a spent walk budget is progress, not a failure")
 	}
-	// one exchange per record costs two round trips (stream set-up, request): at most 10 blocks/s at 50 ms whatever the machine
-	serialBound := 1 / (2 * 0.050)
-	require.GreaterOrEqual(t, rates[50*time.Millisecond], 3*serialBound, "at 50 ms RTT the catch-up is not round-trip bound")
-	require.GreaterOrEqual(t, rates[50*time.Millisecond], rates[0]/2, "50 ms RTT costs at most half the loopback rate")
+	t.Logf("%d walks of 120 ms at 50 ms RTT, %d exchanges for %d blocks", walks, exchanges.Load(), blocks)
+	require.LessOrEqual(t, exchanges.Load(), int64(blocks/MaxChainRecords+walks))
+}
+
+// TestArchiveCatchUpRateProfile measures the catch-up's speed at 0 and 50 ms RTT and where a record's time goes (fetch, verification,
+// retention, the page's read-back). CATCHUP_PROFILE_BLOCKS selects the chain length (unset: skipped).
+func TestArchiveCatchUpRateProfile(t *testing.T) {
+	n, _ := strconv.Atoi(os.Getenv("CATCHUP_PROFILE_BLOCKS"))
+	if n == 0 {
+		t.Skip("set CATCHUP_PROFILE_BLOCKS")
+	}
+	unbounded := PublicBudget{Rate: 1e9, Burst: 1 << 30, GlobalRate: 1e9, GlobalBurst: 1 << 30, ByteRate: 1e12, ByteBurst: 1 << 40,
+		GlobalByteRate: 1e12, GlobalByteBurst: 1 << 40, MaxTrackedPeers: 16}
+	l := newLatencyFixtureBudget(t, n, &unbounded)
+	for _, rtt := range []time.Duration{0, 50 * time.Millisecond} {
+		source, exchanges := l.countedSource(t, rtt)
+		rate, errs := l.catchUp(t, source, 10*time.Second, 10*time.Minute)
+		require.Empty(t, errs)
+		t.Logf("rtt %-5s %d blocks at %7.1f blocks/s, %d exchanges", rtt, n, rate, exchanges.Load())
+	}
+	// the parts, per record
+	source := l.source(t, 0)
+	ctx := context.Background()
+	var qs []archive.Request
+	var recs []*archive.Record
+	start := time.Now()
+	for next := 0; next < n; {
+		top := l.f.entries[n-1-next].Candidate.Hash
+		chain, err := FetchChain(ctx, source.Host, l.replica, archive.Request{Context: l.f.subject, BlockHash: [32]byte(top)}, [32]byte(l.genesis.Hash), MaxChainRecords, DefaultLimits())
+		require.NoError(t, err)
+		for _, c := range chain {
+			qs, recs = append(qs, c.Request), append(recs, c.Record)
+		}
+		next += len(chain)
+	}
+	per := func(d time.Duration) float64 { return float64(d.Microseconds()) / 1000 / float64(n) }
+	t.Logf("  %-28s %7.3f ms per record", "chain fetch (loopback)", per(time.Since(start)))
+	start = time.Now()
+	for i := range qs {
+		_, err := source.decodeEntry(ctx, qs[i], recs[i])
+		require.NoError(t, err)
+	}
+	t.Logf("  %-28s %7.3f ms per record", "verification (decodeEntry)", per(time.Since(start)))
+	start = time.Now()
+	for i := 0; i < len(qs); i += planPutBatch {
+		end := min(i+planPutBatch, len(qs))
+		require.NoError(t, source.Local.PutBatch(qs[i:end], recs[i:end]))
+	}
+	t.Logf("  %-28s %7.3f ms per record", "retention (PutBatch of 16)", per(time.Since(start)))
+	start = time.Now()
+	for i := range qs {
+		rec, err := source.Local.Get(qs[i])
+		require.NoError(t, err)
+		_, err = source.decodeEntry(ctx, qs[i], rec)
+		require.NoError(t, err)
+	}
+	t.Logf("  %-28s %7.3f ms per record", "page read-back + verification", per(time.Since(start)))
 }
 
 // TestFetchSuffixRefusesALongGapInOneExchange: a gap longer than one recovery is refused for its length from the target's certified height,
@@ -283,7 +366,7 @@ func TestTheWalkFallsBackToSingleReadsOnAReplicaWithoutTheChainRead(t *testing.T
 			_ = writeFrame(stream, resetFrame(fmt.Errorf("%w: %w", ErrHandler, archive.ErrInvalid))) // what an earlier build answers
 			return
 		}
-		if err := server.serveFrame(context.Background(), stream, frame); err != nil {
+		if err := server.serveFrame(context.Background(), stream, frame, nil); err != nil {
 			_ = writeFrame(stream, resetFrame(typedHandlerError(err)))
 		}
 	})
