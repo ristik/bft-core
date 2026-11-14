@@ -19,6 +19,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/peerstore"
 	libp2pprotocol "github.com/libp2p/go-libp2p/core/protocol"
 	"github.com/libp2p/go-libp2p/p2p/muxer/yamux"
+	"github.com/libp2p/go-libp2p/p2p/protocol/identify"
 	msmux "github.com/multiformats/go-multistream"
 	"github.com/stretchr/testify/require"
 
@@ -268,7 +269,9 @@ func Test_SendCertificationResponse_ExplicitNegotiationIsCounted(t *testing.T) {
 	require.NoError(t, senderNw.SendCertificationResponse(context.Background(), testCertResponse(t, []byte{1}), p.ID()))
 	recv(t, nw)
 	cm.reset()
-	// forget what identify said: the next send has to ask (the receiver is v1 only, so v2 is refused first)
+	// forget what identify said: the next send has to ask (the receiver is v1 only, so v2 is refused first). The sender stops taking
+	// identify pushes first: one in flight (a receiver address update) would otherwise put the protocols back before the send (#1004)
+	senderPeer.host.RemoveStreamHandler(identify.IDPush)
 	require.NoError(t, senderPeer.host.Peerstore().SetProtocols(p.ID()))
 	require.NoError(t, senderNw.SendCertificationResponse(context.Background(), testCertResponse(t, []byte{1}), p.ID()))
 	recv(t, nw)
@@ -276,6 +279,33 @@ func Test_SendCertificationResponse_ExplicitNegotiationIsCounted(t *testing.T) {
 	st := cm.stats()[0]
 	require.Greater(t, st.writes, 1, "explicit negotiation writes more than once")
 	require.Positive(t, st.repliesBeforeLastWrite, "and waits for a reply before the last write")
+}
+
+// bft-core#1004: a send that libp2p negotiated explicitly (the sender did not know the receiver's protocols when it opened the stream, as
+// before identify has delivered them) returns once the payload is written. Its handshake reply was read during the negotiation; waiting for
+// another would wait for the receiver, which waits for this side's close, until the send deadline, reporting a delivered certificate failed.
+func Test_SendCertificationResponse_ExplicitNegotiationDoesNotWaitForTheReceiver(t *testing.T) {
+	senderPeer, senderNw, cm := newCountingCertSender(t)
+	p, nw := newCertReceiver(t, senderPeer, recvBoth)
+	nw.streamReadTimeout = recvBound // the receiver would wait for the sender as long as the sender's deadline
+	require.NoError(t, senderNw.SendCertificationResponse(context.Background(), testCertResponse(t, nil), p.ID()))
+	recv(t, nw)
+	senderPeer.host.RemoveStreamHandler(identify.IDPush)
+	require.NoError(t, senderPeer.host.Peerstore().SetProtocols(p.ID()))
+	cm.reset()
+	ctx, cancel := context.WithTimeout(context.Background(), recvBound)
+	defer cancel()
+	start := time.Now()
+	err := senderNw.sendCertificationFrame(ctx, p.ID(), []string{ProtocolUnicityCertificatesV2, ProtocolUnicityCertificates}, ProtocolUnicityCertificates,
+		&certificationFrames{cr: testCertResponse(t, nil)})
+	elapsed := time.Since(start)
+	require.NoError(t, err)
+	require.IsType(t, &certification.CertificationResponseV2{}, recv(t, nw))
+	requireNoMore(t, nw)
+	require.Less(t, elapsed, recvBound/2, "the send does not wait for the receiver (bounded far below the deadline, never a latency window)")
+	st := cm.stats()
+	require.Len(t, st, 1)
+	require.Positive(t, st[0].repliesBeforeLastWrite, "it was the explicit path")
 }
 
 // When the receiver advertises none of the protocols libp2p negotiates explicitly, which is
