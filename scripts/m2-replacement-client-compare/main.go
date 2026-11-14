@@ -6,14 +6,13 @@ package main
 import (
 	"bytes"
 	"crypto/sha256"
-	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
+	"path"
 	"regexp"
 	"sort"
 	"strings"
@@ -275,43 +274,46 @@ func compareHistories(in historyInput) (*report, error) {
 	return out, nil
 }
 
+// storedRequest is archive.StoredRequest for a listed name, tolerating a live archive's migration (bft-core#1049): a directory-layout record
+// that vanished after the listing was migrated, and its packed copy, published before the directory went, is read instead.
+func storedRequest(dir, name string) (archive.Request, error) {
+	q, _, err := archive.StoredRequest(dir, name)
+	if errors.Is(err, archive.ErrUnavailable) && !strings.Contains(name, "/") && len(name) > 5 {
+		q, _, err = archive.StoredRequest(dir, "records/"+strings.TrimPrefix(name, "v2-")[:2]+"/"+name)
+	}
+	return q, err
+}
+
 func readArchive(dir string) (map[uint64]*storedBlock, error) {
 	store, err := archive.Open(dir)
 	if err != nil {
 		return nil, err
 	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
+	// every base record in either archive layout (bft-core#1049); only the v2 (receipt-complete) namespace is compared
+	var names []string
+	if err := archive.StoredNames(dir, 1024, func(chunk []string) error { names = append(names, chunk...); return nil }); err != nil {
 		return nil, err
 	}
 	blocks := make(map[uint64]*storedBlock)
-	for _, entry := range entries {
-		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "v2-") {
+	for _, name := range names {
+		if !strings.HasPrefix(path.Base(name), "v2-") {
 			continue
 		}
-		manifest, err := os.ReadFile(filepath.Join(dir, entry.Name(), "manifest"))
-		if err != nil || len(manifest) < 12 || string(manifest[:8]) != "ARCHIVE2" {
-			return nil, fmt.Errorf("invalid v2 archive manifest %s", entry.Name())
-		}
-		requestLen := binary.BigEndian.Uint32(manifest[8:12])
-		if requestLen == 0 || uint64(requestLen)+12 > uint64(len(manifest)) {
-			return nil, fmt.Errorf("invalid archive request length in %s", entry.Name())
-		}
-		q, err := archive.DecodeRequest(manifest[12 : 12+requestLen])
+		q, err := storedRequest(dir, name)
 		if err != nil {
-			return nil, fmt.Errorf("decode request in %s: %w", entry.Name(), err)
+			return nil, fmt.Errorf("invalid v2 archive manifest %s: %w", name, err)
 		}
 		rec, err := store.GetReceiptComplete(q)
 		if err != nil {
-			return nil, fmt.Errorf("read receipt-complete record %s: %w", entry.Name(), err)
+			return nil, fmt.Errorf("read receipt-complete record %s: %w", name, err)
 		}
 		var header gethtypes.Header
 		var body gethtypes.Body
 		if rlp.DecodeBytes(rec.Header, &header) != nil || rlp.DecodeBytes(rec.Body, &body) != nil || header.Number == nil {
-			return nil, fmt.Errorf("decode header/body in %s", entry.Name())
+			return nil, fmt.Errorf("decode header/body in %s", name)
 		}
 		if header.Hash() != commonHash(q.BlockHash) || crypto.Keccak256Hash(rec.Header) != commonHash(q.BlockHash) {
-			return nil, fmt.Errorf("BFT archive request does not bind header hash in %s", entry.Name())
+			return nil, fmt.Errorf("BFT archive request does not bind header hash in %s", name)
 		}
 		if header.TxHash != gethtypes.DeriveSha(gethtypes.Transactions(body.Transactions), trie.NewStackTrie(nil)) {
 			return nil, fmt.Errorf("transaction root does not match at B%d", header.Number.Uint64())

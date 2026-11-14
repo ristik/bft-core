@@ -20,9 +20,11 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	gethtypes "github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/archive"
+	"github.com/unicitynetwork/bft-core/archive/archivetest"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -87,7 +89,7 @@ func countingLocator(t testing.TB, dir string, f *fakeArchive) (*archiveLocator,
 	reads, at := 0, time.Unix(1000, 0)
 	l := &archiveLocator{dir: dir, store: f, rescanEvery: 10 * time.Second, now: func() time.Time { return at },
 		listDir:      func(d string, each func([]string) error) error { reads += 1_000_000; return listNames(d, each) },
-		readManifest: func(p string) ([]byte, error) { reads++; return os.ReadFile(p) },
+		readManifest: func(d, n string) ([]byte, error) { reads++; return readStoredManifest(d, n) },
 		contexts:     map[string]archive.Context{}, seen: map[uint64]struct{}{}}
 	require.NoError(t, l.rescan(context.Background()))
 	return l, &reads, &at
@@ -134,7 +136,7 @@ func TestArchiveLocator_LearnsANewContextOnAThrottledRescan(t *testing.T) {
 
 func TestArchiveLocator_ARescanHonoursCancellation(t *testing.T) {
 	dir, f := archiveOf(t, 600)
-	l := &archiveLocator{dir: dir, store: f, rescanEvery: time.Second, now: time.Now, listDir: listNames, readManifest: os.ReadFile,
+	l := &archiveLocator{dir: dir, store: f, rescanEvery: time.Second, now: time.Now, listDir: listNames, readManifest: readStoredManifest,
 		contexts: map[string]archive.Context{}, seen: map[uint64]struct{}{}}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -145,7 +147,7 @@ func TestArchiveLocator_ARescanHonoursCancellation(t *testing.T) {
 func TestArchiveLocator_ListsTheArchiveInBoundedChunks(t *testing.T) {
 	dir, f := archiveOf(t, 2*listChunk+500)
 	chunks, largest := 0, 0
-	l := &archiveLocator{dir: dir, store: f, rescanEvery: time.Second, now: time.Now, readManifest: os.ReadFile,
+	l := &archiveLocator{dir: dir, store: f, rescanEvery: time.Second, now: time.Now, readManifest: readStoredManifest,
 		listDir: func(d string, each func([]string) error) error {
 			return listNames(d, func(names []string) error {
 				chunks, largest = chunks+1, max(largest, len(names))
@@ -175,7 +177,7 @@ func TestArchiveLocator_ConcurrentMissesShareOneScan(t *testing.T) {
 	var listings atomic.Int32
 	started, release := make(chan struct{}), make(chan struct{})
 	at := time.Unix(1000, 0)
-	l := &archiveLocator{dir: dir, store: f, rescanEvery: 10 * time.Second, now: func() time.Time { return at }, readManifest: os.ReadFile,
+	l := &archiveLocator{dir: dir, store: f, rescanEvery: 10 * time.Second, now: func() time.Time { return at }, readManifest: readStoredManifest,
 		listDir: func(d string, each func([]string) error) error {
 			if listings.Add(1) == 1 {
 				close(started)
@@ -336,4 +338,32 @@ func TestLockProofSource_ProvesUnderTheConfigurationTheCertificateCommitsTo(t *t
 		}
 		require.False(t, bytes.Contains(lp, pdr), "and not the first's")
 	}
+}
+
+// The locator finds a block in either archive layout (bft-core#1049): a packed record, and a record directory an earlier binary wrote, side by
+// side in one archive, both read and checked by the real archive store.
+func TestArchiveLocator_FindsRecordsInBothLayouts(t *testing.T) {
+	dir := t.TempDir()
+	store, err := archive.Open(dir)
+	require.NoError(t, err)
+	record := func(i int) (archive.Request, *archive.Record) {
+		header := []byte{0xc1, 0x80, byte(i)}
+		r := &archive.Record{Header: header, Body: []byte{0xc0}, CanonicalRootInput: []byte{1}, OriginalUC: []byte{2}, OriginalTR: []byte{3}, ResultingUC: []byte{4},
+			ResultingTR: []byte{5}, Companion: []byte{6}, Extensions: map[string][]byte{archive.ReceiptListKey: {0xc0}}}
+		return archive.Request{Context: testContext(uint64(i)), BlockHash: [32]byte(crypto.Keccak256(header))}, r
+	}
+	packedQ, packedRec := record(0)
+	require.NoError(t, store.Put(packedQ, packedRec))
+	legacyQ, legacyRec := record(1)
+	_, err = archivetest.WriteDirectoryLayout(dir, legacyQ, legacyRec, false)
+	require.NoError(t, err)
+	l, err := newArchiveLocator(context.Background(), dir, store, time.Second)
+	require.NoError(t, err)
+	for _, q := range []archive.Request{packedQ, legacyQ} {
+		got, rec, err := l.locate(context.Background(), q.BlockHash)
+		require.NoError(t, err)
+		require.Equal(t, q.BlockHash, got.BlockHash)
+		require.NotNil(t, rec)
+	}
+	require.Len(t, l.contexts, 2, "a Context is learnt from each layout's manifest")
 }

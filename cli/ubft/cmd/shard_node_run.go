@@ -1440,6 +1440,12 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			archiveDone := make(chan struct{})
 			go func() { defer close(archiveDone); _ = publisher.Run(archiveCtx) }()
 			defer func() { cancelArchive(); <-archiveDone; _ = metrics.Close() }()
+			migrationDone := make(chan struct{})
+			go func() {
+				defer close(migrationDone)
+				_ = (&archivewiring.LayoutMigration{Archive: archiveLocal, Log: flags.observe.Logger()}).Run(archiveCtx)
+			}()
+			defer func() { cancelArchive(); <-migrationDone }()
 			if flags.ArchivePrune {
 				worker := &archivewiring.FrontierWorker{Journal: journalStore, Context: journalCtx, Limits: limits, Archive: archiveLocal, Subject: archiveSubject, Replicas: archiveReplicas, PolicyDigest: archiveDigest, Policy: replicaPolicy, Host: archiveHost, TransportLimits: archiveTransportLimits, Log: flags.observe.Logger(), Finalized: recoveryExecutor.Finalized}
 				if flags.TrustHistoryProfile2 {
