@@ -1315,5 +1315,28 @@ class HealthBinding(unittest.TestCase):
             self.assertIsNone(d.binding_expectation(5, 5, True, {'binding': incumbent_binding(shardEpoch=9)})['sigKey'], 'no such configuration')
             self.assertIsNone(d.binding_expectation(5, 5, False, {'binding': incumbent_binding()})['sigKey'], 'before the election no key')
 
+
+class RoundBracket(unittest.TestCase):
+    """bft-core#1061: the joiner's certified round is compared with the incumbent's read before AND after it (its report comes through its
+    agent, seconds late), not with a fixed slack: in step it lies in that bracket, give or take one certificate in delivery."""
+
+    def ready(self, have, before, after=None):
+        mine = {'role': 'active', 'roleEpoch': 5, 'lastUCRound': have, 'executionRecovery': 'ready'}
+        return hd.follower_ready(mine, {'lastUCRound': before}, 5, True, None, None if after is None else {'lastUCRound': after})
+
+    def test_the_gate_runs_steady_three_behind_is_in_step(self):
+        """2026-11-14 gate-1: joiner 1018 read at ~00:24:32, validator 1 at 1021 read at 00:24:37 (the joiner admitted 1021 at 00:24:36.75)."""
+        self.assertTrue(self.ready(1018, 1017, 1021))
+        self.assertFalse(self.ready(1018, 1021), 'the old reading order alone: three behind, refused (the flapping)')
+
+    def test_behind_or_ahead_of_the_bracket_is_not(self):
+        self.assertFalse(self.ready(1012, 1017, 1021), 'behind the earlier reading')
+        self.assertFalse(self.ready(1023, 1017, 1021), 'ahead of the later reading')
+        self.assertTrue(self.ready(1016, 1017, 1021), 'one certificate in delivery at the edge')
+        self.assertTrue(self.ready(1022, 1017, 1021))
+        self.assertFalse(self.ready(0, 1017, 1021), 'no certificate yet')
+        self.assertTrue(self.ready(100, 100), 'without a later reading: the one reading, give or take one')
+        self.assertFalse(self.ready(98, 100))
+
 if __name__ == '__main__':
     unittest.main()

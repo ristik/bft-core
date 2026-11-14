@@ -226,7 +226,7 @@ def binding_refusal(mine, reference, epoch, promoted, expect):
     return None
 
 
-def follower_ready(mine, reference, epoch, promoted, expect=None):
+def follower_ready(mine, reference, epoch, promoted, expect=None, later=None):
     """A follower's own report, compared with an incumbent's. Before the election (promoted False) the joiner is a non-active follower by
     design: it must have installed the current epoch's activation (roleEpoch >= epoch), with either role, and follow the incumbents' certified
     progress. After it (promoted True) its role must be active at the target epoch. Either way its execution recovery must be explicitly
@@ -237,8 +237,14 @@ def follower_ready(mine, reference, epoch, promoted, expect=None):
         return False
     if promoted and mine.get('role') != 'active':
         return False
-    have, want = mine.get('lastUCRound') or 0, reference.get('lastUCRound') or 0
-    if not (have > 0 and want - 2 <= have <= want + 2):
+    # A member admits the very certificates the incumbent admits (one per shard round), so a joiner that follows differs from it only by
+    # a certificate in delivery. What the drive sees differs more: the joiner's report comes through its agent (seconds; on the
+    # 2026-11-14 gate run ~4.5 s, three rounds at ~1.5 s per round, bft-core#1061), read after the incumbent's. So the incumbent is read
+    # before (`reference`) and after (`later`) the joiner's report: in step, the joiner's round lies in that bracket, give or take the one
+    # certificate in delivery at either edge. Without `later` the bracket is the one reading.
+    have, low = mine.get('lastUCRound') or 0, reference.get('lastUCRound') or 0
+    high = max(low, (later or reference).get('lastUCRound') or 0)
+    if not (have > 0 and low - 1 <= have <= high + 1):
         return False
     # progress alone is not completion: the report must be about the intended node and assignment (bft-core#1057); without an
     # expectation this is only the progress predicate
@@ -909,18 +915,19 @@ class Drive(rehearse.Rehearsal):
         health = (lambda: remote.status().get('shardHealth')) if remote is not None else (lambda: self.docker.shard_health(i))
         expected = {}
         def ready():
-            mine, reference = health(), self.docker.shard_health(1)
-            if not mine or not reference:
+            reference, mine, later = self.docker.shard_health(1), health(), self.docker.shard_health(1)   # the joiner's read bracketed
+            if not mine or not reference or not later:
                 self.say(f'  joiner {i}: shard health not readable yet')
                 return False
             if not expected:
                 expected.update(self.binding_expectation(i, epoch, promoted, reference))
             refusal = binding_refusal(mine, reference, epoch, promoted, expected)
             self.say(f'  joiner {i}: role {mine.get("role")} at epoch {mine.get("roleEpoch")}, recovery {mine.get("executionRecovery")}, '
-                     f'certified round {mine.get("lastUCRound")} (validator 1 {reference.get("lastUCRound")}), binding {refusal or "ok"}')
+                     f'certified round {mine.get("lastUCRound")} (validator 1 {reference.get("lastUCRound")}..{(later or {}).get("lastUCRound")}), '
+                     f'binding {refusal or "ok"}')
             if refusal and promoted and expected.get('sigKey') is None:
                 expected.clear()   # the installed configuration may not be written yet: derive the expectation again on the next poll
-            return follower_ready(mine, reference, epoch, promoted, expected)
+            return follower_ready(mine, reference, epoch, promoted, expected, later)
         what = 'active at epoch %d' % epoch if promoted else 'following epoch %d' % epoch
         self.wait(f'the joiner {i} is {what} and certified at the head ({how})', ready, 3600)
 
