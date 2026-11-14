@@ -9,6 +9,7 @@ import (
 
 	libp2ppeer "github.com/libp2p/go-libp2p/core/peer"
 	"github.com/unicitynetwork/bft-core/archive"
+	"github.com/unicitynetwork/bft-core/network"
 	"github.com/unicitynetwork/bft-core/q3active"
 	"github.com/unicitynetwork/bft-core/q3shard"
 	"github.com/unicitynetwork/bft-core/utbstore"
@@ -258,6 +259,61 @@ func seedRootsFromUTB(r *rootFreeRole, store utbEntries) error {
 		r.addRootNodes(entry.RootNodes)
 	}
 	return nil
+}
+
+// memberPrewarm keeps the channels a member needs warm before it needs them (phase 2): the shard peers of the installed and staged
+// assignments, and, once the role is active, the root committee of the active epoch. Each set is reconciled whole on every change
+// (network.MemberProtector): a peer the set no longer names is unprotected, connected or not, and a superseded warm-up cannot re-protect.
+type memberPrewarm struct {
+	members, committee memberSet
+}
+
+// memberSet is the part of network.MemberProtector the prewarm uses.
+type memberSet interface {
+	Set(ctx context.Context, ids []libp2ppeer.ID)
+}
+
+func newMemberPrewarm(p interface {
+	NewMemberProtector(tag string) *network.MemberProtector
+}) *memberPrewarm {
+	return &memberPrewarm{members: p.NewMemberProtector("shard-members"), committee: p.NewMemberProtector("root-committee")}
+}
+
+// shard makes ids the protected, warmed shard peer set.
+func (w *memberPrewarm) shard(ctx context.Context, ids []libp2ppeer.ID) {
+	if w != nil {
+		w.members.Set(ctx, ids)
+	}
+}
+
+// roots makes the committee of tb the protected, warmed root set; nil (a non-active node) protects no root.
+func (w *memberPrewarm) roots(ctx context.Context, tb *types.RootTrustBaseV1) {
+	if w == nil {
+		return
+	}
+	var ids []libp2ppeer.ID
+	if tb != nil {
+		for _, n := range tb.RootNodes {
+			if n == nil {
+				continue
+			}
+			if id, err := libp2ppeer.Decode(n.NodeID); err == nil {
+				ids = append(ids, id)
+			}
+		}
+	}
+	w.committee.Set(ctx, ids)
+}
+
+// decodePeerIDs decodes node IDs, skipping any that is not a peer ID.
+func decodePeerIDs(raw []string) []libp2ppeer.ID {
+	out := make([]libp2ppeer.ID, 0, len(raw))
+	for _, s := range raw {
+		if id, err := libp2ppeer.Decode(s); err == nil {
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 // remoteFallbackArchive is the terminal repair's archive: the local store first, then the node's non-root archive sources (follow sources,

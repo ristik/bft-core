@@ -487,8 +487,9 @@ class Laptop:
         return json.loads(self.exec(f'authority{self.entity}', 'ubft', 'signing-authority', 'status', *OPERATOR).stdout)
 
     def op_authority_step(self, step, epoch, shard_epoch):
-        """One order of the entity's switch (handoff_drive.advance_remote runs them as resumable sub-steps, status first). The shard node is stopped before an
-        authority order and started only by `shard-start` (a joiner's comes back by its restore). The kept credential is written once, never overwritten."""
+        """One order of the entity's switch (handoff_drive.advance_remote runs them as resumable sub-steps, status first). The shard node keeps running
+        through every authority order (phase 2): the order fences its session and the node, refused as fenced, reads the replaced credential in-process
+        (service.ReloadingClient). `shard-start` only starts a node that is not running. The kept credential is written once, never overwritten."""
         j, epoch, shard_epoch = self.entity, int(epoch), int(shard_epoch)
         auth = f'authority{j}'
         conf = f'/network/handoff/shard-conf-{shard_epoch}.json'
@@ -497,7 +498,6 @@ class Laptop:
             return {'started': True}
         if step not in ('complete-enrollment', 'advance-epoch', 'replace-session'):
             raise Failure(f'{step}: not an authority order')
-        self.dc('stop', f'shard{j}')
         if step == 'complete-enrollment':
             command = ['complete-enrollment', *OPERATOR, '--shard-conf', conf]
         elif step == 'advance-epoch':

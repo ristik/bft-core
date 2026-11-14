@@ -91,3 +91,45 @@ func TestRoleGaterRevokesExistingRootConnectionsOnRetirement(t *testing.T) {
 	require.Equal(t, 1, node.RevokeDenied())
 	require.Eventually(t, func() bool { return len(node.host.Network().ConnsToPeer(later.ID())) == 0 }, 5*time.Second, 20*time.Millisecond)
 }
+
+// The member protector (astra on #1054, finding 2): a set is protected and dialled at once, a peer the gater denies is neither, and an
+// assignment change unprotects the peers it drops, connected or not, while a superseded warm-up cannot put one back.
+func TestTheMemberProtectorFollowsAssignmentChurn(t *testing.T) {
+	log := logger.New(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	start := func(gater *RoleGater) *Peer {
+		conf, err := NewPeerConfiguration(randomTestAddressStr, nil, generateKeyPair(t), nil, nil)
+		require.NoError(t, err)
+		conf.Gater = gater
+		p, err := NewPeer(ctx, conf, log, nil)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = p.Close() })
+		return p
+	}
+	a, b, c, denied := start(nil), start(nil), start(nil), start(nil)
+	node := start(&RoleGater{Deny: func(id peer.ID) bool { return id == denied.ID() }})
+	for _, p := range []*Peer{a, b, c, denied} {
+		node.host.Peerstore().AddAddrs(p.ID(), p.MultiAddresses(), peerstore.PermanentAddrTTL)
+	}
+	gone := peer.ID("16Uiu2HAmDisconnectedFormerMember") // never reachable: protection is tracked by ID, not by connection
+	m := node.NewMemberProtector("shard-members")
+	m.Set(ctx, []peer.ID{a.ID(), b.ID(), denied.ID(), node.ID(), gone})
+	require.ElementsMatch(t, []peer.ID{a.ID(), b.ID(), gone}, m.Protected())
+	cm := node.host.ConnManager()
+	require.True(t, cm.IsProtected(a.ID(), "shard-members") && cm.IsProtected(gone, "shard-members"))
+	require.False(t, cm.IsProtected(denied.ID(), "shard-members"))
+	require.Eventually(t, func() bool { return len(node.host.Network().ConnsToPeer(a.ID())) > 0 }, 5*time.Second, 10*time.Millisecond, "dialled")
+	require.Empty(t, node.host.Network().ConnsToPeer(denied.ID()))
+
+	m.Set(ctx, []peer.ID{b.ID(), c.ID()}) // the assignment changed
+	require.ElementsMatch(t, []peer.ID{b.ID(), c.ID()}, m.Protected())
+	require.False(t, cm.IsProtected(a.ID(), "shard-members"), "a dropped, connected member is unprotected")
+	require.False(t, cm.IsProtected(gone, "shard-members"), "a dropped, disconnected member is unprotected too")
+	require.True(t, cm.IsProtected(c.ID(), "shard-members"))
+	time.Sleep(100 * time.Millisecond) // any warm-up of the first set has had its chance
+	require.False(t, cm.IsProtected(a.ID(), "shard-members"), "a superseded warm-up never re-protects")
+	m.Set(ctx, nil)
+	require.Empty(t, m.Protected())
+	require.False(t, cm.IsProtected(b.ID(), "shard-members") || cm.IsProtected(c.ID(), "shard-members"))
+}

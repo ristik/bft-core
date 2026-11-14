@@ -37,8 +37,17 @@ type ActivePeers struct {
 	// member is whether this node itself is a validator of the installed set (the set never contains it). A node that is not a member is
 	// a non-active party: it takes evidence from blocks and mirrors, never from roots.
 	member bool
+	// onStage, when set, is told the peers of each accepted stage (outside the lock), so that their channels can be prewarmed.
+	onStage func([]peer.ID)
 	// selfKey is the signing key the installed set names for this node (nil while it does not name it): health binding evidence only.
 	selfKey []byte
+}
+
+// OnStage installs the hook told the peers of each accepted stage.
+func (a *ActivePeers) OnStage(f func([]peer.ID)) {
+	a.mu.Lock()
+	a.onStage = f
+	a.mu.Unlock()
 }
 
 // NewActivePeers starts with the genesis validators as the shard epoch 0 set.
@@ -191,8 +200,16 @@ func (a *ActivePeers) Stage(ids []string) error {
 		}
 	}
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	a.staged = set
+	hook := a.onStage
+	a.mu.Unlock()
+	if hook != nil {
+		ids := make([]peer.ID, 0, len(set))
+		for id := range set {
+			ids = append(ids, id)
+		}
+		hook(ids)
+	}
 	return nil
 }
 
@@ -204,6 +221,18 @@ func (a *ActivePeers) Peers() []peer.ID {
 	defer a.mu.RUnlock()
 	out := make([]peer.ID, 0, len(a.set))
 	for id := range a.set {
+		out = append(out, id)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
+// StagedPeers is the staged successor assignment's peers (never this node), sorted; empty without a stage.
+func (a *ActivePeers) StagedPeers() []peer.ID {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	out := make([]peer.ID, 0, len(a.staged))
+	for id := range a.staged {
 		out = append(out, id)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })

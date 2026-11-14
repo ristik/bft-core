@@ -9,6 +9,8 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/libp2p/go-libp2p/core/peer"
+
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
 	"golang.org/x/sync/errgroup"
@@ -185,6 +187,16 @@ func (n *Node) SetFollowerRole(nonActive func() bool) { n.SetRole(funcRole{nonAc
 func (n *Node) SetRole(l RoleLease) {
 	n.client.SetRole(l)
 	n.round.SetRole(l)
+}
+
+// HeldPair is the certificate the node holds with its technical record (served to peers by the UC relay).
+func (n *Node) HeldPair() (*types.UnicityCertificate, *certification.TechnicalRecord) {
+	return n.client.Held()
+}
+
+// SetRelay enables the UC relay backup of the client (see BFTClient.SetRelay). Call before Run.
+func (n *Node) SetRelay(host StreamOpener, sources func() []peer.ID, after time.Duration) {
+	n.client.SetRelay(host, sources, after)
 }
 
 // RoleChanged tells the node that its follower predicate may have changed (see BFTClient.RoleChanged).

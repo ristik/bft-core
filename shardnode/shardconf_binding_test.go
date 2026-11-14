@@ -105,7 +105,6 @@ func (f *confBindingFixture) client(confHash []byte) (*BFTClient, *recordingDriv
 		driver:         drv,
 		log:            slog.New(&capturingHandler{}),
 	}
-	c.lastCertResponseTime.Store(1)
 	return c, drv
 }
 
