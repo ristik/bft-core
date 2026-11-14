@@ -90,6 +90,9 @@ type Options struct {
 	// LastLinkOnly keeps only this fixture's own link in its envelope (a chain longer than an envelope may carry, extended link by link
 	// through Runtime.BundleFor).
 	LastLinkOnly bool
+	// SourceState is the P85 source state (rootrecords.State bytes) the old checkpoint's control commits, so that installing the checkpoint
+	// needs the record log it names (storage.BlockStore.SetRecordFetcher); default none.
+	SourceState []byte
 	// PeerEVM gives every EVM validator of the successor a real peer identity, as the production ingress subscribes a request's sender by its
 	// node id; otherwise a replaced member is named evm-N, which only a harness calling the manager directly can use.
 	PeerEVM bool
@@ -323,7 +326,7 @@ func New(t *testing.T, o Options) *Fixture {
 		PredecessorBodyID: oldID, NextBodyID: bodyID[:], SuccessorTRHash: trHash, Kind: "commit",
 		FrozenID: evmroot.D4FrozenID(bodyID[:], f.Evidence.Summary, f.Evidence.FrozenParent, f.Evidence.CandidateDigest, attempt, oldID)}
 	control := evmroot.ControlState{Network: Network, Epoch: oldEpoch, Attempt: attempt, OrderedRound: ordered, PredecessorBodyID: oldID, Phase: "committed",
-		RecordBytes: record.Bytes(), PreviousDigest: bytes.Repeat([]byte{4}, 32), FrozenParent: bytes.Clone(o.Frozen)}
+		RecordBytes: record.Bytes(), PreviousDigest: bytes.Repeat([]byte{4}, 32), FrozenParent: bytes.Clone(o.Frozen), Pos: bytes.Clone(o.SourceState)}
 	key := types.PartitionShardID{PartitionID: PartitionID, ShardID: types.ShardID{}.Key()}
 	states := storage.ShardStates{States: map[types.PartitionShardID]*storage.ShardInfo{key: state}, Changed: storage.ShardSet{key: {}}, Control: &control}
 	f.ExtraSigners = make(map[string]abcrypto.Signer)

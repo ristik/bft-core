@@ -1079,6 +1079,10 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			}
 			if switched {
 				flags.observe.Logger().Info("archive replica policy switched to the installed assignment", "shardEpoch", epoch, "replicas", derived.Replicas)
+			} else {
+				kept := replicaPolicy.Snapshot()
+				flags.observe.Logger().Debug("archive replica policy kept: the installed assignment derives the same replicas", "checkedShardEpoch", epoch,
+					"policyShardEpoch", kept.Epoch, "version", kept.Version, "replicas", derived.Replicas)
 			}
 		}
 		// seedArchivePolicy, after the journal is open and before the first refresh: a policy a previous run adopted keeps its digest.
