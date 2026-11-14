@@ -283,6 +283,10 @@ class RemoteEntity:
     def restore_finish(self):
         return self.client.op('restore-finish', timeout=300)
 
+    def archive_policy(self):
+        """This laptop writer's archivePolicy section (the agent's archive-policy read)."""
+        return self.client.op('archive-policy', timeout=90).get('archivePolicy')
+
     def custody_tx(self, signature, *args):
         return self.client.op('custody-tx', timeout=300, signature=signature, args=[str(a) for a in args])
 
@@ -779,19 +783,40 @@ class Join:
         say(f'evidence prerequisite recorded: {self.evidence_retained!r}')
         say('stopping its validator services (keys and volumes kept)')
         say(f'  {r.client.op("stop-validator", timeout=300)}')
+        self.save(stoppedAt=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))   # no longer a writer the other retirements' gates must read
         say('next: custody.mature([lot]) once the holds pass (holdRetirement 2000 rounds, timeFloor 3600 s, evidence holds), then claim(amount, to) by the '
             'withdrawal key: `remote_entity.py claim` (not run automatically)')
         return 0
 
-    def archive_policies(self):
-        """Every host writer's archivePolicy section (`ubft shard-node status` inside its shard container; bft-core#1034)."""
+    def archive_writers(self):
+        """{entity: (EVM node id, read)} of every writer whose archivePolicy must pass before the retiree stops (astra's review of #1055, P1): each
+        host entity, and each OTHER remote entity that is or was a writer and whose validator still runs: a member, a retiring one, and a retired
+        one not stopped yet (it may still hold the retiree as a current or retained replica of its promises). Read from the registry now; an
+        unreadable registry refuses (fail closed). A remote writer is read through its laptop's agent."""
+        try:
+            states = fresh_states(self.gen)
+            remote = {i: RemoteEntity(self.gen, read_info(self.gen, i)) for i in states}
+        except (RegistryError, KeyError) as error:
+            raise RuntimeError(f'the remote entities\' registry cannot be read: the writers to check are unknown ({error}); nothing is stopped') from None
         out = {}
-        for i in GENESIS_ENTITIES:
-            p = docker('exec', f'{self.gen.name}-shard{i}-1', 'ubft', 'shard-node', 'status', '--url', 'http://127.0.0.1:9101', '--timeout', '30s', check=False)
+        for i in self.d.transport.docker.entities:
+            out[i] = (self.d.evm_node_id(i), lambda i=i: host_archive_policy(self.gen, i))
+        for i, r in remote.items():
+            if i == self.entity:
+                continue
+            if r.state in ('member', 'retiring') or (r.state == 'retired' and not r.info.get('stoppedAt')):
+                out[i] = (r.evm_node_id, r.archive_policy)
+        return out
+
+    def archive_policies(self):
+        """Every writer's archivePolicy section (archive_writers; `ubft shard-node status`, bft-core#1034), an unavailable one as {'error': ...}."""
+        out, self.writer_ids = {}, {}
+        for i, (evm, read) in sorted(self.archive_writers().items()):
+            self.writer_ids[i] = evm
             try:
-                out[i] = json.loads(p.stdout).get('archivePolicy')
-            except ValueError:
-                out[i] = {'error': (p.stderr or p.stdout).strip()[-200:]}
+                out[i] = read()
+            except Exception as error:   # an unreachable laptop agent, a failed exec: unavailable, which fails the gate
+                out[i] = {'error': f'{type(error).__name__}: {error}'[-200:]}
         return out
 
     def wait_archive_migration(self, activated, seconds=ARCHIVE_WAIT):
@@ -824,7 +849,7 @@ class Join:
             return None
         try:
             validators = [v['nodeId'] for v in json.loads(conf.read_text())['validators']]
-            return select_replicas(self.d.evm_node_id(i), validators)
+            return select_replicas((getattr(self, 'writer_ids', None) or {}).get(i) or self.d.evm_node_id(i), validators)
         except (KeyError, TypeError, ValueError):
             return None
 
@@ -966,18 +991,36 @@ ARCHIVE_K, ARCHIVE_MAX_REPLICAS = 2, 3   # archivepolicy.K and archivepolicy.Max
 B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
 
 
+def b58encode(raw):
+    n = int.from_bytes(raw, 'big')
+    out = ''
+    while n:
+        n, r = divmod(n, 58)
+        out = B58[r] + out
+    return '1' * (len(raw) - len(raw.lstrip(b'\0'))) + out
+
+
 def peer_bytes(peer_id):
-    """The raw multihash bytes of a base58btc libp2p peer ID (string(peer.ID) in Go, which archivepolicy orders by)."""
+    """The raw multihash bytes of a canonical base58btc libp2p peer ID (string(peer.ID) in Go, which archivepolicy orders by). Anything else is
+    refused (ValueError): an empty id, a CID or other multibase encoding, a non-canonical base58 string, or bytes that are not one identity or
+    sha2-256 multihash; the caller then fails closed."""
+    if not isinstance(peer_id, str) or not peer_id or any(ch not in B58 for ch in peer_id):
+        raise ValueError(f'not a base58btc peer id: {peer_id!r}')
     n = 0
     for ch in peer_id:
         n = n * 58 + B58.index(ch)
-    raw = n.to_bytes((n.bit_length() + 7) // 8, 'big') if n else b''
-    return b'\0' * (len(peer_id) - len(peer_id.lstrip('1'))) + raw
+    raw = b'\0' * (len(peer_id) - len(peer_id.lstrip('1'))) + (n.to_bytes((n.bit_length() + 7) // 8, 'big') if n else b'')
+    if b58encode(raw) != peer_id:
+        raise ValueError(f'a non-canonical base58 peer id: {peer_id!r}')
+    if len(raw) < 2 or raw[0] not in (0x00, 0x12) or raw[1] != len(raw) - 2 or (raw[0] == 0x12 and raw[1] != 32):
+        raise ValueError(f'not an identity or sha2-256 multihash peer id: {peer_id!r}')
+    return raw
 
 
 def select_replicas(writer, validators):
     """archivepolicy.Select's replicas for `writer` over the installed validators (archivepolicy/policy.go): the others in raw byte order, the
     MaxReplicas after the writer in circular order, sorted. None with fewer than K others."""
+    peer_bytes(writer)   # an empty or malformed writer is refused, not ordered
     others = sorted({v for v in validators if v and v != writer}, key=peer_bytes)
     if len(others) < ARCHIVE_K:
         return None
@@ -1015,6 +1058,15 @@ def archive_gate(policy, retiree, activated, expected):
     if policy.get('migrationComplete') is not True:
         return f"migration not complete (backlog {policy.get('migrationBacklog')})"
     return None
+
+
+def host_archive_policy(generation, i):
+    """Host entity i's archivePolicy section (`ubft shard-node status` inside its shard container)."""
+    p = docker('exec', f'{Path(generation).name}-shard{i}-1', 'ubft', 'shard-node', 'status', '--url', 'http://127.0.0.1:9101', '--timeout', '30s', check=False)
+    try:
+        return json.loads(p.stdout).get('archivePolicy')
+    except ValueError:
+        return {'error': (p.stderr or p.stdout).strip()[-200:]}
 
 
 def activated_shard_epoch(generation, result):

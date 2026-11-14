@@ -1172,6 +1172,9 @@ def main(argv=None):
     except Exception as error:
         d.say(f'STOPPED: {d.scrub(str(error))}. Rerun the same command to continue from handoff/log.jsonl')
         return 1
+    finally:
+        if lock is not None:
+            lock.close()
 
 
 if __name__ == '__main__':

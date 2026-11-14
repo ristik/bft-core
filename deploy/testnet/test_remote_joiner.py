@@ -853,7 +853,8 @@ class ArchiveGate(unittest.TestCase):
     def test_select_replicas_is_archivepolicy_select(self):
         for writer, validators, replicas in SELECT_VECTORS:
             self.assertEqual(re_.select_replicas(writer, validators), replicas or None, writer)
-        self.assertIsNone(re_.select_replicas('a', ['a', 'b']), 'fewer than K others')
+        writer, validators, _ = SELECT_VECTORS[0]
+        self.assertIsNone(re_.select_replicas(writer, [writer, next(v for v in validators if v != writer)]), 'fewer than K others')
 
     def test_the_expected_replicas_come_from_the_checked_epochs_configuration(self):
         writer, validators, replicas = SELECT_VECTORS[-1]
@@ -891,6 +892,97 @@ class ArchiveGate(unittest.TestCase):
         j.archive_policies = lambda: {1: self.policy(), 2: {'error': 'unreachable'}}
         with unittest.mock.patch.object(re_, 'say'), unittest.mock.patch.object(re_.time, 'sleep'), self.assertRaises(RuntimeError):
             j.wait_archive_migration(6, seconds=-1)
+
+
+class EveryWriter(unittest.TestCase):
+    """astra's review of #1055 (P1): the retire gate reads every writer, not only the four host entities: another remote member, or a retired
+    remote writer that still runs, may hold the retiree as a current or retained replica. Each must report and pass; an unavailable one fails."""
+    R = '16Uiu2RETIREE'
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.gen = Path(self.tmp.name)
+        (self.gen / 'handoff').mkdir()
+        write_record(self.gen, 5, 'retired', stakingId=12, retiredShardEpoch=6, evmNodeId=self.R)   # the retiree
+        write_record(self.gen, 6, 'member', evmNodeId='E6')                                       # a second remote joiner
+        write_record(self.gen, 7, 'retired', evmNodeId='E7', stoppedAt='2026-11-14T00:00:00Z')    # stopped: no writer any more
+        write_record(self.gen, 8, 'prepared', evmNodeId='E8')                                     # not a writer yet
+        write_record(self.gen, 9, 'retired', evmNodeId='E9')                                      # retired, still running
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def join(self, remote_policies, evidence=None):
+        j = re_.Join.__new__(re_.Join)
+        j.gen, j.entity, j.evidence_retained = self.gen, 5, evidence
+        j.d = unittest.mock.Mock()
+        j.d.transport.docker.entities = [1, 2]
+        j.d.evm_node_id = lambda i: f'E{i}'
+        j.r = re_.load(self.gen)[5]
+        j.r.client = unittest.mock.Mock()
+        j.expected_replicas = lambda i, p: ['A', 'B', 'C']
+        real_wait = j.wait_archive_migration
+        j.wait_archive_migration = lambda activated: real_wait(activated, seconds=-1)   # one pass, then the timeout
+        good = {'checkedShardEpoch': 6, 'replicas': ['A', 'B', 'C'], 'retained': [], 'migrationComplete': True}
+        self.good = good
+
+        def remote_read(entity):
+            value = remote_policies.get(entity.entity, good)
+            if isinstance(value, Exception):
+                raise value
+            return value
+        return j, unittest.mock.patch.multiple(re_, host_archive_policy=lambda gen, i: dict(good)), \
+            unittest.mock.patch.object(re_.RemoteEntity, 'archive_policy', autospec=True, side_effect=remote_read)
+
+    def test_the_writers_are_the_hosts_the_remote_members_and_the_running_retired(self):
+        j, hosts, remote = self.join({})
+        with hosts, remote:
+            writers = j.archive_writers()
+            self.assertEqual(sorted(writers), [1, 2, 6, 9], 'not the retiree itself, not a stopped or a not yet joined entity')
+            self.assertEqual(writers[6][0], 'E6')
+            with unittest.mock.patch.object(re_, 'say'):
+                j.wait_archive_migration(6)   # every writer passes
+
+    def test_a_second_remote_joiner_that_retains_the_retiree_stops_nothing(self):
+        j, hosts, remote = self.join({6: {'checkedShardEpoch': 6, 'replicas': ['A', 'B', 'C'], 'retained': [self.R], 'migrationComplete': False}},
+                                     evidence='held by roots 1-4')
+        with hosts, remote, unittest.mock.patch.object(re_, 'say'), \
+                unittest.mock.patch.object(re_.time, 'sleep'), self.assertRaises(RuntimeError):
+            j.retire()
+        j.r.client.op.assert_not_called()   # no stop-validator: the evidence note does not replace the archive check
+        self.assertNotIn('stoppedAt', json.loads((re_.info_dir(self.gen) / '5.json').read_text()))
+
+    def test_an_unavailable_remote_writer_stops_nothing(self):
+        j, hosts, remote = self.join({9: re_.AgentError('the laptop agent does not answer')}, evidence='held')
+        with hosts, remote, unittest.mock.patch.object(re_, 'say'), \
+                unittest.mock.patch.object(re_.time, 'sleep'), self.assertRaises(RuntimeError):
+            j.retire()
+        j.r.client.op.assert_not_called()
+
+    def test_when_every_writer_passes_it_stops_and_is_no_writer_any_more(self):
+        j, hosts, remote = self.join({}, evidence='held')
+        j.r.client.op.return_value = {'stopped': {}}
+        with hosts, remote, unittest.mock.patch.object(re_, 'say'):
+            self.assertEqual(j.retire(), 0)
+        self.assertEqual(j.r.client.op.call_args.args[0], 'stop-validator')
+        self.assertIn('stoppedAt', json.loads((re_.info_dir(self.gen) / '5.json').read_text()))
+
+    def test_an_unreadable_registry_stops_nothing(self):
+        j, hosts, remote = self.join({}, evidence='held')
+        (re_.info_dir(self.gen) / '6.json').write_text('{broken')
+        with hosts, remote, self.assertRaises(RuntimeError):
+            j.archive_writers()
+
+    def test_malformed_peer_ids_are_refused_not_ordered(self):
+        writer, validators, _ = SELECT_VECTORS[0]
+        for bad in ('', 'bafzbeigai3eoy2ccc7ybwjfz5r3rdxqrinwi4rwytly24tdbh6yz7zxs4', '0' + writer[1:], '1' + writer, writer.lower(), 'Qm'):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                re_.peer_bytes(bad)
+        with self.assertRaises(ValueError):
+            re_.select_replicas('', validators)
+        with self.assertRaises(ValueError):
+            re_.select_replicas(writer, validators + ['not-a-peer-id'])
+        self.assertEqual(re_.peer_bytes(writer)[:1], b'\x00', 'an identity multihash (secp256k1 key)')
 
 
 class Retire(unittest.TestCase):

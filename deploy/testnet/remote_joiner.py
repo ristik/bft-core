@@ -503,6 +503,11 @@ class Laptop:
         time.sleep(10)
         return {'started': True, 'shard': self.services_state().get(f'shard{j}'), 'head': self.ureth_head(), 'seeded': seeded}
 
+    def op_archive_policy(self):
+        """This writer's archivePolicy (`ubft shard-node status` in its shard container): another entity's retire gate reads it (bft-core#1055)."""
+        done = self.exec(f'shard{self.entity}', 'ubft', 'shard-node', 'status', '--url', self.urls()[1], '--timeout', '30s')
+        return {'archivePolicy': json.loads(done.stdout).get('archivePolicy')}
+
     def op_stop_validator(self):
         """After the entity left the committee: its shard node, root and execution client stop, then its signing authority (its key is not needed any
         more: the delegation ended with the retirement). Volumes stay: the wallet holds the withdrawal key for the claim. Never `compose down`."""
@@ -598,8 +603,9 @@ class Laptop:
 
     OPS = {'status': 'op_status', 'root-post': 'op_root_post', 'logs': 'op_logs', 'put-network': 'op_put_network', 'trust-base-sign': 'op_trust_base_sign',
            'evm-pop': 'op_evm_pop', 'sign-pop': 'op_sign_pop', 'readiness': 'op_readiness', 'install-root': 'op_install_root',
-           'authority-status': 'op_authority_status', 'authority-step': 'op_authority_step', 'restore-start': 'op_restore_start', 'seed-archive': 'op_seed_archive', 'restore-finish': 'op_restore_finish', 'start-authority': 'op_start_authority', 'tx': 'op_tx', 'custody-tx': 'op_custody_tx', 'stop-validator': 'op_stop_validator'}
-    READS = frozenset(('status', 'root-post', 'logs', 'authority-status'))
+           'authority-status': 'op_authority_status', 'authority-step': 'op_authority_step', 'restore-start': 'op_restore_start', 'seed-archive': 'op_seed_archive', 'restore-finish': 'op_restore_finish', 'start-authority': 'op_start_authority', 'tx': 'op_tx', 'custody-tx': 'op_custody_tx', 'stop-validator': 'op_stop_validator',
+           'archive-policy': 'op_archive_policy'}
+    READS = frozenset(('status', 'root-post', 'logs', 'authority-status', 'archive-policy'))
 
     def dispatch(self, name, args):
         if name not in self.OPS:
