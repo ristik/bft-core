@@ -92,10 +92,49 @@ class B1Layout(unittest.TestCase):
         self.assertEqual((g['config']['chainId'],int(g['gasLimit'],16),g['alloc'],g['extraData']),(1337,60000000,{'ab':{'balance':'0x1'}},'0x'+'cd'*32))
     def test_the_workflow_builds_the_pinned_source_and_the_verifier(self):
         workflow=(generate.REPO/'.github/workflows/testnet-package.yml').read_text()
-        self.assertIn('ref: '+generate.PINS['bft'],workflow)
+        # the pinned checkouts come from pins.json itself (a pin bump is one file, #1075): no SHA is repeated in the workflow
+        self.assertIn("json.load(open('deploy/testnet/pins.json'))",workflow)
+        self.assertIsNone(re.search(r'ref: [0-9a-f]{40}',workflow))
+        for out,path in (('bft','pinned-bft'),('aggregator_go','pinned-aggregator-go'),('contracts','pinned-contracts')):
+            self.assertRegex(workflow,r'ref: \$\{\{ steps\.pins\.outputs\.%s \}\}\s+path: %s'%(out,path))
         self.assertIn('./scripts/b1genesis',workflow)
-        self.assertIn('ref: '+generate.PINS['contracts'],workflow)   # the PoS profile's contracts checkout
         self.assertIn('--pos-contracts pinned-contracts',workflow)
+    def test_every_pins_workflow_builds_dnb_tool_from_the_node_pin(self):
+        # #1075: the bridge image's dnb-tool comes from the same bft checkout as the nodes (an older one cannot read their archive layout)
+        for name in ('testnet-bridge.yml','testnet-bridge-pos.yml'):
+            workflow=(generate.REPO/'.github/workflows'/name).read_text()
+            for line in workflow.splitlines():
+                if 'build-bridge-image.py' in line and 'run:' in line:
+                    self.assertIn('--bft-source pinned-bft',line,name)
+        source=(Path(__file__).parent/'bridge/build-bridge-image.py').read_text()
+        self.assertIn("NODE_PINS['bft'] if name == 'bft'",source)
+        self.assertNotIn("rev-parse', '--show-toplevel'",source)   # not the package's own checkout any more
+    def test_the_overlay_refuses_a_bridge_image_built_for_another_bft(self):
+        import importlib.util
+        spec=importlib.util.spec_from_file_location('overlay',Path(__file__).parent/'bridge/overlay.py'); ov=importlib.util.module_from_spec(spec); spec.loader.exec_module(ov)
+        image='sha256:'+'a'*64
+        self.assertEqual(ov.bridge_image({'sources':{'bft':'f'*40},'images':{'bridge':image}},{'bft':'f'*40}),image)
+        for record in ({'sources':{'bft':'e'*40},'images':{'bridge':image}},{'images':{'bridge':image}},{'sources':{'bft':'f'*40},'images':{'bridge':'tnops-bridge:verified'}}):
+            with self.assertRaises(SystemExit) as e: ov.bridge_image(record,{'bft':'f'*40})
+            self.assertRegex(str(e.exception),'bridge image|dnb-tool was built')
+    def test_the_pinned_ubft_must_accept_every_generated_flag(self):
+        import ubft_flags
+        compose={'services':{'root1':{'entrypoint':['ubft','root-node','run','--home','/state','--address=/ip4/0.0.0.0/tcp/8000']},
+                             'shard1':{'entrypoint':['ubft','shard-node','run','--archive-public-reads','--follow-source','/dns4/x']},
+                             'rpc':{'entrypoint':['python3','-u','gateway.py','--not-ubft']},
+                             'auth':{'entrypoint':['/usr/local/bin/ubft','signing-authority','run','--socket','/a']}}}
+        self.assertEqual(ubft_flags.invocations(compose),{('root-node','run'):{'--home','--address'},('shard-node','run'):{'--archive-public-reads','--follow-source'},
+                                                          ('signing-authority','run'):{'--socket'}})
+        # a stand-in for cobra: `ubft <path> <flags> --help` parses every flag first and fails on an unknown one, hidden flags included
+        known={('root-node','run'):{'--home','--address'},('shard-node','run'):{'--follow-source'},('signing-authority','run'):{'--socket'}}
+        def runner(cmd,**kw):
+            words=cmd[1:-1]; path=tuple(w for w in words if not w.startswith('-') and words.index(w)<2)
+            bad=[w.split('=',1)[0] for w in words if w.startswith('--') and w.split('=',1)[0] not in known[path]]
+            return subprocess.CompletedProcess(cmd,1 if bad else 0,'' if bad else 'Usage: ...','Error: unknown flag: '+bad[0] if bad else '')
+        self.assertEqual(ubft_flags.check('/x/ubft',[compose,compose],runner=runner),['ubft shard-node run: Error: unknown flag: --archive-public-reads'])   # an older ubft; said once
+        known[('shard-node','run')].add('--archive-public-reads')
+        self.assertEqual(ubft_flags.check('/x/ubft',[compose],runner=runner),[])
+        self.assertIn('flags_ok(generation)',(Path(__file__).parent/'validate-generation.py').read_text())   # CI runs it on every generation it makes
     def test_the_topology_follows_the_profile(self):
         with tempfile.TemporaryDirectory() as tmp:
             out=Path(tmp)/'tn-fixture';out.mkdir()
@@ -293,7 +332,7 @@ class Aggregator(unittest.TestCase):
             workflow=(generate.REPO/'.github/workflows'/name).read_text()
             self.assertNotIn('rugregator',workflow,name)
             self.assertIn('repository: ristik/aggregator-go',workflow,name)
-        self.assertIn('ref: '+generate.PINS['aggregator-go'],(generate.REPO/'.github/workflows/testnet-package.yml').read_text())
+        self.assertIn('ref: ${{ steps.pins.outputs.aggregator_go }}',(generate.REPO/'.github/workflows/testnet-package.yml').read_text())   # read from pins.json (#1075)
         self.assertNotIn('rugregator',(generate.HERE/'build-images.py').read_text()+(generate.HERE/'Dockerfile.node').read_text())
     def test_the_aggregator_partition_asks_for_no_consistency_proof(self):
         # aggregator-go sends none; under proof_type=aggregator_rsmt_v1 the root would refuse every nonempty certification request
@@ -2401,7 +2440,8 @@ class BridgePosEndpoint(unittest.TestCase):
             (gen/'network/handoff/shard-conf-1.json').write_text('{}')
             (gen/'manifest.json').write_text(json.dumps({'validators':4}))
             (gen/'bridge/bridge-addresses.json').write_text(json.dumps({'BridgeVault':'0x'+'11'*20,'CFG':'0x'+'22'*32}))
-            art=Path(tmp)/'artifacts'; art.mkdir(); (art/'bridge-images.json').write_text(json.dumps({'images':{'bridge':'sha256:'+'a'*64}}))
+            art=Path(tmp)/'artifacts'; art.mkdir(); (art/'bridge-images.json').write_text(json.dumps({'sources':{'bft':generate.PINS['bft']},'images':{'bridge':'sha256:'+'a'*64}}))
+            (Path(tmp)/'pins.json').write_text(json.dumps(generate.PINS))
             with patch.object(ov,'HERE',Path(tmp)/'bridge'), patch.object(sys,'argv',['overlay.py',str(gen)]), patch('builtins.print'):
                 ov.main()
             ep=json.loads((gen/'compose.bridge.yaml').read_text())['services']['lockproof']['entrypoint']
@@ -2471,7 +2511,8 @@ class StagingKnobs(unittest.TestCase):
             gen=Path(tmp)/'tn-x'; (gen/'bridge').mkdir(parents=True)
             (gen/'manifest.json').write_text(json.dumps(manifest))
             (gen/'bridge/bridge-addresses.json').write_text(json.dumps({'BridgeVault':'0x'+'11'*20,'CFG':'0x'+'22'*32}))
-            art=Path(tmp)/'artifacts'; art.mkdir(); (art/'bridge-images.json').write_text(json.dumps({'images':{'bridge':'sha256:'+'a'*64}}))
+            art=Path(tmp)/'artifacts'; art.mkdir(); (art/'bridge-images.json').write_text(json.dumps({'sources':{'bft':generate.PINS['bft']},'images':{'bridge':'sha256:'+'a'*64}}))
+            (Path(tmp)/'pins.json').write_text(json.dumps(generate.PINS))
             with patch.object(ov,'HERE',Path(tmp)/'bridge'), patch.object(sys,'argv',['overlay.py',str(gen)]), patch('builtins.print'):
                 ov.main()
             ep=json.loads((gen/'compose.bridge.yaml').read_text())['services']['lockproof']['entrypoint']

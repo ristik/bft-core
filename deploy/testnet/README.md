@@ -377,6 +377,14 @@ On a Linux docker host, pass the bridge gateway as `--mac-host` (an IP literal, 
 container cannot reach the host's loopback. Every container on that bridge can then reach the forwarded root, shard and EL ports. The p2p ports authenticate
 their peers; the execution clients' 8545 does not.
 
+A second entity on the same Linux host is not separated from the generation by default: Docker routes between bridges, so after its activation it can
+dial the validators' private container addresses directly instead of going through the tunnel, which a real external machine could not.
+`remote_joiner.py start --isolate-bridge` (opt-in, bft-core#1075) adds three DOCKER-USER rules for this project's bridge only: its own containers
+talk to each other, and anything forwarded out of or into the bridge is dropped. The host's own addresses stay reachable (INPUT, not FORWARD): the
+`-L` listeners on the gateway and the published loopback ports, which is exactly what an external party reaches over its ssh connection.
+`--emulate-wan MS` (MS > 0) adds a netem delay of MS ms on the bridge; netem on a bridge delays only its egress (host to container), so the added round trip is MS. Both apply after the network and containers are created and before any of them starts, and a re-run replaces the project's rules in one pass (RETURN first).
+The rules carry the comment `unicity-joiner <project>`; `remote_joiner.py unisolate` removes them and the delay, and touches nothing else.
+
 The registry `$G/handoff/remote-joiners/<J>.json` is written only under `handoff/drive.lock`, over the file's current content, by an atomic, fsynced
 replacement. Its state only moves forward (`follower`, `registered`, `bonded`, `preparing`, `prepared`, `member`, `retiring`, `retired`); a writer holding a
 stale copy is refused. A drive reads it afresh for its guard and refuses when a record is unreadable. Nothing rolls a root store back: an install

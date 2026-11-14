@@ -18,6 +18,15 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - id: pins
+        # every pinned checkout below comes from deploy/testnet/pins.json (no SHA is repeated here: a pin bump is one file, #1075)
+        run: |
+          python3 - <<'E' >> "$GITHUB_OUTPUT"
+          import json
+          p = json.load(open('deploy/testnet/pins.json'))
+          for k in ('bft', 'aggregator-go', 'contracts'):
+              print(f"{k.replace('-', '_')}={p[k]}")
+          E
       - run: docker compose version
       - run: python3 -m unittest discover -s deploy/testnet -p test_package.py -v
         env:
@@ -27,7 +36,7 @@ jobs:
       - run: python3 -m unittest discover -s deploy/testnet/faucet -v
       - uses: actions/checkout@v4
         with:
-          ref: 6efc8d781b351524beca69b388dd82db0f4dc79a
+          ref: ${{ steps.pins.outputs.bft }}
           path: pinned-bft
       - run: make -C pinned-bft build
       - run: go build -C pinned-bft -o /tmp/tn-b1genesis ./scripts/b1genesis
@@ -35,14 +44,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: ristik/aggregator-go
-          ref: b3909de4c8c0dc4682fbb6c7ff9732e7c1771207
+          ref: ${{ steps.pins.outputs.aggregator_go }}
           path: pinned-aggregator-go
       # cgo for secp256k1, no rocksdb tag (memory SMT, state in MongoDB), as build-images.py builds it; go.mod's newer toolchain is fetched by GOTOOLCHAIN=auto
       - run: CGO_ENABLED=1 go build -C pinned-aggregator-go -trimpath -o /tmp/tn-aggregator ./cmd/aggregator
       - uses: actions/checkout@v4
         with:
           repository: ristik/unicity-pos-contracts
-          ref: 7b510f6b5a9cf3987ccc5d7dc77d39f33de12330
+          ref: ${{ steps.pins.outputs.contracts }}
           path: pinned-contracts
           submodules: recursive
       # Foundry v1.8.1 (the contracts' own CI pin: the registry's runtime bytecode and code hash are protocol surface), the digest-pinned release archive

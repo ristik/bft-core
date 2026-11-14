@@ -90,7 +90,7 @@ jobs:
       - name: Build the node images from the pinned sources (aggregator A, the integration variant)
         run: python3 deploy/testnet/build-images.py --bft-source pinned-bft --ureth-source pinned-ureth --aggregator-go-source pinned-aggregator-go
       - name: Build the bridge tools image (dnb-tool from this checkout, contracts and plug-ins at bridge/pins.json)
-        run: python3 deploy/testnet/bridge/build-bridge-image.py --contracts-source pinned-bridge-contracts --nbp-source pinned-nbp
+        run: python3 deploy/testnet/bridge/build-bridge-image.py --bft-source pinned-bft --contracts-source pinned-bridge-contracts --nbp-source pinned-nbp
       - run: go build -o /tmp/tn-keygen ./deploy/testnet/keygen
       - run: go build -C pinned-bft -o /tmp/tn-b1genesis ./scripts/b1genesis
       - name: Generate a --pos --utb generation (the cadence declared for the epoch-1 bridge steps)
