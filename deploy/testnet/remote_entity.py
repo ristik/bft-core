@@ -578,15 +578,28 @@ def archive_tar(generation, source, out=None):
     """The complete record directories (v2-*) of entity `source`'s shard archive as a tar stream on stdout: the certified blocks every shard node replicates
     to its peers anyway (no key material). The laptop seeds its archive with it (remote_joiner.op_restore_start): its node then walks its archive locally,
     where a fetch through the tunnel costs ~7 round trips per record and a catch-up of a thousand blocks never finishes within its deadline."""
-    import tarfile
+    import io, tarfile
     archive = Path(generation) / f'validator{int(source)}' / 'archive'
+
+    def emit(tar, arcname, raw):
+        info = tarfile.TarInfo(arcname)
+        info.size, info.mode, info.mtime = len(raw), 0o600, int(time.time())
+        tar.addfile(info, io.BytesIO(raw))
+
     with tarfile.open(fileobj=out or sys.stdout.buffer, mode='w|') as tar:
         for record in sorted(archive.iterdir()):
-            if record.is_dir() and record.name.startswith('v2-'):   # renamed into place when complete; .writing-* partials are skipped
-                try:
-                    tar.add(record, arcname=record.name)
-                except FileNotFoundError:   # migrated to the packed layout meanwhile: streamed from records/ below
-                    continue
+            if not (record.is_dir() and record.name.startswith('v2-')):   # renamed into place when complete; .writing-* partials are skipped
+                continue
+            # read the whole directory before any of it is streamed: the node's migration (bft-core#1049) may remove it meanwhile, and a
+            # directory streamed in part (its chunks without its manifest) would be placed by the seed instead of the sound packed copy
+            try:
+                files = {f.name: f.read_bytes() for f in sorted(record.iterdir()) if f.is_file()}
+            except FileNotFoundError:   # migrated meanwhile: its packed copy is published before the directory goes, so records/ below has it
+                continue
+            if 'manifest' not in files:
+                continue
+            for name, raw in files.items():
+                emit(tar, f'{record.name}/{name}', raw)
         # the packed layout (bft-core#1049): one file per record, records/<hh>/v2-*, placed complete; .writing-* temporaries are skipped
         records = archive / 'records'
         for shard in sorted(records.iterdir()) if records.is_dir() else []:
@@ -595,10 +608,10 @@ def archive_tar(generation, source, out=None):
             for record in sorted(shard.iterdir()):
                 if record.is_file() and record.name.startswith('v2-'):
                     try:
-                        tar.add(record, arcname=f'records/{shard.name}/{record.name}')
+                        raw = record.read_bytes()
                     except FileNotFoundError:
                         continue
-
+                    emit(tar, f'records/{shard.name}/{record.name}', raw)
 
 def retire_plan(generation, entity):
     """The retirement of the laptop entity, as steps; nothing is run (never rehearsed on the package: the drive refuses a retirement by default)."""
