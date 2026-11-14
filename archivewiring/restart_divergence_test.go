@@ -3,11 +3,8 @@ package archivewiring
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"os"
-	"path/filepath"
 	"reflect"
 	"sync/atomic"
 	"testing"
@@ -258,13 +255,11 @@ func (h *auditHarness) worker() *FrontierWorker {
 // forget removes a block's record from an archive store (a lost disk): both representations the store keeps.
 func forget(t *testing.T, s *archive.Store, q archive.Request) {
 	t.Helper()
-	enc, err := archive.EncodeRequest(q)
-	require.NoError(t, err)
-	sum := sha256.Sum256(enc)
-	name := hex.EncodeToString(sum[:])
 	dir := reflect.ValueOf(s).Elem().FieldByName("dir").String()
-	for _, n := range []string{name, "v2-" + name} {
-		require.NoError(t, os.RemoveAll(filepath.Join(dir, n)))
+	paths, err := archive.RecordPaths(dir, q, nil)
+	require.NoError(t, err)
+	for _, p := range paths {
+		require.NoError(t, os.RemoveAll(p))
 	}
 }
 

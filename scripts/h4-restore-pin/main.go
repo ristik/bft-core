@@ -15,6 +15,7 @@ import (
 
 	gethtypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/rlp"
+	"github.com/unicitynetwork/bft-core/archive"
 	"github.com/unicitynetwork/bft-core/handoffdelivery"
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/util"
@@ -40,40 +41,36 @@ func run(args []string, getenv func(string) string, out io.Writer) error {
 		return errUsage
 	}
 	archiveDir, trustPath, prefix := args[0], args[1], args[2]
-	entries, err := os.ReadDir(archiveDir)
-	if err != nil {
-		return fmt.Errorf("reading the archive: %w", err)
-	}
 	var bestUC, bestTR, bestHeader []byte
 	var bestRound uint64
 	var bestEpoch uint64
 	var bestRootRound uint64
 	var bestV2 bool
-	for _, entry := range entries {
-		name := entry.Name()
-		if !entry.IsDir() || !archiveRecordDirectory(name) {
-			continue
-		}
-		read := func(name string) []byte {
-			b, e := os.ReadFile(filepath.Join(archiveDir, entry.Name(), hex.EncodeToString([]byte(name))+".chunk"))
-			if e != nil {
-				return nil
+	// Every base record, in either archive layout (bft-core#1049: packed files under records/, or a directory per record from an earlier
+	// binary), read whole and validated by the archive's own reader.
+	err := archive.StoredNames(archiveDir, 1024, func(names []string) error {
+		for _, name := range names {
+			_, rec, readErr := archive.ReadStored(archiveDir, name)
+			if readErr != nil {
+				continue
 			}
-			return b
+			var uc types.UnicityCertificate
+			var header gethtypes.Header
+			if types.Cbor.Unmarshal(rec.ResultingUC, &uc) != nil || uc.InputRecord == nil || len(uc.InputRecord.BlockHash) != 32 || len(rec.ResultingTR) == 0 || rlp.DecodeBytes(rec.Header, &header) != nil || header.Number == nil {
+				continue
+			}
+			isV2 := archive.HasReceiptList(rec)
+			// Prefer v2 records because they retain the complete proof material.
+			// Within a version, compare the full root position: rounds restart at
+			// handoff, so round alone cannot identify the newest certified record.
+			if preferPin(isV2, uc.GetRootEpoch(), uc.GetRootRoundNumber(), bestV2, bestEpoch, bestRootRound) {
+				bestRound, bestEpoch, bestRootRound, bestUC, bestTR, bestHeader, bestV2 = uc.GetRoundNumber(), uc.GetRootEpoch(), uc.GetRootRoundNumber(), rec.ResultingUC, rec.ResultingTR, rec.Header, isV2
+			}
 		}
-		ucRaw, trRaw, headerRaw := read("resulting-uc"), read("resulting-tr"), read("header")
-		var uc types.UnicityCertificate
-		var header gethtypes.Header
-		if types.Cbor.Unmarshal(ucRaw, &uc) != nil || uc.InputRecord == nil || len(uc.InputRecord.BlockHash) != 32 || len(trRaw) == 0 || rlp.DecodeBytes(headerRaw, &header) != nil || header.Number == nil {
-			continue
-		}
-		isV2 := strings.HasPrefix(name, "v2-")
-		// Prefer v2 records because they retain the complete proof material.
-		// Within a version, compare the full root position: rounds restart at
-		// handoff, so round alone cannot identify the newest certified record.
-		if preferPin(isV2, uc.GetRootEpoch(), uc.GetRootRoundNumber(), bestV2, bestEpoch, bestRootRound) {
-			bestRound, bestEpoch, bestRootRound, bestUC, bestTR, bestHeader, bestV2 = uc.GetRoundNumber(), uc.GetRootEpoch(), uc.GetRootRoundNumber(), ucRaw, trRaw, headerRaw, isV2
-		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("reading the archive: %w", err)
 	}
 	if bestRound == 0 {
 		return errNoCertifiedPin
@@ -138,20 +135,33 @@ func archiveTrustBodyID(archiveDir string, epoch uint64, anchor *types.RootTrust
 		copy(out[:], raw)
 		return out, err
 	}
-	entries, err := os.ReadDir(archiveDir)
-	if err != nil {
-		return [32]byte{}, err
-	}
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "bundle-") {
+	// Bundles live in the archive's bundles/ directory; an archive written before bft-core#1018 keeps them in the archive directory itself.
+	type bundleFile struct{ dir, name string }
+	var files []bundleFile
+	for _, dir := range []string{filepath.Join(archiveDir, "bundles"), archiveDir} {
+		entries, err := os.ReadDir(dir)
+		if os.IsNotExist(err) && dir != archiveDir {
 			continue
 		}
-		raw, readErr := os.ReadFile(filepath.Join(archiveDir, entry.Name()))
+		if err != nil {
+			return [32]byte{}, err
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				files = append(files, bundleFile{dir, entry.Name()})
+			}
+		}
+	}
+	for _, entry := range files {
+		if !strings.HasPrefix(entry.name, "bundle-") {
+			continue
+		}
+		raw, readErr := os.ReadFile(filepath.Join(entry.dir, entry.name))
 		if readErr != nil || len(raw) < sha256.Size+1 {
 			continue
 		}
 		want := sha256.Sum256(raw[sha256.Size:])
-		if !strings.HasPrefix(entry.Name(), fmt.Sprintf("bundle-%016x-", epoch)) || string(want[:]) != string(raw[:sha256.Size]) {
+		if !strings.HasPrefix(entry.name, fmt.Sprintf("bundle-%016x-", epoch)) || string(want[:]) != string(raw[:sha256.Size]) {
 			continue
 		}
 		bundle, decodeErr := handoffdelivery.DecodeBundle(raw[sha256.Size:])
@@ -161,16 +171,4 @@ func archiveTrustBodyID(archiveDir string, epoch uint64, anchor *types.RootTrust
 		return [32]byte(bundle.Body.Identity()), nil
 	}
 	return [32]byte{}, fmt.Errorf("%w for epoch %d", errNoTrustBodyID, epoch)
-}
-
-func archiveRecordDirectory(name string) bool {
-	if len(name) == 64 {
-		_, err := hex.DecodeString(name)
-		return err == nil
-	}
-	if len(name) == 67 && name[:3] == "v2-" {
-		_, err := hex.DecodeString(name[3:])
-		return err == nil
-	}
-	return false
 }

@@ -47,7 +47,7 @@ func TestManifestDigestMatchesPublishedManifest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	manifest, err := os.ReadFile(filepath.Join(s.dir, loc, "manifest"))
+	manifest, err := StoredManifest(s.dir, recordDir+"/"+shardOf(loc)+"/"+loc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,11 +149,28 @@ func TestMissingChunkAndWrongSubject(t *testing.T) {
 		t.Fatalf("hash accepted: %v", err)
 	}
 	loc, _ := location(q)
-	if err := os.Remove(filepath.Join(s.dir, loc, fileName("body"))); err != nil {
+	path := s.packedPath(loc)
+	whole, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, whole[:len(whole)-len(r.Extensions["future-proof"])], 0600); err != nil {
 		t.Fatal(err)
 	}
 	if got := s.Serve(q); got.Outcome != Unavailable || got.Record != nil {
 		t.Fatalf("partial success: %+v", got)
+	}
+	// the directory layout (before #1049): a missing chunk
+	legacy, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	putLegacy(t, legacy.dir, q, r, false)
+	if err := os.Remove(filepath.Join(legacy.dir, loc, fileName("body"))); err != nil {
+		t.Fatal(err)
+	}
+	if got := legacy.Serve(q); got.Outcome != Unavailable || got.Record != nil {
+		t.Fatalf("partial success from a directory: %+v", got)
 	}
 }
 
@@ -239,14 +256,20 @@ func TestVersionOneAccountingSlotIsEmptyAndRequired(t *testing.T) {
 	if err != nil || len(got.ParentAccounting) != 0 {
 		t.Fatalf("empty accounting slot did not round trip: %v", err)
 	}
-	loc, err := location(q)
+	// in the directory layout (before #1049) the empty slot is an empty file, and a missing one is not accepted
+	legacy := t.TempDir()
+	loc := putLegacy(t, legacy, q, rec, false)
+	old, err := Open(legacy)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Remove(filepath.Join(store.dir, loc, fileName("parent-accounting"))); err != nil {
+	if got, err := old.Get(q); err != nil || len(got.ParentAccounting) != 0 {
+		t.Fatalf("empty accounting slot in a directory: %v", err)
+	}
+	if err := os.Remove(filepath.Join(legacy, loc, fileName("parent-accounting"))); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Get(q); !errors.Is(err, ErrUnavailable) {
+	if _, err := old.Get(q); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("missing accounting slot accepted: %v", err)
 	}
 }
@@ -275,7 +298,12 @@ func TestBeforePublishFaultAndCorruptChunk(t *testing.T) {
 		t.Fatal(err)
 	}
 	loc, _ := location(q)
-	if err := os.WriteFile(filepath.Join(s.dir, loc, fileName("body")), []byte("bad!"), 0600); err != nil {
+	whole, err := os.ReadFile(s.packedPath(loc))
+	if err != nil {
+		t.Fatal(err)
+	}
+	whole[len(whole)-1] ^= 1
+	if err := os.WriteFile(s.packedPath(loc), whole, 0600); err != nil {
 		t.Fatal(err)
 	}
 	if got := s.Serve(q); got.Outcome != Unavailable || got.Record != nil {
@@ -402,39 +430,55 @@ func TestOrphanTemporaryDirectoryIsIgnored(t *testing.T) {
 // before anything is imported; it does not migrate it.
 func TestManifestOfAnotherVersionIsRefusedNotMigrated(t *testing.T) {
 	q, rec := fixture()
-	store, err := Open(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Put(q, rec); err != nil {
-		t.Fatal(err)
-	}
 	loc, err := location(q)
 	if err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(store.dir, loc, "manifest")
-	original, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, magic := range []string{"ARCHIVE0", "ARCHIVE3", "archive1"} {
-		other := append([]byte(magic), original[8:]...)
-		if err := os.WriteFile(path, other, 0o600); err != nil {
+	for _, layout := range []string{"packed", "directory"} {
+		store, err := Open(t.TempDir())
+		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := store.Get(q); !errors.Is(err, ErrCorrupt) {
-			t.Fatalf("manifest with magic %q was read: %v", magic, err)
+		path, offset := store.packedPath(loc), len(packedMagic)+4
+		if layout == "packed" {
+			if err := store.Put(q, rec); err != nil {
+				t.Fatal(err)
+			}
+		} else {
+			putLegacy(t, store.dir, q, rec, false)
+			path, offset = filepath.Join(store.dir, loc, "manifest"), 0
 		}
-		after, err := os.ReadFile(path)
-		if err != nil || !bytes.Equal(after, other) {
-			t.Fatalf("the refused manifest was rewritten: %v", err)
+		original, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
-	if err := os.WriteFile(path, original, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Get(q); err != nil {
-		t.Fatalf("control: the genuine manifest must read: %v", err)
+		for _, magic := range []string{"ARCHIVE0", "ARCHIVE3", "archive1"} {
+			other := bytes.Clone(original)
+			copy(other[offset:], magic)
+			if err := os.WriteFile(path, other, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.Get(q); !errors.Is(err, ErrCorrupt) {
+				t.Fatalf("%s: manifest with magic %q was read: %v", layout, magic, err)
+			}
+			// nor shadowed by a put (#1059 review)
+			if err := store.Put(q, rec); !errors.Is(err, ErrCorrupt) {
+				t.Fatalf("%s: a put over a refused manifest: %v", layout, err)
+			}
+			// nor is it migrated to the packed layout
+			if res, err := store.MigrateLegacy(MaxPutBatch); err != nil || res.Migrated != 0 {
+				t.Fatalf("%s: a refused manifest was migrated: %+v %v", layout, res, err)
+			}
+			after, err := os.ReadFile(path)
+			if err != nil || !bytes.Equal(after, other) {
+				t.Fatalf("%s: the refused manifest was rewritten: %v", layout, err)
+			}
+		}
+		if err := os.WriteFile(path, original, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.Get(q); err != nil {
+			t.Fatalf("%s: control: the genuine manifest must read: %v", layout, err)
+		}
 	}
 }

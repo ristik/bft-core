@@ -1099,6 +1099,10 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			}
 			if switched {
 				flags.observe.Logger().Info("archive replica policy switched to the installed assignment", "shardEpoch", epoch, "replicas", derived.Replicas)
+			} else {
+				kept := replicaPolicy.Snapshot()
+				flags.observe.Logger().Debug("archive replica policy kept: the installed assignment derives the same replicas", "checkedShardEpoch", epoch,
+					"policyShardEpoch", kept.Epoch, "version", kept.Version, "replicas", derived.Replicas)
 			}
 		}
 		// seedArchivePolicy, after the journal is open and before the first refresh: a policy a previous run adopted keeps its digest.
@@ -1598,6 +1602,12 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			archiveDone := make(chan struct{})
 			go func() { defer close(archiveDone); _ = publisher.Run(archiveCtx) }()
 			defer func() { cancelArchive(); <-archiveDone; _ = metrics.Close() }()
+			migrationDone := make(chan struct{})
+			go func() {
+				defer close(migrationDone)
+				_ = (&archivewiring.LayoutMigration{Archive: archiveLocal, Log: flags.observe.Logger()}).Run(archiveCtx)
+			}()
+			defer func() { cancelArchive(); <-migrationDone }()
 			if flags.ArchivePrune {
 				worker := &archivewiring.FrontierWorker{Journal: journalStore, Context: journalCtx, Limits: limits, Archive: archiveLocal, Subject: archiveSubject, Replicas: archiveReplicas, PolicyDigest: archiveDigest, Policy: replicaPolicy, Host: archiveHost, TransportLimits: archiveTransportLimits, Log: flags.observe.Logger(), Finalized: recoveryExecutor.Finalized}
 				if flags.TrustHistoryProfile2 {

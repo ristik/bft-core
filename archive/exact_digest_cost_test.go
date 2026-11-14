@@ -28,9 +28,16 @@ func TestGetExactRejectsAWrongDigestWithoutReadingTheChunks(t *testing.T) {
 
 	loc, err := location(q, recordV2(rec))
 	require.NoError(t, err)
-	chunk := filepath.Join(dir, loc, fileName("body"))
-	damaged := bytes.Repeat([]byte{8}, 1<<20)
-	require.NoError(t, os.WriteFile(chunk, damaged, 0o600))
+	// damage the chunk bytes of the stored record, in whichever layout it was written (#1059 packs a record into one file)
+	if packed := packedPath(dir, loc); fileExists(packed) {
+		b, err := os.ReadFile(packed)
+		require.NoError(t, err)
+		b[len(b)-1] ^= 0xff
+		require.NoError(t, os.WriteFile(packed, b, 0o600))
+	} else {
+		chunk := filepath.Join(dir, loc, fileName("body"))
+		require.NoError(t, os.WriteFile(chunk, bytes.Repeat([]byte{8}, 1<<20), 0o600))
+	}
 
 	for i := 0; i < 2; i++ {
 		_, err = s.GetExact(q, [32]byte{9})
@@ -38,4 +45,32 @@ func TestGetExactRejectsAWrongDigestWithoutReadingTheChunks(t *testing.T) {
 	}
 	_, err = s.GetExact(q, digest)
 	require.ErrorIs(t, err, ErrCorrupt, "the right digest reads the chunks, and checks them")
+}
+
+// astra's review of the #1041 merge: each layout is judged by itself. With the record in both layouts and the packed copy's header damaged,
+// Get and GetExact both return the sound directory copy; a wrong digest still costs a manifest read only.
+func TestGetExactFallsBackToTheOtherLayoutWhenThePackedCopyIsDamaged(t *testing.T) {
+	dir := t.TempDir()
+	s, err := Open(dir)
+	require.NoError(t, err)
+	q, rec := fixture()
+	require.NoError(t, s.Put(q, rec))
+	name := putLegacy(t, dir, q, rec, false) // the same record, in the directory layout too
+	packed := packedPath(dir, name)
+	require.True(t, fileExists(packed), "premise: the put wrote the packed copy")
+	b, err := os.ReadFile(packed)
+	require.NoError(t, err)
+	b[0] ^= 0xff // the packed header
+	require.NoError(t, os.WriteFile(packed, b, 0o600))
+
+	got, err := s.Get(q)
+	require.NoError(t, err)
+	require.Equal(t, rec.Body, got.Body, "Get finds the sound directory copy")
+	digest, err := ManifestDigest(q, rec)
+	require.NoError(t, err)
+	got, err = s.GetExact(q, digest)
+	require.NoError(t, err, "GetExact for the correct digest falls through to the directory copy")
+	require.Equal(t, rec.Body, got.Body)
+	_, err = s.GetExact(q, [32]byte{9})
+	require.ErrorIs(t, err, ErrCorrupt, "a wrong digest: nothing matches, and the damaged packed copy is reported")
 }

@@ -18,6 +18,9 @@ const (
 	ProtocolRootPosControl      = "/ab/root-pos-control/1.0.0"
 )
 
+// consensusSendRetries is the number of repeats of an undelivered proposal, vote or timeout vote to a connected root (#982).
+const consensusSendRetries = 2
+
 func NewLibP2RootConsensusNetwork(self *Peer, capacity uint, sendTimeout time.Duration, obs Observability) (*LibP2PNetwork, error) {
 	n, err := NewLibP2PNetwork(self, capacity, obs)
 	if err != nil {
@@ -29,9 +32,10 @@ func NewLibP2RootConsensusNetwork(self *Peer, capacity uint, sendTimeout time.Du
 	}
 	sendProtocolDescriptions := []SendProtocolDescription{
 		{ProtocolID: ProtocolRootIrChangeReq, Timeout: sendTimeout, MsgType: abdrc.IrChangeReqMsg{}},
-		{ProtocolID: ProtocolRootProposal, Timeout: sendTimeout, MsgType: abdrc.ProposalMsg{}},
-		{ProtocolID: ProtocolRootVote, Timeout: sendTimeout, MsgType: abdrc.VoteMsg{}},
-		{ProtocolID: ProtocolRootTimeout, Timeout: sendTimeout, MsgType: abdrc.TimeoutMsg{}},
+		// a lost proposal or vote has no other repair and stalls a round with exactly a quorum live; a lost timeout vote waits a local timeout
+		{ProtocolID: ProtocolRootProposal, Timeout: sendTimeout, MsgType: abdrc.ProposalMsg{}, Retries: consensusSendRetries},
+		{ProtocolID: ProtocolRootVote, Timeout: sendTimeout, MsgType: abdrc.VoteMsg{}, Retries: consensusSendRetries},
+		{ProtocolID: ProtocolRootTimeout, Timeout: sendTimeout, MsgType: abdrc.TimeoutMsg{}, Retries: consensusSendRetries},
 		{ProtocolID: ProtocolRootStateReq, Timeout: sendTimeout, MsgType: abdrc.StateRequestMsg{}},
 		{ProtocolID: ProtocolRootStateResp, Timeout: sendTimeout, MsgType: abdrc.StateMsg{}},
 		{ProtocolID: ProtocolRootHandoffApproval, Timeout: approvalTimeout, MsgType: abdrc.HandoffApprovalMsg{}},

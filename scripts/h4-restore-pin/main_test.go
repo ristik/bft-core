@@ -13,28 +13,15 @@ import (
 	"testing"
 
 	gethtypes "github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/rlp"
+	"github.com/unicitynetwork/bft-core/archive"
+	"github.com/unicitynetwork/bft-core/archive/archivetest"
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/handoffdelivery"
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/util"
 )
-
-func TestArchiveRecordDirectorySupportsV1AndV2(t *testing.T) {
-	hash := strings.Repeat("ab", 32)
-	for name, want := range map[string]bool{
-		hash:                             true,
-		"v2-" + hash:                     true,
-		"v2-" + strings.Repeat("g0", 32): false,
-		"v3-" + hash:                     false,
-		"v2-" + hash[:62]:                false,
-		"prefix-" + hash:                 false,
-	} {
-		if got := archiveRecordDirectory(name); got != want {
-			t.Errorf("archiveRecordDirectory(%q) = %v, want %v", name, got, want)
-		}
-	}
-}
 
 func TestPreferPinUsesLatestEpochThenRoundAndPrefersV2(t *testing.T) {
 	cases := []struct {
@@ -61,24 +48,32 @@ func TestPreferPinUsesLatestEpochThenRoundAndPrefersV2(t *testing.T) {
 }
 
 func TestArchiveTrustBodyIDReadsTheTipEpochBundle(t *testing.T) {
-	dir := t.TempDir()
-	bundle := handoffdelivery.Bundle{Body: evmroot.TrustBaseBodyV2{Epoch: 3, Version: evmroot.TrustBaseVersion}}
-	raw, err := handoffdelivery.EncodeBundle(bundle)
-	if err != nil {
-		t.Fatal(err)
-	}
-	digest := sha256.Sum256(raw)
-	path := filepath.Join(dir, fmt.Sprintf("bundle-%016x-test", bundle.Body.Epoch))
-	if err := os.WriteFile(path, append(digest[:], raw...), 0600); err != nil {
-		t.Fatal(err)
-	}
-	got, err := archiveTrustBodyID(dir, 3, &types.RootTrustBaseV1{Epoch: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := bundle.Body.Identity()
-	if got != [32]byte(want) {
-		t.Fatalf("body id = %x, want %x", got, want)
+	// The bundle directory of the current archive layout, and the archive directory itself for an archive written before bft-core#1018.
+	for _, sub := range []string{"bundles", ""} {
+		t.Run("in "+sub+"/", func(t *testing.T) {
+			dir := t.TempDir()
+			bundle := handoffdelivery.Bundle{Body: evmroot.TrustBaseBodyV2{Epoch: 3, Version: evmroot.TrustBaseVersion}}
+			raw, err := handoffdelivery.EncodeBundle(bundle)
+			if err != nil {
+				t.Fatal(err)
+			}
+			digest := sha256.Sum256(raw)
+			if err := os.MkdirAll(filepath.Join(dir, sub), 0700); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, sub, fmt.Sprintf("bundle-%016x-test", bundle.Body.Epoch))
+			if err := os.WriteFile(path, append(digest[:], raw...), 0600); err != nil {
+				t.Fatal(err)
+			}
+			got, err := archiveTrustBodyID(dir, 3, &types.RootTrustBaseV1{Epoch: 1})
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := bundle.Body.Identity()
+			if got != [32]byte(want) {
+				t.Fatalf("body id = %x, want %x", got, want)
+			}
+		})
 	}
 }
 
@@ -100,29 +95,42 @@ func TestNamedBodyIDIsTakenOnlyForItsEpochAndOnlyWhenWellFormed(t *testing.T) {
 	}
 }
 
-// pinFixture is an archive with one certified record at root epoch `rootEpoch` and a genesis (epoch 1) trust base; it returns the paths.
-func pinFixture(t *testing.T, rootEpoch uint64) (archive, trustBase, prefix string) {
+// pinFixture is an archive with one certified record at root epoch `rootEpoch`, packed or in the directory layout of an earlier binary
+// (bft-core#1049), and a genesis (epoch 1) trust base; it returns the paths.
+func pinFixture(t *testing.T, rootEpoch uint64, directoryLayout bool) (archiveDir, trustBase, prefix string) {
 	t.Helper()
 	root := t.TempDir()
-	archive = filepath.Join(root, "archive")
-	record := filepath.Join(archive, strings.Repeat("ab", 32))
-	if err := os.MkdirAll(record, 0o700); err != nil {
+	archiveDir = filepath.Join(root, "archive")
+	headerRaw, err := rlp.EncodeToBytes(&gethtypes.Header{Number: big.NewInt(4), Difficulty: new(big.Int)})
+	if err != nil {
 		t.Fatal(err)
 	}
+	q := archive.Request{Context: archive.Context{NetworkID: 1, PartitionID: 2, ExecutionIdentity: []byte("config")}}
+	q.Context.FullShardConfHash[0], q.Context.RegistryAddress[0], q.Context.RegistryCodeHash[0] = 1, 2, 3
+	q.Context.GenesisCommitment[0], q.Context.EVMGenesisHash[0] = 4, 5
+	copy(q.BlockHash[:], crypto.Keccak256(headerRaw))
 	uc := types.UnicityCertificate{
-		InputRecord: &types.InputRecord{RoundNumber: 5, BlockHash: make([]byte, 32)},
+		InputRecord: &types.InputRecord{RoundNumber: 5, BlockHash: q.BlockHash[:]},
 		UnicitySeal: &types.UnicitySeal{Epoch: rootEpoch, RootChainRoundNumber: 9},
 	}
 	ucRaw, err := types.Cbor.Marshal(uc)
 	if err != nil {
 		t.Fatal(err)
 	}
-	headerRaw, err := rlp.EncodeToBytes(&gethtypes.Header{Number: big.NewInt(4)})
-	if err != nil {
+	rec := &archive.Record{Header: headerRaw, Body: []byte{0xc0}, CanonicalRootInput: []byte{1}, OriginalUC: []byte{2}, OriginalTR: []byte{3}, ResultingUC: ucRaw, ResultingTR: []byte{1}, Companion: []byte{6}}
+	if err := os.MkdirAll(archiveDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	for name, raw := range map[string][]byte{"resulting-uc": ucRaw, "resulting-tr": {1}, "header": headerRaw} {
-		if err := os.WriteFile(filepath.Join(record, hex.EncodeToString([]byte(name))+".chunk"), raw, 0o600); err != nil {
+	if directoryLayout {
+		if _, err := archivetest.WriteDirectoryLayout(archiveDir, q, rec, false); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		store, err := archive.Open(archiveDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Put(q, rec); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -130,7 +138,7 @@ func pinFixture(t *testing.T, rootEpoch uint64) (archive, trustBase, prefix stri
 	if err := util.WriteJsonFile(trustBase, &types.RootTrustBaseV1{Epoch: 1}); err != nil {
 		t.Fatal(err)
 	}
-	return archive, trustBase, filepath.Join(root, "pin")
+	return archiveDir, trustBase, filepath.Join(root, "pin")
 }
 
 // Missing input is a named error, not a panic: each refusal is its own sentinel, so a caller can tell them apart.
@@ -149,31 +157,36 @@ func TestRunRefusesMissingInputWithNamedErrors(t *testing.T) {
 		t.Fatalf("archive with no certified record: %v", err)
 	}
 
-	// the case that panicked: the newest record is at root epoch 2, a Q3 activation the archive holds no bundle for
-	archive, trustBase, prefix := pinFixture(t, 2)
-	err := run([]string{archive, trustBase, prefix}, noEnv, &out)
-	if !errors.Is(err, errNoTrustBodyID) {
-		t.Fatalf("missing body identity: %v", err)
-	}
-	if !strings.Contains(err.Error(), "epoch 2") {
-		t.Fatalf("the refusal does not name the epoch: %v", err)
-	}
-	if _, statErr := os.Stat(prefix + ".uc.cbor"); statErr == nil {
-		t.Fatal("a refused run wrote a pin")
-	}
-	// naming another epoch's identity does not help; naming this epoch's does, and the pin is written
-	other := func(string) string { return "3=" + strings.Repeat("ab", 32) }
-	if err := run([]string{archive, trustBase, prefix}, other, &out); !errors.Is(err, errNoTrustBodyID) {
-		t.Fatalf("an identity named for another epoch: %v", err)
-	}
-	named := func(string) string { return "2=" + strings.Repeat("ab", 32) }
-	if err := run([]string{archive, trustBase, prefix}, named, &out); err != nil {
-		t.Fatalf("named identity: %v", err)
-	}
-	if !strings.Contains(out.String(), "bodyID=0x"+strings.Repeat("ab", 32)) {
-		t.Fatalf("pin line: %q", out.String())
-	}
-	if _, statErr := os.Stat(prefix + ".uc.cbor"); statErr != nil {
-		t.Fatalf("the pin was not written: %v", statErr)
+	for _, directoryLayout := range []bool{false, true} {
+		t.Run(map[bool]string{false: "packed", true: "directory layout"}[directoryLayout], func(t *testing.T) {
+			var out strings.Builder
+			// the case that panicked: the newest record is at root epoch 2, a Q3 activation the archive holds no bundle for
+			archive, trustBase, prefix := pinFixture(t, 2, directoryLayout)
+			err := run([]string{archive, trustBase, prefix}, noEnv, &out)
+			if !errors.Is(err, errNoTrustBodyID) {
+				t.Fatalf("missing body identity: %v", err)
+			}
+			if !strings.Contains(err.Error(), "epoch 2") {
+				t.Fatalf("the refusal does not name the epoch: %v", err)
+			}
+			if _, statErr := os.Stat(prefix + ".uc.cbor"); statErr == nil {
+				t.Fatal("a refused run wrote a pin")
+			}
+			// naming another epoch's identity does not help; naming this epoch's does, and the pin is written
+			other := func(string) string { return "3=" + strings.Repeat("ab", 32) }
+			if err := run([]string{archive, trustBase, prefix}, other, &out); !errors.Is(err, errNoTrustBodyID) {
+				t.Fatalf("an identity named for another epoch: %v", err)
+			}
+			named := func(string) string { return "2=" + strings.Repeat("ab", 32) }
+			if err := run([]string{archive, trustBase, prefix}, named, &out); err != nil {
+				t.Fatalf("named identity: %v", err)
+			}
+			if !strings.Contains(out.String(), "bodyID=0x"+strings.Repeat("ab", 32)) {
+				t.Fatalf("pin line: %q", out.String())
+			}
+			if _, statErr := os.Stat(prefix + ".uc.cbor"); statErr != nil {
+				t.Fatalf("the pin was not written: %v", statErr)
+			}
+		})
 	}
 }

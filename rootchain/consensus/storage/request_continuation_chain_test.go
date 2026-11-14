@@ -48,7 +48,8 @@ func TestEVMAssignmentIsContinuedAcrossRootOnlyEpochsThenGenuinelyReplaced(t *te
 				round, epoch uint64
 				body         []byte
 			}{{fxActivate - 6, 4, fxBody1}, {fxActivate - 2, 5, fxBody2}} {
-				v := s.mustResolve(snap, step.round, step.epoch, step.body, PurposeExecute)
+				// the parent is recertified by the first block of each root interval (#1036)
+				v := s.mustResolve(s.snapshotWith(withRootEpoch(s.parent, step.epoch), chain...), step.round, step.epoch, step.body, PurposeExecute)
 				oldView = v
 				require.EqualValues(t, tc.total, v.Context().TotalWeight())
 				require.EqualValues(t, tc.quorum, v.Context().Threshold())
@@ -101,7 +102,7 @@ func TestSuccessorCertifiedParentThroughContinuationsWithRepeatedTimeouts(t *tes
 		for i := 0; i < repeats; i++ {
 			require.NoError(t, cur.nextRound(nil))
 		}
-		snap := s.snapshotWith(&cur, s.anchor, s.succ, c1, c2)
+		snap := s.snapshotWith(withRootEpoch(&cur, 6), s.anchor, s.succ, c1, c2) // recertified in root epoch 6 (#1036)
 		v := s.mustResolve(snap, fxActivate+25, 6, fxBody3, PurposeExecute)
 		require.Equal(t, parent.LastCR.Technical, v.ExpectedTR(), "repeats %d: the certified record, whatever the execution TR advanced to", repeats)
 		require.EqualValues(t, 7+uint64(repeats), cur.TR.Round, "the execution TR advanced by the real timeouts")

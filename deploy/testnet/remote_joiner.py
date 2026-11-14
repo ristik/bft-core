@@ -76,37 +76,83 @@ SEED = r'''
 import os, shutil, sys, tarfile
 ROOT = sys.argv[1] if len(sys.argv) > 1 else '/a'
 t = tarfile.open(fileobj=sys.stdin.buffer, mode='r|')
-added = kept = 0
+added = kept = skipped = 0
 current = None
+def fsync_dir(path):
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+def held(rec):
+    # a record the node has, in either archive layout (bft-core#1049): its packed file records/<hh>/<rec>, or its directory with a manifest
+    # (a directory without one is not a record the node can read)
+    return os.path.exists(os.path.join(ROOT, rec, 'manifest')) or os.path.exists(os.path.join(ROOT, 'records', rec[3:5], rec))
 def finish(rec):
-    global added, kept
+    global added, kept, skipped
     if rec is None:
         return
     final, tmp = os.path.join(ROOT, rec), os.path.join(ROOT, '.seed-' + rec)
-    if os.path.exists(final):
+    if held(rec):
         shutil.rmtree(tmp, ignore_errors=True); kept += 1
+    elif not os.path.exists(os.path.join(tmp, 'manifest')):
+        shutil.rmtree(tmp, ignore_errors=True); skipped += 1   # a directory streamed without its manifest is never placed
     elif os.path.isdir(tmp):
         try:
+            fsync_dir(tmp)
             os.rename(tmp, final); added += 1
+            fsync_dir(ROOT)   # placed durably: the node counts what it finds as stored
         except OSError:   # the running node wrote the same record meanwhile: its own copy stays
             shutil.rmtree(tmp, ignore_errors=True); kept += 1
+def packed(m, shard, rec):
+    # one packed record file: written and synced under a temporary name in its fan-out directory, then linked into place, which (unlike a
+    # rename) never replaces a record the node placed meanwhile; the directories are synced after, so the placement is durable
+    global added, kept
+    if len(shard) != 2 or rec[3:5] != shard or not m.isfile():
+        return
+    if held(rec):
+        kept += 1; return
+    records = os.path.join(ROOT, 'records')
+    d = os.path.join(records, shard)
+    made_records, made_d = not os.path.isdir(records), not os.path.isdir(d)
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    tmp = os.path.join(d, '.seed-' + rec)
+    if os.path.lexists(tmp):
+        os.unlink(tmp)   # a leftover of a crash between link and unlink: another name of a placed record, never written through
+    with open(tmp, 'xb') as out:
+        out.write(t.extractfile(m).read()); out.flush(); os.fsync(out.fileno())
+    os.chmod(tmp, 0o600)
+    try:
+        os.link(tmp, os.path.join(d, rec)); added += 1
+    except FileExistsError:
+        kept += 1
+    os.unlink(tmp)
+    fsync_dir(d)
+    if made_d:
+        fsync_dir(records)
+    if made_records:
+        fsync_dir(ROOT)
 for m in t:
     parts = m.name.split('/')
+    if parts[0] == 'records' and len(parts) == 3 and parts[2].startswith('v2-'):
+        finish(current); current = None
+        packed(m, parts[1], parts[2])
+        continue
     if not parts[0].startswith('v2-') or len(parts) > 2:
         continue
     if parts[0] != current:
         finish(current); current = parts[0]
-    if os.path.exists(os.path.join(ROOT, current)):
+    if held(current):
         continue
     tmp = os.path.join(ROOT, '.seed-' + current)
     os.makedirs(tmp, mode=0o700, exist_ok=True)
     if m.isfile() and len(parts) == 2:
         p = os.path.join(tmp, parts[1])
         with open(p, 'wb') as out:
-            out.write(t.extractfile(m).read())
+            out.write(t.extractfile(m).read()); out.flush(); os.fsync(out.fileno())
         os.chmod(p, 0o600)
 finish(current)
-print('added', added, 'kept', kept)
+print('added', added, 'kept', kept, *(('skipped', skipped) if skipped else ()))
 '''   # a record directory is placed by rename once complete, and only when missing (the seeding of a running node's archive never touches a record it has)
 
 

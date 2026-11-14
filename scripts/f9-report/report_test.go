@@ -45,10 +45,15 @@ func TestMeasureArchiveCountsBytesAndStopsAtDirectoryLimit(t *testing.T) {
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "chunk-00"), []byte("123"), 0600))
 	}
 	require.NoError(t, os.Mkdir(filepath.Join(root, "not-an-archive-record"), 0700))
+	// a packed record (bft-core#1049) is one file in its fan-out directory; a temporary file beside it is not a record
+	packed := filepath.Join(root, "records", "cc")
+	require.NoError(t, os.MkdirAll(packed, 0700))
+	require.NoError(t, os.WriteFile(filepath.Join(packed, "v2-"+strings.Repeat("c", 64)), []byte("1234567"), 0600))
+	require.NoError(t, os.WriteFile(filepath.Join(packed, ".writing-1"), []byte("partial"), 0600))
 	complete := measureArchive(root, 3)
-	require.True(t, complete.Complete)
-	require.Equal(t, uint64(2), complete.Records)
-	require.Equal(t, uint64(16), complete.Bytes)
+	require.True(t, complete.Complete, complete.Error)
+	require.Equal(t, uint64(3), complete.Records)
+	require.Equal(t, uint64(23), complete.Bytes)
 	bounded := measureArchive(root, 1)
 	require.False(t, bounded.Complete)
 	require.Equal(t, uint64(1), bounded.Records)
