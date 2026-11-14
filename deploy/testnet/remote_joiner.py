@@ -868,8 +868,10 @@ def background_stop(lap):
 
 
 def bridge_of(lap):
-    """The Linux bridge interface of this project's validators network (docker names it br-<the network id's first 12 hex digits>)."""
-    return 'br-' + run(['docker', 'network', 'inspect', '-f', '{{.Id}}', f'{lap.state["project"]}_validators']).stdout.strip()[:12]
+    """The Linux bridge interface of this project's validators network: its com.docker.network.bridge.name option when the network sets one,
+    else docker's default name, br-<the network id's first 12 hex digits>."""
+    info = json.loads(run(['docker', 'network', 'inspect', f'{lap.state["project"]}_validators']).stdout)[0]
+    return (info.get('Options') or {}).get('com.docker.network.bridge.name') or 'br-' + info['Id'][:12]
 
 
 def isolation_rules(bridge, project):
@@ -884,31 +886,48 @@ def isolation_rules(bridge, project):
             ['-o', bridge, *tag, '-j', 'DROP']]
 
 
+def tagged_rules(project):
+    """This project's DOCKER-USER rules as `iptables -D` arguments, read from `iptables -S` (none when the chain does not exist)."""
+    listing = run(['sudo', 'iptables', '-S', 'DOCKER-USER'], check=False)
+    if listing.returncode != 0:
+        return []
+    return [shlex.split(line[len('-A DOCKER-USER '):]) for line in listing.stdout.splitlines()
+            if line.startswith('-A DOCKER-USER ') and f'"unicity-joiner {project}"' in line]
+
+
+def drop_tagged_rules(project):
+    for rule in tagged_rules(project):
+        run(['sudo', 'iptables', '-D', 'DOCKER-USER', *rule])
+
+
 def isolate(lap, wan_ms=None, rules=True):
-    """Opt-in (start --isolate-bridge / --emulate-wan MS): the DOCKER-USER rules above (idempotent) and a netem delay on the bridge, both before
-    any container of the project starts. Removed by `unisolate`."""
+    """Opt-in (start --isolate-bridge / --emulate-wan MS): the DOCKER-USER rules above and a netem delay on the bridge, both before any container of
+    the project starts. Re-runnable: the project's tagged rules are removed first and the three inserted again in one pass, so a partial earlier
+    set can never leave a DROP ahead of the RETURN. Removed by `unisolate`.
+    netem on the bridge delays only the bridge's egress, i.e. host-to-container packets (what the containers receive); their own sends leave
+    undelayed, so the added round trip is MS, not 2 x MS."""
     bridge, project = bridge_of(lap), lap.state['project']
     if rules:
+        drop_tagged_rules(project)
         for rule in reversed(isolation_rules(bridge, project)):   # inserted at the top in reverse: they end up in order, ahead of docker's own
-            if run(['sudo', 'iptables', '-C', 'DOCKER-USER', *rule], check=False).returncode != 0:
-                run(['sudo', 'iptables', '-I', 'DOCKER-USER', '1', *rule])
+            run(['sudo', 'iptables', '-I', 'DOCKER-USER', '1', *rule])
         say(f'isolated {bridge}: only its own containers and the host\'s published addresses are reachable (DOCKER-USER, comment "unicity-joiner {project}")')
     if wan_ms:
         jitter = max(1, int(wan_ms) // 10)
         run(['sudo', 'tc', 'qdisc', 'replace', 'dev', bridge, 'root', 'netem', 'delay', f'{int(wan_ms)}ms', f'{jitter}ms'])
         say(f'netem on {bridge}: {int(wan_ms)} ms +- {jitter} ms')
-    lap.state['isolation'] = {'bridge': bridge, 'wanMs': int(wan_ms) if wan_ms else None, 'since': now()}
+    previous = lap.state.get('isolation') or {}
+    lap.state['isolation'] = {'bridge': bridge, 'rules': bool(rules) or bool(previous.get('rules')), 'wanMs': int(wan_ms) if wan_ms else previous.get('wanMs'),
+                              'since': now()}
     lap.save()
 
 
 def unisolate(lap):
-    """Remove this project's DOCKER-USER rules (by their comment) and its bridge's netem qdisc; other rules are never touched."""
+    """Remove this project's DOCKER-USER rules (by their comment) and its bridge's netem qdisc; other rules are never touched. The qdisc is deleted
+    whenever a bridge is recorded (a missing one is not an error), so a re-run of start without --emulate-wan cannot strand a delay."""
     project, iso = lap.state['project'], lap.state.get('isolation') or {}
-    listing = run(['sudo', 'iptables', '-S', 'DOCKER-USER']).stdout.splitlines()
-    for line in listing:
-        if f'"unicity-joiner {project}"' in line and line.startswith('-A DOCKER-USER '):
-            run(['sudo', 'iptables', '-D', 'DOCKER-USER', *shlex.split(line[len('-A DOCKER-USER '):])])
-    if iso.get('wanMs') and iso.get('bridge'):
+    drop_tagged_rules(project)
+    if iso.get('bridge'):
         run(['sudo', 'tc', 'qdisc', 'del', 'dev', iso['bridge'], 'root'], check=False)
     lap.state.pop('isolation', None)
     lap.save()
@@ -964,12 +983,19 @@ def join(lap, dry_run=False, stop_after=None, allow_dirty=False, funder=None, ac
     return subprocess.run(['ssh', '-o', 'BatchMode=yes', '-o', 'ServerAliveInterval=15', s['host'], script]).returncode
 
 
+def positive_ms(text):
+    value = int(text)
+    if value <= 0:
+        raise argparse.ArgumentTypeError(f'--emulate-wan must be a positive number of milliseconds, not {text}')
+    return value
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('action', choices=('init', 'start', 'status', 'join', 'catch-up', 'retire', 'claim', 'agent', 'tunnel', 'background-stop', 'retire-plan', 'unisolate'))
     p.add_argument('--isolate-bridge', action='store_true', help='start, on a shared Linux docker host: DOCKER-USER rules so this entity reaches only its own containers '
                    'and the host\'s published addresses, as an external machine would (bft-core#1075); removed by `unisolate`')
-    p.add_argument('--emulate-wan', type=int, metavar='MS', help='start: a netem delay of MS ms (+-10%%) on this entity\'s bridge from before its first container starts')
+    p.add_argument('--emulate-wan', type=positive_ms, metavar='MS', help='start: a netem delay of MS ms (+-10%%) on this entity\'s bridge from before its first container starts')
     p.add_argument('--home', help='this entity\'s directory on the laptop (default ~/unicity-joiner/<generation>)')
     p.add_argument('--host')
     p.add_argument('--generation')
