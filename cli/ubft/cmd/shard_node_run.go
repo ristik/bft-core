@@ -929,10 +929,17 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		}
 		node.SetRole(role)
 		role.subscribe(node.RoleChanged) // a published promotion subscribes to the roots at once
-		reportRole := func() { epoch, active := role.published(); node.Health().UpdateRole(active, epoch) }
-		role.subscribe(reportRole)
-		reportRole()
+		// the health role is the live lease, read at every report: a restart's replay completes the activation before the runtime has
+		// completed its epoch, and the runtime's completion notifies nobody (bft-core#1061)
+		node.Health().SetRoleSource(role.published)
 	}
+	// the evidence the health report is about (bft-core#1057): this node, its network and shard, the installed configuration and the verified
+	// activation history, read at every report (never a stale notification, bft-core#1061)
+	bindingSource := shardBindingSource{self: peer.ID(), shard: shardConf, installed: activePeers.Installed, confHash: node.ShardConfForEpoch}
+	if q3rt != nil {
+		bindingSource.history = q3rt.HistoryEntries
+	}
+	node.Health().SetBindingSource(bindingSource.binding)
 
 	// The adapter authenticates certificates under the same per-epoch configuration set as the admission, not under a scan of every
 	// installed assignment. Set before Run.
