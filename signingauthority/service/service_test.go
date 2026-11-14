@@ -932,7 +932,12 @@ func TestReloadingClientContinuationsCancellationAndOrdering(t *testing.T) {
 	var mu sync.Mutex
 	current := f.admit(t).ex.credential
 	var loads atomic.Int32
-	load := func() ([]byte, error) { loads.Add(1); mu.Lock(); defer mu.Unlock(); return append([]byte(nil), current...), nil }
+	load := func() ([]byte, error) {
+		loads.Add(1)
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]byte(nil), current...), nil
+	}
 	c, err := NewReloadingClient(ClientConfig{Dial: f.clientDir, Timeout: 5 * time.Second}, load)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
