@@ -10,6 +10,12 @@ Each validator entity is a **four-container pod**: root, paired ureth, shard,
 signing authority. Separate containers give each process bounded resources,
 observable logs and independent restarts without a custom process supervisor.
 Each pod has separate root/shard/authority keys, Engine JWT, journals and archive.
+The shard archive keeps one file per block under `archive/records/<hh>/` since #1049; a node migrates the directory-per-block
+layout of an earlier binary by itself, records readable throughout. **Do not roll a migrated archive back to a binary (or an
+`h4-restore-pin`) from before #1049**: it reads only the directory layout, so every packed record is missing to it.
+Handoff bundles live in the shard archive's `bundles/` directory since #1053. A shard node or an `h4-restore-pin` from before #1053
+looks for them only in the archive directory itself: rolled back to one, a node does not see (or republish) the bundles written since, and
+`h4-restore-pin` needs `H4_RESTORE_BODY_IDS` for their epochs.
 Only its shard and authority share the authority directory/Unix sockets. Operator
 credentials are privileged host material; these pods are not a hostile-container
 security boundary. Never mount one validator's private directory into another.
@@ -33,8 +39,10 @@ engine protocol are supplied by the pinned BFT/ureth builds.
 The generated `compose.yaml` is JSON (valid YAML), default N=4, configurable N=3..16 (the registry's committee ceiling; a PoS generation is further limited to the election cap, 6).
 All services have CPU/memory/PID limits, explicit restart policies, read-only root filesystems
 and bounded Docker JSON logs (30 MiB/service). Each pod caps memory at about 4.2 GiB (4.125 GiB of its four services, of which the shard node's 2 GiB also covers the kernel cache of its archive tree, #1018:
-measured at 13 inodes and about 20 KB of slab per archived block, so at about 2800 blocks/h the archive slab can fill the 2 GiB in about 1.5 to 2.7 days if the kernel does not reclaim it;
-the observer's memory alert below is the early warning, and #1049 packs a record into one file,
+a record is one file since #1049, measured at 1.05 inodes and about 3 KB of slab per archived block (13 inodes and about 20 KB in the
+directory layout before it), so at about 2800 blocks/h the archive slab reaches 1.4 GB after 7 days if the kernel never reclaims it; a node
+started on an archive an earlier binary wrote migrates it in the background, giving back about 17 KB per block;
+the observer's memory alert below is the early warning,
 plus a 16 MiB namespace holder and a 64 MiB metrics relay); shared services cap another 2.375 GiB, approximately **19.2 GiB for N=4** and
 **15.0 GiB for N=3**, plus Docker/OS/page cache/build overhead. Plan at least 24 GiB
 server RAM, 8 cores, 100 GiB initial SSD and off-host backup space; these are initial
@@ -365,6 +373,14 @@ aliases `root5`/`shard5` and joins TCP and Unix sockets in `~/rjoin/<generation>
 
 On the laptop, peer stubs `peer1..4` (aliases `root<i>`, `shard<i>`, `ureth<i>`) forward to the `-L` ports through `host.docker.internal`; the laptop's root and
 shard node announce `/dns4/root5/tcp/8000` and `/dns4/shard5/tcp/9000`. Operator RPCs (8002, 9101) never cross the tunnel.
+On a Linux docker host, pass the bridge gateway as `--mac-host` (an IP literal, e.g. `172.17.0.1`): the `-L` listeners then bind that address, because a
+container cannot reach the host's loopback. Every container on that bridge can then reach the forwarded root, shard and EL ports. The p2p ports authenticate
+their peers; the execution clients' 8545 does not.
+
+The registry `$G/handoff/remote-joiners/<J>.json` is written only under `handoff/drive.lock`, over the file's current content, by an atomic, fsynced
+replacement. Its state only moves forward (`follower`, `registered`, `bonded`, `preparing`, `prepared`, `member`, `retiring`, `retired`); a writer holding a
+stale copy is refused. A drive reads it afresh for its guard and refuses when a record is unreadable. Nothing rolls a root store back: an install
+interrupted before its record prefix was fetched completes on the root's next start (bft-core#1028). The `root-pre-epoch-N` copy is forensic only.
 
 `join` funds the owner from the operator account given as `--funder DIR` (a directory on the host with `keystore.json` and `password`), or else from the faucet
 account (100 UCT and gas; the key stays on the host), and passes `--funder` on to its drives; it registers and bonds (the laptop signs), and then prepares only
@@ -392,7 +408,25 @@ deciding what it signs (for example, checking the trust base and the assignment 
 
 With five unit weights the quorum is four: while the laptop is away the network has no fault tolerance left. Do not sleep the laptop, restart colima or its VM,
 or `docker compose down` its project: a restarted signing authority is a new EVM key that the delegation does not name, and nothing replaces it yet.
-`remote_entity.py retire-plan` prints the retirement sequence; nothing runs it (a retirement is still refused by default by the drive).
+`remote_entity.py retire-plan` prints the retirement sequence. `remote_joiner.py retire` runs it:
+1. It records `retiring`, then sends the owner's requestRetirement (signed on the laptop) unless custody already shows one. A rerun never sends it twice.
+2. It drives the result that excludes the entity (`--allow-unrehearsed-retirement`).
+3. It leaves the retired validator running as a follower, unless the operator passes `--evidence-retained NOTE`. NOTE is a statement, recorded in the
+   registry, that the surviving providers hold the UTB/Q3 lineage, the record cuts and logs and the other recovery evidence through this handoff.
+4. With that statement, it waits until every host writer's `archivePolicy` passes the gate, records the statement, and only then stops the validator
+   services. Volumes and keys are kept.
+
+A writer passes the gate when:
+- its `checkedShardEpoch` is at least the shard epoch the excluding handoff activated. A node without that field (before bft-core#1047) fails closed,
+  and `shardEpoch` is not used;
+- its `replicas` are exactly the ones archivepolicy derives for it from that epoch's installed shard configuration;
+- the retiree is in neither `replicas` nor `retained`;
+- `migrationComplete` is true.
+
+An unreadable report fails closed.
+
+`remote_joiner.py claim` matures and claims the bond once its holds pass. A join reuses an on-chain registration of the laptop's root key instead of
+registering again. One join, retire, claim or catch-up command per entity runs at a time; another is refused.
 
 ## Observation/fault campaign and evidence limits
 
@@ -406,7 +440,7 @@ single-host run proves independent failure domains. Test malformed/limited reque
 during observation and confirm recovery of normal requests. Preserve receipts,
 certification logs and before/after manifest IDs. Record failures as failures.
 
-The sampler is `observe.py` (read-only: no key, credential or signing method): `python3 deploy/testnet/observe.py $G --out /secure/path/observe` takes one sample a minute for 24 hours (`--interval`, `--duration`, `--samples`): every root's certified epoch and round, the gateway's `/healthz` and block number, the faucet guard's `/healthz` (its body, with the budget and balance, is kept for the OPERATOR to compare with the reserve: not judged by the tool; the aggregator's `/health` and the `mongo` healthcheck are likewise manual), every service's state, health and restart count, memory of this project's containers and disk use. It prints an `ALERT` and exits 1 for the notification rules above: certified heads stopped for `--stall` seconds (120; no root's round moved, or the execution chain's block at the gateway did not: the roots keep certifying while a stuck shard does not), a service not running or unhealthy, a restart count that went up, disk above `--disk-limit` percent (80), the gateway or faucet not answering 200, a container's memory above `--mem-limit` percent (90) of its limit, and the execution chain's block rate over the last `--rate-window` seconds (3600) below `--rate-drop` (0.5) of the best such rate seen. The last two catch a starving shard hours before it stalls (#1018: the rate fell from 2800/h to 350/h over four hours, and the memory sat at its limit throughout). The rehearsal runs it as a four-sample smoke (stage `observe`, `--no-faucet`: the faucet guard's health needs the signer, which a rehearsal does not start); that proves the collection and the alert rules on a runner, not a day on the host.
+The sampler is `observe.py` (read-only: no key, credential or signing method): `python3 deploy/testnet/observe.py $G --out /secure/path/observe` takes one sample a minute for 24 hours (`--interval`, `--duration`, `--samples`): every root's certified epoch and round, the gateway's `/healthz` and block number, the faucet guard's `/healthz` (its body, with the budget and balance, is kept for the OPERATOR to compare with the reserve: not judged by the tool; the aggregator's `/health` and the `mongo` healthcheck are likewise manual), every service's state, health and restart count, memory of this project's containers and disk use. It prints an `ALERT` and exits 1 for the notification rules above: certified heads stopped for `--stall` seconds (120; no root's round moved, or the execution chain's block at the gateway did not: the roots keep certifying while a stuck shard does not), a service not running or unhealthy, a restart count that went up, disk above `--disk-limit` percent (80), the gateway or faucet not answering 200, a container's memory above `--mem-limit` percent (90) of its limit for `--mem-samples` (5) samples in a row while its tasks stall on memory (cgroup memory pressure, PSI full avg60, at least `--mem-pressure` percent, 1.0; docker's figure counts page cache, which can sit at a limit for a whole run without stalling anyone; without pressure figures the samples in a row alone), an OOM kill in a container, and the execution chain's block rate over the last `--rate-window` seconds (3600) below `--rate-drop` (0.5) of the median of such rates, counted after the first `--rate-warmup` seconds (one window) so that a catch-up when sampling starts, or a later burst, is not the usual rate. These catch a starving shard hours before it stalls (#1018: the rate fell from 2800/h to 350/h over four hours, and the memory sat at its limit throughout, at 4 to 11 % memory pressure). The rehearsal runs it as a four-sample smoke (stage `observe`, `--no-faucet`: the faucet guard's health needs the signer, which a rehearsal does not start); that proves the collection and the alert rules on a runner, not a day on the host.
 
 For a generation made with `--pos`, `pos_sample.py` (same options, same read-only rule, reuses `observe.collect` and `observe.Watch`) adds the contracts' clock and books to every sample, read through the gateway: the registry's `progress()`, `ucTime()`, `recordCount()`, the custody's `recordCursor()`, the election's `thresholds()`, `openResult()`, `liveCount()`, and the reward pool's balance, `available()`, `totalCredits()`, `accounted()`, `nextStart()`. Extra alerts: registry progress stopped (`--stall`), the custody behind the registry's record count for more than `--lag` s, an election result open for more than `--open-limit` s (while one is open the pool closes the tail only up to the reservation progress, contracts#72), the pool holding less than it has accounted for, no funded balance left, an unreadable view. On a rehearsal runner use `--no-faucet`; the gateway needs the forwarded address, which the sampler sets. The rehearsal stage `pos-observe` runs it for two samples against the running package. It samples the package where it runs; it says nothing about a host unless it runs on that host.
 

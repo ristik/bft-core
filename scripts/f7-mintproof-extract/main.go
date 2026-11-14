@@ -3,15 +3,11 @@
 package main
 
 import (
-	"bytes"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
-	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
@@ -133,27 +129,19 @@ func run(args []string) int {
 }
 
 func requestForBlock(dir string, blockHash common.Hash) (archive.Request, error) {
-	entries, err := os.ReadDir(dir)
+	var matches []archive.Request
+	// every base record in either archive layout (bft-core#1049); only the v2 (receipt-complete) namespace is a mint proof source
+	err := archive.StoredNames(dir, 1024, func(names []string) error {
+		for _, name := range names {
+			request, v2, readErr := archive.StoredRequest(dir, name)
+			if readErr == nil && v2 && request.BlockHash == [32]byte(blockHash) {
+				matches = append(matches, request)
+			}
+		}
+		return nil
+	})
 	if err != nil {
 		return archive.Request{}, err
-	}
-	var matches []archive.Request
-	for _, entry := range entries {
-		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "v2-") {
-			continue
-		}
-		manifest, readErr := os.ReadFile(filepath.Join(dir, entry.Name(), "manifest"))
-		if readErr != nil || len(manifest) < 12 || !bytes.Equal(manifest[:8], []byte("ARCHIVE2")) {
-			continue
-		}
-		requestLen := binary.BigEndian.Uint32(manifest[8:12])
-		if requestLen == 0 || uint64(requestLen)+12 > uint64(len(manifest)) {
-			continue
-		}
-		request, decodeErr := archive.DecodeRequest(manifest[12 : 12+requestLen])
-		if decodeErr == nil && request.BlockHash == [32]byte(blockHash) {
-			matches = append(matches, request)
-		}
 	}
 	if len(matches) != 1 {
 		return archive.Request{}, fmt.Errorf("expected one receipt-complete archive request for %s, found %d", blockHash, len(matches))

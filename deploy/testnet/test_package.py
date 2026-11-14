@@ -26,6 +26,15 @@ import pos_join
 import pos_sample
 import pos_crash
 
+
+def strip_follow(svc):
+    """The joiner's shard service without its --follow-source pair (the one flag a joiner has and a genesis validator has not), and that pair's value."""
+    import copy as _copy
+    svc=_copy.deepcopy(svc); entry=svc['entrypoint']
+    if '--follow-source' not in entry: return svc,None
+    at=entry.index('--follow-source'); value=entry[at+1]; del entry[at:at+2]
+    return svc,value
+
 class FakeRelay:
     def __init__(self): self.calls=[]
     def call(self, method, params):
@@ -254,6 +263,7 @@ class UtbProfile(unittest.TestCase):
     def test_a_joiner_entity_gets_the_profile_with_its_own_store(self):
         four=self.topo(4,self.PIN);five=self.topo(5,self.PIN)
         got=joiner.joiner_services(four,5,'r4','e4')
+        got['shard5'],_=strip_follow(got['shard5'])
         for name in ('root5','shard5'):
             self.assertEqual(got[name],five['services'][name],name)
             self.assertEqual(self.flags(got[name]['entrypoint'])[3],self.PIN)
@@ -1756,7 +1766,10 @@ class Joiner(unittest.TestCase):
         got=joiner.joiner_services(four,5,'r4','e4')
         want={n:five['services'][n] for n in ('pod5','metrics5','root5','authority5','ureth5','shard5')}
         self.assertEqual(sorted(got),sorted(want))
+        got['shard5'],follow=strip_follow(got['shard5'])
         for name in want: self.assertEqual(got[name],want[name],name)
+        # the one difference: the joiner follows the genesis shard nodes, never a root, until its activation
+        self.assertEqual([a.split('/')[2] for a in follow.split(',')],['shard1','shard2','shard3','shard4'])
     def test_the_relayer_identity_file_has_the_fields_it_reads_and_no_evm_key(self):
         f=pos_join.joiner_file('0x'+'1'*64,'0x'+'2'*64,'0x'+'3'*40,'0x'+'4'*40,'rid','eid')
         self.assertEqual(sorted(f),['evmNodeId','expiry','ownerKey','payee','rootKey','rootNodeId','withdrawal'])
@@ -1924,25 +1937,57 @@ class Observe(unittest.TestCase):
     def test_the_faucet_can_be_left_out(self):
         s=self.sample([1]);del s['faucet']
         self.assertEqual(observe.Watch().step(s,0),[])
-    def test_a_container_near_its_memory_limit_is_an_alert(self):
+    def test_a_container_near_its_memory_limit_is_an_alert_only_while_it_stalls_on_memory(self):
         self.assertEqual(observe.memory_use('1.5GiB / 2GiB'),(1.5*2**30,2*2**30))
         self.assertEqual(observe.memory_use('511.6MiB / 512MiB'),(511.6*2**20,512*2**20))
         self.assertIsNone(observe.memory_use('--'),'a stopped container has no usage')
         mem={'p-shard1-1':'1.9GiB / 2GiB','p-root1-1':'100MiB / 384MiB','p-pod1-1':'--'}
-        alerts=observe.Watch().step(self.sample([1],memory=mem),0)
-        self.assertEqual([a for a in alerts if 'memory' in a],['p-shard1-1 memory 1.9GiB / 2GiB is above 90% of its limit'])
-        self.assertEqual(observe.Watch(mem_limit=96).step(self.sample([1],memory=mem),0),[])
-    def test_a_falling_block_rate_is_an_alert_before_the_chain_stops(self):
-        w=observe.Watch(stall=120,rate_window=3600,rate_drop=0.5)
-        # 2800 blocks/h for two hours, then 1000/h: the chain never stops, the rate falls
+        def run(pressure,samples=6,**kw):
+            w,alerts=observe.Watch(**kw),[]
+            for i in range(samples):
+                cg={'p-shard1-1':{'pressure_full_avg60':pressure,'oom_kill':0}}
+                alerts.append([a for a in w.step(self.sample([i+1],memory=mem,cgroup=cg),i*60) if 'memory' in a])
+            return alerts
+        starving=run(4.2)
+        self.assertEqual(starving[:4],[[]]*4,'four samples near the limit are not yet an alert')
+        self.assertEqual(starving[4],['p-shard1-1 memory 1.9GiB / 2GiB is above 90% of its limit for 5 samples (memory pressure, full avg60: 4.2%)'])
+        self.assertEqual(run(0.0),[[]]*6,'page cache at the limit, nobody stalls: no alert on a 24 h run')
+        self.assertTrue(run(None)[4],'without pressure figures, the samples in a row alone')
+        self.assertEqual(run(4.2,mem_limit=96),[[]]*6)
+    def test_an_oom_kill_is_an_alert(self):
+        w=observe.Watch()
+        cg=lambda n:{'p-shard1-1':{'pressure_full_avg60':0.0,'oom_kill':n}}
+        self.assertEqual(w.step(self.sample([1],cgroup=cg(2)),0),[],'the count when sampling starts is history')
+        self.assertEqual(w.step(self.sample([2],cgroup=cg(2)),60),[])
+        self.assertIn('p-shard1-1 had 1 OOM kill(s)',w.step(self.sample([3],cgroup=cg(3)),120))
+    def test_cgroup_memory_reads_pressure_and_oom_kills_and_tolerates_their_absence(self):
+        with tempfile.TemporaryDirectory() as d:
+            c=Path(d,'system.slice','docker-abc.scope');c.mkdir(parents=True)
+            (c/'memory.pressure').write_text('some avg10=8.00 avg60=6.50 avg300=3.00 total=1\nfull avg10=5.00 avg60=4.25 avg300=2.00 total=1\n')
+            (c/'memory.events').write_text('low 0\nhigh 0\nmax 4700000\noom 0\noom_kill 2\n')
+            self.assertEqual(observe.cgroup_memory('abc',d),{'pressure_full_avg60':4.25,'oom_kill':2})
+            self.assertEqual(observe.cgroup_memory('missing',d),{'pressure_full_avg60':None,'oom_kill':None})
+    def rates(self,w,per_minute):
         at,block,alerts=0,0,[]
-        for minute in range(4*60):
-            block+=(2800 if minute<120 else 1000)/60
-            alerts+=[a for a in w.step(self.sample([minute+1]*4,gateway={'healthz':200,'block':int(block)}),at) if 'block rate' in a]
-            if minute==150: self.assertEqual(alerts,[],'half an hour into the decline the hour-long rate is still above half')
+        for minute,rate in enumerate(per_minute):
+            block+=rate/60
+            alerts.append([a for a in w.step(self.sample([minute+1]*4,gateway={'healthz':200,'block':int(block)}),at) if 'block rate' in a])
             at+=60
-        self.assertTrue(alerts and 'fell to 10' in alerts[-1] and 'best 28' in alerts[-1],alerts[-1:])
-        self.assertFalse(any('execution chain stopped' in a for a in alerts))
+        return alerts
+    def test_a_falling_block_rate_is_an_alert_before_the_chain_stops(self):
+        # staging, 2026-11-12: 2800/h, then 2000, 1000, 700 and 340 blocks/h an hour each while the chain still moved
+        decline=[2800]*180+[2000]*60+[1000]*60+[700]*60+[340]*60
+        alerts=self.rates(observe.Watch(stall=120,rate_window=3600,rate_drop=0.5),decline)
+        first=next(i for i,a in enumerate(alerts) if a)
+        self.assertTrue(180+60<first<=180+120+30,f'the alert comes during the hour at 1000/h, at minute {first}')
+        usual=int(re.search(r'usual (\d+)/h',alerts[first][0]).group(1))
+        self.assertTrue(2000<=usual<=2800,alerts[first])
+        self.assertFalse(any('execution chain stopped' in a for x in alerts for a in x))
+    def test_a_catch_up_burst_is_not_the_usual_rate(self):
+        start=[20000]*20+[2800]*300
+        self.assertEqual([a for a in self.rates(observe.Watch(rate_window=3600),start) if a],[],'the warm-up hour keeps a burst at the start out')
+        later=[2800]*240+[20000]*20+[2800]*300
+        self.assertEqual([a for a in self.rates(observe.Watch(rate_window=3600),later) if a],[],'the median is not moved by a later burst')
 
 class PosSample(unittest.TestCase):
     def pos(self,**kw):

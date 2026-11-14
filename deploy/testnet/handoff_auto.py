@@ -31,7 +31,7 @@ HERE = Path(__file__).resolve().parent
 OUTCOMES = {0: 'driven', 1: 'stopped (rerun continues)', 3: 'refused', 4: 'skipped (not the expected committee)', 5: 'busy (another drive holds the lock)'}
 IDLE = 'the election has no open result'
 QUIET_SECONDS = 3600   # a repeated stand-down or skip is logged at most this often
-JOINING = ('registered', 'bonded', 'prepared', 'retiring')   # remote_entity.STATES before 'member', and the retirement
+JOINING = ('registered', 'bonded', 'preparing', 'prepared', 'retiring')   # remote_entity.STATES before 'member', and the retirement
 
 
 def joining(generation):

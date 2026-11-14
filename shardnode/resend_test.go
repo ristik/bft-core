@@ -507,3 +507,109 @@ func TestAnAttemptInvalidatedBetweenSubmitsIsNeverRetriedAsANewOne(t *testing.T)
 		require.Len(t, net.sent(), 2, "the request of the invalidated attempt is never sent again")
 	})
 }
+
+// roleClient is timedClient with phase 1's role lease: active under token 1. bound is a context of a request produced under token 1, with
+// its own attempt handle (one Round request).
+func roleClient(t *testing.T, opts BFTClientOptions) (*confBindingFixture, *BFTClient, *swallowingNet, *tokenRole, func(token uint64) context.Context) {
+	t.Helper()
+	f, c, net, _ := timedClient(t, opts)
+	role := &tokenRole{}
+	role.token.Store(1)
+	role.active.Store(true)
+	c.SetRole(role)
+	h := &attemptHandle{}
+	bound := func(token uint64) context.Context {
+		return withAttemptHandle(withRoleToken(context.Background(), token), h)
+	}
+	return f, c, net, role, bound
+}
+
+// A retirement while the first send fails ends the attempt: it is not kept pending, the timer never sends it, Round's retry of it is refused,
+// and a re-promotion, under a later token, never revives or re-creates it.
+func TestARetirementDuringAFailedFirstSendEndsTheAttempt(t *testing.T) {
+	f, c, _, role, bound := roleClient(t, BFTClientOptions{})
+	net := &hookNet{fail: true}
+	net.hook = func() { role.active.Store(false) }
+	c.net = net
+	req := pendingRequest(f)
+	err := c.Submit(bound(1), req)
+	require.Error(t, err)
+	require.True(t, neverPending(err), "Round does not retry it")
+	c.mu.Lock()
+	require.Nil(t, c.outstanding, "not kept pending under the ended role")
+	c.mu.Unlock()
+	c.resendStale(context.Background(), time.Now().Add(time.Hour))
+	require.ErrorIs(t, c.Submit(bound(1), req), errAttemptSuperseded, "Round's retry is refused")
+
+	role.token.Store(2)
+	role.active.Store(true) // re-promoted, without any certificate progress
+	c.resendStale(context.Background(), time.Now().Add(time.Hour))
+	require.ErrorIs(t, c.Submit(bound(1), req), errAttemptSuperseded, "not revived after the re-promotion")
+	require.ErrorIs(t, c.Submit(bound(2), req), errAttemptSuperseded, "nor re-created under the later token")
+	require.Empty(t, net.sent())
+}
+
+// A retirement and a re-promotion without any certificate progress: the attempt of the ended role is dropped by the next trigger, and neither
+// trigger nor Round's re-send of the request sends it under the later role.
+func TestARetirementAndRepromotionWithoutProgressNeverReviveTheAttempt(t *testing.T) {
+	ctx := context.Background()
+	for _, trigger := range []string{"timer", "duplicate"} {
+		t.Run(trigger, func(t *testing.T) {
+			f, c, net, role, bound := roleClient(t, BFTClientOptions{ResubmitMinInterval: time.Millisecond})
+			req := pendingRequest(f)
+			require.NoError(t, c.Submit(bound(1), req))
+			require.Len(t, net.sent(), 1)
+			role.active.Store(false)
+			role.token.Store(2)
+			role.active.Store(true) // retired and re-promoted before any trigger looked
+			fire := func() {
+				if trigger == "timer" {
+					c.resendStale(ctx, due2(c))
+					return
+				}
+				time.Sleep(3 * time.Millisecond)
+				require.NoError(t, c.handleCertificationResponse(ctx, f.respond(f.ucMine)))
+			}
+			fire()
+			require.Len(t, net.sent(), 1, "the attempt of the ended role is never re-sent")
+			c.mu.Lock()
+			require.Nil(t, c.outstanding, "it is dropped")
+			c.mu.Unlock()
+			fire()
+			require.ErrorIs(t, c.Submit(bound(1), req), errAttemptSuperseded, "Round's re-send under the old token is refused")
+			require.ErrorIs(t, c.Submit(bound(2), req), errAttemptSuperseded, "and the request is never re-created under the new one")
+			require.Len(t, net.sent(), 1)
+		})
+	}
+}
+
+// Both triggers check the attempt's own token: after a role change, an attempt of the earlier token is dropped and not sent, while a new
+// request of the new role (another Round request, its own handle) is sent and re-sent normally. Only the matching attempt is cancelled.
+func TestBothTriggersAdmitOnlyUnderTheAttemptsRole(t *testing.T) {
+	ctx := context.Background()
+	for _, trigger := range []string{"timer", "duplicate"} {
+		t.Run(trigger, func(t *testing.T) {
+			f, c, net, role, bound := roleClient(t, BFTClientOptions{ResubmitMinInterval: time.Millisecond})
+			fire := func() {
+				if trigger == "timer" {
+					c.resendStale(ctx, due2(c))
+					return
+				}
+				time.Sleep(3 * time.Millisecond)
+				require.NoError(t, c.handleCertificationResponse(ctx, f.respond(f.ucMine)))
+			}
+			require.NoError(t, c.Submit(bound(1), pendingRequest(f)))
+			role.token.Store(2) // a new publication of the role: still active, another token
+			fire()
+			require.Len(t, net.sent(), 1, "not re-sent under the new token")
+
+			newer := pendingRequest(f)
+			newer.InputRecord.Hash = bytes.Repeat([]byte{5}, 32)
+			ctx2 := withAttemptHandle(withRoleToken(ctx, 2), &attemptHandle{})
+			require.NoError(t, c.Submit(ctx2, newer))
+			fire()
+			require.Len(t, net.sent(), 3, "the new role's own request is sent and re-sent")
+			require.True(t, bytes.Equal(net.sentWire()[1], net.sentWire()[2]))
+		})
+	}
+}

@@ -574,6 +574,13 @@ func (a *Adapter) Commit(ctx context.Context, hash shardnode.Hash) (shardnode.St
 
 // deriveV2 authenticates the bound observation before reading a parent witness.
 // The parent subject is always the certified BlockRef supplied by the round.
+// sourceUnavailable reports an error caused by a source that is not available yet (recordsfeed.ErrUnavailable says Unavailable()):
+// the block is not judged, it is not invalid.
+func sourceUnavailable(err error) bool {
+	var u interface{ Unavailable() bool }
+	return errors.As(err, &u) && u.Unavailable()
+}
+
 func (a *Adapter) deriveV2(ctx context.Context, p shardnode.RoundParams, uc *types.UnicityCertificate, tr *certification.TechnicalRecord) (rootinput.ResultV2, error) {
 	rootEpoch := a.verifier.RootEpoch
 	a.transitionMu.RLock()
@@ -991,6 +998,12 @@ func (a *Adapter) Verify(ctx context.Context, b shardnode.Block, p shardnode.Rou
 				return shardnode.StatusSyncing, transientParentWitnessError{err}
 			}
 			return shardnode.StatusSyncing, fmt.Errorf("engineapi: acquiring parent witness for round %d: %w", p.Round, err)
+		}
+		if sourceUnavailable(err) {
+			// The root log the import is derived from is not available here yet (a non-active follower asks only mirrors, which may not
+			// hold it yet): this node cannot judge the block, it has not found it invalid. Reported as syncing, so recovery retries
+			// instead of stopping on a finalized-branch conflict (bft-core#1067, case 1).
+			return shardnode.StatusSyncing, fmt.Errorf("engineapi: the root log for round %d is not available yet: %w", p.Round, err)
 		}
 		return shardnode.StatusInvalid, fmt.Errorf("engineapi: authenticating the bound certificate for round %d: %w", p.Round, err)
 	}

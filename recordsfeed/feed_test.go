@@ -6,12 +6,15 @@ import (
 	"crypto"
 	"encoding/binary"
 	"errors"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/bft-core/evmroot"
+	"github.com/unicitynetwork/bft-core/keyvaluedb"
+	"github.com/unicitynetwork/bft-core/keyvaluedb/memorydb"
 	"github.com/unicitynetwork/bft-core/rootinput"
 	"github.com/unicitynetwork/bft-core/rootrecords"
 )
@@ -368,4 +371,127 @@ func TestACutOfAnotherNetworkIsNotAuthenticated(t *testing.T) {
 func TestACutKeyNeedsATreeRootOfTheRightWidth(t *testing.T) {
 	_, err := KeyOf(evmroot.RootOriginV2{RootRound: 1, UnicityTreeRoot: []byte{1}})
 	require.ErrorIs(t, err, ErrAuth)
+}
+
+// A source mirrors exactly what it verified: a follower whose only remote is that mirror (a Source as ServerSource) reaches the same
+// cursor and log without any root, and an unverified cut is never served.
+func TestAVerifiedSourceMirrorsItsCutsAndRecordsToAFollower(t *testing.T) {
+	c := buildChain(t, 300)
+	cut, origin := c.cutOf(t, 500, 9_000)
+	mirror := NewSource(&fakeRemote{cut: cut, records: c.records})
+	key, err := KeyOf(origin)
+	require.NoError(t, err)
+	_, err = mirror.ControlCut(key)
+	require.ErrorIs(t, err, ErrUnavailable, "nothing unverified is mirrored")
+	want, err := mirror.Cursor(context.Background(), origin)
+	require.NoError(t, err)
+
+	follower := NewSource(mirrorRemote{mirror})
+	got, err := follower.Cursor(context.Background(), origin)
+	require.NoError(t, err)
+	require.Equal(t, want, got)
+	for i := range c.records {
+		r, err := follower.Record(uint64(i))
+		require.NoError(t, err)
+		require.Equal(t, c.records[i], r)
+	}
+	_, err = mirror.Records(uint64(len(c.records))+1, 4)
+	require.ErrorIs(t, err, ErrUnavailable)
+}
+
+// mirrorRemote serves a ServerSource as a Remote, as the libp2p server and client do between two nodes.
+type mirrorRemote struct{ s ServerSource }
+
+func (m mirrorRemote) Cut(_ context.Context, key CutKey) (Cut, error) { return m.s.ControlCut(key) }
+func (m mirrorRemote) Records(_ context.Context, from uint64, max int) ([]rootrecords.Record, error) {
+	return m.s.Records(from, max)
+}
+
+// Historical root-free recovery survives the bounded cache and a restart, through the production construction only (NewSource, then
+// SetCutStore): a mirror that verified more origins than its cache holds restarts with nothing but its durable store, restores its record
+// log from it, and a follower catching up from the first origin verifies every origin through that mirror alone.
+func TestHistoricalCutsAndRecordsOutliveTheCacheAndARestart(t *testing.T) {
+	defer func(n int) { maxMirroredCuts = n }(maxMirroredCuts)
+	maxMirroredCuts = 4 // the bound is an optimization; the test exceeds it many times over
+	db := memorydb.New()
+	type origin struct {
+		origin evmroot.RootOriginV2
+	}
+	var origins []origin
+	remote := &fakeRemote{}
+	mirror := NewSource(remote)
+	require.NoError(t, mirror.SetCutStore(KVCutStore{DB: db}))
+	for i := 0; i < 40; i++ {
+		c := buildChain(t, 3+i)
+		cut, o := c.cutOf(t, uint64(500+10*i), uint64(9_000+i))
+		remote.cut, remote.records = cut, c.records
+		_, err := mirror.Cursor(context.Background(), o)
+		require.NoError(t, err)
+		origins = append(origins, origin{o})
+	}
+	require.NoError(t, mirror.PersistenceError())
+
+	restarted := NewSource() // the process restarted: only the durable store
+	require.NoError(t, restarted.SetCutStore(KVCutStore{DB: db}))
+	follower := NewSource(mirrorRemote{restarted})
+	for i, o := range origins {
+		_, err := follower.Cursor(context.Background(), o.origin)
+		require.NoError(t, err, "origin %d", i)
+	}
+	_, err := restarted.Record(0)
+	require.ErrorIs(t, err, ErrUnavailable, "a record loaded from disk is not used by the node itself before a cut re-authenticates it")
+	_, err = mirror.cutsOnly(origins[0].origin)
+	require.ErrorIs(t, err, ErrUnavailable, "the control: the in-memory cache alone has lost the first origin's cut")
+}
+
+// failingDB fails every write after the first n.
+type failingDB struct {
+	keyvaluedb.KeyValueDB
+	writes atomic.Int32
+	n      int32
+}
+
+func (d *failingDB) Write(k []byte, v any) error {
+	if d.writes.Add(1) > d.n {
+		return errors.New("disk full")
+	}
+	return d.KeyValueDB.Write(k, v)
+}
+
+// A retention failure is surfaced, not silently turned into the volatile cache: the source reports it (and its hook fires) while its own
+// verification keeps working; a retained log that does not verify is refused at load.
+func TestRetentionFailuresAreSurfaced(t *testing.T) {
+	c := buildChain(t, 5)
+	cut, o := c.cutOf(t, 500, 9_000)
+	src := NewSource(&fakeRemote{cut: cut, records: c.records})
+	db := &failingDB{KeyValueDB: memorydb.New(), n: 2}
+	require.NoError(t, src.SetCutStore(KVCutStore{DB: db}))
+	var hooked []error
+	src.OnPersistError(func(err error) { hooked = append(hooked, err) })
+	_, err := src.Cursor(context.Background(), o)
+	require.NoError(t, err, "verification does not depend on retention")
+	require.Error(t, src.PersistenceError())
+	require.NotEmpty(t, hooked)
+
+	// a tampered retained log: the second record's identifier no longer chains
+	good := memorydb.New()
+	store := KVCutStore{DB: good}
+	require.NoError(t, store.AppendRecords(c.records))
+	bad := c.records[1]
+	bad.ID[0] ^= 0xff
+	require.NoError(t, store.AppendRecords([]rootrecords.Record{bad}))
+	require.ErrorIs(t, NewSource().SetCutStore(store), ErrAuth)
+}
+
+func (s *Source) cutsOnly(o evmroot.RootOriginV2) (Cut, error) {
+	key, err := KeyOf(o)
+	if err != nil {
+		return Cut{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if cut, ok := s.cuts[key]; ok {
+		return cut, nil
+	}
+	return Cut{}, ErrUnavailable
 }

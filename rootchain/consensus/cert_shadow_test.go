@@ -145,6 +145,7 @@ func TestCertShadowSeesOnlySuccessfulVerificationsAndChangesNothing(t *testing.T
 
 	bad := shadowRecode(t, v)
 	bad.Timeout.HighQc.VoteInfo.Timestamp++
+	bad = shadowRecode(t, bad) // changed on the wire: a decoded message is identified by the bytes it was decoded from
 	before := shadow.stat("other", "QC", 1).calls
 	require.Error(t, rx.manager.onTimeoutMsg(ctx, bad))
 	require.Equal(t, before, shadow.stat("other", "QC", 1).calls, "a failed verification is never reported")
@@ -152,6 +153,7 @@ func TestCertShadowSeesOnlySuccessfulVerificationsAndChangesNothing(t *testing.T
 	// a vote carrying a valid later TC: the TC is one call, its own high QC another; the same QC as the vote's is a repeat within the message
 	withTC := shadowRecode(t, v)
 	withTC.LastTC = tc
+	withTC = shadowRecode(t, withTC)
 	shadow.begin(withTC, 77, round)
 	_ = rx.manager.onTimeoutMsg(ctx, withTC)
 	shadow.end()

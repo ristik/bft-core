@@ -112,3 +112,44 @@ func TestBundleLegacyLocationIsReadListedAndImmutable(t *testing.T) {
 		t.Fatalf("the legacy bundle is left where it is: %v", err)
 	}
 }
+
+// The bundle directory's entry is made durable before a bundle is published in it, and a failed sync of the store directory is retried by
+// the next put even though the directory exists by then; once one sync succeeded, no later put syncs the store directory again.
+func TestBundleDirectoryEntrySyncIsRetriedUntilItSucceeds(t *testing.T) {
+	request, _ := fixture()
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	storeSyncs, failNext := 0, true
+	injected := errors.New("injected sync failure")
+	store.disk = &diskOps{syncFile: (*os.File).Sync, rename: os.Rename, syncDir: func(dir string) error {
+		if dir == store.dir {
+			storeSyncs++
+			if failNext {
+				failNext = false
+				return injected
+			}
+		}
+		return syncDir(dir)
+	}}
+	put := func(epoch uint64) error {
+		_, err := store.PutBundle(BundleRequest{Context: request.Context, Epoch: epoch}, []byte("bundle"), nil)
+		return err
+	}
+	if err := put(1); !errors.Is(err, injected) {
+		t.Fatalf("the failed sync is returned: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(store.dir, bundleDir)); err != nil {
+		t.Fatalf("the directory was made: %v", err)
+	}
+	if err := put(1); err != nil || storeSyncs != 2 {
+		t.Fatalf("the next put syncs the store directory again (%d syncs): %v", storeSyncs, err)
+	}
+	if err := put(2); err != nil || storeSyncs != 2 {
+		t.Fatalf("after one successful sync none follows (%d syncs): %v", storeSyncs, err)
+	}
+	if epochs, err := store.BundleEpochs(request.Context); err != nil || !slices.Equal(epochs, []uint64{1, 2}) {
+		t.Fatalf("epochs: %v %v", epochs, err)
+	}
+}

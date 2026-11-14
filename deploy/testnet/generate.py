@@ -219,7 +219,7 @@ def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, wit
             '--engine-url','http://ureth%d:8551'%i,'--eth-url','http://ureth%d:8545'%i,
             '--jwt-secret','/jwt/jwt.hex','--engine-fee-collector',FEE,'--b1-profile','/network/b1-profile.json','--q3-lane',
             '--execution-journal','/state/execution-journal.db','--archive-store','/archive',
-            '--archive-prune','--journal-candidates','256','--trust-history-profile-2','--rpc-server-address',operator_rpc.listen(rpc_bind,operator_rpc.SHARD_PORT),'--metrics','prometheus',
+            '--archive-prune','--archive-public-reads','--journal-candidates','256','--trust-history-profile-2','--rpc-server-address',operator_rpc.listen(rpc_bind,operator_rpc.SHARD_PORT),'--metrics','prometheus',
             '--signing-authority-socket','/authority/client.sock','--signing-authority-credential','/authority/client.cred']
             + utb_node_flags(utb) + common,   # no --archive-replica: the node derives its replicas from the shard's validators (the next three in peer-ID order, any two make a block durable)
             [evm,auth,network,'./validator%d/jwt:/jwt:ro'%i,'./validator%d/archive:/archive'%i],memory='2048m',cpu=1.5,pod='pod%d'%i)

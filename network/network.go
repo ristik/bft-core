@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/rand/v2"
 	"reflect"
 	"slices"
 	"sync"
@@ -34,6 +35,10 @@ type (
 		ProtocolID string
 		MsgType    any           // value of the message type of the protocol
 		Timeout    time.Duration // timeout per receiver
+		// Retries is how many more times a message is sent to a receiver after an attempt that did not deliver it (the stream could not be
+		// opened or the message not written, mostly the Timeout running out on a loaded host), while the host is still connected to the
+		// receiver. Each attempt has its own Timeout; a receiver that is not connected (down, or never reached) gets no retry.
+		Retries int
 	}
 
 	ReceiveProtocolDescription struct {
@@ -67,6 +72,7 @@ type (
 	sendProtocolData struct {
 		protocolID string
 		timeout    time.Duration // per receiver timeout, ie when sending batch this is for each msg!
+		retries    int           // more attempts per receiver after an undelivered one (SendProtocolDescription.Retries)
 	}
 
 	Observability interface {
@@ -106,6 +112,11 @@ type LibP2PNetwork struct {
 
 	// streamReadTimeout, when set (tests), replaces defaultStreamReadTimeout. Set before the first stream arrives, never changed afterwards.
 	streamReadTimeout time.Duration
+
+	// sendData sends one message to one receiver (sendMsg; a test seam), connected reports whether the host has a connection to the peer
+	sendData  func(ctx context.Context, host *Peer, protocolID string, data []byte, receiverID peer.ID) error
+	connected func(peer.ID) bool
+	fault     atomic.Pointer[SendFault] // SetSendFault
 }
 
 // defaultStreamReadTimeout bounds the whole life of an incoming stream on the receiving side, from the start of its handler until the sender
@@ -132,7 +143,9 @@ func NewLibP2PNetwork(self *Peer, capacity uint, obs Observability) (*LibP2PNetw
 		done:          make(chan struct{}),
 		tracer:        obs.Tracer("LibP2PNetwork"),
 		log:           obs.Logger(),
+		sendData:      sendMsg,
 	}
+	n.connected = func(id peer.ID) bool { return self.Network().Connectedness(id) == libp2pNetwork.Connected }
 	return n, nil
 }
 
@@ -236,20 +249,98 @@ func (n *LibP2PNetwork) sendAsync(ctx context.Context, protocol *sendProtocolDat
 			ctx, span := n.tracer.Start(ctx, "LibP2PNetwork.sendAsync.func", trace.WithNewRoot(), trace.WithLinks(trace.LinkFromContext(ctx)), trace.WithAttributes(attribute.String("protocol", protocol.protocolID)))
 			defer span.End()
 			// network nodes
-			sendCtx, cancel := context.WithTimeout(ctx, protocol.timeout)
-			defer cancel()
-			if err := sendMsg(sendCtx, host, protocol.protocolID, data, receiverID); err != nil {
-				n.log.WarnContext(sendCtx, fmt.Sprintf("sending %s to %v", protocol.protocolID, receiverID), logger.Error(err))
+			attempts, err := n.sendWithRetries(ctx, host, protocol, data, receiverID)
+			if err != nil {
+				n.log.WarnContext(ctx, fmt.Sprintf("sending %s to %v (%d attempts)", protocol.protocolID, receiverID, attempts), logger.Error(err))
 			}
 		}(n.self, receiver)
 	}
 	return nil
 }
 
+// sendWithRetries sends data to the receiver, each attempt with the protocol's timeout, and again (up to protocol.retries more times) while
+// an attempt reported ErrNotDelivered and the host is still connected to the receiver. It returns the number of attempts and the last error.
+//
+// The root consensus has no other repair for a lost proposal or vote, and timeout votes are repeated only every local timeout: on a loaded
+// host the per-message deadline loses messages to live peers (11-30% of the timeout votes in the 128-root runs), and with exactly a quorum
+// live every lost one stalls the round (#982).
+//
+// A failed attempt does not prove that the receiver did not get the message: a write can fail after the receiver has read all of it. A
+// repeat is safe because it is the same serialized statement, not because the first copy is known to be lost: the bytes are encoded once,
+// before the receivers' goroutines, and nothing is signed again, so a receiver that gets two copies handles the second as the duplicate it
+// is (a duplicate vote or timeout vote is refused and counts no weight; a repeated proposal meets the round's voting rules again).
+//
+// Only an attempt to a peer the host is connected to is repeated, and a repeat never dials: connectedness is checked again after the delay
+// (it may have ended meanwhile) and the repeat runs under libp2p's no-dial context, so a peer that disconnected between the check and the
+// stream is not dialed. The first attempt dials as before. The delay before repeat k is k times 100-200 ms, spreading the repeats of a
+// burst; it ends when ctx does.
+func (n *LibP2PNetwork) sendWithRetries(ctx context.Context, host *Peer, protocol *sendProtocolData, data []byte, receiverID peer.ID) (int, error) {
+	attempts := 0
+	attempt := func(ctx context.Context) error {
+		attempts++
+		send, faultErr := true, error(nil)
+		if f := n.fault.Load(); f != nil {
+			if send, faultErr = (*f)(protocol.protocolID, receiverID, attempts); !send {
+				return faultErr
+			}
+		}
+		sendCtx, cancel := context.WithTimeout(ctx, protocol.timeout)
+		defer cancel()
+		if err := n.sendData(sendCtx, host, protocol.protocolID, data, receiverID); err != nil {
+			return err
+		}
+		return faultErr
+	}
+	err := attempt(ctx)
+	for err != nil && attempts <= protocol.retries && errors.Is(err, ErrNotDelivered) && n.connected(receiverID) {
+		delay := time.Duration(attempts) * (100*time.Millisecond + rand.N(100*time.Millisecond)) // #nosec G404 jitter, not security
+		select {
+		case <-ctx.Done():
+			return attempts, errors.Join(err, ctx.Err())
+		case <-time.After(delay):
+		}
+		if !n.connected(receiverID) {
+			break // disconnected during the delay: a repeat would have to dial
+		}
+		err = attempt(libp2pNetwork.WithNoDial(ctx, "repeat of an undelivered consensus message"))
+	}
+	return attempts, err
+}
+
+// ErrNotDelivered marks a send whose delivery is not confirmed: the stream was not opened, or writing the message failed. After a failed
+// write the receiver may still have the whole message; the error says only that the sender cannot count it as delivered.
+var ErrNotDelivered = errors.New("message not delivered")
+
+// notDelivered is a send error that is ErrNotDelivered (delivery not confirmed), with the message of the error it wraps.
+type notDelivered struct{ err error }
+
+func (e notDelivered) Error() string        { return e.err.Error() }
+func (e notDelivered) Unwrap() error        { return e.err }
+func (e notDelivered) Is(target error) bool { return target == ErrNotDelivered }
+
+// SendFault decides the fate of one send attempt (attempt counts from 1). With send false the attempt is not made and fails with err (a lost
+// message). With send true it is made, and if it succeeds it still fails with err when err is not nil (the receiver has the message, the
+// sender sees an error). An error wrapping ErrNotDelivered may be repeated by the network; any other is final.
+type SendFault func(protocolID string, receiver peer.ID, attempt int) (send bool, err error)
+
+// SetSendFault puts f in front of every send attempt to another peer: a fault injection point for tests of lossy links (nil removes it). It
+// is never set in production.
+func (n *LibP2PNetwork) SetSendFault(f SendFault) {
+	if f == nil {
+		n.fault.Store(nil)
+		return
+	}
+	n.fault.Store(&f)
+}
+
 func sendMsg(ctx context.Context, host *Peer, protocolID string, data []byte, receiverID peer.ID) (err error) {
 	s, err := host.CreateStream(ctx, receiverID, protocolID)
 	if err != nil {
-		return fmt.Errorf("open p2p stream: %w", err)
+		err = fmt.Errorf("open p2p stream: %w", err)
+		if lazyHandshakeRefused(err) {
+			return err // the peer does not speak the protocol: a repeat would be refused too
+		}
+		return notDelivered{err}
 	}
 	defer func() {
 		if closeErr := s.Close(); closeErr != nil {
@@ -258,11 +349,15 @@ func sendMsg(ctx context.Context, host *Peer, protocolID string, data []byte, re
 	}()
 	if deadline, ok := ctx.Deadline(); ok {
 		if err = s.SetWriteDeadline(deadline); err != nil {
-			return fmt.Errorf("error setting write deadline: %w", err)
+			return notDelivered{fmt.Errorf("error setting write deadline: %w", err)}
 		}
 	}
 	if _, err = s.Write(data); err != nil {
-		return fmt.Errorf("writing data to p2p stream: %w", err)
+		err = fmt.Errorf("writing data to p2p stream: %w", err)
+		if lazyHandshakeRefused(err) {
+			return err
+		}
+		return notDelivered{err}
 	}
 	// done close the stream
 	return nil
@@ -567,7 +662,10 @@ func (n *LibP2PNetwork) registerSendProtocol(protocol SendProtocolDescription) e
 		return fmt.Errorf("data type %s has been already registered for protocol %s", typ, spd.protocolID)
 	}
 
-	spx := &sendProtocolData{protocolID: protocol.ProtocolID, timeout: protocol.Timeout}
+	if protocol.Retries < 0 {
+		return fmt.Errorf("negative retry count is not allowed, got %d for %s", protocol.Retries, protocol.ProtocolID)
+	}
+	spx := &sendProtocolData{protocolID: protocol.ProtocolID, timeout: protocol.Timeout, retries: protocol.Retries}
 	n.sendProtocols[typ] = spx
 	n.sendProtocols[reflect.PointerTo(typ)] = spx
 	return nil

@@ -133,12 +133,17 @@ func (s *Store) PutBundle(q BundleRequest, raw []byte, same BundleEquivalence) (
 		return false, err
 	}
 	dir := filepath.Join(s.dir, bundleDir)
-	if err := os.Mkdir(dir, 0700); err == nil {
-		if err := syncDir(s.dir); err != nil { // the new directory's entry is durable before anything is published in it
+	if err := os.Mkdir(dir, 0700); err != nil && !os.IsExist(err) {
+		return false, err
+	}
+	// The directory's entry is durable before anything is published in it. The store directory is synced until one sync has succeeded in
+	// this Store, whether or not this call made the directory: a failed sync, or an earlier process that stopped between its mkdir and its
+	// sync, leaves a directory that exists but whose entry may not be durable.
+	if !s.bundleDirSynced {
+		if err := s.ops().syncDir(s.dir); err != nil {
 			return false, err
 		}
-	} else if !os.IsExist(err) {
-		return false, err
+		s.bundleDirSynced = true
 	}
 	file, err := os.CreateTemp(dir, ".bundle-*")
 	if err != nil {
@@ -163,7 +168,7 @@ func (s *Store) PutBundle(q BundleRequest, raw []byte, same BundleEquivalence) (
 	if err = os.Rename(file.Name(), current); err != nil {
 		return false, err
 	}
-	return true, syncDir(dir)
+	return true, s.ops().syncDir(dir)
 }
 
 func readBundle(path string) ([]byte, error) {

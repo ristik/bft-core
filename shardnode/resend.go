@@ -28,6 +28,10 @@ import (
 //     configuration of a new shard epoch (an assignment change, published together with the invalidation under c.mu). An attempt of an older
 //     generation is never sent again, by either re-send trigger (resendPending is their one admission), and is checked again immediately
 //     before the network send (sendRequest's final admission). A Round retry of an attempt that was superseded during its first send stops;
+//   - role-bound (phase 1's role lease): the attempt keeps the role token it was produced under, every send of it, both re-send triggers and
+//     the first send alike, is admitted last under that token (sendRequest), and the end of the role drops exactly that attempt (ErrFollower is
+//     never pending). Through its attemptHandle, a request whose attempt ended with its role is refused for good: a later role, a
+//     re-promotion included, never revives or re-creates it;
 //   - cancelled on activation (and, through sendRequest, on whatever final checks a build adds): every send is admitted last against the
 //     attempt's root-epoch origin (#1036), and an attempt built before the installed root activation is cancelled. As in #1051's policy, a send
 //     admitted before an activation or an invalidation may still complete: the network queues an admitted write asynchronously. The roots
@@ -73,7 +77,7 @@ var errAttemptSuperseded = errors.New("shardnode: the pending attempt was supers
 // neverPending reports whether a send failed in a way that makes the request unsendable for good: it is not kept as the pending attempt, and
 // Round does not retry it.
 func neverPending(err error) bool {
-	return errors.Is(err, ErrRequestAcrossActivation) || errors.Is(err, errAttemptSuperseded)
+	return errors.Is(err, ErrRequestAcrossActivation) || errors.Is(err, errAttemptSuperseded) || errors.Is(err, ErrFollower)
 }
 
 // resendInterval is the configured base of the timed re-send, or a negative value when it is disabled.
@@ -130,19 +134,23 @@ func thaw(wire []byte) (*certification.BlockCertificationRequest, error) {
 	return &req, nil
 }
 
-// beginAttemptLocked is the owned attempt of req on luc, bound to the root-epoch origin of the certificate that authorised it and to the
-// current generation, published as c.outstanding before anything is sent. The same logical attempt again (Round's retry: the same bytes on the
-// same certificate and origin, in the same generation) is the current attempt, kept with its retry budget. c.mu must be held.
-func (c *BFTClient) beginAttemptLocked(req *certification.BlockCertificationRequest, luc *types.UnicityCertificate, origin uint64, now time.Time) (*outstandingRequest, error) {
+// beginAttemptLocked is the owned attempt of req on luc, bound to the root-epoch origin of the certificate that authorised it, to the role
+// token it was produced under (token, bound: phase 1's role lease, Round.sendUnder) and to the current generation, published as c.outstanding
+// before anything is sent. The same logical attempt again (Round's retry: the same bytes on the same certificate and origin, under the same
+// token, in the same generation) is the current attempt, kept with its retry budget. c.mu must be held.
+func (c *BFTClient) beginAttemptLocked(req *certification.BlockCertificationRequest, luc *types.UnicityCertificate, origin uint64, token uint64, bound bool,
+	now time.Time) (*outstandingRequest, error) {
 	wire, err := freeze(req)
 	if err != nil {
 		return nil, err
 	}
 	on := deliveryAttempt{partitionRound: luc.GetRoundNumber(), rootRound: luc.GetRootRoundNumber()}
-	if o := c.outstanding; o != nil && o.gen == c.attemptGen && o.on == on && o.rootEpoch == origin && bytes.Equal(o.wire, wire) {
+	if o := c.outstanding; o != nil && o.gen == c.attemptGen && o.on == on && o.rootEpoch == origin && o.token == token && o.bound == bound &&
+		bytes.Equal(o.wire, wire) {
 		return o, nil
 	}
-	o := &outstandingRequest{wire: wire, on: on, gen: c.attemptGen, jitter: c.resendJitter(), firstSent: now, lastSent: now, rootEpoch: origin}
+	o := &outstandingRequest{wire: wire, on: on, gen: c.attemptGen, jitter: c.resendJitter(), firstSent: now, lastSent: now, rootEpoch: origin,
+		token: token, bound: bound}
 	if o.req, err = thaw(wire); err != nil {
 		return nil, err
 	}
@@ -153,7 +161,7 @@ func (c *BFTClient) beginAttemptLocked(req *certification.BlockCertificationRequ
 // newAttemptLocked is beginAttemptLocked for a caller that knows its request encodes (tests): it panics otherwise.
 func (c *BFTClient) newAttemptLocked(req *certification.BlockCertificationRequest, luc *types.UnicityCertificate, origin uint64, now time.Time) *outstandingRequest {
 	c.outstanding = nil
-	o, err := c.beginAttemptLocked(req, luc, origin, now)
+	o, err := c.beginAttemptLocked(req, luc, origin, 0, false, now)
 	if err != nil {
 		panic(err)
 	}
@@ -190,7 +198,8 @@ func (c *BFTClient) submitAttemptLocked(ctx context.Context, req *certification.
 	if h != nil && h.o != nil && !c.currentLocked(h.o) {
 		return nil, fmt.Errorf("%w: the attempt of this request was invalidated (generation %d, now %d)", errAttemptSuperseded, h.o.gen, c.attemptGen)
 	}
-	o, err := c.beginAttemptLocked(req, luc, origin, now)
+	token, bound := roleTokenOf(ctx)
+	o, err := c.beginAttemptLocked(req, luc, origin, token, bound, now)
 	if err != nil {
 		return nil, err
 	}
@@ -198,6 +207,13 @@ func (c *BFTClient) submitAttemptLocked(ctx context.Context, req *certification.
 		h.o = o
 	}
 	return o, nil
+}
+
+// roleEndedLocked reports whether the role o was produced under has ended (a retirement, a revocation or a new publication of the role): o is
+// then never sent again, and a later role, a re-promotion included, never revives it. An attempt bound to no token (a caller that binds none)
+// is judged by sendRequest's follower check alone. c.mu must be held.
+func (c *BFTClient) roleEndedLocked(o *outstandingRequest) bool {
+	return o.bound && !c.role.Load().admits(o.token)
 }
 
 // currentLocked reports whether o is still the client's attempt, in the current generation. c.mu must be held.
@@ -217,11 +233,15 @@ func (c *BFTClient) currentAttempt(o *outstandingRequest) func() error {
 	}
 }
 
-// sendAttempt sends a private copy of o's frozen bytes to the roots selected from held, admitted last against its origin and its currency.
+// sendAttempt sends a private copy of o's frozen bytes to the roots selected from held, under o's own role token, admitted last against that
+// token (sendRequest's role check), its origin and its currency. Both re-send triggers and the first send go through it.
 func (c *BFTClient) sendAttempt(ctx context.Context, o *outstandingRequest, held *types.UnicityCertificate) error {
 	msg, err := thaw(o.wire)
 	if err != nil {
 		return err
+	}
+	if o.bound {
+		ctx = withRoleToken(ctx, o.token) // a re-send stays bound to the role the request was produced under
 	}
 	return c.sendRequest(ctx, msg, held, o.rootEpoch, c.currentAttempt(o))
 }
@@ -235,7 +255,8 @@ func (c *BFTClient) settleLocked(ctx context.Context, o *outstandingRequest, err
 			c.cancelAcrossActivationLocked(ctx, o)
 		}
 		return false
-	case !c.currentLocked(o) || neverPending(err):
+	case !c.currentLocked(o) || neverPending(err) || c.roleEndedLocked(o):
+		// superseded, refused for good (ErrFollower among them), or its role ended meanwhile: only this attempt is dropped
 		if c.outstanding == o {
 			c.outstanding = nil
 		}
@@ -290,8 +311,8 @@ func (c *BFTClient) resendPending(ctx context.Context, held *types.UnicityCertif
 		c.mu.Unlock()
 		return
 	}
-	if o.gen != c.attemptGen {
-		c.outstanding = nil // invalidated by progress or an assignment change: never re-sent
+	if o.gen != c.attemptGen || c.roleEndedLocked(o) {
+		c.outstanding = nil // invalidated by progress, an assignment change or the end of its role: never re-sent
 		c.mu.Unlock()
 		return
 	}
@@ -314,8 +335,8 @@ func (c *BFTClient) resendPending(ctx context.Context, held *types.UnicityCertif
 			c.log.InfoContext(ctx, "certification request still outstanding, re-sent unchanged", slog.String("trigger", trigger),
 				slog.Uint64("round", o.req.InputRecord.RoundNumber), slog.Int("attempt", attempt), slog.Uint64("heldRootRound", held.GetRootRoundNumber()))
 		}
-	case errors.Is(err, ErrRequestAcrossActivation), errors.Is(err, errAttemptSuperseded):
-		// cancelled (activation), or superseded during the send's preparation: nothing was sent
+	case errors.Is(err, ErrRequestAcrossActivation), errors.Is(err, errAttemptSuperseded), errors.Is(err, ErrFollower):
+		// cancelled (activation, the end of its role), or superseded during the send's preparation: nothing was sent
 	default:
 		if c.log != nil {
 			c.log.WarnContext(ctx, "re-sending the pending certification request failed", slog.String("trigger", trigger), slog.Int("attempt", attempt),

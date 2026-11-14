@@ -18,11 +18,12 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
-// TestMetadataFootprintProfile measures what the archive's on-disk layout costs the kernel per archived block (bft-core#1018): the inodes a
-// record takes, the slab its creation charges to this process's memory cgroup (ext4 inode and dentry cache, which a container's memory
-// limit counts), and what one BundleEpochs call costs at that archive size (the publisher calls it every two seconds). Records have the
-// production shape, nine fields and two extensions. ARCHIVE_FOOTPRINT_RECORDS selects how many records (unset: skipped); run it in a
-// cgroup of its own (systemd-run --user --scope) for the slab figure to be this test's alone.
+// TestMetadataFootprintProfile measures what the archive's on-disk layout costs the kernel per archived block (bft-core#1018, #1049): the inodes
+// a record takes and the slab its creation charges to this process's memory cgroup (ext4 inode and dentry cache, which a container's memory
+// limit counts), for the directory layout an earlier binary wrote and for the packed layout PutBatch writes now; then what migrating the
+// directory archive costs and releases, and what one BundleEpochs call costs (the publisher calls it every two seconds). Records have the
+// production shape, nine fields and two extensions. ARCHIVE_FOOTPRINT_RECORDS selects how many records (unset: skipped); run it in a cgroup of
+// its own (systemd-run --user --scope) for the slab figures to be this test's alone.
 func TestMetadataFootprintProfile(t *testing.T) {
 	n, _ := strconv.Atoi(os.Getenv("ARCHIVE_FOOTPRINT_RECORDS"))
 	if n == 0 {
@@ -45,87 +46,110 @@ func TestMetadataFootprintProfile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dir := t.TempDir()
-	s, err := Open(dir)
+	_, cgroup := cgroupSlab(t)
+	if cgroup != "" {
+		t.Logf("cgroup %s", cgroup)
+	}
+	inodes := func(dir string) (dirs, files int) {
+		if err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if path == dir {
+				return nil
+			}
+			if d.IsDir() {
+				dirs++
+			} else {
+				files++
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return dirs, files
+	}
+	measure := func(label string, write func(dir string)) string {
+		dir := t.TempDir()
+		before, _ := cgroupSlab(t)
+		start := time.Now()
+		write(dir)
+		took := time.Since(start)
+		after, _ := cgroupSlab(t)
+		d, f := inodes(dir)
+		t.Logf("%-34s %d records of %d chunks: %d directories and %d files, %.2f inodes per record; slab %.0f bytes per record; written in %.2f ms per record",
+			label+":", n, len(fields), d, f, float64(d+f)/float64(n), float64(after-before)/float64(n), float64(took.Microseconds())/1000/float64(n))
+		return dir
+	}
+	legacy := measure("directory layout (before #1049)", func(dir string) {
+		for i := range qs {
+			putLegacy(t, dir, qs[i], recs[i], false) // as the earlier store published it, without its syncs
+		}
+	})
+	packed := measure("packed layout (#1049, PutBatch)", func(dir string) {
+		s, err := Open(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i < n; i += 16 {
+			end := min(i+16, n)
+			if err := s.PutBatch(qs[i:end], recs[i:end]); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+
+	// migrating the directory archive: what it costs, and the slab it gives back
+	s, err := Open(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, _ := cgroupSlab(t)
+	start := time.Now()
+	migrated := 0
+	for {
+		res, err := s.MigrateLegacy(MaxPutBatch)
+		if err != nil {
+			t.Fatal(err)
+		}
+		migrated += res.Migrated
+		if res.Done {
+			break
+		}
+	}
+	took := time.Since(start)
+	after, _ := cgroupSlab(t)
+	d, f := inodes(legacy)
+	t.Logf("migration of the directory archive: %d records in %.2f ms per record; slab %+.0f bytes per record; %.2f inodes per record left",
+		migrated, float64(took.Microseconds())/1000/float64(n), float64(after-before)/float64(n), float64(d+f)/float64(n))
+
+	ps, err := Open(packed)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for epoch := uint64(1); epoch <= 4; epoch++ {
-		if _, err := s.PutBundle(BundleRequest{Context: qs[0].Context, Epoch: epoch}, []byte("bundle"), nil); err != nil {
+		if _, err := ps.PutBundle(BundleRequest{Context: qs[0].Context, Epoch: epoch}, []byte("bundle"), nil); err != nil {
 			t.Fatal(err)
 		}
 	}
-	slabBefore, cgroup := cgroupSlab(t)
-	start := time.Now()
-	for i := 0; i < n; i += 16 {
-		end := min(i+16, n)
-		if err := s.PutBatch(qs[i:end], recs[i:end]); err != nil {
-			t.Fatal(err)
-		}
-	}
-	putTime := time.Since(start)
-	slabAfter, _ := cgroupSlab(t)
-	var dirs, files int
-	if err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if path == dir {
-			return nil
-		}
-		if d.IsDir() {
-			dirs++
-		} else {
-			files++
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
-	}
-	top, err := os.ReadDir(dir)
+	top, err := os.ReadDir(packed)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Logf("%d records of %d chunks: %d directories and %d files (%.2f inodes per record), %d entries in the store directory; put %.2f ms per record",
-		n, len(fields), dirs, files, float64(dirs+files)/float64(n), len(top), float64(putTime.Microseconds())/1000/float64(n))
-	if cgroup != "" {
-		t.Logf("slab charged to %s: %d -> %d bytes, %.0f bytes per record", cgroup, slabBefore, slabAfter, float64(slabAfter-slabBefore)/float64(n))
-	}
 	const calls = 50
-	var before, after runtime.MemStats
+	var mb, ma runtime.MemStats
 	runtime.GC()
-	runtime.ReadMemStats(&before)
+	runtime.ReadMemStats(&mb)
 	start = time.Now()
 	for range calls {
-		epochs, err := s.BundleEpochs(qs[0].Context)
+		epochs, err := ps.BundleEpochs(qs[0].Context)
 		if err != nil || len(epochs) != 4 {
 			t.Fatal(epochs, err)
 		}
 	}
 	elapsed := time.Since(start)
-	runtime.ReadMemStats(&after)
-	t.Logf("BundleEpochs at %d store entries: %.3f ms and %d bytes allocated per call", len(top), float64(elapsed.Microseconds())/1000/calls, (after.TotalAlloc-before.TotalAlloc)/calls)
-
-	// For comparison, the same bytes as ONE file per record in 256 fan-out directories. This is a cost model only; nothing reads it.
-	model := t.TempDir()
-	payload := make([]byte, 0, 16<<10)
-	for _, v := range fields {
-		payload = append(payload, v...)
-	}
-	slabBefore, _ = cgroupSlab(t)
-	for i := range n {
-		sub := filepath.Join(model, fmt.Sprintf("%02x", i%256))
-		if err := os.MkdirAll(sub, 0700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(sub, fmt.Sprintf("%064x", i)), payload, 0600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	slabAfter, _ = cgroupSlab(t)
-	if cgroup != "" {
-		t.Logf("one file per record in 256 directories (model): %.2f inodes per record, %.0f bytes of slab per record", float64(n+256)/float64(n), float64(slabAfter-slabBefore)/float64(n))
-	}
+	runtime.ReadMemStats(&ma)
+	t.Logf("BundleEpochs, packed archive (%d store-directory entries): %.3f ms and %d bytes allocated per call", len(top), float64(elapsed.Microseconds())/1000/calls, (ma.TotalAlloc-mb.TotalAlloc)/calls)
 }
 
 // cgroupSlab is the slab memory charged to this process's cgroup (v2), and the cgroup's path; zero and "" where it cannot be read.

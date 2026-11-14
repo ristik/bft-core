@@ -58,45 +58,101 @@ VOLUMES = ('root', 'evm', 'auth', 'ureth', 'archive', 'jwt', 'network', 'wallet'
 PRIVATE = ('root', 'evm', 'auth', 'ureth', 'archive', 'jwt', 'wallet', 'work')
 ROOT_POSTS = ('/api/v1/q3/signers', '/api/v1/q3/status', '/api/v1/handoff/plan', '/api/v1/handoff/intent', '/api/v1/handoff/endorse',
               '/api/v1/handoff/evm-assignment/context')
-SUBNET = '10.231.5.0/24'   # the laptop's validators network: not one of the host's 172.x container networks (their announced addresses are not dialable here)
+def subnet(project):
+    """The laptop's validators network: 10.231.<n>.0/24 with n from the project name (two generations' joiner projects may exist side by side, one stopped),
+    never one of the host's 172.x container networks (their announced addresses are not dialable here)."""
+    import hashlib
+    return f'10.231.{16 + hashlib.sha256(project.encode()).digest()[0] % 224}.0/24'
 OPERATOR = ['--operator-socket', '/authority/operator.sock', '--operator-credential', '/authority/operator.cred']
+# The explicit cold restore (op_restore_start) empties ONLY the selected execution and bootstrap stores: the shard node's home (its keys and node-info
+# kept), its archive and the execution client's data. It never mounts the signing authority's volume (`auth`: the authority's anti-equivocation and
+# session history, the operator credential), the root's store, the wallet or the tunnel tools (astra, briefs/astra-q-1029-1043-answer.md Q2).
+COLD_RESTORE_VOLUMES = ('evm', 'archive', 'ureth')
+COLD_RESTORE_WIPE = ('find /evm -mindepth 1 -maxdepth 1 ! -name keys.json ! -name node-info.json -exec rm -rf {} + && '
+                     'find /archive -mindepth 1 -maxdepth 1 -exec rm -rf {} + && find /ureth -mindepth 1 -maxdepth 1 -exec rm -rf {} +')
 
 
 SEED = r'''
 import os, shutil, sys, tarfile
 ROOT = sys.argv[1] if len(sys.argv) > 1 else '/a'
 t = tarfile.open(fileobj=sys.stdin.buffer, mode='r|')
-added = kept = 0
+added = kept = skipped = 0
 current = None
+def fsync_dir(path):
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+def held(rec):
+    # a record the node has, in either archive layout (bft-core#1049): its packed file records/<hh>/<rec>, or its directory with a manifest
+    # (a directory without one is not a record the node can read)
+    return os.path.exists(os.path.join(ROOT, rec, 'manifest')) or os.path.exists(os.path.join(ROOT, 'records', rec[3:5], rec))
 def finish(rec):
-    global added, kept
+    global added, kept, skipped
     if rec is None:
         return
     final, tmp = os.path.join(ROOT, rec), os.path.join(ROOT, '.seed-' + rec)
-    if os.path.exists(final):
+    if held(rec):
         shutil.rmtree(tmp, ignore_errors=True); kept += 1
+    elif not os.path.exists(os.path.join(tmp, 'manifest')):
+        shutil.rmtree(tmp, ignore_errors=True); skipped += 1   # a directory streamed without its manifest is never placed
     elif os.path.isdir(tmp):
         try:
+            fsync_dir(tmp)
             os.rename(tmp, final); added += 1
+            fsync_dir(ROOT)   # placed durably: the node counts what it finds as stored
         except OSError:   # the running node wrote the same record meanwhile: its own copy stays
             shutil.rmtree(tmp, ignore_errors=True); kept += 1
+def packed(m, shard, rec):
+    # one packed record file: written and synced under a temporary name in its fan-out directory, then linked into place, which (unlike a
+    # rename) never replaces a record the node placed meanwhile; the directories are synced after, so the placement is durable
+    global added, kept
+    if len(shard) != 2 or rec[3:5] != shard or not m.isfile():
+        return
+    if held(rec):
+        kept += 1; return
+    records = os.path.join(ROOT, 'records')
+    d = os.path.join(records, shard)
+    made_records, made_d = not os.path.isdir(records), not os.path.isdir(d)
+    os.makedirs(d, mode=0o700, exist_ok=True)
+    tmp = os.path.join(d, '.seed-' + rec)
+    if os.path.lexists(tmp):
+        os.unlink(tmp)   # a leftover of a crash between link and unlink: another name of a placed record, never written through
+    with open(tmp, 'xb') as out:
+        out.write(t.extractfile(m).read()); out.flush(); os.fsync(out.fileno())
+    os.chmod(tmp, 0o600)
+    try:
+        os.link(tmp, os.path.join(d, rec)); added += 1
+    except FileExistsError:
+        kept += 1
+    os.unlink(tmp)
+    fsync_dir(d)
+    if made_d:
+        fsync_dir(records)
+    if made_records:
+        fsync_dir(ROOT)
 for m in t:
     parts = m.name.split('/')
+    if parts[0] == 'records' and len(parts) == 3 and parts[2].startswith('v2-'):
+        finish(current); current = None
+        packed(m, parts[1], parts[2])
+        continue
     if not parts[0].startswith('v2-') or len(parts) > 2:
         continue
     if parts[0] != current:
         finish(current); current = parts[0]
-    if os.path.exists(os.path.join(ROOT, current)):
+    if held(current):
         continue
     tmp = os.path.join(ROOT, '.seed-' + current)
     os.makedirs(tmp, mode=0o700, exist_ok=True)
     if m.isfile() and len(parts) == 2:
         p = os.path.join(tmp, parts[1])
         with open(p, 'wb') as out:
-            out.write(t.extractfile(m).read())
+            out.write(t.extractfile(m).read()); out.flush(); os.fsync(out.fileno())
         os.chmod(p, 0o600)
 finish(current)
-print('added', added, 'kept', kept)
+print('added', added, 'kept', kept, *(('skipped', skipped) if skipped else ()))
 '''   # a record directory is placed by rename once complete, and only when missing (the seeding of a running node's archive never touches a record it has)
 
 
@@ -158,7 +214,7 @@ def laptop_compose(host_compose, entity, root_id, evm_id, project, mac_host='hos
             'restart': 'unless-stopped', 'mem_limit': '64m', 'cpus': 0.2, 'pids_limit': 64, 'read_only': True, 'cap_drop': ['ALL'],
             'security_opt': ['no-new-privileges:true'], 'logging': {'driver': 'json-file', 'options': {'max-size': '10m', 'max-file': '3'}}}
     used = sorted({m.split(':')[0] for svc in services.values() for m in svc.get('volumes', [])})
-    return {'name': project, 'services': services, 'networks': {'validators': {'ipam': {'config': [{'subnet': SUBNET}]}}},
+    return {'name': project, 'services': services, 'networks': {'validators': {'ipam': {'config': [{'subnet': subnet(project)}]}}},
             'volumes': {v: {'external': True, 'name': f'{project}_{v}'} for v in used}}
 
 
@@ -175,9 +231,19 @@ def restore_entry(entry, body_id):
     return entry + ['--tip-uc', '/state/tip.uc.cbor', '--tip-tr', '/state/tip.tr.cbor', '--trust-body-id', body_id]
 
 
-def tunnel_command(host, entity, sock_dir):
+def forward_bind(mac_host):
+    """Where the tunnel's -L listeners bind: the --mac-host address when it is an IP literal (a Linux docker host: the bridge gateway, e.g. 172.17.0.1,
+    which the peer stubs dial), else loopback (colima maps host.docker.internal to the Mac's loopback)."""
+    import ipaddress
+    try:
+        return str(ipaddress.ip_address(mac_host))
+    except ValueError:
+        return '127.0.0.1'
+
+
+def tunnel_command(host, entity, sock_dir, mac_host='host.docker.internal'):
     return ['ssh', '-N', '-o', 'ExitOnForwardFailure=yes', '-o', 'ServerAliveInterval=10', '-o', 'ServerAliveCountMax=3', '-o', 'ConnectTimeout=15',
-            '-o', 'BatchMode=yes', *remote_entity.ssh_forwards(entity, sock_dir), host]
+            '-o', 'BatchMode=yes', *remote_entity.ssh_forwards(entity, sock_dir, bind=forward_bind(mac_host)), host]
 
 
 class Laptop:
@@ -278,6 +344,17 @@ class Laptop:
         status, _, payload = done.stdout.partition(b'\n')
         return int(status), payload
 
+    def shard_health(self, timeout=10):
+        """The shard node's /api/v1/health (published role, certified round, execution recovery), read inside its namespace; None if unreadable."""
+        cmd = ['docker', 'run', '--rm', '--network', f'container:{self.pod_id()}', '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true',
+               '--user', '10001:10001', '--entrypoint', 'python3', self.rpc_image, '-c', handoff_ops.GET_HELPER, self.urls()[1] + '/api/v1/health', str(timeout)]
+        done = run(cmd, check=False, timeout=timeout + 60)
+        status, _, payload = (done.stdout if isinstance(done.stdout, str) else done.stdout.decode()).partition('\n')
+        try:
+            return json.loads(payload) if done.returncode == 0 and status == '200' else None
+        except ValueError:
+            return None
+
     def ureth_head(self):
         code = ('import json,urllib.request as u;r=u.Request("http://ureth%d:8545",json.dumps({"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}).encode(),'
                 '{"Content-Type":"application/json"});print(int(json.loads(u.urlopen(r,timeout=5).read())["result"],16))' % self.entity)
@@ -288,6 +365,8 @@ class Laptop:
         services = self.services_state()
         out = {'entity': self.entity, 'services': services, 'restoring': (self.home / 'compose.restore.json').is_file(), 'rootNodeId': self.state['rootNodeId'], 'evmNodeId': self.state['evmNodeId'],
                'accounts': self.state['accounts'], 'authorityScope': self.state.get('authorityScope')}
+        if services.get(f'shard{self.entity}') == 'running':
+            out['shardHealth'] = self.shard_health()
         if services.get(f'root{self.entity}') == 'running':
             for key, path in (('follower', '/api/v1/q3/status'), ('signers', '/api/v1/q3/signers')):
                 try:
@@ -383,7 +462,11 @@ class Laptop:
         raise Failure(f'{what}: not within {seconds} s (last: {last})')
 
     def op_install_root(self, epoch):
-        """rehearse.pos_install for this root: stop, keep its store in the volume <project>_root-pre-epoch-N (once), recreate with the install flag."""
+        """rehearse.pos_install for this root: stop, keep its store in the volume <project>_root-pre-epoch-N (once), recreate with the install flag.
+        The copy is forensic only: nothing restores a root store from it (it holds the safety module's record of what the root key signed). An
+        install interrupted before the checkpoint's record prefix was retained completes on the root's next start only with bft-core#1046 (the
+        record fetcher installed before the Q3 recovery) in the pinned image; without it every restart fails in the recovery: the root stays down,
+        nothing is rolled back (fail closed)."""
         epoch, j = int(epoch), self.entity
         if self.root_epoch() == epoch:
             return {'already': True}
@@ -396,7 +479,8 @@ class Laptop:
             run(['docker', 'volume', 'create', backup])
             self.one(self.node_image, ['-c', 'cp -a /state/. /backup/'], [f'{self.vol("root")}:/state:ro', f'{backup}:/backup'], user='0:0', entrypoint='sh')
         self.dc('up', '-d', '--no-deps', '--force-recreate', f'root{j}', extra=[override])
-        self.wait(f'root {j} listens again', lambda: self.root_post('/api/v1/q3/signers')[0] in (200, 400, 409, 422, 503), 120)
+        # an install of many epochs fetches every activation bundle through the tunnel before the operator listener starts
+        self.wait(f'root {j} listens again', lambda: self.root_post('/api/v1/q3/signers')[0] in (200, 400, 409, 422, 503), 900)
         return {'backup': backup}
 
     def op_authority_status(self):
@@ -446,15 +530,15 @@ class Laptop:
         return {'seeded': self.seed_archive()}
 
     def op_restore_start(self, uc_b64, tr_b64, body_id):
-        """rehearse.restore_joiner, the laptop half: the execution client's and the shard node's state emptied (its keys kept), the pin written, `shard-node restore`."""
+        """The explicit COLD bootstrap of an empty or new node (handoff_drive --cold-restore only; never on the election path): the execution client's
+        and the shard node's state emptied (its keys kept), the pin written, `shard-node restore`. A provisioned joiner instead runs as a root-free
+        follower (--follow-source) from the start and is promoted by its verified activation (handoff_drive.follow_joiner): nothing is emptied."""
         if not re.fullmatch(r'0x[0-9a-fA-F]+', body_id):
             raise Failure('bad body id')
         j = self.entity
         self.dc('stop', f'shard{j}', f'ureth{j}')
-        wipe = ('find /evm -mindepth 1 -maxdepth 1 ! -name keys.json ! -name node-info.json -exec rm -rf {} + && '
-                'find /archive -mindepth 1 -maxdepth 1 -exec rm -rf {} + && find /ureth -mindepth 1 -maxdepth 1 -exec rm -rf {} +')
-        self.one(self.node_image, ['-c', wipe], [f'{self.vol("evm")}:/evm', f'{self.vol("archive")}:/archive', f'{self.vol("ureth")}:/ureth'], entrypoint='sh')
-        seeded = self.seed_archive()   # before the restore: its fetch from the pinned tip to genesis then finds every record locally
+        self.one(self.node_image, ['-c', COLD_RESTORE_WIPE], [f'{self.vol(v)}:/{v}' for v in COLD_RESTORE_VOLUMES], entrypoint='sh')
+        seeded = None   # NOT seeded here: `shard-node restore` refuses an archive directory that is not empty (it fetches every record itself, from peers)
         self.dc('up', '-d', '--no-deps', f'ureth{j}')
         self.wait(f'the execution client {j} answers', lambda: self.ureth_head() is not None, 180)
         self.vol_write('evm', 'tip.uc.cbor', base64.b64decode(uc_b64), 0o600)
@@ -464,6 +548,19 @@ class Laptop:
         self.dc('up', '-d', '--no-deps', '--force-recreate', f'shard{j}')
         time.sleep(10)
         return {'started': True, 'shard': self.services_state().get(f'shard{j}'), 'head': self.ureth_head(), 'seeded': seeded}
+
+    def op_archive_policy(self):
+        """This writer's archivePolicy (`ubft shard-node status` in its shard container): another entity's retire gate reads it (bft-core#1055)."""
+        done = self.exec(f'shard{self.entity}', 'ubft', 'shard-node', 'status', '--url', self.urls()[1], '--timeout', '30s')
+        return {'archivePolicy': json.loads(done.stdout).get('archivePolicy')}
+
+    def op_stop_validator(self):
+        """After the entity left the committee: its shard node, root and execution client stop, then its signing authority (its key is not needed any
+        more: the delegation ended with the retirement). Volumes stay: the wallet holds the withdrawal key for the claim. Never `compose down`."""
+        j = self.entity
+        for service in (f'shard{j}', f'root{j}', f'ureth{j}', f'authority{j}'):
+            self.dc('stop', service)
+        return {'stopped': self.services_state()}
 
     def op_restore_finish(self):
         j = self.entity
@@ -525,10 +622,36 @@ class Laptop:
             self.save()
         return out
 
+    CUSTODY_CALLS = {'requestRetirement(uint64)': 'owner', 'mature(uint256[])': 'owner', 'claim(uint256,address)': 'withdrawal'}
+
+    def op_custody_tx(self, signature, args):
+        """A custody call signed HERE with this entity's owner or withdrawal key (cast in the node image, keys from the wallet volume, never printed): only
+        requestRetirement, mature and claim, only to the deployment's custody. Sent to every host execution client (their pools do not gossip)."""
+        if signature not in self.CUSTODY_CALLS:
+            raise Failure(f'{signature}: not a custody call this agent signs')
+        if not all(re.fullmatch(r'[0-9]+|0x[0-9a-fA-F]{40}|\[[0-9, ]*\]', str(a)) for a in args):
+            raise Failure('bad arguments')
+        custody = json.loads(self.vol_read('network', 'pos-deployment.json'))['custody']
+        signer = self.CUSTODY_CALLS[signature]
+        chain = json.loads(self.vol_read('network', 'genesis.json'))['config']['chainId']
+        urls = ' '.join(f'http://ureth{i}:8545' for i in remote_entity.GENESIS_ENTITIES)
+        quoted = ' '.join(shlex.quote(str(a)) for a in args)
+        script = (f'set -e; '   # cast mktx ignores ETH_PRIVATE_KEY: the key goes as an argument inside this one-shot container only
+                  f'raw=$(/tools/cast mktx --legacy --rpc-url http://ureth1:8545 --chain {chain} --private-key "$(cat /wallet/{signer}.key)" {custody} {shlex.quote(signature)} {quoted}); '
+                  f'for u in {urls}; do /tools/cast publish --rpc-url $u "$raw" >/dev/null 2>&1 || true; done; '
+                  f'h=$(/tools/cast keccak "$raw"); echo "tx $h"; /tools/cast receipt --rpc-url http://ureth1:8545 --confirmations 1 --json "$h" | tr -d "\\n" | grep -oE "\\"(status|blockNumber)\\":\\"0x[0-9a-f]+\\""')
+        done = self.one(self.node_image, ['-c', script], [f'{self.vol("wallet")}:/wallet:ro', f'{self.vol("tools")}:/tools:ro', f'{self.vol("network")}:/network:ro'],
+                        network=self.network(), entrypoint='sh', check=False)
+        out = (done.stdout + done.stderr).strip()
+        if done.returncode:
+            raise Failure(f'{signature}: exit {done.returncode}: {out[-400:]}')
+        return {'out': out[-400:], 'signer': signer, 'address': self.state['accounts'][signer]}
+
     OPS = {'status': 'op_status', 'root-post': 'op_root_post', 'logs': 'op_logs', 'put-network': 'op_put_network', 'trust-base-sign': 'op_trust_base_sign',
            'evm-pop': 'op_evm_pop', 'sign-pop': 'op_sign_pop', 'readiness': 'op_readiness', 'install-root': 'op_install_root',
-           'authority-status': 'op_authority_status', 'authority-step': 'op_authority_step', 'restore-start': 'op_restore_start', 'seed-archive': 'op_seed_archive', 'restore-finish': 'op_restore_finish', 'start-authority': 'op_start_authority', 'tx': 'op_tx'}
-    READS = frozenset(('status', 'root-post', 'logs', 'authority-status'))
+           'authority-status': 'op_authority_status', 'authority-step': 'op_authority_step', 'restore-start': 'op_restore_start', 'seed-archive': 'op_seed_archive', 'restore-finish': 'op_restore_finish', 'start-authority': 'op_start_authority', 'tx': 'op_tx', 'custody-tx': 'op_custody_tx', 'stop-validator': 'op_stop_validator',
+           'archive-policy': 'op_archive_policy'}
+    READS = frozenset(('status', 'root-post', 'logs', 'authority-status', 'archive-policy'))
 
     def dispatch(self, name, args):
         if name not in self.OPS:
@@ -580,7 +703,8 @@ def init(host, generation, home, mac_host, allow_dirty=False):
     if entities != list(remote_entity.GENESIS_ENTITIES):
         raise Failure(f'the host generation has entities {entities}; this tool joins a fifth to the four genesis entities')
     entity = max(entities) + 1
-    project = f'{generation}-joiner{entity}'
+    project = (json.loads((home / 'state.json').read_text()).get('project') if (home / 'state.json').is_file() else None) or f'{generation}-joiner{entity}'
+    # a second identity for the same entity (after a retirement) needs its own project: state.json may name it before init
     images = {'node': host_compose['services'][f'root{entities[0]}']['image'], 'rpc': host_compose['services']['rpc']['image']}
     ensure_images(host, list(images.values()))
     state_path = home / 'state.json'
@@ -609,7 +733,7 @@ def init(host, generation, home, mac_host, allow_dirty=False):
     extract = 'import io,sys,tarfile;t=tarfile.open(fileobj=io.BytesIO(sys.stdin.buffer.read()));t.extractall("/network",filter="data")'
     lap.one(lap.rpc_image, ['-c', extract], [f'{lap.vol("network")}:/network'], entrypoint='python3', input=tar, text=False)
     lap.one(lap.node_image, ['-c', 'chmod -R a+rX /network'], [f'{lap.vol("network")}:/network'], entrypoint='sh')
-    (home / 'network-files.txt').write_text(lap.one(lap.node_image, ['-c', 'cd /network && ls -la . handoff'], [f'{lap.vol("network")}:/network:ro'], entrypoint='sh').stdout)
+    (home / 'network-files.txt').write_text(lap.one(lap.node_image, ['-c', 'cd /network && ls -la . $(test -d handoff && echo handoff)'], [f'{lap.vol("network")}:/network:ro'], entrypoint='sh').stdout)
     # the keys, made where they stay
     have = lambda volume, rel: lap.one(lap.node_image, ['-c', f'test -e /v/{rel}'], [f'{lap.vol(volume)}:/v:ro'], entrypoint='sh', check=False).returncode == 0
     if not have('root', 'keys.json'):
@@ -630,6 +754,8 @@ def init(host, generation, home, mac_host, allow_dirty=False):
         lap.one(lap.rpc_image, ['-', 'identity', '/wallet', '/root/keys.json', f'/wallet/{out}', root_id, evm_id, *extra],
                 [f'{lap.vol("wallet")}:/wallet', f'{lap.vol("root")}:/root:ro'], entrypoint='python3', input=keys_py)
     lap.vol_write('tools', 'tunnel_relay.py', (HERE / 'tunnel_relay.py').read_bytes(), 0o644)
+    if not have('tools', 'cast'):   # Foundry's cast from the host (a public tool, no key): the custody calls (retirement, mature, claim) sign here with it
+        lap.vol_write('tools', 'cast', ssh(host, 'cat "$(command -v cast || echo $HOME/.foundry/bin/cast)"', text=False).stdout, 0o755)
     token_file = home / 'agent.token'
     if not token_file.is_file():
         fd = os.open(token_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -645,8 +771,9 @@ def init(host, generation, home, mac_host, allow_dirty=False):
     version = source_version()
     if (version['dirty'] or not version['commit']) and not allow_dirty:
         raise Failure(f'{HERE} is dirty or not a git checkout (commit {version["commit"]}): the host runs this code with sudo; commit it, or pass --allow-dirty')
-    sources = sorted(p.name for p in HERE.glob('*.py'))
-    tarball = run(['tar', '--no-xattrs', '-C', str(HERE), '-cf', '-', *sources], text=False).stdout
+    sources = sorted(p.name for p in HERE.glob('*.py') if not p.name.startswith('.'))
+    tarball = subprocess.run(['tar', '--no-xattrs', '-C', str(HERE), '-cf', '-', *sources], capture_output=True, check=True,
+                             env=dict(os.environ, COPYFILE_DISABLE='1')).stdout   # no AppleDouble ._* members (macOS tar)
     ssh(host, f'mkdir -p {host_dir}/testnet && tar -C {host_dir}/testnet -xf -', input=tarball, text=False)
     record = dict(version, deployedAt=now(), deployedFrom=str(HERE))
     ssh(host, f'cat > {host_dir}/testnet/SOURCE.json', input=json.dumps(record, indent=1, sort_keys=True) + '\n')
@@ -700,7 +827,7 @@ def serve_agent(lap, port=PORTS['agent']):
 
 def tunnel_loop(lap):
     host, sock, j = lap.state['host'], lap.state['sockDir'], lap.entity
-    cmd = tunnel_command(host, j, sock)
+    cmd = tunnel_command(host, j, sock, lap.state.get('macHost', 'host.docker.internal'))
     while True:
         # sshd has StreamLocalBindUnlink no: the -R sockets of the previous connection must go first, or the forwards fail
         ssh(host, f'rm -f {sock}/root{j}.sock {sock}/shard{j}.sock {sock}/agent.sock', check=False)
@@ -755,13 +882,16 @@ def start(lap):
     if lap.state.get('authorityScope') and services.get(f'authority{j}') != 'running':
         say(f'WARNING: authority{j} was started at {lap.state["authorityScope"]} and is not running: its EVM key is lost (a VM restart?). '
             'It is NOT restarted: the delegation names the lost key')
-    if lap.state.get('authorityScope') and services.get(f'shard{j}') != 'running' and services.get(f'authority{j}') == 'running':
-        lap.dc('start', f'shard{j}')
+    # the shard node runs from start as a root-free follower (--follow-source), well before its join, so that it follows several epochs
+    # before its activation (#1050). It needs no authority to follow: its signing client connects lazily, at its first request, which only
+    # an activated, enrolled node makes. The authority is still started at the prepare, at the scope its delegation names.
+    if services.get(f'shard{j}') != 'running':
+        lap.dc('up', '-d', '--no-deps', f'shard{j}')
     lap.wait('the root reports itself a follower or a member', lambda: lap.status().get('follower') is not None or lap.root_epoch(), 180, every=5)
     say(json.dumps(lap.status(), sort_keys=True))
 
 
-def join(lap, dry_run=False, stop_after=None, allow_dirty=False, funder=None):
+def join(lap, dry_run=False, stop_after=None, allow_dirty=False, funder=None, action='join', evidence_retained=None):
     """remote_entity.py join on the host, as a transient `systemd-run --user` unit (a dropped ssh session of this laptop must not kill a drive half way), its log
     followed here until it ends. Rerunning resumes: the host's state is in handoff/remote-joiners/<J>.json and the drive's journal."""
     s = lap.state
@@ -769,10 +899,11 @@ def join(lap, dry_run=False, stop_after=None, allow_dirty=False, funder=None):
     if (version['dirty'] or not version['commit']) and not allow_dirty:
         raise Failure(f'{HERE} is dirty or not a git checkout (commit {version["commit"]}): commit and redeploy (init), or pass --allow-dirty')
     say(f'laptop checkout {HERE}: commit {version["commit"]}, dirty {version["dirty"]}, digest {version["digest"][:16]} (the host refuses a different deployed copy)')
-    cmd = (f'sudo env PATH="$PATH:$(dirname {shlex.quote(s["hostCast"])})" python3 -u {s["hostDir"]}/testnet/remote_entity.py join {s["hostGeneration"]} '
+    cmd = (f'sudo env PATH="$PATH:$(dirname {shlex.quote(s["hostCast"])})" python3 -u {s["hostDir"]}/testnet/remote_entity.py {action} {s["hostGeneration"]} '
            f'--entity {lap.entity} --ubft {s["hostUbft"]} --restore-pin {s["hostRestorePin"]} --cast {s["hostCast"]}' + (' --dry-run' if dry_run else '') + (f' --stop-after {stop_after}' if stop_after else '')
-           + f' --source-digest {version["digest"]}' + (' --allow-dirty' if allow_dirty else '') + (f' --funder {shlex.quote(funder)}' if funder else ''))
-    unit = f'laptop-join-{int(time.time())}'
+           + f' --source-digest {version["digest"]}' + (' --allow-dirty' if allow_dirty else '') + (f' --funder {shlex.quote(funder)}' if funder else '')
+           + (f' --evidence-retained {shlex.quote(evidence_retained)}' if evidence_retained else ''))
+    unit = f'laptop-{action}-{int(time.time())}'
     log = f'{s["hostDir"]}/{unit}.log'
     script = (f'systemd-run --user --quiet --collect --unit={unit} bash -c {shlex.quote(f"{cmd} > {log} 2>&1; echo EXIT=$? >> {log}")} && '
               f'touch {log} && (tail -n +1 -F {log} 2>/dev/null & t=$!; while systemctl --user is-active -q {unit}; do sleep 2; done; sleep 1; kill $t) && '
@@ -783,14 +914,16 @@ def join(lap, dry_run=False, stop_after=None, allow_dirty=False, funder=None):
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument('action', choices=('init', 'start', 'status', 'join', 'agent', 'tunnel', 'background-stop', 'retire-plan'))
+    p.add_argument('action', choices=('init', 'start', 'status', 'join', 'catch-up', 'retire', 'claim', 'agent', 'tunnel', 'background-stop', 'retire-plan'))
     p.add_argument('--home', help='this entity\'s directory on the laptop (default ~/unicity-joiner/<generation>)')
     p.add_argument('--host')
     p.add_argument('--generation')
     p.add_argument('--mac-host', default='host.docker.internal', help='how a container of the docker VM reaches the Mac\'s loopback (colima: host.docker.internal)')
     p.add_argument('--dry-run', action='store_true')
+    p.add_argument('--evidence-retained', metavar='NOTE', help='retire: the recorded statement that the surviving providers hold the UTB/Q3 lineage, record cuts '
+                   'and logs through the handoff; only then is the retired validator stopped (otherwise it keeps running as a follower)')
     p.add_argument('--allow-dirty', action='store_true', help='init/join: deploy or run a dirty, uncommitted or mismatched copy of deploy/testnet on the host')
-    p.add_argument('--stop-after', choices=('bonded', 'caught-up'), help='join: stop after the bond, or after the result names the joiner and its nodes caught up')
+    p.add_argument('--stop-after', choices=('bonded',), help='join: stop after the bond')
     p.add_argument('--funder', help='join: a directory ON THE HOST with keystore.json and password, the operator account that pays the owner\'s 100 UCT bond and gas '
                    '(default: the faucet account)')
     a = p.parse_args(argv)
@@ -816,6 +949,12 @@ def main(argv=None):
                 print(f'{name}: ' + (f'pid {pid.read_text().strip()}' if pid.is_file() else 'not started'))
         elif a.action == 'join':
             return join(lap, a.dry_run, a.stop_after, a.allow_dirty, a.funder)
+        elif a.action == 'retire':   # requestRetirement (owner key, here), the handoff that leaves it out, the clean stop
+            return join(lap, allow_dirty=a.allow_dirty, action='retire', funder=a.funder, evidence_retained=a.evidence_retained)
+        elif a.action == 'claim':   # mature (owner key) and claim (withdrawal key) after the retirement, once the holds pass
+            return join(lap, allow_dirty=a.allow_dirty, action='claim', funder=a.funder)
+        elif a.action == 'catch-up':   # the follower to the current epoch (root install restart, shard restore): no chain transaction, the timer keeps driving
+            return join(lap, allow_dirty=a.allow_dirty, action='catch-up')
         elif a.action == 'agent':
             serve_agent(lap)
         elif a.action == 'tunnel':
