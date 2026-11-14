@@ -604,6 +604,9 @@ func (v *RequestRoundView) validRequest(req *certification.BlockCertificationReq
 	return nil
 }
 
+// PrevRootEpoch is the root epoch of the certificate the view's requests build on: the committed parent's (#1036).
+func (v *RequestRoundView) PrevRootEpoch() uint64 { return v.prevUC.GetRootEpoch() }
+
 // ErrRequestBeforeActivation refuses a request built on a certificate of a root epoch before the root-only activation of its view's
 // interval (#1036): it may lack the transition the first block of the new epoch carries.
 var ErrRequestBeforeActivation = errors.New("certification request built before the root activation")
