@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"math/rand/v2"
+	"sync/atomic"
 	"time"
 
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
@@ -26,13 +27,35 @@ import (
 //   - a failed first send: Submit keeps the attempt even when its first send failed (except one refused across an activation), so the timer
 //     sends it; Round's own short retries are not the only ones.
 //
-// The re-sends of both kinds count toward MaxResubmits. The roots take a byte-identical request as idempotent (rootchain.Node.countRequest).
+// It is due once both the attempt's last send and the last delivery (deliveryClock) are older than the interval, the send plus its jitter: the
+// first paces the re-sends, the second is the stall the UC relay also reads. The re-sends of both kinds count toward MaxResubmits. The roots take a byte-identical request as idempotent (rootchain.Node.countRequest).
 const (
 	// DefaultResendInterval is the base of the timed re-send's delay (see BFTClientOptions.ResendInterval).
 	DefaultResendInterval = 1500 * time.Millisecond
 	// resendCheckEvery is how often Run looks for an attempt due for a timed re-send.
 	resendCheckEvery = 250 * time.Millisecond
 )
+
+// deliveryClock is when the client last adopted a new certificate, a repeat included, never an invalid or duplicate one. It is the narrow part
+// of follower-phase2's progress clock (UsefulProgress.Delivered, #1054) that the timed re-send consumes: that clock satisfies it, so the
+// re-send and the UC relay read one definition of a stalled delivery. The re-send is due only once delivery is stalled for the interval.
+type deliveryClock interface{ Delivered() time.Time }
+
+// lastDelivery is the client's own deliveryClock until #1054's progress clock replaces it (deliveries): noteAdoptedLocked stamps it on both
+// adoption paths. Zero is "nothing delivered yet", which is stalled.
+type lastDelivery struct{ at atomic.Int64 }
+
+func (d *lastDelivery) stamp(t time.Time) { d.at.Store(t.UnixNano()) }
+
+func (d *lastDelivery) Delivered() time.Time {
+	if n := d.at.Load(); n != 0 {
+		return time.Unix(0, n)
+	}
+	return time.Time{}
+}
+
+// deliveries is the clock the timed re-send reads.
+func (c *BFTClient) deliveries() deliveryClock { return &c.delivered }
 
 // errAttemptSuperseded refuses the send of an attempt that is no longer the current one of the current generation.
 var errAttemptSuperseded = errors.New("shardnode: the pending attempt was superseded before its send")
@@ -108,7 +131,7 @@ func (c *BFTClient) resendStale(ctx context.Context, now time.Time) {
 		return
 	}
 	if o.gen != gen || o.on != (deliveryAttempt{partitionRound: held.GetRoundNumber(), rootRound: held.GetRootRoundNumber()}) ||
-		o.resent >= limit || now.Sub(o.lastSent) < every+o.jitter {
+		o.resent >= limit || now.Sub(o.lastSent) < every+o.jitter || now.Sub(c.deliveries().Delivered()) < every {
 		c.mu.Unlock()
 		return
 	}

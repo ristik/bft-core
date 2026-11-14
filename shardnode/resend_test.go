@@ -255,3 +255,17 @@ func TestRunResendsAPendingRequestOnItsTimer(t *testing.T) {
 	require.Same(t, o, c.outstanding, "the same attempt, re-sent")
 	c.mu.Unlock()
 }
+
+// The re-send is due only once delivery has stalled for the interval, by the same clock the UC relay reads: a delivery recorded without
+// ending the attempt (as a relay-fed clock may) postpones it.
+func TestTheTimedResendWaitsForAStalledDelivery(t *testing.T) {
+	ctx := context.Background()
+	f, c, net, _ := timedClient(t, BFTClientOptions{})
+	require.NoError(t, c.Submit(ctx, pendingRequest(f)))
+	when := due(c)
+	c.delivered.stamp(when.Add(-c.resendInterval() / 2))
+	c.resendStale(ctx, when)
+	require.Len(t, net.sent(), 1, "delivery is not stalled for the interval yet")
+	c.resendStale(ctx, when.Add(c.resendInterval()))
+	require.Len(t, net.sent(), 2, "once it is, the attempt is re-sent")
+}

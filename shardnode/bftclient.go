@@ -205,6 +205,8 @@ type BFTClient struct {
 	// attemptGen is the generation of the pending attempt (resend.go): it advances on a new attempt, on every adopted certificate and on an
 	// installed shard configuration, and an attempt of an older generation is never sent again.
 	attemptGen uint64
+	// delivered is when a new certificate was last adopted (resend.go deliveryClock).
+	delivered lastDelivery
 	// consecutiveRepeats counts the repeat certificates adopted since the last non-repeat one, and lastProgress is when that last non-repeat
 	// certificate was adopted, seeded at Run so a node that starts into a run of repeats still has an age (#976). Both are updated by
 	// noteAdoptedLocked on BOTH adoption paths and are in memory: a restart resets them, and the diagnostics built on them say so.
@@ -1511,6 +1513,7 @@ func (c *BFTClient) sendRequest(ctx context.Context, req *certification.BlockCer
 // duplicate is not adopted and never reaches here. c.mu must be held.
 func (c *BFTClient) noteAdoptedLocked(class UCClass) {
 	c.attemptGen++ // progress or a repeat: the pending attempt's generation is over (resend.go)
+	c.delivered.stamp(time.Now())
 	if class == UCRepeat {
 		c.consecutiveRepeats++
 		return
