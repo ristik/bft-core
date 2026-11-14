@@ -11,6 +11,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
+	gethtypes "github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/rlp"
 	libp2pnetwork "github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/unicitynetwork/bft-core/archive"
@@ -104,7 +107,23 @@ func (s *Server) authorized(id peer.ID) bool {
 }
 
 // readOperation reports whether op only reads the store.
-func readOperation(op byte) bool { return op == 2 || op == 3 || op == 4 || op == 6 }
+func readOperation(op byte) bool { return op == 2 || op == 3 || op == 4 || op == 6 || op == opChain }
+
+// opChain is the chain read (bft-core#1066): [7][count u16][stop 32][request]. The replica answers the default read (op 2) of the requested
+// block, then of its parent, its parent's parent and so on, in one response: [n u8] then n times [len u32][encoded response]. It stops after
+// count records (at most MaxChainRecords), before the block named stop (the caller's anchor), at the first block it does not hold, and once
+// another record would take the response past chainResponseBytes; the first record is always sent. The answer is a locator like every
+// read: the caller asks for each record under the hash its child's header names and authenticates each one.
+const opChain = 7
+
+// MaxChainRecords bounds one chain read. A catch-up walk that took one exchange per block was round-trip bound: at 50 ms RTT, with stream
+// set-up, a few blocks a second (bft-core#1066). One exchange per MaxChainRecords blocks keeps it bandwidth bound.
+const MaxChainRecords = 64
+
+// chainResponseBytes is the soft byte bound of a chain answer: records are added while the answer stays under it. One record alone may be
+// larger (up to the frame bound, as for a single read), so a chain read is never more than one frame and never more than one read's worth
+// of bytes beyond this.
+const chainResponseBytes = 8 << 20
 
 func (s *Server) reservePublic(id peer.ID) error {
 	s.mu.Lock()
@@ -347,6 +366,9 @@ func (s *Server) serveFrame(ctx context.Context, rw io.ReadWriter, frame []byte)
 	if op == 4 || op == 5 {
 		return typedHandlerError(s.serveBundle(ctx, rw, op, frame[1:]))
 	}
+	if op == opChain {
+		return typedHandlerError(s.serveChain(ctx, rw, frame[1:]))
+	}
 	if op == 3 {
 		query, err := archive.DecodeRoundRequest(frame[1:])
 		if err != nil || !sameArchiveContext(query.Context, s.subject) {
@@ -430,6 +452,15 @@ func (s *Server) serveFrame(ctx context.Context, rw io.ReadWriter, frame []byte)
 		}
 		return typedHandlerError(writeFrame(rw, []byte{1}))
 	}
+	encoded, err := archive.EncodeResponse(s.serveDefault(q))
+	if err != nil {
+		return err
+	}
+	return typedHandlerError(writeFrame(rw, encoded))
+}
+
+// serveDefault is the default read (op 2) of a request in this replica's subject.
+func (s *Server) serveDefault(q archive.Request) archive.Response {
 	answer := s.store.Serve(q)
 	if s.defaultDigest != nil {
 		if digest, selected := s.defaultDigest(q); selected {
@@ -439,11 +470,71 @@ func (s *Server) serveFrame(ctx context.Context, rw io.ReadWriter, frame []byte)
 			}
 		}
 	}
-	encoded, err := archive.EncodeResponse(answer)
-	if err != nil {
-		return err
+	return answer
+}
+
+// serveChain answers a chain read (opChain). A request outside this replica's subject is answered Invalid, as op 2 does.
+func (s *Server) serveChain(ctx context.Context, rw io.ReadWriter, payload []byte) error {
+	if len(payload) < 2+32+2 {
+		return fmt.Errorf("%w: %w", ErrHandler, archive.ErrInvalid)
 	}
-	return typedHandlerError(writeFrame(rw, encoded))
+	count := int(binary.BigEndian.Uint16(payload[:2]))
+	var stop [32]byte
+	copy(stop[:], payload[2:34])
+	q, err := archive.DecodeRequest(payload[34:])
+	if err != nil || count < 1 || count > MaxChainRecords {
+		return fmt.Errorf("%w: %w", ErrHandler, archive.ErrInvalid)
+	}
+	qb, _ := archive.EncodeRequest(q)
+	if !bytes.Equal(qb[:len(qb)-32], s.want) {
+		encoded, err := archive.EncodeResponse(archive.Response{Request: q, Outcome: archive.Invalid})
+		if err != nil {
+			return err
+		}
+		return writeFrame(rw, chainAnswer([][]byte{encoded}))
+	}
+	var answers [][]byte
+	size := 1
+	for len(answers) < count && ctx.Err() == nil {
+		answer := s.serveDefault(q)
+		if answer.Outcome != archive.OK && len(answers) > 0 {
+			break // the chain this replica holds ends here: the caller asks again (elsewhere) from this block
+		}
+		encoded, err := archive.EncodeResponse(answer)
+		if err != nil {
+			return err
+		}
+		if len(answers) > 0 && size+4+len(encoded) > chainResponseBytes {
+			break
+		}
+		answers, size = append(answers, encoded), size+4+len(encoded)
+		if answer.Outcome != archive.OK {
+			break
+		}
+		var header gethtypes.Header
+		if rlp.DecodeBytes(answer.Record.Header, &header) != nil || header.ParentHash == (common.Hash{}) || [32]byte(header.ParentHash) == stop {
+			break
+		}
+		q.BlockHash = header.ParentHash
+	}
+	if len(answers) == 0 {
+		return fmt.Errorf("%w: %w", ErrHandler, ctx.Err())
+	}
+	return writeFrame(rw, chainAnswer(answers))
+}
+
+func chainAnswer(answers [][]byte) []byte {
+	size := 1
+	for _, a := range answers {
+		size += 4 + len(a)
+	}
+	out := make([]byte, 1, size)
+	out[0] = byte(len(answers))
+	for _, a := range answers {
+		out = binary.BigEndian.AppendUint32(out, uint32(len(a)))
+		out = append(out, a...)
+	}
+	return out
 }
 
 func (s *Server) serveBundle(ctx context.Context, rw io.ReadWriter, op byte, payload []byte) error {
@@ -503,6 +594,8 @@ func archiveOperation(op byte) string {
 		return "bundle-put"
 	case 6:
 		return "get-exact"
+	case opChain:
+		return "get-chain"
 	default:
 		return "unknown"
 	}
@@ -696,6 +789,68 @@ func FetchExact(ctx context.Context, host shardnode.EvidenceHost, id peer.ID, q 
 		return nil, ErrReplica
 	}
 	return response.Record, nil
+}
+
+// ChainRecord is one record of a chain read, under the request it was asked for.
+type ChainRecord struct {
+	Request archive.Request
+	Record  *archive.Record
+}
+
+// FetchChain reads, from one replica, the block q names and up to max-1 of its ancestors in one exchange (opChain), stopping before the
+// block stop names. Record i+1 is accepted only as the answer to the request for the parent hash record i's header names, so the answer is
+// a hash-linked chain under the caller's own requests; nothing in it is authenticated (the caller verifies every record). A replica that
+// does not hold q answers ErrReplica, as Fetch does; one without the chain read refuses it (an old replica: the caller falls back to Fetch).
+func FetchChain(ctx context.Context, host shardnode.EvidenceHost, id peer.ID, q archive.Request, stop [32]byte, max int, limits Limits) ([]ChainRecord, error) {
+	if host == nil || id == "" || !limits.valid() || max < 1 {
+		return nil, archive.ErrInvalid
+	}
+	max = min(max, MaxChainRecords)
+	raw, err := archive.EncodeRequest(q)
+	if err != nil {
+		return nil, err
+	}
+	payload := make([]byte, 0, 1+2+32+len(raw))
+	payload = append(payload, opChain)
+	payload = binary.BigEndian.AppendUint16(payload, uint16(max))
+	payload = append(append(payload, stop[:]...), raw...)
+	answer, err := exchange(ctx, host, id, payload, limits)
+	if err != nil {
+		return nil, err
+	}
+	if len(answer) < 1 || int(answer[0]) < 1 || int(answer[0]) > max {
+		return nil, ErrReplica
+	}
+	n, rest := int(answer[0]), answer[1:]
+	out := make([]ChainRecord, 0, n)
+	want := q
+	for i := 0; i < n; i++ {
+		if len(rest) < 4 {
+			return nil, ErrReplica
+		}
+		size := binary.BigEndian.Uint32(rest[:4])
+		if uint64(size) > uint64(len(rest)-4) {
+			return nil, ErrReplica
+		}
+		response, err := archive.DecodeFor(want, rest[4:4+size])
+		rest = rest[4+size:]
+		if err != nil || response.Outcome != archive.OK || response.Record == nil {
+			if len(out) > 0 {
+				return out, nil // a usable prefix: the caller asks again from the first block it lacks
+			}
+			return nil, ErrReplica
+		}
+		out = append(out, ChainRecord{Request: want, Record: response.Record})
+		var header gethtypes.Header
+		if rlp.DecodeBytes(response.Record.Header, &header) != nil {
+			return out, nil
+		}
+		want.BlockHash = header.ParentHash
+	}
+	if len(rest) != 0 {
+		return nil, ErrReplica
+	}
+	return out, nil
 }
 
 // Fetch reads an exact record from one configured replica. Authentication is
