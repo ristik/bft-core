@@ -35,9 +35,16 @@ const (
 	MaxBatchBytes = 1 << 20
 )
 
+// unavailableError is ErrUnavailable's type: it says Unavailable(), so that a consumer that cannot import this package (the executor
+// adapter) tells "not available here yet" from "not authentic" by an interface check (bft-core#1067).
+type unavailableError struct{}
+
+func (unavailableError) Error() string     { return "recordsfeed: the root log is unavailable" }
+func (unavailableError) Unavailable() bool { return true }
+
 var (
 	// ErrUnavailable reports a cut or a record no asked root could provide.
-	ErrUnavailable = errors.New("recordsfeed: the root log is unavailable")
+	ErrUnavailable error = unavailableError{}
 	// ErrAuth reports a cut that does not lead to the origin's tree root, a state that is not the canonical source state, or records
 	// that do not extend to the authenticated tip.
 	ErrAuth = errors.New("recordsfeed: not authenticated by the origin")
