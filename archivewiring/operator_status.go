@@ -94,22 +94,28 @@ type OperatorStatus struct {
 // still holds copies this writer promised. No writer reporting it as retained is necessary before powering it off, not sufficient: see
 // MigrationScope.
 type PolicyReport struct {
-	Version          uint64   `json:"version"`
-	Digest           string   `json:"digest,omitempty"`
-	ShardEpoch       uint64   `json:"shardEpoch"`
-	Replicas         []string `json:"replicas"`
-	Retained         []string `json:"retained,omitempty"`
-	MigrationSince   uint64   `json:"migrationSince,omitempty"`
-	MigrationThrough uint64   `json:"migrationThrough,omitempty"`
-	MigrationBacklog uint64   `json:"migrationBacklog"`
-	MigrationDone    bool     `json:"migrationComplete"`
+	// Version is this node's local count of policy changes; it is not comparable between writers.
+	Version uint64 `json:"version"`
+	Digest  string `json:"digest,omitempty"`
+	// ShardEpoch is the installed shard epoch the policy in force was derived from (the one its digest commits). A later assignment
+	// that derives the same replicas keeps the policy, so it can lag the installed epoch and differ between writers (bft-core#1044).
+	ShardEpoch uint64 `json:"shardEpoch"`
+	// CheckedShardEpoch is the latest installed shard epoch whose assignment was evaluated and derived these replicas: compare this one
+	// between writers to see that each follows the installed assignment.
+	CheckedShardEpoch uint64   `json:"checkedShardEpoch"`
+	Replicas          []string `json:"replicas"`
+	Retained          []string `json:"retained,omitempty"`
+	MigrationSince    uint64   `json:"migrationSince,omitempty"`
+	MigrationThrough  uint64   `json:"migrationThrough,omitempty"`
+	MigrationBacklog  uint64   `json:"migrationBacklog"`
+	MigrationDone     bool     `json:"migrationComplete"`
 	// MigrationScope says what completion proves: not UTB/Q3 history, record proofs or evidence outside the archive.
 	MigrationScope string `json:"migrationScope"`
 }
 
 // PolicyReportOf reports a policy snapshot.
 func PolicyReportOf(s ReplicaPolicySnapshot) *PolicyReport {
-	r := &PolicyReport{Version: s.Version, ShardEpoch: s.Epoch, Replicas: names(s.Replicas), Retained: names(s.Retained), MigrationDone: len(s.Retained) == 0,
+	r := &PolicyReport{Version: s.Version, ShardEpoch: s.Epoch, CheckedShardEpoch: s.Checked, Replicas: names(s.Replicas), Retained: names(s.Retained), MigrationDone: len(s.Retained) == 0,
 		MigrationScope: "this writer's promised block records and retained activation bundles only"}
 	if s.Digest != ([32]byte{}) {
 		r.Digest = fmt.Sprintf("0x%x", s.Digest)
