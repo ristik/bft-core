@@ -39,7 +39,6 @@ account instead of the faucet account, whose nonces belong to the public faucet'
 """
 import argparse
 import datetime
-import fcntl
 import hashlib
 import json
 import os
@@ -185,13 +184,88 @@ class Journal:
         return detail
 
 
+def norm_hex(value):
+    """A hex string as the comparisons use it: lower case, without 0x; '' for anything else."""
+    return value.lower().removeprefix('0x') if isinstance(value, str) else ''
+
+
+def binding_refusal(mine, reference, epoch, promoted, expect):
+    """Why joiner health report `mine` is not evidence about the intended node under the intended assignment, or None (bft-core#1057; astra,
+    briefs/astra-q-1029-1043-answer.md Q3). `reference` is a host incumbent's report (validator 1), `expect` what the drive expects: nodeId
+    (the joiner's registered EVM node id), bodyId (the activation body of `epoch`, from the roots' activation record) and, after the election,
+    sigKey (the key the installed shard configuration names for the joiner). Checked:
+      - the report is about the expected node, of the incumbent's network, partition and shard;
+      - the expected handoff is in the node's verified activation history at `epoch` (a later epoch counts only with it in its ancestry), and
+        that history agrees with the incumbent's on every epoch both hold;
+      - after the election: the node's installed configuration is the incumbent's (shard epoch and configuration hash) and names it, with the
+        expected key.
+    This decides only whether the drive may call the join complete; the node's role and its signing authority decide what it signs."""
+    mb, rb = (mine or {}).get('binding'), (reference or {}).get('binding')
+    if not isinstance(mb, dict) or not isinstance(rb, dict):
+        return 'no binding in the health report'
+    if not expect or not expect.get('nodeId') or mb.get('nodeId') != expect['nodeId']:
+        return f"the report is about node {mb.get('nodeId')}, not {(expect or {}).get('nodeId')}"
+    for key in ('networkId', 'partitionId', 'shardId'):
+        if mb.get(key) is None or mb.get(key) != rb.get(key):
+            return f'{key} {mb.get(key)} is not the incumbent\'s {rb.get(key)}'
+    mine_h = {e.get('epoch'): norm_hex(e.get('bodyId')) for e in mb.get('history') or []}
+    ref_h = {e.get('epoch'): norm_hex(e.get('bodyId')) for e in rb.get('history') or []}
+    want = norm_hex(expect.get('bodyId'))
+    if not want or mine_h.get(epoch) != want:
+        return f'the expected activation {want or "?"} of epoch {epoch} is not in the node\'s verified history ({mine_h.get(epoch) or "absent"})'
+    if any(ref_h[e] != body for e, body in mine_h.items() if e in ref_h):
+        return 'the node\'s verified history differs from the incumbent\'s'
+    if promoted:
+        if mb.get('member') is not True:
+            return 'the installed configuration does not name the node'
+        if not norm_hex(expect.get('sigKey')) or norm_hex(mb.get('sigKey')) != norm_hex(expect.get('sigKey')):
+            return f"the installed configuration names key {mb.get('sigKey')} for it, not {expect.get('sigKey')}"
+        if not mb.get('shardConfHash') or (mb.get('shardEpoch'), norm_hex(mb.get('shardConfHash'))) != (rb.get('shardEpoch'), norm_hex(rb.get('shardConfHash'))):
+            return (f"installed configuration {mb.get('shardEpoch')}/{mb.get('shardConfHash')} is not the incumbent's "
+                    f"{rb.get('shardEpoch')}/{rb.get('shardConfHash')}")
+    return None
+
+
+def expectation_complete(expect, promoted):
+    """Whether a binding expectation has every value binding_refusal needs (an incomplete one is derived again, not kept)."""
+    return bool(expect and expect.get('nodeId') and expect.get('bodyId') and (not promoted or expect.get('sigKey')))
+
+
+def follower_ready(mine, reference, epoch, promoted, expect=None, later=None):
+    """A follower's own report, compared with an incumbent's. Before the election (promoted False) the joiner is a non-active follower by
+    design: it must have installed the current epoch's activation (roleEpoch >= epoch), with either role, and follow the incumbents' certified
+    progress. After it (promoted True) its role must be active at the target epoch. Either way its execution recovery must be explicitly
+    ready (missing or empty is not ready) and its certified (admitted) round within two of the incumbent's, never ahead by more."""
+    if mine.get('executionRecovery') != 'ready':
+        return False
+    if (mine.get('roleEpoch') or 0) < epoch or mine.get('role') not in ('active', 'follower'):
+        return False
+    if promoted and mine.get('role') != 'active':
+        return False
+    # A member admits the very certificates the incumbent admits (one per shard round), so a joiner that follows differs from it only by
+    # a certificate in delivery. What the drive sees differs more: the joiner's report comes through its agent (seconds; on the
+    # 2026-11-14 gate run ~4.5 s, three rounds at ~1.5 s per round, bft-core#1061), read after the incumbent's. So the incumbent is read
+    # before (`reference`) and after (`later`) the joiner's report: in step, the joiner's round lies in that bracket, give or take the one
+    # certificate in delivery at either edge. Without `later` the bracket is the one reading.
+    have, low = mine.get('lastUCRound') or 0, reference.get('lastUCRound') or 0
+    high = max(low, (later or reference).get('lastUCRound') or 0)
+    if not (have > 0 and low - 1 <= have <= high + 1):
+        return False
+    # progress alone is not completion: the report must be about the intended node and assignment (bft-core#1057); without an
+    # expectation this is only the progress predicate
+    return expect is None or binding_refusal(mine, reference, epoch, promoted, expect) is None
+
+
 # --- the drive -------------------------------------------------------------------------------------------------------------------
 class Drive(rehearse.Rehearsal):
     """The rehearsal's primitives (gateway calls, exec in a service, one-shot node containers, the relayer, the scrubbed log) on a generation in service."""
     remote, require, allow_excluding = {}, frozenset(), False   # set by __init__ (remote_entity.load): defaults for a Drive made without it
 
-    def __init__(self, generation, cast, ubft, restore_pin=None, joiners=None, require=(), allow_excluding=False, funder=None):
+    cold_restore = False   # set by __init__: the explicit cold bootstrap (wipe, pin, replay) instead of the follower
+
+    def __init__(self, generation, cast, ubft, restore_pin=None, joiners=None, require=(), allow_excluding=False, funder=None, cold_restore=False):
         generation = Path(generation).resolve()
+        self.cold_restore = cold_restore
         self.funder = Path(funder).resolve() if funder else None
         super().__init__(generation, generation / 'handoff' / 'drive', cast)
         self.ubft, self.restore_pin = Path(ubft).resolve(), (Path(restore_pin).resolve() if restore_pin else None)
@@ -204,6 +278,7 @@ class Drive(rehearse.Rehearsal):
         if saved.is_file():
             self.joiner_map = {**json.loads(saved.read_text()), **self.joiner_map}
         self.transport = remote_entity.EntityTransport(docker, self.remote)
+        self.docker = docker
         self.require, self.allow_excluding = set(require or ()), allow_excluding
         self.net, self.work = self.gen / 'network', self.gen / 'network' / 'handoff'
         self.deployment = json.loads((self.net / 'pos-deployment.json').read_text())
@@ -271,8 +346,13 @@ class Drive(rehearse.Rehearsal):
         return out
 
     def pending_remote(self):
-        """Remote entities prepared for a join (their delegation admitted, their authority at the successor scope) but not yet members."""
-        return {i for i, r in self.remote.items() if r.state == 'prepared'}
+        """Remote entities prepared for a join (their delegation admitted, their authority at the successor scope) but not yet members, read from the
+        registry NOW (a join's prepare may have changed it since this drive started). A record that cannot be read refuses the drive (fail closed)."""
+        try:
+            states = remote_entity.fresh_states(self.gen)
+        except remote_entity.RegistryError as error:
+            raise Refused(f'the remote joiners\' registry cannot be read: {error}; a result that leaves a prepared joiner out cannot be ruled out') from None
+        return {i for i, state in states.items() if state in ('preparing', 'prepared')}   # preparing: its authority may already run at the successor scope
 
     def root_info(self, i):
         status, body = self.transport.post(i, '/api/v1/q3/signers', b'{}')
@@ -454,7 +534,9 @@ class Drive(rehearse.Rehearsal):
         self.exec_in('root1', 'ubft', 'root', 'handoff', 'evm-context', '--root-rpc', self.root_rpc, '--out', '/tmp/context.json')
         context = work / f'{tag}-context.json'
         context.write_text(self.exec_in('root1', 'cat', '/tmp/context.json'))
-        ids = {i: (self.root_node_id(i), self.evm_node_id(i)) for i in self.new}
+        # the relayer resolves the incumbent committee's node ids too (a retiring member is in K but not elected): every entity of old and new is named,
+        # the possession proofs below are made by the elected ones only
+        ids = {i: (self.root_node_id(i), self.evm_node_id(i)) for i in sorted(set(self.old) | set(self.new))}
         subprocess.run(['chown', '-R', '10001:10001', str(work)], check=True)
         args = ['pos-relayer', 'proposal', *(['--reserved'] if reserved else []), '--eth-rpc', 'http://ureth1:8545', '--pos-deployment', '/deployment.json',
                 '--context', f'/work/{tag}-context.json', '--result-id', result, '--node-ids', ','.join(f'{r},{e}' for r, e in ids.values()),
@@ -465,7 +547,7 @@ class Drive(rehearse.Rehearsal):
         self.expect(run.returncode == 0, f'{tag}: pos-relayer proposal', run.stderr.strip()[-500:])
         proposal = work / f'{tag}-proposal'
         pops = []
-        for i, (_, evm) in ids.items():
+        for i, (_, evm) in ((i, ids[i]) for i in self.new):
             if i in self.remote:
                 (work / f'{tag}-pop-{i}.json').write_text(self.remote[i].evm_pop(context, proposal / 'validators.json', proposal / 'identities.json'))
                 pops.append(str(work / f'{tag}-pop-{i}.json'))
@@ -550,9 +632,13 @@ class Drive(rehearse.Rehearsal):
         code = {k.lower().removeprefix('0x'): v for k, v in spec.items()}[self.REGISTRY.lower().removeprefix('0x')]['code']
         code_hash = hashlib.sha256(bytes.fromhex(code.removeprefix('0x'))).hexdigest()
         receipts = []
-        for i in sorted(self.joiners & set(self.remote)):
-            self.catch_up_remote(i)
-        for i in self.new:
+        # the host entities' receipts first: each readiness stages the candidate in that entity's shard node, whose archive server then admits the
+        # joiner the candidate names (activePeers.Stage, shard_node_run.go). Only then can a remote joiner's shard node restore from those replicas
+        # (before, they refuse a non-member: run of 2026-11-13 00:35, "unavailable from both replicas"); its catch-up comes next, then its receipt
+        late = sorted(self.joiners & set(self.remote))
+        for i in [j for j in self.new if j not in late] + late:
+            if i in late:
+                self.catch_up_remote(i)
             if i in self.remote:
                 (work / f'receipt-{i}.json').write_text(self.remote[i].readiness(work / 'candidate.cbor', genesis, code_hash))
                 receipts.append(str(work / f'receipt-{i}.json'))
@@ -564,7 +650,7 @@ class Drive(rehearse.Rehearsal):
             receipts.append(str(work / f'receipt-{i}.json'))
         return receipts
 
-    def catch_up_remote(self, i):
+    def catch_up_remote(self, i, root=True):
         """A remote joiner's root started at the genesis trust base and, as a non-member, receives no consensus traffic: on a network past its first handoff it
         stays at epoch 1, and its readiness is refused ("the candidate is not the next epoch of this chain"). Its install restart to the CURRENT epoch makes it
         fetch and verify every activation bundle from the incumbents (installQ3Epochs; it stays a follower), so that the candidate is its next epoch."""
@@ -572,7 +658,10 @@ class Drive(rehearse.Rehearsal):
         epoch = self.follower_epoch(i)
         if epoch is not None and epoch > current:
             raise Refused(f'the joiner\'s root {i} is at epoch {epoch}, past the epoch {current} being left')
-        if epoch != current:
+        if epoch != current and not root:
+            self.say(f'  remote joiner {i}: its root is at epoch {epoch}: left to the join drive (a follower root fetches the records an install needs only '
+                     'once a staged candidate names it, after q3-candidate)')
+        elif epoch != current:
             self.say(f'  remote joiner {i}: its root is at epoch {epoch}; install restart to epoch {current} (activation bundles from the incumbents)')
             self.remote[i].install_root(current)
             self.wait(f'the joiner\'s root {i} installed epoch {current}', lambda: self.follower_epoch(i) == current, 300)
@@ -580,12 +669,17 @@ class Drive(rehearse.Rehearsal):
             # the shard node's own follower installs epoch 2 and then needs the terminal records of the previous EVM configuration, which a staging-only node
             # has in neither journal nor archive: its verified history stays at epoch 2 and its stage of the candidate is refused. Restored from a survivor's
             # pin of the CURRENT epoch, its history tip is that epoch (the restore after its enrollment repeats this at the new epoch).
-            self.say(f'  remote joiner {i}: its shard node is restored at epoch {current} before its readiness (a staging-only node cannot follow past epoch 2)')
-            target, self.target = self.target, current
-            try:
-                self.restore_remote(i, follow=False)
-            finally:
-                self.target = target
+            if self.cold_restore:
+                self.say(f'  remote joiner {i}: its shard node is restored at epoch {current} before its readiness (--cold-restore)')
+                target, self.target = self.target, current
+                try:
+                    self.restore_remote(i, follow=False)
+                finally:
+                    self.target = target
+            else:
+                # the root-free follower (--follow-source) installs every activation from the incumbents' mirrors and executes the certified blocks
+                # from their archives: nothing is emptied, pinned or replayed here
+                self.follow_joiner(i, current, promoted=False)   # before the election: following the current epoch, not active
             self.remote[i].info['shardCaughtUp'] = current
             self.remote[i].save()
 
@@ -651,8 +745,10 @@ class Drive(rehearse.Rehearsal):
                 journal.run('install', lambda i=i: self.remote[i].install_root(self.target), sub=f'root{i}')
                 continue
             journal.run('install', lambda i=i: self.install_root(i, files, base), sub=f'root{i}')
-        for i in roots:
+        for i in sorted(self.new):
             self.wait(f'root {i} certifies at epoch {self.target}', lambda i=i: self.root_epoch(i, self.transport) == self.target, 300)
+        for i in sorted(set(roots) - set(self.new)):   # a leaver installs the epoch (it holds the commit) but certifies nothing in it: it is a follower there
+            self.wait(f'the leaving root {i} installed epoch {self.target}', lambda i=i: self.follower_epoch(i) == self.target or self.root_epoch(i, self.transport) == self.target, 300)
         self.exec_in('root1', 'ubft', 'root', 'handoff', 'q3-activation', '--root-rpc', self.root_rpc, '--epoch', str(self.target), '--out', '/tmp/activation.json')
         record = json.loads(self.exec_in('root1', 'cat', '/tmp/activation.json'))
         (self.evh() / f'activation-record-{self.target}.json').write_text(json.dumps(record, indent=1) + '\n')
@@ -712,7 +808,10 @@ class Drive(rehearse.Rehearsal):
                 self.exec_in(f'authority{i}', 'ubft', 'signing-authority', 'replace-session', *OPERATOR, '--out', '/authority/client.cred')
                 return {'generation': self.authority_status(i).get('generation')}
             journal.run('advance', session, sub=f'{unit}/replace-session')
-            journal.run('advance', lambda: self.restore_joiner(i) or {}, sub=f'{unit}/restore')   # empties and restores its shard node, then runs it (rehearse)
+            if self.cold_restore:
+                journal.run('advance', lambda: self.restore_joiner(i) or {}, sub=f'{unit}/restore')   # empties and restores its shard node (rehearse)
+            else:
+                journal.run('advance', lambda: self.follow_joiner(i, self.target, promoted=True) or {}, sub=f'{unit}/follow')   # the same follower, started again on its retained state
             return {'joiner': True}
         def advance():
             status = healthy(self.authority_status(i))
@@ -757,7 +856,10 @@ class Drive(rehearse.Rehearsal):
                 remote.authority_step('replace-session', self.target, shard_epoch)
                 return {'generation': remote.authority_status().get('generation')}
             journal.run('advance', session, sub=f'{unit}/replace-session')
-            journal.run('advance', lambda: self.restore_remote(i) or {}, sub=f'{unit}/restore')
+            if self.cold_restore:
+                journal.run('advance', lambda: self.restore_remote(i) or {}, sub=f'{unit}/restore')
+            else:
+                journal.run('advance', lambda: self.follow_joiner(i, self.target, promoted=True) or {}, sub=f'{unit}/follow')
             return {'joiner': True, 'remote': True}
         def advance():
             status = healthy(remote.authority_status())
@@ -794,16 +896,83 @@ class Drive(rehearse.Rehearsal):
             journal.run('advance', lambda i=i: self.advance_entity(i, shard_epoch, journal), sub=f'entity{i}')
         return {'shardEpoch': shard_epoch}
 
+    def follow_joiner(self, i, epoch, promoted):
+        """Idempotent replacement of the joiner restores (phase 1 follower). The joiner's shard node runs as a root-free follower from its
+        provisioning on (--follow-source): it installs each activation from the incumbents' mirrors and executes the certified blocks from their
+        archives, and the completed activation naming it publishes its role as active in the same process. This only (re)starts the shard
+        container on its RETAINED state (an authority order stops it) and waits until the node itself reports ready (follower_ready): before
+        the election (promoted False) caught up in the current epoch as a follower, after it (promoted True) active at the target epoch.
+        Nothing is emptied, pinned or replayed, and a timeout is a failure, never a restore.
+
+        Not yet the hot-promotion latency objective: an authority order still stops and restarts the shard process (state kept)."""
+        remote = self.remote.get(i)
+        if remote is not None:
+            if f'shard{i}' not in remote.running():
+                remote.authority_step('shard-start', self.target, 0)
+        else:
+            self.compose('start', f'shard{i}')
+        self.wait_ready(i, epoch, promoted, 'no restore')
+
+    def wait_ready(self, i, epoch, promoted, how):
+        """Wait until joiner i's shard node itself reports follower_ready (its /api/v1/health against validator 1's): the one completion check of
+        the follower path and of the explicit cold restore alike; a timeout is a failure."""
+        remote = self.remote.get(i)
+        health = (lambda: remote.status().get('shardHealth')) if remote is not None else (lambda: self.docker.shard_health(i))
+        expected = {}
+        def ready():
+            reference, mine, later = self.docker.shard_health(1), health(), self.docker.shard_health(1)   # the joiner's read bracketed
+            if not mine or not reference or not later:
+                self.say(f'  joiner {i}: shard health not readable yet')
+                return False
+            if not expectation_complete(expected, promoted):
+                # derived again on every poll until complete: a transient failure (the roots' activation record not readable yet, the
+                # installed configuration not written yet) is retried, never cached
+                expected.clear()
+                expected.update(self.binding_expectation(i, epoch, promoted, reference))
+            refusal = binding_refusal(mine, reference, epoch, promoted, expected)
+            self.say(f'  joiner {i}: role {mine.get("role")} at epoch {mine.get("roleEpoch")}, recovery {mine.get("executionRecovery")}, '
+                     f'certified round {mine.get("lastUCRound")} (validator 1 {reference.get("lastUCRound")}..{(later or {}).get("lastUCRound")}), '
+                     f'binding {refusal or "ok"}')
+            return follower_ready(mine, reference, epoch, promoted, expected, later)
+        what = 'active at epoch %d' % epoch if promoted else 'following epoch %d' % epoch
+        self.wait(f'the joiner {i} is {what} and certified at the head ({how})', ready, 3600)
+
+    def binding_expectation(self, i, epoch, promoted, reference):
+        """What joiner i's health binding must say (binding_refusal): its EVM node id as registered, the activation body of `epoch` as the roots
+        record it, and after the election the signing key the installed shard configuration names for it (network/handoff/shard-conf-<N>.json
+        of the incumbent's installed shard epoch, as the drive fetched it from a root). A value that cannot be read stays None: the check fails."""
+        node_id = self.evm_node_id(i)
+        out = {'nodeId': node_id, 'bodyId': self.activation_body(epoch), 'sigKey': None}
+        if promoted:
+            shard_epoch = ((reference or {}).get('binding') or {}).get('shardEpoch')
+            conf = self.work / f'shard-conf-{shard_epoch}.json'
+            try:
+                named = [v for v in json.loads(conf.read_text())['validators'] if v.get('nodeId') == node_id]
+                out['sigKey'] = named[0].get('sigKey') if len(named) == 1 else None
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
+        return out
+
+    def activation_body(self, epoch):
+        """The V3 body id of the activation of root epoch `epoch` as the roots record it (the drive's activation record, else root 1's
+        `q3-activation`), or None."""
+        path = self.evidence / f'epoch{epoch}' / f'activation-record-{epoch}.json'
+        try:
+            if path.is_file():
+                return json.loads(path.read_text()).get('v3BodyId')
+            self.exec_in('root1', 'ubft', 'root', 'handoff', 'q3-activation', '--root-rpc', self.root_rpc, '--epoch', str(epoch), '--out', '/tmp/drive-activation.json')
+            return json.loads(self.exec_in('root1', 'cat', '/tmp/drive-activation.json')).get('v3BodyId')
+        except (rehearse.Failure, OSError, ValueError):
+            return None
+
     def restore_remote(self, i, follow=True):
-        """rehearse.restore_joiner for an entity on another machine: the pin (the latest certified record of the new epoch, its technical record, the trust
-        history's body id) is read HERE from a survivor's archive and shipped; the laptop empties its shard node's and execution client's state, restores, catches up."""
+        """The explicit cold restore (--cold-restore only) of an entity on another machine: the pin (the latest certified record of the epoch, its technical
+        record, the trust history's body id) is read HERE from a survivor's archive and shipped; the laptop empties ONLY its selected execution and
+        bootstrap stores (remote_joiner.COLD_RESTORE_VOLUMES: never the signing authority's anti-equivocation and session history), restores, and runs
+        the node again. It always starts over: no height or log shortcut decides that an earlier restore is done (astra, briefs/astra-q-1029-1043-answer.md
+        Q2). It ends with the same runtime readiness as the follower path (wait_ready: the node's own health; a close execution height is not
+        completion): following the current epoch before the election (follow False), active at the target after it."""
         self.expect(bool(self.restore_pin), 'the joiner\'s restore needs --restore-pin (scripts/h4-restore-pin of the pinned source)')
-        if follow:
-            status = self.remote[i].status()
-            head, chain = status.get('urethHead'), int(self.ureth(1, 'eth_blockNumber'), 16)
-            if not status.get('restoring') and status.get('services', {}).get(f'shard{i}') == 'running' and head and head + 5 >= chain:
-                self.say(f'  remote entity {i}: its shard node already runs at the head ({head} of {chain}): restored earlier')   # a resumed drive does not wipe it
-                return
         bodies = self.restore_body_ids()
         self.expect(bool(bodies), 'an activation record names the V3 body id the restore is anchored to')
         env = dict(os.environ, H4_RESTORE_BODY_IDS=bodies)
@@ -833,23 +1002,13 @@ class Drive(rehearse.Rehearsal):
             seen.append(head)
             self.say(f'  remote entity {i}: execution client at {head} (replaying to the pin)')
             return head and len(seen) >= 5 and len(set(seen[-5:])) == 1
-        if not follow:
-            # before its Commit the node is no member: it gets no certificate and never follows the head. Its replay to the pin is all it can do, and enough:
-            # the pin's record is its verified history's tip (what its readiness needs)
-            self.wait(f'the laptop\'s execution client {i} replays to the pin', replayed, 7200)
-            return
-        # restore mode stops at the pin (it asks its archive for nothing later): once replayed, it runs as an ordinary node, which walks its seeded archive
-        # and follows the certificates it now receives as a member
+        # restore mode stops at the pin (it asks its archive for nothing later): that only ends restore mode, it is not completion. The node then runs
+        # as provisioned (the root-free follower), walks its seeded archive and follows the head, and is done only when it reports itself ready
         self.wait(f'the laptop\'s execution client {i} replays to the pin', replayed, 7200)
         self.remote[i].seed_archive()   # the records certified during the replay
         finished = self.remote[i].restore_finish()
-        self.expect(finished.get('running') is True, f'the laptop\'s shard node {i} runs as an ordinary node', str(finished)[:300])
-        def caught_up():
-            head = self.remote[i].status().get('urethHead')
-            target = int(self.ureth(1, 'eth_blockNumber'), 16)
-            self.say(f'  remote entity {i}: execution client at {head}, validator 1 at {target}')
-            return head is not None and head + 5 >= target
-        self.wait(f'the laptop\'s execution client {i} catches up with validator 1', caught_up, 3600)
+        self.expect(finished.get('running') is True, f'the laptop\'s shard node {i} runs again', str(finished)[:300])
+        self.wait_ready(i, self.target, follow, 'after a cold restore')
 
     def step_lockproof(self, mode):
         overlay = self.gen / BRIDGE_OVERRIDE
@@ -936,16 +1095,9 @@ def parse_members(text):
 
 
 def hold_lock(generation):
-    """The open lock file of the generation's drives (handoff/drive.lock), locked exclusively; None when another drive holds it."""
-    path = Path(generation) / 'handoff' / 'drive.lock'
-    path.parent.mkdir(parents=True, exist_ok=True)
-    handle = open(path, 'a')
-    try:
-        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        handle.close()
-        return None
-    return handle
+    """The open lock file of the generation's drives (handoff/drive.lock), locked exclusively; None when another drive holds it. remote_entity's: the
+    registry writes of this process then know it holds the lock (they take it themselves otherwise)."""
+    return remote_entity.hold_lock(generation)
 
 
 def parse_joiners(values):
@@ -964,7 +1116,9 @@ def main(argv=None):
     p.add_argument('result', nargs='?', help='the election result to drive (default: the open one, or the unfinished drive in handoff/log.jsonl)')
     p.add_argument('--ubft', type=Path, required=True, help='the pinned ubft binary of the generation')
     p.add_argument('--cast', default='cast')
-    p.add_argument('--restore-pin', type=Path, help='h4-restore-pin (scripts/h4-restore-pin built from the pinned source): needed for a joiner')
+    p.add_argument('--restore-pin', type=Path, help='h4-restore-pin (scripts/h4-restore-pin built from the pinned source): needed for --cold-restore')
+    p.add_argument('--cold-restore', action='store_true',
+                   help='the explicit cold bootstrap of a joiner (empty its state, pin, replay) instead of the root-free follower; never needed on the election path')
     p.add_argument('--joiner', action='append', help='STAKINGID=ENTITY of a prepared joiner (also read from handoff/joiners.json)')
     p.add_argument('--min-window-rounds', type=int, default=MIN_WINDOW_ROUNDS, help='refuse the steps before the Prepare with fewer progress rounds left')
     p.add_argument('--lockproof-restart', choices=('auto', 'always', 'never'), default='auto',
@@ -986,7 +1140,7 @@ def main(argv=None):
         if lock is None:
             print('BUSY: another handoff-drive holds handoff/drive.lock; nothing done', flush=True)
             return 5
-    d = Drive(a.generation, a.cast, a.ubft, a.restore_pin, parse_joiners(a.joiner), a.require_member, a.allow_excluding_joiner, a.funder)
+    d = Drive(a.generation, a.cast, a.ubft, a.restore_pin, parse_joiners(a.joiner), a.require_member, a.allow_excluding_joiner, a.funder, a.cold_restore)
     if d.funder:
         try:
             funder_address(d.funder)
@@ -1031,6 +1185,9 @@ def main(argv=None):
     except Exception as error:
         d.say(f'STOPPED: {d.scrub(str(error))}. Rerun the same command to continue from handoff/log.jsonl')
         return 1
+    finally:
+        if lock is not None:
+            lock.close()
 
 
 if __name__ == '__main__':

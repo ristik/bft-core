@@ -375,3 +375,34 @@ func (p P2PRemote) RecordsFromSource(ctx context.Context, source int, from uint6
 }
 
 var _ Remote = P2PRemote{}
+
+// RoleRemote picks its sources by the node's role: a non-active node (NonActive true) asks only Mirrors (shard validators and archive
+// replicas that serve their verified cuts and records), never a root; an active node asks Roots first and Mirrors as backup. Everything
+// served is verified by the Source against the origin either way.
+type RoleRemote struct {
+	Opener    Opener
+	Roots     []peer.ID
+	Mirrors   func() []peer.ID
+	NonActive func() bool
+}
+
+func (r RoleRemote) peers() []peer.ID {
+	var out []peer.ID
+	if r.NonActive == nil || !r.NonActive() {
+		out = append(out, r.Roots...)
+	}
+	if r.Mirrors != nil {
+		out = append(out, r.Mirrors()...)
+	}
+	return out
+}
+
+func (r RoleRemote) remote() P2PRemote { return P2PRemote{Opener: r.Opener, Roots: r.peers()} }
+
+func (r RoleRemote) Cut(ctx context.Context, key CutKey) (Cut, error) {
+	return r.remote().Cut(ctx, key)
+}
+
+func (r RoleRemote) Records(ctx context.Context, from uint64, max int) ([]rootrecords.Record, error) {
+	return r.remote().Records(ctx, from, max)
+}

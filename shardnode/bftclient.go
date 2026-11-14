@@ -211,6 +211,87 @@ type BFTClient struct {
 	// firstResponse is set once any certification response has arrived; it ends the early startup handshake retry.
 	firstResponse atomic.Bool
 	profile2      *Profile2Consumer
+
+	// follower, when set and true, makes this client a non-active follower: it sends nothing to the roots (no handshake, no request) and
+	// takes certificates only from FollowCertificate. Read on every use, so a promotion takes effect at the next one.
+	role atomic.Pointer[roleHolder]
+	// followed carries certificates from a non-root follow source into Run, where they are handled exactly as a root's response.
+	followed chan *certification.CertificationResponse
+	// wasFollower is Run's memory of the last role it saw: a promotion handshakes at once (RoleChanged, else the next heartbeat).
+	wasFollower bool
+	roleWake    chan struct{}
+}
+
+// RoleChanged tells Run that the follower predicate may have changed (a verified activation installed or retired this node), so that a
+// promotion subscribes to the roots now instead of at the next heartbeat. It never blocks.
+func (c *BFTClient) RoleChanged() {
+	select {
+	case c.roleWake <- struct{}{}:
+	default:
+	}
+}
+
+// checkRole handshakes with the roots when the node has just stopped being a follower.
+func (c *BFTClient) checkRole(ctx context.Context) {
+	follower := c.isFollower()
+	if follower == c.wasFollower {
+		return
+	}
+	c.wasFollower = follower
+	if follower {
+		return
+	}
+	if c.log != nil {
+		c.log.InfoContext(ctx, "promoted from follower: subscribing to the roots")
+	}
+	if err := c.sendHandshake(ctx); err != nil && c.log != nil {
+		c.log.ErrorContext(ctx, "handshake after promotion failed", slog.String("err", err.Error()))
+	}
+}
+
+// ErrFollower refuses root traffic while this client is a non-active follower.
+var ErrFollower = errors.New("shardnode: non-active follower: no root traffic")
+
+// SetFollowerRole installs the non-active predicate (see BFTClient.follower). Call before Run.
+func (c *BFTClient) SetFollowerRole(nonActive func() bool) { c.SetRole(funcRole{nonActive}) }
+
+// SetRole installs the published role lease. Call before Run.
+func (c *BFTClient) SetRole(l RoleLease) { c.role.Store(&roleHolder{lease: l}) }
+
+func (c *BFTClient) isFollower() bool {
+	_, active := c.role.Load().current()
+	return !active
+}
+
+// Holds reports whether this client's held certificate (adopted after durable admission) is at or past uc: the acknowledgement a follow
+// source uses to stop re-offering a certificate.
+func (c *BFTClient) Holds(uc *types.UnicityCertificate) bool {
+	c.mu.Lock()
+	luc := c.luc
+	c.mu.Unlock()
+	if luc == nil || uc == nil {
+		return false
+	}
+	if luc.GetRootEpoch() != uc.GetRootEpoch() {
+		return luc.GetRootEpoch() > uc.GetRootEpoch()
+	}
+	return luc.GetRootRoundNumber() >= uc.GetRootRoundNumber()
+}
+
+// FollowCertificate hands Run a certificate obtained from a non-root source (an archive record's resulting pair). It is untrusted until Run
+// verifies it through the same admission as a root's response. It never blocks: with the queue full the newest offer is dropped, and the
+// follow source offers again. It reports whether the offer was queued.
+func (c *BFTClient) FollowCertificate(uc *types.UnicityCertificate, tr *certification.TechnicalRecord) bool {
+	if uc == nil || tr == nil {
+		return false
+	}
+	cr := &certification.CertificationResponse{Partition: c.partitionID, Shard: c.shardID, UC: *uc, Technical: *tr}
+	select {
+	case c.followed <- cr:
+		return true
+	default:
+		return false
+	}
 }
 
 // SetProfile2Consumer enables the proof-gated epoch boundary before Run.
@@ -244,6 +325,29 @@ func (c *BFTClient) classifyUC(prev, next *types.UnicityCertificate) (UCClass, e
 	return ClassifyUC(prev, next)
 }
 
+// classifyDurable classifies a certificate the configured journal has already admitted durably as its tip (deliverConfigured). It is
+// classifyUC, except across installed epochs this node adopted no certificate of: a root-free follower's head follower offers only the
+// newest certificate, so its in-memory LUC can be several root epochs behind the journal's tip (bft-core#1067). The journal authenticated
+// the certificate against the node's verified epoch history and checked that it extends its durable chain, and every epoch up to the
+// certificate's is installed (the epoch classifier is selected only then), so the comparison is the boundary one, the previous
+// certificate taken as of the epoch before: partition-round order, repeat and equivocation are checked exactly as at a single handoff. A
+// restart reaches the same state, seeding the LUC from the journal's tip. Everything else keeps classifyUC's verdict.
+func (c *BFTClient) classifyDurable(prev, next *types.UnicityCertificate) (UCClass, error) {
+	class, err := c.classifyUC(prev, next)
+	if !errors.Is(err, ErrImpossibleUCOrder) || c.profile2 != nil || prev == nil || next == nil || prev.UnicitySeal == nil || next.UnicitySeal == nil {
+		return class, err
+	}
+	gate, ok := c.admission.(interface{ Profile2Ready(uint64) bool })
+	if !ok || !gate.Profile2Ready(next.GetRootEpoch()) || next.GetRootEpoch() <= prev.GetRootEpoch()+1 {
+		return class, err
+	}
+	shifted := *prev
+	seal := *prev.UnicitySeal
+	seal.Epoch = next.GetRootEpoch() - 1
+	shifted.UnicitySeal = &seal
+	return ClassifyUCEpoch(&shifted, next)
+}
+
 // outstandingRequest is a submitted certification request awaiting the certificate of its round. The signed request is kept
 // as submitted: a re-send puts the same bytes on the wire, it never re-signs or rebuilds.
 type outstandingRequest struct {
@@ -252,6 +356,9 @@ type outstandingRequest struct {
 	firstSent time.Time       // the first submission of this logical attempt: a re-send never changes it (lastSent does)
 	lastSent  time.Time
 	resent    int
+	// token is the role token the request was produced under (bound), so that a re-send is admitted only under that same role.
+	token uint64
+	bound bool
 }
 
 // deliveryAttempt identifies one certificate for retry purposes. Rounds are enough: a UCDuplicate
@@ -310,6 +417,8 @@ func NewBFTClient(
 		driver:         driver,
 		log:            log,
 		opts:           opts,
+		followed:       make(chan *certification.CertificationResponse, 4),
+		roleWake:       make(chan struct{}, 1),
 	}
 	c.lastCertResponseTime.Store(time.Now().UnixMilli())
 	return c, nil
@@ -448,6 +557,7 @@ func (c *BFTClient) Run(ctx context.Context) error {
 		}()
 	}
 
+	c.wasFollower = c.isFollower()
 	if err := c.initialHandshake(ctx); err != nil {
 		return fmt.Errorf("initial handshake: %w", err)
 	}
@@ -521,12 +631,17 @@ func (c *BFTClient) Run(ctx context.Context) error {
 			if deliver(msg) {
 				return errors.New("shardnode: network received channel closed")
 			}
+		case cr := <-c.followed:
+			// a follow source's certificate: the same verification, admission and driver as a root's response
+			if err := c.handleCertificationResponse(ctx, cr); err != nil && c.log != nil {
+				c.log.DebugContext(ctx, "followed certificate not admitted", slog.String("err", err.Error()))
+			}
 		case <-startupC:
 			if c.firstResponse.Load() {
 				startupC = nil
 				break
 			}
-			if c.log != nil {
+			if c.log != nil && !c.isFollower() { // a follower sends no handshake (sendHandshake is a no-op): nothing to report
 				c.log.WarnContext(ctx, "no certificate yet, re-sending handshake", slog.Int("attempt", startupAttempt+1))
 			}
 			if err := c.sendHandshake(ctx); err != nil && c.log != nil {
@@ -534,11 +649,14 @@ func (c *BFTClient) Run(ctx context.Context) error {
 			}
 			startupAttempt++
 			startup.Reset(startupHandshakeDelay(c.opts.StartupHandshakeInterval, c.opts.InactivityTimeout, startupAttempt))
+		case <-c.roleWake:
+			c.checkRole(ctx)
 		case <-heartbeat.C:
+			c.checkRole(ctx)
 			c.reportPending(ctx)
 			last := time.UnixMilli(c.lastCertResponseTime.Load())
 			if time.Since(last) > c.opts.InactivityTimeout {
-				if c.log != nil {
+				if c.log != nil && !c.isFollower() {
 					c.log.WarnContext(ctx, "inactivity timeout exceeded, re-sending handshake")
 				}
 				if c.log != nil {
@@ -692,6 +810,9 @@ func (c *BFTClient) initialHandshake(ctx context.Context) error {
 }
 
 func (c *BFTClient) sendHandshake(ctx context.Context) error {
+	if c.isFollower() {
+		return nil // a non-active follower does not subscribe to the roots; its certificates come from FollowCertificate
+	}
 	c.mu.Lock()
 	luc := c.luc
 	c.mu.Unlock()
@@ -1113,7 +1234,7 @@ func (c *BFTClient) deliverConfigured(ctx context.Context, uc *types.UnicityCert
 		return nil
 	}
 	retry := c.hasConfiguredFailed && c.configuredFailed == id
-	class, err := c.classifyUC(c.luc, cursor)
+	class, err := c.classifyDurable(c.luc, cursor)
 	if err != nil {
 		c.mu.Unlock()
 		return fmt.Errorf("classifying durably admitted certificate: %w", err)
@@ -1409,13 +1530,18 @@ func (c *BFTClient) Submit(ctx context.Context, req *certification.BlockCertific
 	c.mu.Lock()
 	c.submittedSinceHandshake = true
 	now := time.Now()
-	c.outstanding = &outstandingRequest{req: req, on: deliveryAttempt{partitionRound: luc.GetRoundNumber(), rootRound: luc.GetRootRoundNumber()}, firstSent: now, lastSent: now}
+	token, bound := roleTokenOf(ctx)
+	c.outstanding = &outstandingRequest{req: req, on: deliveryAttempt{partitionRound: luc.GetRoundNumber(), rootRound: luc.GetRootRoundNumber()}, firstSent: now, lastSent: now,
+		token: token, bound: bound}
 	c.mu.Unlock()
 	return nil
 }
 
 // sendRequest puts req on the wire to the root nodes selected from luc.
 func (c *BFTClient) sendRequest(ctx context.Context, req *certification.BlockCertificationRequest, luc *types.UnicityCertificate) error {
+	if c.isFollower() {
+		return ErrFollower
+	}
 	tb, err := c.trustBaseStore.GetByEpoch(ctx, luc.GetRootEpoch())
 	if err != nil {
 		return fmt.Errorf("loading trust base for epoch %d: %w", luc.GetRootEpoch(), err)
@@ -1423,6 +1549,14 @@ func (c *BFTClient) sendRequest(ctx context.Context, req *certification.BlockCer
 	rootIDs, err := rootNodesSelector(luc, tb, c.opts.CertNodes)
 	if err != nil {
 		return fmt.Errorf("selecting root nodes for certification: %w", err)
+	}
+	// the final check, immediately before the request leaves: the role must still be the one the request was produced under
+	if token, bound := roleTokenOf(ctx); bound {
+		if !c.role.Load().admits(token) {
+			return ErrFollower
+		}
+	} else if c.isFollower() {
+		return ErrFollower
 	}
 	return c.net.Send(ctx, req, rootIDs...)
 }
@@ -1542,6 +1676,9 @@ func (c *BFTClient) resubmitPending(ctx context.Context, held *types.UnicityCert
 	o.resent++
 	o.lastSent = time.Now()
 	req, attempt := o.req, o.resent
+	if o.bound {
+		ctx = withRoleToken(ctx, o.token) // a re-send stays bound to the role the request was produced under
+	}
 	c.mu.Unlock()
 
 	if err := c.sendRequest(ctx, req, held); err != nil {
