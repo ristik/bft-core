@@ -624,8 +624,10 @@ func (x *ConsensusManager) loop(ctx context.Context) error {
 			x.shadow.begin(msg, x.msgSeq, x.pacemaker.GetCurrentRound())
 			handled := time.Now()
 			if err := x.handleRootNetMsg(ctx, msg); err != nil {
-				if _, isTimeout := msg.(*abdrc.TimeoutMsg); isTimeout && errors.Is(err, quorumweight.ErrDuplicateSigner) {
-					x.log.DebugContext(ctx, fmt.Sprintf("processing %T", msg), logger.Error(err)) // a retransmission of a counted timeout vote is routine
+				if _, isTimeout := msg.(*abdrc.TimeoutMsg); isTimeout && (errors.Is(err, quorumweight.ErrDuplicateSigner) || errors.Is(err, errStaleTimeoutVote)) {
+					// a retransmission of a counted timeout vote, and a vote of a round this node has left (every vote after the quorum one of a
+					// round: about n-q per round and root, #982), are routine
+					x.log.DebugContext(ctx, fmt.Sprintf("processing %T", msg), logger.Error(err))
 				} else {
 					x.log.WarnContext(ctx, fmt.Sprintf("processing %T", msg), logger.Error(err))
 				}
@@ -1191,6 +1193,9 @@ func (x *ConsensusManager) voteQuorumInfo() QuorumInfo {
 	return trust
 }
 
+// errStaleTimeoutVote refuses a timeout vote of a round before the current one.
+var errStaleTimeoutVote = errors.New("stale timeout vote")
+
 // onTimeoutMsg handles timeout vote messages from other root validators
 // Timeout votes are broadcast to all nodes on local timeout and all validators try to assemble
 // timeout certificate independently.
@@ -1198,7 +1203,7 @@ func (x *ConsensusManager) onTimeoutMsg(ctx context.Context, vote *abdrc.Timeout
 	ctx, span := x.tracer.Start(ctx, "ConsensusManager.onTimeoutMsg")
 	defer span.End()
 	if vote.Timeout.Round < x.pacemaker.GetCurrentRound() {
-		return fmt.Errorf("stale timeout vote for round %d from %s", vote.Timeout.Round, vote.Author)
+		return fmt.Errorf("%w for round %d from %s", errStaleTimeoutVote, vote.Timeout.Round, vote.Author)
 	}
 	// A message that is byte for byte one already verified and counted in this round (a retransmission) is not verified again: only vote.Verify
 	// is skipped. Everything else below runs as before, in the same order, so a certificate it carries is still processed (#982).
