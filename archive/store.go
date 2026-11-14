@@ -453,8 +453,10 @@ func (s *Store) Get(q Request) (*Record, error) {
 }
 
 // GetExact reads the stored representation of the request whose manifest digest is the given one: the base object of the request if it is that manifest, else the variant
-// object stored for it (PutVariant). The digest is a locator, not a verdict: what is returned is re-read, validated and its manifest digest recomputed and compared. A damaged
-// base object does not hide a sound variant; with neither, the result is ErrCorrupt if something was damaged and ErrUnavailable if nothing was stored.
+// object stored for it (PutVariant). The digest is a locator, not a verdict: what is returned is re-read, validated and its manifest digest recomputed and compared. An object
+// is passed over from its self-hashed manifest when that names another digest, without reading its chunks; so a damaged base object does not hide a sound variant, and damage
+// is found only where it matters. The result is ErrCorrupt when a manifest is damaged or the object of the requested digest is damaged, and ErrUnavailable when no object of
+// that digest is stored (damaged chunks of an object of another digest are not read, so they do not make it ErrCorrupt).
 func (s *Store) GetExact(q Request, digest [32]byte) (*Record, error) {
 	return s.getExact(q, digest, false)
 }
@@ -485,7 +487,21 @@ func (s *Store) getExact(q Request, digest [32]byte, receiptCompleteOnly bool) (
 			return nil, err
 		}
 		for _, name := range []string{base, base + "-" + hex.EncodeToString(digest[:])} {
-			r, err := s.readDir(q, v2, filepath.Join(s.dir, name))
+			dir := filepath.Join(s.dir, name)
+			// the manifest names its own digest (self-hashed): an object of another digest is passed over without reading its chunks, so
+			// a caller's wrong digest costs a manifest read, not a record read (bft-core#1066, astra's review of #1070)
+			held, err := manifestDigestIn(dir)
+			if errors.Is(err, ErrUnavailable) {
+				continue
+			}
+			if err != nil {
+				damaged = true
+				continue
+			}
+			if held != digest {
+				continue
+			}
+			r, err := s.readDir(q, v2, dir)
 			if errors.Is(err, ErrUnavailable) {
 				continue
 			}
@@ -528,9 +544,29 @@ func (s *Store) getVersion(q Request, v2 bool) (*Record, error) {
 	return s.readDir(q, v2, filepath.Join(s.dir, loc))
 }
 
+// maxManifestBytes bounds a manifest read.
+const maxManifestBytes = 16 << 10
+
+// manifestDigestIn reads only the manifest stored in dir and returns the manifest digest it carries, checked against its own content (the
+// digest is the SHA-256 of the manifest before it, as ManifestDigest computes it). It says nothing of the chunks: readDir checks them.
+func manifestDigestIn(dir string) ([32]byte, error) {
+	var d [32]byte
+	m, err := readBounded(filepath.Join(dir, "manifest"), maxManifestBytes)
+	if os.IsNotExist(err) {
+		return d, ErrUnavailable
+	}
+	if err != nil || len(m) < 8+4+1+32 {
+		return d, ErrCorrupt
+	}
+	if sha256.Sum256(m[:len(m)-32]) != [32]byte(m[len(m)-32:]) {
+		return d, ErrCorrupt
+	}
+	return [32]byte(m[len(m)-32:]), nil
+}
+
 // readDir reads and validates the record stored in dir for the request.
 func (s *Store) readDir(q Request, v2 bool, dir string) (*Record, error) {
-	m, err := readBounded(filepath.Join(dir, "manifest"), 16<<10)
+	m, err := readBounded(filepath.Join(dir, "manifest"), maxManifestBytes)
 	if os.IsNotExist(err) {
 		return nil, ErrUnavailable
 	}
