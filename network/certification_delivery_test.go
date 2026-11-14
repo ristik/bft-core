@@ -60,13 +60,15 @@ func (m *countingMuxer) NewConn(c net.Conn, isServer bool, scope network.PeerSco
 	return &countingConn{MuxedConn: mc, m: m}, nil
 }
 
-// stats returns the certificate streams opened since the last call to reset.
+// stats returns the certificate streams this side opened since the last call to reset. Accepted streams are traced only (#1004): an
+// inbound identify push names the certificate protocols too, and counting it as a certificate stream failed the counts whenever a push
+// arrived during a test.
 func (m *countingMuxer) stats() (res []streamStats) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, s := range m.streams {
 		s.mu.Lock()
-		if s.cert {
+		if s.cert && !s.inbound {
 			res = append(res, s.streamStats)
 		}
 		s.mu.Unlock()
