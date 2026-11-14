@@ -2,12 +2,16 @@ package cmd
 
 import (
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"testing"
 
 	"github.com/libp2p/go-libp2p/core/crypto"
 	libp2ppeer "github.com/libp2p/go-libp2p/core/peer"
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/q3active"
+	"github.com/unicitynetwork/bft-core/shardnode"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -51,4 +55,51 @@ func TestTheShardBindingReportsTheInstalledEvidence(t *testing.T) {
 	require.Empty(t, b.History, "an unreadable history is left out")
 	src.history = nil
 	require.Empty(t, src.binding().History, "no Q3 runtime")
+}
+
+// bft-core#1061: a restart replays the activation (activationCompleted) before the runtime has completed its epoch; the runtime's later
+// completion notifies nobody. The health reads the live lease at every report, so the node that signs is reported active.
+func TestARestartAfterActivationReportsTheActiveRole(t *testing.T) {
+	runtimeEpoch := uint64(2)
+	role := newShardRole(1, false, func() uint64 { return runtimeEpoch })
+	notified := 0
+	role.subscribe(func() { notified++ })
+	health := shardnode.NewHealth()
+	health.SetRoleSource(role.published)
+
+	role.activationCompleted(3, true) // the replay at start, the runtime still at epoch 2
+	require.Equal(t, "follower", health.Snapshot().Role, "not active before the runtime completes the epoch")
+	_, active := role.Lease()
+	require.False(t, active)
+	before := notified
+
+	runtimeEpoch = 3 // the runtime completes the epoch: no notification
+	require.Equal(t, before, notified, "premise: nothing is notified")
+	_, active = role.Lease()
+	require.True(t, active, "the lease the node signs under is active")
+	s := health.Snapshot()
+	require.Equal(t, "active", s.Role, "and the health reports what the lease says")
+	require.Equal(t, uint64(3), s.RoleEpoch)
+
+	role.assignmentInstalled(false) // a later assignment without this node
+	require.Equal(t, "follower", health.Snapshot().Role, "a revocation is reported at once too")
+}
+
+// The production wiring reads the role and the binding live (no one-off UpdateRole/UpdateBinding).
+func TestShardNodeRunReportsTheLiveRoleAndBinding(t *testing.T) {
+	file, err := parser.ParseFile(token.NewFileSet(), "shard_node_run.go", nil, 0)
+	require.NoError(t, err)
+	calls := map[string]int{}
+	ast.Inspect(file, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok {
+			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+				calls[sel.Sel.Name]++
+			}
+		}
+		return true
+	})
+	require.Equal(t, 1, calls["SetRoleSource"])
+	require.Equal(t, 1, calls["SetBindingSource"])
+	require.Zero(t, calls["UpdateRole"], "no snapshot of the role that a later lease change would not refresh")
+	require.Zero(t, calls["UpdateBinding"])
 }

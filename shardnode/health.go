@@ -43,6 +43,11 @@ type Health struct {
 	role                           string
 	roleEpoch                      uint64
 	binding                        *Binding
+	// roleSource and bindingSource, when set, are read at every snapshot: the report is the live role lease and the current binding, not
+	// the value of the last notification (bft-core#1061: a restart's replay published the role before the runtime completed the epoch,
+	// and nothing notified it afterwards)
+	roleSource    func() (epoch uint64, active bool)
+	bindingSource func() Binding
 
 	updatedAt time.Time
 }
@@ -215,6 +220,27 @@ func (h *Health) updateExecutionRecovery(outcome, detail string) {
 	h.updatedAt = time.Now()
 }
 
+// SetRoleSource makes every snapshot report the role the source gives at that moment (the live role lease, see RoleLease). It takes
+// precedence over UpdateRole.
+func (h *Health) SetRoleSource(f func() (epoch uint64, active bool)) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.roleSource = f
+}
+
+// SetBindingSource makes every snapshot report the binding the source gives at that moment. It takes precedence over UpdateBinding.
+func (h *Health) SetBindingSource(f func() Binding) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.bindingSource = f
+}
+
 // UpdateRole records the published role (see RoleLease) for operators and orchestration.
 func (h *Health) UpdateRole(active bool, epoch uint64) {
 	if h == nil {
@@ -246,6 +272,20 @@ func (h *Health) Snapshot() Snapshot {
 		return Snapshot{}
 	}
 	h.mu.RLock()
+	roleSource, bindingSource := h.roleSource, h.bindingSource
+	h.mu.RUnlock()
+	// the sources are read outside the lock: they take the role's and the installed set's own locks
+	var live *Binding
+	if bindingSource != nil {
+		b := bindingSource()
+		live = &b
+	}
+	var liveEpoch uint64
+	var liveActive bool
+	if roleSource != nil {
+		liveEpoch, liveActive = roleSource()
+	}
+	h.mu.RLock()
 	defer h.mu.RUnlock()
 	s := Snapshot{
 		ExecutorOK:                     h.executorOK,
@@ -271,6 +311,16 @@ func (h *Health) Snapshot() Snapshot {
 		b := *h.binding
 		b.History = append([]HistoryEntry(nil), b.History...)
 		s.Binding = &b
+	}
+	if live != nil {
+		live.History = append([]HistoryEntry(nil), live.History...)
+		s.Binding = live
+	}
+	if roleSource != nil {
+		s.Role, s.RoleEpoch = "follower", liveEpoch
+		if liveActive {
+			s.Role = "active"
+		}
 	}
 	if !h.updatedAt.IsZero() {
 		s.SecondsSinceUpdate = time.Since(h.updatedAt).Seconds()

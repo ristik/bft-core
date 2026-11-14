@@ -50,3 +50,29 @@ func TestTheInstalledSetNamesThisNodesKeyAndTheHealthCarriesTheBinding(t *testin
 	var nilHealth *Health
 	nilHealth.UpdateBinding(in) // nil-safe like every update
 }
+
+// bft-core#1061: with a role source the snapshot is the live role, whatever was or was not notified; the binding source likewise.
+func TestTheHealthReportsTheLiveRoleAndBinding(t *testing.T) {
+	h := NewHealth()
+	h.UpdateRole(false, 3) // the stale publication
+	epoch, active := uint64(3), false
+	h.SetRoleSource(func() (uint64, bool) { return epoch, active })
+	s := h.Snapshot()
+	require.Equal(t, "follower", s.Role)
+	active = true // the lease turned active; nothing notified the health
+	s = h.Snapshot()
+	require.Equal(t, "active", s.Role)
+	require.Equal(t, uint64(3), s.RoleEpoch)
+
+	shardEpoch := uint64(2)
+	h.UpdateBinding(Binding{NodeID: "stale"})
+	h.SetBindingSource(func() Binding {
+		return Binding{NodeID: "n", ShardEpoch: shardEpoch, History: []HistoryEntry{{Epoch: 1, BodyID: "b"}}}
+	})
+	require.Equal(t, "n", h.Snapshot().Binding.NodeID)
+	shardEpoch = 3
+	got := h.Snapshot().Binding
+	require.Equal(t, uint64(3), got.ShardEpoch)
+	got.History[0].BodyID = "changed"
+	require.Equal(t, "b", h.Snapshot().Binding.History[0].BodyID)
+}
