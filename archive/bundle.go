@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -78,10 +79,31 @@ var ErrBundleConflict = errors.New("archive: a semantically different handoff bu
 // untrusted availability bytes and knows no handoff format. The caller verifies BOTH bundles before it compares them.
 type BundleEquivalence func(existing, incoming []byte) (bool, error)
 
+// Handoff bundles live in their own directory (bft-core#1018): the store directory holds one entry per archived block, and the publisher asks
+// for the bundle epochs every two seconds, so a listing of the store directory cost a full read of an ever-growing directory (about 86k
+// entries after 25 h on staging) for a handful of bundles. A store written before this layout keeps its bundles in the store directory
+// itself; they are still read and listed (that listing is taken once per Store, since this binary never writes there).
+const bundleDir = "bundles"
+
+func (s *Store) bundlePaths(name string) (current, legacy string) {
+	return filepath.Join(s.dir, bundleDir, name), filepath.Join(s.dir, name)
+}
+
+// readBundleAt reads the bundle under its current location, else under the legacy one.
+func (s *Store) readBundleAt(name string) ([]byte, error) {
+	current, legacy := s.bundlePaths(name)
+	raw, err := readBundle(current)
+	if err != ErrUnavailable {
+		return raw, err
+	}
+	return readBundle(legacy)
+}
+
 // PutBundle atomically retains untrusted availability bytes. Verification of the proof, full snapshot and lineage belongs to the caller.
 //
 // Under an existing key, identical bytes are a no-op. Different bytes are compared with same: an equivalent bundle is a no-op and the
 // first copy is kept (stored is false), a different one is refused with ErrBundleConflict, and so is any difference when same is nil.
+// A copy retained at the legacy location counts as existing.
 func (s *Store) PutBundle(q BundleRequest, raw []byte, same BundleEquivalence) (stored bool, err error) {
 	if len(raw) == 0 || len(raw) > MaxBundleBytes {
 		return false, ErrInvalid
@@ -92,8 +114,7 @@ func (s *Store) PutBundle(q BundleRequest, raw []byte, same BundleEquivalence) (
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	path := filepath.Join(s.dir, name)
-	if old, err := readBundle(path); err == nil {
+	if old, err := s.readBundleAt(name); err == nil {
 		if bytes.Equal(old, raw) {
 			return false, nil
 		}
@@ -111,7 +132,15 @@ func (s *Store) PutBundle(q BundleRequest, raw []byte, same BundleEquivalence) (
 	} else if err != ErrUnavailable {
 		return false, err
 	}
-	file, err := os.CreateTemp(s.dir, ".bundle-*")
+	dir := filepath.Join(s.dir, bundleDir)
+	if err := os.Mkdir(dir, 0700); err == nil {
+		if err := syncDir(s.dir); err != nil { // the new directory's entry is durable before anything is published in it
+			return false, err
+		}
+	} else if !os.IsExist(err) {
+		return false, err
+	}
+	file, err := os.CreateTemp(dir, ".bundle-*")
 	if err != nil {
 		return false, err
 	}
@@ -130,10 +159,11 @@ func (s *Store) PutBundle(q BundleRequest, raw []byte, same BundleEquivalence) (
 	if closeErr != nil {
 		return false, closeErr
 	}
-	if err = os.Rename(file.Name(), path); err != nil {
+	current, _ := s.bundlePaths(name)
+	if err = os.Rename(file.Name(), current); err != nil {
 		return false, err
 	}
-	return true, syncDir(s.dir)
+	return true, syncDir(dir)
 }
 
 func readBundle(path string) ([]byte, error) {
@@ -167,27 +197,51 @@ func (s *Store) GetBundle(q BundleRequest) ([]byte, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return readBundle(filepath.Join(s.dir, name))
+	return s.readBundleAt(name)
 }
 
+// BundleEpochs lists the epochs of the bundles retained for the context, ascending. It reads the bundle directory, which holds only
+// bundles, and the names of the legacy bundles listed once from the store directory.
 func (s *Store) BundleEpochs(ctx Context) ([]uint64, error) {
 	name, err := bundleName(BundleRequest{Context: ctx, Epoch: 1})
 	if err != nil {
 		return nil, err
 	}
 	suffix := name[len("bundle-")+16:]
-	entries, err := os.ReadDir(s.dir)
-	if err != nil {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.legacyBundles == nil {
+		entries, err := os.ReadDir(s.dir)
+		if err != nil {
+			return nil, err
+		}
+		legacy := []string{}
+		for _, entry := range entries {
+			if n := entry.Name(); !entry.IsDir() && strings.HasPrefix(n, "bundle-") {
+				legacy = append(legacy, n)
+			}
+		}
+		s.legacyBundles = legacy
+	}
+	entries, err := os.ReadDir(filepath.Join(s.dir, bundleDir))
+	if err != nil && !os.IsNotExist(err) {
 		return nil, err
 	}
-	var epochs []uint64
+	names := slices.Clone(s.legacyBundles)
 	for _, entry := range entries {
-		n := entry.Name()
+		if !entry.IsDir() {
+			names = append(names, entry.Name())
+		}
+	}
+	seen := make(map[uint64]bool)
+	var epochs []uint64
+	for _, n := range names {
 		if !strings.HasPrefix(n, "bundle-") || !strings.HasSuffix(n, suffix) || len(n) != len(name) {
 			continue
 		}
 		epoch, err := strconv.ParseUint(n[len("bundle-"):len("bundle-")+16], 16, 64)
-		if err == nil && epoch >= 1 {
+		if err == nil && epoch >= 1 && !seen[epoch] {
+			seen[epoch] = true
 			epochs = append(epochs, epoch)
 		}
 	}

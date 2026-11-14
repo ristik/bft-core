@@ -138,20 +138,33 @@ func archiveTrustBodyID(archiveDir string, epoch uint64, anchor *types.RootTrust
 		copy(out[:], raw)
 		return out, err
 	}
-	entries, err := os.ReadDir(archiveDir)
-	if err != nil {
-		return [32]byte{}, err
-	}
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasPrefix(entry.Name(), "bundle-") {
+	// Bundles live in the archive's bundles/ directory; an archive written before bft-core#1018 keeps them in the archive directory itself.
+	type bundleFile struct{ dir, name string }
+	var files []bundleFile
+	for _, dir := range []string{filepath.Join(archiveDir, "bundles"), archiveDir} {
+		entries, err := os.ReadDir(dir)
+		if os.IsNotExist(err) && dir != archiveDir {
 			continue
 		}
-		raw, readErr := os.ReadFile(filepath.Join(archiveDir, entry.Name()))
+		if err != nil {
+			return [32]byte{}, err
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				files = append(files, bundleFile{dir, entry.Name()})
+			}
+		}
+	}
+	for _, entry := range files {
+		if !strings.HasPrefix(entry.name, "bundle-") {
+			continue
+		}
+		raw, readErr := os.ReadFile(filepath.Join(entry.dir, entry.name))
 		if readErr != nil || len(raw) < sha256.Size+1 {
 			continue
 		}
 		want := sha256.Sum256(raw[sha256.Size:])
-		if !strings.HasPrefix(entry.Name(), fmt.Sprintf("bundle-%016x-", epoch)) || string(want[:]) != string(raw[:sha256.Size]) {
+		if !strings.HasPrefix(entry.name, fmt.Sprintf("bundle-%016x-", epoch)) || string(want[:]) != string(raw[:sha256.Size]) {
 			continue
 		}
 		bundle, decodeErr := handoffdelivery.DecodeBundle(raw[sha256.Size:])

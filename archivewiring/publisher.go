@@ -370,6 +370,14 @@ func (p *Publisher) publishBundles(ctx context.Context) error {
 	}
 	var waiting error
 	for _, epoch := range epochs {
+		// A bundle every replica has acknowledged (or refused as conflicting) needs nothing more: it is not read and verified again
+		// on every pass (bft-core#1018).
+		p.mu.Lock()
+		settled := len(p.Replicas) > 0 && p.bundleAck[epoch]|p.bundleConflict[epoch] == uint8(1<<len(p.Replicas)-1)
+		p.mu.Unlock()
+		if settled {
+			continue
+		}
 		q := archive.BundleRequest{Context: p.Subject, Epoch: epoch}
 		raw, err := p.Archive.GetBundle(q)
 		if err != nil {

@@ -61,24 +61,32 @@ func TestPreferPinUsesLatestEpochThenRoundAndPrefersV2(t *testing.T) {
 }
 
 func TestArchiveTrustBodyIDReadsTheTipEpochBundle(t *testing.T) {
-	dir := t.TempDir()
-	bundle := handoffdelivery.Bundle{Body: evmroot.TrustBaseBodyV2{Epoch: 3, Version: evmroot.TrustBaseVersion}}
-	raw, err := handoffdelivery.EncodeBundle(bundle)
-	if err != nil {
-		t.Fatal(err)
-	}
-	digest := sha256.Sum256(raw)
-	path := filepath.Join(dir, fmt.Sprintf("bundle-%016x-test", bundle.Body.Epoch))
-	if err := os.WriteFile(path, append(digest[:], raw...), 0600); err != nil {
-		t.Fatal(err)
-	}
-	got, err := archiveTrustBodyID(dir, 3, &types.RootTrustBaseV1{Epoch: 1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := bundle.Body.Identity()
-	if got != [32]byte(want) {
-		t.Fatalf("body id = %x, want %x", got, want)
+	// The bundle directory of the current archive layout, and the archive directory itself for an archive written before bft-core#1018.
+	for _, sub := range []string{"bundles", ""} {
+		t.Run("in "+sub+"/", func(t *testing.T) {
+			dir := t.TempDir()
+			bundle := handoffdelivery.Bundle{Body: evmroot.TrustBaseBodyV2{Epoch: 3, Version: evmroot.TrustBaseVersion}}
+			raw, err := handoffdelivery.EncodeBundle(bundle)
+			if err != nil {
+				t.Fatal(err)
+			}
+			digest := sha256.Sum256(raw)
+			if err := os.MkdirAll(filepath.Join(dir, sub), 0700); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, sub, fmt.Sprintf("bundle-%016x-test", bundle.Body.Epoch))
+			if err := os.WriteFile(path, append(digest[:], raw...), 0600); err != nil {
+				t.Fatal(err)
+			}
+			got, err := archiveTrustBodyID(dir, 3, &types.RootTrustBaseV1{Epoch: 1})
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := bundle.Body.Identity()
+			if got != [32]byte(want) {
+				t.Fatalf("body id = %x, want %x", got, want)
+			}
+		})
 	}
 }
 
