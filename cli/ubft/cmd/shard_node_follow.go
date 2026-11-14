@@ -234,11 +234,11 @@ func (a notifyingActivator) Activate(ctx context.Context, b q3active.Bundle) err
 }
 
 // published is the role's completed epoch and active bit, for health reporting.
+// The epoch and the active bit come from ONE lease sample (the token carries the epoch): a completedEpoch read apart from the lease could pair
+// a newer epoch with the older epoch's active bit (astra's review of #1060 r2).
 func (r *shardRole) published() (uint64, bool) {
-	_, active := r.Lease()
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.completedEpoch, active
+	token, active := r.Lease()
+	return token >> 1, active
 }
 
 // utbEntries is the part of a utbstore.Store root seeding reads.
