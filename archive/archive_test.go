@@ -461,6 +461,10 @@ func TestManifestOfAnotherVersionIsRefusedNotMigrated(t *testing.T) {
 			if _, err := store.Get(q); !errors.Is(err, ErrCorrupt) {
 				t.Fatalf("%s: manifest with magic %q was read: %v", layout, magic, err)
 			}
+			// nor shadowed by a put (#1059 review)
+			if err := store.Put(q, rec); !errors.Is(err, ErrCorrupt) {
+				t.Fatalf("%s: a put over a refused manifest: %v", layout, err)
+			}
 			// nor is it migrated to the packed layout
 			if res, err := store.MigrateLegacy(MaxPutBatch); err != nil || res.Migrated != 0 {
 				t.Fatalf("%s: a refused manifest was migrated: %+v %v", layout, res, err)

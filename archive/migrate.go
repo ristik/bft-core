@@ -114,7 +114,7 @@ func (s *Store) MigrateLegacy(max int) (MigrationResult, error) {
 		if !bytes.Equal(a, encoded) {
 			return false, ErrInvalid
 		}
-		return true, nil
+		return true, s.ensureDurableLocked(name)
 	})
 	for _, it := range published {
 		remove = append(remove, it.name)
@@ -196,6 +196,13 @@ func (s *Store) removeLegacy(names []string) error {
 	defer s.mu.Unlock()
 	if err := s.fault("migrate-before-remove"); err != nil {
 		return err
+	}
+	// a packed copy this call found rather than wrote may not be durable (placed by a seed, or by an earlier process whose directory sync
+	// failed): it is synced before the directory, the other copy, goes
+	for _, n := range names {
+		if err := s.ensureDurableLocked(n); err != nil {
+			return err
+		}
 	}
 	for _, n := range names {
 		if err := os.RemoveAll(filepath.Join(s.dir, n)); err != nil {

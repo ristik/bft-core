@@ -419,8 +419,10 @@ func TestPutBatchReturnsAFailedSyncAndPublishesNothingBeforeIt(t *testing.T) {
 			if err := s.PutBatch(qs, recs); err != nil {
 				t.Fatalf("putting the batch again: %v", err)
 			}
-			if tc.published != 0 && again.count("sync-dir") != fanouts(qs, recs) {
-				t.Fatalf("the directories of the published records are synced again: %v", again.events)
+			// the records published without a durable directory are synced again (file and directory, ensureDurableLocked) before the
+			// retry reports them stored
+			if tc.published != 0 && (again.count("sync-dir") < fanouts(qs, recs) || again.count("sync-file") != 4) {
+				t.Fatalf("the published records and their directories are synced again: %v", again.events)
 			}
 		})
 	}

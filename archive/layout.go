@@ -20,7 +20,7 @@ import (
 // manifest digest) and <hh> is the first byte of the location's hash in hex, so no directory holds more than about 1/256 of the archive. The file is
 // packedMagic, the manifest's length (4 bytes, big-endian), the manifest (exactly the bytes the directory layout keeps as its manifest file,
 // checksum included), then the chunks back to back in the manifest's key order. It is written to a temporary file in its fan-out directory,
-// synced, renamed into place and the directory synced: a record is either whole or absent, never partial.
+// synced, linked into place (never replacing a file already there) and the directory synced: a record is either whole or absent, never partial.
 //
 // Directory (before #1049): a directory <name> in the store directory itself, holding the manifest and one <hex(key)>.chunk file per field. Such
 // records are still read, and MigrateLegacy moves them to the packed layout. A record takes 13 inodes this way and one packed: the kernel's inode
@@ -296,7 +296,9 @@ func StoredNames(dir string, chunk int, each func([]string) error) error {
 	if err := listNames(dir, chunk, func(names []string) error {
 		var out []string
 		for _, n := range names {
-			if recordName(n, false) {
+			// a record held in both layouts (a migration between its two steps, or a tool on a live archive) is listed once, packed, as a
+			// read prefers it
+			if recordName(n, false) && !fileExists(packedPath(dir, n)) {
 				out = append(out, n)
 			}
 		}
@@ -336,6 +338,11 @@ func StoredNames(dir string, chunk int, each func([]string) error) error {
 		}
 	}
 	return nil
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 func listNames(dir string, chunk int, each func([]string) error) error {

@@ -32,6 +32,7 @@ type Store struct {
 	prepared      bool            // the packed layout's directories exist and are durable (prepareRecordDirs)
 	migrateSkip   map[string]bool // directory-layout records MigrateLegacy leaves as they are; under mu
 	unsynced      map[string]bool // fan-out directories whose sync after a publication failed: synced again by the next put; under mu
+	durable       map[string]bool // packed records published or synced by this process (ensureDurableLocked); under mu
 }
 
 func Open(dir string) (*Store, error) {
@@ -132,7 +133,7 @@ func archiveMagic(v2 bool) string {
 }
 
 // fault calls the Fault hook, if one is set, at a named point of a put: "after-chunk" (each chunk written) and "before-publish"
-// (before each record's rename). An error from the hook fails the put there.
+// (before each record's publication). An error from the hook fails the put there.
 func (s *Store) fault(point string) error {
 	if s.Fault == nil {
 		return nil
@@ -148,16 +149,52 @@ type diskOps struct {
 	rename   func(from, to string) error
 }
 
-var realDiskOps = diskOps{syncFile: (*os.File).Sync, syncDir: syncDir, rename: publishNoReplace}
+var realDiskOps = diskOps{syncFile: (*os.File).Sync, syncDir: syncDir, rename: func(from, to string) error { return publishNoReplace(from, to, os.Remove) }}
 
-// publishNoReplace gives the synced temporary file from its final name and removes the temporary name: a hard link, which unlike a rename
-// never replaces a file already at to (os.ErrExist then). A record is immutable, and another writer of the directory (a joiner's archive
-// seed) may have placed one there.
-func publishNoReplace(from, to string) error {
+// publishNoReplace gives the synced temporary file its final name by a hard link, which unlike a rename never replaces a file already at to
+// (os.ErrExist then): a record is immutable, and another writer of the directory (a joiner's archive seed) may have placed one there. Once the
+// link exists the record is published, whatever happens to the temporary name: a failure to remove it is ignored (the leftover is the same
+// inode, and the caller removes it again), so the publication is synced and indexed like any other.
+func publishNoReplace(from, to string, remove func(string) error) error {
 	if err := os.Link(from, to); err != nil {
 		return err
 	}
-	return os.Remove(from)
+	_ = remove(from)
+	return nil
+}
+
+// ensureDurableLocked makes a packed record that this store did not publish itself durable before it counts as stored: another writer (a
+// joiner's seed, or an earlier process whose directory sync failed) may have placed it without syncing it, and a put that finds it reports
+// the record durable to its caller (a replica's acknowledgement). The file and its fan-out directory are synced once per name per process.
+// Called under the store's lock.
+func (s *Store) ensureDurableLocked(name string) error {
+	if s.durable[name] {
+		return nil
+	}
+	path := s.packedPath(name)
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	err = s.ops().syncFile(f)
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err == nil {
+		err = s.ops().syncDir(filepath.Dir(path))
+	}
+	if err != nil {
+		return err
+	}
+	s.markDurableLocked(name)
+	return nil
+}
+
+func (s *Store) markDurableLocked(name string) {
+	if s.durable == nil {
+		s.durable = map[string]bool{}
+	}
+	s.durable[name] = true
 }
 
 func (s *Store) ops() diskOps {
@@ -243,7 +280,7 @@ func (s *Store) syncAndCloseAll(files []*os.File) error {
 	return errors.Join(errs...)
 }
 
-// Put publishes a record only after its packed file has been synced, by a rename into its fan-out directory, and returns only after that
+// Put publishes a record only after its packed file has been synced, by a link into its fan-out directory, and returns only after that
 // directory has been synced. A failed write leaves at most an ignored temporary file. Existing records are immutable.
 func (s *Store) Put(q Request, rec *Record) error {
 	return s.PutBatch([]Request{q}, []*Record{rec})
@@ -265,7 +302,7 @@ type staged struct {
 }
 
 // PutBatch is Put for several records with the device flushes shared: every record's packed file is written, then all are synced
-// together, then each record is published by its rename, and every fan-out directory a record was published in is synced once. The
+// together, then each record is published by its link, and every fan-out directory a record was published in is synced once. The
 // rule of Put holds for each record: nothing of it is published before its file has been synced, and PutBatch returns nil only when
 // every record is durable. On an error some records of the batch may already be published (each of them whole and immutable); the
 // rest leave at most ignored temporary files, and the caller may put them again. A record that is already stored, in either layout,
@@ -276,7 +313,7 @@ func (s *Store) PutBatch(qs []Request, recs []*Record) error {
 
 // PutVariant stores a record that is ANOTHER valid representation of a block already stored under its request (bft-core#876: the same certified block under a different
 // resulting certificate has a different manifest). The base object of the request is never touched: the variant is a separate immutable object addressed by (request, manifest
-// digest), published with the same stage / sync / rename discipline, and a variant that is already stored must be identical. Variants are read with GetExact only.
+// digest), published with the same stage / sync / link discipline, and a variant that is already stored must be identical. Variants are read with GetExact only.
 func (s *Store) PutVariant(q Request, rec *Record) error {
 	return s.putBatch([]Request{q}, []*Record{rec}, true)
 }
@@ -356,12 +393,12 @@ func (s *Store) syncUnsynced() error {
 }
 
 // publishPacked writes each item's packed bytes to a temporary file in its fan-out directory, syncs them all, then, under the store's lock,
-// publishes each by its rename unless exists (called under the lock) reports it stored meanwhile, and syncs every fan-out directory it
+// publishes each by its link (publishNoReplace) unless exists (called under the lock) reports it stored meanwhile, and syncs every fan-out directory it
 // published in. It returns the items it published and made durable.
 //
 // The writing and syncing run without the store's lock: they are most of a put's time, and a reader, or another writer staging its own
 // records, has no reason to wait for them. The lock is held for the publication, so that a record is never visible to a reader before its
-// directory is synced. If a rename fails part way, the records renamed before it are made durable and indexed like the rest before the
+// directory is synced. If a link fails part way, the records published before it are made durable and indexed like the rest before the
 // error is returned, so a failure leaves no record that is readable but neither synced nor indexed.
 func (s *Store) publishPacked(items []staged, packed [][]byte, exists func(Request, bool, string, []byte) (bool, error)) ([]staged, error) {
 	if len(items) == 0 {
@@ -377,7 +414,7 @@ func (s *Store) publishPacked(items []staged, packed [][]byte, exists func(Reque
 		}
 		for _, it := range items {
 			if it.tmp != "" {
-				_ = os.Remove(it.tmp) // already renamed away when the record was published
+				_ = os.Remove(it.tmp) // already gone when the record was published (or a leftover link to it, which is harmless)
 			}
 		}
 	}()
@@ -448,18 +485,17 @@ func (s *Store) publishPacked(items []staged, packed [][]byte, exists func(Reque
 		}
 		return nil, errors.Join(publishErr, dirErr)
 	}
-	if s.rounds != nil {
-		for _, it := range published {
-			if it.index {
-				s.indexRecord(it.q, it.rec)
-			}
+	for _, it := range published {
+		s.markDurableLocked(it.name)
+		if s.rounds != nil && it.index {
+			s.indexRecord(it.q, it.rec)
 		}
 	}
 	return published, publishErr
 }
 
 // prepareRecordDirs makes the packed layout's directories once per process: records/ and its 256 fan-out directories, each parent synced
-// after, so that a rename into a fan-out directory is never lost with the directory's own entry. It is done on the first write, not at
+// after, so that a link into a fan-out directory is never lost with the directory's own entry. It is done on the first write, not at
 // Open, so a reader (a tool) never writes to an archive.
 func (s *Store) prepareRecordDirs() error {
 	s.prepMu.Lock()
@@ -494,17 +530,12 @@ func (s *Store) storedSame(q Request, v2 bool, name string, encoded []byte) (boo
 	return s.storedSameLocked(q, v2, name, encoded)
 }
 
-// storedSameLocked is storedSame under the store's lock. A copy that cannot be read whole in either layout counts as absent: the put then
-// stores a sound one, which a read prefers (a directory-layout record that lost a chunk to damage is repaired this way).
+// storedSameLocked is storedSame under the store's lock. Only a record that is absent in both layouts counts as absent (a directory-layout record
+// that lost a chunk is ErrUnavailable, and a put then stores a sound packed copy, which reads prefer); a damaged or foreign copy in either layout
+// is refused as the read refuses it, never shadowed by a new copy. A packed copy found identical is made durable before it counts as stored.
 func (s *Store) storedSameLocked(q Request, v2 bool, name string, encoded []byte) (bool, error) {
 	old, err := readNamed(s.dir, q, v2, name)
 	if errors.Is(err, ErrUnavailable) {
-		return false, nil
-	}
-	if errors.Is(err, ErrCorrupt) {
-		if _, statErr := os.Stat(s.packedPath(name)); statErr == nil {
-			return false, err // a damaged packed copy is not replaced: the rename would hide the damage the read already reports
-		}
 		return false, nil
 	}
 	if err != nil {
@@ -513,6 +544,11 @@ func (s *Store) storedSameLocked(q Request, v2 bool, name string, encoded []byte
 	a, _ := EncodeResponse(Response{q, OK, old})
 	if !bytes.Equal(a, encoded) {
 		return false, ErrInvalid
+	}
+	if _, statErr := os.Stat(s.packedPath(name)); statErr == nil {
+		if err := s.ensureDurableLocked(name); err != nil {
+			return false, err
+		}
 	}
 	return true, nil
 }

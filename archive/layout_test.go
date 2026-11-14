@@ -396,7 +396,7 @@ func TestPublicationNeverReplacesAFilePlacedMeanwhile(t *testing.T) {
 		loc, _ := location(q, recordV2(rec))
 		s.disk = &diskOps{syncFile: (*os.File).Sync, syncDir: syncDir, rename: func(from, to string) error {
 			writePacked(t, s, loc, q, placed) // the other writer is first
-			return publishNoReplace(from, to)
+			return publishNoReplace(from, to, os.Remove)
 		}}
 		err = s.Put(q, rec)
 		if differ && !errors.Is(err, ErrInvalid) || !differ && err != nil {
@@ -406,8 +406,175 @@ func TestPublicationNeverReplacesAFilePlacedMeanwhile(t *testing.T) {
 		if err != nil || !bytes.Equal(got.Body, placed.Body) {
 			t.Fatalf("differ=%v: the placed record is kept: %v", differ, err)
 		}
+		if !differ && !s.durable[loc] {
+			t.Fatal("a copy placed by another writer is synced before the put reports it stored")
+		}
 		if left := leftovers(t, s); len(left) != 0 {
 			t.Fatalf("temporary files left: %v", left)
 		}
+	}
+}
+
+// #1059 review: a record held in both layouts is listed once, packed (as a read prefers it), so a tool sees one record, not two.
+func TestStoredNamesListsARecordHeldInBothLayoutsOnce(t *testing.T) {
+	q, rec := fixture()
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := putLegacy(t, s.dir, q, rec, false)
+	writePacked(t, s, name, q, rec) // a migration between its two steps
+	var listed []string
+	if err := StoredNames(s.dir, 16, func(names []string) error { listed = append(listed, names...); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{recordDir + "/" + shardOf(name) + "/" + name}; !slices.Equal(listed, want) {
+		t.Fatalf("listed %v, want %v", listed, want)
+	}
+}
+
+// #1059 review: a put refuses a directory-layout record it cannot read whole and sound (a flipped byte, another manifest magic), as the read
+// refuses it, instead of shadowing it with a new packed copy; a record that lost a chunk (ErrUnavailable) is still repaired by a put.
+func TestPutRefusesADamagedDirectoryRecordAndRepairsALostChunk(t *testing.T) {
+	q, rec := fixture()
+	loc, _ := location(q, false)
+	for name, damage := range map[string]func(dir string){
+		"a flipped chunk byte": func(dir string) {
+			path := filepath.Join(dir, loc, fileName("body"))
+			b, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			b[0] ^= 1
+			if err := os.WriteFile(path, b, 0600); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"another manifest magic": func(dir string) {
+			path := filepath.Join(dir, loc, "manifest")
+			b, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			copy(b, "ARCHIVE3")
+			if err := os.WriteFile(path, b, 0600); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		s, err := Open(t.TempDir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		putLegacy(t, s.dir, q, rec, false)
+		damage(s.dir)
+		if err := s.Put(q, rec); !errors.Is(err, ErrCorrupt) {
+			t.Fatalf("%s: the put is refused: %v", name, err)
+		}
+		if _, err := os.Stat(s.packedPath(loc)); !os.IsNotExist(err) {
+			t.Fatalf("%s: no packed copy shadows the damaged one: %v", name, err)
+		}
+	}
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	putLegacy(t, s.dir, q, rec, false)
+	if err := os.Remove(filepath.Join(s.dir, loc, fileName("body"))); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Put(q, rec); err != nil {
+		t.Fatalf("a lost chunk is repaired by a put: %v", err)
+	}
+	if _, err := s.Get(q); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// #1059 review: a packed copy this store did not write (a joiner's seed) is synced, file and directory, before a put that finds it reports the
+// record stored, once per name; a copy the store published itself is not synced again.
+func TestAPutThatFindsAnUnsyncedPackedCopySyncsItFirst(t *testing.T) {
+	q, rec := fixture()
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	loc, _ := location(q, false)
+	writePacked(t, s, loc, q, rec) // placed by another writer, durability unknown
+	log := &opLog{}
+	log.install(s)
+	if err := s.Put(q, rec); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"sync-file", "sync-dir"}; !slices.Equal(log.events, want) {
+		t.Fatalf("the found copy is synced before success: %v, want %v", log.events, want)
+	}
+	if err := s.Put(q, rec); err != nil || len(log.events) != 2 {
+		t.Fatalf("once per name: %v %v", log.events, err)
+	}
+	other, otherRec := batchFixture(t, 1)
+	if err := s.Put(other[0], otherRec[0]); err != nil {
+		t.Fatal(err)
+	}
+	n := len(log.events)
+	if err := s.Put(other[0], otherRec[0]); err != nil || len(log.events) != n {
+		t.Fatalf("a record this store published is not synced again: %v %v", log.events[n:], err)
+	}
+}
+
+// #1059 review: once the link exists the record is published, even if removing the temporary name then fails: it is synced and indexed, and a
+// retry is a no-op.
+func TestALinkedRecordIsPublishedWhenTheTemporaryNameCannotBeRemoved(t *testing.T) {
+	qs, recs := batchFixture(t, 1)
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.rounds = map[string]map[uint64][]Request{}
+	log := &opLog{}
+	log.install(s)
+	s.disk.rename = func(from, to string) error {
+		return log.do("rename", s.dir, to, func() error {
+			return publishNoReplace(from, to, func(string) error { return errors.New("injected: the temporary name stays") })
+		})
+	}
+	if err := s.PutBatch(qs, recs); err != nil {
+		t.Fatalf("the published record is reported: %v", err)
+	}
+	if log.count("sync-dir") != 1 || indexedCount(s) != 1 {
+		t.Fatalf("synced and indexed like any other: %v, %d indexed", log.events, indexedCount(s))
+	}
+	if left := leftovers(t, s); len(left) != 0 {
+		t.Fatalf("the caller removes the temporary name again: %v", left)
+	}
+	if _, err := s.Get(qs[0]); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// #1059 review: a migration that finds a packed copy it did not write syncs that copy before it removes the directory, the other copy.
+func TestMigrateLegacySyncsAFoundPackedCopyBeforeRemovingTheDirectory(t *testing.T) {
+	q, rec := fixture()
+	s, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := putLegacy(t, s.dir, q, rec, false)
+	writePacked(t, s, name, q, rec) // placed by another writer
+	log := &opLog{}
+	log.install(s)
+	removed := false
+	s.Fault = func(point string) error {
+		if point == "migrate-before-remove" {
+			removed = true
+		}
+		return nil
+	}
+	res, err := s.MigrateLegacy(MaxPutBatch)
+	if err != nil || res.Migrated != 1 || !removed {
+		t.Fatalf("%+v %v", res, err)
+	}
+	if log.count("rename") != 0 || log.count("sync-file") != 1 || log.first("sync-dir") < log.first("sync-file") || log.last("sync-store") < log.first("sync-dir") {
+		t.Fatalf("the found copy is synced (file, then directory) before the removal and its store sync: %v", log.events)
 	}
 }
