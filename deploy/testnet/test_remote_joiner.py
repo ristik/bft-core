@@ -5,7 +5,6 @@ import asyncio
 import json
 import os
 from pathlib import Path
-import shlex
 import socket
 import subprocess
 import tempfile
@@ -144,7 +143,8 @@ class FakeHost:
                 return subprocess.CompletedProcess(cmd, 1, '', 'No chain/target/match by that name')
             op = cmd[2]
             if op == '-S':
-                return ok('-N DOCKER-USER\n' + ''.join('-A DOCKER-USER ' + ' '.join(shlex.quote(w) for w in r) + '\n' for r in self.chain))
+                # as iptables -S prints it: a value with a space in double quotes
+                return ok('-N DOCKER-USER\n' + ''.join('-A DOCKER-USER ' + ' '.join(f'"{w}"' if ' ' in w else w for w in r) + '\n' for r in self.chain))
             if op == '-I':
                 self.chain.insert(int(cmd[4]) - 1, cmd[5:])
             elif op == '-D':

@@ -891,8 +891,13 @@ def tagged_rules(project):
     listing = run(['sudo', 'iptables', '-S', 'DOCKER-USER'], check=False)
     if listing.returncode != 0:
         return []
-    return [shlex.split(line[len('-A DOCKER-USER '):]) for line in listing.stdout.splitlines()
-            if line.startswith('-A DOCKER-USER ') and f'"unicity-joiner {project}"' in line]
+    out = []
+    for line in listing.stdout.splitlines():
+        if line.startswith('-A DOCKER-USER '):
+            words = shlex.split(line[len('-A DOCKER-USER '):])
+            if any(w == '--comment' and i + 1 < len(words) and words[i + 1] == f'unicity-joiner {project}' for i, w in enumerate(words)):
+                out.append(words)
+    return out
 
 
 def drop_tagged_rules(project):
