@@ -461,13 +461,14 @@ func (unknownMembers) GetQuorumThreshold() uint64      { return 3 }
 func (unknownMembers) GetMaxFaultyNodes() uint64       { return 1 }
 func (unknownMembers) GetRootNodes() []*types.NodeInfo { return nil }
 
-// A weight error after the signature was added to the certificate leaves nothing remembered: the vote is not a verified, counted one.
+// A vote without weight is refused before the certificate is touched (the weight is summed as signers are added, #982) and leaves nothing
+// remembered: the vote is not a verified, counted one. (Before, the signature was added and then the recount failed.)
 func TestWeightFailureAfterAddRemembersNothing(t *testing.T) {
 	var r VoteRegister
 	vote := &abdrc.TimeoutMsg{Timeout: &drctypes.Timeout{Round: 5, Epoch: 1}, Author: "stranger", Signature: []byte{1}}
 	ctx := verifyContext{n: 1}
 	_, _, err := r.InsertTimeoutVote(vote, profile2QuorumInfo{QuorumInfo: unknownMembers{}}, timeoutMemo{digest: [32]byte{7}, ctx: ctx})
 	require.ErrorIs(t, err, quorumweight.ErrUnknownSigner)
-	require.Contains(t, r.timeoutCert.Signatures, "stranger", "the signature was added before the weight failed")
+	require.NotContains(t, r.timeoutCert.Signatures, "stranger", "the certificate is left as it was")
 	require.False(t, r.VerifiedTimeoutHit("stranger", 5, 1, [32]byte{7}, ctx), "and nothing was remembered")
 }
