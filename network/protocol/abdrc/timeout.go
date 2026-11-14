@@ -2,6 +2,7 @@ package abdrc
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"fmt"
 
 	"github.com/unicitynetwork/bft-go-base/crypto"
@@ -23,6 +24,11 @@ type TimeoutMsg struct {
 	// Scheme is the signing scheme of the wire form: 0 or 1 is the legacy form, 2 the domain-bound form [2, payload]. It is not
 	// part of the legacy encoding; the epoch of the timeout decides which one a verifier accepts.
 	Scheme uint64 `cbor:"-" json:"-"`
+
+	// wire is the SHA-256 of the exact bytes the message was decoded from, set by UnmarshalCBOR and by nothing else; zero (hasWire false) for a
+	// message built in memory. It is not part of any encoding. See TakeWireDigest.
+	wire    [sha256.Size]byte
+	hasWire bool
 }
 
 type timeoutMsgWire TimeoutMsg
@@ -55,6 +61,7 @@ func (x *TimeoutMsg) UnmarshalCBOR(data []byte) error {
 		}
 		*x = TimeoutMsg(w.Payload)
 		x.Scheme = votesig.SchemeDomainBound
+		x.wire, x.hasWire = sha256.Sum256(data), true
 		return nil
 	}
 	var legacy timeoutMsgWire
@@ -63,7 +70,19 @@ func (x *TimeoutMsg) UnmarshalCBOR(data []byte) error {
 	}
 	*x = TimeoutMsg(legacy)
 	x.Scheme = 0
+	x.wire, x.hasWire = sha256.Sum256(data), true
 	return nil
+}
+
+// TakeWireDigest returns the SHA-256 of the exact bytes this message was decoded from and forgets it, so that it is returned at most once: ok is
+// false for a message that was not decoded (built or signed in memory) or whose digest was already taken. Decoding is deterministic, so two
+// messages with the same wire digest were decoded from the same bytes and have the same content; that is the only claim it supports, and only
+// for a message that nothing changed after decoding. The consensus loop takes it when it first handles a received message, before anything
+// else can touch the message; any later handling of the same object (a replay) encodes the message instead.
+func (x *TimeoutMsg) TakeWireDigest() (digest [sha256.Size]byte, ok bool) {
+	digest, ok = x.wire, x.hasWire
+	x.wire, x.hasWire = [sha256.Size]byte{}, false
+	return digest, ok
 }
 
 func (x *TimeoutMsg) signingScheme() uint64 {

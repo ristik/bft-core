@@ -462,6 +462,8 @@ func Test_BoltDB_VoteMsg(t *testing.T) {
 		require.NoError(t, db.WriteVote(voteTO))
 		msg, err = db.ReadLastVote()
 		require.NoError(t, err)
+		_, decoded := msg.(*abdrc.TimeoutMsg).TakeWireDigest() // the digest of the stored bytes it was decoded from is not part of its value
+		require.True(t, decoded)
 		require.Equal(t, voteTO, msg)
 	})
 }

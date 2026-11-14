@@ -57,10 +57,18 @@ func recodeTimeout(t *testing.T, v *abdrc.TimeoutMsg) *abdrc.TimeoutMsg {
 	return c
 }
 
-func corrupted(t *testing.T, v *abdrc.TimeoutMsg) *abdrc.TimeoutMsg {
+// changedTimeout is v with mutate applied, as it arrives from the network: encoded after the change and decoded again. A decoded message
+// carries the digest of the bytes it was decoded from (TimeoutMsg.TakeWireDigest), so a change made to it in memory afterwards would not be
+// a different message to the handler; a changed message on the wire is.
+func changedTimeout(t *testing.T, v *abdrc.TimeoutMsg, mutate func(*abdrc.TimeoutMsg)) *abdrc.TimeoutMsg {
+	t.Helper()
 	c := recodeTimeout(t, v)
-	c.Signature = bytes.Repeat([]byte{0x5a}, len(v.Signature))
-	return c
+	mutate(c)
+	return recodeTimeout(t, c)
+}
+
+func corrupted(t *testing.T, v *abdrc.TimeoutMsg) *abdrc.TimeoutMsg {
+	return changedTimeout(t, v, func(c *abdrc.TimeoutMsg) { c.Signature = bytes.Repeat([]byte{0x5a}, len(v.Signature)) })
 }
 
 // An identical replay of a counted message is not verified again; the registration still gives its ordinary answer (the signer is counted).
@@ -136,8 +144,7 @@ func TestChangedEnvelopeOfACountedSignerMisses(t *testing.T) {
 		"signature": func(c *abdrc.TimeoutMsg) { c.Signature = append([]byte{0}, c.Signature...) },
 	}
 	for name, mutate := range mutations {
-		c := recodeTimeout(t, v)
-		mutate(c)
+		c := changedTimeout(t, v, mutate)
 		d, _, ok := receiver.manager.timeoutCacheKey(c)
 		require.True(t, ok, name)
 		require.NotEqual(t, base, d, "%s changes the digest", name)
@@ -280,19 +287,21 @@ func TestChangedHighQCOfTheSameRoundIsVerifiedAndRefused(t *testing.T) {
 	require.NoError(t, rx.manager.onTimeoutMsg(ctx, v))
 	require.Equal(t, 1, *calls)
 
-	changed := recodeTimeout(t, v)
-	changed.Timeout.HighQc.VoteInfo.Timestamp++ // content of the QC, same round: the vote's own signature is still valid
+	changed := changedTimeout(t, v, func(c *abdrc.TimeoutMsg) {
+		c.Timeout.HighQc.VoteInfo.Timestamp++ // content of the QC, same round: the vote's own signature is still valid
+	})
 	require.Equal(t, v.Timeout.HighQc.VoteInfo.RoundNumber, changed.Timeout.HighQc.VoteInfo.RoundNumber)
 	err := rx.manager.onTimeoutMsg(ctx, changed)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "invalid timeout vote")
 	require.Equal(t, 2, *calls, "a miss: it was verified")
 
-	fewer := recodeTimeout(t, v)
-	for id := range fewer.Timeout.HighQc.Signatures {
-		delete(fewer.Timeout.HighQc.Signatures, id) // witnesses removed, same round
-		break
-	}
+	fewer := changedTimeout(t, v, func(c *abdrc.TimeoutMsg) {
+		for id := range c.Timeout.HighQc.Signatures {
+			delete(c.Timeout.HighQc.Signatures, id) // witnesses removed, same round
+			break
+		}
+	})
 	err = rx.manager.onTimeoutMsg(ctx, fewer)
 	require.Error(t, err)
 	require.Equal(t, 3, *calls)
@@ -316,8 +325,7 @@ func TestChangedLastTCOfACountedVoteStillAdvancesTheReceiver(t *testing.T) {
 	require.Equal(t, 1, *calls)
 	require.Equal(t, round, rx.manager.pacemaker.GetCurrentRound(), "an identical replay moves nothing")
 
-	withTC := recodeTimeout(t, v)
-	withTC.LastTC = tc
+	withTC := changedTimeout(t, v, func(c *abdrc.TimeoutMsg) { c.LastTC = tc })
 	_ = rx.manager.onTimeoutMsg(ctx, withTC) // the registration may refuse the repeat signer; the certificate is processed before that
 	require.Equal(t, 2, *calls, "a miss: verified")
 	require.Equal(t, round+1, rx.manager.pacemaker.GetCurrentRound(), "its timeout certificate advanced the receiver")
