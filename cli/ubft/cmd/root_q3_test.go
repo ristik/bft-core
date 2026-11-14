@@ -144,3 +144,48 @@ func TestOnlyAnActivatedHistorySelectsTheRequestHistory(t *testing.T) {
 	require.NoError(t, rt.Activate(context.Background(), p.Bundle()))
 	require.True(t, rootQ3HasActivation(rt), "after the activation")
 }
+
+// rootNodeRunCalls is every call in rootNodeRun by the name it calls (a function or a method), in source order.
+func rootNodeRunCalls(t *testing.T) map[string][]token.Pos {
+	t.Helper()
+	file, err := parser.ParseFile(token.NewFileSet(), "root_node.go", nil, 0)
+	require.NoError(t, err)
+	calls := map[string][]token.Pos{}
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != "rootNodeRun" {
+			continue
+		}
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			switch f := call.Fun.(type) {
+			case *ast.Ident:
+				calls[f.Name] = append(calls[f.Name], call.Pos())
+			case *ast.SelectorExpr:
+				calls[f.Sel.Name] = append(calls[f.Sel.Name], call.Pos())
+			}
+			return true
+		})
+	}
+	require.NotEmpty(t, calls, "rootNodeRun is in root_node.go")
+	return calls
+}
+
+// #1028: the Q3 recovery in attachRootQ3 completes an installation that was interrupted before its checkpoint's record-log prefix was
+// retained, and it fetches that prefix through the manager's record fetcher from the other roots. The fetcher must therefore be installed,
+// and the bootstrap peers dialled, before the recovery runs; otherwise every restart of such a root fails in the recovery. The consensus
+// package's TestARestartAfterAnInstallInterruptedForTheRecordPrefixCompletesWithTheFetcher shows both outcomes on a real manager.
+func TestRootNodeRunInstallsTheRecordFetcherBeforeTheQ3Recovery(t *testing.T) {
+	calls := rootNodeRunCalls(t)
+	for _, name := range []string{"SetRecordFetcher", "BootstrapConnect", "attachRootQ3", "installQ3Epochs", "InstallEpochBundle"} {
+		require.Len(t, calls[name], 1, name)
+	}
+	require.Less(t, calls["SetRecordFetcher"][0], calls["attachRootQ3"][0], "the fetcher exists when the recovery needs the prefix")
+	require.Less(t, calls["BootstrapConnect"][0], calls["attachRootQ3"][0], "the recovery can reach the roots it fetches from")
+	require.Less(t, calls["SetRecordFetcher"][0], calls["installQ3Epochs"][0])
+	require.Less(t, calls["SetRecordFetcher"][0], calls["InstallEpochBundle"][0])
+	require.Less(t, calls["BootstrapConnect"][0], calls["installQ3Epochs"][0])
+}
