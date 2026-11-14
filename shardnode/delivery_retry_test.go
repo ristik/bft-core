@@ -1,7 +1,6 @@
 package shardnode
 
 import (
-	"time"
 	"bytes"
 	"context"
 	"crypto"
@@ -11,6 +10,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 

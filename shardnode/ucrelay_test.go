@@ -2,9 +2,11 @@ package shardnode
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	libp2pnetwork "github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/peerstore"
 	"github.com/stretchr/testify/require"
@@ -89,4 +91,98 @@ func TestTheUCRelayServerAdmitsOnlyItsPeers(t *testing.T) {
 	require.Error(t, err, "a peer that is not admitted gets nothing")
 	require.True(t, s.reserve("p") && s.reserve("p"))
 	require.False(t, s.reserve("p"), "two concurrent requests per peer")
+}
+
+// blackholeOpener is a relay peer that never answers: CreateStream blocks until its context ends.
+type blackholeOpener struct {
+	entered   chan struct{}
+	cancelled atomic.Int32
+	calls     atomic.Int32
+}
+
+func (o *blackholeOpener) CreateStream(ctx context.Context, _ peer.ID, _ string) (libp2pnetwork.Stream, error) {
+	o.calls.Add(1)
+	select {
+	case o.entered <- struct{}{}:
+	default:
+	}
+	<-ctx.Done()
+	o.cancelled.Add(1)
+	return nil, ctx.Err()
+}
+
+// astra on #1054, finding 1: a relay peer that blackholes its streams no longer holds up the client's loop. A genuine root push queued while
+// both relay fetches are blocked is delivered at once, and that adoption cancels the blocked fetches; a retirement cancels them too and
+// starts no further batch.
+func TestABlackholedRelayDoesNotDelayTheRootPushAndIsCancelled(t *testing.T) {
+	for _, tc := range []string{"root push", "retirement"} {
+		t.Run(tc, func(t *testing.T) {
+			f := newConfBindingFixture(t)
+			net := &lateRootNet{received: make(chan any, 4)}
+			driver := &firstUCDriver{got: make(chan struct{})}
+			client, err := NewBFTClient(testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t)), net, f.signer, authPartitionID, types.ShardID{}, f.confMine,
+				stubTrustBaseStore{tb: f.tb}, driver, nil, BFTClientOptions{HandshakeNodes: 1, CertNodes: 1, HeartbeatInterval: time.Hour, InactivityTimeout: time.Hour})
+			require.NoError(t, err)
+			opener := &blackholeOpener{entered: make(chan struct{}, 2)}
+			client.SetRelay(opener, func() []peer.ID { return []peer.ID{"a", "b"} }, 20*time.Millisecond)
+			var follower atomic.Bool
+			client.SetFollowerRole(follower.Load)
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			go func() { done <- client.Run(ctx) }()
+			t.Cleanup(func() { cancel(); <-done })
+
+			<-opener.entered
+			<-opener.entered // both relay fetches are blocked, in parallel
+			switch tc {
+			case "root push":
+				net.received <- f.respond(f.ucMine)
+				select {
+				case <-driver.got:
+				case <-time.After(500 * time.Millisecond):
+					t.Fatal("the root push waited behind the blocked relay")
+				}
+			case "retirement":
+				follower.Store(true)
+				client.RoleChanged()
+			}
+			require.Eventually(t, func() bool { return opener.cancelled.Load() == 2 }, time.Second, 5*time.Millisecond,
+				"the blocked fetches are cancelled, not left to their deadline")
+			calls := opener.calls.Load()
+			if tc == "retirement" {
+				time.Sleep(150 * time.Millisecond)
+				require.Equal(t, calls, opener.calls.Load(), "a non-active node starts no further batch")
+			}
+		})
+	}
+}
+
+// The relay server budgets each peer's requests (a burst, then a steady rate), besides its concurrency limits, and serializes the held
+// pair once per held pair.
+func TestTheUCRelayServerBudgetsRequestsAndCachesTheFrame(t *testing.T) {
+	f := newConfBindingFixture(t)
+	good := f.respond(f.ucMine)
+	encodes := 0
+	s := NewUCRelayServer(func() (*types.UnicityCertificate, *certification.TechnicalRecord) {
+		encodes++
+		return &good.UC, &good.Technical
+	}, nil)
+	now := time.Unix(1000, 0)
+	s.now = func() time.Time { return now }
+	for range ucRelayBurst {
+		require.True(t, s.reserve("p"))
+		s.release("p")
+	}
+	require.False(t, s.reserve("p"), "the burst is spent")
+	require.True(t, s.reserve("q"), "another peer has its own budget")
+	s.release("q")
+	now = now.Add(time.Second)
+	require.True(t, s.reserve("p"), "the budget refills at its rate")
+	s.release("p")
+
+	a, err := s.frame()
+	require.NoError(t, err)
+	b, err := s.frame()
+	require.NoError(t, err)
+	require.Same(t, &a[0], &b[0], "the held pair is serialized once")
 }

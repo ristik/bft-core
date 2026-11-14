@@ -55,11 +55,29 @@ type UCRelayServer struct {
 	mu      sync.Mutex
 	total   int
 	perPeer map[peer.ID]int
+	// buckets is each peer's request budget (a token bucket, ucRelayRate per second up to ucRelayBurst).
+	buckets map[peer.ID]*relayBucket
+	now     func() time.Time
+	// the serialized frame of the held pair, rebuilt only when the held pair changes
+	cachedUC *types.UnicityCertificate
+	cachedTR *certification.TechnicalRecord
+	cached   []byte
 }
+
+type relayBucket struct {
+	tokens float64
+	at     time.Time
+}
+
+const (
+	ucRelayRate         = 2.0 // requests per second per peer
+	ucRelayBurst        = 4
+	ucRelayTrackedPeers = 1024
+)
 
 // NewUCRelayServer serves held to the peers allowed admits (the active and staged shard peers).
 func NewUCRelayServer(held func() (*types.UnicityCertificate, *certification.TechnicalRecord), allowed func(peer.ID) bool) *UCRelayServer {
-	return &UCRelayServer{held: held, allowed: allowed, perPeer: map[peer.ID]int{}}
+	return &UCRelayServer{held: held, allowed: allowed, perPeer: map[peer.ID]int{}, buckets: map[peer.ID]*relayBucket{}, now: time.Now}
 }
 
 func (s *UCRelayServer) reserve(id peer.ID) bool {
@@ -68,6 +86,26 @@ func (s *UCRelayServer) reserve(id peer.ID) bool {
 	if s.total >= ucRelayMaxConcurrent || s.perPeer[id] >= ucRelayMaxPerPeer {
 		return false
 	}
+	now := s.now()
+	b := s.buckets[id]
+	if b == nil {
+		if len(s.buckets) >= ucRelayTrackedPeers {
+			for other := range s.buckets { // bounded state: drop an idle peer's budget (it refills to the burst anyway)
+				if s.perPeer[other] == 0 {
+					delete(s.buckets, other)
+					break
+				}
+			}
+		}
+		b = &relayBucket{tokens: ucRelayBurst, at: now}
+		s.buckets[id] = b
+	}
+	b.tokens = min(ucRelayBurst, b.tokens+now.Sub(b.at).Seconds()*ucRelayRate)
+	b.at = now
+	if b.tokens < 1 {
+		return false
+	}
+	b.tokens--
 	s.total++
 	s.perPeer[id]++
 	return true
@@ -92,31 +130,48 @@ func (s *UCRelayServer) Handler(st libp2pnetwork.Stream) {
 	}
 	defer s.release(id)
 	_ = st.SetDeadline(time.Now().Add(ucRelayDeadline))
-	uc, tr := s.held()
-	if uc == nil || tr == nil {
-		_ = st.Reset()
-		return
-	}
-	ub, err := types.Cbor.Marshal(uc)
+	frame, err := s.frame()
 	if err != nil {
 		_ = st.Reset()
 		return
+	}
+	if _, err := st.Write(frame); err != nil {
+		_ = st.Reset()
+	}
+}
+
+// frame is the serialized answer for the held pair, encoded once per held pair (the client replaces the held pointers on adoption).
+func (s *UCRelayServer) frame() ([]byte, error) {
+	uc, tr := s.held()
+	if uc == nil || tr == nil {
+		return nil, ErrUCRelay
+	}
+	s.mu.Lock()
+	if s.cachedUC == uc && s.cachedTR == tr && s.cached != nil {
+		out := s.cached
+		s.mu.Unlock()
+		return out, nil
+	}
+	s.mu.Unlock()
+	ub, err := types.Cbor.Marshal(uc)
+	if err != nil {
+		return nil, err
 	}
 	tb, err := types.Cbor.Marshal(tr)
 	if err != nil {
-		_ = st.Reset()
-		return
+		return nil, err
 	}
 	body, err := types.Cbor.Marshal(ucRelayPair{UC: ub, Technical: tb})
 	if err != nil || len(body) > ucRelayMaxResponse {
-		_ = st.Reset()
-		return
+		return nil, ErrUCRelay
 	}
 	var n [4]byte
 	binary.BigEndian.PutUint32(n[:], uint32(len(body)))
-	if _, err := st.Write(append(n[:], body...)); err != nil {
-		_ = st.Reset()
-	}
+	out := append(n[:], body...)
+	s.mu.Lock()
+	s.cachedUC, s.cachedTR, s.cached = uc, tr, out
+	s.mu.Unlock()
+	return out, nil
 }
 
 // StreamOpener opens a stream to a peer (network.Peer.CreateStream).
@@ -124,7 +179,8 @@ type StreamOpener interface {
 	CreateStream(ctx context.Context, id peer.ID, protocol string) (libp2pnetwork.Stream, error)
 }
 
-// FetchHeldPair asks one peer for the pair it holds.
+// FetchHeldPair asks one peer for the pair it holds. A cancelled ctx ends the exchange wherever it is, a stream read included (the stream
+// is reset).
 func FetchHeldPair(ctx context.Context, host StreamOpener, id peer.ID) (*types.UnicityCertificate, *certification.TechnicalRecord, error) {
 	ctx, cancel := context.WithTimeout(ctx, ucRelayDeadline)
 	defer cancel()
@@ -136,6 +192,15 @@ func FetchHeldPair(ctx context.Context, host StreamOpener, id peer.ID) (*types.U
 	if dl, ok := ctx.Deadline(); ok {
 		_ = st.SetDeadline(dl)
 	}
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = st.Reset() // interrupts a blocked read
+		case <-stop:
+		}
+	}()
 	_ = st.CloseWrite()
 	var n [4]byte
 	if _, err := io.ReadFull(st, n[:]); err != nil {
@@ -161,54 +226,118 @@ func FetchHeldPair(ctx context.Context, host StreamOpener, id peer.ID) (*types.U
 	return &uc, &tr, nil
 }
 
-// ucRelayClient is the backup path of an active node: when the roots have given no useful progress for After, it asks up to two of its
-// active peers for the pair they hold and offers what it gets through the same admission as a root's response. Asking is rate-limited to
-// once per After; a duplicate, stale or invalid answer refreshes nothing (the progress clock moves only on an adopted certificate).
+// ucRelayClient is the backup path of an active node: when the roots have given no useful progress for after, it asks two of its active
+// peers, in parallel and OUTSIDE the client's event loop, for the pair they hold, and queues what it gets into the loop's serialized
+// admission (the same verification and admission as a root's response). At most one batch runs at a time, bounded by the relay deadline;
+// the next is not started before after has passed since the last one ended, and eligibility (an active role, still no progress) is
+// checked again before each. A batch is cancelled, stream reads included, the moment a certificate is adopted or the role ends. A
+// duplicate, stale or invalid answer refreshes nothing (the progress clock moves only on an adopted certificate).
 type ucRelayClient struct {
 	host    StreamOpener
 	sources func() []peer.ID
 	after   time.Duration
-	asked   time.Time
+	results chan *certification.CertificationResponse
+
+	mu      sync.Mutex
+	running bool
+	cancel  context.CancelFunc
+	ended   time.Time
 	next    int
 }
 
-// SetRelay enables the UC relay backup: when no certificate has been adopted for after, up to two of sources are asked. Call before Run.
+// SetRelay enables the UC relay backup: when no certificate has been adopted for after, two of sources are asked. Call before Run.
 func (c *BFTClient) SetRelay(host StreamOpener, sources func() []peer.ID, after time.Duration) {
 	if host == nil || sources == nil || after <= 0 {
 		return
 	}
-	c.relay = &ucRelayClient{host: host, sources: sources, after: after}
+	c.relay = &ucRelayClient{host: host, sources: sources, after: after, results: make(chan *certification.CertificationResponse, 2)}
 }
 
-// relayDue reports whether the backup should ask now (Run's loop only).
+// relayResults is the channel Run admits relayed pairs from; nil without a relay.
+func (c *BFTClient) relayResults() <-chan *certification.CertificationResponse {
+	if c.relay == nil {
+		return nil
+	}
+	return c.relay.results
+}
+
+// relayDue reports whether a new batch should start now: an active role, nothing adopted for after (repeats included), no batch running,
+// and after passed since the last one ended.
 func (c *BFTClient) relayDue(now time.Time) bool {
-	if c.relay == nil || c.isFollower() {
+	r := c.relay
+	if r == nil || c.isFollower() {
 		return false
 	}
-	since := now.Sub(c.clock().Delivered()) // nothing adopted, repeats included: delivery is stalled
-	return since >= c.relay.after && now.Sub(c.relay.asked) >= c.relay.after
+	if now.Sub(c.clock().Delivered()) < r.after {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return !r.running && now.Sub(r.ended) >= r.after
 }
 
-// relayFetch asks up to two sources, rotating through them, and offers each pair it gets to the admission. Run's loop only.
-func (c *BFTClient) relayFetch(ctx context.Context, now time.Time) {
+// relayCancel ends a running batch (an adopted certificate, or the role ended). Safe on a client without a relay.
+func (c *BFTClient) relayCancel() {
 	r := c.relay
-	r.asked = now
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	cancel := r.cancel
+	r.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+// relayStart starts one bounded batch in the background: two sources, rotating, fetched in parallel; each verified-by-admission answer is
+// queued for Run. It returns at once.
+func (c *BFTClient) relayStart(ctx context.Context) {
+	r := c.relay
 	sources := r.sources()
+	if len(sources) == 0 {
+		return
+	}
+	r.mu.Lock()
+	if r.running {
+		r.mu.Unlock()
+		return
+	}
+	batch, cancel := context.WithTimeout(ctx, ucRelayDeadline)
+	r.running, r.cancel = true, cancel
+	picked := make([]peer.ID, 0, 2)
 	for k := 0; k < 2 && k < len(sources); k++ {
-		id := sources[(r.next+k)%len(sources)]
-		uc, tr, err := FetchHeldPair(ctx, r.host, id)
-		if err != nil {
-			if c.log != nil {
-				c.log.DebugContext(ctx, "UC relay source unavailable", slog.String("peer", id.String()), slog.String("err", err.Error()))
-			}
-			continue
-		}
-		cr := &certification.CertificationResponse{Partition: c.partitionID, Shard: c.shardID, UC: *uc, Technical: *tr}
-		if err := c.handleCertificationResponse(ctx, cr); err != nil && c.log != nil {
-			c.log.DebugContext(ctx, "relayed certificate not admitted", slog.String("peer", id.String()), slog.String("err", err.Error()))
-		}
+		picked = append(picked, sources[(r.next+k)%len(sources)])
 	}
-	if len(sources) > 0 {
-		r.next = (r.next + 2) % len(sources)
-	}
+	r.next = (r.next + 2) % len(sources)
+	r.mu.Unlock()
+	go func() {
+		var wg sync.WaitGroup
+		for _, id := range picked {
+			wg.Add(1)
+			go func(id peer.ID) {
+				defer wg.Done()
+				uc, tr, err := FetchHeldPair(batch, r.host, id)
+				if err != nil {
+					if c.log != nil {
+						c.log.DebugContext(batch, "UC relay source unavailable", slog.String("peer", id.String()), slog.String("err", err.Error()))
+					}
+					return
+				}
+				if c.isFollower() {
+					return // the role ended while this peer answered: nothing is queued
+				}
+				cr := &certification.CertificationResponse{Partition: c.partitionID, Shard: c.shardID, UC: *uc, Technical: *tr}
+				select {
+				case r.results <- cr:
+				default: // the loop has two queued already: this one would add nothing
+				}
+			}(id)
+		}
+		wg.Wait()
+		cancel()
+		r.mu.Lock()
+		r.running, r.cancel, r.ended = false, nil, time.Now()
+		r.mu.Unlock()
+	}()
 }

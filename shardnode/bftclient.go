@@ -248,6 +248,7 @@ func (c *BFTClient) checkRole(ctx context.Context) {
 	}
 	c.wasFollower = follower
 	if follower {
+		c.relayCancel() // the role ended: a relay batch still asking stops
 		return
 	}
 	if c.log != nil {
@@ -710,7 +711,12 @@ func (c *BFTClient) Run(ctx context.Context) error {
 			c.checkRole(ctx)
 		case now := <-relayC:
 			if c.relayDue(now) {
-				c.relayFetch(ctx, now)
+				c.relayStart(ctx) // in the background: the loop never waits on a relay peer
+			}
+		case cr := <-c.relayResults():
+			// a relayed pair: the same verification, admission and driver as a root's response, serialized here
+			if err := c.handleCertificationResponse(ctx, cr); err != nil && c.log != nil {
+				c.log.DebugContext(ctx, "relayed certificate not admitted", slog.String("err", err.Error()))
 			}
 		case <-heartbeat.C:
 			c.checkRole(ctx)
@@ -1648,6 +1654,7 @@ func (c *BFTClient) noteAdoptedLocked(class UCClass) {
 	}
 	c.clock().adopted(class == UCRepeat)
 	c.firstResponse.Store(true)
+	c.relayCancel() // useful progress: a relay batch still asking is no longer needed
 	if class == UCRepeat {
 		c.consecutiveRepeats++
 		return
