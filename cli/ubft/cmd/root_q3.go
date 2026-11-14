@@ -57,10 +57,11 @@ type q3BundleProvider struct {
 	rt *q3active.Runtime
 }
 
-func (p q3BundleProvider) Q3Bundle(_ context.Context, epoch uint64) (q3active.Bundle, error) {
+func (p q3BundleProvider) Q3Bundle(ctx context.Context, epoch uint64) (q3active.Bundle, error) {
 	// an activation this node has already staged is served from the journal: once the roots have moved on, the committed tree no longer
-	// holds the old tip its live evidence needs
-	if b, ok, err := p.rt.StagedBundle(epoch); err != nil || ok {
+	// holds the old tip its live evidence needs. It is one indexed, cancellation-aware read, so a request for a historical or absent epoch
+	// costs the same whatever the journal holds.
+	if b, ok, err := p.rt.StagedBundleAt(ctx, epoch); err != nil || ok {
 		return b, err
 	}
 	link, head, candidate, err := p.cm.Q3ActivationEvidence(epoch)

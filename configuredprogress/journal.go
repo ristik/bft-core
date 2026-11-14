@@ -712,11 +712,7 @@ func (s *Store) appendJournalObservation(tx *bolt.Tx, pair *verifiedPair, dd [32
 		if e != nil {
 			return e
 		}
-		resolvedTarget := target
-		if w.Unresolved {
-			resolvedTarget = nil
-		}
-		if superseded, e = evictSupersededObservations(b, key, uc.GetRootEpoch(), w.RootRound, resolvedTarget, irBytes); e != nil {
+		if superseded, e = evictSupersededObservations(b, key, uc.GetRootEpoch(), w.RootRound, !w.Unresolved, target, irBytes); e != nil {
 			return e
 		}
 	}

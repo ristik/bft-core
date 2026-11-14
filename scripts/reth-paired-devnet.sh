@@ -129,7 +129,32 @@ negativeReths="reth-wrong reth-wrongchain reth-othergenesis reth-laterfork"
 # nodes only, and a reth is stopped by its pid file only if that pid is still a `reth node` running
 # from this checkout. This runs nested inside scripts/reth-smoke.sh, whose own teardown cannot undo
 # anything a machine-wide sweep here had already killed.
+# dump_stalled_roots makes a wedged root diagnosable (#1063): at teardown, a root of this checkout whose debug.log has not moved for
+# LANE_STALL_DUMP_SECS seconds (default 5; 0 disables) gets SIGQUIT first. A Go process then writes the stack of every goroutine to its stderr,
+# which is that debug.log (m2_start_root), and exits; the lanes copy the log into their evidence. A healthy root logs several lines a second at
+# debug level, so only a root that stopped progressing (or the whole committee, waiting on one) is dumped. The roots are stopped next anyway.
+dump_stalled_roots() {
+  local secs=${LANE_STALL_DUMP_SECS:-5} now p home log age dumped=()
+  [ "$secs" -gt 0 ] 2>/dev/null || return 0
+  now=$(date +%s)
+  for p in $(owned_pids 'ubft root-node run'); do
+    home=$(ps -o args= -p "$p" 2>/dev/null | sed -n 's/.*--home \([^ ]*\).*/\1/p')
+    log=$home/debug.log
+    [ -n "$home" ] && [ -f "$log" ] || continue
+    age=$(( now - $(p_mtime "$log") ))
+    [ "$age" -ge "$secs" ] || continue
+    echo "STALL: root $home (pid $p) wrote no log for ${age}s at teardown: SIGQUIT, goroutine dump in $log"
+    printf '\n=== #1063 stall dump: no log output for %ss at teardown, SIGQUIT at %s ===\n' "$age" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$log"
+    kill -QUIT "$p" 2>/dev/null && dumped+=("$p")
+  done
+  local i
+  for p in ${dumped[@]+"${dumped[@]}"}; do
+    for i in $(seq 1 30); do kill -0 "$p" 2>/dev/null || break; sleep 0.1; done
+  done
+}
+
 cleanup() {
+  dump_stalled_roots
   if [ "${F8_MIXED_LANE:-0}" = 1 ]; then f8_stop; fi
   if [ "${ANYAGE_LANE:-0}" = 1 ]; then stop_aggs; fi   # by this run's own pid files
   ./stop-evm.sh -a >/dev/null 2>&1 || true

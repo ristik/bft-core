@@ -36,10 +36,20 @@ import (
 // 2. A resolved repeat observation O of block B is superseded by a later retained (or incoming) observation N of the same complete input
 //    record of the same block. It is deleted only if it is not B's own association (the certificate the candidate records as its result) and
 //    no retained candidate was authorized by it. Every journal invariant that read O is then satisfied by N or by the association: B keeps its
-//    newest resolved observation, the latest observation (durable progress) is never touched, unresolved, quiet and bootstrap observations are
-//    never touched, and LoadJournal's authorization check of a retained candidate still finds its authorizing certificate. Recovery and peer
-//    serving walk the observations in root order for the newest certified target (and, for a quiet tail, the nearest earlier target); deleting
-//    an older duplicate of a certificate whose newer duplicate stays at a later position changes neither answer.
+//    newest resolved observation, the latest observation (durable progress) is never touched, unresolved observations are never touched, and
+//    LoadJournal's authorization check of a retained candidate still finds its authorizing certificate. Recovery and peer serving walk the
+//    observations in root order for the newest certified target (and, for a quiet tail, the nearest earlier target); deleting an older
+//    duplicate of a certificate whose newer duplicate stays at a later position changes neither answer.
+//    The same holds for a quiet or bootstrap observation (no target block): a stall right after the bootstrap certificate, or after a quiet
+//    round, journals one more repeat of that input record per root timeout, and rule 2 restricted to block targets would leave the observation
+//    bound to fill exactly as before. Such an observation is grouped by its complete input record instead of by a block: an older one is
+//    deleted when a later observation of the identical input record is retained (or incoming) and no retained candidate was authorized by it.
+//    It has no candidate and so no association. Its readers see the same answers: LoadJournal checks only that it is resolved and that the
+//    latest observation matches durable progress; the journal provider matches a held quiet interval by its partition round and input record
+//    bytes, which every copy shares, and then takes the nearest earlier block target, which no deleted copy is (a block certificate later than
+//    the first copy of an input record and earlier than a repeat of it would be a regression of the root's latest input record); recovery's
+//    walk keeps its last certificate and its last block target. The shard's quiet-interval anchor is kept in memory by the round, from
+//    delivered certificates, not from this history.
 
 // deadCandidate reports whether an uncertified candidate of round r can never be certified, given an authenticated certificate pair.
 func deadCandidate(round uint64, uc *types.UnicityCertificate, tr *certification.TechnicalRecord) bool {
@@ -74,21 +84,31 @@ func evictDeadCandidates(b *bolt.Bucket, uc *types.UnicityCertificate, tr *certi
 	return evicted, nil
 }
 
+// supersessionGroup is the set of observations rule 2 compares: those of one target block, or, for a quiet or bootstrap observation (no target),
+// those of one complete input record.
+func supersessionGroup(target, ir []byte) string {
+	if len(target) == sha256.Size {
+		return "b" + string(target)
+	}
+	return "q" + string(ir)
+}
+
 // evictSupersededObservations deletes every resolved repeat observation that a later observation of the same certified input record of the same
-// block supersedes (rule 2). The incoming observation (newKey, newEpoch, newRootRound, newTarget, newIR) is not stored yet and counts as the
-// latest of its target.
-func evictSupersededObservations(b *bolt.Bucket, newKey []byte, newEpoch, newRootRound uint64, newTarget, newIR []byte) (int, error) {
+// block, or of the same quiet or bootstrap input record, supersedes (rule 2). The incoming observation (newKey, newEpoch, newRootRound, newTarget,
+// newIR) is not stored yet; if newResolved, it counts as the latest of its group. A nil newKey means there is no incoming observation.
+func evictSupersededObservations(b *bolt.Bucket, newKey []byte, newEpoch, newRootRound uint64, newResolved bool, newTarget, newIR []byte) (int, error) {
 	type position struct {
 		epoch, root uint64
 		ir          []byte
 	}
 	latest := make(map[string]position)
 	note := func(target []byte, epoch, root uint64, ir []byte) {
-		if p, ok := latest[string(target)]; !ok || rootPositionLater(epoch, root, p.epoch, p.root) {
-			latest[string(target)] = position{epoch: epoch, root: root, ir: ir}
+		g := supersessionGroup(target, ir)
+		if p, ok := latest[g]; !ok || rootPositionLater(epoch, root, p.epoch, p.root) {
+			latest[g] = position{epoch: epoch, root: root, ir: ir}
 		}
 	}
-	if len(newTarget) == sha256.Size {
+	if newKey != nil && newResolved && (len(newTarget) == 0 || len(newTarget) == sha256.Size) {
 		note(newTarget, newEpoch, newRootRound, newIR)
 	}
 	type entry struct {
@@ -105,8 +125,8 @@ func evictSupersededObservations(b *bolt.Bucket, newKey []byte, newEpoch, newRoo
 		if err != nil {
 			return 0, err
 		}
-		if o.Unresolved || len(o.TargetHash) != sha256.Size {
-			continue // unresolved, quiet and bootstrap observations are never evicted
+		if o.Unresolved || len(o.TargetHash) != 0 && len(o.TargetHash) != sha256.Size {
+			continue // unresolved observations are never evicted
 		}
 		var uc types.UnicityCertificate
 		if err := types.Cbor.Unmarshal(o.UC, &uc); err != nil {
@@ -129,7 +149,7 @@ func evictSupersededObservations(b *bolt.Bucket, newKey []byte, newEpoch, newRoo
 	}
 	evicted := 0
 	for _, e := range resolved {
-		newest := latest[string(e.target)]
+		newest := latest[supersessionGroup(e.target, e.ir)]
 		if !rootPositionLater(newest.epoch, newest.root, e.epoch, e.root) || !bytes.Equal(newest.ir, e.ir) {
 			continue // the newest observation of its block, or not a repeat of it
 		}
@@ -139,16 +159,18 @@ func evictSupersededObservations(b *bolt.Bucket, newKey []byte, newEpoch, newRoo
 			// journal written before #1019). LoadJournal requires a local candidate's authorization to be present.
 			continue
 		}
-		candidateRaw := b.Get(journalCandidateKey(e.target))
-		if candidateRaw == nil {
-			continue
-		}
-		candidate, err := decodeCandidate(candidateRaw)
-		if err != nil {
-			return evicted, err
-		}
-		if candidate.Status != 1 || bytes.Equal(e.uc, candidate.ResultingUC) && bytes.Equal(e.tr, candidate.ResultingTR) {
-			continue // the block's own association
+		if len(e.target) == sha256.Size {
+			candidateRaw := b.Get(journalCandidateKey(e.target))
+			if candidateRaw == nil {
+				continue
+			}
+			candidate, err := decodeCandidate(candidateRaw)
+			if err != nil {
+				return evicted, err
+			}
+			if candidate.Status != 1 || bytes.Equal(e.uc, candidate.ResultingUC) && bytes.Equal(e.tr, candidate.ResultingTR) {
+				continue // the block's own association
+			}
 		}
 		if err := b.Delete(e.key); err != nil {
 			return evicted, err
@@ -207,7 +229,7 @@ func (s *Store) EvictSuperseded(ctx context.Context, c Context, limits JournalLi
 		if candidates, e = evictDeadCandidates(b, uc, tr); e != nil {
 			return e
 		}
-		observations, e = evictSupersededObservations(b, nil, 0, 0, nil, nil)
+		observations, e = evictSupersededObservations(b, nil, 0, 0, false, nil, nil)
 		return e
 	})
 	if errors.Is(err, ErrStale) {
