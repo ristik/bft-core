@@ -325,6 +325,29 @@ func (c *BFTClient) classifyUC(prev, next *types.UnicityCertificate) (UCClass, e
 	return ClassifyUC(prev, next)
 }
 
+// classifyDurable classifies a certificate the configured journal has already admitted durably as its tip (deliverConfigured). It is
+// classifyUC, except across installed epochs this node adopted no certificate of: a root-free follower's head follower offers only the
+// newest certificate, so its in-memory LUC can be several root epochs behind the journal's tip (bft-core#1067). The journal authenticated
+// the certificate against the node's verified epoch history and checked that it extends its durable chain, and every epoch up to the
+// certificate's is installed (the epoch classifier is selected only then), so the comparison is the boundary one, the previous
+// certificate taken as of the epoch before: partition-round order, repeat and equivocation are checked exactly as at a single handoff. A
+// restart reaches the same state, seeding the LUC from the journal's tip. Everything else keeps classifyUC's verdict.
+func (c *BFTClient) classifyDurable(prev, next *types.UnicityCertificate) (UCClass, error) {
+	class, err := c.classifyUC(prev, next)
+	if !errors.Is(err, ErrImpossibleUCOrder) || c.profile2 != nil || prev == nil || next == nil || prev.UnicitySeal == nil || next.UnicitySeal == nil {
+		return class, err
+	}
+	gate, ok := c.admission.(interface{ Profile2Ready(uint64) bool })
+	if !ok || !gate.Profile2Ready(next.GetRootEpoch()) || next.GetRootEpoch() <= prev.GetRootEpoch()+1 {
+		return class, err
+	}
+	shifted := *prev
+	seal := *prev.UnicitySeal
+	seal.Epoch = next.GetRootEpoch() - 1
+	shifted.UnicitySeal = &seal
+	return ClassifyUCEpoch(&shifted, next)
+}
+
 // outstandingRequest is a submitted certification request awaiting the certificate of its round. The signed request is kept
 // as submitted: a re-send puts the same bytes on the wire, it never re-signs or rebuilds.
 type outstandingRequest struct {
@@ -1211,7 +1234,7 @@ func (c *BFTClient) deliverConfigured(ctx context.Context, uc *types.UnicityCert
 		return nil
 	}
 	retry := c.hasConfiguredFailed && c.configuredFailed == id
-	class, err := c.classifyUC(c.luc, cursor)
+	class, err := c.classifyDurable(c.luc, cursor)
 	if err != nil {
 		c.mu.Unlock()
 		return fmt.Errorf("classifying durably admitted certificate: %w", err)
