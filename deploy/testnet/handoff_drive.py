@@ -226,6 +226,11 @@ def binding_refusal(mine, reference, epoch, promoted, expect):
     return None
 
 
+def expectation_complete(expect, promoted):
+    """Whether a binding expectation has every value binding_refusal needs (an incomplete one is derived again, not kept)."""
+    return bool(expect and expect.get('nodeId') and expect.get('bodyId') and (not promoted or expect.get('sigKey')))
+
+
 def follower_ready(mine, reference, epoch, promoted, expect=None, later=None):
     """A follower's own report, compared with an incumbent's. Before the election (promoted False) the joiner is a non-active follower by
     design: it must have installed the current epoch's activation (roleEpoch >= epoch), with either role, and follow the incumbents' certified
@@ -919,14 +924,15 @@ class Drive(rehearse.Rehearsal):
             if not mine or not reference or not later:
                 self.say(f'  joiner {i}: shard health not readable yet')
                 return False
-            if not expected:
+            if not expectation_complete(expected, promoted):
+                # derived again on every poll until complete: a transient failure (the roots' activation record not readable yet, the
+                # installed configuration not written yet) is retried, never cached
+                expected.clear()
                 expected.update(self.binding_expectation(i, epoch, promoted, reference))
             refusal = binding_refusal(mine, reference, epoch, promoted, expected)
             self.say(f'  joiner {i}: role {mine.get("role")} at epoch {mine.get("roleEpoch")}, recovery {mine.get("executionRecovery")}, '
                      f'certified round {mine.get("lastUCRound")} (validator 1 {reference.get("lastUCRound")}..{(later or {}).get("lastUCRound")}), '
                      f'binding {refusal or "ok"}')
-            if refusal and promoted and expected.get('sigKey') is None:
-                expected.clear()   # the installed configuration may not be written yet: derive the expectation again on the next poll
             return follower_ready(mine, reference, epoch, promoted, expected, later)
         what = 'active at epoch %d' % epoch if promoted else 'following epoch %d' % epoch
         self.wait(f'the joiner {i} is {what} and certified at the head ({how})', ready, 3600)

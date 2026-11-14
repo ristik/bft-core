@@ -1338,5 +1338,49 @@ class RoundBracket(unittest.TestCase):
         self.assertTrue(self.ready(100, 100), 'without a later reading: the one reading, give or take one')
         self.assertFalse(self.ready(98, 100))
 
+
+class ExpectationRetry(unittest.TestCase):
+    """astra's review of #1055 (P2): an incomplete expectation (the roots' activation record or the installed configuration not readable yet)
+    is derived again on the next poll, never cached: a transient failure followed by success becomes ready."""
+
+    def drive(self, bodies, keys):
+        d = hd.Drive.__new__(hd.Drive)
+        report = {'role': 'active', 'roleEpoch': 5, 'lastUCRound': 100, 'executionRecovery': 'ready', 'binding': joiner_binding()}
+
+        class Remote:
+            def status(self):
+                return {'shardHealth': dict(report)}
+
+        class Docker:
+            def shard_health(self, i):
+                return {'lastUCRound': 100, 'binding': incumbent_binding()}
+        d.remote, d.docker, d.say = {5: Remote()}, Docker(), lambda text: None
+        self.asked = []
+
+        def expectation(i, epoch, promoted, reference):
+            self.asked.append(epoch)
+            return {'nodeId': '16Uiu2JOINER', 'bodyId': bodies.pop(0) if bodies else 'b5', 'sigKey': keys.pop(0) if keys else '0x02aa'}
+        d.binding_expectation = expectation
+        d.wait = lambda what, fn, seconds: next((r for r in (fn() for _ in range(5)) if r), None) or (_ for _ in ()).throw(AssertionError(what))
+        return d
+
+    def test_a_transient_activation_lookup_failure_is_retried(self):
+        d = self.drive(bodies=[None, None], keys=[])
+        d.wait_ready(5, 5, True, 'test')
+        self.assertEqual(len(self.asked), 3, 'derived again after each incomplete expectation, then kept')
+
+    def test_a_transient_configuration_failure_is_retried(self):
+        d = self.drive(bodies=[], keys=[None])
+        d.wait_ready(5, 5, True, 'test')
+        self.assertEqual(len(self.asked), 2)
+
+    def test_a_complete_expectation_is_derived_once(self):
+        d = self.drive(bodies=[], keys=[])
+        d.wait_ready(5, 5, True, 'test')
+        self.assertEqual(len(self.asked), 1)
+        self.assertFalse(hd.expectation_complete({'nodeId': 'n', 'bodyId': None, 'sigKey': 'k'}, True))
+        self.assertFalse(hd.expectation_complete({'nodeId': 'n', 'bodyId': 'b', 'sigKey': None}, True))
+        self.assertTrue(hd.expectation_complete({'nodeId': 'n', 'bodyId': 'b', 'sigKey': None}, False))
+
 if __name__ == '__main__':
     unittest.main()
