@@ -666,6 +666,7 @@ func TestTalliesAreKeyedByRootEpoch(t *testing.T) {
 	require.NoError(t, f.submit(f.request(1, v, 9, nil)))
 	require.Equal(t, 2, f.counted())
 	cm.epoch = 4
+	f.si.LastCR.UC.UnicitySeal.Epoch = 4 // the new epoch's first block recertified the shard: its requests build on that certificate (#1036)
 	require.NoError(t, f.submit(f.request(2, v, 9, nil)))
 	require.Equal(t, 1, f.counted(), "the epoch-3 tally was retired, not completed")
 	require.Empty(t, f.certs())
@@ -707,4 +708,48 @@ func TestEarlyReservationsAreConservedAcrossReplay(t *testing.T) {
 	again := b.take(1, types.ShardID{})
 	b.release(again[0])
 	require.Equal(t, size, b.bytes)
+}
+
+// The legacy collector (no request view, #1036): after a root-only activation the shard's context is unchanged, so a request built on its
+// certificate of the closed epoch matches the committed ShardInfo in everything ValidRequest compares. It is refused, and neither counted
+// nor handed over, until the shard is recertified in the installed root epoch; a request built on that certificate is certified. The
+// genesis root epoch is unaffected.
+func TestTheLegacyCollectorRefusesARequestOfTheClosedEpoch(t *testing.T) {
+	f := newFixture(t, fxOpts{})
+	cm := &epochCM{viewCM: f.cm, epoch: fxRootEp + 1} // the root-only activation is installed
+	f.node.consensusManager = cm
+	f.cm.enabled = false
+	v := f.viewEnabled()
+	for i := 0; i < 3; i++ {
+		err := f.submit(f.request(i, v, 9, nil))
+		require.ErrorIs(t, err, storage.ErrRequestBeforeActivation, "request %d", i)
+	}
+	require.Zero(t, f.counted(), "nothing of the closed epoch is counted")
+	require.Empty(t, f.certs())
+	require.Zero(t, f.node.early.len(), "nor held")
+
+	// the same requests under the view-aware branch are refused alike, whatever the view itself admits
+	f.cm.enabled = true
+	require.ErrorIs(t, f.submit(f.request(0, f.view(), 9, nil)), storage.ErrRequestBeforeActivation)
+	require.Zero(t, f.counted())
+	f.cm.enabled = false
+
+	// the first ordinary block of the new epoch recertifies the shard: requests built on that certificate are certified
+	f.si.LastCR.UC.UnicitySeal.Epoch = fxRootEp + 1
+	for i := 0; i < 3; i++ {
+		require.NoError(t, f.submit(f.request(i, v, 9, nil)))
+	}
+	require.Len(t, f.certs(), 1)
+	require.EqualValues(t, fxRootEp+1, f.certs()[0].RootEpoch)
+
+	// in the genesis root epoch the rule is void, whatever the certificate's seal epoch
+	g := newFixture(t, fxOpts{})
+	g.node.consensusManager = &epochCM{viewCM: g.cm, epoch: 1}
+	g.cm.enabled = false
+	g.si.LastCR.UC.UnicitySeal.Epoch = 0
+	gv := g.viewEnabled()
+	for i := 0; i < 3; i++ {
+		require.NoError(t, g.submit(g.request(i, gv, 9, nil)))
+	}
+	require.Len(t, g.certs(), 1)
 }

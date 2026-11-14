@@ -289,8 +289,11 @@ type RequestRoundView struct {
 	trDigest   []byte
 	t2         time.Duration
 	collection bool // resolved before its activation round, collection only
-	assignKey  []byte
-	viewKey    []byte
+	// continuedAt is the root epoch of the root-only activation (a continuation) whose interval authorises the target round, zero when
+	// the interval is the assignment's own. A request of such an interval must be built on a certificate of that root epoch (#1036).
+	continuedAt uint64
+	assignKey   []byte
+	viewKey     []byte
 }
 
 func lp(h interface{ Write([]byte) (int, error) }, b []byte) {
@@ -475,6 +478,9 @@ func ResolveRequestContext(q RequestQuery, snap *RequestSnapshot) (*RequestRound
 	v := &RequestRoundView{ctx: act.ctx, pdr: pdr, expectedTR: tr, prevHash: bytes.Clone(snap.parent.rootHash), prevUC: prevUC,
 		ucDigest: bytes.Clone(snap.parent.ucDigest), pending: pending, target: q, version: act.version, start: act.start,
 		trDigest: bytes.Clone(act.trHash), t2: act.pdr.T2Timeout, collection: collection, assignKey: assignmentKey(act, snap.hashAlg)}
+	if snap.base[idx] != idx {
+		v.continuedAt = act.rootEpoch
+	}
 	v.target.RootBodyID, v.target.ParentID, v.target.PrevUCDigest = bytes.Clone(q.RootBodyID), bytes.Clone(q.ParentID), bytes.Clone(q.PrevUCDigest)
 	v.bindViewKey(snap.hashAlg)
 	return v, nil
@@ -587,8 +593,23 @@ func (v *RequestRoundView) validRequest(req *certification.BlockCertificationReq
 	if req.InputRecord.Timestamp != v.prevUC.UnicitySeal.Timestamp {
 		return fmt.Errorf("%w: IR timestamp %d doesn't match UnicitySeal timestamp %d", ErrStaleRequestContext, req.InputRecord.Timestamp, v.prevUC.UnicitySeal.Timestamp)
 	}
+	// A root-only activation leaves the shard epoch, round and parent state unchanged, so a request built before it matches all of the
+	// above. The shard's first block of the new root epoch must carry the transition, and it is built on the activation's certificate
+	// (every shard is recertified by the first block of the new root epoch). Until that certificate is the committed parent, a request
+	// of this interval is one of the closed epoch and is refused (#1036).
+	if v.continuedAt != 0 && v.prevUC.GetRootEpoch() < v.continuedAt {
+		return fmt.Errorf("%w: %w: the request builds on a certificate of root epoch %d, the interval of root epoch %d needs its activation certificate",
+			ErrStaleRequestContext, ErrRequestBeforeActivation, v.prevUC.GetRootEpoch(), v.continuedAt)
+	}
 	return nil
 }
+
+// PrevRootEpoch is the root epoch of the certificate the view's requests build on: the committed parent's (#1036).
+func (v *RequestRoundView) PrevRootEpoch() uint64 { return v.prevUC.GetRootEpoch() }
+
+// ErrRequestBeforeActivation refuses a request built on a certificate of a root epoch before the root-only activation of its view's
+// interval (#1036): it may lack the transition the first block of the new epoch carries.
+var ErrRequestBeforeActivation = errors.New("certification request built before the root activation")
 
 // view as the weights and admission of rctypes.IRChangeReq.Verify
 func (v *RequestRoundView) MemberCount() int                       { return v.ctx.MemberCount() }

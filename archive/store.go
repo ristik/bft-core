@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -20,12 +21,19 @@ var ErrCorrupt = errors.New("archive record invalid")
 // Store holds immutable local availability copies. One process may write a
 // store at a time; archivewiring owns peer publication and verification.
 type Store struct {
-	dir           string
-	mu            sync.Mutex
-	Fault         func(string) error
-	disk          *diskOps // nil: the real operations (see diskOps)
-	rounds        map[string]map[uint64][]Request
-	receiptRounds map[string]map[uint64][]Request
+	dir             string
+	mu              sync.Mutex
+	Fault           func(string) error
+	disk            *diskOps // nil: the real operations (see diskOps)
+	rounds          map[string]map[uint64][]Request
+	receiptRounds   map[string]map[uint64][]Request
+	legacyBundles   []string // bundle file names in the store directory itself (the layout before bundleDir), listed once; nil until then
+	bundleDirSynced bool     // the store directory has been synced since bundleDir was found or made (PutBundle); under mu
+	prepMu          sync.Mutex
+	prepared        bool            // the packed layout's directories exist and are durable (prepareRecordDirs)
+	migrateSkip     map[string]bool // directory-layout records MigrateLegacy leaves as they are; under mu
+	unsynced        map[string]bool // fan-out directories whose sync after a publication failed: synced again by the next put; under mu
+	durable         map[string]bool // packed records published or synced by this process (ensureDurableLocked); under mu
 }
 
 func Open(dir string) (*Store, error) {
@@ -126,7 +134,7 @@ func archiveMagic(v2 bool) string {
 }
 
 // fault calls the Fault hook, if one is set, at a named point of a put: "after-chunk" (each chunk written) and "before-publish"
-// (before each record's rename). An error from the hook fails the put there.
+// (before each record's publication). An error from the hook fails the put there.
 func (s *Store) fault(point string) error {
 	if s.Fault == nil {
 		return nil
@@ -142,7 +150,53 @@ type diskOps struct {
 	rename   func(from, to string) error
 }
 
-var realDiskOps = diskOps{syncFile: (*os.File).Sync, syncDir: syncDir, rename: os.Rename}
+var realDiskOps = diskOps{syncFile: (*os.File).Sync, syncDir: syncDir, rename: func(from, to string) error { return publishNoReplace(from, to, os.Remove) }}
+
+// publishNoReplace gives the synced temporary file its final name by a hard link, which unlike a rename never replaces a file already at to
+// (os.ErrExist then): a record is immutable, and another writer of the directory (a joiner's archive seed) may have placed one there. Once the
+// link exists the record is published, whatever happens to the temporary name: a failure to remove it is ignored (the leftover is the same
+// inode, and the caller removes it again), so the publication is synced and indexed like any other.
+func publishNoReplace(from, to string, remove func(string) error) error {
+	if err := os.Link(from, to); err != nil {
+		return err
+	}
+	_ = remove(from)
+	return nil
+}
+
+// ensureDurableLocked makes a packed record that this store did not publish itself durable before it counts as stored: another writer (a
+// joiner's seed, or an earlier process whose directory sync failed) may have placed it without syncing it, and a put that finds it reports
+// the record durable to its caller (a replica's acknowledgement). The file and its fan-out directory are synced once per name per process.
+// Called under the store's lock.
+func (s *Store) ensureDurableLocked(name string) error {
+	if s.durable[name] {
+		return nil
+	}
+	path := s.packedPath(name)
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	err = s.ops().syncFile(f)
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err == nil {
+		err = s.ops().syncDir(filepath.Dir(path))
+	}
+	if err != nil {
+		return err
+	}
+	s.markDurableLocked(name)
+	return nil
+}
+
+func (s *Store) markDurableLocked(name string) {
+	if s.durable == nil {
+		s.durable = map[string]bool{}
+	}
+	s.durable[name] = true
+}
 
 func (s *Store) ops() diskOps {
 	if s.disk != nil {
@@ -195,17 +249,6 @@ func readBounded(path string, limit int64) ([]byte, error) {
 	return b, nil
 }
 
-// writeUnsynced creates path exclusively, writes b and leaves the file open in *open for syncAndCloseAll.
-func writeUnsynced(open *[]*os.File, path string, b []byte) error {
-	h, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
-	if err != nil {
-		return err
-	}
-	*open = append(*open, h)
-	_, err = h.Write(b)
-	return err
-}
-
 // MaxConcurrentFileSyncs bounds the file syncs a put has in flight. A blocked fsync can hold an OS thread, and a full batch has up
 // to 832 files (bft-core#913); the sync of a batch still overlaps on the device, but never occupies more than this many threads.
 const MaxConcurrentFileSyncs = 16
@@ -238,40 +281,40 @@ func (s *Store) syncAndCloseAll(files []*os.File) error {
 	return errors.Join(errs...)
 }
 
-// Put publishes chunks only after every chunk and the checksummed manifest
-// have been synced. A failed pre-publication write leaves at most an ignored
-// temporary directory. Existing records are immutable.
+// Put publishes a record only after its packed file has been synced, by a link into its fan-out directory, and returns only after that
+// directory has been synced. A failed write leaves at most an ignored temporary file. Existing records are immutable.
 func (s *Store) Put(q Request, rec *Record) error {
 	return s.PutBatch([]Request{q}, []*Record{rec})
 }
 
-// MaxPutBatch bounds one PutBatch: its records are held in memory and their files are open together until they are synced. A record
-// has nine fields, its extensions (at most sixteen) and a manifest, so a full batch can hold up to 832 files open at once; the
-// restore uses batches of 16.
+// MaxPutBatch bounds one PutBatch: its records are held in memory and their files are open together until they are synced.
 const MaxPutBatch = 32
 
-// staged is one record of a batch written to its temporary directory, not yet synced or published.
+// staged is one record of a batch written to its temporary file, not yet synced or published.
 type staged struct {
 	q       Request
 	rec     *Record
+	v2      bool
+	name    string // the record's name: its location, and for a variant "-" and its manifest digest
 	tmp     string
 	final   string
 	encoded []byte
+	index   bool
 }
 
-// PutBatch is Put for several records with the device flushes shared: every file of every record is written, then all files are
-// synced together, then all temporary directories, then each record is published by its rename and the store directory is synced
-// once. The rule of Put holds for each record: nothing of it is published before every one of its chunks, its manifest and its
-// directory have been synced, and PutBatch returns nil only when every record is durable. On an error some records of the batch may
-// already be published (each of them whole and immutable); the rest leave at most ignored temporary directories, and the caller may
-// put them again. A record that is already stored must be identical, as with Put.
+// PutBatch is Put for several records with the device flushes shared: every record's packed file is written, then all are synced
+// together, then each record is published by its link, and every fan-out directory a record was published in is synced once. The
+// rule of Put holds for each record: nothing of it is published before its file has been synced, and PutBatch returns nil only when
+// every record is durable. On an error some records of the batch may already be published (each of them whole and immutable); the
+// rest leave at most ignored temporary files, and the caller may put them again. A record that is already stored, in either layout,
+// must be identical, as with Put.
 func (s *Store) PutBatch(qs []Request, recs []*Record) error {
 	return s.putBatch(qs, recs, false)
 }
 
 // PutVariant stores a record that is ANOTHER valid representation of a block already stored under its request (bft-core#876: the same certified block under a different
 // resulting certificate has a different manifest). The base object of the request is never touched: the variant is a separate immutable object addressed by (request, manifest
-// digest), published with the same stage / sync / rename discipline, and a variant that is already stored must be identical. Variants are read with GetExact only.
+// digest), published with the same stage / sync / link discipline, and a variant that is already stored must be identical. Variants are read with GetExact only.
 func (s *Store) PutVariant(q Request, rec *Record) error {
 	return s.putBatch([]Request{q}, []*Record{rec}, true)
 }
@@ -280,17 +323,9 @@ func (s *Store) putBatch(qs []Request, recs []*Record, variant bool) error {
 	if len(qs) != len(recs) || len(qs) == 0 || len(qs) > MaxPutBatch {
 		return ErrInvalid
 	}
-	var open []*os.File // written, not yet synced; closed here if PutBatch returns before syncAndCloseAll takes them
-	var batch []staged
-	defer func() {
-		for _, h := range open {
-			_ = h.Close()
-		}
-		for _, st := range batch {
-			_ = os.RemoveAll(st.tmp) // already renamed away when the record was published
-		}
-	}()
 	inBatch := make(map[string][]byte, len(qs))
+	var items []staged
+	var packed [][]byte
 	for i, q := range qs {
 		rec := recs[i]
 		f, err := allFields(rec)
@@ -300,7 +335,8 @@ func (s *Store) putBatch(qs []Request, recs []*Record, variant bool) error {
 		if !bytes.Equal(crypto.Keccak256(rec.Header), q.BlockHash[:]) {
 			return ErrInvalid
 		}
-		loc, err := location(q, recordV2(rec))
+		v2 := recordV2(rec)
+		name, err := location(q, v2)
 		if err != nil {
 			return err
 		}
@@ -309,134 +345,211 @@ func (s *Store) putBatch(qs []Request, recs []*Record, variant bool) error {
 			if derr != nil {
 				return derr
 			}
-			loc += "-" + hex.EncodeToString(digest[:])
+			name += "-" + hex.EncodeToString(digest[:])
 		}
-		final := filepath.Join(s.dir, loc)
 		encoded, _ := EncodeResponse(Response{q, OK, rec})
-		if earlier, dup := inBatch[final]; dup {
+		if earlier, dup := inBatch[name]; dup {
 			if !bytes.Equal(earlier, encoded) {
 				return ErrInvalid
 			}
 			continue
 		}
-		inBatch[final] = encoded
-		if exists, err := s.storedSame(q, rec, final, encoded); err != nil {
+		inBatch[name] = encoded
+		if exists, err := s.storedSame(q, v2, name, encoded); err != nil {
 			return err
 		} else if exists {
 			continue
 		}
-		tmp, err := os.MkdirTemp(s.dir, ".writing-")
+		manifest, keys, err := encodeManifest(q, rec, f, func() error { return s.fault("after-chunk") })
 		if err != nil {
 			return err
 		}
-		batch = append(batch, staged{q: q, rec: rec, tmp: tmp, final: final, encoded: encoded})
-		keys := make([]string, 0, len(f))
-		for k := range f {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		var manifest bytes.Buffer
-		manifest.Write([]byte(archiveMagic(recordV2(rec))))
-		qb, _ := EncodeRequest(q)
-		putBytes(&manifest, qb)
-		manifest.WriteByte(byte(len(keys)))
-		for _, k := range keys {
-			if len(k) > 64 || len(k) == 0 {
-				return ErrInvalid
-			}
-			if er := writeUnsynced(&open, filepath.Join(tmp, fileName(k)), f[k]); er != nil {
-				return er
-			}
-			putBytes(&manifest, []byte(k))
-			put32(&manifest, uint32(len(f[k])))
-			d := sha256.Sum256(f[k])
-			manifest.Write(d[:])
-			if er := s.fault("after-chunk"); er != nil {
-				return er
-			}
-		}
-		d := sha256.Sum256(manifest.Bytes())
-		expected, err := ManifestDigest(q, rec)
-		if err != nil || d != expected {
-			return ErrInvalid
-		}
-		manifest.Write(d[:])
-		if err = writeUnsynced(&open, filepath.Join(tmp, "manifest"), manifest.Bytes()); err != nil {
-			return err
-		}
+		items = append(items, staged{q: q, rec: rec, v2: v2, name: name, final: s.packedPath(name), encoded: encoded, index: !variant})
+		packed = append(packed, packRecord(manifest, keys, f))
 	}
-	// Every chunk and manifest is synced before its directory is, and every directory before any publication below. The syncs of one
-	// stage are issued together, so one device flush can serve them, instead of one after another.
-	synced := open
-	open = nil
-	if err := s.syncAndCloseAll(synced); err != nil {
+	if _, err := s.publishPacked(items, packed, s.storedSameLocked); err != nil {
 		return err
 	}
-	dirs := make([]string, len(batch))
-	for i, st := range batch {
-		dirs[i] = st.tmp
+	return s.syncUnsynced()
+}
+
+// syncUnsynced syncs the fan-out directories an earlier publication failed to sync: a put of a record found already stored reports success
+// only once the record is durable.
+func (s *Store) syncUnsynced() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.unsynced) == 0 {
+		return nil
 	}
+	dirs := make([]string, 0, len(s.unsynced))
+	for d := range s.unsynced {
+		dirs = append(dirs, d)
+	}
+	sort.Strings(dirs)
 	if err := s.syncDirs(dirs); err != nil {
 		return err
 	}
-	// Publication. If a rename fails part way, the records renamed before it are already visible to Get: they are made durable and
-	// indexed like the rest before the error is returned, so a failed batch leaves no record that is readable but neither synced
-	// nor indexed.
-	//
-	// Everything above ran without the store's lock: writing and syncing a record's files is most of a put's time, and a reader, or
-	// another writer staging its own records, has no reason to wait for it. The lock is taken for the publication only, so that a
-	// record is never visible to Get before the store directory is synced, as before.
+	s.unsynced = nil
+	return nil
+}
+
+// publishPacked writes each item's packed bytes to a temporary file in its fan-out directory, syncs them all, then, under the store's lock,
+// publishes each by its link (publishNoReplace) unless exists (called under the lock) reports it stored meanwhile, and syncs every fan-out directory it
+// published in. It returns the items it published and made durable.
+//
+// The writing and syncing run without the store's lock: they are most of a put's time, and a reader, or another writer staging its own
+// records, has no reason to wait for them. The lock is held for the publication, so that a record is never visible to a reader before its
+// directory is synced. If a link fails part way, the records published before it are made durable and indexed like the rest before the
+// error is returned, so a failure leaves no record that is readable but neither synced nor indexed.
+func (s *Store) publishPacked(items []staged, packed [][]byte, exists func(Request, bool, string, []byte) (bool, error)) ([]staged, error) {
+	if len(items) == 0 {
+		return nil, nil
+	}
+	if err := s.prepareRecordDirs(); err != nil {
+		return nil, err
+	}
+	var open []*os.File // written, not yet synced; closed here if this returns before syncAndCloseAll takes them
+	defer func() {
+		for _, h := range open {
+			_ = h.Close()
+		}
+		for _, it := range items {
+			if it.tmp != "" {
+				_ = os.Remove(it.tmp) // already gone when the record was published (or a leftover link to it, which is harmless)
+			}
+		}
+	}()
+	for i := range items {
+		h, err := os.CreateTemp(filepath.Dir(items[i].final), ".writing-*")
+		if err != nil {
+			return nil, err
+		}
+		open = append(open, h)
+		items[i].tmp = h.Name()
+		if _, err := h.Write(packed[i]); err != nil {
+			return nil, err
+		}
+	}
+	synced := open
+	open = nil
+	if err := s.syncAndCloseAll(synced); err != nil {
+		return nil, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var publishErr error
 	var published []staged
-	for _, st := range batch {
+	dirs := map[string]bool{}
+	for _, it := range items {
 		if publishErr = s.fault("before-publish"); publishErr != nil {
 			break
 		}
 		// another put may have published the same record while this one was being staged: it must be identical, and then there
 		// is nothing to publish (the staged copy is removed on return)
-		var exists bool
-		if exists, publishErr = s.storedSameLocked(st.q, st.rec, st.final, st.encoded); publishErr != nil {
+		var stored bool
+		if stored, publishErr = exists(it.q, it.v2, it.name, it.encoded); publishErr != nil {
 			break
-		} else if exists {
+		} else if stored {
 			continue
 		}
-		if publishErr = s.ops().rename(st.tmp, st.final); publishErr != nil {
+		if publishErr = s.ops().rename(it.tmp, it.final); errors.Is(publishErr, os.ErrExist) {
+			// placed by another writer since the check: it must be this record
+			if stored, publishErr = exists(it.q, it.v2, it.name, it.encoded); publishErr == nil && !stored {
+				publishErr = ErrInvalid
+			}
+			if publishErr != nil {
+				break
+			}
+			continue
+		}
+		if publishErr != nil {
 			break
 		}
-		published = append(published, st)
+		published = append(published, it)
+		dirs[filepath.Dir(it.final)] = true
 	}
-	// the publications (and, for records that were already stored, their earlier ones) are durable once the store directory is
-	storeErr := s.ops().syncDir(s.dir)
-	if storeErr == nil && s.rounds != nil && !variant {
-		for _, st := range published {
-			s.indexRecord(st.q, st.rec)
+	if len(published) == 0 {
+		return nil, publishErr
+	}
+	// the publications are durable once their directories are
+	syncs := make([]string, 0, len(dirs))
+	for d := range dirs {
+		syncs = append(syncs, d)
+	}
+	sort.Strings(syncs)
+	if dirErr := s.syncDirs(syncs); dirErr != nil {
+		if s.unsynced == nil {
+			s.unsynced = map[string]bool{}
+		}
+		for _, d := range syncs {
+			s.unsynced[d] = true
+		}
+		return nil, errors.Join(publishErr, dirErr)
+	}
+	for _, it := range published {
+		s.markDurableLocked(it.name)
+		if s.rounds != nil && it.index {
+			s.indexRecord(it.q, it.rec)
 		}
 	}
-	return errors.Join(publishErr, storeErr)
+	return published, publishErr
 }
 
-// storedSame reports whether the record is already stored, which it may only be with identical content (ErrInvalid otherwise).
-func (s *Store) storedSame(q Request, rec *Record, final string, encoded []byte) (bool, error) {
+// prepareRecordDirs makes the packed layout's directories once per process: records/ and its 256 fan-out directories, each parent synced
+// after, so that a link into a fan-out directory is never lost with the directory's own entry. It is done on the first write, not at
+// Open, so a reader (a tool) never writes to an archive.
+func (s *Store) prepareRecordDirs() error {
+	s.prepMu.Lock()
+	defer s.prepMu.Unlock()
+	if s.prepared {
+		return nil
+	}
+	root := filepath.Join(s.dir, recordDir)
+	if err := os.Mkdir(root, 0700); err != nil && !os.IsExist(err) {
+		return err
+	}
+	for i := 0; i < 256; i++ {
+		if err := os.Mkdir(filepath.Join(root, fmt.Sprintf("%02x", i)), 0700); err != nil && !os.IsExist(err) {
+			return err
+		}
+	}
+	// synced even when they existed: an earlier process may have made them and stopped before its sync
+	if err := s.ops().syncDir(root); err != nil {
+		return err
+	}
+	if err := s.ops().syncDir(s.dir); err != nil {
+		return err
+	}
+	s.prepared = true
+	return nil
+}
+
+// storedSame reports whether the record is already stored, in either layout, which it may only be with identical content (ErrInvalid otherwise).
+func (s *Store) storedSame(q Request, v2 bool, name string, encoded []byte) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.storedSameLocked(q, rec, final, encoded)
+	return s.storedSameLocked(q, v2, name, encoded)
 }
 
-func (s *Store) storedSameLocked(q Request, rec *Record, final string, encoded []byte) (bool, error) {
-	if _, err := os.Stat(final); os.IsNotExist(err) {
+// storedSameLocked is storedSame under the store's lock. Only a record that is absent in both layouts counts as absent (a directory-layout record
+// that lost a chunk is ErrUnavailable, and a put then stores a sound packed copy, which reads prefer); a damaged or foreign copy in either layout
+// is refused as the read refuses it, never shadowed by a new copy. A packed copy found identical is made durable before it counts as stored.
+func (s *Store) storedSameLocked(q Request, v2 bool, name string, encoded []byte) (bool, error) {
+	old, err := readNamed(s.dir, q, v2, name)
+	if errors.Is(err, ErrUnavailable) {
 		return false, nil
-	} else if err != nil {
-		return false, err
 	}
-	old, err := s.readDir(q, recordV2(rec), final)
 	if err != nil {
 		return false, err
 	}
 	a, _ := EncodeResponse(Response{q, OK, old})
 	if !bytes.Equal(a, encoded) {
 		return false, ErrInvalid
+	}
+	if _, statErr := os.Stat(s.packedPath(name)); statErr == nil {
+		if err := s.ensureDurableLocked(name); err != nil {
+			return false, err
+		}
 	}
 	return true, nil
 }
@@ -485,7 +598,7 @@ func (s *Store) getExact(q Request, digest [32]byte, receiptCompleteOnly bool) (
 			return nil, err
 		}
 		for _, name := range []string{base, base + "-" + hex.EncodeToString(digest[:])} {
-			r, err := s.readDir(q, v2, filepath.Join(s.dir, name))
+			r, err := readNamed(s.dir, q, v2, name)
 			if errors.Is(err, ErrUnavailable) {
 				continue
 			}
@@ -525,93 +638,7 @@ func (s *Store) getVersion(q Request, v2 bool) (*Record, error) {
 	if err != nil {
 		return nil, err
 	}
-	return s.readDir(q, v2, filepath.Join(s.dir, loc))
-}
-
-// readDir reads and validates the record stored in dir for the request.
-func (s *Store) readDir(q Request, v2 bool, dir string) (*Record, error) {
-	m, err := readBounded(filepath.Join(dir, "manifest"), 16<<10)
-	if os.IsNotExist(err) {
-		return nil, ErrUnavailable
-	}
-	if err != nil {
-		return nil, ErrCorrupt
-	}
-	magic := archiveMagic(v2)
-	if len(m) < 8+4+1+32 || !bytes.Equal(m[:8], []byte(magic)) {
-		return nil, ErrCorrupt
-	}
-	d := sha256.Sum256(m[:len(m)-32])
-	if !bytes.Equal(d[:], m[len(m)-32:]) {
-		return nil, ErrCorrupt
-	}
-	r := bytes.NewReader(m[8 : len(m)-32])
-	qb, err := readBytes(r, MaxRequestBytes)
-	if err != nil {
-		return nil, ErrCorrupt
-	}
-	if _, err := DecodeRequest(qb); err != nil {
-		return nil, ErrCorrupt
-	}
-	want, _ := EncodeRequest(q)
-	if !bytes.Equal(want, qb) {
-		return nil, ErrCorrupt
-	}
-	n, err := r.ReadByte()
-	if err != nil || n < byte(len(required)) || n > byte(len(required)+16) {
-		return nil, ErrCorrupt
-	}
-	f := make(map[string][]byte, int(n))
-	last := ""
-	total := 0
-	for i := 0; i < int(n); i++ {
-		kb, e := readBytes(r, 64)
-		if e != nil || len(kb) == 0 || string(kb) <= last {
-			return nil, ErrCorrupt
-		}
-		k := string(kb)
-		last = k
-		var size uint32
-		if e = binaryRead32(r, &size); e != nil || size > MaxChunkBytes || (size == 0 && k != "parent-accounting") || (size != 0 && k == "parent-accounting") {
-			return nil, ErrCorrupt
-		}
-		var hash [32]byte
-		if _, e = io.ReadFull(r, hash[:]); e != nil {
-			return nil, ErrCorrupt
-		}
-		v, e := readBounded(filepath.Join(dir, fileName(k)), MaxChunkBytes)
-		if os.IsNotExist(e) {
-			return nil, ErrUnavailable
-		}
-		if e != nil {
-			return nil, ErrCorrupt
-		}
-		if len(v) != int(size) {
-			return nil, ErrCorrupt
-		}
-		check := sha256.Sum256(v)
-		if check != hash {
-			return nil, ErrCorrupt
-		}
-		f[k] = v
-		total += len(v)
-		if total > MaxRecordBytes {
-			return nil, ErrCorrupt
-		}
-	}
-	if r.Len() != 0 {
-		return nil, ErrCorrupt
-	}
-	rec := &Record{Header: f["header"], Body: f["body"], CanonicalRootInput: f["root-input"], OriginalUC: f["original-uc"], OriginalTR: f["original-tr"], ResultingUC: f["resulting-uc"], ResultingTR: f["resulting-tr"], Companion: f["companion"], ParentAccounting: f["parent-accounting"], Extensions: map[string][]byte{}}
-	for k, v := range f {
-		if !reserved(k) {
-			rec.Extensions[k] = v
-		}
-	}
-	if !validRecord(rec) || recordV2(rec) != v2 || !bytes.Equal(crypto.Keccak256(rec.Header), q.BlockHash[:]) {
-		return nil, ErrCorrupt
-	}
-	return rec, nil
+	return readNamed(s.dir, q, v2, loc)
 }
 
 func binaryRead32(r io.Reader, v *uint32) error {
