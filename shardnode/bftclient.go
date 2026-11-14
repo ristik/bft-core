@@ -713,9 +713,13 @@ func (c *BFTClient) Run(ctx context.Context) error {
 			if c.relayDue(now) {
 				c.relayStart(ctx) // in the background: the loop never waits on a relay peer
 			}
-		case cr := <-c.relayResults():
-			// a relayed pair: the same verification, admission and driver as a root's response, serialized here
-			if err := c.handleCertificationResponse(ctx, cr); err != nil && c.log != nil {
+		case p := <-c.relayResults():
+			// a relayed pair: admitted only under the role and batch it was asked under, then through the same verification,
+			// admission and driver as a root's response, serialized here
+			if !c.relayAdmissible(p) {
+				break
+			}
+			if err := c.handleCertificationResponse(ctx, p.cr); err != nil && c.log != nil {
 				c.log.DebugContext(ctx, "relayed certificate not admitted", slog.String("err", err.Error()))
 			}
 		case <-heartbeat.C:

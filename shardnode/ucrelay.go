@@ -236,13 +236,24 @@ type ucRelayClient struct {
 	host    StreamOpener
 	sources func() []peer.ID
 	after   time.Duration
-	results chan *certification.CertificationResponse
+	results chan relayedPair
 
 	mu      sync.Mutex
 	running bool
 	cancel  context.CancelFunc
 	ended   time.Time
 	next    int
+	// batch is the identity of the latest batch; invalidBefore discards every result of a batch below it. Retirement and useful progress
+	// invalidate (a result already queued is then dropped at admission); a batch that simply completes keeps its queued answers usable.
+	batch, invalidBefore uint64
+}
+
+// relayedPair is one relay answer, with the role token and the batch it was asked under: it is admitted only while that role and batch
+// are still current (astra on #1054, r2).
+type relayedPair struct {
+	cr    *certification.CertificationResponse
+	token uint64
+	batch uint64
 }
 
 // SetRelay enables the UC relay backup: when no certificate has been adopted for after, two of sources are asked. Call before Run.
@@ -250,11 +261,11 @@ func (c *BFTClient) SetRelay(host StreamOpener, sources func() []peer.ID, after 
 	if host == nil || sources == nil || after <= 0 {
 		return
 	}
-	c.relay = &ucRelayClient{host: host, sources: sources, after: after, results: make(chan *certification.CertificationResponse, 2)}
+	c.relay = &ucRelayClient{host: host, sources: sources, after: after, results: make(chan relayedPair, 2)}
 }
 
 // relayResults is the channel Run admits relayed pairs from; nil without a relay.
-func (c *BFTClient) relayResults() <-chan *certification.CertificationResponse {
+func (c *BFTClient) relayResults() <-chan relayedPair {
 	if c.relay == nil {
 		return nil
 	}
@@ -276,7 +287,8 @@ func (c *BFTClient) relayDue(now time.Time) bool {
 	return !r.running && now.Sub(r.ended) >= r.after
 }
 
-// relayCancel ends a running batch (an adopted certificate, or the role ended). Safe on a client without a relay.
+// relayCancel ends and invalidates the latest batch (an adopted certificate, or the role ended): its fetches stop and its answers, queued
+// or still to come, are dropped at admission. Safe on a client without a relay.
 func (c *BFTClient) relayCancel() {
 	r := c.relay
 	if r == nil {
@@ -284,6 +296,7 @@ func (c *BFTClient) relayCancel() {
 	}
 	r.mu.Lock()
 	cancel := r.cancel
+	r.invalidBefore = r.batch + 1
 	r.mu.Unlock()
 	if cancel != nil {
 		cancel()
@@ -303,8 +316,15 @@ func (c *BFTClient) relayStart(ctx context.Context) {
 		r.mu.Unlock()
 		return
 	}
+	token, active := c.role.Load().current() // the role the batch is asked under, rechecked at every enqueue and at admission
+	if !active {
+		r.mu.Unlock()
+		return
+	}
 	batch, cancel := context.WithTimeout(ctx, ucRelayDeadline)
 	r.running, r.cancel = true, cancel
+	r.batch++
+	batchID := r.batch
 	picked := make([]peer.ID, 0, 2)
 	for k := 0; k < 2 && k < len(sources); k++ {
 		picked = append(picked, sources[(r.next+k)%len(sources)])
@@ -324,12 +344,12 @@ func (c *BFTClient) relayStart(ctx context.Context) {
 					}
 					return
 				}
-				if c.isFollower() {
-					return // the role ended while this peer answered: nothing is queued
+				if !c.role.Load().admits(token) {
+					return // the role ended (or was re-published) while this peer answered: nothing is queued
 				}
 				cr := &certification.CertificationResponse{Partition: c.partitionID, Shard: c.shardID, UC: *uc, Technical: *tr}
 				select {
-				case r.results <- cr:
+				case r.results <- relayedPair{cr: cr, token: token, batch: batchID}:
 				default: // the loop has two queued already: this one would add nothing
 				}
 			}(id)
@@ -340,4 +360,16 @@ func (c *BFTClient) relayStart(ctx context.Context) {
 		r.running, r.cancel, r.ended = false, nil, time.Now()
 		r.mu.Unlock()
 	}()
+}
+
+// relayAdmissible reports whether a queued relay answer may still be admitted: its role token is the current, active one and its batch has
+// not been invalidated. A retirement, a re-publication or useful progress since the batch began drops it, even if it was queued already.
+func (c *BFTClient) relayAdmissible(p relayedPair) bool {
+	r := c.relay
+	if r == nil || !c.role.Load().admits(p.token) {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return p.batch >= r.invalidBefore
 }

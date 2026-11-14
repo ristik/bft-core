@@ -186,3 +186,59 @@ func TestTheUCRelayServerBudgetsRequestsAndCachesTheFrame(t *testing.T) {
 	require.NoError(t, err)
 	require.Same(t, &a[0], &b[0], "the held pair is serialized once")
 }
+
+// relayWithQueuedAnswer is a client (not running) whose relay batch has queued a genuine answer from a real relay server, under role
+// token 7. The caller decides what happens before admission.
+func relayWithQueuedAnswer(t *testing.T) (*BFTClient, *tokenRole, relayedPair, *confBindingFixture) {
+	t.Helper()
+	f := newConfBindingFixture(t)
+	good := f.respond(f.ucMine)
+	node := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
+	server := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
+	server.RegisterProtocolHandler(UCRelayProtocol, NewUCRelayServer(func() (*types.UnicityCertificate, *certification.TechnicalRecord) { return &good.UC, &good.Technical }, nil).Handler)
+	node.Network().Peerstore().AddAddrs(server.ID(), server.MultiAddresses(), peerstore.PermanentAddrTTL)
+	client, err := NewBFTClient(node, &lateRootNet{received: make(chan any, 1)}, f.signer, authPartitionID, types.ShardID{}, f.confMine,
+		stubTrustBaseStore{tb: f.tb}, &firstUCDriver{got: make(chan struct{})}, nil, BFTClientOptions{HandshakeNodes: 1, CertNodes: 1})
+	require.NoError(t, err)
+	role := &tokenRole{}
+	role.token.Store(7)
+	role.active.Store(true)
+	client.SetRole(role)
+	client.SetRelay(node, func() []peer.ID { return []peer.ID{server.ID()} }, time.Millisecond)
+	client.relayStart(context.Background())
+	var p relayedPair
+	select {
+	case p = <-client.relay.results:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no relayed answer was queued")
+	}
+	require.Eventually(t, func() bool { client.relay.mu.Lock(); defer client.relay.mu.Unlock(); return !client.relay.running }, time.Second, 5*time.Millisecond)
+	return client, role, p, f
+}
+
+// astra on #1054, r2: an answer queued under one role is admitted only while that role and its batch are current.
+func TestAQueuedRelayAnswerIsAdmittedOnlyUnderItsRoleAndBatch(t *testing.T) {
+	t.Run("completed batch", func(t *testing.T) {
+		client, _, p, _ := relayWithQueuedAnswer(t)
+		require.True(t, client.relayAdmissible(p), "a batch that simply completed keeps its queued answers usable")
+	})
+	t.Run("retirement after the answer was queued", func(t *testing.T) {
+		client, role, p, f := relayWithQueuedAnswer(t)
+		role.active.Store(false)
+		client.checkRole(context.Background()) // the loop processes the retirement before it reaches the queue
+		require.False(t, client.relayAdmissible(p))
+		require.False(t, client.Holds(f.ucMine), "nothing is adopted as a follower")
+	})
+	t.Run("retirement and re-promotion between loop iterations", func(t *testing.T) {
+		client, role, p, _ := relayWithQueuedAnswer(t)
+		role.active.Store(false)
+		role.token.Store(9)
+		role.active.Store(true) // the loop never saw the flip: its remembered role is unchanged
+		require.False(t, client.relayAdmissible(p), "the answer belongs to the ended role, whatever the loop remembers")
+	})
+	t.Run("progress invalidates the batch, racing the enqueue", func(t *testing.T) {
+		client, _, p, _ := relayWithQueuedAnswer(t)
+		client.relayCancel() // an adoption (or retirement) after the worker's last check, before admission
+		require.False(t, client.relayAdmissible(p))
+	})
+}
