@@ -1,6 +1,7 @@
 package shardnode
 
 import (
+	"time"
 	"bytes"
 	"context"
 	"crypto"
@@ -223,11 +224,16 @@ func TestFailedDeliveryIsRetriedByDuplicate(t *testing.T) {
 	require.Equal(t, uint64(5), client.luc.GetRoundNumber(), "the observation cursor did advance")
 	require.Empty(t, sub.rounds(), "nothing may be signed from an unreconciled executor")
 
+	delivered, advanced := client.Progress().Delivered(), client.Progress().Advanced()
+
 	// 2. A retransmission of the same certificate, still unavailable. This is the delivery that
 	//    used to be dropped as a duplicate, taking the only retry route with it.
+	time.Sleep(2 * time.Millisecond)
 	err = client.handleCertificationResponse(ctx, respond(uc5))
 	require.Error(t, err)
 	require.Equal(t, 2, drv.count(), "a duplicate of an unapplied certificate is a retry, not a no-op")
+	require.Equal(t, delivered, client.Progress().Delivered(), "the retry of a failed apply is not progress (astra on #1054)")
+	require.Equal(t, advanced, client.Progress().Advanced())
 	require.Empty(t, sub.rounds())
 
 	// 3. The payload arrives (a resync completes, a peer serves the block). The next

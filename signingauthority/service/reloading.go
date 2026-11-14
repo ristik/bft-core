@@ -13,8 +13,9 @@ import (
 // operator advanced the epoch or replaced the session), it reads the current credential again and, when it changed, connects under the
 // new one. The shard process keeps running through every authority order (phase 2).
 //
-// Timeout. One call of the wrapper has one budget: the configured timeout from the moment the call starts, or the caller's earlier
-// deadline. A fenced Reserve (or RestoreStatus) is retried once under the new session within that same budget, never with a fresh one.
+// Timeout. One call of the wrapper has one budget: the configured timeout (DefaultTimeout when zero) from the moment the call starts, or
+// the caller's earlier deadline. A fenced Reserve (or RestoreStatus) is retried once under the new session within that same budget, never
+// with a fresh one. The budget bounds the authority exchanges; the credential loader callback is not interrupted by it.
 //
 // Retries. Only a fenced Reserve is retried: the authority refused it before reserving anything. A fenced Sign, RetainResponse or Release
 // is reported (the round abstains); the next operation uses the new session. The wrapper does NOT bind a Reserve→Release sequence to one
@@ -55,12 +56,15 @@ func (r *ReloadingClient) client() *Client {
 	return r.current
 }
 
-// budget is the call's one deadline: the configured timeout from now, or the caller's earlier deadline.
+// budget is the call's one deadline: the effective timeout from now (a zero Timeout is the client's DefaultTimeout, as newExchange
+// normalizes it), or the caller's earlier deadline. It bounds the authority exchanges of both attempts; the credential loader is a
+// synchronous callback it does not interrupt (the production loader reads one small local file).
 func (r *ReloadingClient) budget(ctx context.Context) (context.Context, context.CancelFunc) {
-	if r.cfg.Timeout <= 0 {
-		return context.WithCancel(ctx)
+	timeout := r.cfg.Timeout
+	if timeout <= 0 {
+		timeout = DefaultTimeout
 	}
-	return context.WithTimeout(ctx, r.cfg.Timeout)
+	return context.WithTimeout(ctx, timeout)
 }
 
 // reload switches from used to the current credential if it differs, and reports whether a newer client is now current. It does nothing

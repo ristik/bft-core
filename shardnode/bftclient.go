@@ -1516,7 +1516,9 @@ func (c *BFTClient) handleCertificationResponse(ctx context.Context, cr *certifi
 	c.luc = &cr.UC
 	tr := cr.Technical
 	c.heldTR = &tr
-	c.noteAdoptedLocked(class)
+	if class != UCDuplicate {
+		c.noteAdoptedLocked(class) // a retry of a failed apply is a duplicate: it adopts nothing and counts nothing (astra on #1054)
+	}
 	metrics := c.metrics
 	health := c.health
 	c.mu.Unlock()
@@ -1641,6 +1643,9 @@ func (c *BFTClient) sendRequest(ctx context.Context, req *certification.BlockCer
 // handleCertificationResponse and the configured one in deliverConfigured): a repeat extends the run of repeats, anything else is progress. A
 // duplicate is not adopted and never reaches here. c.mu must be held.
 func (c *BFTClient) noteAdoptedLocked(class UCClass) {
+	if class == UCDuplicate || class == UCStale {
+		return // defensively: neither is an adoption, so neither moves the progress clock or the counters
+	}
 	c.clock().adopted(class == UCRepeat)
 	c.firstResponse.Store(true)
 	if class == UCRepeat {

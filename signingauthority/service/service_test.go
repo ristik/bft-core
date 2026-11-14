@@ -960,3 +960,24 @@ func TestReloadingClientContinuationsCancellationAndOrdering(t *testing.T) {
 	require.Same(t, c.client(), c.client())
 	require.NotSame(t, stale, c.client(), "and never puts an older one back")
 }
+
+// A zero Timeout is the client's DefaultTimeout, and one call of the wrapper shares it across both attempts (astra on #1054): the budget
+// is one deadline, set at entry.
+func TestAZeroTimeoutReloadingClientSharesOneDefaultBudget(t *testing.T) {
+	f := newFixture(t)
+	cred := f.admit(t).ex.credential
+	c, err := NewReloadingClient(ClientConfig{Dial: f.clientDir}, func() ([]byte, error) { return cred, nil })
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+	ctx, cancel := c.budget(context.Background())
+	defer cancel()
+	deadline, ok := ctx.Deadline()
+	require.True(t, ok, "a zero timeout is not an unbounded call")
+	require.InDelta(t, DefaultTimeout.Seconds(), time.Until(deadline).Seconds(), 1)
+	early, cancelEarly := context.WithTimeout(context.Background(), time.Second)
+	defer cancelEarly()
+	ctx2, cancel2 := c.budget(early)
+	defer cancel2()
+	d2, _ := ctx2.Deadline()
+	require.Less(t, time.Until(d2), 2*time.Second, "an earlier caller deadline is kept")
+}
