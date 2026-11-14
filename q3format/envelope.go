@@ -16,6 +16,10 @@ var (
 
 // The proposed transport limits (briefs/q3-design-v2.md section 2), to be checked against maximum-size valid fixtures before
 // they are frozen: a longer history travels in consecutive segments, and nothing is ever omitted to fit.
+//
+// MaxLinks bounds one segment, not the history. An activation's envelope carries only its own link and is verified against the
+// receiver's own history (#1035); a receiver that lacks earlier epochs takes them as consecutive segments of their own. The bound
+// admits the bundles an earlier version staged with the whole lineage, which it could build only while that lineage fitted.
 const (
 	EnvelopeVersion  = 1
 	MaxLinks         = 64

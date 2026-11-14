@@ -217,7 +217,7 @@ func TestEvictSupersededObservationsKeepsAssociationNewestAndAuthorizations(t *t
 	var n int
 	require.NoError(t, s.db.Update(func(tx *bolt.Tx) error {
 		var err error
-		n, err = evictSupersededObservations(tx.Bucket(bucketName), nil, 0, 0, nil, nil)
+		n, err = evictSupersededObservations(tx.Bucket(bucketName), nil, 0, 0, false, nil, nil)
 		return err
 	}))
 	require.Equal(t, 1, n)
