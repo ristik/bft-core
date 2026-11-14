@@ -123,9 +123,10 @@ func TestServeRootRecordsAuthorizesThroughRecordsServerAllowed(t *testing.T) {
 	require.True(t, wired, "serveRootRecords builds the records server from recordsServerAllowed(allowed, shardConfs, cm)")
 }
 
-// #1048: the prefix fetch asks the installed committee, then the newest committee this root holds, then the bootstrap peers and the
-// configured shard validators (record mirrors), each once and never this root: locators only, every record verified against the checkpoint.
-func TestTheRecordFetcherAsksEveryLocatorOnceInOrder(t *testing.T) {
+// #1048: the prefix fetch's source list holds the installed committee, the newest committee this root holds, the bootstrap peers and the
+// configured shard validators (record mirrors), without repeats and never this root: locators only, every record verified against the
+// checkpoint. (The collector rotates its starting source and repeats passes; the list is what each pass indexes.)
+func TestTheRecordFetcherListsEveryLocatorWithoutRepeats(t *testing.T) {
 	got := recordSources("self", []peer.ID{"a", "self", "b"}, []peer.ID{"b", "c"}, []peer.ID{"boot", "a", ""}, []peer.ID{"shard1", "c"})
 	require.Equal(t, []peer.ID{"a", "b", "c", "boot", "shard1"}, got)
 	require.Empty(t, recordSources("self", []peer.ID{"self"}))

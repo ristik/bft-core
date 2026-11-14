@@ -163,7 +163,7 @@ func TestPublicReadsAreBoundedByTheirOwnBudget(t *testing.T) {
 
 	t.Run("the tracked peers are bounded", func(t *testing.T) {
 		l := DefaultPublicLimits()
-		l.MaxTrackedPeers = 4
+		l.MaxTrackedPeers, l.Pending, l.PerPeer = 4, 4, 1
 		b := newPublicBudget(l, time.Now)
 		for i := 0; i < 50; i++ {
 			id := peer.ID(rune('a' + i))
@@ -172,6 +172,58 @@ func TestPublicReadsAreBoundedByTheirOwnBudget(t *testing.T) {
 			}
 		}
 		require.LessOrEqual(t, len(b.requests), 4)
+	})
+
+	// astra's review of #1056 (P2): with a small table, a depleted bucket must not be dropped and recreated full by other peers' churn.
+	t.Run("a depleted request bucket is never reset by eviction", func(t *testing.T) {
+		now := time.Unix(1_000, 0)
+		l := DefaultPublicLimits()
+		l.MaxTrackedPeers, l.Pending, l.PerPeer, l.GlobalBurst, l.GlobalRate = 2, 2, 1, 1_000, 1_000
+		b := newPublicBudget(l, func() time.Time { return now })
+		take := func(id peer.ID) bool {
+			ok := b.admit(id)
+			if ok {
+				b.release(id)
+			}
+			return ok
+		}
+		for i := 0; i < l.Burst; i++ {
+			require.True(t, take("A"), i)
+		}
+		require.False(t, take("A"), "A's burst is spent")
+		require.True(t, take("B"))
+		require.False(t, take("C"), "no entry has refilled: a new peer is refused, A's depleted bucket is kept")
+		require.False(t, take("A"), "A is still depleted: no token without refill")
+		now = now.Add(time.Duration(float64(l.Burst)/l.Rate*float64(time.Second)) + time.Second)
+		require.True(t, take("C"), "B has refilled completely: dropping it gives nobody tokens")
+		require.True(t, take("A"), "and A has earned its tokens back by the rate")
+	})
+
+	t.Run("a depleted byte bucket is never reset by eviction", func(t *testing.T) {
+		now := time.Unix(1_000, 0)
+		l := DefaultPublicLimits()
+		l.MaxTrackedPeers, l.Pending, l.PerPeer = 2, 2, 1
+		l.ByteRate, l.ByteBurst, l.GlobalByteRate, l.GlobalByteBurst = 1_000, MaxBatchBytes, 1e9, 100*MaxBatchBytes
+		b := newPublicBudget(l, func() time.Time { return now })
+		require.True(t, b.spend("A", MaxBatchBytes))
+		require.False(t, b.spend("A", 10_000), "A's bytes are spent")
+		require.True(t, b.spend("B", 1))
+		require.False(t, b.spend("C", 1), "no entry has refilled: a new peer is refused")
+		require.False(t, b.spend("A", 10_000), "A's depleted byte bucket was kept")
+		now = now.Add(time.Duration(float64(MaxBatchBytes)/l.ByteRate*float64(time.Second)) + time.Second)
+		require.True(t, b.spend("C", 1))
+		require.LessOrEqual(t, len(b.bytes), 2)
+	})
+
+	t.Run("a table whose entries are all in flight takes no new peer", func(t *testing.T) {
+		l := DefaultPublicLimits()
+		l.MaxTrackedPeers, l.Pending, l.PerPeer = 2, 2, 1
+		b := newPublicBudget(l, time.Now)
+		require.True(t, b.admit("A"))
+		require.True(t, b.admit("B"))
+		b.limits.Pending = 3 // a third slot, but no room in the table
+		require.False(t, b.admit("C"))
+		require.Len(t, b.requests, 2)
 	})
 }
 
@@ -186,6 +238,7 @@ func TestPublicLimitsThatCannotWorkAreRefused(t *testing.T) {
 		"batch above the feed's":       func(l *PublicLimits) { l.MaxBatch = MaxBatch + 1 },
 		"deadline below the header":    func(l *PublicLimits) { l.Deadline = l.HeaderDeadline / 2 },
 		"no tracked peers":             func(l *PublicLimits) { l.MaxTrackedPeers = 0 },
+		"a table below the slots":      func(l *PublicLimits) { l.MaxTrackedPeers = l.Pending - 1 },
 	} {
 		l := DefaultPublicLimits()
 		mutate(&l)

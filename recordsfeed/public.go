@@ -37,9 +37,12 @@ type PublicLimits struct {
 	// MaxBatch is the most records one public request returns (at most MaxBatch).
 	MaxBatch int
 	// HeaderDeadline bounds the wait for the request frame (a peer that opens a stream and withholds its request frees the slot quickly),
-	// Deadline the whole exchange.
+	// Deadline the stream's I/O for the whole exchange. Neither bounds the server's own work between them (the source's read and the
+	// encoding are synchronous and not cancelled); a slot is held until that work returns.
 	HeaderDeadline, Deadline time.Duration
-	// MaxTrackedPeers bounds the per-peer rate state; idle entries are dropped first.
+	// MaxTrackedPeers bounds the per-peer state of each table (requests, bytes). It must hold every concurrent public reader (at least
+	// Pending). Only an entry whose bucket has refilled completely is dropped for a new peer, so dropping it gives nobody tokens; when no
+	// entry can be dropped, a new peer is refused until one can.
 	MaxTrackedPeers int
 }
 
@@ -61,7 +64,7 @@ var ErrPublicLimits = errors.New("recordsfeed: invalid public read limits")
 func (l PublicLimits) valid() bool {
 	return l.Pending > 0 && l.PerPeer > 0 && l.PerPeer <= l.Pending && l.Rate > 0 && l.Burst >= 1 && l.GlobalRate > 0 && l.GlobalBurst >= 1 &&
 		l.ByteRate > 0 && l.ByteBurst >= MaxBatchBytes && l.GlobalByteRate > 0 && l.GlobalByteBurst >= MaxBatchBytes &&
-		l.MaxBatch > 0 && l.MaxBatch <= MaxBatch && l.HeaderDeadline > 0 && l.Deadline >= l.HeaderDeadline && l.MaxTrackedPeers > 0
+		l.MaxBatch > 0 && l.MaxBatch <= MaxBatch && l.HeaderDeadline > 0 && l.Deadline >= l.HeaderDeadline && l.MaxTrackedPeers >= l.Pending
 }
 
 // operationAllowed is the per-operation authorization boundary: authorized is whether the server's allowed function accepts the peer.
@@ -118,10 +121,9 @@ func (b *publicBudget) admit(id peer.ID) bool {
 		b.rejected++
 		return false
 	}
-	req := b.bucketLocked(b.requests, id, now, l.Burst)
-	req.refill(now, l.Rate, l.Burst)
+	req := b.bucketLocked(b.requests, id, now, l.Rate, l.Burst)
 	b.allReqs.refill(now, l.GlobalRate, l.GlobalBurst)
-	if req.tokens < 1 || b.allReqs.tokens < 1 {
+	if req == nil || req.tokens < 1 || b.allReqs.tokens < 1 {
 		b.rejected++
 		return false
 	}
@@ -138,10 +140,9 @@ func (b *publicBudget) spend(id peer.ID, n int) bool {
 	defer b.mu.Unlock()
 	now := b.now()
 	l := b.limits
-	own := b.bucketLocked(b.bytes, id, now, l.ByteBurst)
-	own.refill(now, l.ByteRate, l.ByteBurst)
+	own := b.bucketLocked(b.bytes, id, now, l.ByteRate, l.ByteBurst)
 	b.allBytes.refill(now, l.GlobalByteRate, l.GlobalByteBurst)
-	if own.tokens < float64(n) || b.allBytes.tokens < float64(n) {
+	if own == nil || own.tokens < float64(n) || b.allBytes.tokens < float64(n) {
 		b.rejected++
 		return false
 	}
@@ -160,29 +161,30 @@ func (b *publicBudget) release(id peer.ID) {
 	}
 }
 
-// bucketLocked is the peer's bucket in m, made full when new. The tracked peers are bounded: first the idle peers whose buckets have
-// refilled (they lose nothing by it), then the longest idle one.
-func (b *publicBudget) bucketLocked(m map[peer.ID]*tokenBucket, id peer.ID, now time.Time, burst int) *tokenBucket {
+// bucketLocked is the peer's bucket in m, refilled to now, or nil when the peer cannot be tracked. A new peer gets a full bucket only in
+// place of an entry that has refilled completely by now and has no stream in flight: such an entry is exactly what a new full bucket
+// would be, so dropping it gives no peer tokens it has not earned. A peer whose bucket is still depleted keeps it; when every entry is
+// depleted or in flight, a new peer is refused (nil) until one refills.
+func (b *publicBudget) bucketLocked(m map[peer.ID]*tokenBucket, id peer.ID, now time.Time, rate float64, burst int) *tokenBucket {
 	if t := m[id]; t != nil {
+		t.refill(now, rate, burst)
 		return t
 	}
 	if len(m) >= b.limits.MaxTrackedPeers {
-		var oldest peer.ID
-		var oldestAt time.Time
 		for other, t := range m {
 			if b.perPeer[other] > 0 {
 				continue
 			}
-			if t.tokens >= float64(burst) || now.Sub(t.at) > time.Hour {
+			t.refill(now, rate, burst)
+			if t.tokens >= float64(burst) {
 				delete(m, other)
-				continue
-			}
-			if oldest == "" || t.at.Before(oldestAt) {
-				oldest, oldestAt = other, t.at
+				if len(m) < b.limits.MaxTrackedPeers {
+					break
+				}
 			}
 		}
-		if len(m) >= b.limits.MaxTrackedPeers && oldest != "" {
-			delete(m, oldest)
+		if len(m) >= b.limits.MaxTrackedPeers {
+			return nil
 		}
 	}
 	t := &tokenBucket{tokens: float64(burst), at: now}
