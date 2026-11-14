@@ -598,29 +598,32 @@ func (s *Store) getExact(q Request, digest [32]byte, receiptCompleteOnly bool) (
 			return nil, err
 		}
 		for _, name := range []string{base, base + "-" + hex.EncodeToString(digest[:])} {
-			// the manifest names its own digest (self-hashed): an object of another digest is passed over without reading its chunks, so
-			// a caller's wrong digest costs a manifest read, not a record read (bft-core#1066, astra's review of #1070), in either layout
-			held, err := namedManifestDigest(s.dir, name)
-			if errors.Is(err, ErrUnavailable) {
-				continue
-			}
-			if err != nil {
-				damaged = true
-				continue
-			}
-			if held != digest {
-				continue
-			}
-			r, err := readNamed(s.dir, q, v2, name)
-			if errors.Is(err, ErrUnavailable) {
-				continue
-			}
-			if err != nil {
-				damaged = true
-				continue
-			}
-			if got, derr := ManifestDigest(q, r); derr == nil && got == digest {
-				return r, nil
+			// Each layout is judged by itself (astra's review of the #1041 merge): its self-hashed manifest is checked first, so a wrong digest
+			// costs a manifest read, never a record read (bft-core#1066); only a layout whose manifest names the digest has its chunks read; a
+			// damaged or mismatching copy in one layout falls through to the other (#1059's recovery).
+			for _, l := range exactLayouts {
+				held, err := l.digest(s.dir, name)
+				if errors.Is(err, ErrUnavailable) {
+					continue
+				}
+				if err != nil {
+					damaged = true
+					continue
+				}
+				if held != digest {
+					continue
+				}
+				r, err := l.read(s.dir, q, v2, name)
+				if errors.Is(err, ErrUnavailable) {
+					continue
+				}
+				if err != nil {
+					damaged = true
+					continue
+				}
+				if got, derr := ManifestDigest(q, r); derr == nil && got == digest {
+					return r, nil
+				}
 			}
 		}
 	}
