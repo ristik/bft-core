@@ -21,18 +21,19 @@ var ErrCorrupt = errors.New("archive record invalid")
 // Store holds immutable local availability copies. One process may write a
 // store at a time; archivewiring owns peer publication and verification.
 type Store struct {
-	dir           string
-	mu            sync.Mutex
-	Fault         func(string) error
-	disk          *diskOps // nil: the real operations (see diskOps)
-	rounds        map[string]map[uint64][]Request
-	receiptRounds map[string]map[uint64][]Request
-	legacyBundles []string // bundle file names in the store directory itself (the layout before bundleDir), listed once; nil until then
-	prepMu        sync.Mutex
-	prepared      bool            // the packed layout's directories exist and are durable (prepareRecordDirs)
-	migrateSkip   map[string]bool // directory-layout records MigrateLegacy leaves as they are; under mu
-	unsynced      map[string]bool // fan-out directories whose sync after a publication failed: synced again by the next put; under mu
-	durable       map[string]bool // packed records published or synced by this process (ensureDurableLocked); under mu
+	dir             string
+	mu              sync.Mutex
+	Fault           func(string) error
+	disk            *diskOps // nil: the real operations (see diskOps)
+	rounds          map[string]map[uint64][]Request
+	receiptRounds   map[string]map[uint64][]Request
+	legacyBundles   []string // bundle file names in the store directory itself (the layout before bundleDir), listed once; nil until then
+	bundleDirSynced bool     // the store directory has been synced since bundleDir was found or made (PutBundle); under mu
+	prepMu          sync.Mutex
+	prepared        bool            // the packed layout's directories exist and are durable (prepareRecordDirs)
+	migrateSkip     map[string]bool // directory-layout records MigrateLegacy leaves as they are; under mu
+	unsynced        map[string]bool // fan-out directories whose sync after a publication failed: synced again by the next put; under mu
+	durable         map[string]bool // packed records published or synced by this process (ensureDurableLocked); under mu
 }
 
 func Open(dir string) (*Store, error) {
