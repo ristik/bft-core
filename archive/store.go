@@ -20,13 +20,14 @@ var ErrCorrupt = errors.New("archive record invalid")
 // Store holds immutable local availability copies. One process may write a
 // store at a time; archivewiring owns peer publication and verification.
 type Store struct {
-	dir           string
-	mu            sync.Mutex
-	Fault         func(string) error
-	disk          *diskOps // nil: the real operations (see diskOps)
-	rounds        map[string]map[uint64][]Request
-	receiptRounds map[string]map[uint64][]Request
-	legacyBundles []string // bundle file names in the store directory itself (the layout before bundleDir), listed once; nil until then
+	dir             string
+	mu              sync.Mutex
+	Fault           func(string) error
+	disk            *diskOps // nil: the real operations (see diskOps)
+	rounds          map[string]map[uint64][]Request
+	receiptRounds   map[string]map[uint64][]Request
+	legacyBundles   []string // bundle file names in the store directory itself (the layout before bundleDir), listed once; nil until then
+	bundleDirSynced bool     // the store directory has been synced since bundleDir was found or made (PutBundle); under mu
 }
 
 func Open(dir string) (*Store, error) {

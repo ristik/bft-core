@@ -6,8 +6,10 @@ sidecar the handoff wrapper uses), the public gateway's /healthz and block numbe
 containers' memory and the disk use of the generation's filesystem. Each sample is one line of JSONL; the summary lists every ALERT and the exit code is 1 if there is
 any (a failure is recorded as a failure). Alerts follow the README's notification rules: certified heads stopped for --stall seconds (no root's round moved), a
 service not running or unhealthy, a restart count that went up, disk above --disk-limit percent, the gateway or faucet not answering 200; and, to see a starving
-shard before it stalls (#1018): a container's memory above --mem-limit percent of its limit (the limit also counts the kernel cache of a growing archive), and
-the chain's block rate over the last --rate-window seconds below --rate-drop of the best such rate seen.
+shard before it stalls (#1018): a container's memory above --mem-limit percent of its limit for --mem-samples samples in a row while its tasks stall on
+memory (cgroup memory pressure, full avg60, at least --mem-pressure percent; page cache alone fills a limit without stalling anyone), an OOM kill in a
+container, and the chain's block rate over the last --rate-window seconds below --rate-drop of the median of such rates seen after the first --rate-warmup
+seconds (a catch-up burst, when sampling starts or later, is not the chain's rate).
 
 It only reads: no key, no credential, no signing method. The faucet's budget and balance are in its /healthz body, kept as text in the sample for the operator to
 compare with the reserve; this tool does not interpret them. It measures the package where it runs, nothing about a host unless it runs on that host.
@@ -67,8 +69,10 @@ def collect(generation, transport, now=time.time, faucet=True):
             sample['roots'][str(i)] = {'error': str(error)[:200]}
     ps = subprocess.run(compose + ['ps', '-a', '--format', 'json'], text=True, capture_output=True)
     for row in ps_rows(ps.stdout):
-        restarts = subprocess.run(['docker', 'inspect', '--format', '{{.RestartCount}}', row['ID']], text=True, capture_output=True).stdout.strip()
+        restarts, _, ident = subprocess.run(['docker', 'inspect', '--format', '{{.RestartCount}} {{.Id}}', row['ID']], text=True, capture_output=True).stdout.strip().partition(' ')
         sample['services'][row['Service']] = {'state': row.get('State'), 'health': row.get('Health') or None, 'restarts': int(restarts) if restarts.isdigit() else None}
+        if ident:
+            sample.setdefault('cgroup', {})[row.get('Name') or row['Service']] = cgroup_memory(ident)
     config = json.loads((Path(generation) / 'compose.yaml').read_text())
     # the services Compose declares and this sampler expects to run: a missing one is an alert (no container at all would otherwise leave no row to judge)
     sample['missing'] = sorted(set(config['services']) - set(sample['services']) - (set() if faucet else {'signer'}))
@@ -92,6 +96,24 @@ def collect(generation, transport, now=time.time, faucet=True):
     return sample
 
 
+def cgroup_memory(ident, root='/sys/fs/cgroup'):
+    """A container's memory pressure (PSI 'full avg60', percent) and OOM kill count from its cgroup v2 files, None where they cannot be read (another
+    cgroup driver or version, or not this host's container)."""
+    out = {'pressure_full_avg60': None, 'oom_kill': None}
+    for d in (Path(root) / 'system.slice' / f'docker-{ident}.scope', Path(root) / 'docker' / ident):
+        try:
+            for line in (d / 'memory.pressure').read_text().splitlines():
+                if line.startswith('full '):
+                    out['pressure_full_avg60'] = float(dict(kv.split('=', 1) for kv in line.split()[1:])['avg60'])
+            for line in (d / 'memory.events').read_text().splitlines():
+                if line.startswith('oom_kill '):
+                    out['oom_kill'] = int(line.split()[1])
+            return out
+        except (OSError, ValueError, KeyError, IndexError):
+            continue
+    return out
+
+
 UNITS = {'B': 1, 'KiB': 1 << 10, 'MiB': 1 << 20, 'GiB': 1 << 30, 'TiB': 1 << 40, 'kB': 10 ** 3, 'KB': 10 ** 3, 'MB': 10 ** 6, 'GB': 10 ** 9, 'TB': 10 ** 12}
 
 
@@ -108,17 +130,22 @@ def memory_use(text):
 
 class Watch:
     """The state the alerts compare a sample with: the best round seen and when it last moved, the restart counts, and the gateway's blocks over the
-    last rate window with the best block rate seen."""
+    last rate window with the block rates seen."""
 
-    def __init__(self, stall=120, disk_limit=80, mem_limit=90, rate_window=3600, rate_drop=0.5):
+    def __init__(self, stall=120, disk_limit=80, mem_limit=90, rate_window=3600, rate_drop=0.5, mem_samples=5, mem_pressure=1.0, rate_warmup=None):
         self.stall, self.disk_limit, self.mem_limit, self.rate_window, self.rate_drop = stall, disk_limit, mem_limit, rate_window, rate_drop
+        self.mem_samples, self.mem_pressure = mem_samples, mem_pressure
+        self.rate_warmup = rate_window if rate_warmup is None else rate_warmup
+        self.started = None
+        self.near = {}   # container -> samples in a row above mem_limit
+        self.ooms = {}   # container -> its last OOM kill count
         self.best = None
         self.moved_at = None
         self.best_block = None
         self.block_moved_at = None
         self.restarts = {}
         self.blocks = collections.deque()   # (at, block), from the newest sample at least rate_window old
-        self.best_rate = None
+        self.rates = collections.deque(maxlen=20000)   # the window rates seen after the warm-up, for their median
 
     def step(self, sample, at):
         """The alerts this sample raises. `at` is the sample's time in seconds (any monotonic origin)."""
@@ -144,21 +171,36 @@ class Watch:
         if at - self.block_moved_at >= self.stall:
             alerts.append(f'the execution chain stopped: no block past {self.best_block} for {int(at - self.block_moved_at)} s')
         # a falling block rate comes hours before a stall (#1018: 2800/h fell to 350/h over four hours of a starving shard)
+        if self.started is None:
+            self.started = at
         if block is not None:
             self.blocks.append((at, block))
             while len(self.blocks) > 1 and self.blocks[1][0] <= at - self.rate_window:
                 self.blocks.popleft()
             since, first = self.blocks[0]
-            if at - since >= self.rate_window:
+            if at - since >= self.rate_window and since - self.started >= self.rate_warmup:
                 rate = (block - first) * 3600 / (at - since)
-                if self.best_rate is None or rate > self.best_rate:
-                    self.best_rate = rate
-                elif self.best_rate > 0 and rate < self.rate_drop * self.best_rate:
-                    alerts.append(f'the block rate fell to {rate:.0f}/h over the last {int(at - since)} s, below {self.rate_drop:.0%} of the best {self.best_rate:.0f}/h')
+                usual = sorted(self.rates)[len(self.rates) // 2] if self.rates else None
+                if usual and rate < self.rate_drop * usual:
+                    alerts.append(f'the block rate fell to {rate:.0f}/h over the last {int(at - since)} s, below {self.rate_drop:.0%} of the usual {usual:.0f}/h')
+                self.rates.append(rate)
+        cgroups = sample.get('cgroup', {})
         for name, usage in sorted(sample.get('memory', {}).items()):
             use = memory_use(usage)
-            if use and use[1] > 0 and 100 * use[0] / use[1] > self.mem_limit:
-                alerts.append(f'{name} memory {usage.strip()} is above {self.mem_limit:g}% of its limit')
+            near = bool(use and use[1] > 0 and 100 * use[0] / use[1] > self.mem_limit)
+            self.near[name] = self.near.get(name, 0) + 1 if near else 0
+            pressure = cgroups.get(name, {}).get('pressure_full_avg60')
+            # docker's figure counts page cache, which can sit at the limit for a whole run: only a limit its tasks stall on is an alert
+            if self.near[name] >= self.mem_samples and (pressure is None or pressure >= self.mem_pressure):
+                stalled = 'unknown' if pressure is None else f'{pressure:g}%'
+                alerts.append(f'{name} memory {usage.strip()} is above {self.mem_limit:g}% of its limit for {self.near[name]} samples (memory pressure, full avg60: {stalled})')
+        for name, c in sorted(cgroups.items()):
+            oom = c.get('oom_kill')
+            before = self.ooms.get(name)
+            if oom is not None and before is not None and oom > before:
+                alerts.append(f'{name} had {oom - before} OOM kill(s)')
+            if oom is not None:
+                self.ooms[name] = oom
         for name in sample.get('missing', []):
             alerts.append(f'{name} has no container')
         for name, s in sorted(sample['services'].items()):
@@ -192,12 +234,15 @@ def main():
     p.add_argument('--disk-limit', type=float, default=80)
     p.add_argument('--mem-limit', type=float, default=90, help='percent of a container\'s memory limit above which its use is an alert (default 90)')
     p.add_argument('--rate-window', type=float, default=3600, help='seconds over which the block rate is measured (default 3600)')
-    p.add_argument('--rate-drop', type=float, default=0.5, help='a block rate below this fraction of the best rate seen is an alert (default 0.5)')
+    p.add_argument('--rate-drop', type=float, default=0.5, help='a block rate below this fraction of the median rate seen is an alert (default 0.5)')
+    p.add_argument('--rate-warmup', type=float, default=None, help='seconds from the first sample whose windows are not counted (default: one rate window)')
+    p.add_argument('--mem-samples', type=int, default=5, help='samples in a row above --mem-limit before it is an alert (default 5)')
+    p.add_argument('--mem-pressure', type=float, default=1.0, help='memory pressure (PSI full avg60, percent) at or above which a container near its limit is starving (default 1.0)')
     p.add_argument('--no-faucet', action='store_true', help='do not sample the faucet guard (its /healthz needs the signer, which a rehearsal does not start)')
     a = p.parse_args()
     a.out.mkdir(parents=True, exist_ok=True)
     transport = handoff_ops.DockerTransport(a.generation)
-    watch, alerts, start, n = Watch(a.stall, a.disk_limit, a.mem_limit, a.rate_window, a.rate_drop), [], time.monotonic(), 0
+    watch, alerts, start, n = Watch(a.stall, a.disk_limit, a.mem_limit, a.rate_window, a.rate_drop, a.mem_samples, a.mem_pressure, a.rate_warmup), [], time.monotonic(), 0
     with (a.out / 'samples.jsonl').open('a') as out:
         while True:
             at = time.monotonic() - start
