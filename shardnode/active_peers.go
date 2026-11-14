@@ -227,6 +227,18 @@ func (a *ActivePeers) Peers() []peer.ID {
 	return out
 }
 
+// StagedPeers is the staged successor assignment's peers (never this node), sorted; empty without a stage.
+func (a *ActivePeers) StagedPeers() []peer.ID {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	out := make([]peer.ID, 0, len(a.staged))
+	for id := range a.staged {
+		out = append(out, id)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
 // EvidenceProviders makes ActivePeers the evidence ProviderSource: who to ask follows the active assignment.
 func (a *ActivePeers) EvidenceProviders() []peer.ID { return a.Peers() }
 

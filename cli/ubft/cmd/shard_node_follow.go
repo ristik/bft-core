@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	libp2ppeer "github.com/libp2p/go-libp2p/core/peer"
 	"github.com/unicitynetwork/bft-core/archive"
+	"github.com/unicitynetwork/bft-core/network"
 	"github.com/unicitynetwork/bft-core/q3active"
 	"github.com/unicitynetwork/bft-core/q3shard"
 	"github.com/unicitynetwork/bft-core/utbstore"
@@ -261,49 +261,48 @@ func seedRootsFromUTB(r *rootFreeRole, store utbEntries) error {
 	return nil
 }
 
-// memberPrewarm opens the channels a member needs before it needs them (phase 2): the shard peers of the installed and staged assignments,
-// and, once the role is active, the root committee of the active epoch. Each warm-up runs in the background with a bound and never blocks
-// the caller (an installer, a staging request, a role publication).
+// memberPrewarm keeps the channels a member needs warm before it needs them (phase 2): the shard peers of the installed and staged
+// assignments, and, once the role is active, the root committee of the active epoch. Each set is reconciled whole on every change
+// (network.MemberProtector): a peer the set no longer names is unprotected, connected or not, and a superseded warm-up cannot re-protect.
 type memberPrewarm struct {
-	peer interface {
-		Prewarm(ctx context.Context, tag string, ids []libp2ppeer.ID) []libp2ppeer.ID
-	}
-	log interface {
-		Debug(msg string, args ...any)
-	}
+	members, committee memberSet
 }
 
-const prewarmTimeout = 10 * time.Second
+// memberSet is the part of network.MemberProtector the prewarm uses.
+type memberSet interface {
+	Set(ctx context.Context, ids []libp2ppeer.ID)
+}
 
+func newMemberPrewarm(p interface {
+	NewMemberProtector(tag string) *network.MemberProtector
+}) *memberPrewarm {
+	return &memberPrewarm{members: p.NewMemberProtector("shard-members"), committee: p.NewMemberProtector("root-committee")}
+}
+
+// shard makes ids the protected, warmed shard peer set.
 func (w *memberPrewarm) shard(ctx context.Context, ids []libp2ppeer.ID) {
-	w.run(ctx, "shard-members", ids)
-}
-
-func (w *memberPrewarm) roots(ctx context.Context, tb *types.RootTrustBaseV1) {
-	var ids []libp2ppeer.ID
-	for _, n := range tb.RootNodes {
-		if n == nil {
-			continue
-		}
-		if id, err := libp2ppeer.Decode(n.NodeID); err == nil {
-			ids = append(ids, id)
-		}
+	if w != nil {
+		w.members.Set(ctx, ids)
 	}
-	w.run(ctx, "root-committee", ids)
 }
 
-func (w *memberPrewarm) run(ctx context.Context, tag string, ids []libp2ppeer.ID) {
-	if w == nil || w.peer == nil || len(ids) == 0 {
+// roots makes the committee of tb the protected, warmed root set; nil (a non-active node) protects no root.
+func (w *memberPrewarm) roots(ctx context.Context, tb *types.RootTrustBaseV1) {
+	if w == nil {
 		return
 	}
-	go func() {
-		ctx, cancel := context.WithTimeout(ctx, prewarmTimeout)
-		defer cancel()
-		got := w.peer.Prewarm(ctx, tag, ids)
-		if w.log != nil {
-			w.log.Debug("prewarmed member channels", "tag", tag, "asked", len(ids), "connected", len(got))
+	var ids []libp2ppeer.ID
+	if tb != nil {
+		for _, n := range tb.RootNodes {
+			if n == nil {
+				continue
+			}
+			if id, err := libp2ppeer.Decode(n.NodeID); err == nil {
+				ids = append(ids, id)
+			}
 		}
-	}()
+	}
+	w.committee.Set(ctx, ids)
 }
 
 // decodePeerIDs decodes node IDs, skipping any that is not a peer ID.

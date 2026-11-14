@@ -870,14 +870,18 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	role.subscribe(follower.changed)
 	// prewarmed member channels (phase 2): the shard peers of the installed and the staged assignment are kept connected; once the role is
 	// active, the current root committee too. A non-active node never dials a root (the gater refuses it), so roots are warmed at promotion.
-	warm := &memberPrewarm{peer: peer, log: flags.observe.Logger()}
-	activePeers.OnStage(func(ids []libp2ppeer.ID) { warm.shard(ctx, ids) }) // the successor assignment's peers, before its activation
+	// Each set is reconciled whole (astra on #1054): members of a dropped assignment or committee are unprotected.
+	warm := newMemberPrewarm(peer)
+	warm.shard(ctx, activePeers.Peers())
+	activePeers.OnStage(func([]libp2ppeer.ID) { warm.shard(ctx, append(activePeers.Peers(), activePeers.StagedPeers()...)) }) // the successor's peers, before its activation
 	role.subscribe(func() {
+		var committee *types.RootTrustBaseV1
 		if role.active() && q3rt != nil && q3Trust != nil {
 			if tb, err := q3Trust.Verified().GetByEpoch(ctx, q3rt.ActiveEpoch()); err == nil {
-				warm.roots(ctx, tb)
+				committee = tb
 			}
 		}
+		warm.roots(ctx, committee) // the active epoch's committee once active; none (all unprotected) otherwise
 	})
 	follower.setMirrors(q3MirrorPeers(activePeers, followSourceIDs(followSources)))
 	var headFollower *archivewiring.HeadFollower
@@ -1285,7 +1289,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 						return err
 					}
 					role.assignmentInstalled(activePeers.Member())
-					warm.shard(ctx, activePeers.Peers())
+					warm.shard(ctx, append(activePeers.Peers(), activePeers.StagedPeers()...)) // the install clears the staged set
 					return nil
 				},
 				NoteJoiner: func(view handoffdelivery.Bundle, step handoff.AssignmentStep) error {

@@ -168,3 +168,14 @@ func TestActivePeersTellTheStageHookItsPeers(t *testing.T) {
 	require.Error(t, peers.Stage([]string{"not a peer id"}))
 	require.Equal(t, []peer.ID{j}, told)
 }
+
+func TestActivePeersReportTheStagedPeersUntilTheInstall(t *testing.T) {
+	self, v2, j := newPeerID(t), newPeerID(t), newPeerID(t)
+	peers, err := NewActivePeers(self, validatorsOf(self, v2))
+	require.NoError(t, err)
+	require.Empty(t, peers.StagedPeers())
+	require.NoError(t, peers.Stage([]string{self.String(), j.String()}))
+	require.Equal(t, []peer.ID{j}, peers.StagedPeers(), "never this node")
+	require.NoError(t, peers.Install(1, validatorsOf(self, j)))
+	require.Empty(t, peers.StagedPeers(), "an install clears the stage")
+}

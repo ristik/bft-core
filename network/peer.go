@@ -282,44 +282,73 @@ func (p *Peer) RegisterProtocolHandler(protocolID string, handler network.Stream
 	})
 }
 
-// Prewarm opens (or keeps) a connection to each peer whose address is known, concurrently, and protects it from the connection manager's
-// trimming under tag: the channels a node will use the moment it becomes active are open before it needs them. A peer the role gater
-// denies is skipped. It returns the peers connected.
-func (p *Peer) Prewarm(ctx context.Context, tag string, ids []peer.ID) []peer.ID {
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-	var done []peer.ID
-	for _, id := range ids {
-		if id == p.host.ID() || p.gater().denied(id) {
-			continue
-		}
-		wg.Add(1)
-		go func(id peer.ID) {
-			defer wg.Done()
-			if err := p.host.Connect(ctx, peer.AddrInfo{ID: id, Addrs: p.host.Peerstore().Addrs(id)}); err != nil {
-				return
-			}
-			p.host.ConnManager().Protect(id, tag)
-			mu.Lock()
-			done = append(done, id)
-			mu.Unlock()
-		}(id)
-	}
-	wg.Wait()
-	return done
+// MemberProtector keeps one set of member peers warm (phase 2): connected, and protected from the connection manager's trimming under its
+// tag, so that the channels a node will use the moment it becomes active are open before it needs them. Set replaces the whole set
+// (astra on #1054): the peers it drops are unprotected at once, connected or not; the peers it keeps or adds are protected at once, by
+// ID, and dialled in the background. Protection is changed only inside Set, under its lock, so a warm-up of an earlier set, which Set
+// also cancels, can never re-protect a peer the current set dropped. A peer the role gater denies is neither protected nor dialled.
+type MemberProtector struct {
+	p         *Peer
+	tag       string
+	mu        sync.Mutex
+	protected map[peer.ID]struct{}
+	cancel    context.CancelFunc
 }
 
-// Unprotect releases the trimming protection of tag for every peer not in keep.
-func (p *Peer) Unprotect(tag string, keep []peer.ID) {
-	kept := make(map[peer.ID]struct{}, len(keep))
-	for _, id := range keep {
-		kept[id] = struct{}{}
+// NewMemberProtector is a protector of the member set under tag.
+func (p *Peer) NewMemberProtector(tag string) *MemberProtector {
+	return &MemberProtector{p: p, tag: tag, protected: map[peer.ID]struct{}{}}
+}
+
+// Set makes ids the protected, warmed member set. A dial runs at most until ctx ends or the next Set.
+func (m *MemberProtector) Set(ctx context.Context, ids []peer.ID) {
+	cm := m.p.host.ConnManager()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.cancel != nil {
+		m.cancel() // a superseded warm-up stops dialling
 	}
-	for _, id := range p.host.Network().Peers() {
-		if _, ok := kept[id]; !ok {
-			p.host.ConnManager().Unprotect(id, tag)
+	want := make(map[peer.ID]struct{}, len(ids))
+	for _, id := range ids {
+		if id == m.p.host.ID() || m.p.gater().denied(id) {
+			continue
+		}
+		want[id] = struct{}{}
+	}
+	for id := range m.protected {
+		if _, keep := want[id]; !keep {
+			cm.Unprotect(id, m.tag)
+			delete(m.protected, id)
 		}
 	}
+	var dial []peer.ID
+	for id := range want {
+		if _, had := m.protected[id]; !had {
+			cm.Protect(id, m.tag)
+			m.protected[id] = struct{}{}
+		}
+		if len(m.p.host.Network().ConnsToPeer(id)) == 0 {
+			dial = append(dial, id)
+		}
+	}
+	warm, cancel := context.WithCancel(ctx)
+	m.cancel = cancel
+	for _, id := range dial {
+		go func(id peer.ID) {
+			_ = m.p.host.Connect(warm, peer.AddrInfo{ID: id, Addrs: m.p.host.Peerstore().Addrs(id)})
+		}(id)
+	}
+}
+
+// Protected is the member set currently protected (for status and tests).
+func (m *MemberProtector) Protected() []peer.ID {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]peer.ID, 0, len(m.protected))
+	for id := range m.protected {
+		out = append(out, id)
+	}
+	return out
 }
 
 // gater is the configured role gater, nil without one (or without a configuration, as some tests build a Peer).

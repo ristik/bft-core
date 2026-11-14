@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -168,30 +167,20 @@ func TestRootsAreSeededFromTheRetainedUTBEntriesAtStartup(t *testing.T) {
 	}
 }
 
-type recordingPrewarm struct {
-	mu   sync.Mutex
-	tags map[string][]libp2ppeer.ID
-	done chan struct{}
-}
+type recordingSet struct{ sets [][]libp2ppeer.ID }
 
-func (r *recordingPrewarm) Prewarm(_ context.Context, tag string, ids []libp2ppeer.ID) []libp2ppeer.ID {
-	r.mu.Lock()
-	r.tags[tag] = append(r.tags[tag], ids...)
-	r.mu.Unlock()
-	r.done <- struct{}{}
-	return ids
-}
+func (r *recordingSet) Set(_ context.Context, ids []libp2ppeer.ID) { r.sets = append(r.sets, ids) }
 
-// The shard members are warmed at once, the root committee by its authenticated identities, both in the background.
-func TestMemberPrewarmWarmsShardPeersAndTheRootCommittee(t *testing.T) {
-	rec := &recordingPrewarm{tags: map[string][]libp2ppeer.ID{}, done: make(chan struct{}, 2)}
-	w := &memberPrewarm{peer: rec}
+// The prewarm reconciles each set whole: the shard members as given, the root committee by its authenticated identities, and no root
+// at all when the role is not active (astra on #1054, finding 2).
+func TestMemberPrewarmReconcilesShardPeersAndTheRootCommittee(t *testing.T) {
+	members, committee := &recordingSet{}, &recordingSet{}
+	w := &memberPrewarm{members: members, committee: committee}
 	shard, root := followTestID(t), followTestID(t)
 	w.shard(context.Background(), []libp2ppeer.ID{shard})
 	w.roots(context.Background(), &types.RootTrustBaseV1{RootNodes: []*types.NodeInfo{{NodeID: root.String()}, nil, {NodeID: "not a peer id"}}})
-	<-rec.done
-	<-rec.done
-	require.Equal(t, []libp2ppeer.ID{shard}, rec.tags["shard-members"])
-	require.Equal(t, []libp2ppeer.ID{root}, rec.tags["root-committee"])
+	w.roots(context.Background(), nil)
+	require.Equal(t, [][]libp2ppeer.ID{{shard}}, members.sets)
+	require.Equal(t, [][]libp2ppeer.ID{{root}, nil}, committee.sets, "retired: the committee set is emptied")
 	require.Equal(t, []libp2ppeer.ID{shard}, decodePeerIDs([]string{shard.String(), "bad"}))
 }
