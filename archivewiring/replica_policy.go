@@ -29,11 +29,18 @@ type ReplicaPolicy struct {
 
 // ReplicaPolicySnapshot is one version of the policy.
 type ReplicaPolicySnapshot struct {
+	// Version counts this process's changes of the snapshot (switches, seeds and adopted migration states). It is local to the node: two
+	// writers under the same assignment report different versions.
 	Version  uint64
 	Replicas []peer.ID // two or three, canonical order
 	Digest   [32]byte  // the derived policy's digest; zero for an explicit (legacy) pair, which never switches
 	Encoded  []byte    // the derived policy's canonical encoding (archivepolicy.Policy.Encode), persisted by the frontier worker
-	Epoch    uint64    // the installed shard epoch the replicas were derived from (diagnostics)
+	// Epoch is the installed shard epoch the policy in force was derived from: the epoch its encoding and digest commit. An assignment
+	// that derives the same replicas keeps the policy, and Epoch with it (bft-core#1044).
+	Epoch uint64
+	// Checked is the latest installed shard epoch whose assignment was evaluated and derived these replicas (Epoch or later): the epoch
+	// the policy is known to follow. It changes no version: the policy itself is unchanged.
+	Checked  uint64
 	Retained []peer.ID // earlier replicas still holding promised copies not yet verified on Replicas
 	// Migration is the durable migration state the frontier worker last applied, nil before (or without pruning).
 	Migration *configuredprogress.ArchiveMigration
@@ -64,7 +71,7 @@ func NewReplicaPolicy(replicas []peer.ID, digest [32]byte, encoded []byte, epoch
 	if !validReplicas(replicas) || digest != ([32]byte{}) && len(encoded) == 0 {
 		return nil, ErrConfig
 	}
-	return &ReplicaPolicy{snap: ReplicaPolicySnapshot{Version: 1, Replicas: slices.Clone(replicas), Digest: digest, Encoded: slices.Clone(encoded), Epoch: epoch},
+	return &ReplicaPolicy{snap: ReplicaPolicySnapshot{Version: 1, Replicas: slices.Clone(replicas), Digest: digest, Encoded: slices.Clone(encoded), Epoch: epoch, Checked: epoch},
 		changed: make(chan struct{})}, nil
 }
 
@@ -91,22 +98,27 @@ func (p *ReplicaPolicy) bump() {
 	p.changed = make(chan struct{})
 }
 
-// Switch makes a derived policy current. It reports false, changing nothing, when the replicas are the current ones (another epoch
-// or membership with the same replica set keeps the policy and its digest: no migration without a replica change) or when the current
-// policy is an explicit pair. Retained holders and the migration state are the frontier worker's to publish for the new policy.
+// Switch makes a derived policy current. It reports false when the replicas are the current ones (another epoch or membership with the
+// same replica set keeps the policy and its digest: no migration without a replica change), recording only that the policy was checked
+// at that epoch (Checked, no new version), or when the current policy is an explicit pair, which changes nothing. Retained holders and
+// the migration state are the frontier worker's to publish for the new policy.
 func (p *ReplicaPolicy) Switch(replicas []peer.ID, digest [32]byte, encoded []byte, epoch uint64) (bool, error) {
 	if !validReplicas(replicas) || digest == ([32]byte{}) || len(encoded) == 0 {
 		return false, ErrConfig
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if p.snap.Digest == ([32]byte{}) || slices.Equal(p.snap.Replicas, replicas) {
+	if p.snap.Digest == ([32]byte{}) {
+		return false, nil
+	}
+	if slices.Equal(p.snap.Replicas, replicas) {
+		p.snap.Checked = max(p.snap.Checked, epoch)
 		return false, nil
 	}
 	// Until the worker adopts the switch, every earlier replica still counts as a holder: nothing is released by the switch itself.
 	retained := p.snap.Readable()
 	retained = slices.DeleteFunc(retained, func(id peer.ID) bool { return p.untracked || slices.Contains(replicas, id) })
-	p.snap = ReplicaPolicySnapshot{Version: p.snap.Version, Replicas: slices.Clone(replicas), Digest: digest, Encoded: slices.Clone(encoded), Epoch: epoch, Retained: retained}
+	p.snap = ReplicaPolicySnapshot{Version: p.snap.Version, Replicas: slices.Clone(replicas), Digest: digest, Encoded: slices.Clone(encoded), Epoch: epoch, Checked: epoch, Retained: retained}
 	p.bump()
 	return true, nil
 }
@@ -148,7 +160,7 @@ func (p *ReplicaPolicy) Seed(replicas []peer.ID, digest [32]byte, encoded []byte
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.snap = ReplicaPolicySnapshot{Version: p.snap.Version, Replicas: slices.Clone(replicas), Digest: digest, Encoded: slices.Clone(encoded), Epoch: epoch}
+	p.snap = ReplicaPolicySnapshot{Version: p.snap.Version, Replicas: slices.Clone(replicas), Digest: digest, Encoded: slices.Clone(encoded), Epoch: epoch, Checked: epoch}
 	p.bump()
 	return nil
 }
