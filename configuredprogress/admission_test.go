@@ -187,6 +187,69 @@ func TestAdmissionRetryBudgetIsNotRenewedByDuplicateDelivery(t *testing.T) {
 	}
 }
 
+// rendezvousGate holds the first two WithinFinality calls until both have arrived, then runs them one at a time; later calls pass. It
+// makes a race deterministic: Submit notifies the bootstrap invalidation itself right after it wakes the coordinator, whose first step
+// may notify it too.
+type rendezvousGate struct {
+	mu      sync.Mutex
+	arrived int
+	both    chan struct{}
+	run     sync.Mutex
+}
+
+func (g *rendezvousGate) WithinFinality(ctx context.Context, f func() error) error {
+	g.mu.Lock()
+	g.arrived++
+	n := g.arrived
+	if n == 2 {
+		close(g.both)
+	}
+	g.mu.Unlock()
+	if n <= 2 {
+		select {
+		case <-g.both:
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(5 * time.Second):
+			return errors.New("rendezvous gate: the second notification never came")
+		}
+	}
+	g.run.Lock()
+	defer g.run.Unlock()
+	return f()
+}
+
+// bft-core#904, made deterministic: Submit wakes the coordinator before it notifies the bootstrap invalidation itself, so the episode's
+// first step can find the notification still due and make it. That notification is bookkeeping (idempotent, whoever runs first does
+// it), not a durable commit or a delivery: it must not take one of the episode's attempts, or the delivery of a policy with two attempts
+// falls behind the cooldown. Here both notifications always meet, so the episode's first step always finds it due.
+func TestAdmissionInvalidationNotificationDoesNotTakeAnAttempt(t *testing.T) {
+	f := newFixture(t, 1)
+	s, _ := f.open(2)
+	defer s.Close()
+	_, _, err := s.Initialize(context.Background(), f.ctx)
+	require.NoError(t, err)
+	clock := newControlledClock()
+	deliveries := make(chan struct{}, 4)
+	invalidations := 0
+	c := newTestAdmission(t, f, s, &rendezvousGate{both: make(chan struct{})}, clock, admissionPolicy{attempts: 2, duration: time.Minute, cooldown: 10 * time.Second},
+		func() { invalidations++ }, func(context.Context, rootinput.VerifiedObservationV2) error {
+			deliveries <- struct{}{}
+			return errors.New("adoption failed")
+		})
+	u, tr := f.sign(f.c.InputRecord(1), 2, 5)
+	_, err = c.Submit(context.Background(), u, tr)
+	require.NoError(t, err)
+	clock.advance(t, 0) // the spacing between the episode's two attempts: persist, then deliver
+	select {
+	case <-deliveries:
+	case <-time.After(2 * time.Second):
+		st := c.Status()
+		t.Fatalf("delivery was not attempted in the episode: active=%v pending first=%v latest=%v delivery=%v, last error: %v", st.EpisodeActive, st.PendingFirst, st.PendingLatest, st.DeliveryPending, st.LastError)
+	}
+	require.Equal(t, 1, invalidations, "the invalidation is notified once, by whichever ran first")
+}
+
 func TestAdmissionFirstOrdinaryIsLatchedBeforeNewestAndNotDelivered(t *testing.T) {
 	f := newFixture(t, 2)
 	s, _ := f.open(2)
@@ -290,6 +353,15 @@ func TestAdmissionCancellationWhileBlockedAtGateDoesNotCommit(t *testing.T) {
 	gate.mu.Lock()
 	var invalidations atomic.Int32
 	clock := newControlledClock()
+	committing, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	s.SetFaultHook(func(point string) error {
+		if point == "before-observation-commit" {
+			once.Do(func() { close(committing) })
+			<-release
+		}
+		return nil
+	})
 	c := newTestAdmission(t, f, s, gate, clock, admissionPolicy{attempts: 3, duration: time.Second, spacing: time.Second, cooldown: time.Hour}, func() { invalidations.Add(1) }, func(context.Context, rootinput.VerifiedObservationV2) error { return nil })
 	authenticated := make(chan struct{})
 	c.onAuthenticated = func(rootinput.VerifiedObservationV2) { close(authenticated) }
@@ -307,17 +379,22 @@ func TestAdmissionCancellationWhileBlockedAtGateDoesNotCommit(t *testing.T) {
 	gate.mu.Unlock()
 	require.ErrorIs(t, <-done, context.Canceled)
 	require.True(t, c.Status().BootstrapInvalidated, "authenticated ordinary knowledge is sticky even when gate acquisition is canceled")
-	// The retained observation is intentionally worker-owned after caller cancellation.
-	// Pause after worker invalidation so persistence cannot race this assertion.
+	// The retained observation is intentionally worker-owned after caller cancellation. The worker is held at its commit, after it has
+	// notified the invalidation, so the state the canceled caller left is observed before the worker's own commit.
 	select {
-	case <-clock.waits:
+	case <-committing:
 	case <-time.After(2 * time.Second):
-		t.Fatal("worker did not pause after invalidation")
+		t.Fatal("worker did not reach its commit")
 	}
 	require.EqualValues(t, 1, invalidations.Load())
 	st, _, err := s.Load(context.Background(), f.ctx)
 	require.NoError(t, err)
-	require.Zero(t, st.Revision())
+	require.Zero(t, st.Revision(), "nothing committed by the canceled caller")
+	close(release)
+	waitAdmission(t, func() bool {
+		st, _, err := s.Load(context.Background(), f.ctx)
+		return err == nil && st.Revision() == 1
+	})
 }
 
 func TestAdmissionEpisodeDeadlineReachesBlockingDelivery(t *testing.T) {
