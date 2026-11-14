@@ -57,6 +57,10 @@ type BFTClientOptions struct {
 	ResubmitMinInterval time.Duration
 	// MaxResubmits bounds the re-sends of one pending request (zero: DefaultMaxResubmits; negative disables re-sending).
 	MaxResubmits int
+	// ResendInterval is the base of the timed exact re-send of a pending request (resend.go): the same signed bytes are sent again once
+	// ResendInterval plus a random jitter of up to half of it has passed since their last send without progress (zero: DefaultResendInterval;
+	// negative disables the timed re-send, the duplicate-triggered one stays). The re-sends count toward MaxResubmits.
+	ResendInterval time.Duration
 	// PendingWarnAfter is how long a certification request may be pending, or the shard may go without a non-repeat certificate while work remains,
 	// before a warning is logged (zero: DefaultPendingWarnAfter; negative disables the warning, not the gauges). An operational threshold, not a
 	// delivery deadline: it says nothing about T2 (#976).
@@ -198,6 +202,9 @@ type BFTClient struct {
 	// pending exactly while that certificate is the held one (a certificate that advances the round replaces the held one, and
 	// the next Submit replaces this).
 	outstanding *outstandingRequest
+	// attemptGen is the generation of the pending attempt (resend.go): it advances on a new attempt, on every adopted certificate and on an
+	// installed shard configuration, and an attempt of an older generation is never sent again.
+	attemptGen uint64
 	// consecutiveRepeats counts the repeat certificates adopted since the last non-repeat one, and lastProgress is when that last non-repeat
 	// certificate was adopted, seeded at Run so a node that starts into a run of repeats still has an age (#976). Both are updated by
 	// noteAdoptedLocked on BOTH adoption paths and are in memory: a restart resets them, and the diagnostics built on them say so.
@@ -252,6 +259,10 @@ type outstandingRequest struct {
 	firstSent time.Time       // the first submission of this logical attempt: a re-send never changes it (lastSent does)
 	lastSent  time.Time
 	resent    int
+	// gen is the generation the attempt was made in (resend.go). It never changes; req, on and rootEpoch never change either.
+	gen uint64
+	// jitter is the random part of the next timed re-send's delay, drawn once per send.
+	jitter time.Duration
 	// rootEpoch is the root epoch of the certificate the request was built on. Once a later root epoch is installed the request is one of
 	// the closed epoch (it lacks the transition the first block of the new one carries): it is cancelled, never sent again (#1036).
 	rootEpoch uint64
@@ -497,6 +508,8 @@ func (c *BFTClient) Run(ctx context.Context) error {
 		return fmt.Errorf("initial handshake: %w", err)
 	}
 
+	resend := time.NewTicker(resendCheckEvery) // the timed exact re-send (resend.go)
+	defer resend.Stop()
 	heartbeat := time.NewTicker(c.opts.HeartbeatInterval)
 	defer heartbeat.Stop()
 
@@ -544,6 +557,8 @@ func (c *BFTClient) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case now := <-resend.C:
+			c.resendStale(ctx, now)
 		case <-c.admissionWake:
 			c.mu.Lock()
 			uc := c.feedPending
@@ -1452,24 +1467,26 @@ func (c *BFTClient) Submit(ctx context.Context, req *certification.BlockCertific
 	if !bound {
 		origin = luc.GetRootEpoch()
 	}
-	if err := c.sendRequest(ctx, req, luc, origin); err != nil {
+	err := c.sendRequest(ctx, req, luc, origin)
+	if err != nil && neverPending(err) {
 		return err
 	}
-	// A submitted request refills this node's subscription at the root chain, so nothing else needs
-	// to ask for one this round.
 	c.mu.Lock()
-	c.submittedSinceHandshake = true
-	now := time.Now()
-	c.outstanding = &outstandingRequest{req: req, on: deliveryAttempt{partitionRound: luc.GetRoundNumber(), rootRound: luc.GetRootRoundNumber()}, firstSent: now, lastSent: now,
-		rootEpoch: origin}
+	if err == nil {
+		// A submitted request refills this node's subscription at the root chain, so nothing else needs
+		// to ask for one this round.
+		c.submittedSinceHandshake = true
+	}
+	// a first send that failed is still the pending attempt: the timed re-send sends it (resend.go)
+	c.outstanding = c.newAttemptLocked(req, luc, origin, time.Now())
 	c.mu.Unlock()
-	return nil
+	return err
 }
 
 // sendRequest puts req on the wire to the root nodes selected from luc.
 // origin is the root epoch of the certificate that authorised req: the send is admitted only while no later root epoch is installed, checked
-// last, immediately before the request leaves (the in-flight policy above).
-func (c *BFTClient) sendRequest(ctx context.Context, req *certification.BlockCertificationRequest, luc *types.UnicityCertificate, origin uint64) error {
+// last, immediately before the request leaves (the in-flight policy above), together with every admit the caller adds (resend.go).
+func (c *BFTClient) sendRequest(ctx context.Context, req *certification.BlockCertificationRequest, luc *types.UnicityCertificate, origin uint64, admit ...func() error) error {
 	tb, err := c.trustBaseStore.GetByEpoch(ctx, luc.GetRootEpoch())
 	if err != nil {
 		return fmt.Errorf("loading trust base for epoch %d: %w", luc.GetRootEpoch(), err)
@@ -1481,6 +1498,11 @@ func (c *BFTClient) sendRequest(ctx context.Context, req *certification.BlockCer
 	if c.crossesActivation(origin) {
 		return fmt.Errorf("%w: built on a certificate of root epoch %d", ErrRequestAcrossActivation, origin)
 	}
+	for _, a := range admit {
+		if err := a(); err != nil {
+			return err
+		}
+	}
 	return c.net.Send(ctx, req, rootIDs...)
 }
 
@@ -1488,6 +1510,7 @@ func (c *BFTClient) sendRequest(ctx context.Context, req *certification.BlockCer
 // handleCertificationResponse and the configured one in deliverConfigured): a repeat extends the run of repeats, anything else is progress. A
 // duplicate is not adopted and never reaches here. c.mu must be held.
 func (c *BFTClient) noteAdoptedLocked(class UCClass) {
+	c.attemptGen++ // progress or a repeat: the pending attempt's generation is over (resend.go)
 	if class == UCRepeat {
 		c.consecutiveRepeats++
 		return
@@ -1647,7 +1670,16 @@ func (c *BFTClient) InstallShardConf(epoch uint64, hash []byte) error {
 	if err != nil {
 		return err
 	}
-	return set.Install(epoch, hash)
+	_, knownErr := set.ForEpoch(epoch)
+	if err := set.Install(epoch, hash); err != nil {
+		return err
+	}
+	if knownErr != nil { // a new shard epoch's configuration is an assignment change: the pending attempt is never re-sent under it (resend.go)
+		c.mu.Lock()
+		c.attemptGen++
+		c.mu.Unlock()
+	}
+	return nil
 }
 
 // shardConfSet is the client's set; a client assembled without the constructor (tests) gets its genesis-only set on first use.
