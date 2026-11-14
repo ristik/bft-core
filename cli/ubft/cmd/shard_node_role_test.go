@@ -166,3 +166,21 @@ func TestRootsAreSeededFromTheRetainedUTBEntriesAtStartup(t *testing.T) {
 		require.True(t, seeded.deny(id), "root %s", m.ID)
 	}
 }
+
+type recordingSet struct{ sets [][]libp2ppeer.ID }
+
+func (r *recordingSet) Set(_ context.Context, ids []libp2ppeer.ID) { r.sets = append(r.sets, ids) }
+
+// The prewarm reconciles each set whole: the shard members as given, the root committee by its authenticated identities, and no root
+// at all when the role is not active (astra on #1054, finding 2).
+func TestMemberPrewarmReconcilesShardPeersAndTheRootCommittee(t *testing.T) {
+	members, committee := &recordingSet{}, &recordingSet{}
+	w := &memberPrewarm{members: members, committee: committee}
+	shard, root := followTestID(t), followTestID(t)
+	w.shard(context.Background(), []libp2ppeer.ID{shard})
+	w.roots(context.Background(), &types.RootTrustBaseV1{RootNodes: []*types.NodeInfo{{NodeID: root.String()}, nil, {NodeID: "not a peer id"}}})
+	w.roots(context.Background(), nil)
+	require.Equal(t, [][]libp2ppeer.ID{{shard}}, members.sets)
+	require.Equal(t, [][]libp2ppeer.ID{{root}, nil}, committee.sets, "retired: the committee set is emptied")
+	require.Equal(t, []libp2ppeer.ID{shard}, decodePeerIDs([]string{shard.String(), "bad"}))
+}

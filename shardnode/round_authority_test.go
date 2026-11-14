@@ -651,7 +651,6 @@ func TestARefusedAuthorizationIsNotRebuiltAfterAPersistenceFailure(t *testing.T)
 		trustBaseStore: stubTrustBaseStore{tb: f.tb},
 		driver:         &persistingDriver{driver: round, store: NewFileStore(filepath.Join(roDir, "luc.cbor"))},
 	}
-	client.lastCertResponseTime.Store(1)
 	respond := &certification.CertificationResponse{
 		Partition: authPartitionID, Shard: types.ShardID{}, Technical: *f.tr, UC: *f.uc,
 	}

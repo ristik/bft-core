@@ -322,7 +322,8 @@ type shardNodeRunFlags struct {
 	JournalBytes         int64
 	ArchiveStore         string
 	ArchiveReplicas      []string
-	ArchivePublicReads   bool     // serve archive reads to non-validators under a separate budget
+	ArchivePublicReads   bool // serve archive reads to non-validators under a separate budget
+	UCRelayAfter         time.Duration
 	FollowSources        []string // non-root bootstrap peers; set, roots are refused while this node is not active
 	ArchivePrune         bool
 	TrustHistoryProfile2 bool
@@ -446,6 +447,8 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 		"maximum retained hot journal bytes with --execution-journal; pruning requires --archive-prune")
 	cmd.Flags().StringVar(&flags.ArchiveStore, "archive-store", "",
 		"local certified archive directory; requires --execution-journal. Replicas are derived from the shard's validators (the next three after this node in peer-ID order, any two sufficing) unless exactly two --archive-replica peer IDs are given")
+	cmd.Flags().DurationVar(&flags.UCRelayAfter, "uc-relay-after", time.Second,
+		"with no adopted certificate for this long, ask two active shard peers for the certificate they hold (verified like a root's response); 0 disables")
 	cmd.Flags().BoolVar(&flags.ArchivePublicReads, "archive-public-reads", false,
 		"serve archive reads (never writes) to peers that are not validators, such as root-free followers, under a separate bounded budget")
 	cmd.Flags().StringSliceVar(&flags.FollowSources, "follow-source", nil,
@@ -865,6 +868,21 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	role := newShardRole(trustBases[0].GetEpoch(), activePeers.Member(), runtimeEpoch)
 	follower.setRole(role.active)
 	role.subscribe(follower.changed)
+	// prewarmed member channels (phase 2): the shard peers of the installed and the staged assignment are kept connected; once the role is
+	// active, the current root committee too. A non-active node never dials a root (the gater refuses it), so roots are warmed at promotion.
+	// Each set is reconciled whole (astra on #1054): members of a dropped assignment or committee are unprotected.
+	warm := newMemberPrewarm(peer)
+	warm.shard(ctx, activePeers.Peers())
+	activePeers.OnStage(func([]libp2ppeer.ID) { warm.shard(ctx, append(activePeers.Peers(), activePeers.StagedPeers()...)) }) // the successor's peers, before its activation
+	role.subscribe(func() {
+		var committee *types.RootTrustBaseV1
+		if role.active() && q3rt != nil && q3Trust != nil {
+			if tb, err := q3Trust.Verified().GetByEpoch(ctx, q3rt.ActiveEpoch()); err == nil {
+				committee = tb
+			}
+		}
+		warm.roots(ctx, committee) // the active epoch's committee once active; none (all unprotected) otherwise
+	})
 	follower.setMirrors(q3MirrorPeers(activePeers, followSourceIDs(followSources)))
 	var headFollower *archivewiring.HeadFollower
 	// Every shard-membership consumer (block dissemination, the archive and journal servers, the journal suffix and evidence providers)
@@ -920,6 +938,12 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	)
 	if err != nil {
 		return fmt.Errorf("creating shard node: %w", err)
+	}
+	// the UC relay (phase 2): this node serves the pair it holds to its shard peers, and when the roots give no useful progress for
+	// --uc-relay-after it asks two active peers for theirs; a relayed pair is verified and admitted exactly like a root's response
+	peer.RegisterProtocolHandler(shardnode.UCRelayProtocol, shardnode.NewUCRelayServer(node.HeldPair, activePeers.Allowed).Handler)
+	if flags.UCRelayAfter > 0 {
+		node.SetRelay(peer, activePeers.Peers, flags.UCRelayAfter)
 	}
 	if follower.enabled {
 		// a root-free follower: while this node is not a validator of the installed assignment it takes certificates from its follow
@@ -1265,6 +1289,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 						return err
 					}
 					role.assignmentInstalled(activePeers.Member())
+					warm.shard(ctx, append(activePeers.Peers(), activePeers.StagedPeers()...)) // the install clears the staged set
 					return nil
 				},
 				NoteJoiner: func(view handoffdelivery.Bundle, step handoff.AssignmentStep) error {

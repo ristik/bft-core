@@ -76,7 +76,7 @@ func TestAnAdvancingCertificateRetiresThePendingAgeAndTheCounters(t *testing.T) 
 func TestRepeatsAreCountedAndRebuiltAttemptsDoNotResetTheNoProgressAge(t *testing.T) {
 	w := newPendingWorld(t, BFTClientOptions{})
 	w.accept(t, w.uc(t, 5, 55)) // progress: the last non-repeat certificate
-	progress := w.c.lastProgress
+	progress := w.c.clock().Advanced()
 	require.NoError(t, w.c.Submit(context.Background(), pendingRequest(w.f)))
 
 	w.accept(t, w.uc(t, 5, 60)) // a T2 repeat of round 5
@@ -173,14 +173,18 @@ func TestThePendingFiguresMoveOnTheConfiguredAdoptionPath(t *testing.T) {
 	}
 
 	require.NoError(t, deliverUC(f.ucMine)) // the first certificate: progress
-	progress := c.lastProgress
+	progress := c.clock().Advanced()
 	require.False(t, progress.IsZero())
 	require.Zero(t, c.pendingDiagnostics(time.Now()).ConsecutiveRepeats)
 
 	repeat := w.uc(t, 4, 60)
 	require.Error(t, deliverUC(repeat), "the apply of the repeat fails: the delivery will be retried")
 	require.Equal(t, 1, c.pendingDiagnostics(time.Now()).ConsecutiveRepeats, "a repeat adopted through the configured path counts")
+	delivered, advanced := c.Progress().Delivered(), c.Progress().Advanced()
+	time.Sleep(2 * time.Millisecond)
 	require.NoError(t, deliverUC(repeat), "the retry of the failed apply")
+	require.Equal(t, delivered, c.Progress().Delivered(), "configured path: the retry is not progress either")
+	require.Equal(t, advanced, c.Progress().Advanced())
 	d := c.pendingDiagnostics(progress.Add(25 * time.Second))
 	require.Equal(t, 1, d.ConsecutiveRepeats, "the retry is a duplicate: not adopted, not counted")
 	require.Equal(t, 25*time.Second, d.NoProgressAge, "work remains and the clock runs from the last progress")
@@ -191,18 +195,15 @@ func TestThePendingFiguresMoveOnTheConfiguredAdoptionPath(t *testing.T) {
 	require.Zero(t, d.NoProgressAge)
 }
 
-// Run seeds the progress clock, so a node that starts into a run of repeats reports a no-progress age (rev3's nit on #995).
+// The progress clock starts with the client, so a node that starts into a run of repeats reports a no-progress age (rev3's nit on #995).
 func TestRunSeedsTheProgressClock(t *testing.T) {
 	sink := &admissionSink{}
 	c, _ := newAdmissionTestClient(t, sink, &admissionTestNet{})
-	c.mu.Lock()
-	require.True(t, c.lastProgress.IsZero(), "premise: nothing has run yet")
-	c.mu.Unlock()
 	factory := &admissionTestFactory{}
 	cancel, done := startAdmissionClient(t, c, factory, sink)
 	defer func() { cancel(); require.ErrorIs(t, <-done, context.Canceled) }()
 	c.mu.Lock()
-	seeded := c.lastProgress
+	seeded := c.clock().Advanced()
 	c.consecutiveRepeats = 1 // as if the first certificates seen were repeats
 	c.mu.Unlock()
 	require.False(t, seeded.IsZero())

@@ -122,16 +122,10 @@ func buildCertificationSigning(flags *shardNodeSigningFlags, keyConf *KeyConf, s
 		}
 		var (
 			provisionedMu sync.Mutex
-			provisioned   *service.Client
+			provisioned   *service.ReloadingClient
 		)
 		deferred, err := shardnode.NewLazyDeferredAuthoritySigner(func() (shardnode.SigningAuthorityClient, error) {
-			credential, err := readCredentialFile(flags.SigningAuthorityCredential)
-			if err != nil {
-				return nil, fmt.Errorf("loading the signing authority credential: %w", err)
-			}
-			client, err := service.NewClient(service.ClientConfig{
-				Dial: service.UnixDialer(flags.SigningAuthoritySocket), Credential: credential, Timeout: timeout,
-			})
+			client, err := reloadingAuthorityClient(flags, timeout)
 			if err != nil {
 				return nil, err
 			}
@@ -166,18 +160,12 @@ func buildCertificationSigning(flags *shardNodeSigningFlags, keyConf *KeyConf, s
 		return nil, ErrGenesisLocalKey
 	}
 
-	credential, err := readCredentialFile(flags.SigningAuthorityCredential)
-	if err != nil {
-		return nil, fmt.Errorf("loading the signing authority credential: %w", err)
-	}
 	// A signature that arrives after T2 is of no use to this round, so T2 is the natural bound.
 	timeout := flags.SigningAuthorityTimeout
 	if timeout <= 0 {
 		timeout = shardConf.T2Timeout
 	}
-	client, err := service.NewClient(service.ClientConfig{
-		Dial: service.UnixDialer(flags.SigningAuthoritySocket), Credential: credential, Timeout: timeout,
-	})
+	client, err := reloadingAuthorityClient(flags, timeout)
 	if err != nil {
 		return nil, err
 	}
@@ -219,4 +207,21 @@ func localSigningKey(keyConf *KeyConf) ([]byte, bool) {
 func localSigningKeyBytes(keyConf *KeyConf) []byte {
 	key, _ := localSigningKey(keyConf)
 	return key
+}
+
+// reloadingAuthorityClient connects to the signing authority under the credential file's current contents and follows a session replacement
+// (replace-session, advance-epoch) in-process: a fenced refusal re-reads the file. The shard process is not restarted for authority orders.
+func reloadingAuthorityClient(flags *shardNodeSigningFlags, timeout time.Duration) (*service.ReloadingClient, error) {
+	client, err := service.NewReloadingClient(service.ClientConfig{Dial: service.UnixDialer(flags.SigningAuthoritySocket), Timeout: timeout},
+		func() ([]byte, error) {
+			credential, err := readCredentialFile(flags.SigningAuthorityCredential)
+			if err != nil {
+				return nil, fmt.Errorf("loading the signing authority credential: %w", err)
+			}
+			return credential, nil
+		})
+	if err != nil {
+		return nil, err
+	}
+	return client, nil
 }

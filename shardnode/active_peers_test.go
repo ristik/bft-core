@@ -155,3 +155,27 @@ func TestActivePeersSameEpochDifferingOnlyInSelfIsAConflict(t *testing.T) {
 	require.False(t, without.Member())
 	require.NoError(t, without.Install(1, validatorsOf(b)), "the same assignment again is a no-op")
 }
+
+// Each accepted stage tells the prewarm hook its peers (never this node); a refused stage tells it nothing.
+func TestActivePeersTellTheStageHookItsPeers(t *testing.T) {
+	self, v2, j := newPeerID(t), newPeerID(t), newPeerID(t)
+	peers, err := NewActivePeers(self, validatorsOf(self, v2))
+	require.NoError(t, err)
+	var told []peer.ID
+	peers.OnStage(func(ids []peer.ID) { told = append(told, ids...) })
+	require.NoError(t, peers.Stage([]string{self.String(), j.String()}))
+	require.Equal(t, []peer.ID{j}, told)
+	require.Error(t, peers.Stage([]string{"not a peer id"}))
+	require.Equal(t, []peer.ID{j}, told)
+}
+
+func TestActivePeersReportTheStagedPeersUntilTheInstall(t *testing.T) {
+	self, v2, j := newPeerID(t), newPeerID(t), newPeerID(t)
+	peers, err := NewActivePeers(self, validatorsOf(self, v2))
+	require.NoError(t, err)
+	require.Empty(t, peers.StagedPeers())
+	require.NoError(t, peers.Stage([]string{self.String(), j.String()}))
+	require.Equal(t, []peer.ID{j}, peers.StagedPeers(), "never this node")
+	require.NoError(t, peers.Install(1, validatorsOf(self, j)))
+	require.Empty(t, peers.StagedPeers(), "an install clears the stage")
+}
