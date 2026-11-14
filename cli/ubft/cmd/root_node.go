@@ -441,6 +441,15 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		stopWitnesses := serveWitnesses(host, cm)
 		defer stopWitnesses()
 	}
+	if flags.HandoffProfile {
+		// The record fetcher is installed and the bootstrap peers are dialled before the Q3 recovery: an installation interrupted before
+		// its checkpoint's P85 record-log prefix was retained completes in that recovery, which fetches the prefix from the other roots and
+		// verifies it against the checkpoint (#1028). Without the fetcher every restart of such a root failed in the recovery.
+		cm.SetRecordFetcher(rootRecordFetcher{host: host, cm: cm})
+	}
+	if err = host.BootstrapConnect(ctx, log); err != nil {
+		return err
+	}
 	if q3rt != nil {
 		if err = attachRootQ3(ctx, q3rt, cm); err != nil {
 			return err
@@ -471,9 +480,6 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 			return err
 		}
 		server.Register(host)
-	}
-	if err = host.BootstrapConnect(ctx, log); err != nil {
-		return err
 	}
 	if flags.InstallHandoffEpoch != 0 {
 		if !flags.HandoffProfile || flags.InstallHandoffEpoch < 2 {
@@ -1017,7 +1023,8 @@ func recordsServerAllowed(static map[peer.ID]struct{}, shardConfs []*types.Parti
 
 // serveRootRecords serves the root's source-log cuts and records to the validators of the shards this root was configured with. The
 // shard pairs an EVM with the root and derives the next prefix of the log from them, verifying everything against the unicity tree
-// root of its certificate, so the service needs no trust in the node it asks.
+// root of its certificate, so the service needs no trust in the node it asks. The root's own fetcher (rootRecordFetcher) is installed
+// by rootNodeRun before the Q3 recovery, not here (#1028).
 func serveRootRecords(log *slog.Logger, host *network.Peer, cm *consensus.ConsensusManager, shardConfs []*types.PartitionDescriptionRecord) (func(), error) {
 	eligible, err := frontierEligiblePeers(shardConfs)
 	if err != nil {
@@ -1034,7 +1041,6 @@ func serveRootRecords(log *slog.Logger, host *network.Peer, cm *consensus.Consen
 	// fetches the missing prefix from them (storage.BlockStore.SetRecordFetcher), verifying every record against the checkpoint.
 	server := recordsfeed.NewServer(recordsSource{cm}, recordsServerAllowed(allowed, shardConfs, cm))
 	host.RegisterProtocolHandler(recordsfeed.ProtocolID, server.Handler)
-	cm.SetRecordFetcher(rootRecordFetcher{host: host, cm: cm})
 	log.Info("root records feed enabled", "validators", len(eligible))
 	return func() { host.RemoveProtocolHandler(recordsfeed.ProtocolID) }, nil
 }
