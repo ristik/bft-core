@@ -185,9 +185,7 @@ func (c *BFTClient) relayDue(now time.Time) bool {
 	if c.relay == nil || c.isFollower() {
 		return false
 	}
-	c.mu.Lock()
-	since := now.Sub(c.lastProgress)
-	c.mu.Unlock()
+	since := now.Sub(c.clock().Delivered()) // nothing adopted, repeats included: delivery is stalled
 	return since >= c.relay.after && now.Sub(c.relay.asked) >= c.relay.after
 }
 

@@ -76,7 +76,7 @@ func TestAnAdvancingCertificateRetiresThePendingAgeAndTheCounters(t *testing.T) 
 func TestRepeatsAreCountedAndRebuiltAttemptsDoNotResetTheNoProgressAge(t *testing.T) {
 	w := newPendingWorld(t, BFTClientOptions{})
 	w.accept(t, w.uc(t, 5, 55)) // progress: the last non-repeat certificate
-	progress := w.c.lastProgress
+	progress := w.c.clock().Advanced()
 	require.NoError(t, w.c.Submit(context.Background(), pendingRequest(w.f)))
 
 	w.accept(t, w.uc(t, 5, 60)) // a T2 repeat of round 5
@@ -173,7 +173,7 @@ func TestThePendingFiguresMoveOnTheConfiguredAdoptionPath(t *testing.T) {
 	}
 
 	require.NoError(t, deliverUC(f.ucMine)) // the first certificate: progress
-	progress := c.lastProgress
+	progress := c.clock().Advanced()
 	require.False(t, progress.IsZero())
 	require.Zero(t, c.pendingDiagnostics(time.Now()).ConsecutiveRepeats)
 
@@ -191,18 +191,15 @@ func TestThePendingFiguresMoveOnTheConfiguredAdoptionPath(t *testing.T) {
 	require.Zero(t, d.NoProgressAge)
 }
 
-// Run seeds the progress clock, so a node that starts into a run of repeats reports a no-progress age (rev3's nit on #995).
+// The progress clock starts with the client, so a node that starts into a run of repeats reports a no-progress age (rev3's nit on #995).
 func TestRunSeedsTheProgressClock(t *testing.T) {
 	sink := &admissionSink{}
 	c, _ := newAdmissionTestClient(t, sink, &admissionTestNet{})
-	c.mu.Lock()
-	require.True(t, c.lastProgress.IsZero(), "premise: nothing has run yet")
-	c.mu.Unlock()
 	factory := &admissionTestFactory{}
 	cancel, done := startAdmissionClient(t, c, factory, sink)
 	defer func() { cancel(); require.ErrorIs(t, <-done, context.Canceled) }()
 	c.mu.Lock()
-	seeded := c.lastProgress
+	seeded := c.clock().Advanced()
 	c.consecutiveRepeats = 1 // as if the first certificates seen were repeats
 	c.mu.Unlock()
 	require.False(t, seeded.IsZero())

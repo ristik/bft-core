@@ -198,17 +198,22 @@ type BFTClient struct {
 	// pending exactly while that certificate is the held one (a certificate that advances the round replaces the held one, and
 	// the next Submit replaces this).
 	outstanding *outstandingRequest
-	// consecutiveRepeats counts the repeat certificates adopted since the last non-repeat one, and lastProgress is when that last non-repeat
-	// certificate was adopted, seeded at Run so a node that starts into a run of repeats still has an age (#976). Both are updated by
-	// noteAdoptedLocked on BOTH adoption paths and are in memory: a restart resets them, and the diagnostics built on them say so.
+	// consecutiveRepeats counts the repeat certificates adopted since the last non-repeat one (#976); the time of that last non-repeat is
+	// the progress clock's Advanced. Both are updated by noteAdoptedLocked on BOTH adoption paths and are in memory: a restart resets them,
+	// and the diagnostics built on them say so.
 	consecutiveRepeats int
-	lastProgress       time.Time
 	lastPendingWarn    time.Time
 	// resubmitWanted is set by the configured-mode feed observer, which performs no network I/O, to ask Run to re-send.
 	resubmitWanted bool
 
-	lastCertResponseTime atomic.Int64
-	// firstResponse is set once any certification response has arrived; it ends the early startup handshake retry.
+	// progress is the common progress clock: it moves only on an adopted certificate (see UsefulProgress). Use clock().
+	progress     *progressClock
+	progressInit sync.Once
+	// lastHandshake is when a handshake was last sent (UnixNano): the inactivity re-handshake is paced at one per InactivityTimeout, so a
+	// stalled node asks again on that cadence, not once per heartbeat. It is pacing only, never evidence of progress.
+	lastHandshake atomic.Int64
+	// firstResponse is set once a certificate has been adopted; it ends the early startup handshake retry. An invalid, stale or duplicate
+	// response does not end it.
 	firstResponse atomic.Bool
 	profile2      *Profile2Consumer
 
@@ -424,7 +429,7 @@ func NewBFTClient(
 		followed:       make(chan *certification.CertificationResponse, 4),
 		roleWake:       make(chan struct{}, 1),
 	}
-	c.lastCertResponseTime.Store(time.Now().UnixMilli())
+	c.clock() // the clock starts at construction: a node that starts into silence has an age
 	return c, nil
 }
 
@@ -513,9 +518,6 @@ func (c *BFTClient) Run(ctx context.Context) error {
 	if c.running {
 		c.mu.Unlock()
 		return ErrClientRunning
-	}
-	if c.lastProgress.IsZero() {
-		c.lastProgress = time.Now() // a node that starts into a run of repeats still has a no-progress age
 	}
 	hasDriver := c.driver != nil
 	factory, gate := c.admissionFactory, c.admissionGate
@@ -668,8 +670,10 @@ func (c *BFTClient) Run(ctx context.Context) error {
 		case <-heartbeat.C:
 			c.checkRole(ctx)
 			c.reportPending(ctx)
-			last := time.UnixMilli(c.lastCertResponseTime.Load())
-			if time.Since(last) > c.opts.InactivityTimeout {
+			// measured from the last ADOPTED certificate (an invalid, stale or duplicate response does not postpone it), and paced at one
+			// re-handshake per timeout
+			if time.Since(c.clock().Delivered()) > c.opts.InactivityTimeout &&
+				time.Since(time.Unix(0, c.lastHandshake.Load())) >= c.opts.InactivityTimeout {
 				if c.log != nil && !c.isFollower() {
 					c.log.WarnContext(ctx, "inactivity timeout exceeded, re-sending handshake")
 				}
@@ -865,6 +869,7 @@ func (c *BFTClient) sendHandshake(ctx context.Context) error {
 		return fmt.Errorf("selecting root nodes for handshake: %w", err)
 	}
 	msg := handshake.Handshake{PartitionID: c.partitionID, ShardID: c.shardID, NodeID: c.nodeID}
+	c.lastHandshake.Store(time.Now().UnixNano())
 	if err := c.net.Send(ctx, msg, rootIDs...); err != nil {
 		return fmt.Errorf("sending handshake: %w", err)
 	}
@@ -1309,8 +1314,6 @@ func (c *BFTClient) handleCertificationResponse(ctx context.Context, cr *certifi
 	if cr == nil {
 		return errors.New("nil certification response")
 	}
-	c.lastCertResponseTime.Store(time.Now().UnixMilli())
-	c.firstResponse.Store(true)
 	c.mu.Lock()
 	admission := c.admission
 	profile2 := c.profile2
@@ -1581,11 +1584,13 @@ func (c *BFTClient) sendRequest(ctx context.Context, req *certification.BlockCer
 // handleCertificationResponse and the configured one in deliverConfigured): a repeat extends the run of repeats, anything else is progress. A
 // duplicate is not adopted and never reaches here. c.mu must be held.
 func (c *BFTClient) noteAdoptedLocked(class UCClass) {
+	c.clock().adopted(class == UCRepeat)
+	c.firstResponse.Store(true)
 	if class == UCRepeat {
 		c.consecutiveRepeats++
 		return
 	}
-	c.consecutiveRepeats, c.lastProgress = 0, time.Now()
+	c.consecutiveRepeats = 0
 }
 
 // PendingDiagnostics is what the shard knows about work that has not been certified yet (#976). It is built from this process's memory only: a
@@ -1611,8 +1616,8 @@ func (c *BFTClient) pendingDiagnostics(now time.Time) PendingDiagnostics {
 	if o := c.outstanding; o != nil && c.luc != nil && o.on == (deliveryAttempt{partitionRound: c.luc.GetRoundNumber(), rootRound: c.luc.GetRootRoundNumber()}) {
 		d.Pending, d.OutstandingAge = true, now.Sub(o.firstSent)
 	}
-	if (d.Pending || c.consecutiveRepeats > 0) && !c.lastProgress.IsZero() {
-		d.NoProgressAge = now.Sub(c.lastProgress)
+	if d.Pending || c.consecutiveRepeats > 0 {
+		d.NoProgressAge = now.Sub(c.clock().Advanced())
 	}
 	return d
 }
