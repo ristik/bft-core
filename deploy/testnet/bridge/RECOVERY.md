@@ -134,7 +134,7 @@ every bridged token is lost with it, by design and as disclosed. Nothing carries
 3. **Network operator:** stops publishing the old `bridge/public/`, runs `reset.py`, starts the new generation, then deploys the bridge on it:
    ```sh
    # only when bridge/pins.json changed: rebuild the tools image ("Operator steps" in README.md)
-   python3 deploy/testnet/bridge/build-bridge-image.py --contracts-source /srv/src/contracts-pinned --nbp-source /srv/src/nbp-pinned
+   python3 deploy/testnet/bridge/build-bridge-image.py --bft-source /srv/src/bft-pinned --contracts-source /srv/src/contracts-pinned --nbp-source /srv/src/nbp-pinned
    python3 deploy/testnet/bridge/deploy_bridge.py /srv/testnet/NEWGEN --agg-conf network/aggregator-conf.json --agg-url http://aggregator:8080 \
        --tester-eth-url https://… --tester-agg-url https://… --tester-lockproof-url https://…
    python3 deploy/testnet/bridge/overlay.py /srv/testnet/NEWGEN

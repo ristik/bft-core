@@ -196,6 +196,8 @@ type completedRound struct {
 	// token is the role token the request was signed under. A replay sends these bytes only under that token; when it has ended the
 	// cache is kept (the authorization is answered, so nothing is rebuilt or re-signed) and the replay abstains.
 	token uint64
+	// handle holds the request's attempt across every send of it (resend.go attemptHandle): Round's retries and a re-delivery's re-send.
+	handle *attemptHandle
 }
 
 func (c *completedRound) authorizes(uc *types.UnicityCertificate, exp Expectation) bool {
@@ -764,7 +766,7 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 			r.health.updateVoting(false, nonVotingFollower)
 			return nil // signed under a role that has ended: kept, never rebuilt, re-signed or sent under another token
 		}
-		return r.sendUnder(ctx, uc, r.completed.req, exp.Round, r.completed.token)
+		return r.sendUnder(withAttemptHandle(ctx, r.completed.handle), uc, r.completed.req, exp.Round, r.completed.token)
 	}
 
 	// RE-DELIVERY OF AN AUTHORIZATION THE SIGNER ALREADY REFUSED. Nothing was signed, so there is
@@ -1083,6 +1085,7 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 		rootRound:      uc.GetRootRoundNumber(),
 		req:            req,
 		token:          r.leaseToken,
+		handle:         &attemptHandle{},
 	}
 	r.health.updateSubmitted(exp.Round)
 	r.health.updateVoting(true, "")
@@ -1091,7 +1094,7 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 		r.log.InfoContext(ctx, "submitting block certification request",
 			slog.Uint64("round", exp.Round), slog.Bool("quiet", irQuiet), slog.Bool("leader", leader == r.nodeID))
 	}
-	return r.send(ctx, uc, req, exp.Round)
+	return r.send(withAttemptHandle(ctx, r.completed.handle), uc, req, exp.Round)
 }
 
 // ErrSubmissionFailed marks a failure to SEND an already-applied round's certification request.
@@ -1131,8 +1134,8 @@ func (r *Round) sendUnder(ctx context.Context, uc *types.UnicityCertificate, req
 		if err = r.submitter.Submit(ctx, req); err == nil {
 			return nil
 		}
-		if attempt >= submitRetries || ctx.Err() != nil || errors.Is(err, ErrRequestAcrossActivation) || errors.Is(err, ErrFollower) {
-			// a closed epoch's request, or one whose role has ended, never becomes sendable
+		if attempt >= submitRetries || ctx.Err() != nil || neverPending(err) {
+			// a closed epoch's request, one whose role has ended, or one whose attempt was superseded never becomes sendable
 			break
 		}
 		if r.log != nil {

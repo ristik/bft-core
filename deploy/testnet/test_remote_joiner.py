@@ -124,6 +124,148 @@ class Forwards(unittest.TestCase):
             self.assertEqual(total, 1)
 
 
+class FakeHost:
+    """iptables' DOCKER-USER chain, tc and docker network inspect, as far as isolate/unisolate use them."""
+
+    def __init__(self, chain=True, options=None, rules=None):
+        self.chain = list(rules or []) if chain else None
+        self.options, self.calls, self.qdisc = options or {}, [], None
+
+    def run(self, cmd, check=True, **kw):
+        self.calls.append(cmd)
+        ok = lambda out='': subprocess.CompletedProcess(cmd, 0, out, '')
+        if cmd[:3] == ['docker', 'network', 'inspect']:
+            return ok(json.dumps([{'Id': 'f9cd10559d30' + 'a' * 52, 'Options': self.options}]))
+        if cmd[:2] == ['sudo', 'iptables']:
+            if self.chain is None:
+                if check:
+                    raise rj.Failure('iptables: No chain/target/match by that name')
+                return subprocess.CompletedProcess(cmd, 1, '', 'No chain/target/match by that name')
+            op = cmd[2]
+            if op == '-S':
+                # as iptables -S prints it: a value with a space in double quotes
+                return ok('-N DOCKER-USER\n' + ''.join('-A DOCKER-USER ' + ' '.join(f'"{w}"' if ' ' in w else w for w in r) + '\n' for r in self.chain))
+            if op == '-I':
+                self.chain.insert(int(cmd[4]) - 1, cmd[5:])
+            elif op == '-D':
+                self.chain.remove(cmd[4:])
+            return ok()
+        if cmd[:3] == ['sudo', 'tc', 'qdisc']:
+            if cmd[3] == 'replace':
+                self.qdisc = cmd[8:]
+            elif cmd[3] == 'del':
+                self.qdisc = None
+            return ok()
+        return ok()
+
+
+class BridgeIsolation(unittest.TestCase):
+    """start --isolate-bridge / --emulate-wan (bft-core#1075): on a shared Linux docker host the entity reaches only its own containers and the host's
+    published addresses, from before its first container starts; the rules are found and removed by their comment only."""
+    OTHER = ['-i', 'br-1111', '-m', 'comment', '--comment', 'unicity-joiner other', '-j', 'DROP']
+
+    def lap(self):
+        lap = rj.Laptop.__new__(rj.Laptop)
+        lap.state = {'project': 'tn-x-joiner5', 'entity': 5}
+        lap.save = lambda: None
+        return lap
+
+    def patched(self, host):
+        return unittest.mock.patch.multiple(rj, run=host.run, say=lambda t: None)
+
+    def test_the_rules_match_only_this_bridge_and_carry_the_project(self):
+        rules = rj.isolation_rules('br-f9cd10559d30', 'tn-x-joiner5')
+        self.assertEqual([r[-1] for r in rules], ['RETURN', 'DROP', 'DROP'])
+        self.assertEqual(rules[0][:4], ['-i', 'br-f9cd10559d30', '-o', 'br-f9cd10559d30'], 'its own containers talk to each other')
+        self.assertEqual(rules[1][:2], ['-i', 'br-f9cd10559d30'], 'nothing forwarded out of it: no other bridge, no private address')
+        self.assertEqual(rules[2][:2], ['-o', 'br-f9cd10559d30'], 'nothing forwarded into it')
+        for r in rules:
+            self.assertIn('unicity-joiner tn-x-joiner5', r)
+
+    def test_the_bridge_name_option_wins_over_the_default(self):
+        lap = self.lap()
+        for options, want in (({}, 'br-f9cd10559d30'), ({'com.docker.network.bridge.name': 'tnj5'}, 'tnj5')):
+            with self.patched(FakeHost(options=options)):
+                self.assertEqual(rj.bridge_of(lap), want)
+
+    def test_isolate_puts_the_return_first_and_netem_applies(self):
+        host, lap = FakeHost(rules=[self.OTHER]), self.lap()
+        with self.patched(host):
+            rj.isolate(lap, wan_ms=50)
+        self.assertEqual(host.chain[:3], rj.isolation_rules('br-f9cd10559d30', 'tn-x-joiner5'))
+        self.assertEqual(host.chain[3], self.OTHER, 'another project\'s rule is kept, after ours')
+        self.assertEqual(host.qdisc, ['delay', '50ms', '5ms'])
+        self.assertEqual((lap.state['isolation']['bridge'], lap.state['isolation']['wanMs']), ('br-f9cd10559d30', 50))
+
+    def test_a_rerun_keeps_the_order_without_duplicates_even_from_a_partial_set(self):
+        ours = rj.isolation_rules('br-f9cd10559d30', 'tn-x-joiner5')
+        for start in ([], [ours[2]], [ours[1], self.OTHER], ours):   # nothing, only one DROP (an interrupted run), a DROP before a foreign rule, all three
+            host, lap = FakeHost(rules=list(start)), self.lap()
+            with self.patched(host):
+                rj.isolate(lap)
+                rj.isolate(lap)
+            mine = [r for r in host.chain if 'unicity-joiner tn-x-joiner5' in r]
+            self.assertEqual(mine, ours, f'from {start}: exactly the three, RETURN first')
+            self.assertEqual(host.chain[:3], ours)
+
+    def test_a_rerun_without_wan_keeps_the_delay_on_record_and_unisolate_removes_it(self):
+        host, lap = FakeHost(), self.lap()
+        with self.patched(host):
+            rj.isolate(lap, wan_ms=50)
+            rj.isolate(lap)   # start --isolate-bridge again, without --emulate-wan
+            self.assertEqual(lap.state['isolation']['wanMs'], 50)
+            lap.state['isolation']['wanMs'] = None   # even if the record lost it, the qdisc goes
+            rj.unisolate(lap)
+        self.assertIsNone(host.qdisc)
+        self.assertIn(['sudo', 'tc', 'qdisc', 'del', 'dev', 'br-f9cd10559d30', 'root'], host.calls)
+        self.assertEqual([r for r in host.chain if 'unicity-joiner tn-x-joiner5' in r], [])
+        self.assertNotIn('isolation', lap.state)
+
+    def test_unisolate_removes_only_its_own_rules(self):
+        ours = rj.isolation_rules('br-f9cd10559d30', 'tn-x-joiner5')
+        host, lap = FakeHost(rules=[*ours, self.OTHER, ['-j', 'RETURN']]), self.lap()
+        lap.state['isolation'] = {'bridge': 'br-f9cd10559d30'}
+        with self.patched(host):
+            rj.unisolate(lap)
+        self.assertEqual(host.chain, [self.OTHER, ['-j', 'RETURN']])
+
+    def test_unisolate_without_the_chain_or_the_tag_is_quiet(self):
+        for host in (FakeHost(chain=False), FakeHost(rules=[self.OTHER])):
+            lap = self.lap()
+            lap.state['isolation'] = {'bridge': 'br-f9cd10559d30'}
+            with self.patched(host):
+                rj.unisolate(lap)
+            self.assertNotIn('isolation', lap.state)
+            self.assertFalse(any(c[2:3] == ['-D'] for c in host.calls if c[:2] == ['sudo', 'iptables']))
+
+    def test_emulate_wan_must_be_positive(self):
+        self.assertEqual(rj.positive_ms('50'), 50)
+        for bad in ('0', '-5'):
+            with self.assertRaises(rj.argparse.ArgumentTypeError):
+                rj.positive_ms(bad)
+        with self.assertRaises(SystemExit), unittest.mock.patch('sys.stderr'):
+            rj.main(['start', '--home', '/nonexistent', '--emulate-wan', '0'])
+
+    def test_start_isolates_before_any_container_runs(self):
+        order = []
+        lap = unittest.mock.Mock()
+        lap.entity = 5
+        lap.state = {'project': 'tn-x-joiner5'}
+        lap.services_state.return_value = {}
+        lap.dc.side_effect = lambda *a, **k: order.append(('dc',) + a)
+        lap.status.return_value = {'follower': True}
+        with unittest.mock.patch.object(rj, 'isolate', lambda l, w, rules: order.append(('isolate', w, rules))), \
+                unittest.mock.patch.object(rj, 'background', lambda *a: order.append(('background', a[1]))), unittest.mock.patch.object(rj, 'say', lambda t: None):
+            rj.start(lap, isolate_bridge=True, wan_ms=50)
+        self.assertEqual(order[0][:3], ('dc', 'up', '--no-start'))
+        self.assertEqual(order[1], ('isolate', 50, True))
+        order.clear()
+        with unittest.mock.patch.object(rj, 'isolate', lambda *a, **k: order.append('isolate')), \
+                unittest.mock.patch.object(rj, 'background', lambda *a: None), unittest.mock.patch.object(rj, 'say', lambda t: None):
+            rj.start(lap)
+        self.assertNotIn('isolate', order, 'opt-in only')
+
+
 class LaptopCompose(unittest.TestCase):
     def setUp(self):
         self.out = rj.laptop_compose(genesis_compose(), 5, '16Uiu2ROOT5', '16Uiu2EVM5', 'tn-test-joiner5')

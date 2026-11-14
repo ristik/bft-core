@@ -47,6 +47,13 @@ func (p *progressClock) adopted(repeat bool) {
 	}
 }
 
+// setDelivered places the delivery mark (tests).
+func (p *progressClock) setDelivered(t time.Time) {
+	p.mu.Lock()
+	p.delivered = t
+	p.mu.Unlock()
+}
+
 func (p *progressClock) Delivered() time.Time {
 	p.mu.Lock()
 	defer p.mu.Unlock()
