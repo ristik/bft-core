@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/ainvaltin/httpsrv"
@@ -83,9 +84,11 @@ type (
 		UTBCaptureUCResp         string // lane diagnostics: write each distinct version 2 certification response that carries entries here, before it is sent
 		HandoffProfile           bool
 		InstallHandoffEpoch      uint64
-		Q3Lane                   bool // the Q3 acceptance lane: a verified Q3 history, the install journal and the V3 handoff pipeline
-		Q3JournalDBFile          string
-		B1Registry               bool // the deployment carries the B1 registry: a handoff above its 16 members is refused at admission
+		// RecordsPublicReads serves record reads (never cuts) of the records feed to any peer under recordsfeed.DefaultPublicLimits (#1048)
+		RecordsPublicReads bool
+		Q3Lane             bool // the Q3 acceptance lane: a verified Q3 history, the install journal and the V3 handoff pipeline
+		Q3JournalDBFile    string
+		B1Registry         bool // the deployment carries the B1 registry: a handoff above its 16 members is refused at admission
 
 		BlockRate        uint32
 		MaxRequests      uint   // certification request channel capacity
@@ -159,6 +162,8 @@ func rootNodeRunCmd(baseFlags *baseFlags) *cobra.Command {
 		fmt.Sprintf("path to the orchestration database (default: %s)", filepath.Join("$UBFT_HOME", orchestrationDBFileName)))
 	cmd.Flags().BoolVar(&flags.HandoffProfile, "profile-3", false, "run the version-3 root handoff network profile (the execution rule with root-applied shard-configuration transitions; a store or peer of profile 2 is refused)")
 	cmd.Flags().Uint64Var(&flags.InstallHandoffEpoch, "install-handoff-epoch", 0, "fetch and verify this successor epoch before starting profile-2 consensus")
+	cmd.Flags().BoolVar(&flags.RecordsPublicReads, "records-public-reads", true, "serve the retained source-log records (never the cuts) to any peer, under a bounded public budget: a root "+
+		"that is not a member of this root's committees (one that catches up several epochs behind) completes its checkpoints' record prefixes from it (--profile-3)")
 	cmd.Flags().BoolVar(&flags.Q3Lane, "q3-lane", false, "run the Q3 acceptance lane: verified Q3 history, install journal and V3 handoffs (requires --profile-3)")
 	cmd.Flags().StringVar(&flags.Q3JournalDBFile, "q3-journal-db", "",
 		fmt.Sprintf("Q3 install journal database (default: %s)", filepath.Join("$UBFT_HOME", q3JournalDBFileName)))
@@ -445,7 +450,11 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		// The record fetcher is installed and the bootstrap peers are dialled before the Q3 recovery: an installation interrupted before
 		// its checkpoint's P85 record-log prefix was retained completes in that recovery, which fetches the prefix from the other roots and
 		// verifies it against the checkpoint (#1028). Without the fetcher every restart of such a root failed in the recovery.
-		cm.SetRecordFetcher(rootRecordFetcher{host: host, cm: cm})
+		fetcher, fetchErr := newRootRecordFetcher(host, cm, trustBaseStore, flags.BootstrapAddresses, shardConfs)
+		if fetchErr != nil {
+			return fetchErr
+		}
+		cm.SetRecordFetcher(fetcher)
 	}
 	if err = host.BootstrapConnect(ctx, log); err != nil {
 		return err
@@ -468,7 +477,7 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		defer stopFrontier()
 	}
 	if flags.HandoffProfile {
-		stopRecords, recErr := serveRootRecords(log, host, cm, shardConfs)
+		stopRecords, recErr := serveRootRecords(log, host, cm, shardConfs, flags.RecordsPublicReads)
 		if recErr != nil {
 			return recErr
 		}
@@ -934,31 +943,100 @@ func serveWitnesses(host *network.Peer, cm *consensus.ConsensusManager) func() {
 	return func() { host.RemoveProtocolHandler(poswitness.ProtocolID) }
 }
 
-// rootRecordFetcher fetches source-log records from the other roots of the current trust base, in the order the trust base lists them.
+// rootRecordFetcher fetches the source-log records a checkpoint commits and this root lacks (storage.BlockStore.SetRecordFetcher). Its
+// sources are locators only (bft-core#1048): whatever one serves is verified record by record against the checkpoint, and a source whose
+// records do not verify is skipped for the next one. The list is built, without this root or a repeat (recordSources), from:
+//   - the roots of the installed trust base;
+//   - the roots of the newest trust base this root holds: an epoch install stores the activated epoch's verified trust base before it
+//     completes its checkpoint, so these are the committee that holds the checkpoint's log;
+//   - the bootstrap peers (configured: the current roots of a network this root lags behind, its old committee possibly gone);
+//   - the configured shard validators, which mirror the verified record log where they serve the feed.
+//
+// The prefix collector (storage.fetchFromSources) does not ask them once each in this order: each pass asks every source in turn from a
+// starting index that rotates between fetches, and passes repeat until one serves the verified prefix or the fetch's bound. Sources takes
+// a snapshot of the list at each pass and RecordsFromSource indexes that snapshot, so a source index means the same peer for the whole pass
+// even if a trust base is installed meanwhile.
+//
+// A root that is not a member of the committees they follow is served record reads under their public budget (recordsfeed.PublicLimits).
 type rootRecordFetcher struct {
 	host *network.Peer
 	cm   *consensus.ConsensusManager
+	mu   sync.Mutex
+	snap []peer.ID // the list of the pass in progress (Sources)
+	// newest is the trust base store's newest trust base (TrustBaseStore.LoadLast)
+	newest func() (*types.RootTrustBaseV1, error)
+	// bootstrap and mirrors are the configured locators
+	bootstrap, mirrors []peer.ID
 }
 
-func (f rootRecordFetcher) remote() recordsfeed.P2PRemote {
-	var others []peer.ID
-	for _, id := range f.cm.Validators() {
-		if id != f.host.ID() {
-			others = append(others, id)
+func (f *rootRecordFetcher) remote() recordsfeed.P2PRemote {
+	var newest []peer.ID
+	if f.newest != nil {
+		if tb, err := f.newest(); err == nil && tb != nil {
+			for _, n := range tb.RootNodes {
+				if id, err := peer.Decode(n.NodeID); err == nil {
+					newest = append(newest, id)
+				}
+			}
 		}
 	}
-	return recordsfeed.P2PRemote{Opener: recordsfeed.FromLibp2p(f.host), Roots: others}
+	return recordsfeed.P2PRemote{Opener: recordsfeed.FromLibp2p(f.host), Roots: recordSources(f.host.ID(), f.cm.Validators(), newest, f.bootstrap, f.mirrors)}
 }
 
-func (f rootRecordFetcher) Records(ctx context.Context, from uint64, max int) ([]rootrecords.Record, error) {
+// recordSources is the fetch order of rootRecordFetcher: every list in turn, without self and without a repeat.
+func recordSources(self peer.ID, lists ...[]peer.ID) []peer.ID {
+	seen := map[peer.ID]struct{}{self: {}}
+	var out []peer.ID
+	for _, list := range lists {
+		for _, id := range list {
+			if _, ok := seen[id]; ok || id == "" {
+				continue
+			}
+			seen[id] = struct{}{}
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// newRootRecordFetcher is the production fetcher: the bootstrap peers and the configured shard validators as extra locators.
+func newRootRecordFetcher(host *network.Peer, cm *consensus.ConsensusManager, trustBases *trustbase.TrustBaseStore, bootstrap []string, shardConfs []*types.PartitionDescriptionRecord) (*rootRecordFetcher, error) {
+	nodes, err := getBootStrapNodes(bootstrap)
+	if err != nil {
+		return nil, err
+	}
+	f := &rootRecordFetcher{host: host, cm: cm, newest: trustBases.LoadLast}
+	for _, n := range nodes {
+		f.bootstrap = append(f.bootstrap, n.ID)
+	}
+	if f.mirrors, err = frontierEligiblePeers(shardConfs); err != nil {
+		return nil, err
+	}
+	return f, nil
+}
+
+func (f *rootRecordFetcher) Records(ctx context.Context, from uint64, max int) ([]rootrecords.Record, error) {
 	return f.remote().Records(ctx, from, max)
 }
 
-// Sources and RecordsFromSource let the block store ask one root at a time and skip one whose records do not verify (#647).
-func (f rootRecordFetcher) Sources() int { return f.remote().Sources() }
+// Sources and RecordsFromSource let the block store ask one root at a time and skip one whose records do not verify (#647). Sources
+// snapshots the list for the pass; RecordsFromSource indexes the snapshot.
+func (f *rootRecordFetcher) Sources() int {
+	remote := f.remote()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.snap = remote.Roots
+	return len(f.snap)
+}
 
-func (f rootRecordFetcher) RecordsFromSource(ctx context.Context, source int, from uint64, max int) ([]rootrecords.Record, error) {
-	return f.remote().RecordsFromSource(ctx, source, from, max)
+func (f *rootRecordFetcher) RecordsFromSource(ctx context.Context, source int, from uint64, max int) ([]rootrecords.Record, error) {
+	f.mu.Lock()
+	snap := f.snap
+	f.mu.Unlock()
+	if snap == nil {
+		snap = f.remote().Roots
+	}
+	return recordsfeed.P2PRemote{Opener: recordsfeed.FromLibp2p(f.host), Roots: snap}.RecordsFromSource(ctx, source, from, max)
 }
 
 // recordsSource adapts the consensus manager to the records feed's server.
@@ -1025,7 +1103,7 @@ func recordsServerAllowed(static map[peer.ID]struct{}, shardConfs []*types.Parti
 // shard pairs an EVM with the root and derives the next prefix of the log from them, verifying everything against the unicity tree
 // root of its certificate, so the service needs no trust in the node it asks. The root's own fetcher (rootRecordFetcher) is installed
 // by rootNodeRun before the Q3 recovery, not here (#1028).
-func serveRootRecords(log *slog.Logger, host *network.Peer, cm *consensus.ConsensusManager, shardConfs []*types.PartitionDescriptionRecord) (func(), error) {
+func serveRootRecords(log *slog.Logger, host *network.Peer, cm *consensus.ConsensusManager, shardConfs []*types.PartitionDescriptionRecord, publicReads bool) (func(), error) {
 	eligible, err := frontierEligiblePeers(shardConfs)
 	if err != nil {
 		return nil, err
@@ -1040,6 +1118,15 @@ func serveRootRecords(log *slog.Logger, host *network.Peer, cm *consensus.Consen
 	// The other roots of the trust base are served too: a root that installs an epoch checkpoint without the source log it commits
 	// fetches the missing prefix from them (storage.BlockStore.SetRecordFetcher), verifying every record against the checkpoint.
 	server := recordsfeed.NewServer(recordsSource{cm}, recordsServerAllowed(allowed, shardConfs, cm))
+	if publicReads {
+		// record reads (never cuts) of any other peer, under their own bounded budget: a root behind that no committee member authorizes
+		// any more completes its checkpoints' prefixes from them, verifying every record (bft-core#1048)
+		limits := recordsfeed.DefaultPublicLimits()
+		if err := server.SetPublicRecords(limits); err != nil {
+			return nil, err
+		}
+		log.Info("root records feed: public record reads", "pending", limits.Pending, "perPeer", limits.PerPeer, "rate", limits.Rate, "byteRate", limits.ByteRate)
+	}
 	host.RegisterProtocolHandler(recordsfeed.ProtocolID, server.Handler)
 	log.Info("root records feed enabled", "validators", len(eligible))
 	return func() { host.RemoveProtocolHandler(recordsfeed.ProtocolID) }, nil

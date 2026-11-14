@@ -943,6 +943,31 @@ type malformedRequest struct{ err error }
 func (e malformedRequest) Error() string   { return e.err.Error() }
 func (e malformedRequest) Unwrap() []error { return []error{e.err, rctypes.ErrInvalidRequest} }
 
+// FreshInRootEpoch is the activation freshness rule of a shard request (#1036): in root epoch rootEpoch a request is admitted (collected or
+// executed) only once the shard's committed certificate is of that root epoch. Every root epoch after the genesis one recertifies every shard
+// in its first ordinary block (the epoch anchor's child marks them all changed), so the requests of the new epoch build on that certificate;
+// until it is the committed one, a request that matches the shard's context is one of the closed epoch, built without the transition the
+// new epoch's first block carries. A root-only activation changes nothing else a request is checked against, so nothing else refuses it.
+//
+// It depends on the committed certificate and the root epoch only, never on a request view: the view and the legacy paths, at collection
+// and at execution, apply the same rule. The genesis root epoch has nothing before it, and a shard without a certificate is refused elsewhere.
+func (si *ShardInfo) FreshInRootEpoch(rootEpoch uint64) error {
+	if si == nil || si.LastCR == nil {
+		return nil
+	}
+	return FreshCertificate(si.LastCR.UC.GetRootEpoch(), rootEpoch)
+}
+
+// FreshCertificate is the rule of FreshInRootEpoch for a shard whose committed certificate is of root epoch built: a request view applies it
+// to the parent certificate it resolved (RequestRoundView.PrevRootEpoch).
+func FreshCertificate(built, rootEpoch uint64) error {
+	if rootEpoch <= rctypes.GenesisRootEpoch || built >= rootEpoch {
+		return nil
+	}
+	return fmt.Errorf("%w: %w: the shard is certified in root epoch %d, root epoch %d is installed and has not recertified it yet",
+		ErrStaleRequestContext, ErrRequestBeforeActivation, built, rootEpoch)
+}
+
 // ValidRequest checks signature, membership and continuity of a request. A signer that is not a member and a bad signature
 // keep their own identities; every other refusal (a nil or malformed request, another shard, stale continuity) also matches
 // rctypes.ErrInvalidRequest, preserving the underlying error.

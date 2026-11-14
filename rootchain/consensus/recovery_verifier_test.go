@@ -94,9 +94,27 @@ func TestTheRecoveryVerifierExecutesAWeightedProofTheLegacyDispatchRefuses(t *te
 	view, enabled, err := r.manager.RequestView(q3fixture.PartitionID, types.ShardID{})
 	require.NoError(t, err)
 	require.True(t, enabled)
-	tr := view.ExpectedTR()
-	uc, err := view.PreviousUC()
+	// The first successor block (7) switches the shard to the activated assignment and recertifies it; block 8 carries no request, and its
+	// QC, carried by block 9, commits block 7. A node applies that commit before it executes block 9, so the shard's proof, in block 9, is
+	// built on the recertification of root epoch 2 (#1036).
+	anchorBlock, err := r.manager.blockStore.Block(anchor.Slot)
 	require.NoError(t, err)
+	switching, err := anchorBlock.Extend(&rctypes.BlockData{Version: 3, Epoch: 2, Round: 7, Anchor: anchor, Payload: &rctypes.Payload{Version: 3}},
+		r.manager.irReqVerifier, r.orchestration, crypto.SHA256, r.manager.log)
+	require.NoError(t, err)
+	empty, err := switching.Extend(&rctypes.BlockData{Version: 3, Epoch: 2, Round: 8, Payload: &rctypes.Payload{Version: 3},
+		Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 7, Epoch: 2, CurrentRootHash: switching.RootHash}}},
+		r.manager.irReqVerifier, r.orchestration, crypto.SHA256, r.manager.log)
+	require.NoError(t, err)
+	qc8 := &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 8, ParentRoundNumber: 7, Epoch: 2, CurrentRootHash: empty.RootHash},
+		LedgerCommitInfo: &types.UnicitySeal{Version: 1, NetworkID: 5, Epoch: 2, Timestamp: 99, RootChainRoundNumber: 7, Hash: switching.RootHash}}
+	_, err = switching.GenerateCertificates(qc8)
+	require.NoError(t, err)
+	shardKey := types.PartitionShardID{PartitionID: q3fixture.PartitionID, ShardID: types.ShardID{}.Key()}
+	recert := switching.ShardState.States[shardKey].LastCR
+	require.EqualValues(t, 2, recert.UC.GetRootEpoch())
+	empty.ShardState.States[shardKey].LastCR = recert
+	tr, uc := recert.Technical, &recert.UC
 	proof := &rctypes.IRChangeReq{Partition: q3fixture.PartitionID, Shard: types.ShardID{}, CertReason: rctypes.Quorum}
 	for _, id := range view.Context().NodeIDs() {
 		if w, err := view.SignerWeight(id); err != nil || w != 6 {
@@ -110,15 +128,8 @@ func TestTheRecoveryVerifierExecutesAWeightedProofTheLegacyDispatchRefuses(t *te
 		proof.Requests = append(proof.Requests, bcr)
 	}
 	require.Len(t, proof.Requests, 1, "the heavy entity alone is a quorum of the weighted request context")
-	// the first successor block switches the shard to the activated assignment and carries no request of it; the proof is in the next
-	anchorBlock, err := r.manager.blockStore.Block(anchor.Slot)
-	require.NoError(t, err)
-	switching, err := anchorBlock.Extend(&rctypes.BlockData{Version: 3, Epoch: 2, Round: 7, Anchor: anchor, Payload: &rctypes.Payload{Version: 3}},
-		r.manager.irReqVerifier, r.orchestration, crypto.SHA256, r.manager.log)
-	require.NoError(t, err)
-	block := &rctypes.BlockData{Version: 3, Epoch: 2, Round: 8, Payload: &rctypes.Payload{Version: 3, Requests: []*rctypes.IRChangeReq{proof}},
-		Qc: &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 7, Epoch: 2, CurrentRootHash: switching.RootHash}}}
-	parent := switching
+	block := &rctypes.BlockData{Version: 3, Epoch: 2, Round: 9, Payload: &rctypes.Payload{Version: 3, Requests: []*rctypes.IRChangeReq{proof}}, Qc: qc8}
+	parent := empty
 	extend := func(v *IRChangeReqVerifier) (*storage.ExecutedBlock, error) {
 		return parent.Extend(block, v, r.orchestration, crypto.SHA256, r.manager.log)
 	}

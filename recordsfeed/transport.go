@@ -116,14 +116,37 @@ func (o libp2pOpener) CreateStream(ctx context.Context, to peer.ID, protocol str
 	return o.host.CreateStream(ctx, to, protocol)
 }
 
-// Server answers cut and record requests from the peers it allows (the validators of the shards this root serves).
+// Server answers cut and record requests from the peers it allows (the validators of the shards this root serves, the other roots), and,
+// with SetPublicRecords, record reads of any other peer under a separate bounded budget (public.go: the per-operation boundary).
 type Server struct {
 	source  ServerSource
 	allowed func(peer.ID) bool
+	public  *publicBudget
 
 	mu      sync.Mutex
 	pending int
 	peers   map[peer.ID]int
+}
+
+// SetPublicRecords admits record reads (never a cut) from peers allowed refuses, under limits, apart from the authorized peers' budget.
+// Call before the handler is registered.
+func (s *Server) SetPublicRecords(limits PublicLimits) error {
+	if !limits.valid() {
+		return ErrPublicLimits
+	}
+	s.public = newPublicBudget(limits, time.Now)
+	return nil
+}
+
+// PublicStats reports the public budget's counters; zero without public reads.
+func (s *Server) PublicStats() PublicStats {
+	if s.public == nil {
+		return PublicStats{}
+	}
+	b := s.public
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return PublicStats{Pending: b.pending, Rejected: b.rejected, BytesSent: b.bytesSent}
 }
 
 // NewServer serves source to the peers allowed accepts; allowed is consulted per request.
@@ -136,12 +159,37 @@ func (s *Server) Handler(st libp2pnetwork.Stream) { s.Serve(st.Conn().RemotePeer
 
 // Serve answers one request on st; whatever it does not like resets the stream.
 func (s *Server) Serve(from peer.ID, st Stream) {
-	if !s.admit(from) {
+	if from == "" {
 		_ = st.Reset()
 		return
 	}
-	defer s.release(from)
-	if err := st.SetDeadline(time.Now().Add(ServerDeadline)); err != nil {
+	authorized := s.allowed != nil && s.allowed(from)
+	public := !authorized && s.public != nil
+	started := time.Now()
+	batch := MaxBatch
+	switch {
+	case authorized:
+		if !s.admit(from) {
+			_ = st.Reset()
+			return
+		}
+		defer s.release(from)
+		if err := st.SetDeadline(started.Add(ServerDeadline)); err != nil {
+			_ = st.Reset()
+			return
+		}
+	case public:
+		if !s.public.admit(from) {
+			_ = st.Reset()
+			return
+		}
+		defer s.public.release(from)
+		batch = s.public.limits.MaxBatch
+		if err := st.SetDeadline(started.Add(s.public.limits.HeaderDeadline)); err != nil {
+			_ = st.Reset()
+			return
+		}
+	default:
 		_ = st.Reset()
 		return
 	}
@@ -154,6 +202,16 @@ func (s *Server) Serve(from peer.ID, st Stream) {
 	if err := types.Cbor.Unmarshal(raw, &req); err != nil {
 		_ = st.Reset()
 		return
+	}
+	if !operationAllowed(req.Kind, authorized, public) {
+		_ = st.Reset()
+		return
+	}
+	if public {
+		if err := st.SetDeadline(started.Add(s.public.limits.Deadline)); err != nil {
+			_ = st.Reset()
+			return
+		}
 	}
 	var body []byte
 	switch req.Kind {
@@ -169,7 +227,7 @@ func (s *Server) Serve(from peer.ID, st Stream) {
 			err = cerr
 		}
 	case kindRecords:
-		recs, rerr := s.source.Records(req.From, int(min(req.Max, MaxBatch)))
+		recs, rerr := s.source.Records(req.From, min(int(req.Max), batch))
 		if rerr != nil {
 			err = rerr
 			break
@@ -185,6 +243,10 @@ func (s *Server) Serve(from peer.ID, st Stream) {
 	if err != nil || len(body) == 0 {
 		body = nil // "not held": a zero-length response
 	}
+	if public && len(body) > 0 && !s.public.spend(from, len(body)) {
+		_ = st.Reset() // over the byte budget: nothing is sent, the reader asks again later or elsewhere
+		return
+	}
 	if err := writeFrame(st, body); err != nil {
 		_ = st.Reset()
 		return
@@ -192,6 +254,7 @@ func (s *Server) Serve(from peer.ID, st Stream) {
 	_ = st.Close()
 }
 
+// admit takes one of the authorized peers' stream slots (allowed must accept the peer).
 func (s *Server) admit(from peer.ID) bool {
 	if from == "" || s.allowed == nil || !s.allowed(from) {
 		return false

@@ -213,10 +213,8 @@ func TestQ3InstallPreservesSelectedRequestHistory(t *testing.T) {
 			require.True(t, enabled)
 			require.EqualValues(t, 9, view.TotalWeight())
 			require.EqualValues(t, 5, view.Threshold())
-			proof := func(heavy bool) *rctypes.IRChangeReq {
-				tr := view.ExpectedTR()
-				uc, err := view.PreviousUC()
-				require.NoError(t, err)
+			// proofOn is the proof of the light or the heavy members built on the certificate uc, for the shard round and epoch of tr
+			proofOn := func(heavy bool, tr certification.TechnicalRecord, uc *types.UnicityCertificate) *rctypes.IRChangeReq {
 				req := &rctypes.IRChangeReq{Partition: q3fixture.PartitionID, Shard: types.ShardID{}, CertReason: rctypes.Quorum}
 				for _, id := range view.Context().NodeIDs() {
 					w, err := view.SignerWeight(id)
@@ -230,6 +228,11 @@ func TestQ3InstallPreservesSelectedRequestHistory(t *testing.T) {
 					req.Requests = append(req.Requests, bcr)
 				}
 				return req
+			}
+			proof := func(heavy bool) *rctypes.IRChangeReq {
+				uc, err := view.PreviousUC()
+				require.NoError(t, err)
+				return proofOn(heavy, view.ExpectedTR(), uc)
 			}
 			lights, heavy := proof(false), proof(true)
 			_, err = r.manager.irReqVerifier.VerifyIRChangeReqView(view, lights)
@@ -257,6 +260,19 @@ func TestQ3InstallPreservesSelectedRequestHistory(t *testing.T) {
 				_, err = r.manager.blockStore.ProcessQc(qc8)
 				require.NoError(t, err)
 			}
+			// Block 9 carries qc8, which commits block 7; a node processes it before it executes block 9 (onProposalMsg). Block 7
+			// recertified the shard in root epoch 2, so the requests of block 9 build on that certificate: one built on the closed epoch's
+			// certificate is refused (#1036). The commit is applied here to the parent block 9 is executed on, as the store applies it.
+			shardKey := types.PartitionShardID{PartitionID: q3fixture.PartitionID, ShardID: types.ShardID{}.Key()}
+			_, err = b8.Extend(&rctypes.BlockData{Version: 3, Epoch: 2, Round: 9, Payload: &rctypes.Payload{Version: 3, Requests: []*rctypes.IRChangeReq{heavy}}, Qc: qc8},
+				r.manager.irReqVerifier, r.orchestration, crypto.SHA256, r.manager.log, r.manager.blockStore.LeaderInputs())
+			require.ErrorIs(t, err, storage.ErrRequestBeforeActivation, "without the commit, the shard's certificate is the closed epoch's")
+			_, err = b7.GenerateCertificates(qc8)
+			require.NoError(t, err)
+			recert := b7.ShardState.States[shardKey].LastCR
+			require.EqualValues(t, 2, recert.UC.GetRootEpoch())
+			b8.ShardState.States[shardKey].LastCR = recert
+			lights, heavy = proofOn(false, recert.Technical, &recert.UC), proofOn(true, recert.Technical, &recert.UC)
 			block := func(req *rctypes.IRChangeReq) *rctypes.BlockData {
 				return &rctypes.BlockData{Version: 3, Epoch: 2, Round: 9, Payload: &rctypes.Payload{Version: 3, Requests: []*rctypes.IRChangeReq{req}}, Qc: qc8}
 			}

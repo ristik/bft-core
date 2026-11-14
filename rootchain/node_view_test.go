@@ -197,7 +197,7 @@ func (f *fixture) setParent(shardRound uint64, pdr *types.PartitionDescriptionRe
 		Timestamp: 1000, Epoch: si.TR.Epoch}
 	si.LastCR = &certification.CertificationResponse{Partition: 1, Technical: si.TR, UC: types.UnicityCertificate{Version: 1, InputRecord: ir,
 		UnicityTreeCertificate: &types.UnicityTreeCertificate{Version: 1, Partition: 1},
-		UnicitySeal:            &types.UnicitySeal{Version: 1, NetworkID: fxNetwork, RootChainRoundNumber: 10, Timestamp: 1000, Hash: []byte{4}}}}
+		UnicitySeal:            &types.UnicitySeal{Version: 1, NetworkID: fxNetwork, RootChainRoundNumber: 10, Epoch: fxRootEp, Timestamp: 1000, Hash: []byte{4}}}}
 	require.NoError(f.t, si.LastCR.SetTechnicalRecord(si.TR))
 	require.NoError(f.t, si.LastCR.IsValid(), "premise: the last response is one a rejection can carry")
 	f.si, f.parentID = si, bytes.Repeat([]byte{0x9D, byte(shardRound)}, 16)

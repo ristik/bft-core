@@ -704,15 +704,22 @@ func (c *AdmissionCoordinator) runEpisode() {
 	}
 }
 
-// step performs at most one durable commit or one delivery; both consume the shared episode budget.
+// step performs at most one durable commit or one delivery; both consume the shared episode budget. A bootstrap invalidation still due is
+// notified first, within the same step: the notification is idempotent bookkeeping, which Submit also makes right after it wakes this
+// loop, so whichever of the two runs first must not change the budget (bft-core#904: when this loop got there first, a two-attempt
+// episode spent one attempt on it and the delivery waited out the cooldown). A failed notification is the step's error.
 func (c *AdmissionCoordinator) step(ctx context.Context) (bool, error) {
 	c.mu.Lock()
-	first, latest, obligation := c.pendingFirst, c.pendingLatest, c.obligation
 	needsInvalidation := c.bootstrapInvalidated && !c.invalidationNotified
 	c.mu.Unlock()
 	if needsInvalidation {
-		return true, c.notifyInvalidation(ctx)
+		if err := c.notifyInvalidation(ctx); err != nil {
+			return true, err
+		}
 	}
+	c.mu.Lock()
+	first, latest, obligation := c.pendingFirst, c.pendingLatest, c.obligation
+	c.mu.Unlock()
 	if first != nil {
 		return true, c.persist(ctx, *first, true)
 	}
@@ -730,7 +737,7 @@ func (c *AdmissionCoordinator) step(ctx context.Context) (bool, error) {
 		}
 		return true, err
 	}
-	return false, nil
+	return needsInvalidation, nil
 }
 
 func sameObservation(a, b rootinput.VerifiedObservationV2) bool {
