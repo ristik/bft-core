@@ -203,6 +203,8 @@ type BFTClient struct {
 	attemptGen uint64
 	// delivered is when a new certificate was last adopted (resend.go deliveryClock).
 	delivered lastDelivery
+	// activation is Run's catch-up with a root epoch installed beyond the held certificate (activation.go). Run alone touches it.
+	activation activationCatchUp
 	// outstanding is the request this client last submitted and the certificate it was submitted on: the request is still
 	// pending exactly while that certificate is the held one (a certificate that advances the round replaces the held one, and
 	// the next Submit replaces this).
@@ -674,6 +676,7 @@ func (c *BFTClient) Run(ctx context.Context) error {
 			return ctx.Err()
 		case now := <-resend.C:
 			c.resendStale(ctx, now)
+			c.catchUpActivation(ctx, now) // a root activation: ask the new epoch's roots for its certificate at once (activation.go)
 		case <-c.admissionWake:
 			c.mu.Lock()
 			uc := c.feedPending
