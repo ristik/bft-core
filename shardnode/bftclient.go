@@ -198,15 +198,15 @@ type BFTClient struct {
 	// retrying, since a later certificate supersedes an earlier one.
 	unapplied *deliveryAttempt
 
-	// outstanding is the request this client last submitted and the certificate it was submitted on: the request is still
-	// pending exactly while that certificate is the held one (a certificate that advances the round replaces the held one, and
-	// the next Submit replaces this).
-	outstanding *outstandingRequest
 	// attemptGen is the generation of the pending attempt (resend.go): it advances on a new attempt, on every adopted certificate and on an
 	// installed shard configuration, and an attempt of an older generation is never sent again.
 	attemptGen uint64
 	// delivered is when a new certificate was last adopted (resend.go deliveryClock).
 	delivered lastDelivery
+	// outstanding is the request this client last submitted and the certificate it was submitted on: the request is still
+	// pending exactly while that certificate is the held one (a certificate that advances the round replaces the held one, and
+	// the next Submit replaces this).
+	outstanding *outstandingRequest
 	// consecutiveRepeats counts the repeat certificates adopted since the last non-repeat one, and lastProgress is when that last non-repeat
 	// certificate was adopted, seeded at Run so a node that starts into a run of repeats still has an age (#976). Both are updated by
 	// noteAdoptedLocked on BOTH adoption paths and are in memory: a restart resets them, and the diagnostics built on them say so.
