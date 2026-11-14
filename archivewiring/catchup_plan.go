@@ -104,47 +104,76 @@ func (s *RecoverySource) Extend(ctx context.Context, p *ArchivePlan, until time.
 			return fmt.Errorf("%w: catch-up gap exceeds %d blocks; restore the validator", ErrArchiveRecoveryUnavailable, MaxPlanBlocks)
 		}
 		q := archive.Request{Context: s.Subject, BlockHash: p.next}
-		entry, rec, local, err := s.fetchVerifiedRecord(ctx, q)
+		want := MaxChainRecords
+		if n := len(p.walked); n > 0 && p.heights[n-1] > p.After.Number+1 {
+			want = int(min(uint64(want), p.heights[n-1]-p.After.Number-1))
+		}
+		// one exchange brings a run of records (bft-core#1066); each is verified and checked below exactly as a single read was
+		got, err := s.fetchVerifiedChain(ctx, q, [32]byte(p.After.Hash), want)
 		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr // the walk's time budget, spent mid-read: what was walked is kept and the next call resumes
+			}
 			return fmt.Errorf("%w: %x: %v", ErrArchiveRecoveryUnavailable, p.next, err)
 		}
-		number := entry.Block.Number
-		// Defence in depth: the walk follows certified parent hashes, so a height that breaks off (here and at the anchor below) needs
-		// a forged certified record. The first record's height is checked against the anchor's (a Top at or below it).
-		if n := len(p.walked); n > 0 && number+1 != p.heights[n-1] {
-			return fmt.Errorf("%w: archive block %x is at height %d, its child at %d", ErrArchiveRecoveryInvalid, p.next, number, p.heights[n-1])
-		}
-		if number <= p.After.Number {
-			if len(p.walked) > 0 {
-				// a verified chain that came down from above the anchor's height without containing the anchor proves the anchor is not on it
-				return fmt.Errorf("%w: %w: archive chain to %x passes the retained anchor's height %d without reaching it", ErrArchiveRecoveryInvalid, shardnode.ErrCertifiedChainForksAnchor, p.Top, p.After.Number)
+		for _, v := range got {
+			if p.joined {
+				break
 			}
-			return fmt.Errorf("%w: archive chain to %x passes the retained anchor's height %d without reaching it", ErrArchiveRecoveryInvalid, p.Top, p.After.Number)
-		}
-		joins := bytes.Equal(entry.Block.ParentHash, p.After.Hash)
-		switch {
-		case joins && number != p.After.Number+1:
-			return fmt.Errorf("%w: archive chain joins the retained anchor at height %d, not %d", ErrArchiveRecoveryInvalid, number, p.After.Number+1)
-		case !joins && (number == p.After.Number+1 || len(entry.Block.ParentHash) != 32):
-			return fmt.Errorf("%w: %w: archive chain to %x does not reach the retained anchor %x", ErrArchiveRecoveryInvalid, shardnode.ErrCertifiedChainForksAnchor, p.Top, p.After.Hash)
-		}
-		// accepted: a refused record above is not recorded, so a resumed walk asks for it again
-		if !local {
-			pendingQ, pendingRec = append(pendingQ, q), append(pendingRec, rec)
-		}
-		p.index[p.next] = len(p.walked)
-		p.walked, p.heights = append(p.walked, p.next), append(p.heights, number)
-		if joins {
-			p.joined = true
-		} else {
-			p.next = [32]byte(common.BytesToHash(entry.Block.ParentHash))
-		}
-		if len(pendingQ) == planPutBatch {
-			if err := flush(); err != nil {
+			if len(p.walked) >= MaxPlanBlocks {
+				return fmt.Errorf("%w: catch-up gap exceeds %d blocks; restore the validator", ErrArchiveRecoveryUnavailable, MaxPlanBlocks)
+			}
+			if err := s.acceptWalked(p, v, &pendingQ, &pendingRec); err != nil {
 				return err
 			}
-			mark = len(p.walked)
+			if len(pendingQ) == planPutBatch {
+				if err := flush(); err != nil {
+					return err
+				}
+				mark = len(p.walked)
+			}
 		}
+	}
+	return nil
+}
+
+// acceptWalked checks one verified record against the plan's walk and records it: the next block to walk, its height, and (when it was not
+// local) the record for retention.
+func (s *RecoverySource) acceptWalked(p *ArchivePlan, v verifiedRecord, pendingQ *[]archive.Request, pendingRec *[]*archive.Record) error {
+	entry := v.entry
+	if !bytes.Equal(entry.Block.Hash, p.next[:]) {
+		return fmt.Errorf("%w: archive block %x answered for %x", ErrArchiveRecoveryInvalid, entry.Block.Hash, p.next)
+	}
+	number := entry.Block.Number
+	// Defence in depth: the walk follows certified parent hashes, so a height that breaks off (here and at the anchor below) needs
+	// a forged certified record. The first record's height is checked against the anchor's (a Top at or below it).
+	if n := len(p.walked); n > 0 && number+1 != p.heights[n-1] {
+		return fmt.Errorf("%w: archive block %x is at height %d, its child at %d", ErrArchiveRecoveryInvalid, p.next, number, p.heights[n-1])
+	}
+	if number <= p.After.Number {
+		if len(p.walked) > 0 {
+			// a verified chain that came down from above the anchor's height without containing the anchor proves the anchor is not on it
+			return fmt.Errorf("%w: %w: archive chain to %x passes the retained anchor's height %d without reaching it", ErrArchiveRecoveryInvalid, shardnode.ErrCertifiedChainForksAnchor, p.Top, p.After.Number)
+		}
+		return fmt.Errorf("%w: archive chain to %x passes the retained anchor's height %d without reaching it", ErrArchiveRecoveryInvalid, p.Top, p.After.Number)
+	}
+	joins := bytes.Equal(entry.Block.ParentHash, p.After.Hash)
+	switch {
+	case joins && number != p.After.Number+1:
+		return fmt.Errorf("%w: archive chain joins the retained anchor at height %d, not %d", ErrArchiveRecoveryInvalid, number, p.After.Number+1)
+	case !joins && (number == p.After.Number+1 || len(entry.Block.ParentHash) != 32):
+		return fmt.Errorf("%w: %w: archive chain to %x does not reach the retained anchor %x", ErrArchiveRecoveryInvalid, shardnode.ErrCertifiedChainForksAnchor, p.Top, p.After.Hash)
+	}
+	// accepted: a refused record above is not recorded, so a resumed walk asks for it again
+	if !v.local {
+		*pendingQ, *pendingRec = append(*pendingQ, v.q), append(*pendingRec, v.rec)
+	}
+	p.index[p.next] = len(p.walked)
+	p.walked, p.heights = append(p.walked, p.next), append(p.heights, number)
+	if joins {
+		p.joined = true
+	} else {
+		p.next = [32]byte(common.BytesToHash(entry.Block.ParentHash))
 	}
 	return nil
 }
