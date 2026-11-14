@@ -25,6 +25,9 @@ func (p *lastCRPipeline) commitUCs(s *BlockStore, round uint64) ([]*certificatio
 func TestCommittedControlSuppressesTheResponseAndKeepsThePair(t *testing.T) {
 	p := newLastCRPipeline(t)
 	s := p.s
+	// the suppression below is imposed on epoch 2 blocks and so suppresses the epoch's recertification too; the pair it keeps is taken to be
+	// a certificate of epoch 2, as a request is certified in epoch 2 only on one (#1036)
+	s.blockTree.root.data.ShardState.States[p.f.shard].LastCR.UC.UnicitySeal.Epoch = 2
 	committed := func() *evmroot.ControlState {
 		return &evmroot.ControlState{Network: 5, Epoch: 1, Phase: "committed", OrderedRound: 7, PredecessorBodyID: bytes.Repeat([]byte{1}, 32)}
 	}
