@@ -274,6 +274,16 @@ func compareHistories(in historyInput) (*report, error) {
 	return out, nil
 }
 
+// storedRequest is archive.StoredRequest for a listed name, tolerating a live archive's migration (bft-core#1049): a directory-layout record
+// that vanished after the listing was migrated, and its packed copy, published before the directory went, is read instead.
+func storedRequest(dir, name string) (archive.Request, error) {
+	q, _, err := archive.StoredRequest(dir, name)
+	if errors.Is(err, archive.ErrUnavailable) && !strings.Contains(name, "/") && len(name) > 5 {
+		q, _, err = archive.StoredRequest(dir, "records/"+strings.TrimPrefix(name, "v2-")[:2]+"/"+name)
+	}
+	return q, err
+}
+
 func readArchive(dir string) (map[uint64]*storedBlock, error) {
 	store, err := archive.Open(dir)
 	if err != nil {
@@ -289,7 +299,7 @@ func readArchive(dir string) (map[uint64]*storedBlock, error) {
 		if !strings.HasPrefix(path.Base(name), "v2-") {
 			continue
 		}
-		q, _, err := archive.StoredRequest(dir, name)
+		q, err := storedRequest(dir, name)
 		if err != nil {
 			return nil, fmt.Errorf("invalid v2 archive manifest %s: %w", name, err)
 		}

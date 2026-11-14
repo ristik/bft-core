@@ -448,6 +448,19 @@ class ArchiveSeedRaces(unittest.TestCase):
             (archive / 'v2-bb1' / '6865616465722e6368756e6b.chunk').write_bytes(b'x')
             self.assertNotIn('v2-bb1', ' '.join(tf.open(fileobj=io.BytesIO(self.tar(gen))).getnames()))
 
+    def test_a_directory_whose_packed_copy_exists_is_not_streamed(self):
+        """The survivor's migration publishes the packed copy before it deletes the directory: a directory read while it is deleted can
+        still hold its manifest without all its chunks, so a directory already packed is never streamed (#1059 re-review)."""
+        import tarfile as tf, io
+        with tempfile.TemporaryDirectory() as d:
+            gen = Path(d) / 'gen'
+            archive = gen / 'validator1' / 'archive'
+            (archive / 'v2-aa1').mkdir(parents=True)
+            (archive / 'v2-aa1' / 'manifest').write_bytes(b'm')   # its chunks already deleted
+            (archive / 'records' / 'aa').mkdir(parents=True)
+            (archive / 'records' / 'aa' / 'v2-aa1').write_bytes(b'packed')
+            self.assertEqual(tf.open(fileobj=io.BytesIO(self.tar(gen))).getnames(), ['records/aa/v2-aa1'])
+
     def test_the_seed_never_places_a_directory_without_its_manifest_and_places_the_packed_copy(self):
         import tarfile as tf, io
         with tempfile.TemporaryDirectory() as d:

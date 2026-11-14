@@ -590,6 +590,8 @@ def archive_tar(generation, source, out=None):
         for record in sorted(archive.iterdir()):
             if not (record.is_dir() and record.name.startswith('v2-')):   # renamed into place when complete; .writing-* partials are skipped
                 continue
+            if (archive / 'records' / record.name[3:5] / record.name).exists():
+                continue   # packed already: the migration may be deleting this directory under the read below; records/ streams the record
             # read the whole directory before any of it is streamed: the node's migration (bft-core#1049) may remove it meanwhile, and a
             # directory streamed in part (its chunks without its manifest) would be placed by the seed instead of the sound packed copy
             try:
