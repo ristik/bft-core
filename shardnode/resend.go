@@ -160,6 +160,46 @@ func (c *BFTClient) newAttemptLocked(req *certification.BlockCertificationReques
 	return o
 }
 
+// attemptHandle is one request's hold on its attempt across every Submit of it: Round makes one per completed round (completedRound.handle)
+// and binds it to each send of that round's request, its retries and a re-delivery's re-send alike (withAttemptHandle). The first Submit
+// through a handle binds the attempt it publishes; every later Submit through it is admitted only while that attempt is still the current
+// one of its generation. An invalidated attempt therefore stays refused for that request, even when the pending pointer is already gone (a
+// timer, an assignment change): an invalidated retry never becomes a fresh attempt in a later generation. Its fields are under c.mu.
+type attemptHandle struct{ o *outstandingRequest }
+
+type attemptHandleKey struct{}
+
+// withAttemptHandle binds the Submits under ctx to h.
+func withAttemptHandle(ctx context.Context, h *attemptHandle) context.Context {
+	if h == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, attemptHandleKey{}, h)
+}
+
+func attemptHandleOf(ctx context.Context) *attemptHandle {
+	h, _ := ctx.Value(attemptHandleKey{}).(*attemptHandle)
+	return h
+}
+
+// submitAttemptLocked is Submit's attempt: the one its handle already holds while that is still current (the same logical attempt keeps its
+// budget), errAttemptSuperseded once that attempt was invalidated, and otherwise a new owned attempt bound to the handle. c.mu must be held.
+func (c *BFTClient) submitAttemptLocked(ctx context.Context, req *certification.BlockCertificationRequest, luc *types.UnicityCertificate, origin uint64,
+	now time.Time) (*outstandingRequest, error) {
+	h := attemptHandleOf(ctx)
+	if h != nil && h.o != nil && !c.currentLocked(h.o) {
+		return nil, fmt.Errorf("%w: the attempt of this request was invalidated (generation %d, now %d)", errAttemptSuperseded, h.o.gen, c.attemptGen)
+	}
+	o, err := c.beginAttemptLocked(req, luc, origin, now)
+	if err != nil {
+		return nil, err
+	}
+	if h != nil {
+		h.o = o
+	}
+	return o, nil
+}
+
 // currentLocked reports whether o is still the client's attempt, in the current generation. c.mu must be held.
 func (c *BFTClient) currentLocked(o *outstandingRequest) bool {
 	return c.outstanding == o && c.attemptGen == o.gen

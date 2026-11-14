@@ -430,3 +430,80 @@ func TestARepeatedSubmitKeepsTheAttemptAndItsBudget(t *testing.T) {
 	require.Len(t, net.sent(), 1+1+1+1, "first send, one timed re-send, the retry's send, the last re-send of the budget")
 	sameBytes(t, net)
 }
+
+// afterFirstSubmit is the client as Round's submitter, running after once the first Submit has returned: an event between two Submits of
+// the same request.
+type afterFirstSubmit struct {
+	c     *BFTClient
+	calls int
+	after func()
+}
+
+func (s *afterFirstSubmit) Submit(ctx context.Context, req *certification.BlockCertificationRequest) error {
+	err := s.c.Submit(ctx, req)
+	s.calls++
+	if s.calls == 1 && s.after != nil {
+		s.after()
+	}
+	return err
+}
+
+// Between two Submits of one request (Round's retry after a failed first send, or a re-delivery's re-send): an attempt invalidated in between
+// stays refused for that request through its handle, even once a timer has removed the pending pointer. It never becomes a fresh attempt in
+// the later generation.
+func TestAnAttemptInvalidatedBetweenSubmitsIsNeverRetriedAsANewOne(t *testing.T) {
+	ctx := context.Background()
+	for name, tc := range map[string]struct {
+		event       func(f *confBindingFixture, c *BFTClient)
+		sent, calls int
+	}{
+		"control: nothing in between, the retry is sent": {nil, 1, 2},
+		"an assignment change in between":                {func(f *confBindingFixture, c *BFTClient) { require.NoError(t, c.InstallShardConf(7, f.confOther)) }, 0, 2},
+		"an assignment change, then the timer dropped the attempt": {func(f *confBindingFixture, c *BFTClient) {
+			require.NoError(t, c.InstallShardConf(7, f.confOther))
+			c.resendStale(ctx, time.Now().Add(time.Hour))
+			c.mu.Lock()
+			require.Nil(t, c.outstanding, "premise: the pending pointer is gone")
+			c.mu.Unlock()
+		}, 0, 2},
+		"progress in between": {func(_ *confBindingFixture, c *BFTClient) { c.mu.Lock(); c.noteAdoptedLocked(UCValid); c.mu.Unlock() }, 0, 2},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f, c, _, _ := timedClient(t, BFTClientOptions{})
+			net := &flakyNet{fail: 1}
+			c.net = net
+			w := &afterFirstSubmit{c: c}
+			if tc.event != nil {
+				w.after = func() { tc.event(f, c) }
+			}
+			r := &Round{submitter: w}
+			err := r.send(withAttemptHandle(ctx, &attemptHandle{}), f.ucMine, pendingRequest(f), 5)
+			require.Equal(t, tc.calls, w.calls, "Round retried once and stopped")
+			require.Len(t, net.sent(), tc.sent)
+			if tc.sent == 0 {
+				require.ErrorIs(t, err, errAttemptSuperseded)
+				c.resendStale(ctx, time.Now().Add(time.Hour))
+				require.Empty(t, net.sent(), "and the timer never sends it")
+				c.mu.Lock()
+				require.Nil(t, c.outstanding, "no fresh attempt was published")
+				c.mu.Unlock()
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+
+	t.Run("a re-delivery's re-send after an assignment change", func(t *testing.T) {
+		f, c, net, _ := timedClient(t, BFTClientOptions{})
+		r := &Round{submitter: c}
+		h := &attemptHandle{} // the completed round's handle, kept for its re-deliveries
+		req := pendingRequest(f)
+		require.NoError(t, r.send(withAttemptHandle(ctx, h), f.ucMine, req, 5))
+		require.Len(t, net.sent(), 1)
+		require.NoError(t, r.send(withAttemptHandle(ctx, h), f.ucMine, req, 5), "control: re-sent within its generation")
+		require.Len(t, net.sent(), 2)
+		require.NoError(t, c.InstallShardConf(7, f.confOther))
+		require.ErrorIs(t, r.send(withAttemptHandle(ctx, h), f.ucMine, req, 5), errAttemptSuperseded)
+		require.Len(t, net.sent(), 2, "the request of the invalidated attempt is never sent again")
+	})
+}

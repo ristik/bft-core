@@ -1472,7 +1472,7 @@ func (c *BFTClient) Submit(ctx context.Context, req *certification.BlockCertific
 		origin = luc.GetRootEpoch()
 	}
 	// the owned attempt is published before its first send, with the held certificate and the generation captured together (resend.go)
-	o, err := c.beginAttemptLocked(req, luc, origin, time.Now())
+	o, err := c.submitAttemptLocked(ctx, req, luc, origin, time.Now())
 	c.mu.Unlock()
 	if err != nil {
 		return err

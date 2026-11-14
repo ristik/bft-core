@@ -189,6 +189,8 @@ type completedRound struct {
 	partitionRound uint64 // the certificate that authorized it
 	rootRound      uint64
 	req            *certification.BlockCertificationRequest
+	// handle holds the request's attempt across every send of it (resend.go attemptHandle): Round's retries and a re-delivery's re-send.
+	handle *attemptHandle
 }
 
 func (c *completedRound) authorizes(uc *types.UnicityCertificate, exp Expectation) bool {
@@ -724,7 +726,7 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 			r.log.DebugContext(ctx, "re-delivery of an authorization already answered: re-sending the identical signed request",
 				slog.Uint64("round", exp.Round), slog.Uint64("partitionRound", uc.GetRoundNumber()))
 		}
-		return r.send(ctx, uc, r.completed.req, exp.Round)
+		return r.send(withAttemptHandle(ctx, r.completed.handle), uc, r.completed.req, exp.Round)
 	}
 
 	// RE-DELIVERY OF AN AUTHORIZATION THE SIGNER ALREADY REFUSED. Nothing was signed, so there is
@@ -1026,6 +1028,7 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 		partitionRound: uc.GetRoundNumber(),
 		rootRound:      uc.GetRootRoundNumber(),
 		req:            req,
+		handle:         &attemptHandle{},
 	}
 	r.health.updateSubmitted(exp.Round)
 	r.health.updateVoting(true, "")
@@ -1034,7 +1037,7 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 		r.log.InfoContext(ctx, "submitting block certification request",
 			slog.Uint64("round", exp.Round), slog.Bool("quiet", irQuiet), slog.Bool("leader", leader == r.nodeID))
 	}
-	return r.send(ctx, uc, req, exp.Round)
+	return r.send(withAttemptHandle(ctx, r.completed.handle), uc, req, exp.Round)
 }
 
 // ErrSubmissionFailed marks a failure to SEND an already-applied round's certification request.
