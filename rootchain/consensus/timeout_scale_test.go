@@ -15,8 +15,8 @@ import (
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
 
-	testobservability "github.com/unicitynetwork/bft-core/internal/testutils/observability"
 	testnetwork "github.com/unicitynetwork/bft-core/internal/testutils/network"
+	testobservability "github.com/unicitynetwork/bft-core/internal/testutils/observability"
 	"github.com/unicitynetwork/bft-core/keyvaluedb/memorydb"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	tbstore "github.com/unicitynetwork/bft-core/rootchain/consensus/trustbase"
