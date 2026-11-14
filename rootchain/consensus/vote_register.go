@@ -43,6 +43,8 @@ type (
 		// Tracks all timeout votes for this round
 		// if 2f+1 or threshold votes, then TC is formed
 		timeoutCert *drctypes.TimeoutCert
+		// timeoutWeight is the weight of the signers in timeoutCert, summed as they are added (see InsertTimeoutVote)
+		timeoutWeight quorumweight.Tally
 		// Helper, to avoid duplicate votes
 		authorToVote map[string]voteID
 	}
@@ -194,16 +196,28 @@ func (v *VoteRegister) InsertTimeoutVote(timeout *abdrc.TimeoutMsg, quorumInfo Q
 	if v.timeoutCert.Scheme != scheme {
 		return nil, 0, fmt.Errorf("%w: timeout vote of %q is scheme %d, the certificate being formed is scheme %d", votesig.ErrScheme, timeout.Author, scheme, v.timeoutCert.Scheme)
 	}
+	// The signers' weight is summed as they are added, not recounted over the whole certificate for every vote (that was O(n) per vote, and
+	// O(n^2) under stake weighting, where authorWeight scans the committee: #982). The sum equals the recount: every signer of the certificate
+	// is of the certificate's epoch (TimeoutCert.Add refuses another), the manager registers a vote only of its current trust base's epoch
+	// (checkWeightEpoch), and an installed epoch's committee and weights never change, so no counted signer's weight changes while the
+	// register lives. The author's weight and the new sum are established before the certificate is touched: a vote that has no weight (not
+	// a member of a weighted committee) or would overflow the sum is refused and leaves the certificate as it was.
+	w, err := authorWeight(quorumInfo, timeout.Author)
+	if err != nil {
+		return nil, 0, fmt.Errorf("timeout vote weight: %w", err)
+	}
+	if _, err := quorumweight.Add(v.timeoutWeight.Weight(), w); err != nil {
+		return nil, 0, fmt.Errorf("timeout vote weight: %w", err)
+	}
 	// append signature
 	if err := v.timeoutCert.Add(timeout.Author, timeout.Timeout, timeout.Signature); err != nil {
 		return nil, 0, fmt.Errorf("failed to add vote to timeout certificate: %w", err)
 	}
-
-	// Check if TC can be formed
-	sigCount, err := signedTimeoutWeight(v.timeoutCert.Signatures, quorumInfo)
-	if err != nil {
+	// cannot fail: Add refused a signer already in the certificate and the sum was checked above
+	if err := v.timeoutWeight.Add(timeout.Author, w); err != nil {
 		return nil, 0, fmt.Errorf("timeout vote weight: %w", err)
 	}
+	sigCount := v.timeoutWeight.Weight()
 	// The vote is counted and its weight accounted: only now is the exact message remembered (an error above, including one after Add has
 	// stored the signature, remembers nothing).
 	if len(remember) > 0 {
@@ -357,6 +371,7 @@ func (v *VoteRegister) Reset() {
 	clear(v.hashToSignatures)
 	clear(v.authorToVote)
 	v.timeoutCert = nil
+	v.timeoutWeight = quorumweight.Tally{}
 }
 
 // timeoutScheme is the wire scheme of a timeout vote: 2 for the domain-bound form, 0 for the legacy one (0 and 1 are the same form).

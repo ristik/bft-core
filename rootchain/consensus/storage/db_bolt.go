@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"sync"
 	"time"
 
 	"go.etcd.io/bbolt"
@@ -236,6 +237,16 @@ Implementation of persistent storage for the BlockTree and SafetyModule using bb
 */
 type BoltDB struct {
 	db *bbolt.DB
+	// lastTC remembers the round of the stored TC for the bytes it was decoded from (LastTCRound); copies of the store share it
+	lastTC *lastTCMemo
+}
+
+// lastTCMemo is the round of the TC whose stored encoding is raw. It is a cache of a pure function of raw, so it can never be stale: a
+// lookup compares the bytes now stored with raw and decodes again when they differ (a write, a delete, a write that failed).
+type lastTCMemo struct {
+	mu    sync.Mutex
+	raw   []byte
+	round uint64
 }
 
 const currentDBVersion uint64 = 1
@@ -258,6 +269,7 @@ func NewBoltStorage(file string, opts ...BoltOption) (db BoltDB, err error) {
 	_, err = os.Stat(file)
 	newDB := err != nil && errors.Is(err, fs.ErrNotExist)
 
+	db.lastTC = &lastTCMemo{}
 	db.db, err = bbolt.Open(file, 0600, &bbolt.Options{Timeout: 3 * time.Second})
 	if err != nil {
 		return db, fmt.Errorf("open database: %w", err)
@@ -457,6 +469,42 @@ func (db BoltDB) ReadLastTC() (tc *rctypes.TimeoutCert, _ error) {
 		}
 		if k, v := b.Cursor().Seek(keyTimeoutCert); bytes.Equal(k, keyTimeoutCert) {
 			return types.Cbor.Unmarshal(v, &tc)
+		}
+		return nil
+	})
+}
+
+// LastTCRound is the round of the stored TC (ok false when none is stored), the same as ReadLastTC().GetRound(). Every timeout message carries
+// a TC and ProcessTc asks this for each one: the stored certificate is read every time, but decoded only when its bytes differ from the ones
+// decoded last time (at 128 roots decoding it was about 40% of the handling of a retransmitted timeout vote, #982).
+func (db BoltDB) LastTCRound() (round uint64, ok bool, _ error) {
+	return round, ok, db.db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(bucketCertificates)
+		if b == nil {
+			return errNoCertificatesBucket
+		}
+		k, v := b.Cursor().Seek(keyTimeoutCert)
+		if !bytes.Equal(k, keyTimeoutCert) {
+			return nil
+		}
+		if m := db.lastTC; m != nil {
+			m.mu.Lock()
+			defer m.mu.Unlock()
+			if m.raw != nil && bytes.Equal(m.raw, v) {
+				round, ok = m.round, true
+				return nil
+			}
+		}
+		var tc *rctypes.TimeoutCert
+		if err := types.Cbor.Unmarshal(v, &tc); err != nil {
+			return err
+		}
+		if tc == nil {
+			return nil
+		}
+		round, ok = tc.GetRound(), true
+		if m := db.lastTC; m != nil {
+			m.raw, m.round = bytes.Clone(v), round // v is valid only inside the transaction
 		}
 		return nil
 	})
