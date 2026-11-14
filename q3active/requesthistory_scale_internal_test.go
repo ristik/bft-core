@@ -24,8 +24,8 @@ func (c requestScaleCandidates) HandoffCandidate(id []byte) ([]byte, error) {
 }
 
 // requestScaleRuntime is a runtime whose verified history holds a coupled first activation followed by root-only ones, epochs in all, every
-// one admitted. The history is the fixtures' own verified one: an install envelope carries at most q3format.MaxLinks links, so a chain
-// of hundreds of epochs is not installed through the journal here; what is measured is the request history over it.
+// one admitted. The history is the fixtures' own verified one, not installed through the journal (q3delivery's long-lineage test does
+// that): what is measured is the request history over it.
 func requestScaleRuntime(t *testing.T, epochs int) (*Runtime, *q3fixture.Fixture) {
 	rt, fixtures := requestScaleChain(t, epochs)
 	return rt, fixtures[0]

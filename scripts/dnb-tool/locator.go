@@ -7,8 +7,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -30,8 +30,8 @@ type archiveLocator struct {
 	dir          string
 	store        receiptGetter
 	rescanEvery  time.Duration
-	listDir      func(string, func([]string) error) error // the archive's entry names, chunk by chunk; a test counts the listings
-	readManifest func(string) ([]byte, error)             // os.ReadFile; a test counts the reads
+	listDir      func(string, func([]string) error) error // the archive's record names, chunk by chunk (listNames); a test counts the listings
+	readManifest func(dir, name string) ([]byte, error)   // readStoredManifest; a test counts the reads
 	now          func() time.Time
 
 	mu       sync.Mutex
@@ -42,7 +42,7 @@ type archiveLocator struct {
 }
 
 func newArchiveLocator(ctx context.Context, dir string, store receiptGetter, rescanEvery time.Duration) (*archiveLocator, error) {
-	l := &archiveLocator{dir: dir, store: store, rescanEvery: rescanEvery, listDir: listNames, readManifest: os.ReadFile, now: time.Now,
+	l := &archiveLocator{dir: dir, store: store, rescanEvery: rescanEvery, listDir: listNames, readManifest: readStoredManifest, now: time.Now,
 		contexts: map[string]archive.Context{}, seen: map[uint64]struct{}{}}
 	return l, l.rescan(ctx)
 }
@@ -132,7 +132,7 @@ func (l *archiveLocator) scan(ctx context.Context) error {
 			if done {
 				continue
 			}
-			m, err := l.readManifest(filepath.Join(l.dir, name, "manifest"))
+			m, err := l.readManifest(l.dir, name)
 			if err != nil {
 				continue // not published yet (a record is renamed into place complete), or unreadable: the next scan tries again
 			}
@@ -153,32 +153,25 @@ func (l *archiveLocator) scan(ctx context.Context) error {
 // listChunk is how many entry names one read of the archive directory returns: a listing holds no more than this in memory at a time.
 const listChunk = 1024
 
-// listNames hands each chunk of dir's entry names to each, unsorted (a listing of a large archive need not sort).
+// listNames hands each chunk of dir's record names to each, unsorted, in either archive layout (archive.StoredNames, bft-core#1049): a
+// listing of a large archive need not sort.
 func listNames(dir string, each func([]string) error) error {
-	f, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	for {
-		names, err := f.Readdirnames(listChunk)
-		if len(names) > 0 {
-			if err := each(names); err != nil {
-				return err
-			}
-		}
-		if errors.Is(err, io.EOF) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-	}
+	return archive.StoredNames(dir, listChunk, each)
 }
 
-// nameKey is the first 8 bytes of a v2 record directory's name ("v2-" + hex sha256 of its Request); other entries are not records.
+// readStoredManifest reads the manifest of a record named by listNames. A directory-layout manifest is read as the file it is; a packed
+// record's is read from the front of its file and checksum-verified (archive.StoredManifest). Either way only its Request is used here: the
+// record itself is read and checked by archive.Store on every lookup.
+func readStoredManifest(dir, name string) ([]byte, error) {
+	if strings.Contains(name, "/") {
+		return archive.StoredManifest(dir, name)
+	}
+	return os.ReadFile(filepath.Join(dir, name, "manifest"))
+}
+
+// nameKey is the first 8 bytes of a v2 record's name ("v2-" + hex sha256 of its Request), whatever its layout; other records are not v2.
 func nameKey(name string) (uint64, bool) {
-	h, ok := strings.CutPrefix(name, "v2-")
+	h, ok := strings.CutPrefix(path.Base(name), "v2-")
 	if !ok || len(h) != 64 {
 		return 0, false
 	}

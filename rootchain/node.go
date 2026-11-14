@@ -366,7 +366,11 @@ func (v *Node) admitRequest(ctx context.Context, req *certification.BlockCertifi
 		return fmt.Errorf("acquiring shard %s - %s info: %w", req.PartitionID, req.ShardID, err)
 	}
 	// we got the shard info thus it's a valid partition/shard
-	if err := si.ValidRequest(req); err != nil {
+	err = si.ValidRequest(req)
+	if err == nil {
+		err = si.FreshInRootEpoch(snapshot) // a request that matches the closed epoch's context is refused (#1036)
+	}
+	if err != nil {
 		if legacyNearFuture(si, req) {
 			herr := v.holdNearFuture(req, origin, snapshot, nil)
 			if herr == nil {
@@ -406,6 +410,20 @@ func (v *Node) admitRequest(ctx context.Context, req *certification.BlockCertifi
 		return fmt.Errorf("subscribing the sender: %w", err)
 	}
 	return v.countRequest(ctx, req, si, false, snapshot)
+}
+
+// freshInRootEpoch applies the activation freshness rule (storage.ShardInfo.FreshInRootEpoch) to a request a view admitted, on the parent
+// certificate the view resolved: the view's own fence covers the continuations it resolves, this one holds whatever the view (#1036). A view
+// that does not name its parent's root epoch is judged on the committed ShardInfo; an unknown shard is the view's to refuse.
+func (v *Node) freshInRootEpoch(req *certification.BlockCertificationRequest, view requestAdmission, rootEpoch uint64) error {
+	if named, ok := view.(interface{ PrevRootEpoch() uint64 }); ok {
+		return storage.FreshCertificate(named.PrevRootEpoch(), rootEpoch)
+	}
+	si, err := v.consensusManager.ShardInfo(req.PartitionID, req.ShardID)
+	if err != nil || si == nil {
+		return nil
+	}
+	return si.FreshInRootEpoch(rootEpoch)
 }
 
 // legacyNearFuture reports whether a request refused under the committed ShardInfo is the authentic request of the round right after
@@ -586,6 +604,9 @@ func (v *Node) collectUnderView(ctx context.Context, req *certification.BlockCer
 			view = again
 			err = view.ValidRequest(req)
 		}
+	}
+	if err == nil {
+		err = v.freshInRootEpoch(req, view, snapshot) // whatever view admitted it (#1036)
 	}
 	if err != nil && errors.Is(err, storage.ErrStaleRequestContext) && req.IRRound() == view.ExpectedTR().Round+1 {
 		// ValidRequest compares the round only after membership, signature and shard passed under this view: the request is

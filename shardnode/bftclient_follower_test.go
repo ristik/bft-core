@@ -105,12 +105,12 @@ func TestClientSendIsBoundToTheOriginatingRoleToken(t *testing.T) {
 	req := &certification.BlockCertificationRequest{PartitionID: authPartitionID}
 	ctx := context.Background()
 
-	require.NoError(t, client.sendRequest(withRoleToken(ctx, 7), req, f.ucMine))
+	require.NoError(t, client.sendRequest(withRoleToken(ctx, 7), req, f.ucMine, f.ucMine.GetRootEpoch()))
 	require.EqualValues(t, 1, net.sends.Load())
 	role.token.Store(9) // revoked and re-published: active again under another token
-	require.ErrorIs(t, client.sendRequest(withRoleToken(ctx, 7), req, f.ucMine), ErrFollower)
+	require.ErrorIs(t, client.sendRequest(withRoleToken(ctx, 7), req, f.ucMine, f.ucMine.GetRootEpoch()), ErrFollower)
 	require.EqualValues(t, 1, net.sends.Load(), "the old request does not leave under the new role")
-	require.NoError(t, client.sendRequest(withRoleToken(ctx, 9), req, f.ucMine))
+	require.NoError(t, client.sendRequest(withRoleToken(ctx, 9), req, f.ucMine, f.ucMine.GetRootEpoch()))
 }
 
 // Round to client: a request signed under token 7 and answered (the round's completed cache), re-delivered after the role was re-published

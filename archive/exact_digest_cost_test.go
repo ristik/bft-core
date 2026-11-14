@@ -28,9 +28,16 @@ func TestGetExactRejectsAWrongDigestWithoutReadingTheChunks(t *testing.T) {
 
 	loc, err := location(q, recordV2(rec))
 	require.NoError(t, err)
-	chunk := filepath.Join(dir, loc, fileName("body"))
-	damaged := bytes.Repeat([]byte{8}, 1<<20)
-	require.NoError(t, os.WriteFile(chunk, damaged, 0o600))
+	// damage the chunk bytes of the stored record, in whichever layout it was written (#1059 packs a record into one file)
+	if packed := packedPath(dir, loc); fileExists(packed) {
+		b, err := os.ReadFile(packed)
+		require.NoError(t, err)
+		b[len(b)-1] ^= 0xff
+		require.NoError(t, os.WriteFile(packed, b, 0o600))
+	} else {
+		chunk := filepath.Join(dir, loc, fileName("body"))
+		require.NoError(t, os.WriteFile(chunk, bytes.Repeat([]byte{8}, 1<<20), 0o600))
+	}
 
 	for i := 0; i < 2; i++ {
 		_, err = s.GetExact(q, [32]byte{9})

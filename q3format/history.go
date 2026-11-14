@@ -5,6 +5,7 @@ import (
 	"crypto"
 	"errors"
 	"fmt"
+	"sync/atomic"
 
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/handoff"
@@ -152,6 +153,9 @@ type History struct {
 	// utbGenesis says the genesis epoch itself is a UTB epoch (a fresh deployment whose genesis configuration enables the signed trust-base
 	// endorsement from its first epoch): the first handoff is then endorsed too, which a Q3 activation's own tuple cannot arrange for the epoch before it.
 	utbGenesis bool
+	// tail is claimed by the one extension that may append into the spare capacity after entries (see extend). It is shared by the copies
+	// of a history that share its entries (WithUTBGenesis), and nil for a history that must always be copied to extend.
+	tail *atomic.Bool
 }
 
 // UTB reports whether this is a UTB chain: its genesis epoch, and so every epoch after it, endorses the successor trust-base entry.
@@ -178,7 +182,7 @@ func NewHistory(genesis *types.RootTrustBaseV1) (*History, error) {
 		return nil, errors.Join(ErrHistory, err)
 	}
 	owned := cloneTrustBase(genesis) // the history is the owner of its authority: a later change by the caller must not alter it
-	h := &History{network: uint64(genesis.NetworkID)}
+	h := &History{network: uint64(genesis.NetworkID), tail: new(atomic.Bool)}
 	copy(h.genesis[:], id)
 	e := Entry{epoch: 1, start: genesis.EpochStart, version: 1, scheme: 1, bodyID: h.genesis, tb: owned}
 	h.entries = []Entry{e}
@@ -281,8 +285,16 @@ func (h *History) Ordinary(epoch, round uint64) error {
 	return nil
 }
 
+// extend is h with e appended. A history is immutable, so the entries an extension shares with h are never written again. The first
+// extension of a history appends into the spare capacity of its backing array, so a replay of N epochs copies O(N) entries in all rather
+// than the whole history per epoch. Any further extension of the same history (a second envelope verified against it, a verify racing an
+// adopt) copies into an array of its own, so no two extensions ever write the same slot.
 func (h *History) extend(e Entry) *History {
-	return &History{network: h.network, genesis: h.genesis, entries: append(append([]Entry(nil), h.entries...), e), utbGenesis: h.utbGenesis}
+	entries := h.entries
+	if len(entries) == cap(entries) || h.tail == nil || !h.tail.CompareAndSwap(false, true) {
+		entries = append(make([]Entry, 0, 2*len(h.entries)+1), h.entries...)
+	}
+	return &History{network: h.network, genesis: h.genesis, entries: append(entries, e), utbGenesis: h.utbGenesis, tail: new(atomic.Bool)}
 }
 
 // Evidence is the frozen-state input the committed record binds: the pre-freeze summary, the frozen EVM parent and the

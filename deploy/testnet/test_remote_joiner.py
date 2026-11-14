@@ -467,6 +467,167 @@ class FollowJoiner(unittest.TestCase):
         self.assertEqual(calls, [(5, 3, False)])
 
 
+class ArchiveSeed(unittest.TestCase):
+    def test_records_are_streamed_and_only_missing_ones_placed(self):
+        import io, subprocess, sys, tarfile as tf
+        with tempfile.TemporaryDirectory() as d:
+            gen, dest = Path(d) / 'gen', Path(d) / 'dest'
+            archive = gen / 'validator1' / 'archive'
+            for name in ('v2-aa', 'v2-bb', '.writing-cc'):
+                (archive / name).mkdir(parents=True)
+                (archive / name / 'header.chunk').write_bytes(name.encode())
+                (archive / name / 'manifest').write_bytes(b'm')
+            (dest / 'v2-aa').mkdir(parents=True)
+            (dest / 'v2-aa' / 'header.chunk').write_bytes(b'mine')
+            (dest / 'v2-aa' / 'manifest').write_bytes(b'mine')
+            stream = io.BytesIO()
+            re_.archive_tar(gen, 1, stream)
+            names = tf.open(fileobj=io.BytesIO(stream.getvalue())).getnames()
+            self.assertNotIn('.writing-cc', ' '.join(names), 'a partial record is never streamed')
+            done = subprocess.run([sys.executable, '-c', rj.SEED, str(dest)], input=stream.getvalue(), capture_output=True, check=True)
+            self.assertEqual(done.stdout.decode().strip(), 'added 1 kept 1')
+            self.assertEqual((dest / 'v2-aa' / 'header.chunk').read_bytes(), b'mine', 'a record the node has is never touched')
+            self.assertEqual((dest / 'v2-bb' / 'header.chunk').read_bytes(), b'v2-bb')
+            self.assertEqual(sorted(p.name for p in dest.iterdir()), ['v2-aa', 'v2-bb'], 'no temporary directory left')
+
+    def test_packed_records_are_streamed_and_placed_without_replacing_either_layout(self):
+        """bft-core#1049: a record is one file, records/<hh>/v2-<hash>. The survivor streams both layouts; the seed places a packed record only
+        when the node holds it in neither layout, and never replaces a file."""
+        import io, subprocess, sys, tarfile as tf
+        with tempfile.TemporaryDirectory() as d:
+            gen, dest = Path(d) / 'gen', Path(d) / 'dest'
+            archive = gen / 'validator1' / 'archive'
+            for name in ('v2-aa1', 'v2-bb1', 'v2-cc1', '.writing-dd1'):
+                (archive / 'records' / name[3:5]).mkdir(parents=True, exist_ok=True)
+                (archive / 'records' / name[3:5] / name).write_bytes(name.encode())
+            (archive / 'v2-ee1').mkdir(parents=True)   # an unmigrated directory beside them
+            (archive / 'v2-ee1' / 'manifest').write_bytes(b'v2-ee1')
+            (dest / 'records' / 'aa').mkdir(parents=True)
+            (dest / 'records' / 'aa' / 'v2-aa1').write_bytes(b'mine')   # held packed
+            (dest / 'v2-bb1').mkdir(parents=True)                      # held as a directory
+            (dest / 'v2-bb1' / 'manifest').write_bytes(b'mine')
+            stream = io.BytesIO()
+            re_.archive_tar(gen, 1, stream)
+            names = tf.open(fileobj=io.BytesIO(stream.getvalue())).getnames()
+            self.assertIn('records/cc/v2-cc1', names)
+            self.assertNotIn('.writing-dd1', ' '.join(names), 'a temporary file is never streamed')
+            done = subprocess.run([sys.executable, '-c', rj.SEED, str(dest)], input=stream.getvalue(), capture_output=True, check=True)
+            self.assertEqual(done.stdout.decode().strip(), 'added 2 kept 2', done.stderr.decode())
+            self.assertEqual((dest / 'records' / 'aa' / 'v2-aa1').read_bytes(), b'mine', 'a packed record the node has is never touched')
+            self.assertFalse((dest / 'records' / 'bb' / 'v2-bb1').exists(), 'a record held as a directory is not placed packed beside it')
+            self.assertEqual((dest / 'records' / 'cc' / 'v2-cc1').read_bytes(), b'v2-cc1')
+            self.assertEqual((dest / 'v2-ee1' / 'manifest').read_bytes(), b'v2-ee1', 'a directory is placed as a directory')
+            left = [p.name for p in dest.rglob('.seed-*')]
+            self.assertEqual(left, [], 'no temporary left')
+
+
+class ArchiveSeedRaces(unittest.TestCase):
+    """#1059 review: the survivor's migration races the stream, and the seed's placements must be durable and readable."""
+
+    def tar(self, gen):
+        import io
+        stream = io.BytesIO()
+        re_.archive_tar(gen, 1, stream)
+        return stream.getvalue()
+
+    def seed(self, raw, dest):
+        import subprocess, sys
+        return subprocess.run([sys.executable, '-c', rj.SEED, str(dest)], input=raw, capture_output=True, check=True).stdout.decode().strip()
+
+    def test_a_directory_that_vanishes_while_it_is_read_is_not_streamed_in_part(self):
+        import tarfile as tf, io
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as d:
+            gen = Path(d) / 'gen'
+            archive = gen / 'validator1' / 'archive'
+            (archive / 'v2-aa1').mkdir(parents=True)
+            for f in ('6865616465722e6368756e6b.chunk', 'manifest'):
+                (archive / 'v2-aa1' / f).write_bytes(b'x')
+            (archive / 'records' / 'aa').mkdir(parents=True)
+            (archive / 'records' / 'aa' / 'v2-aa1').write_bytes(b'packed')   # the migration published it, then removes the directory
+            real = Path.read_bytes
+            def vanishing(path):
+                if path.name == 'manifest' and path.parent.name == 'v2-aa1':
+                    raise FileNotFoundError(path)
+                return real(path)
+            with mock.patch.object(Path, 'read_bytes', vanishing):
+                names = tf.open(fileobj=io.BytesIO(self.tar(gen))).getnames()
+            self.assertEqual(names, ['records/aa/v2-aa1'], 'only the packed copy: none of the vanished directory')
+            # a directory without a manifest on the survivor (damage) is not streamed either
+            (archive / 'v2-bb1').mkdir()
+            (archive / 'v2-bb1' / '6865616465722e6368756e6b.chunk').write_bytes(b'x')
+            self.assertNotIn('v2-bb1', ' '.join(tf.open(fileobj=io.BytesIO(self.tar(gen))).getnames()))
+
+    def test_a_directory_whose_packed_copy_exists_is_not_streamed(self):
+        """The survivor's migration publishes the packed copy before it deletes the directory: a directory read while it is deleted can
+        still hold its manifest without all its chunks, so a directory already packed is never streamed (#1059 re-review)."""
+        import tarfile as tf, io
+        with tempfile.TemporaryDirectory() as d:
+            gen = Path(d) / 'gen'
+            archive = gen / 'validator1' / 'archive'
+            (archive / 'v2-aa1').mkdir(parents=True)
+            (archive / 'v2-aa1' / 'manifest').write_bytes(b'm')   # its chunks already deleted
+            (archive / 'records' / 'aa').mkdir(parents=True)
+            (archive / 'records' / 'aa' / 'v2-aa1').write_bytes(b'packed')
+            self.assertEqual(tf.open(fileobj=io.BytesIO(self.tar(gen))).getnames(), ['records/aa/v2-aa1'])
+
+    def test_the_seed_never_places_a_directory_without_its_manifest_and_places_the_packed_copy(self):
+        import tarfile as tf, io
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / 'dest'
+            dest.mkdir()
+            out = io.BytesIO()
+            with tf.open(fileobj=out, mode='w') as tar:
+                for name, raw in (('v2-aa1/6865616465722e6368756e6b.chunk', b'x'), ('records/aa/v2-aa1', b'packed')):
+                    info = tf.TarInfo(name); info.size = len(raw)
+                    tar.addfile(info, io.BytesIO(raw))
+            self.assertEqual(self.seed(out.getvalue(), dest), 'added 1 kept 0 skipped 1')
+            self.assertFalse((dest / 'v2-aa1').exists(), 'the partial directory is not placed')
+            self.assertEqual((dest / 'records' / 'aa' / 'v2-aa1').read_bytes(), b'packed', 'and does not hide the packed copy')
+            self.assertEqual([p.name for p in dest.rglob('.seed-*')], [])
+
+    def test_a_leftover_seed_name_is_unlinked_not_written_through(self):
+        import tarfile as tf, io
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / 'dest'
+            (dest / 'records' / 'aa').mkdir(parents=True)
+            other = dest / 'records' / 'aa' / 'v2-aa2'
+            other.write_bytes(b'placed earlier')
+            os.link(other, dest / 'records' / 'aa' / '.seed-v2-aa1')   # a crash between a link and its unlink
+            out = io.BytesIO()
+            with tf.open(fileobj=out, mode='w') as tar:
+                info = tf.TarInfo('records/aa/v2-aa1'); info.size = 3
+                tar.addfile(info, io.BytesIO(b'new'))
+            self.assertEqual(self.seed(out.getvalue(), dest), 'added 1 kept 0')
+            self.assertEqual(other.read_bytes(), b'placed earlier', 'the other name of the leftover inode is untouched')
+            self.assertEqual((dest / 'records' / 'aa' / 'v2-aa1').read_bytes(), b'new')
+
+    def test_the_seed_syncs_what_it_places(self):
+        import subprocess, sys, tarfile as tf, io
+        with tempfile.TemporaryDirectory() as d:
+            dest = Path(d) / 'dest'
+            dest.mkdir()
+            out = io.BytesIO()
+            with tf.open(fileobj=out, mode='w') as tar:
+                for name, raw in (('v2-bb1/manifest', b'm'), ('records/aa/v2-aa1', b'packed')):
+                    info = tf.TarInfo(name); info.size = len(raw)
+                    tar.addfile(info, io.BytesIO(raw))
+            # count the fsyncs: the placed file, its fan-out directory and the two directories the seed made (records/<hh>, records/), and the
+            # placed directory's file, the directory itself before its rename and the archive directory after
+            seed = Path(d) / 'seed.py'
+            seed.write_text(rj.SEED)
+            counted = ('import os, runpy, sys\nreal, calls = os.fsync, []\n'
+                       'os.fsync = lambda fd: (calls.append(fd), real(fd))[1]\n'
+                       'sys.argv = ["seed", sys.argv[1]]\n'
+                       f'runpy.run_path({str(seed)!r}, run_name="__main__")\n'
+                       'sys.stderr.write("fsyncs=%d" % len(calls))\n')
+            done = subprocess.run([sys.executable, '-c', counted, str(dest)], input=out.getvalue(), capture_output=True)
+            self.assertEqual(done.returncode, 0, done.stderr.decode())
+            self.assertEqual(done.stdout.decode().strip(), 'added 2 kept 0')
+            fsyncs = int(done.stderr.decode().rsplit('fsyncs=', 1)[1])
+            self.assertEqual(fsyncs, 7, 'packed: file, fan-out directory, records/, archive directory; directory: its file, itself, the archive directory')
+
+
 class SourceCheck(unittest.TestCase):
     """The host runs the laptop-copied deploy/testnet with sudo: a copy is run only when it is the recorded clean commit and the laptop's own checkout."""
 

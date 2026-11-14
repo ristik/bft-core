@@ -176,7 +176,7 @@ func (x *BlockStore) ProcessTc(tc *rctypes.TimeoutCert) error {
 	// Every timeout message carries the previous round's TC, so a node sees each TC about n times: only the first one for its round is written. A synced
 	// commit per message took about 40% of an unknown-leader round on a shared disk (#886). The stored TC is read, not remembered: other paths delete it, and a
 	// failed write leaves it older, so the next copy writes. A store that cannot be read is written to, as before.
-	if last, err := x.storage.ReadLastTC(); err == nil && last != nil && last.GetRound() >= tc.GetRound() {
+	if last, ok, err := x.lastTCRound(); err == nil && ok && last >= tc.GetRound() {
 		return nil
 	}
 	// persist last known TC
@@ -184,6 +184,24 @@ func (x *BlockStore) ProcessTc(tc *rctypes.TimeoutCert) error {
 		return fmt.Errorf("TC write failed: %w", err)
 	}
 	return nil
+}
+
+// LastTCRounder is a store that tells the round of its stored TC without decoding the certificate each time (BoltDB). A store proxy
+// forwards it, or ProcessTc decodes the stored TC for every timeout message again.
+type LastTCRounder interface {
+	LastTCRound() (round uint64, ok bool, err error)
+}
+
+// lastTCRound is the round of the stored TC; ok is false when no TC is stored.
+func (x *BlockStore) lastTCRound() (uint64, bool, error) {
+	if s, is := x.storage.(LastTCRounder); is {
+		return s.LastTCRound()
+	}
+	last, err := x.storage.ReadLastTC()
+	if err != nil || last == nil {
+		return 0, false, err
+	}
+	return last.GetRound(), true, nil
 }
 
 /*

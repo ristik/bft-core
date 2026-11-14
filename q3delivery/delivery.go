@@ -1,7 +1,9 @@
-// Package q3delivery serves and fetches the activation bundle of a V3 epoch between root nodes: the proof envelope that authenticates the
-// activation from the pinned genesis, the old epoch's committed checkpoint and the candidate preimage (q3active.Bundle). It is the V3
-// counterpart of handoffdelivery, with its own protocol identifier: a peer that does not speak it cannot fetch a V3 bundle, and a V2
-// peer is never asked for one.
+// Package q3delivery serves and fetches the activation bundle of a V3 epoch between root nodes: the proof envelope of the activating link,
+// the old epoch's committed checkpoint and the candidate preimage (q3active.Bundle). It is the V3 counterpart of handoffdelivery, with its
+// own protocol identifier: a peer that does not speak it cannot fetch a V3 bundle, and a V2 peer is never asked for one.
+//
+// A bundle is one epoch's: its size does not grow with the chain (#1035). A receiver verifies it against its own history, forward from its
+// pin, so it asks for the epochs it lacks in order, each by its own request.
 //
 // A bundle fetched here is untrusted bytes. The caller hands it to its own q3active.Runtime, which verifies it against the verified
 // history and installs it through the journal; nothing about the peer is trusted, and what a peer serves is only ever the evidence.

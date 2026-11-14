@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/libp2p/go-libp2p/p2p/net/swarm"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/unicitynetwork/bft-core/logger"
@@ -97,8 +98,8 @@ func (f *certificationFrames) v2Frame() ([]byte, error) {
 SendCertificationResponse sends the response asynchronously to the receivers, offering
 "/ab/certificates/0.0.2" and "/ab/certificates/0.0.1" to each. The protocol is the first one the
 receiver announced via identify on its current connection, so no negotiation round trip
-precedes the payload in steady state (explicit negotiation happens only when the receiver
-announced neither). The serialization is chosen from the stream protocol before any payload is
+precedes the payload in steady state (explicit negotiation happens only when the sender knows of
+neither, eg before identify has delivered the receiver's protocols). The serialization is chosen from the stream protocol before any payload is
 written; exactly one certificate is sent per receiver and a failure is never followed by a
 second send in the same or another format.
 */
@@ -203,6 +204,14 @@ func (n *LibP2PNetwork) sendCertificationFrame(ctx context.Context, receiver pee
 	if _, err = s.Write(data); err != nil {
 		_ = s.Reset() // Close must not wait for the handshake reply of a stalled peer
 		return fmt.Errorf("writing data to p2p stream (%s): %w", negotiated, err)
+	}
+	// A stream that host.NewStream negotiated explicitly (the receiver's protocols were not in the peerstore when it
+	// opened, eg identify had not delivered them yet) is the swarm's own stream: its handshake reply was read before
+	// NewStream returned, and nothing more comes from the receiver until it closes. Reading it would wait for the
+	// receiver, whose handler waits for this side's close, until the send deadline: the certificate delivered, the
+	// send reported failed and the stream reset (bft-core#1004). Only the lazy stream has a reply to observe.
+	if _, negotiated := s.(*swarm.Stream); negotiated {
+		return nil
 	}
 	// Observe the (already pipelined) handshake reply, after the payload went out. A refusal means the
 	// receiver advertised a protocol it does not handle (now); it is reported, not retried.

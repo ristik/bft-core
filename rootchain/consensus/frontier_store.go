@@ -34,7 +34,20 @@ var _ interface {
 	storage.RecordStore
 	storage.CutStore
 	storage.BlockCommitter
+	storage.LastTCRounder
 } = (*frontierPersistentStore)(nil)
+
+// LastTCRound forwards the cheap stored-TC round of the real store; otherwise it decodes the stored TC.
+func (s *frontierPersistentStore) LastTCRound() (uint64, bool, error) {
+	if store, ok := s.PersistentStore.(storage.LastTCRounder); ok {
+		return store.LastTCRound()
+	}
+	tc, err := s.ReadLastTC()
+	if err != nil || tc == nil {
+		return 0, false, err
+	}
+	return tc.GetRound(), true, nil
+}
 
 func (s *frontierPersistentStore) fault(err error) error {
 	if err != nil {

@@ -764,7 +764,7 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 			r.health.updateVoting(false, nonVotingFollower)
 			return nil // signed under a role that has ended: kept, never rebuilt, re-signed or sent under another token
 		}
-		return r.sendUnder(ctx, r.completed.req, exp.Round, r.completed.token)
+		return r.sendUnder(ctx, uc, r.completed.req, exp.Round, r.completed.token)
 	}
 
 	// RE-DELIVERY OF AN AUTHORIZATION THE SIGNER ALREADY REFUSED. Nothing was signed, so there is
@@ -1091,7 +1091,7 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 		r.log.InfoContext(ctx, "submitting block certification request",
 			slog.Uint64("round", exp.Round), slog.Bool("quiet", irQuiet), slog.Bool("leader", leader == r.nodeID))
 	}
-	return r.send(ctx, req, exp.Round)
+	return r.send(ctx, uc, req, exp.Round)
 }
 
 // ErrSubmissionFailed marks a failure to SEND an already-applied round's certification request.
@@ -1112,22 +1112,27 @@ const submitRetries = 2
 
 const submitRetryInterval = 100 * time.Millisecond
 
-func (r *Round) send(ctx context.Context, req *certification.BlockCertificationRequest, round uint64) error {
-	return r.sendUnder(ctx, req, round, r.leaseToken)
+// send submits req, authorised by uc, under the role lease this certificate's handling took.
+func (r *Round) send(ctx context.Context, uc *types.UnicityCertificate, req *certification.BlockCertificationRequest, round uint64) error {
+	return r.sendUnder(ctx, uc, req, round, r.leaseToken)
 }
 
-// sendUnder sends signed bytes bound to the role token they were signed under: the round and the client admit the send only under it.
-func (r *Round) sendUnder(ctx context.Context, req *certification.BlockCertificationRequest, round uint64, token uint64) error {
+// sendUnder sends signed bytes bound to the role token they were signed under, and to the root epoch of uc, the certificate that authorised
+// them (withRequestOrigin, #1036): the round and the client admit every network send of them only while that role holds and no later root
+// epoch is installed.
+func (r *Round) sendUnder(ctx context.Context, uc *types.UnicityCertificate, req *certification.BlockCertificationRequest, round uint64, token uint64) error {
 	if !r.role.Load().admits(token) {
 		return ErrFollower
 	}
 	ctx = withRoleToken(ctx, token)
+	ctx = withRequestOrigin(ctx, uc.GetRootEpoch())
 	var err error
 	for attempt := 0; ; attempt++ {
 		if err = r.submitter.Submit(ctx, req); err == nil {
 			return nil
 		}
-		if attempt >= submitRetries || ctx.Err() != nil {
+		if attempt >= submitRetries || ctx.Err() != nil || errors.Is(err, ErrRequestAcrossActivation) || errors.Is(err, ErrFollower) {
+			// a closed epoch's request, or one whose role has ended, never becomes sendable
 			break
 		}
 		if r.log != nil {
