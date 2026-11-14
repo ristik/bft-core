@@ -34,6 +34,11 @@ type ActivePeers struct {
 	// is only the genesis one, which may still name a validator that a later step retired. A held set authorizes nobody (a peer refused
 	// in that window retries; see archivewiring.ErrPeerNotAllowed) rather than authorizing a stale set.
 	held bool
+	// member is whether this node itself is a validator of the installed set (the set never contains it). A node that is not a member is
+	// a non-active party: it takes evidence from blocks and mirrors, never from roots.
+	member bool
+	// selfKey is the signing key the installed set names for this node (nil while it does not name it): health binding evidence only.
+	selfKey []byte
 }
 
 // NewActivePeers starts with the genesis validators as the shard epoch 0 set.
@@ -43,7 +48,7 @@ func NewActivePeers(self peer.ID, genesis []*types.NodeInfo) (*ActivePeers, erro
 	if err != nil {
 		return nil, err
 	}
-	a.set = set
+	a.set, a.member, a.selfKey = set, names(self, genesis), keyOf(self, genesis)
 	return a, nil
 }
 
@@ -78,13 +83,56 @@ func (a *ActivePeers) Install(epoch uint64, validators []*types.NodeInfo) error 
 	case epoch < a.epoch:
 		return nil
 	case epoch == a.epoch:
-		if !sameSet(a.set, set) {
+		// the self-membership bit is part of the set: {self,B} and {B} at one epoch are different assignments
+		if !sameSet(a.set, set) || a.member != names(a.self, validators) {
 			return fmt.Errorf("%w: shard epoch %d", ErrActivePeersConflict, epoch)
 		}
 		return nil
 	}
-	a.epoch, a.set, a.staged = epoch, set, nil
+	a.epoch, a.set, a.staged, a.member, a.selfKey = epoch, set, nil, names(a.self, validators), keyOf(a.self, validators)
 	return nil
+}
+
+// names reports whether the validators include self.
+func names(self peer.ID, validators []*types.NodeInfo) bool {
+	for _, v := range validators {
+		if v == nil {
+			continue
+		}
+		if id, err := peer.Decode(v.NodeID); err == nil && id == self {
+			return true
+		}
+	}
+	return false
+}
+
+// keyOf is the signing key validators name for self, nil when they do not name it.
+func keyOf(self peer.ID, validators []*types.NodeInfo) []byte {
+	for _, v := range validators {
+		if v == nil {
+			continue
+		}
+		if id, err := peer.Decode(v.NodeID); err == nil && id == self {
+			return append([]byte(nil), v.SigKey...)
+		}
+	}
+	return nil
+}
+
+// Installed is the installed set's shard epoch, whether it names this node, and the signing key it names for it (nil when it does not):
+// what the health binding reports (bft-core#1057). It authorizes nothing.
+func (a *ActivePeers) Installed() (epoch uint64, member bool, key []byte) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.epoch, a.member, append([]byte(nil), a.selfKey...)
+}
+
+// Member reports whether this node is a validator of the installed (active) assignment. It is a role fact for source selection only:
+// whether the node may sign is decided by its signing gates and authority, never by this.
+func (a *ActivePeers) Member() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.member
 }
 
 func sameSet(a, b map[peer.ID]struct{}) bool {

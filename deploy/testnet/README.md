@@ -373,6 +373,14 @@ aliases `root5`/`shard5` and joins TCP and Unix sockets in `~/rjoin/<generation>
 
 On the laptop, peer stubs `peer1..4` (aliases `root<i>`, `shard<i>`, `ureth<i>`) forward to the `-L` ports through `host.docker.internal`; the laptop's root and
 shard node announce `/dns4/root5/tcp/8000` and `/dns4/shard5/tcp/9000`. Operator RPCs (8002, 9101) never cross the tunnel.
+On a Linux docker host, pass the bridge gateway as `--mac-host` (an IP literal, e.g. `172.17.0.1`): the `-L` listeners then bind that address, because a
+container cannot reach the host's loopback. Every container on that bridge can then reach the forwarded root, shard and EL ports. The p2p ports authenticate
+their peers; the execution clients' 8545 does not.
+
+The registry `$G/handoff/remote-joiners/<J>.json` is written only under `handoff/drive.lock`, over the file's current content, by an atomic, fsynced
+replacement. Its state only moves forward (`follower`, `registered`, `bonded`, `preparing`, `prepared`, `member`, `retiring`, `retired`); a writer holding a
+stale copy is refused. A drive reads it afresh for its guard and refuses when a record is unreadable. Nothing rolls a root store back: an install
+interrupted before its record prefix was fetched completes on the root's next start (bft-core#1028). The `root-pre-epoch-N` copy is forensic only.
 
 `join` funds the owner from the operator account given as `--funder DIR` (a directory on the host with `keystore.json` and `password`), or else from the faucet
 account (100 UCT and gas; the key stays on the host), and passes `--funder` on to its drives; it registers and bonds (the laptop signs), and then prepares only
@@ -400,7 +408,25 @@ deciding what it signs (for example, checking the trust base and the assignment 
 
 With five unit weights the quorum is four: while the laptop is away the network has no fault tolerance left. Do not sleep the laptop, restart colima or its VM,
 or `docker compose down` its project: a restarted signing authority is a new EVM key that the delegation does not name, and nothing replaces it yet.
-`remote_entity.py retire-plan` prints the retirement sequence; nothing runs it (a retirement is still refused by default by the drive).
+`remote_entity.py retire-plan` prints the retirement sequence. `remote_joiner.py retire` runs it:
+1. It records `retiring`, then sends the owner's requestRetirement (signed on the laptop) unless custody already shows one. A rerun never sends it twice.
+2. It drives the result that excludes the entity (`--allow-unrehearsed-retirement`).
+3. It leaves the retired validator running as a follower, unless the operator passes `--evidence-retained NOTE`. NOTE is a statement, recorded in the
+   registry, that the surviving providers hold the UTB/Q3 lineage, the record cuts and logs and the other recovery evidence through this handoff.
+4. With that statement, it waits until every host writer's `archivePolicy` passes the gate, records the statement, and only then stops the validator
+   services. Volumes and keys are kept.
+
+A writer passes the gate when:
+- its `checkedShardEpoch` is at least the shard epoch the excluding handoff activated. A node without that field (before bft-core#1047) fails closed,
+  and `shardEpoch` is not used;
+- its `replicas` are exactly the ones archivepolicy derives for it from that epoch's installed shard configuration;
+- the retiree is in neither `replicas` nor `retained`;
+- `migrationComplete` is true.
+
+An unreadable report fails closed.
+
+`remote_joiner.py claim` matures and claims the bond once its holds pass. A join reuses an on-chain registration of the laptop's root key instead of
+registering again. One join, retire, claim or catch-up command per entity runs at a time; another is refused.
 
 ## Observation/fault campaign and evidence limits
 

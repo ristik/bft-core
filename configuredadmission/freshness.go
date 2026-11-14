@@ -49,6 +49,10 @@ type Freshness struct {
 	Logger    *slog.Logger
 	// Signing is the signing configuration of a root epoch, from the verified history: the wire form of the QCs the requester accepts. Nil is the legacy scheme.
 	Signing func(epoch uint64) (votesig.Config, error)
+	// RootFree, when set and true at start, is a root-free follower (#1050): it never asks a root quorum for a bootstrap receipt (its role
+	// gater refuses the roots). Its bootstrap certificate comes from its follow sources, and readiness requires authenticated ordinary
+	// progress, which it reaches by following; until then Require reports the freshness unavailable.
+	RootFree func() bool
 
 	mu        sync.Mutex
 	guard     *bootstrapGuard
@@ -113,6 +117,13 @@ func (f *Freshness) start(ctx context.Context, c configuredprogress.Context, sto
 	// The guard is kept from here on, even if the requester cannot be built: it carries the ordinary
 	// latch for the journal admission.
 	f.guard = g
+	if f.RootFree != nil && f.RootFree() {
+		f.startErr = fmt.Errorf("%w: root-free follower: ready once authenticated ordinary progress is admitted", ErrFreshnessUnavailable)
+		if f.Logger != nil {
+			f.Logger.InfoContext(ctx, "root-free follower: no root-quorum bootstrap receipt is asked; readiness follows authenticated ordinary progress")
+		}
+		return g
+	}
 	peers, err := RootPeers(f.TrustBase)
 	if err != nil {
 		return fail(err)

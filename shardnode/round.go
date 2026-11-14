@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
@@ -32,6 +33,9 @@ type Submitter interface {
 // protocol knowledge beyond the certification/types packages — those live
 // in BFTClient.
 type Round struct {
+	role atomic.Pointer[roleHolder] // see SetRole
+	// leaseToken is the role lease the current certificate's handling started under (HandleCertificate holds r.mu).
+	leaseToken  uint64
 	nodeID      string
 	partitionID types.PartitionID
 	shardID     types.ShardID
@@ -189,6 +193,9 @@ type completedRound struct {
 	partitionRound uint64 // the certificate that authorized it
 	rootRound      uint64
 	req            *certification.BlockCertificationRequest
+	// token is the role token the request was signed under. A replay sends these bytes only under that token; when it has ended the
+	// cache is kept (the authorization is answered, so nothing is rebuilt or re-signed) and the replay abstains.
+	token uint64
 }
 
 func (c *completedRound) authorizes(uc *types.UnicityCertificate, exp Expectation) bool {
@@ -317,6 +324,30 @@ func NewRound(nodeID string, partitionID types.PartitionID, shardID types.ShardI
 // block — see awaitTimeout. Deployments that know their shard's T2 should
 // set this below it, so a stalled leader is discovered and abstained from
 // well before the root chain would time the round out anyway.
+// SetFollowerRole installs the non-active predicate: while it is true the round observes, recovers and commits what is certified, then
+// stops. It never builds, verifies a proposal, disseminates, reserves a signature or sends a request. Call before the first certificate.
+func (r *Round) SetFollowerRole(nonActive func() bool) { r.SetRole(funcRole{nonActive}) }
+
+// SetRole installs the published role lease (see RoleLease). Call before the first certificate.
+func (r *Round) SetRole(l RoleLease) { r.role.Store(&roleHolder{lease: l}) }
+
+// takeLease reads the role for one certificate's handling and reports whether this node may act in it.
+func (r *Round) takeLease() bool {
+	token, active := r.role.Load().current()
+	r.leaseToken = token
+	return active
+}
+
+// leaseLost reports whether the role this certificate's handling started under has ended (retired, or re-published) since takeLease. It
+// is checked immediately before every irreversible action.
+func (r *Round) leaseLost() bool {
+	token, active := r.role.Load().current()
+	return !active || token != r.leaseToken
+}
+
+// nonVotingFollower is the health reason of a non-active follower.
+const nonVotingFollower = "non-active follower: follows certified blocks, does not build or sign"
+
 func (r *Round) SetAwaitTimeout(d time.Duration) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -641,6 +672,11 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 	if r.journalRecovery != nil && !sameBlockRef(head, recoveredHead) {
 		return fmt.Errorf("shardnode: executor identity changed immediately after journal recovery: got %d/%x, certified %d/%x", head.Number, head.Hash, recoveredHead.Number, recoveredHead.Hash)
 	}
+	// THE FOLLOWER BOUNDARY. A non-active node has now observed and executed what is certified; it produces nothing for the next round.
+	if !r.takeLease() {
+		r.health.updateVoting(false, nonVotingFollower)
+		return nil
+	}
 	if r.executorGenesis == nil {
 		g, gerr := r.executor.GenesisBlock(ctx)
 		if gerr != nil {
@@ -724,7 +760,11 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 			r.log.DebugContext(ctx, "re-delivery of an authorization already answered: re-sending the identical signed request",
 				slog.Uint64("round", exp.Round), slog.Uint64("partitionRound", uc.GetRoundNumber()))
 		}
-		return r.send(ctx, uc, r.completed.req, exp.Round)
+		if !r.role.Load().admits(r.completed.token) {
+			r.health.updateVoting(false, nonVotingFollower)
+			return nil // signed under a role that has ended: kept, never rebuilt, re-signed or sent under another token
+		}
+		return r.sendUnder(ctx, uc, r.completed.req, exp.Round, r.completed.token)
 	}
 
 	// RE-DELIVERY OF AN AUTHORIZATION THE SIGNER ALREADY REFUSED. Nothing was signed, so there is
@@ -793,8 +833,16 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 		return fmt.Errorf("shardnode: execution journal stopped before block production: %s", r.health.Snapshot().ExecutionRecoveryDetail)
 	}
 	ph.mark("before-produce")
+	if r.leaseLost() {
+		r.health.updateVoting(false, nonVotingFollower)
+		return nil
+	}
 	block, params, err := r.produceBlock(ctx, head, exp, sealHash, leader, uc, tr, readinessTicket)
 	if err != nil {
+		if errors.Is(err, ErrFollower) { // the role ended before one of the round's irreversible actions: an abstention, not a failure
+			r.health.updateVoting(false, nonVotingFollower)
+			return nil
+		}
 		if errors.Is(err, errReadinessRevoked) {
 			r.recordReadinessRevoked(ctx, err)
 			return nil
@@ -842,6 +890,10 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 		}
 		if err := binder.CheckBlockBinding(ctx, block, params); err != nil {
 			return fmt.Errorf("retaining follower candidate: %w", err)
+		}
+		if r.leaseLost() { // after the wait for the leader and the binding check, immediately before the speculative journal write
+			r.health.updateVoting(false, nonVotingFollower)
+			return nil
 		}
 		if err := r.journal.RetainCandidate(ctx, block, params, false); err != nil {
 			// A follower's candidate and its provenance came from the leader.
@@ -991,6 +1043,10 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 	if r.journalRecovery != nil && r.health.Snapshot().ExecutionRecovery == "stopped" {
 		return fmt.Errorf("shardnode: execution journal stopped before signature: %s", r.health.Snapshot().ExecutionRecoveryDetail)
 	}
+	if r.leaseLost() { // retired (or re-published) while this round built or verified: no signature
+		r.health.updateVoting(false, nonVotingFollower)
+		return nil
+	}
 	signed, err := r.certSigner.Sign(ctx, uc, tr, req)
 	if err != nil {
 		reason := signingDeclinedReason(err)
@@ -1026,6 +1082,7 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 		partitionRound: uc.GetRoundNumber(),
 		rootRound:      uc.GetRootRoundNumber(),
 		req:            req,
+		token:          r.leaseToken,
 	}
 	r.health.updateSubmitted(exp.Round)
 	r.health.updateVoting(true, "")
@@ -1055,16 +1112,27 @@ const submitRetries = 2
 
 const submitRetryInterval = 100 * time.Millisecond
 
-// send submits req, authorised by uc. Every attempt carries uc's root epoch as the request's origin (withRequestOrigin): the client admits
-// each network send of it only while no later root epoch is installed (#1036).
+// send submits req, authorised by uc, under the role lease this certificate's handling took.
 func (r *Round) send(ctx context.Context, uc *types.UnicityCertificate, req *certification.BlockCertificationRequest, round uint64) error {
+	return r.sendUnder(ctx, uc, req, round, r.leaseToken)
+}
+
+// sendUnder sends signed bytes bound to the role token they were signed under, and to the root epoch of uc, the certificate that authorised
+// them (withRequestOrigin, #1036): the round and the client admit every network send of them only while that role holds and no later root
+// epoch is installed.
+func (r *Round) sendUnder(ctx context.Context, uc *types.UnicityCertificate, req *certification.BlockCertificationRequest, round uint64, token uint64) error {
+	if !r.role.Load().admits(token) {
+		return ErrFollower
+	}
+	ctx = withRoleToken(ctx, token)
 	ctx = withRequestOrigin(ctx, uc.GetRootEpoch())
 	var err error
 	for attempt := 0; ; attempt++ {
 		if err = r.submitter.Submit(ctx, req); err == nil {
 			return nil
 		}
-		if attempt >= submitRetries || ctx.Err() != nil || errors.Is(err, ErrRequestAcrossActivation) { // a closed epoch's request never becomes sendable
+		if attempt >= submitRetries || ctx.Err() != nil || errors.Is(err, ErrRequestAcrossActivation) || errors.Is(err, ErrFollower) {
+			// a closed epoch's request, or one whose role has ended, never becomes sendable
 			break
 		}
 		if r.log != nil {
@@ -1444,6 +1512,9 @@ func (r *Round) buildFinal(ctx context.Context, params RoundParams, held *types.
 	if err := r.revalidateChildReadiness(ctx, ticket, held); err != nil {
 		return "", err
 	}
+	if r.leaseLost() { // after the slow preparation and the gate, immediately before the Engine call
+		return "", ErrFollower
+	}
 	return build(ctx)
 }
 
@@ -1696,6 +1767,9 @@ func (r *Round) produceBlock(ctx context.Context, head BlockRef, exp Expectation
 		if err != nil {
 			return Block{}, params, fmt.Errorf("build: %w", err)
 		}
+		if r.leaseLost() {
+			return Block{}, params, ErrFollower
+		}
 		block, err := r.executor.Seal(ctx, id)
 		r.metrics.recordBuildDuration(ctx, time.Since(buildStart))
 		if err != nil {
@@ -1708,6 +1782,9 @@ func (r *Round) produceBlock(ctx context.Context, head BlockRef, exp Expectation
 				r.metrics.recordRecoveryStop(ctx)
 				return Block{}, params, err
 			}
+			if r.leaseLost() {
+				return Block{}, params, ErrFollower
+			}
 			if err := r.journal.RetainCandidate(ctx, block, params, true); err != nil {
 				if errors.Is(err, ErrLeaderProposalConflict) {
 					return Block{}, params, err
@@ -1718,6 +1795,9 @@ func (r *Round) produceBlock(ctx context.Context, head BlockRef, exp Expectation
 			}
 		}
 		if r.disseminator != nil {
+			if r.leaseLost() {
+				return Block{}, params, ErrFollower
+			}
 			if err := r.disseminator.Publish(ctx, exp.Round, block); err != nil {
 				return Block{}, params, fmt.Errorf("publishing round %d block: %w", exp.Round, err)
 			}

@@ -598,16 +598,32 @@ func (s *Store) getExact(q Request, digest [32]byte, receiptCompleteOnly bool) (
 			return nil, err
 		}
 		for _, name := range []string{base, base + "-" + hex.EncodeToString(digest[:])} {
-			r, err := readNamed(s.dir, q, v2, name)
-			if errors.Is(err, ErrUnavailable) {
-				continue
-			}
-			if err != nil {
-				damaged = true
-				continue
-			}
-			if got, derr := ManifestDigest(q, r); derr == nil && got == digest {
-				return r, nil
+			// Each layout is judged by itself (astra's review of the #1041 merge): its self-hashed manifest is checked first, so a wrong digest
+			// costs a manifest read, never a record read (bft-core#1066); only a layout whose manifest names the digest has its chunks read; a
+			// damaged or mismatching copy in one layout falls through to the other (#1059's recovery).
+			for _, l := range exactLayouts {
+				held, err := l.digest(s.dir, name)
+				if errors.Is(err, ErrUnavailable) {
+					continue
+				}
+				if err != nil {
+					damaged = true
+					continue
+				}
+				if held != digest {
+					continue
+				}
+				r, err := l.read(s.dir, q, v2, name)
+				if errors.Is(err, ErrUnavailable) {
+					continue
+				}
+				if err != nil {
+					damaged = true
+					continue
+				}
+				if got, derr := ManifestDigest(q, r); derr == nil && got == digest {
+					return r, nil
+				}
 			}
 		}
 	}

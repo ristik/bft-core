@@ -177,6 +177,27 @@ func resumeFrom(client *BFTClient, round *Round, luc *types.UnicityCertificate) 
 // abstaining. Call after New, before Run. Callers should derive it from the shard's T2 with
 // AwaitTimeoutForT2 rather than picking a value: see that function for what a budget longer than T2
 // does to a validator whose leader has gone quiet.
+// SetFollowerRole makes the node a non-active follower while nonActive reports true: its client sends nothing to the roots and takes
+// certificates from FollowCertificate, and its round executes what is certified but never builds or signs. Call before Run.
+func (n *Node) SetFollowerRole(nonActive func() bool) { n.SetRole(funcRole{nonActive}) }
+
+// SetRole installs the published role lease (see RoleLease) on the client and the round. Call before Run.
+func (n *Node) SetRole(l RoleLease) {
+	n.client.SetRole(l)
+	n.round.SetRole(l)
+}
+
+// RoleChanged tells the node that its follower predicate may have changed (see BFTClient.RoleChanged).
+func (n *Node) RoleChanged() { n.client.RoleChanged() }
+
+// Holds reports whether the node holds a durably admitted certificate at or past uc (see BFTClient.Holds).
+func (n *Node) Holds(uc *types.UnicityCertificate) bool { return n.client.Holds(uc) }
+
+// FollowCertificate offers a certificate from a non-root follow source (see BFTClient.FollowCertificate).
+func (n *Node) FollowCertificate(uc *types.UnicityCertificate, tr *certification.TechnicalRecord) bool {
+	return n.client.FollowCertificate(uc, tr)
+}
+
 func (n *Node) SetAwaitTimeout(d time.Duration) {
 	n.round.SetAwaitTimeout(d)
 }

@@ -17,12 +17,14 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/ainvaltin/httpsrv"
 	"github.com/ethereum/go-ethereum/common"
 	libp2ppeer "github.com/libp2p/go-libp2p/core/peer"
+	libp2ppeerstore "github.com/libp2p/go-libp2p/core/peerstore"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/spf13/cobra"
@@ -35,6 +37,7 @@ import (
 	"github.com/unicitynetwork/bft-core/archive"
 	"github.com/unicitynetwork/bft-core/archivepolicy"
 	"github.com/unicitynetwork/bft-core/archivewiring"
+	"github.com/unicitynetwork/bft-core/b1paired"
 	"github.com/unicitynetwork/bft-core/b1state"
 	"github.com/unicitynetwork/bft-core/certifiedstore"
 	"github.com/unicitynetwork/bft-core/configuredadmission"
@@ -51,6 +54,7 @@ import (
 	"github.com/unicitynetwork/bft-core/q3delivery"
 	"github.com/unicitynetwork/bft-core/q3format"
 	"github.com/unicitynetwork/bft-core/q3shard"
+	"github.com/unicitynetwork/bft-core/recordsfeed"
 	"github.com/unicitynetwork/bft-core/registrygenesis"
 	"github.com/unicitynetwork/bft-core/registryproof"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
@@ -59,6 +63,7 @@ import (
 	"github.com/unicitynetwork/bft-core/shardnode"
 	"github.com/unicitynetwork/bft-core/shardnode/executortest"
 	"github.com/unicitynetwork/bft-core/signingauthority"
+	"github.com/unicitynetwork/bft-core/utbmirror"
 	"github.com/unicitynetwork/bft-core/utbprofile"
 	"github.com/unicitynetwork/bft-core/utbstore"
 )
@@ -317,6 +322,8 @@ type shardNodeRunFlags struct {
 	JournalBytes         int64
 	ArchiveStore         string
 	ArchiveReplicas      []string
+	ArchivePublicReads   bool     // serve archive reads to non-validators under a separate budget
+	FollowSources        []string // non-root bootstrap peers; set, roots are refused while this node is not active
 	ArchivePrune         bool
 	TrustHistoryProfile2 bool
 	UTBGenesisFile       string // enables the signed trust-base entry (UTB) profile: the canonical genesis entry (trust-base utb-genesis)
@@ -439,6 +446,10 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 		"maximum retained hot journal bytes with --execution-journal; pruning requires --archive-prune")
 	cmd.Flags().StringVar(&flags.ArchiveStore, "archive-store", "",
 		"local certified archive directory; requires --execution-journal. Replicas are derived from the shard's validators (the next three after this node in peer-ID order, any two sufficing) unless exactly two --archive-replica peer IDs are given")
+	cmd.Flags().BoolVar(&flags.ArchivePublicReads, "archive-public-reads", false,
+		"serve archive reads (never writes) to peers that are not validators, such as root-free followers, under a separate bounded budget")
+	cmd.Flags().StringSliceVar(&flags.FollowSources, "follow-source", nil,
+		"libp2p multiaddress of a non-root peer (shard validator or archive replica) to bootstrap from while this node is not an active validator; with it set, root connections are refused until activation")
 	cmd.Flags().StringSliceVar(&flags.ArchiveReplicas, "archive-replica", nil,
 		"explicit replica peer ID; set exactly twice with --archive-store to replace the derived replica set with this fixed pair (both required)")
 	cmd.Flags().BoolVar(&flags.ArchivePrune, "archive-prune", false,
@@ -613,13 +624,49 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		Count: flags.BootstrapConnectRetryCount,
 		Delay: flags.BootstrapConnectRetryDelay,
 	}
-	peerConf, err := network.NewPeerConfiguration(flags.Address, flags.AnnounceAddresses, authKeyPair, bootNodes, bootstrapConnectRetry)
+	followSources, err := getBootStrapNodes(flags.FollowSources)
+	if err != nil {
+		return fmt.Errorf("follow sources parameter error: %w", err)
+	}
+	// A root-free follower bootstraps from its follow sources only and keeps every known root closed while it is not active (the role is
+	// read on each connection: activation opens the roots without a restart). The roots' addresses are still learned, for that moment.
+	follower := newRootFreeRole(len(followSources) != 0, trustBases)
+	if utbEntries != nil {
+		// every authenticated UTB entry retained before a restart names a root committee, whether or not its activation followed: learned
+		// here, before any follower networking opens (OnEntry fires only for entries appended from now on)
+		if err := seedRootsFromUTB(follower, utbEntries); err != nil {
+			return err
+		}
+	}
+
+	peerBoot := bootNodes
+	if follower.enabled {
+		peerBoot = followSources
+	}
+	peerConf, err := network.NewPeerConfiguration(flags.Address, flags.AnnounceAddresses, authKeyPair, peerBoot, bootstrapConnectRetry)
 	if err != nil {
 		return fmt.Errorf("creating peer configuration: %w", err)
 	}
+	peerConf.Gater = &network.RoleGater{Deny: follower.deny}
 	peer, err := network.NewPeer(ctx, peerConf, flags.observe.Logger(), flags.observe.PrometheusRegisterer())
 	if err != nil {
 		return fmt.Errorf("creating peer: %w", err)
+	}
+	var utbFollower *utbmirror.Follower
+	if utbEntries != nil {
+		// this node mirrors the finalized trust-base entries it holds; a root-free follower extends its own chain from the mirrors
+		peer.RegisterProtocolHandler(utbmirror.Protocol, utbmirror.NewServer(utbEntries).Handler)
+		if len(followSources) != 0 {
+			utbFollower = &utbmirror.Follower{Store: utbEntries, Host: peer, Mirrors: follower.mirrorPeers, Log: flags.observe.Logger(),
+				// an authenticated successor's committee is a root committee from the moment it authenticates, before its Q3 activation
+				OnEntry: func(e *types.RootTrustBaseV2) { follower.addRootNodes(e.RootNodes) }}
+		}
+	}
+	follower.setRevoke(func() { peer.RevokeDenied() })
+	if follower.enabled {
+		for _, root := range bootNodes {
+			peer.Network().Peerstore().AddAddrs(root.ID, root.Addrs, libp2ppeerstore.PermanentAddrTTL)
+		}
 	}
 
 	shardNet, err := network.NewShardNetwork(peer, flags.observe, network.DefaultShardNetworkOptions)
@@ -754,7 +801,9 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			if verifierContext.B1, jErr = newB1PairConfig(b1Profile, b1rt, flags.EthURL, 10*time.Second); jErr != nil {
 				return jErr
 			}
-			attachRecordsFeed(verifierContext.B1, peer, bootNodes)
+			if jErr = attachShardRecordsFeed(verifierContext.B1, peer, bootNodes, follower, flags.ExecutionJournal, flags.observe.Logger()); jErr != nil {
+				return jErr
+			}
 			// The execution client is the paired ureth: every build and import carries the pair binding its own gate compares.
 			if q3Admit, jErr = wireQ3Pair(executor, b1rt, uint64(shardConf.NetworkID), origin.Valid(), [32]byte(origin.BlockHash())); jErr != nil {
 				return jErr
@@ -788,7 +837,9 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				if verifierContext.B1, jErr = newB1PairConfig(b1Profile, q3rt, flags.EthURL, 10*time.Second); jErr != nil {
 					return jErr
 				}
-				attachRecordsFeed(verifierContext.B1, peer, bootNodes)
+				if jErr = attachShardRecordsFeed(verifierContext.B1, peer, bootNodes, follower, flags.ExecutionJournal, flags.observe.Logger()); jErr != nil {
+					return jErr
+				}
 			}
 		}
 	}
@@ -806,6 +857,16 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	if err != nil {
 		return fmt.Errorf("deriving the shard peers: %w", err)
 	}
+	// the published role: active only once the activation naming this node has completed; revoked at once by an assignment without it
+	var runtimeEpoch func() uint64
+	if q3rt != nil {
+		runtimeEpoch = q3rt.ActiveEpoch
+	}
+	role := newShardRole(trustBases[0].GetEpoch(), activePeers.Member(), runtimeEpoch)
+	follower.setRole(role.active)
+	role.subscribe(follower.changed)
+	follower.setMirrors(q3MirrorPeers(activePeers, followSourceIDs(followSources)))
+	var headFollower *archivewiring.HeadFollower
 	// Every shard-membership consumer (block dissemination, the archive and journal servers, the journal suffix and evidence providers)
 	// follows this set: the genesis validators until a verified assignment step is installed, then the active assignment's.
 	disseminator, err := buildDisseminator(peer, flags.observe, shardConf.Validators, activePeers, flags.TrustHistoryProfile2)
@@ -860,6 +921,26 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	if err != nil {
 		return fmt.Errorf("creating shard node: %w", err)
 	}
+	if follower.enabled {
+		// a root-free follower: while this node is not a validator of the installed assignment it takes certificates from its follow
+		// sources only, executes what is certified, and never builds, signs or sends anything to a root
+		if flags.ExecutionJournal == "" || flags.ArchiveStore == "" {
+			return errors.New("--follow-source requires --execution-journal and --archive-store")
+		}
+		node.SetRole(role)
+		role.subscribe(node.RoleChanged) // a published promotion subscribes to the roots at once
+		// the health role is the live lease, read at every report: a restart's replay completes the activation before the runtime has
+		// completed its epoch, and the runtime's completion notifies nobody (bft-core#1061)
+		node.Health().SetRoleSource(role.published)
+	}
+	// the evidence the health report is about (bft-core#1057): this node, its network and shard, the installed configuration and the verified
+	// activation history, read at every report (never a stale notification, bft-core#1061)
+	bindingSource := shardBindingSource{self: peer.ID(), shard: shardConf, installed: activePeers.Installed, confHash: node.ShardConfForEpoch}
+	if q3rt != nil {
+		bindingSource.history = q3rt.HistoryEntries
+	}
+	node.Health().SetBindingSource(bindingSource.binding)
+
 	// The adapter authenticates certificates under the same per-epoch configuration set as the admission, not under a scan of every
 	// installed assignment. Set before Run.
 	verifierContext.SetConfForEpoch(node.ShardConfForEpoch)
@@ -965,6 +1046,12 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			// replica policy) keeps this service until the current replicas hold them; it gets no journal, evidence or consensus access.
 			archiveServer.SetPeerAuthorizer(func(id libp2ppeer.ID) bool { return activePeers.Allowed(id) || replicaPolicy.Holder(id) })
 			archiveServer.SetLogger(flags.observe.Logger())
+			if flags.ArchivePublicReads {
+				// non-active followers read (never write) under their own budget, apart from the validators' slots
+				if e := archiveServer.SetPublicReads(archivewiring.Limits{Deadline: archiveTransportLimits.Deadline, Pending: 4, PerPeer: 2}); e != nil {
+					return fmt.Errorf("archive public reads: %w", e)
+				}
+			}
 			archiveServer.Register(ctx, peer)
 		}
 		// refreshArchivePolicy re-derives the replicas from the installed assignment and switches the versioned policy when they changed.
@@ -1174,7 +1261,11 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				},
 				Transition: verifierContext.InstallVerifiedTransition,
 				InstallAssignment: func(view handoffdelivery.Bundle, step handoff.AssignmentStep) error {
-					return installVerifiedAssignment(node, activePeers, view, step)
+					if err := installVerifiedAssignment(node, activePeers, view, step); err != nil {
+						return err
+					}
+					role.assignmentInstalled(activePeers.Member())
+					return nil
 				},
 				NoteJoiner: func(view handoffdelivery.Bundle, step handoff.AssignmentStep) error {
 					if err := noteJoinerStep(signing, view, step, node.ShardConfForEpoch); err != nil {
@@ -1187,6 +1278,11 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				Activate:             q3Trust.ActivateQ3,
 				Log: func(epoch uint64) {
 					flags.observe.Logger().Info("handoff activated", "rootEpoch", epoch, "q3", true)
+					if tb, tbErr := q3Trust.Verified().GetByEpoch(ctx, epoch); tbErr == nil {
+						follower.addRoots(tb)
+					}
+					// the activation is complete: publish its role (it opens only once the runtime has completed the epoch too)
+					role.activationCompleted(epoch, activePeers.Member())
 					refreshArchivePolicy()
 				},
 			}
@@ -1198,10 +1294,20 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			if err := q3rt.Attach(q3active.Participants{Root: sink, Safety: q3rt.Trust(nil), Shard: q3Trust.Guarded(), Authority: q3rt.Trust(nil)}); err != nil {
 				return fmt.Errorf("q3 runtime: %w", err)
 			}
-			q3Follower = &q3shard.Q3Follower{Runtime: q3rt, AnchorEpoch: trustBases[0].GetEpoch(), CurrentRoots: currentRoots,
-				Fetch: func(ctx context.Context, id libp2ppeer.ID, epoch uint64) (q3active.Bundle, error) {
+			// This node mirrors the activations its journal staged, for non-active parties that must not ask the roots (phase 1 follower).
+			mirror, mirrorErr := q3delivery.NewServer(q3shard.MirrorProvider{Runtime: q3rt})
+			if mirrorErr != nil {
+				return fmt.Errorf("q3 activation mirror: %w", mirrorErr)
+			}
+			mirror.Register(peer)
+			mirrorPeers := q3MirrorPeers(activePeers, append(followSourceIDs(followSources), archiveReplicas...))
+			// a node whose published role is not active is a non-active party: mirrors only
+			q3Follower = shardQ3Follower(notifyingActivator{Q3Activator: q3rt, role: role}, trustBases[0].GetEpoch(), currentRoots, mirrorPeers,
+				func() bool { return !role.active() },
+				knownRoots(trustBases[0].GetEpoch(), q3rt.ActiveEpoch, q3Trust.Verified().GetByEpoch),
+				func(ctx context.Context, id libp2ppeer.ID, epoch uint64) (q3active.Bundle, error) {
 					return q3delivery.Request(ctx, peer, id, epoch)
-				}}
+				})
 			catcher = q3Follower
 		}
 		var restoreLineage func(context.Context) error
@@ -1253,6 +1359,20 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		}
 		// Frontier enablement is part of the archive setup that follows the replica validation: it runs from this one action after the
 		// persisted replay on a plain run, and after CatchUp and before the archive replay on a restore.
+		// the terminal repair's archive: local, then (verified downstream) the node's non-root archive sources (#1050: a follower that
+		// installed an epoch from its mirrors holds no terminal body of it)
+		terminalArchive := func() handoffArchiveReader {
+			if archiveLocal == nil {
+				return nil
+			}
+			return remoteFallbackArchive{local: archiveLocal,
+				sources: func() []libp2ppeer.ID {
+					return follower.nonRoot(append(append(followSourceIDs(followSources), readableArchiveReplicas(replicaPolicy, archiveReplicas)...), activePeers.Peers()...))
+				},
+				fetch: func(id libp2ppeer.ID, q archive.Request) (*archive.Record, error) {
+					return archivewiring.Fetch(ctx, archiveHost, id, q, archiveTransportLimits)
+				}}
+		}
 		enableArchiveFrontier := func(ctx context.Context) error {
 			if archiveLocal == nil || !flags.ArchivePrune {
 				return nil
@@ -1288,7 +1408,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			}
 			// The terminal repair runs only now, against the authenticated frontier and restore base: a terminal they already discharge
 			// is skipped, not resurrected into the hot journal (the frontier cannot be enabled any earlier, as it needs the validated set).
-			if err := repairUndischargedHandoffTerminals(ctx, journalStore, archiveLocal, archiveSubject, journalCtx, limits, restoredHandoffTerminals); err != nil {
+			if err := repairUndischargedHandoffTerminals(ctx, journalStore, terminalArchive(), archiveSubject, journalCtx, limits, restoredHandoffTerminals); err != nil {
 				flags.observe.Logger().Error("profile2 handoff terminal repair failed", "error", err)
 				return fmt.Errorf("repairing saved handoff observations: %w", err)
 			}
@@ -1345,7 +1465,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			if flags.TrustHistoryProfile2 {
 				repairRestoredHandoffs = func(ctx context.Context) error {
 					restoringHandoffHistory = false
-					return repairUndischargedHandoffTerminals(ctx, journalStore, archiveLocal,
+					return repairUndischargedHandoffTerminals(ctx, journalStore, terminalArchive(),
 						archiveSubject, journalCtx, limits, restoredHandoffTerminals)
 				}
 			}
@@ -1389,6 +1509,9 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		// `shard-node restore` (D-M2-1) is unchanged and independent of it.
 		freshness := &configuredadmission.Freshness{Opener: peer, TrustBase: trustBases[0], Logger: flags.observe.Logger()}
 		freshness.Signing = freshnessSigning(q3rt, flags.UTBGenesisFile != "", trustBases[0])
+		if follower.enabled {
+			freshness.RootFree = func() bool { return !role.active() }
+		}
 		coordinator := &configuredadmission.ExecutionRecovery{Freshness: freshness, Store: journalStore, Context: journalCtx, JournalLimits: limits, Executor: recoveryExecutor, Gate: node.FinalityGate(), Log: flags.observe.Logger(), Genesis: genesis, Limits: configuredadmission.DefaultRecoveryLimits()}
 		server, serverErr := shardnode.NewJournalServer(configuredadmission.JournalProvider{Store: journalStore, Context: journalCtx, Limits: limits}, shardnode.DefaultJournalTransportLimits())
 		if serverErr != nil {
@@ -1402,6 +1525,24 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		if archiveLocal != nil {
 			source := &archivewiring.RecoverySource{Context: journalCtx, Subject: archiveSubject, Local: archiveLocal, Host: archiveHost,
 				Replicas: archiveReplicas, Policy: replicaPolicy, Limits: archiveTransportLimits, MaxBlocks: configuredadmission.DefaultRecoveryLimits().Blocks, Log: flags.observe.Logger()}
+			if follower.enabled {
+				source.Followed = func() []libp2ppeer.ID { return follower.nonRoot(followSourceIDs(followSources)) }
+				// the root-free certificate source: the newest verified archive head, offered while this node is not active
+				headFollower = &archivewiring.HeadFollower{Binding: archivewiring.CertifiedBinding{Context: journalCtx, Subject: archiveSubject},
+					Host: archiveHost, Limits: archiveTransportLimits, Active: role.active, Offer: node.FollowCertificate, Accepted: node.Holds,
+					// a fresh journal begins with the bootstrap certificate: taken from the sources' first record, never from a root quorum
+					NeedsBootstrap: func() bool {
+						st, _, err := journalStore.Load(ctx, journalCtx)
+						if err != nil {
+							return false
+						}
+						_, observed := st.Observed()
+						return !observed
+					}, Log: flags.observe.Logger(),
+					Sources: func() []libp2ppeer.ID {
+						return follower.nonRoot(append(append(followSourceIDs(followSources), readableArchiveReplicas(replicaPolicy, archiveReplicas)...), activePeers.Peers()...))
+					}}
+			}
 			archiveCatchUp = &archivewiring.CatchUp{Source: source}
 			coordinator.FetchArchive = func(ctx context.Context, after shardnode.BlockRef, target []byte) ([]shardnode.JournalFetchEntry, error) {
 				entries, fetchErr := source.FetchSuffix(ctx, after, target)
@@ -1569,6 +1710,12 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	}
 	if q3Follower != nil {
 		g.Go(func() error { return q3Follower.Run(gctx) })
+	}
+	if headFollower != nil {
+		g.Go(func() error { return headFollower.Run(gctx) })
+	}
+	if utbFollower != nil {
+		g.Go(func() error { return utbFollower.Run(gctx) })
 	}
 	return g.Wait()
 }
@@ -2116,4 +2263,77 @@ func freshnessSigning(q3rt *q3active.Runtime, utb bool, anchor *types.RootTrustB
 		return func(uint64) (votesig.Config, error) { return cfg, nil }
 	}
 	return nil
+}
+
+// q3MirrorPeers lists the non-root holders of activation evidence: the installed assignment's other validators, then the archive replicas.
+func q3MirrorPeers(active *shardnode.ActivePeers, replicas []libp2ppeer.ID) func() []libp2ppeer.ID {
+	fixed := append([]libp2ppeer.ID(nil), replicas...)
+	return func() []libp2ppeer.ID {
+		return append(active.Peers(), fixed...)
+	}
+}
+
+// knownRoots names every root identity this node knows from authenticated committee data: the committee of every verified epoch from the
+// anchor to the active one. A bootnode is not a root by being a bootnode (generated joiners list incumbent shard nodes there). The set is
+// rebuilt only when the active epoch moves, so a lookup is a map read.
+func knownRoots(anchor uint64, active func() uint64, trust func(context.Context, uint64) (*types.RootTrustBaseV1, error)) func(libp2ppeer.ID) bool {
+	var mu sync.Mutex
+	var builtAt uint64
+	set := map[libp2ppeer.ID]struct{}{}
+	return func(id libp2ppeer.ID) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		if top := active(); top != builtAt || len(set) == 0 {
+			set = map[libp2ppeer.ID]struct{}{}
+			for e := anchor; e <= max(top, anchor); e++ {
+				tb, err := trust(context.Background(), e)
+				if err != nil || tb == nil {
+					continue
+				}
+				for _, n := range tb.RootNodes {
+					if n == nil {
+						continue
+					}
+					if pid, err := libp2ppeer.Decode(n.NodeID); err == nil {
+						set[pid] = struct{}{}
+					}
+				}
+			}
+			builtAt = top
+		}
+		_, ok := set[id]
+		return ok
+	}
+}
+
+// shardQ3Follower is the shard node's activation follower. bootLocators are the configured bootnodes, which may mix roots and shard peers:
+// only those isRoot authenticates are treated as roots, so an incumbent shard listed as a bootnode remains a mirror a non-active node asks.
+func shardQ3Follower(rt q3shard.Q3Activator, anchor uint64, bootLocators []libp2ppeer.ID, mirrors func() []libp2ppeer.ID, nonActive func() bool,
+	isRoot func(libp2ppeer.ID) bool, fetch func(context.Context, libp2ppeer.ID, uint64) (q3active.Bundle, error)) *q3shard.Q3Follower {
+	return &q3shard.Q3Follower{Runtime: rt, AnchorEpoch: anchor, CurrentRoots: bootLocators, Mirrors: mirrors, NonActive: nonActive, IsRoot: isRoot, Fetch: fetch}
+}
+
+// openRecordCuts opens the durable store of verified root-record cuts and records next to the execution journal (nil without a journal).
+// It is opened where the records feed is attached, after the restore checks, so that nothing is written before them. A store that cannot
+// be opened is an error: the node does not silently fall back to the volatile cache.
+func openRecordCuts(journal string) (recordsfeed.CutStore, error) {
+	if journal == "" {
+		return nil, nil
+	}
+	db, err := boltdb.New(journal + ".cuts")
+	if err != nil {
+		return nil, fmt.Errorf("opening the root-record store %s: %w", journal+".cuts", err)
+	}
+	return recordsfeed.KVCutStore{DB: db}, nil
+}
+
+// attachShardRecordsFeed is attachRecordsFeed with the shard node's durable store and its failure reporting.
+func attachShardRecordsFeed(cfg *b1paired.Config, host recordsfeed.Libp2p, roots []libp2ppeer.AddrInfo, role *rootFreeRole, journal string, log *slog.Logger) error {
+	cuts, err := openRecordCuts(journal)
+	if err != nil {
+		return err
+	}
+	return attachRecordsFeed(cfg, host, roots, role, cuts, func(err error) {
+		log.Error("root-record retention failed: this node no longer mirrors its full record history", "error", err)
+	})
 }

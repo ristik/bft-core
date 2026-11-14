@@ -3,6 +3,7 @@ package shardnode_test
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -180,5 +181,153 @@ func certifyFrom(req *certification.BlockCertificationRequest, rootRound, timest
 		Version:     1,
 		InputRecord: req.InputRecord,
 		UnicitySeal: &types.UnicitySeal{Version: 1, RootChainRoundNumber: rootRound, Timestamp: timestamp},
+	}
+}
+
+// A non-active follower observes what is certified but never builds or signs: no request reaches the submitter while the role holds,
+// even when the technical record names it leader. Promotion (the role turning false) lets the same round, same state, take part at the
+// next certificate, without a restart.
+func TestRound_FollowerNeverBuildsOrSignsUntilPromoted(t *testing.T) {
+	ctx := context.Background()
+	exec := executortest.New()
+	sub := &recordingSubmitter{}
+	r, nodeID := newTestRound(t, exec, sub)
+	var active atomic.Bool
+	r.SetFollowerRole(func() bool { return !active.Load() })
+
+	require.NoError(t, r.HandleCertificate(ctx, genesisUC(1000), tr(1, 0, nodeID)))
+	require.NoError(t, r.HandleCertificate(ctx, genesisUC(1001), tr(1, 0, nodeID)))
+	sub.mu.Lock()
+	require.Empty(t, sub.got, "a follower sends no certification request")
+	sub.mu.Unlock()
+	head, err := exec.Head(ctx)
+	require.NoError(t, err)
+	require.Empty(t, head.Hash, "a follower builds nothing")
+
+	active.Store(true)
+	require.NoError(t, r.HandleCertificate(ctx, genesisUC(1002), tr(1, 0, nodeID)))
+	req := sub.last(t)
+	require.Equal(t, uint64(1), req.InputRecord.RoundNumber, "promoted, it takes part from the next certificate")
+}
+
+// flippingExecutor retires the node while the round is building its block.
+type flippingExecutor struct {
+	shardnode.Executor
+	during func()
+}
+
+func (e flippingExecutor) Build(ctx context.Context, p shardnode.RoundParams) (shardnode.BuildID, error) {
+	e.during()
+	return e.Executor.Build(ctx, p)
+}
+
+type leaseRole struct {
+	token  atomic.Uint64
+	active atomic.Bool
+}
+
+func (l *leaseRole) Lease() (uint64, bool) { return l.token.Load(), l.active.Load() }
+
+// A retirement while the round is building (after its role check) withholds the signature and the request: the lease is checked again
+// immediately before signing. A re-publication (same active bit, a new token) is treated the same way: work begun under the old lease ends.
+func TestRound_RetirementWhileBuildingWithholdsTheSignature(t *testing.T) {
+	ctx := context.Background()
+	role := &leaseRole{}
+	role.active.Store(true)
+	for name, tc := range map[string]struct {
+		flip func()
+		sent bool
+	}{
+		"unchanged (control)": {func() {}, true},
+		"retired":             {func() { role.active.Store(false) }, false},
+		"re-published":        {func() { role.token.Add(1) }, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			role.active.Store(true)
+			sub := &recordingSubmitter{}
+			r, nodeID := newTestRound(t, flippingExecutor{Executor: executortest.New(), during: tc.flip}, sub)
+			r.SetRole(role)
+			require.NoError(t, r.HandleCertificate(ctx, genesisUC(1000), tr(1, 0, nodeID)))
+			sub.mu.Lock()
+			defer sub.mu.Unlock()
+			require.Equal(t, tc.sent, len(sub.got) == 1, "a request only while the lease held through the round")
+		})
+	}
+}
+
+// actionRecorder records the irreversible leader actions and can end the role at a chosen point.
+type actionRecorder struct {
+	shardnode.Executor
+	mu                    sync.Mutex
+	builds, seals         int
+	duringPrepare, during func()
+}
+
+func (e *actionRecorder) PrepareBuild(_ context.Context, p shardnode.RoundParams) (func(context.Context) (shardnode.BuildID, error), error) {
+	e.duringPrepare() // slow preparation: the role may end here, before the Engine call
+	return func(ctx context.Context) (shardnode.BuildID, error) {
+		e.mu.Lock()
+		e.builds++
+		e.mu.Unlock()
+		e.during()
+		return e.Executor.Build(ctx, p)
+	}, nil
+}
+
+func (e *actionRecorder) Seal(ctx context.Context, id shardnode.BuildID) (shardnode.Block, error) {
+	e.mu.Lock()
+	e.seals++
+	e.mu.Unlock()
+	return e.Executor.Seal(ctx, id)
+}
+
+type publishRecorder struct {
+	shardnode.Disseminator
+	published atomic.Int32
+}
+
+func (d *publishRecorder) Publish(ctx context.Context, round uint64, b shardnode.Block) error {
+	d.published.Add(1)
+	return d.Disseminator.Publish(ctx, round, b)
+}
+
+// The lease is checked immediately before each irreversible action, not only once per round: a role that ends during the slow build
+// preparation stops the Engine build itself, and one that ends during the build stops the seal, the publication and the request.
+func TestRound_RoleEndingBeforeEachLeaderActionStopsIt(t *testing.T) {
+	ctx := context.Background()
+	for name, tc := range map[string]struct {
+		prepare, build      bool // end the role during preparation / during the build
+		builds, seals, pubs int
+		sent                bool
+	}{
+		"unchanged (control)":    {false, false, 1, 1, 1, true},
+		"retired during prepare": {true, false, 0, 0, 0, false},
+		"retired during build":   {false, true, 1, 0, 0, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			role := &leaseRole{}
+			role.active.Store(true)
+			end := func(when bool) func() {
+				return func() {
+					if when {
+						role.active.Store(false)
+					}
+				}
+			}
+			exec := &actionRecorder{Executor: executortest.New(), duringPrepare: end(tc.prepare), during: end(tc.build)}
+			signer, err := abcrypto.NewInMemorySecp256K1Signer()
+			require.NoError(t, err)
+			pub := &publishRecorder{Disseminator: shardnode.NewLoopbackDisseminator()}
+			sub := &recordingSubmitter{}
+			r := shardnode.NewRound("leader", types.PartitionID(8), types.ShardID{}, exec, pub, signer, sub, nil)
+			r.SetRole(role)
+			_ = r.HandleCertificate(ctx, genesisUC(1000), tr(1, 0, "leader"))
+			require.Equal(t, tc.builds, exec.builds, "Engine builds")
+			require.Equal(t, tc.seals, exec.seals, "seals")
+			require.EqualValues(t, tc.pubs, pub.published.Load(), "publications")
+			sub.mu.Lock()
+			defer sub.mu.Unlock()
+			require.Equal(t, tc.sent, len(sub.got) == 1)
+		})
 	}
 }

@@ -519,3 +519,49 @@ func DirectoryLayoutFiles(q Request, rec *Record, variant bool) (string, map[str
 	}
 	return name, files, nil
 }
+
+// exactLayout is one storage layout as an exact read uses it: its manifest digest alone, then the record.
+type exactLayout struct {
+	digest func(dir, name string) ([32]byte, error)
+	read   func(dir string, q Request, v2 bool, name string) (*Record, error)
+}
+
+// exactLayouts are the layouts an exact read tries, packed first (as readNamed prefers it), each judged by itself.
+var exactLayouts = []exactLayout{
+	{digest: packedManifestDigest, read: func(dir string, q Request, v2 bool, name string) (*Record, error) {
+		return readPacked(q, v2, packedPath(dir, name))
+	}},
+	{digest: legacyManifestDigest, read: func(dir string, q Request, v2 bool, name string) (*Record, error) {
+		return readLegacy(q, v2, filepath.Join(dir, name))
+	}},
+}
+
+// manifestDigestOf is the digest a self-hashed manifest carries (the record's ManifestDigest), checked against its own content.
+func manifestDigestOf(m []byte) ([32]byte, error) {
+	var d [32]byte
+	if _, _, _, err := checkManifest(m); err != nil {
+		return d, err
+	}
+	return [32]byte(m[len(m)-32:]), nil
+}
+
+// packedManifestDigest is the manifest digest of the packed record file of name; no chunk is read.
+func packedManifestDigest(dir, name string) ([32]byte, error) {
+	m, err := readPackedManifest(packedPath(dir, name))
+	if err != nil {
+		return [32]byte{}, err
+	}
+	return manifestDigestOf(m)
+}
+
+// legacyManifestDigest is the manifest digest of the directory-layout record of name; no chunk is read.
+func legacyManifestDigest(dir, name string) ([32]byte, error) {
+	m, err := readBounded(filepath.Join(dir, name, "manifest"), maxManifestBytes)
+	if os.IsNotExist(err) {
+		return [32]byte{}, ErrUnavailable
+	}
+	if err != nil {
+		return [32]byte{}, ErrCorrupt
+	}
+	return manifestDigestOf(m)
+}
