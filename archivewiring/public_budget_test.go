@@ -169,3 +169,52 @@ func TestADepletedBudgetEntryIsNeverEvicted(t *testing.T) {
 	require.True(t, budget.begin("e"), "an entry has refilled completely: dropping it gives nobody tokens")
 	budget.end("e")
 }
+
+// astra's re-check of #1070: an exact-digest read with a wrong digest examined every stored representation of the block (two 1 MiB records
+// here) and was charged only its small refusal, so a frozen small byte bucket never ran out. The store now refuses a wrong digest from the
+// manifest without reading the records (archive.TestGetExactRejectsAWrongDigestWithoutReadingTheChunks proves that no chunk is read), so
+// the refusal's charge is what it cost; a right digest is charged the record it read.
+func TestPublicExactReadsOfAWrongDigestDoNotReadTheRecords(t *testing.T) {
+	t.Parallel()
+	q, rec := transportFixture()
+	rec.Body = bytes.Repeat([]byte{0xc0}, 1<<20)
+	variant := *rec
+	variant.ResultingUC = []byte{9}
+	store, err := archive.Open(t.TempDir())
+	require.NoError(t, err)
+	require.NoError(t, store.Put(q, rec))
+	require.NoError(t, store.PutVariant(q, &variant))
+	s, err := NewServer(store, q.Context, func(context.Context, archive.Request, *archive.Record) error { return nil }, []peer.ID{"validator"}, DefaultLimits())
+	require.NoError(t, err)
+	require.NoError(t, s.SetPublicReads(Limits{Deadline: time.Second, Pending: 4, PerPeer: 2}))
+	b := ample()
+	b.ByteRate, b.ByteBurst = 1, 8<<10                  // a few refusals fit; a record does not
+	clock := &fakeClock{t: time.Unix(1_700_000_000, 0)} // frozen: nothing refills
+	s.publicBudget = newPublicBudget(b, clock.now)
+	raw, err := archive.EncodeRequest(q)
+	require.NoError(t, err)
+	exact := func(digest [32]byte) (archive.Response, error) {
+		var out bytes.Buffer
+		if err := s.serveFrame(context.Background(), &out, append(append([]byte{6}, digest[:]...), raw...), &readMeter{budget: s.publicBudget, id: "f1"}); err != nil {
+			return archive.Response{}, err
+		}
+		frame, err := readFrame(&out, maxArchiveFrameBytes)
+		require.NoError(t, err)
+		return archive.DecodeResponse(frame)
+	}
+	for i := 0; i < 8; i++ {
+		answer, err := exact([32]byte{byte(i + 1)})
+		require.NoError(t, err)
+		require.Equal(t, archive.Unavailable, answer.Outcome)
+	}
+	require.Positive(t, s.publicBudget.peers["f1"].bytes.tokens, "eight wrong-digest reads cost refusals only: no record was read")
+
+	digest, err := archive.ManifestDigest(q, rec)
+	require.NoError(t, err)
+	answer, err := exact(digest)
+	require.NoError(t, err)
+	require.Equal(t, archive.OK, answer.Outcome)
+	require.Negative(t, s.publicBudget.peers["f1"].bytes.tokens, "the right digest is charged the 1 MiB it read")
+	_, err = exact(digest)
+	require.ErrorIs(t, err, ErrPeerLimit, "and the next read waits for the debt to be repaid")
+}
