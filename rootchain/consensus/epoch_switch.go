@@ -214,12 +214,37 @@ func (x *ConsensusManager) shardFacing(ctx context.Context, fn func() error) err
 	if err := x.awaitContext(ctx); err != nil {
 		return err
 	}
-	x.ctxMu.RLock()
+	if err := x.readContext(ctx); err != nil {
+		return err
+	}
 	defer x.ctxMu.RUnlock()
 	if s := x.switchCtx.Load(); s != nil && (s.Phase == SwitchSwitching || s.Phase == SwitchFaulted) {
 		return ErrSwitching
 	}
 	return fn()
+}
+
+// readContext takes the barrier's read side within the caller's context and switchWait: a switch that begins after awaitContext let the
+// caller through holds the write side until it publishes or faults, and the caller waits for that no longer than it would have waited for
+// a pending switch (#1086 review). A free barrier is taken at once.
+func (x *ConsensusManager) readContext(ctx context.Context) error {
+	if x.ctxMu.TryRLock() {
+		return nil
+	}
+	bound := time.NewTimer(switchWait)
+	defer bound.Stop()
+	tick := time.NewTicker(time.Millisecond)
+	defer tick.Stop()
+	for !x.ctxMu.TryRLock() {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-bound.C:
+			return ErrSwitching
+		case <-tick.C:
+		}
+	}
+	return nil
 }
 
 // operator runs an operator entry point (a plan, an intent, an endorsement, an abort, a staged candidate, a submitted control) against
@@ -251,6 +276,7 @@ func (x *ConsensusManager) checkEpochSwitch(ctx context.Context) error {
 		return nil
 	}
 	target := installed + 1
+	x.reconsiderSwitch(target)
 	if err := x.safety.member(installed); err != nil {
 		x.log.InfoContext(ctx, "the epoch's handoff is committed; this root follows the epoch and installs the successor across a restart",
 			"epoch", installed, "target", target)
@@ -287,6 +313,14 @@ func (x *ConsensusManager) checkEpochSwitch(ctx context.Context) error {
 type switchDecline struct {
 	target uint64
 	reason string
+}
+
+// reconsiderSwitch resets an earlier decline of the activation into target: a new committed root evaluates it again, and the decline is
+// stated again if it still holds. Until then nothing of target is parked.
+func (x *ConsensusManager) reconsiderSwitch(target uint64) {
+	if d := x.switchDeclined.Load(); d != nil && d.target == target {
+		x.switchDeclined.Store(nil)
+	}
 }
 
 func (x *ConsensusManager) declineSwitch(target uint64, reason string) {
@@ -519,6 +553,9 @@ func (x *ConsensusManager) parkFuture(msg any, origin messageOrigin, now time.Ti
 	if !ok || installed == ^uint64(0) || epoch != installed+1 {
 		return false
 	}
+	if d := x.switchDeclined.Load(); d != nil && d.target == epoch {
+		return true // this root does not switch into that epoch: nothing of it is kept (refused, as before)
+	}
 	f := &x.future
 	if f.epoch != epoch {
 		*f = futureMessages{epoch: epoch, byPeer: map[peer.ID]parkedShare{}}
@@ -563,19 +600,41 @@ func (f *futureMessages) expire(now time.Time) {
 	f.items = kept
 }
 
+// sweepFuture is the loop's periodic expiry of the parked messages: their lifetime holds without another arrival.
+func (x *ConsensusManager) sweepFuture(now time.Time) { x.future.expire(now) }
+
+// futureSweep is the period of sweepFuture; nil (no sweep) for a manager that never parks.
+func (x *ConsensusManager) futureSweep() (<-chan time.Time, func()) {
+	if x.switcher == nil || x.q3 == nil {
+		return nil, func() {}
+	}
+	t := time.NewTicker(futureMessageTTL / 6)
+	return t.C, t.Stop
+}
+
 // dropFuture forgets every parked message.
 func (x *ConsensusManager) dropFuture() { x.future = futureMessages{} }
 
 // replayFuture hands the parked messages of the now installed epoch to the ordinary handlers, once, and drops the rest.
 func (x *ConsensusManager) replayFuture(ctx context.Context) {
+	for _, msg := range x.replayable(time.Now()) {
+		if err := x.handleRootNetMsg(ctx, msg); err != nil {
+			x.log.DebugContext(ctx, fmt.Sprintf("replaying a %T parked before the switch", msg), logger.Error(err))
+		}
+	}
+}
+
+// replayable takes the parked messages to replay: those of the installed epoch still within their lifetime. Nothing stays parked.
+func (x *ConsensusManager) replayable(now time.Time) []any {
+	x.future.expire(now) // nothing older than its lifetime is handled
 	f := x.future
 	x.future = futureMessages{}
 	if f.epoch == 0 || f.epoch != x.InstalledRootEpoch() {
-		return
+		return nil
 	}
+	out := make([]any, 0, len(f.items))
 	for _, m := range f.items {
-		if err := x.handleRootNetMsg(ctx, m.msg); err != nil {
-			x.log.DebugContext(ctx, fmt.Sprintf("replaying a %T parked before the switch", m.msg), logger.Error(err))
-		}
+		out = append(out, m.msg)
 	}
+	return out
 }

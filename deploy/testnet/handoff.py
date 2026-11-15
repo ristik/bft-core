@@ -31,6 +31,17 @@ def switch_complete(view, target):
     return view.get('activeEpoch') == target and switch.get('epoch') == target and switch.get('phase') in ('running', 'following')
 
 
+def status_epoch(view):
+    """The installed epoch a successful q3/status answer establishes: a switch-aware image's published one (Running or Following; None while Switching,
+    Faulted or declined-and-not-yet-restarted can show another), an older image's activeEpoch. Never the raw activeEpoch of a root that reports a switch."""
+    switch = view.get('switch')
+    if not switch:
+        return view.get('activeEpoch')
+    if switch.get('phase') in ('running', 'following') and switch.get('epoch') == view.get('activeEpoch'):
+        return switch.get('epoch')
+    return None
+
+
 def installed_result(view, target):
     """The install step's result for a root whose switch state shows `target` published (switch_complete): whether it got there in process."""
     switch = view['switch']
@@ -41,12 +52,17 @@ def installed_result(view, target):
 
 def switched_in_process(status, target, wait=None, sleep=time.sleep, clock=time.monotonic):
     """bft-core#1086: the root's in-process switch into `target` (its q3/status `switch`, phase running or following, with the target installed), else None.
-    `status` is the root's q3/status answer as a dict, or None while it does not answer. A root that reports no `switch` does not switch in process (an older
-    image, or --in-process-epoch-switch=false): None at once. A switch that is still switching, or a root still in the old epoch, is asked again until `wait`
+    `status` is the root's q3/status answer as a dict, or None while it does not answer (asked again until `wait`). A root that answers without a `switch`
+    does not switch in process (an older image, or --in-process-epoch-switch=false): None at once. A switch that is still switching, or a root still in the old epoch, is asked again until `wait`
     has passed; a faulted switch (the root exits to its recovery) and a declined one (a successor with joiners, a leaver, no own evidence) are None at once. None means: install the root by the restart, through the same evidence gate."""
     deadline = clock() + (SWITCH_WAIT_SECONDS if wait is None else wait)
     while True:
-        view = status() or {}
+        view = status()
+        if view is None:   # unavailable: not evidence of anything
+            if clock() >= deadline:
+                return None
+            sleep(0.1)
+            continue
         switch = view.get('switch')
         if not switch:
             return None

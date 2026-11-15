@@ -83,8 +83,21 @@ class InProcessSwitch(unittest.TestCase):
         self.assertGreater(len(asked), 1)
 
     def test_a_root_that_does_not_answer_is_asked_again(self):
-        status, _, clock = self.answers(None, {'activeEpoch': 3, 'switch': {'phase': 'running', 'epoch': 3}})
-        self.assertIsNone(handoff.switched_in_process(status, 3, wait=10, sleep=lambda s: None, clock=clock), 'no switch reported: not a switching root')
+        status, asked, clock = self.answers(None, {'activeEpoch': 3, 'switch': {'phase': 'running', 'epoch': 3}})
+        self.assertIsNotNone(handoff.switched_in_process(status, 3, wait=10, sleep=lambda s: None, clock=clock), 'an unavailable status is no evidence: asked again')
+        self.assertEqual(len(asked), 2)
+
+    def test_a_root_that_never_answers_is_restarted_after_the_wait(self):
+        status, asked, clock = self.answers(None)
+        self.assertIsNone(handoff.switched_in_process(status, 3, wait=5, sleep=lambda s: None, clock=clock))
+        self.assertGreater(len(asked), 1)
+
+    def test_the_status_epoch_of_a_switching_root_is_its_published_one(self):
+        self.assertEqual(handoff.status_epoch({'activeEpoch': 3}), 3, 'an older image: its activeEpoch')
+        self.assertEqual(handoff.status_epoch({'activeEpoch': 3, 'switch': {'phase': 'running', 'epoch': 3}}), 3)
+        self.assertEqual(handoff.status_epoch({'activeEpoch': 3, 'switch': {'phase': 'following', 'epoch': 3}}), 3)
+        for phase in ('switching', 'faulted'):
+            self.assertIsNone(handoff.status_epoch({'activeEpoch': 3, 'switch': {'phase': phase, 'epoch': 2, 'target': 3}}), phase)
 
 
 class InProcessSwitchInstall(unittest.TestCase):

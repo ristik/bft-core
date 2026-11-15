@@ -546,6 +546,39 @@ func TestInProcessSwitchParksTheNextEpochsMessagesWithinTheirSendersBounds(t *te
 		m.declineSwitch(2, "joiners")
 		require.Zero(t, parked())
 		require.Zero(t, m.future.bytes)
+		m.reconsiderSwitch(2)
+	})
+	t.Run("expired without another arrival", func(t *testing.T) {
+		require.True(t, m.parkFuture(proposal(2, member(1)), from(member(1), 10), now))
+		require.NotZero(t, parked())
+		m.sweepFuture(now.Add(futureMessageTTL + time.Second)) // the loop's periodic sweep
+		require.Zero(t, parked())
+		require.Zero(t, m.future.bytes)
+		require.Empty(t, m.future.byPeer)
+	})
+	t.Run("an expired entry is not replayed", func(t *testing.T) {
+		old := proposal(2, member(1))
+		fresh := proposal(2, member(2))
+		require.True(t, m.parkFuture(old, from(member(1), 10), now.Add(-futureMessageTTL-time.Second)))
+		require.True(t, m.parkFuture(fresh, from(member(2), 10), now))
+		installed := *m.trustBase.Load()
+		installed.Epoch = 2 // as if the switch had installed epoch 2
+		prev := m.trustBase.Swap(&installed)
+		defer m.trustBase.Store(prev)
+		require.Equal(t, []any{fresh}, m.replayable(now))
+		require.Zero(t, parked())
+	})
+	t.Run("nothing parked after a decline until it is reconsidered", func(t *testing.T) {
+		m.declineSwitch(2, "joiners")
+		require.True(t, m.parkFuture(proposal(2, member(1)), from(member(1), 10), now))
+		require.Zero(t, parked(), "an arrival after the decline is refused")
+		m.reconsiderSwitch(3)
+		require.True(t, m.parkFuture(proposal(2, member(1)), from(member(1), 10), now))
+		require.Zero(t, parked(), "another target's reconsideration does not reset it")
+		m.reconsiderSwitch(2)
+		require.True(t, m.parkFuture(proposal(2, member(1)), from(member(1), 10), now))
+		require.Equal(t, 1, parked(), "a reconsidered activation parks again")
+		m.dropFuture()
 	})
 	t.Run("replayed only into their epoch", func(t *testing.T) {
 		require.True(t, m.parkFuture(proposal(2, member(1)), from(member(1), 1), now))
@@ -767,4 +800,21 @@ func TestInProcessSwitchDefaultTriggerWithOldEpochWorkInFlight(t *testing.T) {
 		t.Logf("member %d switched in %v", i, s.Took)
 		require.NoError(t, r.rt.Gate(context.Background(), c.f.Claim))
 	}
+}
+
+// A shard-facing admission that a switch overtakes between its wait and its read side waits no longer than its caller's context (#1086
+// review, round 2): the read side is taken context-aware.
+func TestInProcessSwitchShardFacingAdmissionHonoursItsContext(t *testing.T) {
+	f := q3fixture.New(t, q3fixture.Options{})
+	r := openAlone(t, f, 0, nil)
+	m := r.manager
+	m.ctxMu.Lock() // a switch that took the write side after the caller's awaitContext
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err := m.RequestCertification(ctx, IRChangeRequest{})
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Less(t, time.Since(start), time.Second)
+	m.ctxMu.Unlock()
+	require.NoError(t, m.shardFacing(context.Background(), func() error { return nil }), "a free barrier is taken at once")
 }

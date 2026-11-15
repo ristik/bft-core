@@ -709,6 +709,8 @@ func (x *ConsensusManager) loop(ctx context.Context) error {
 	if x.backoff == nil && x.params != nil {
 		x.backoff = backoffShadowFromEnv(x.params.LocalTimeout)
 	}
+	sweep, stopSweep := x.futureSweep()
+	defer stopSweep()
 	for {
 		// a committed activation this root switches into ends the context here, before anything else is handled in it (#1086)
 		if err := x.checkEpochSwitch(ctx); err != nil {
@@ -751,6 +753,8 @@ func (x *ConsensusManager) loop(ctx context.Context) error {
 			}
 		case event := <-x.pacemaker.StatusEvents():
 			x.handlePacemakerEvent(ctx, event)
+		case now := <-sweep:
+			x.sweepFuture(now)
 		case req := <-x.frontierRequests():
 			x.handleFrontierRequest(ctx, req)
 		}
