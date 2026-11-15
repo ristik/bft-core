@@ -1,17 +1,17 @@
 name: testnet-bridge
-# The bridge on the container package (TN-B #429/#438, briefs/tnb-without-host.md): the package built and brought up as testnet-rehearsal does it, then
-# deploy/testnet/bridge/rehearse_bridge.py. Evidence of the PACKAGE only, never of the host. No third-party service is contacted (the faucet signer is not
+# The bridge on the container package: the package built and brought up as testnet-rehearsal does it, then the native bridge v2 stages
+# (deploy/testnet/bridge/nb2/rehearse_nb2.py, NB2-09 bft-core#1105; they replaced the protocol 6/7 stages of rehearse_bridge.py). Evidence of the PACKAGE only, never of the host. No third-party service is contacted (the faucet signer is not
 # started). Long: it builds ureth from source. A workflow_dispatch only exists once this file is on the default branch, so it also runs on a push of a
 # tnb-rehearsal/** branch.
 on:
   pull_request:
-    paths: ['deploy/testnet/bridge/**', 'scripts/dnb-tool/**', '.github/workflows/testnet-bridge.yml']
+    paths: ['deploy/testnet/bridge/**', 'scripts/dnb-tool/**', 'scripts/nb2-evidence/**', 'nb2ref/**', '.github/workflows/testnet-bridge.yml']
   push:
     branches: ['tnb-rehearsal/**']
   workflow_dispatch:
     inputs:
       stages:
-        description: 'rehearse_bridge.py stages, comma separated (default: all)'
+        description: 'rehearse_nb2.py stages, comma separated (default: all but the PoS ones)'
         required: false
         default: ''
 permissions:
@@ -83,6 +83,8 @@ jobs:
         run: python3 deploy/testnet/bridge/build-bridge-image.py --bft-source pinned-bft --contracts-source pinned-contracts --nbp-source pinned-nbp
       - run: go build -o /tmp/tn-keygen ./deploy/testnet/keygen
       - run: go build -C pinned-bft -o /tmp/tn-b1genesis ./scripts/b1genesis
+      - name: The Go reference verifier and wallet-evidence tool (nb2ref), from this checkout
+        run: go build -o /tmp/nb2-evidence ./scripts/nb2-evidence
       - name: Generate a generation (authorities start here and stay live)
         run: |
           umask 077
@@ -92,11 +94,14 @@ jobs:
             --captcha-sitekey rehearsal-sitekey --captcha-secret-file /tmp/captcha-secret
       - name: Bring the package up (rehearse.py up, identity)
         run: sudo -E env "PATH=$PATH" python3 deploy/testnet/rehearse.py --generation /srv/tn-bridge-1 --evidence "$RUNNER_TEMP/evidence" --stages up,identity
-      - name: Bridge stages
+      - name: Native bridge v2 stages
         env:
           STAGES: ${{ inputs.stages }}
         run: |
-          sudo -E env "PATH=$PATH" python3 deploy/testnet/bridge/rehearse_bridge.py --generation /srv/tn-bridge-1 --evidence "$RUNNER_TEMP/evidence" ${STAGES:+--stages "$STAGES"}
+          sudo -E env "PATH=$PATH" python3 deploy/testnet/bridge/nb2/rehearse_nb2.py --generation /srv/tn-bridge-1 --evidence "$RUNNER_TEMP/evidence" --nb2-evidence /tmp/nb2-evidence ${STAGES:+--stages "$STAGES"}
+      - name: The driver keys removed
+        if: always()
+        run: sudo rm -f /srv/tn-bridge-1/bridge/nb2/driver.env
       - name: Resources and logs
         if: always()
         run: |
@@ -104,7 +109,7 @@ jobs:
           sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/evidence"   # the rehearsal ran as root
           docker stats --no-stream --format 'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.PIDs}}' > "$RUNNER_TEMP/evidence/docker-stats.txt" || true
           df -h / > "$RUNNER_TEMP/evidence/df.txt" || true
-          sudo bash -c "cd /srv/tn-bridge-1 && docker compose -f compose.yaml -f compose.bridge.yaml ps -a > '$RUNNER_TEMP/evidence/compose-ps.txt' && docker compose -f compose.yaml -f compose.bridge.yaml logs --no-color --timestamps --tail 400 > '$RUNNER_TEMP/evidence/compose-logs.txt'" || true
+          sudo bash -c "cd /srv/tn-bridge-1 && docker compose -f compose.yaml ps -a > '$RUNNER_TEMP/evidence/compose-ps.txt' && docker compose -f compose.yaml logs --no-color --timestamps --tail 400 > '$RUNNER_TEMP/evidence/compose-logs.txt'" || true
           sudo PYTHONDONTWRITEBYTECODE=1 python3 deploy/testnet/redact_evidence.py /srv/tn-bridge-1 "$RUNNER_TEMP/evidence/compose-logs.txt" || sudo bash -c "echo '[log withheld: redaction did not finish]' > '$RUNNER_TEMP/evidence/compose-logs.txt'"
           sudo cp /srv/tn-bridge-1/manifest.json "$RUNNER_TEMP/evidence/manifest.json" || true
           sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/evidence" || true

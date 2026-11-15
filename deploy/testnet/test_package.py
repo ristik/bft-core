@@ -145,6 +145,8 @@ class B1Layout(unittest.TestCase):
                 svc=cfg['services']
                 self.assertEqual(svc['ureth%d'%i]['entrypoint'][-2:],['--unicity.network-id','3'])
                 self.assertEqual(svc['ureth%d'%i]['entrypoint'][svc['ureth%d'%i]['entrypoint'].index('--builder.gaslimit')+1],'123456')
+                # NB2-09 (#1105): every validator's pool admits encoded transactions up to L_max = 512 KiB
+                self.assertEqual(svc['ureth%d'%i]['entrypoint'][svc['ureth%d'%i]['entrypoint'].index('--txpool.max-tx-input-bytes')+1],str(512<<10))
                 shard=svc['shard%d'%i]['entrypoint']
                 self.assertEqual(shard[shard.index('--b1-profile')+1],'/network/b1-profile.json')
                 self.assertIn('--q3-lane',shard);self.assertNotIn('--registry-layout',shard)
@@ -1921,6 +1923,60 @@ class BridgeRelease(unittest.TestCase):
     def test_addresses_that_are_not_the_broadcast_deployments_are_refused(self):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaisesRegex(SystemExit,'not bridge-addresses'): self.build(*self.generation(tmp,vault='0x'+'cc'*20))
+
+class NB2Release(unittest.TestCase):
+    """bridge/nb2/release_nb2.py on a fake generation: the wallets' pins, the limits read where they are in force, and the refusals."""
+    IMAGE='sha256:'+'11'*32
+    def module(self):
+        import importlib.util
+        sys.path.insert(0,str(Path(__file__).parent/'bridge'))
+        self.addCleanup(sys.path.remove,str(Path(__file__).parent/'bridge'))
+        spec=importlib.util.spec_from_file_location('release_nb2',Path(__file__).parent/'bridge/nb2/release_nb2.py')
+        m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m);return m
+    def generation(self,tmp):
+        gen=Path(tmp)/'gen';(gen/'bridge/nb2').mkdir(parents=True);(gen/'network').mkdir();art=Path(tmp)/'artifacts';art.mkdir()
+        (gen/'manifest.json').write_text(json.dumps({'generation':'tn-x','chain_id':31337,'genesis_hash':'0x'+'ab'*32,'validators':4,'artifacts':{'sources':{'ureth':'u'},'images':{'node':'n'}}}))
+        (art/'bridge-images.json').write_text(json.dumps({'sources':{'contracts':'c'*40,'native-bridge-plugins':'p'*40},'images':{'bridge':self.IMAGE}}))
+        (gen/'network/b1-profile.json').write_text(json.dumps({'maxGas':269547540+60000000,'ordinaryCapacity':60000000}))
+        pair=lambda build,k,b:{'build':build,'K':k,'B':b,'Qmax':'1','gamma':'0x93'+build[0]*2,'domain':'0x'+'dd'*32,
+                               'vault':{'address':'0x'+'aa'*20,'block':12,'transaction':'0x02','runtimeCodeHash':'0x'+'a1'*32},
+                               'verifier':{'address':'0x'+'bb'*20,'block':11,'transaction':'0x01','codeHash':'0x'+'b1'*32},'helper':{'address':'0x'+'cc'*20,'codeHash':'0x'+'c1'*32}}
+        record={'primary':'test','deployments':{'test':pair('test',4,2),'production':pair('production',64,16)},'deployer':'0x'+'ee'*20,'trustPin':'0x'+'99'*32,
+                'profileHash':'0x'+'a9'*32,'vectorsDigest':'9b'*32}
+        return gen,art,record
+    URETH=['unicity-reth','node','--txpool.max-tx-input-bytes','524288']
+    def build(self,gen,art,record,ureth=None):
+        m=self.module()
+        with patch.object(m,'ARTIFACTS',art):
+            return m.build(gen,record,self.IMAGE,ureth or self.URETH)
+    def test_the_pins_are_the_wallets_deployment_pins(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            r=self.build(*self.generation(tmp))
+        self.assertEqual(r['pins'],{'gamma':'0x93tt','build':'test','vaultRuntimeCodeHash':'0x'+'a1'*32,'maxEncodedTxBytes':524288,'userGasLimit':'60000000',
+                                    'gasReserve':'500000','returnReserveSegments':64,'deploymentBlock':12,'stateReadOnly':False})
+        self.assertEqual(r['deployment']['production']['K'],64);self.assertEqual(r['deployment']['firstBlock'],11)
+        self.assertEqual(r['limits']['blockGasLimit']['value'],329547540)
+        self.assertGreaterEqual(r['limits']['gatewayMaxRawTxBodyBytes']['value'],2*524288+(64<<10))   # section 12.7
+        self.assertEqual(r['limits']['gatewayLogBlockRange']['value'],gateway.LOG_BLOCK_RANGE)
+        self.assertEqual(r['limits']['gatewayMaxResultBytes']['value'],gateway.MAX_RESULT_BYTES)
+    def test_an_unpinned_pool_limit_or_a_pruning_node_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            g=self.generation(tmp)
+            with self.assertRaisesRegex(SystemExit,'max-tx-input-bytes'): self.build(*g,ureth=['unicity-reth','node'])
+            with self.assertRaisesRegex(SystemExit,'proof source'): self.build(*g,ureth=self.URETH+['--unicity.no-proof-source'])
+            with self.assertRaisesRegex(SystemExit,'2 L_max'): self.build(*g,ureth=['unicity-reth','node','--txpool.max-tx-input-bytes',str(4<<20)])
+    def test_another_image_than_the_recorded_one_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gen,art,record=self.generation(tmp)
+            m=self.module()
+            with patch.object(m,'ARTIFACTS',art):
+                with self.assertRaisesRegex(SystemExit,'records'): m.build(gen,record,'sha256:'+'22'*32,self.URETH)
+    def test_the_driver_runs_read_only_with_the_lane_directory_mounted(self):
+        m=self.module()
+        with patch('deploy_bridge.image',return_value=self.IMAGE),patch('deploy_bridge.validators_network',return_value='tn_validators'):
+            cmd=m.driver_cmd(Path('/srv/g'),'state',env_file=Path('/srv/g/bridge/nb2/driver.env'))
+        self.assertIn('--read-only',cmd);self.assertIn(f'{Path(__file__).parent/"bridge/nb2"}:/opt/bridge/native-bridge-plugins/tests/live/nb2lane:ro',cmd)
+        self.assertEqual(cmd[cmd.index('--env-file')+1],'/srv/g/bridge/nb2/driver.env');self.assertEqual(cmd[-2:],['tests/live/nb2lane/driver.ts','state'])
 
 class LoadGenerator(unittest.TestCase):
     """deploy/testnet/loadgen.py against an in-memory node and a fake clock."""

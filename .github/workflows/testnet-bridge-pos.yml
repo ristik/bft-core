@@ -1,10 +1,11 @@
 # The bridge across a PoS root handoff, preflight (bft-core #430 row 2; briefs/pos-release-rerun-plan.md §4.1, arch §8/§9): one --pos --utb generation
-# (aggregator A, the integration variant), the bridge deployed and its epoch-1 artifacts made before the election, the handoff driven by rehearse.py,
-# then the redeem across it with the bridge client's live trust refresh (deploy/testnet/bridge/bridge_pos.py). A hosted-runner smoke, not the host run.
+# (aggregator A, the integration variant), the native bridge v2 deployed and its epoch-1 deposit made before the election, the handoff driven by rehearse.py,
+# then the return across it with the wallet's live trust refresh (deploy/testnet/bridge/nb2/rehearse_nb2.py pos-deposit, pos-return; NB2-09 bft-core#1105).
+# A hosted-runner smoke, not the host run.
 name: testnet-bridge-pos
 on:
   pull_request:
-    paths: ['deploy/testnet/bridge/bridge_pos.py', 'deploy/testnet/bridge/sdk_clients.py', 'deploy/testnet/bridge/rehearse_bridge.py', 'deploy/testnet/bridge/overlay.py', 'deploy/testnet/bridge/trust_recorder.mjs',
+    paths: ['deploy/testnet/bridge/nb2/**', 'scripts/nb2-evidence/**', 'nb2ref/**', 'deploy/testnet/bridge/sdk_clients.py', 'deploy/testnet/bridge/deploy_bridge.py',
             'deploy/testnet/bridge/pins.json', 'deploy/testnet/sdk-clients/**', 'scripts/dnb-tool/**', '.github/workflows/testnet-bridge-pos.yml',
             # bft-core#1091: the only --utb generation CI builds, and its pos-advance is the authorities' proof-verified advance on a UTB chain; a bft pin or a
             # change of how authorities are generated is exercised here too (the hosted rehearsal's package is the one without UTB)
@@ -96,6 +97,8 @@ jobs:
         run: python3 deploy/testnet/bridge/build-bridge-image.py --bft-source pinned-bft --contracts-source pinned-bridge-contracts --nbp-source pinned-nbp
       - run: go build -o /tmp/tn-keygen ./deploy/testnet/keygen
       - run: go build -C pinned-bft -o /tmp/tn-b1genesis ./scripts/b1genesis
+      - name: The Go reference verifier and wallet-evidence tool (nb2ref), from this checkout
+        run: go build -o /tmp/nb2-evidence ./scripts/nb2-evidence
       - name: Generate a --pos --utb generation (the cadence declared for the epoch-1 bridge steps)
         run: |
           umask 077
@@ -109,27 +112,23 @@ jobs:
           echo "{\"cadenceSeconds\": $CADENCE_SECONDS, \"cadenceRounds\": $CADENCE_ROUNDS, \"utbAggregator\": \"integration\"}" > "$RUNNER_TEMP/evidence/generation-recipe.json"
       - name: 1. Package up, the 5a smoke (epoch 1)
         run: sudo -E env "PATH=$PATH" python3 deploy/testnet/rehearse.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/1-package" --ubft pinned-bft/build/ubft --stages up,identity,first-tx,pos-smoke
-      - name: 2. Bridge deploy and the epoch-1 artifacts (before the election and the root install)
-        run: sudo -E env "PATH=$PATH" python3 deploy/testnet/bridge/rehearse_bridge.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/2-bridge-epoch1" --stages deploy,fund,pos-epoch1
+      - name: 2. The native bridge v2 deployed, and a deposit, mint and transfer in epoch 1 (before the election and the root install)
+        run: sudo -E env "PATH=$PATH" python3 deploy/testnet/bridge/nb2/rehearse_nb2.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/2-nb2-epoch1" --nb2-evidence /tmp/nb2-evidence --stages deploy,fund,pos-deposit
       - name: 3. The handoff (election, proposal, propose, install, advance)
         run: sudo -E env "PATH=$PATH" python3 deploy/testnet/rehearse.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/3-handoff" --ubft pinned-bft/build/ubft --stages pos-election,pos-proposal,pos-propose,pos-install,pos-advance
-      - name: '4. The redeems across the handoff: consolidated with the live trust refresh, and the per-SID historical anchor'
-        run: sudo -E env "PATH=$PATH" python3 deploy/testnet/bridge/rehearse_bridge.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/4-bridge-redeem" --ubft pinned-bft/build/ubft --stages pos-redeem,pos-historical
+      - name: '4. The return across the epoch change: transfer, split, burn, verdicts by the plug-in, the deployed verifier and Go, redeem; custody'
+        run: sudo -E env "PATH=$PATH" python3 deploy/testnet/bridge/nb2/rehearse_nb2.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/4-nb2-return" --nb2-evidence /tmp/nb2-evidence --stages pos-return,custody
       - name: 5. The second handoff (root epoch 2 -> 3)
         run: sudo -E env "PATH=$PATH" python3 deploy/testnet/rehearse.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/5-handoff-2" --ubft pinned-bft/build/ubft --stages pos-handoff-2
-      - name: 6. The gap at epoch 3 (a lagging wallet repairs the range in one-entry pages)
-        run: sudo -E env "PATH=$PATH" python3 deploy/testnet/bridge/rehearse_bridge.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/6-bridge-gap" --ubft pinned-bft/build/ubft --stages pos-gap
-      - name: 7. The pods restarted at epoch 3 (each entity's execution client, root and shard node)
-        run: sudo -E env "PATH=$PATH" python3 deploy/testnet/rehearse.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/7-restart-2" --ubft pinned-bft/build/ubft --stages pos-restart-2
-      - name: 8. The aggregator restarted, the bridge after the restarts, the replay negatives; custody
-        run: sudo -E env "PATH=$PATH" python3 deploy/testnet/bridge/rehearse_bridge.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/8-bridge-restarts-replays" --ubft pinned-bft/build/ubft --stages pos-agg-restart,pos-after-restart,pos-replays,custody
-      - name: 9. The public SDK clients (JS, Rust, Java main; cold, warm, restart; typed negatives with controls)
-        run: sudo -E env "PATH=$PATH" python3 deploy/testnet/bridge/rehearse_bridge.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/9-sdk-clients" --ubft pinned-bft/build/ubft --stages pos-sdk-clients
-      - name: 10. The roots' signed history (utb-live)
-        run: sudo -E env "PATH=$PATH" python3 deploy/testnet/rehearse.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/10-utb-live" --ubft pinned-bft/build/ubft --stages utb-live
+      - name: 6. The pods restarted at epoch 3 (each entity's execution client, root and shard node)
+        run: sudo -E env "PATH=$PATH" python3 deploy/testnet/rehearse.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/6-restart-2" --ubft pinned-bft/build/ubft --stages pos-restart-2
+      - name: 7. The public SDK clients (JS, Rust, Java main; cold, warm, restart; typed negatives with controls)
+        run: sudo -E env "PATH=$PATH" python3 deploy/testnet/bridge/rehearse_bridge.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/7-sdk-clients" --ubft pinned-bft/build/ubft --stages pos-sdk-clients
+      - name: 8. The roots' signed history (utb-live)
+        run: sudo -E env "PATH=$PATH" python3 deploy/testnet/rehearse.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/8-utb-live" --ubft pinned-bft/build/ubft --stages utb-live
       - name: The tester wallets' key removed (whichever step stopped)
         if: always()
-        run: sudo rm -f /srv/tn-bridge-pos/bridge/pos-tester.key
+        run: sudo rm -f /srv/tn-bridge-pos/bridge/pos-tester.key /srv/tn-bridge-pos/bridge/nb2/driver.env
       - name: Resources and logs
         if: always()
         run: |

@@ -1,17 +1,69 @@
-# The bridge on the testnet package (TN-B)
+# The bridge on the testnet package
 
-TN-B (#429), with B-TEST (#438) as its prerequisite, puts fake-value bridging on the public PoA testnet. This directory adds the bridge to the container package in
-`deploy/testnet` without changing the package's own services. The plan, and the items that do or don't need the host, are in `briefs/tnb-without-host.md`.
+**Native bridge v2 (NB2, #1096) is the bridge the lanes deploy and test** (NB2-09, #1105): `nb2/`, below. Spec:
+`docs/design/native-bridge-v2.md`. The protocol 6/7 files further down (TN-B #429/#438: `deploy_bridge.py`'s BridgeVault, the lock-proof
+endpoint, the tester, `rehearse_bridge.py`'s stages, `bridge_pos.py`, `bridge_load.py`) are no longer run by any lane; NB2-10 (#1106) removes
+them. The lock-proof service is not part of the v2 package: a v2 wallet fetches every piece of evidence from the ordinary node RPC behind the
+public gateway (spec section 12.7).
 
-Status: **part 5** (the release manifest). Part 1 is the bridge tools image, the post-genesis deploy and the lock-proof endpoint. Part 2 adds the bridge's round trip on the package's one
-aggregator (aggregator-go on partition 7, one shard: owner decision 40): lock, mint, transfers, burn, redeem and claim, driven by native-bridge-plugins' live
-driver (`tests/live/anyage.ts`) in the bridge tools image, plus the consolidated and long-history redeems, on-chain negatives and a backup and restore with the
-bridge deployed. Part 3 adds the bridge tester (native-bridge-plugins `tester/`), its page and the published directory, below. Part 4 adds the live negatives (#438): a
-conflicting burn, replays after the validator restart and after the restore, and the vault's custody books. Part 5 adds the release manifest, below. Not covered here: a reset with
-outstanding locks, retired-key forged histories, the proof refresh across rotations, and the public routes to the aggregator and for redemptions
-(`briefs/tnb-without-host.md`).
+## Native bridge v2 (`nb2/`)
 
-## Files
+| file | what it does |
+|---|---|
+| `nb2/deploy_nb2.py` | an operator action on a running generation: the trust-base bundle and its pin (`dnb-tool trust-bundle`), the verifier (`NativeBridgeVerifierV2`, which creates its receipt helper), Γ by the Go reference (`nb2-evidence gamma`) for the vault's predicted address, and the vault with exactly those bytes, all from the tools image's contracts build output (`cast send --create`, signed with the faucet keystore). It deploys the test build (K = 4, B = 2) and the production build (64, 16) beside it, reads `config()` and `domain()` back, and writes `GENERATION/bridge/nb2/` |
+| `nb2/release_nb2.py` | the release manifest `GENERATION/bridge/nb2/public/nb2-release.json` (below) |
+| `nb2/driver.ts` | the live driver: the TypeScript wallet plug-in (native-bridge-plugins `packages/native-bridge-plugin/src/nb2`, NB2-07) through the public gateway only. It runs in the bridge tools image with this directory mounted read-only at `tests/live/nb2lane/` of the image's plug-in checkout |
+| `nb2/rehearse_nb2.py` | the lane stages (below) |
+
+```
+python3 deploy/testnet/bridge/build-bridge-image.py --bft-source <bft at deploy/testnet/pins.json> --contracts-source <contracts at pin> --nbp-source <plug-ins at pin>
+go build -o /tmp/nb2-evidence ./scripts/nb2-evidence
+# generation up as in ../README.md, then:
+sudo python3 deploy/testnet/bridge/nb2/deploy_nb2.py /srv/<generation> --nb2-evidence /tmp/nb2-evidence [--k 4 --b 2 | --k 64 --b 16 --no-production]
+```
+
+Publish `GENERATION/bridge/nb2/public/` (the manifest, the trust bundle and its pin) and nothing else: `GENERATION/bridge/nb2/driver.env` holds the lane's keys.
+
+### The release manifest
+
+`nb2-release.json` holds no secret. Each value is read from where it is in force:
+
+| part | contents | read from |
+| --- | --- | --- |
+| `pins` | spec section 4.3, as a wallet's `DeploymentPins`: `gamma`, `build`, `vaultRuntimeCodeHash`, `maxEncodedTxBytes`, `userGasLimit`, `gasReserve` 500,000, `returnReserveSegments` 64, `deploymentBlock` (the vault's creation block, from which wallets read logs), `stateReadOnly` false | the deployment and the limits below |
+| `deployment` | per build: Γ and D, K, B, Qmax; the vault's, the verifier's and the receipt helper's address, creation transaction, block and code hash | the creation receipts and the chain |
+| `profile` | the semantic profile hash (in Γ), the vectors digest, the B1 profile's sha256 | the image's plug-in checkout; `network/b1-profile.json` |
+| `trust` | the bundle's file and its genesis EntryID (Γ.rootGenesis32); where newer entries come from | `dnb-tool trust-bundle` |
+| `limits` | `maxEncodedTxBytes` (L_max) 512 KiB, `userGasLimit` and the block gas limit, the gateway's bodies, log window and answer cap, retention, how transactions and blocks travel | `compose.yaml` (`--txpool.max-tx-input-bytes`, generate.py `MAX_TX_INPUT_BYTES`), `network/b1-profile.json` (`ordinaryCapacity`, `maxGas`), `gateway.py`. The manifest refuses a validator that is not a full proof source, an unpinned pool limit, or a gateway bound below 2 L_max + 64 KiB |
+| `envelope` | the operating envelope: per split depth, the largest transfer history whose return passes the pre-burn preflight at `returnReserveSegments` (the burn counted at the decoder bounds, about 4.5M gas), the historical proofs that fit beside it by bytes and by gas, and for the reference part the return delay at 1, 10 and 100 payments a second | `driver.ts envelope`: the plug-in's measured gas model (`MeasuredGasModel`) over the pins |
+
+Gas binds before bytes on this deployment: at `userGasLimit` 60M the largest admitted history is about 280 transfers (about 290 KB of evidence),
+well below L_max. The `boundary` stage finds the real boundary on live tokens.
+
+### The rehearsal stages
+
+`nb2/rehearse_nb2.py` runs on a generation that `rehearse.py --stages up,identity` brought up (`.github/workflows/testnet-bridge.yml`; the PoS lane
+runs `deploy,fund,pos-deposit` before the handoff and `pos-return,custody` after it, `.github/workflows/testnet-bridge-pos.yml`). Each stage's
+expectations and outputs are in the script's docstring; the outputs (`out/*.json`) and the three-way verdict tables are kept in the evidence.
+
+| stage | what it checks |
+|---|---|
+| `deploy` | both builds deployed and readable through the gateway; the manifest against the chain (code hashes, creation blocks, `config()` is Γ); Go decodes Γ to the deployed fields; the plug-in's installation check (`NativeBridgeV2.open`: chain ID, `config()`, runtime code hash); the companion horizon is null; each verifier build refuses the other's Γ (ConfigShape) and each vault build's constructor the other's K (BadConfig(16)) |
+| `limits` | a transaction of exactly L_max encoded bytes accepted by the gateway, included, and its block held by every validator; L_max + 1 refused by every validator's pool and through the gateway; the gateway's large-body bound (413 above it); a transaction at `userGasLimit` included, and the outcome of one above it recorded |
+| `fund` | the driver keys (`nb2/driver.env`, mode 0600, never in the evidence) funded from the faucet |
+| `circulate` | deposit 100 (EIP-1559), mint, transfer, split 60 + 40, split 40 into 15 + 25, transfer; an origin-only token from a legacy deposit; a one-transfer token; three nested split levels; tokens with 16 and 17 certificate claims; a long history (one aggregator batch) |
+| `returns` | the 60, 15 and 25 returned with their own indices while a second key's small returns rotate the K = 4 segments: exactly 100 paid; each part's replay refused while in the recent buffers (AlreadyPaid, the wallet reconciles without a send) and after eviction (the wallet finds it in a sealed segment; the old calldata, a zero history and a forged gap proof refused); a witness made stale by two rotations refused (StaleEndpoint) and paid after refresh; a too-low gas limit reverted with the vault unchanged, then paid; a return whose broadcast the gateway calls partial (HTTP 503, #1121: the transaction already in one pool) found by receipt polling, with one send |
+| `evidence` | `scripts/nb2-evidence/stage.sh` against the real vault: the deposit receipt proof and the newest seal receipt through the gateway, verified by nb2ref |
+| `verifier` | on every burned part (origin only with a legacy receipt, one transfer, one and two split levels, three nested levels, 16 and 17 claims, the long history): the deployed verifier's 192-byte verdict equals the plug-in's and Go's; isolated mutations (each certificate's seal signature in check order, two other UC bytes, an RSMT sibling and bitmap, the unlock recovery IDs 2 and 3 and a signature byte, a non-minimal evidence version, trailing and missing bytes) are refused, with the same rule from all three; fault injection by `eth_simulateV1` on validator 1 (0x0100 and 0x0102 missing, reverting, false, short; the helper's code replaced or removed) |
+| `gas` | the real gas of every paid return beside its preflight limit, and the refusals' gas |
+| `boundary` | the largest transfer history the wallet's preflight admits, returned; one transfer more refused before the burn (CapacityPreflight): the documented capacity limit, not a recovery |
+| `cold` | a burned part redeemed by a wallet whose derived caches (trust history, held witnesses) were deleted; journal, token and burn kept |
+| `custody` | from the vault's events: each deposit number once, each redemption paid once, Q = deposits − payouts = `state().outstanding`, balance ≥ Q, segments sealed once each in order, and Go reads the whole segment history |
+| `pos-deposit`, `pos-return` | PoS lane: a deposit, mint and transfer in epoch 1; after the epoch change a transfer, a split, the burn, the three verdicts under the wallet's extended trust history, and the redeem |
+
+## Protocol 6/7 (not run by the lanes; removed by NB2-10, #1106)
+
+### Files
 
 | file | what it does |
 |---|---|
@@ -25,7 +77,7 @@ outstanding locks, retired-key forged histories, the proof refresh across rotati
 | `rehearse_bridge.py` | the bridge stages of the runner rehearsal (`.github/workflows/testnet-bridge.yml`) |
 | `bridge_load.py` | sustained bridge load for the host's measured envelope: parallel testers looping the round trip, sampling this generation's containers and disk (its docstring) |
 
-## Operator steps
+### Operator steps
 
 ```
 python3 deploy/testnet/bridge/build-bridge-image.py --bft-source <bft at deploy/testnet/pins.json> --contracts-source <contracts at pin> --nbp-source <native-bridge-plugins at pin>
@@ -35,47 +87,7 @@ sudo python3 deploy/testnet/bridge/overlay.py /srv/<generation>
 cd /srv/<generation> && sudo docker compose -f compose.yaml -f compose.bridge.yaml up -d lockproof
 ```
 
-## The rehearsal stages
-
-`rehearse_bridge.py` runs on a generation that `rehearse.py --stages up,identity` brought up (`.github/workflows/testnet-bridge.yml`):
-
-| stage | what it checks |
-|---|---|
-| `deploy` | TokenVerifier and BridgeVault deployed after genesis and readable through the public gateway; the vault's CFG. The release manifest against the chain: each contract's address, code hash and deploy block, the vault's CFG, the genesis, the B1 profile, and the limits (D1 2 MiB, D3 60M, the latest block's gas limit, the proof window, the gateway's three body bounds, the SDK batch bound) |
-| `lockproof` | the lock-proof endpoint (below) |
-| `fund` | a driver key for this generation, in `GENERATION/bridge/driver.env` (mode 0600, never in the evidence), funded from the faucet |
-| `roundtrip` | a lock, its proof from validator 1's archive, the mint, 3 transfers and the burn certified by the aggregator, the return proof verified by `eth_call`, then the redemption and the claim with the last validator stopped; it rejoins with the same blocks. The vault's balance rises by the lock and falls back after the claim. The redeem transaction fits the gateway's `eth_sendRawTransaction` bound. |
-| `negatives` | after the round trip, whose release ran with a validator stopped and restarted: the redeemed envelope is refused a second time (`PartAlreadyRedeemed`), a second claim is refused (`InsufficientCredit`), and the vault keeps the nullifier. Then the driver's `negatives`: a conflicting burn of the same state to another address is not certified once later blocks are built (after a sentinel submitted later is certified, the aggregator still serves the first burn's proof, and the plug-in refuses to build a return proof of the conflicting one); a fresh proof of the redeemed burn, consolidated under a newer seal, is refused as `PartAlreadyRedeemed`; the same fresh proof re-signed by unknown keys (an unknown-key forgery, not a retired committee) is refused by the plug-in (`ErrQuorumNotMet`) and by the composition (`BridgeRejected`). The vault's balance does not move. |
-| `tester` | the bridge tester CLI as a tester runs it, with only its own faucet-funded key and `bridge/public/`: a configuration of another generation (genesis hash) refused before the wallet exists, then init, lock, mint, two transfers, burn, redeem, claim and status. A repeated mint is refused, the tester is credited exactly what it locked, and the vault pays it back. It goes through the public gateway for everything (the chain, the redemption, and the aggregator on `/aggregator`) and reaches the lock-proof endpoint on the internal network. |
-| `split` | the split lane (protocol 6) with the tester CLI: lock 100, split 40 + 60, split the 40 into 15 + 25, redeem 15 (85 remain), its retry refused (`PartAlreadyRedeemed`), the 60's negatives by the driver (the split parent returned, a changed recipient, a changed amount: `BridgeRejected` with their status; out of gas: status 0, vault unchanged) and a duplicate submission credited once, redeem 25 (the lock complete), claim; the vault pays back exactly what was locked |
-| `consolidated` | the SDK's consolidation over the one shard (K = 1 anchor), redeemed and claimed, with the per-SID envelope priced as the control |
-| `long-history` | a token with `--long-transfers` transfers (default 250, at most 254: one aggregator batch holds 256 state IDs, the mint, the transfers and the burn), consolidated; one gas short reverts and leaves the vault unchanged; then redeemed and claimed |
-| `backup-restore` | `rehearse.py`'s quiesced backup and restore with the bridge deployed (the endpoint stopped too): the redeemed lock stays spent, the `negatives` replays are all refused again on the restored generation (the aggregator's spent state included), and a new round trip completes |
-| `custody` | the vault's books from its whole event log: each lock nonce 1..`lastNonce` once; each credit once, for a lock of the same amount, with the nullifier the vault keeps; uncredited locks unspent; the counters L, D, P equal the event sums, with 0 ≤ P ≤ D ≤ L; the recipients' `claimable` sums to D − P; and the balance is L − P plus donations |
-
-The driver signs with its own key and with the fixed, publicly known keys of its recipient and submitter (`tests/live/anyage.ts`). That is fine on a
-rehearsal generation, but not on a public network: anyone can spend what those addresses hold. A redeem transaction carries the whole return proof; the public gateway
-takes `eth_sendRawTransaction`, `eth_call` and `eth_estimateGas` bodies up to 4.5 MiB (`gateway.py` `MAX_RAW_TX_BODY`, `LARGE_METHODS`; every other method
-16 KiB), so a redemption up to the 2 MiB envelope, and the call and the estimate a wallet makes on it first, fit as
-hex. The `roundtrip` stage checks it.
-
-## The release manifest
-
-`deploy_bridge.py` writes `GENERATION/bridge/public/bridge-release.json`, one file that names what this generation's bridge was built and deployed from and
-the limits it runs with. It holds no secret and is published with the tester's files. Each value is read from where it is in force, not restated:
-
-| part | contents | read from |
-| --- | --- | --- |
-| `package` | generation, chain ID, genesis hash, validators, the node images and their source pins | the generation's `manifest.json` |
-| `bridge` | the bridge tools image, its source pins (contracts, native-bridge-plugins, Node, Go, Foundry, bft-core) and dnb-tool's sha256 | `artifacts/bridge-images.json`, refused if it is not the image the deploy ran |
-| `contracts` | the contracts commit; BridgeVault's and TokenVerifier's address, deploy transaction, block and code hash; the CFG | the deploy's broadcast record and the chain |
-| `profile` | the vector corpus digest, the native-bridge-plugins commit, the state-transition SDK (version, tarball, integrity), the B1 profile and its sha256 | the image's checkouts, refused if the plug-ins' corpus is not the one the contracts' golden tests pin; `network/b1-profile.json` |
-| `limits` | D1 the redemption envelope bound (2 MiB), D3 the ordinary block capacity (60M gas), the block gas limit, the proof window, the gateway's body bound, the lock-proof endpoint's rate, the largest lock, the SDK batch bound | the generation's files where the value is configured; otherwise the constant's definition, named beside it, at its component's pin |
-
-The rehearsal's `deploy` stage checks it against the chain. A changed pin, image or limit shows up as a changed manifest; there is no compatibility between
-releases (greenroom).
-
-## The lock-proof endpoint
+### The lock-proof endpoint
 
 A tester who locks on the EVM needs the lock's proof to mint. `dnb-tool lockproof-serve` builds that proof from the block's certificate in one validator's
 archive and from that validator's `eth_getProof`. It serves the same bytes as `dnb-tool lockproof`.
@@ -97,7 +109,7 @@ GET /healthz
   lock, fetch the proof, keep it.
 - No prover and no service state, per owner §36 and the orchestrator's 2026-10-22 decision.
 
-## The bridge tester
+### The bridge tester
 
 `deploy_bridge.py` writes `GENERATION/bridge/public/`, the one directory to publish for testers. It holds the page, `tester-config.json` and the four public
 files that config names: the trust-base bundle, its genesis entry id, the EVM shard's PDR and the deployment document. Publish nothing else from
