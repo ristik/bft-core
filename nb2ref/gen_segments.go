@@ -5,6 +5,8 @@ import (
 	"math/big"
 	"math/rand"
 
+	"github.com/decred/dcrd/dcrec/secp256k1/v4"
+	"github.com/decred/dcrd/dcrec/secp256k1/v4/ecdsa"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -91,7 +93,8 @@ func (g *gen) sealReceipts() error {
 			pdr, _ := types.Cbor.Marshal(w.EVM.PDRs[0])
 			return CArr(CUint(1), CBytes(pdr), CBytes(p.UC), CBytes(p.Header), CUint(p.TxIndex), CUint(p.LogIndex), nodesCBOR(p.Nodes))
 		}},
-		{id: "seal-no-entry-for-epoch", want: "SealReceipt", inner: "NoEntryForEpoch", seg: 0, data: data0, o: ReceiptOpts{Seal: &SealOpts{Network: DevNetwork, Epoch: 3, RootRound: 3 * RotationRound}}},
+		{id: "seal-no-entry-for-epoch", note: "14.6, 14.7: an otherwise valid UC from an epoch absent from the bundle; retryable (extend the trust-base history and retry), DepositUC on chain", want: "SealReceipt", inner: "NoEntryForEpoch", seg: 0, data: data0, o: ReceiptOpts{Seal: &SealOpts{Network: DevNetwork, Epoch: 3, RootRound: 3 * RotationRound}}},
+		{id: "seal-root-before-epoch", note: "14.7 multi-fault: the IR changed after sealing and the seal names an epoch the bundle does not hold; the root fails first, so DepositUC, not the retryable NoEntryForEpoch", want: "SealReceipt", inner: "DepositUC", seg: 0, data: data0, o: ReceiptOpts{Seal: &SealOpts{Network: DevNetwork, Epoch: 3, RootRound: 3 * RotationRound}, TamperUC: func(uc *types.UnicityCertificate) { uc.InputRecord.Timestamp++ }}},
 		{id: "seal-failed-transaction", want: "SealReceipt", inner: "ReceiptStatus", seg: 0, data: data0, o: ReceiptOpts{MutReceipt: func(r *RawReceipt) { r.Status = []byte{} }}},
 		{id: "seal-path", want: "SealReceipt", inner: "ReceiptPath", seg: 0, data: data0, o: ReceiptOpts{TxIndex: 2, MutProof: func(p *DepositProof) { p.TxIndex = 0 }}},
 		{id: "seal-emitter", want: "SealReceipt", inner: "LogEmitter", seg: 0, data: data0, o: ReceiptOpts{MutLog: func(l *RawLog) { l.Address = Recipient20("impostor") }}},
@@ -381,10 +384,11 @@ func (g *gen) wallet() error {
 		return nil
 	}
 	for _, e := range []error{
-		comp("companion-ok", "ok", 2, ""),
+		comp("companion-found", "found", 2, ""),
 		comp("companion-pruned", "unavailable", 0, "EvidencePruned"),
 		comp("companion-unknown", "unknown", 0, "CompanionUnknown"),
-		comp("companion-three-witnesses", "ok", 3, "CompanionProvider"),
+		comp("companion-three-witnesses", "found", 3, "CompanionProvider"),
+		comp("companion-status-ok", "ok", 2, "CompanionProvider"),
 		cap("capacity-preflight-ok", "preflight", 524288, 20480, 2048, 64, 2490, 2500, 64, 0, 2_000_000, 12_000, 0, 30_000_000, ""),
 		cap("capacity-preflight-exact", "preflight", 32+64*257+1000, 1000, 32, 64, 0, 0, 64, 0, 0, 1, 0, 64, ""),
 		cap("capacity-preflight-one-short", "preflight", 32+64*257+999, 1000, 32, 64, 0, 0, 64, 0, 0, 1, 0, 64, "CapacityPreflight"),
@@ -427,6 +431,9 @@ func (g *gen) primitives() error {
 		}
 		g.f.Primitives.MinterScalars = append(g.f.Primitives.MinterScalars, MinterScalarVector{Scalar: h32(s.k), Valid: err == nil})
 	}
+	if err := g.unlockPrimitives(); err != nil {
+		return err
+	}
 	sel := func(s string) Hex { h := HE([]byte(s)); return Hex(h[:4]) }
 	g.f.Primitives.Constants = map[string]Hex{
 		"DEPOSIT_SECRET":        h32(TagDepositSecret),
@@ -442,6 +449,74 @@ func (g *gen) primitives() error {
 		"selector.config":       sel("config()"),
 		"selector.state":        sel("state()"),
 		"selector.verifyReturn": sel("verifyReturn(bytes,bytes)"),
+	}
+	return nil
+}
+
+// AstraUnlockKeyID2 is the source key of astra's constructed recovery ID 2 example (briefs/astra-review-1110-r2-answer.md): digest
+// integer 1, r = 2, s = 1; R is the even-y point with x = n + 2 and Q = r^-1 (R - G).
+const AstraUnlockKeyID2 = "028a0dee06163f357e0e71688f3785eb53891144624c633ed43706b6268bb4316f"
+
+// unlockPrimitives emits the section 14.7 primitive recovery vectors: valid and invalid recovery IDs 2 and 3, all
+// UnlockRecovery under the NB2 unlock restriction, with ID 0/1 and ID 4 controls.
+func (g *gen) unlockPrimitives() error {
+	one := w256(1)
+	sig := func(r, s *big.Int, id byte) []byte {
+		out := make([]byte, 65)
+		r.FillBytes(out[:32])
+		s.FillBytes(out[32:64])
+		out[64] = id
+		return out
+	}
+	// The key a (digest, r||s, id) recovers to under the SDK relation, nil when recovery fails.
+	recovered := func(d [32]byte, u []byte) *secp256k1.PublicKey {
+		c := append([]byte{27 + 4 + u[64]}, u[:64]...)
+		k, _, err := ecdsa.RecoverCompact(c, d[:])
+		if err != nil {
+			return nil
+		}
+		return k
+	}
+	two, s1 := big.NewInt(2), big.NewInt(1)
+	astra2, astra3 := sig(two, s1, 2), sig(two, s1, 3)
+	k2, k3 := recovered(one, astra2), recovered(one, astra3)
+	if k2 == nil || k3 == nil || fmt.Sprintf("%x", k2.SerializeCompressed()) != AstraUnlockKeyID2 {
+		return fmt.Errorf("unlock primitives: astra's ID 2 example does not recover %s", AstraUnlockKeyID2)
+	}
+	ctl := KeyFromSeed("nb2-unlock-primitive")
+	cd := HU([]byte("nb2-unlock-primitive"))
+	cs := ecdsa.SignCompact(ctl, cd[:], true)
+	ctlSig := append(append([]byte(nil), cs[1:]...), cs[0]-27-4)
+	other := append([]byte(nil), ctlSig...)
+	other[64] ^= 1
+	nm1 := new(big.Int).Sub(secpN, big.NewInt(1)) // r + n >= p: no point for IDs 2 and 3
+	cases := []struct {
+		id, note, want string
+		key            *secp256k1.PublicKey
+		d              [32]byte
+		u              []byte
+	}{
+		{id: "unlock-id0-1-valid", note: "control: an ordinary signature (recovery ID 0 or 1) recovering the source key", key: ctl.PubKey(), d: cd, u: ctlSig},
+		{id: "unlock-id0-1-other-key", note: "control: the other of IDs 0/1 recovers another key", want: "UnlockKey", key: ctl.PubKey(), d: cd, u: other},
+		{id: "unlock-id2-valid", note: "astra's construction: digest 1, r = 2, s = 1, ID 2 (x = n + 2, even y) recovers the source key and verifies under the SDK relation; NB2 refuses it", want: "UnlockRecovery", key: k2, d: one, u: astra2},
+		{id: "unlock-id3-valid", note: "as unlock-id2-valid with the odd-y point (ID 3): valid under the SDK relation; NB2 refuses it", want: "UnlockRecovery", key: k3, d: one, u: astra3},
+		{id: "unlock-id2-other-key", note: "ID 2 recovering a key other than the source key", want: "UnlockRecovery", key: ctl.PubKey(), d: one, u: astra2},
+		{id: "unlock-id3-other-key", note: "ID 3 recovering a key other than the source key", want: "UnlockRecovery", key: k2, d: one, u: astra3},
+		{id: "unlock-id2-unrecoverable", note: "ID 2 with r = n - 1: r + n >= p, recovery fails", want: "UnlockRecovery", key: k2, d: one, u: sig(nm1, s1, 2)},
+		{id: "unlock-id3-unrecoverable", note: "ID 3 with r = n - 1: r + n >= p, recovery fails", want: "UnlockRecovery", key: k3, d: one, u: sig(nm1, s1, 3)},
+		{id: "unlock-id4", note: "outside the SDK's 0..3", want: "UnlockRecovery", key: ctl.PubKey(), d: cd, u: append(append([]byte(nil), ctlSig[:64]...), 4)},
+	}
+	for _, c := range cases {
+		err := VerifyUnlockDigest(c.key, c.d, c.u)
+		if e := checkExpect(c.id, err, c.want); e != nil {
+			return e
+		}
+		sdk := c.u[64] <= 3 && sdkRecover(c.key, c.d, c.u[:64], c.u[64]) == nil
+		if sdk != (c.id == "unlock-id0-1-valid" || c.id == "unlock-id2-valid" || c.id == "unlock-id3-valid") {
+			return fmt.Errorf("unlock primitive %s: SDK relation accepts = %v", c.id, sdk)
+		}
+		g.f.Primitives.Unlocks = append(g.f.Primitives.Unlocks, UnlockVector{ID: g.id(c.id), Note: c.note, Key: Hex(c.key.SerializeCompressed()),
+			Digest: h32(c.d), Unlock: Hex(c.u), SDKValid: sdk, Expect: expectOf(err)})
 	}
 	return nil
 }

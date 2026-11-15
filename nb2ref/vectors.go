@@ -350,6 +350,7 @@ type StateReadVector struct {
 // PrimitiveVectors are rule-level checks no whole input can reach.
 type PrimitiveVectors struct {
 	MinterScalars []MinterScalarVector `json:"minterScalars"`
+	Unlocks       []UnlockVector       `json:"unlockRecovery"`
 	Constants     map[string]Hex       `json:"constants"`
 }
 
@@ -358,6 +359,19 @@ type PrimitiveVectors struct {
 type MinterScalarVector struct {
 	Scalar Hex  `json:"scalar"`
 	Valid  bool `json:"valid"`
+}
+
+// UnlockVector is one token-unlock signature checked at the primitive level (section 14.4, the NB2 unlock restriction):
+// VerifyUnlockDigest(key, digest, unlock). sdkValid says whether the pinned SDK relation (ids 0..3: recover with the supplied
+// id, require the source key, compact verify) accepts it; NB2 refuses every id 2 or 3, valid or not, as UnlockRecovery.
+type UnlockVector struct {
+	ID       string `json:"id"`
+	Note     string `json:"note,omitempty"`
+	Key      Hex    `json:"key"`    // the compressed source key
+	Digest   Hex    `json:"digest"` // the 32-byte unlock message H(C(b(sourceHash32), b(txHash32)))
+	Unlock   Hex    `json:"unlock"` // r32||s32||recoveryId
+	SDKValid bool   `json:"sdkValid"`
+	Expect   Expect `json:"expect"`
 }
 
 // expectOf renders an error as an expectation.
@@ -387,6 +401,10 @@ func expectOf(err error) Expect {
 				on = ErrDepositUC
 			}
 			e.OnChain = on.Name
+		}
+		// A seal receipt wrapping the retryable NoEntryForEpoch (section 14.6): the same EVM UC is DepositUC on chain.
+		if r == ErrSealReceipt && errors.Is(err, ErrNoEntryForEpoch) {
+			e.OnChain = ErrDepositUC.Name
 		}
 		if on.Section != "14.6" {
 			e.Revert = revertData(on)

@@ -9,6 +9,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/decred/dcrd/dcrec/secp256k1/v4"
+	"github.com/decred/dcrd/dcrec/secp256k1/v4/ecdsa"
 )
 
 var (
@@ -187,6 +190,33 @@ func TestVectorReplay(t *testing.T) {
 			t.Errorf("state read %s: %v", v.ID, err)
 		}
 	}
+	if len(f.Primitives.Unlocks) == 0 {
+		t.Error("no unlock recovery primitive vectors")
+	}
+	for _, v := range f.Primitives.Unlocks {
+		key, err := ParseKey(v.Key)
+		if err != nil {
+			t.Fatalf("unlock %s: key: %v", v.ID, err)
+		}
+		if err := VerifyUnlockDigest(key, [32]byte(v.Digest), v.Unlock); !sameExpect(expectOf(err), v.Expect) {
+			t.Errorf("unlock %s: %v, want %+v", v.ID, err, v.Expect)
+		}
+		// The SDK relation (ids 0..3) independently: a valid id 2/3 recovers the source key and verifies; NB2 still refuses it.
+		if sdk := v.Unlock[64] <= 3 && sdkRecover(key, [32]byte(v.Digest), v.Unlock[:64], v.Unlock[64]) == nil; sdk != v.SDKValid {
+			t.Errorf("unlock %s: SDK relation accepts = %v, vector says %v", v.ID, sdk, v.SDKValid)
+		}
+		if v.SDKValid && v.Unlock[64] >= 2 {
+			var r, s secp256k1.ModNScalar
+			r.SetByteSlice(v.Unlock[:32])
+			s.SetByteSlice(v.Unlock[32:64])
+			if !ecdsa.NewSignature(&r, &s).Verify(v.Digest, key) {
+				t.Errorf("unlock %s: marked SDK-valid but the compact verification fails", v.ID)
+			}
+			if v.Expect.Error != "UnlockRecovery" {
+				t.Errorf("unlock %s: a valid recovery ID %d must still be UnlockRecovery", v.ID, v.Unlock[64])
+			}
+		}
+	}
 	for _, v := range f.Primitives.MinterScalars {
 		if _, err := MinterKeyFromScalar([32]byte(v.Scalar)); (err == nil) != v.Valid {
 			t.Errorf("minter scalar %x: %v", v.Scalar, err)
@@ -267,6 +297,9 @@ func vectoredRules(f *VectorFile) map[string]int {
 	for _, v := range f.Seal {
 		n[v.Expect.Error]++
 		n[v.Inner]++
+	}
+	for _, v := range f.Primitives.Unlocks {
+		n[v.Expect.Error]++
 	}
 	for _, v := range f.Gap {
 		n[v.Expect.Error]++
@@ -410,6 +443,11 @@ func TestDisableEachCheck(t *testing.T) {
 				continue
 			}
 			if _, err := VerifySealReceipt(cfg[v.Deployment], trust[v.Deployment], v.Receipt); err == nil {
+				passed = append(passed, v.ID)
+			}
+		}
+		for _, v := range f.Primitives.Unlocks {
+			if key, err := ParseKey(v.Key); err == nil && v.Expect.Error == name && VerifyUnlockDigest(key, [32]byte(v.Digest), v.Unlock) == nil {
 				passed = append(passed, v.ID)
 			}
 		}

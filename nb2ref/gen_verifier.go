@@ -80,6 +80,17 @@ func (g *gen) configs() error {
 		add("constructor-other-address", w.Gamma, Environment{Address: Recipient20("other"), ChainID: env.ChainID, VerifierCodeHash: env.VerifierCodeHash}, "", "BadConfig9"),
 		add("constructor-other-chain", w.Gamma, Environment{Address: env.Address, ChainID: 1, VerifierCodeHash: env.VerifierCodeHash}, "", "BadConfig5"),
 		add("constructor-verifier-codehash", w.Gamma, Environment{Address: env.Address, ChainID: env.ChainID, VerifierCodeHash: HE([]byte("other"))}, "", "BadConfig15"),
+		// Staged constructor precedence (section 4.1), each with two or more faults: the array (19), the fields in index order,
+		// then, only for a Γ that decodes completely, asset (10), ty (11), aid (12), vault (9), chainId (5), verifier code hash (15).
+		add("constructor-order-chain-env-and-asset", mut(func(c *Config) { c.Asset = HU([]byte("other-asset")) }), Environment{Address: env.Address, ChainID: 1, VerifierCodeHash: env.VerifierCodeHash}, "", "BadConfig10"),
+		add("constructor-order-vault-and-ty", mut(func(c *Config) { c.Ty = HU([]byte("other-type")) }), Environment{Address: Recipient20("other"), ChainID: env.ChainID, VerifierCodeHash: env.VerifierCodeHash}, "", "BadConfig11"),
+		add("constructor-order-field7-and-asset", mut(func(c *Config) { c.EVMShard = []byte{}; c.Asset = HU([]byte("other-asset")) }), env, "ConfigShape", "BadConfig7"),
+		add("constructor-order-chain-env-and-codehash", w.Gamma, Environment{Address: env.Address, ChainID: 1, VerifierCodeHash: HE([]byte("other"))}, "", "BadConfig5"),
+		add("constructor-order-array-and-field", append(mut(func(c *Config) { c.Network = 0 }), 0), env, "ConfigShape", "BadConfig19"),
+		add("constructor-order-two-fields", mut(func(c *Config) { c.Network = 0; c.EVMShard = []byte{} }), env, "ConfigShape", "BadConfig2"),
+		add("constructor-order-aid-and-chain-env", mut(func(c *Config) { c.Aid = HU([]byte("other-coin")) }), Environment{Address: env.Address, ChainID: 1, VerifierCodeHash: env.VerifierCodeHash}, "", "BadConfig12"),
+		add("constructor-order-k-before-b", mut(func(c *Config) { c.K, c.B = 4, 0 }), env, "ConfigShape", "BadConfig16"),
+		add("constructor-order-over-1024-bytes", append(bytes.Clone(w.Gamma), make([]byte, 1025-len(w.Gamma))...), env, "ConfigShape", "BadConfig19"),
 	}
 	for _, e := range steps {
 		if e != nil {
@@ -283,6 +294,9 @@ func (g *gen) verifier() error {
 		{id: "DepositUC-latest-committee", note: "a root epoch 1 seal signed by the epoch 2 committee: never judged by the latest committee", want: "DepositUC", o: directOpts{Dep: ReceiptOpts{Committee: w.Roots[1]}}},
 		{id: "DepositUC-seal-network", want: "DepositUC", o: directOpts{Dep: ReceiptOpts{Seal: &SealOpts{Network: DevNetwork + 1, Epoch: 1, RootRound: DevRootRound}}}},
 		{id: "NoEntryForEpoch-deposit", note: "retryable", want: "NoEntryForEpoch", o: directOpts{Dep: ReceiptOpts{Seal: &SealOpts{Network: DevNetwork, Epoch: 3, RootRound: 3 * RotationRound}}}},
+		{id: "DepositUC-root-before-epoch", note: "multi-fault: the IR changed after sealing and the seal names an epoch the history does not hold; the root fails first (DepositUC, not NoEntryForEpoch)", want: "DepositUC", o: directOpts{Dep: ReceiptOpts{Seal: &SealOpts{Network: DevNetwork, Epoch: 3, RootRound: 3 * RotationRound}, TamperUC: func(uc *types.UnicityCertificate) {
+			uc.InputRecord.Timestamp++
+		}}}},
 		{id: "DepositHeader-tampered", note: "14.7: header bytes changed (extra data), still canonical", want: "DepositHeader", o: directOpts{Dep: ReceiptOpts{MutProof: func(p *DepositProof) {
 			p.Header = retaggedHeader(p.Header)
 		}}}},
@@ -367,6 +381,8 @@ func (g *gen) verifier() error {
 			}
 		}}},
 		{id: "UnlockRecovery", want: "UnlockRecovery", o: directOpts{MutDraft: func(d *Draft) { d.AfterSign = func(t *Token) { t.Proofs[0].CD.Unlock[64] += 4 } }}},
+		{id: "UnlockRecovery-id2-lineage", note: "14.4 NB2 unlock restriction: a lineage transfer's unlock with recovery ID 2 is UnlockRecovery (under the SDK relation alone it would be UnlockKey)", want: "UnlockRecovery", o: directOpts{MutDraft: func(d *Draft) { d.AfterSign = func(t *Token) { t.Proofs[0].CD.Unlock[64] = 2 } }}},
+		{id: "UnlockRecovery-id3-mint", note: "14.4 NB2 unlock restriction: the mint unlock with recovery ID 3 is UnlockRecovery", want: "UnlockRecovery", o: directOpts{MutDraft: func(d *Draft) { d.AfterSign = func(t *Token) { t.MintProof.CD.Unlock[64] = 3 } }}},
 		{id: "UnlockKey", note: "the other recovery ID", want: "UnlockKey", o: directOpts{MutDraft: func(d *Draft) { d.AfterSign = func(t *Token) { t.Proofs[0].CD.Unlock[64] ^= 1 } }}},
 		{id: "NoTransfers", note: "a minted token returned with no burn", want: "NoTransfers", o: directOpts{MutDraft: func(d *Draft) { d.Transfers = nil; d.Owners = d.Owners[:1] }}},
 		{id: "DeadlineMismatch", want: "DeadlineMismatch", o: directOpts{MutDraft: func(d *Draft) {

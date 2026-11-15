@@ -17,7 +17,7 @@ import (
 // Profile bounds of the deposit evidence (profile.json "limits"), checked before any cryptography.
 const (
 	MaxJustificationBytes   = 65536
-	MaxUCBytes              = 16384
+	MaxEVMUCBytes           = 16384 // profile evmUcBytes: the EVM UC of a DepositProof
 	MaxHeaderBytes          = 2048
 	MaxReceiptNodes         = 65
 	MaxReceiptBranchNodeLen = 1024
@@ -152,7 +152,7 @@ func decodeDepositProofItem(it *item) (*DepositProof, error) {
 		return b, nil
 	}
 	var err error
-	if p.UC, err = blob(&k[1], MaxUCBytes); err != nil {
+	if p.UC, err = blob(&k[1], MaxEVMUCBytes); err != nil {
 		return nil, err
 	}
 	if p.Header, err = blob(&k[2], MaxHeaderBytes); err != nil {

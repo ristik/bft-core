@@ -15,7 +15,10 @@ type SealReceipt struct {
 // VerifySealReceipt verifies a seal receipt proof (a DepositProof container whose log is SegmentSealed) exactly as section 6.2
 // steps 2 to 5 for that event: the same EVM UC rule, header, receipt path, type, status, log index and emitter, topics
 // [topic0(SegmentSealed), u256(j)] with j < 2^48, and data of exactly 128 + 32K bytes whose identifiers are strictly sorted
-// and whose heads link (H_{j+1} = NextHead(D, j, headBefore, M_j)). Every failure is SealReceipt wrapping the inner rule.
+// and whose heads link (H_{j+1} = NextHead(D, j, headBefore, M_j)). Every failure is SealReceipt wrapping the inner rule
+// (section 14.6): the retryable NoEntryForEpoch when the trust input lacks the seal epoch after the earlier per-UC checks pass
+// (extend the authenticated history and retry; the receipt is not invalid for that alone), DepositUC for every other
+// EVM-certificate failure.
 func VerifySealReceipt(c *Config, t *TrustInput, receipt []byte) (*SealReceipt, error) {
 	if err := t.bind(c); err != nil {
 		return nil, err
@@ -137,11 +140,12 @@ var (
 	ErrCompanionProvider = errors.New("nb2: companion witnesses are not exactly [certificate, technical record] (provider fault)")
 )
 
-// CheckCompanion classifies a seal companion answer: "ok" with exactly two witnesses is usable; "unavailable" (pruned below the
+// CheckCompanion classifies a seal companion answer (ureth SealCompanionLookup, serde tag "status"): "found" with exactly two
+// witnesses is usable; "unavailable" (pruned below the
 // node's horizon) is EvidencePruned; "unknown" is retryable; anything else is a provider fault.
 func CheckCompanion(status string, witnesses int) error {
 	switch {
-	case status == "ok" && witnesses == 2:
+	case status == "found" && witnesses == 2:
 		return nil
 	case status == "unavailable":
 		return ErrEvidencePruned

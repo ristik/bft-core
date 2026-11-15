@@ -306,7 +306,11 @@ func (v *Vault) redeem(eta [32]byte, a uint64, history []byte, ver VerifierCall,
 			}
 		}
 	}
-	// 5. The verifier.
+	// 5. The verifier. A revert of at most MaxVerifierRevert bytes is VerifierRefused(revertData); a longer revert, like return data
+	// that is not exactly 192 canonical bytes, is VerifierBadReturn (the vault never copies unbounded revert data).
+	if ver.Revert != nil && len(ver.Revert) > MaxVerifierRevert {
+		return nil, ErrVerifierBadReturn
+	}
 	if ver.Revert != nil {
 		disabledRefused := disabled[ErrVerifierRefused]
 		delete(disabled, ErrVerifierRefused)
@@ -419,6 +423,9 @@ func (v *Vault) seal(p int) error {
 	v.A = put(put(v.A, shiftC, bitsC, new(big.Int).SetUint64(c+1)), shiftM, bitsM, new(big.Int))
 	return nil
 }
+
+// MaxVerifierRevert is MAX_VERIFIER_REVERT, the longest verifier revert the vault relays as VerifierRefused(revertData).
+const MaxVerifierRevert = 1024
 
 // decodeVerdictABI accepts exactly 192 canonical bytes: uint64 and address words with zero high bytes.
 func decodeVerdictABI(b []byte) (*Verdict, bool) {
