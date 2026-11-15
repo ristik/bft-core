@@ -178,6 +178,8 @@ export Q3_PINS_FILE=$PINS
 # The execution clients are pinned to this deployment's chain: network id 3 and the genesis trust base's identity. The lane runs on the fresh-B1 stack: one profile
 # (ubft engine-api b1-profile) is the source of the registry genesis (layout 3), ureth's --unicity.* bindings and the shard nodes' Update admission.
 export URETH_PIN_NETWORK_ID=3 Q3_B1=1 H3_SLOT_LAYOUT=3 EVM_OPERATOR_STATUS_RPC=1
+# the Q4 rows exercise the install restart itself (the first successor proposal is held across it): the roots keep that path (bft-core#1086)
+export M2_IN_PROCESS_SWITCH=false
 export EVM_PARTITION_PARAMS_EXTRA=${EVM_PARTITION_PARAMS_EXTRA:-continuity_max_distance=1/1}
 # the roots run the q4shim binary from their first start; the shim directory is outside test-nodes (the devnet setup owns that tree)
 export Q4_SHIM_DIR=$EVIDENCE_DIR/shim Q4_ROOT_BIN=$EVIDENCE_DIR/bin/ubft

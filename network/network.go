@@ -117,6 +117,60 @@ type LibP2PNetwork struct {
 	sendData  func(ctx context.Context, host *Peer, protocolID string, data []byte, receiverID peer.ID) error
 	connected func(peer.ID) bool
 	fault     atomic.Pointer[SendFault] // SetSendFault
+
+	// origins, once TrackOrigins was called, hold the authenticated sender and frame size of every received message until the consumer
+	// takes them (TakeOrigin); a message dropped before it was queued leaves none
+	originsOn atomic.Bool
+	originsMu sync.Mutex
+	origins   map[any]MessageOrigin
+}
+
+// MessageOrigin is where a received message came from: the authenticated remote peer of its stream (s.Conn().RemotePeer()) and the
+// size of its wire frame's payload.
+type MessageOrigin struct {
+	Peer peer.ID
+	Size uint64
+}
+
+// TrackOrigins makes the network keep the origin of every message it queues from now on, until the consumer takes it with TakeOrigin.
+// A consumer that calls it must take the origin of every message it receives.
+func (n *LibP2PNetwork) TrackOrigins() {
+	n.originsMu.Lock()
+	defer n.originsMu.Unlock()
+	if n.origins == nil {
+		n.origins = make(map[any]MessageOrigin)
+	}
+	n.originsOn.Store(true)
+}
+
+// TakeOrigin returns and forgets the origin of a received message: its authenticated sender and frame payload size.
+func (n *LibP2PNetwork) TakeOrigin(msg any) (from peer.ID, size uint64, ok bool) {
+	if !n.originsOn.Load() {
+		return "", 0, false
+	}
+	n.originsMu.Lock()
+	defer n.originsMu.Unlock()
+	o, ok := n.origins[msg]
+	delete(n.origins, msg)
+	return o.Peer, o.Size, ok
+}
+
+func (n *LibP2PNetwork) recordOrigin(msg any, o MessageOrigin) {
+	if !n.originsOn.Load() {
+		return
+	}
+	n.originsMu.Lock()
+	n.origins[msg] = o
+	n.originsMu.Unlock()
+}
+
+func (n *LibP2PNetwork) forgetOrigin(msg any) {
+	if !n.originsOn.Load() {
+		return
+	}
+	n.originsMu.Lock()
+	delete(n.origins, msg)
+	n.originsMu.Unlock()
 }
 
 // defaultStreamReadTimeout bounds the whole life of an incoming stream on the receiving side, from the start of its handler until the sender
@@ -427,6 +481,7 @@ func (n *LibP2PNetwork) drain() {
 		select {
 		case msg := <-n.receivedMsgs:
 			n.Delivered(msg)
+			n.forgetOrigin(msg)
 		default:
 			return
 		}
@@ -494,10 +549,12 @@ func (n *LibP2PNetwork) streamHandlerForProtocol(protocolID string, ctor func() 
 			}
 			msg := ctor()
 			var reserved int64
+			var frame uint64
 			switch {
 			case ingress != nil:
 				var length uint64
 				if length, err = readFrameLength(reader, maxFrame); err == nil {
+					frame = length
 					reserved = int64(length) /* #nosec G115 bounded by maxFrame */
 					if !ingress.reserve(remote, reserved) {
 						n.log.Warn(fmt.Sprintf("refusing a %d byte %q frame from %s: ingress budget exhausted", length, protocolID, remote))
@@ -508,9 +565,11 @@ func (n *LibP2PNetwork) streamHandlerForProtocol(protocolID string, ctor func() 
 					}
 				}
 			case maxFrame > 0:
-				err = deserializeMsgLimited(reader, msg, maxFrame)
+				if frame, err = readFrameLength(reader, maxFrame); err == nil {
+					err = readFramePayload(reader, msg, frame)
+				}
 			default:
-				err = deserializeMsg(reader, msg)
+				frame, err = deserializeMsgCounted(reader, msg)
 			}
 			if err != nil {
 				if errors.Is(err, io.EOF) {
@@ -531,10 +590,12 @@ func (n *LibP2PNetwork) streamHandlerForProtocol(protocolID string, ctor func() 
 			if ingress != nil {
 				ingress.queue(msg, remote, reserved) // before it is visible to the consumer, so Delivered always finds it
 			}
+			n.recordOrigin(msg, MessageOrigin{Peer: remote, Size: frame}) // likewise before the consumer can take the message
 			if err = n.receivedMsg(s.Conn().RemotePeer(), protocolID, msg); err != nil {
 				if ingress != nil {
 					ingress.delivered(msg) // dropped: released
 				}
+				n.forgetOrigin(msg)
 				// log error, but also reset the stream to signal that node is not able to consume more messages
 				n.log.Warn(fmt.Sprintf("failed to process message: %v", err))
 				return

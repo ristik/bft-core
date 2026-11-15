@@ -52,6 +52,8 @@ type (
 		UTBStore *utbstore.Store
 		// Evidence is the evidence service's ingress tap: every decoded root vote is offered to it before any filter of onVoteMsg.
 		Evidence *rootevidence.Observer
+		// EpochSwitch, set, makes a member that stays in the committee switch into a committed Q3 activation in process (#1086).
+		EpochSwitch EpochSwitch
 	}
 
 	Option func(c *Optional)

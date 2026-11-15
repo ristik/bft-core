@@ -60,6 +60,9 @@ type (
 		parentTime func(uint64) (uint64, error)
 		now        func() uint64
 		utb        UTBSource
+		// fence refuses every signature while the manager switches epoch in process, and every signature of an epoch below the one it
+		// switched into (#1086); nil signs as before
+		fence func(epoch uint64) error
 	}
 
 	// ActivationGate is the verified history's signer admission (q3active.Runtime). It refuses an epoch the history does not hold
@@ -171,6 +174,22 @@ func (s *SafetyModule) member(epoch uint64) error {
 		return nil
 	}
 	return s.members.Member(epoch)
+}
+
+// WithSigningFence puts the manager's in-process epoch switch in front of every signature the module makes (#1086): a vote, a timeout
+// and a proposal or forwarded request alike.
+func WithSigningFence(f func(epoch uint64) error) SafetyOption {
+	return func(s *SafetyModule) { s.fence = f }
+}
+
+// fenced is the switch fence and then the membership of the epoch: every signing path asks it first.
+func (s *SafetyModule) fenced(epoch uint64) error {
+	if s.fence != nil {
+		if err := s.fence(epoch); err != nil {
+			return err
+		}
+	}
+	return s.member(epoch)
 }
 
 // WithActivationGate makes every signing decision of the module wait for the verified history's admission of its epoch. With a gate
@@ -314,7 +333,7 @@ func (s *SafetyModule) MakeVote(block *drctypes.BlockData, execStateID []byte, h
 	if block == nil {
 		return nil, fmt.Errorf("block is nil")
 	}
-	if err := s.member(block.Epoch); err != nil {
+	if err := s.fenced(block.Epoch); err != nil {
 		return nil, err
 	}
 	// The overall validity of the block must be checked prior to calling this method
@@ -380,7 +399,7 @@ func (s *SafetyModule) MakeVote(block *drctypes.BlockData, execStateID []byte, h
 
 func (s *SafetyModule) SignTimeout(tmoVote *abdrc.TimeoutMsg, lastRoundTC *drctypes.TimeoutCert) error {
 	if tmoVote != nil && tmoVote.Timeout != nil { // a root the epoch does not name refuses before anything else is looked at
-		if err := s.member(tmoVote.Timeout.Epoch); err != nil {
+		if err := s.fenced(tmoVote.Timeout.Epoch); err != nil {
 			return err
 		}
 	}
@@ -411,7 +430,7 @@ func (s *SafetyModule) SignTimeout(tmoVote *abdrc.TimeoutMsg, lastRoundTC *drcty
 // activation gate the epoch must be admitted, exactly as for a vote or timeout: a leader whose installed epoch is not completely
 // activated signs and broadcasts nothing.
 func (s *SafetyModule) Sign(epoch uint64, msg Signable) error {
-	if err := s.member(epoch); err != nil {
+	if err := s.fenced(epoch); err != nil {
 		return err
 	}
 	if s.gate != nil {

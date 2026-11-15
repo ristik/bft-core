@@ -121,6 +121,16 @@ type V3Candidate struct {
 // PlanV3Candidate derives the V3 body and candidate of the next epoch's committee with its exact weights and, for a coupled change, the
 // successor EVM assignment mirroring them. It registers nothing.
 func (x *ConsensusManager) PlanV3Candidate(next *types.RootTrustBaseV1, proposal *evmassign.Proposal) (V3Candidate, error) {
+	// an operator entry point runs in one published consensus context, never during an in-process epoch switch (#1086)
+	var out V3Candidate
+	err := x.operator(func() (err error) {
+		out, err = x.opPlanV3Candidate(next, proposal)
+		return err
+	})
+	return out, err
+}
+
+func (x *ConsensusManager) opPlanV3Candidate(next *types.RootTrustBaseV1, proposal *evmassign.Proposal) (V3Candidate, error) {
 	if x.q3 == nil {
 		return V3Candidate{}, fmt.Errorf("%w: no Q3 history", ErrHandoffApproval)
 	}
@@ -157,6 +167,9 @@ type Q3Status struct {
 	// Follower is true while the installed epoch's committee does not name this node: it follows, verifies, catches up and stages, and its
 	// safety module refuses every signature (ErrNotAMember). It is derived from the authenticated trust base, never set by a flag.
 	Follower bool
+	// Switch is the in-process epoch switch's state (#1086); InProcessSwitch says the manager switches in process at all.
+	Switch          SwitchState
+	InProcessSwitch bool
 }
 
 // Q3Status reports the chain this node's verified history is rooted in, the staged candidate and the installed epoch.
@@ -173,7 +186,8 @@ func (x *ConsensusManager) Q3Status() (Q3Status, error) {
 	if x.safety != nil && x.safety.members != nil {
 		follower = x.safety.member(installed) != nil
 	}
-	return Q3Status{Network: cfg.Network, Genesis: cfg.Genesis, Staged: x.q3Staged.Load(), ActiveEpoch: installed, Follower: follower}, nil
+	return Q3Status{Network: cfg.Network, Genesis: cfg.Genesis, Staged: x.q3Staged.Load(), ActiveEpoch: installed, Follower: follower,
+		Switch: x.SwitchState(), InProcessSwitch: x.switcher != nil}, nil
 }
 
 // ErrV3CandidateSuperseded is returned when the candidate the members signed readiness for is not the one this validator would derive any
@@ -184,6 +198,16 @@ var ErrV3CandidateSuperseded = errors.New("consensus: the V3 candidate was deriv
 // successor member, and registers it as this validator's intent exactly as PlanHandoff does. The receipts are checked against the body and
 // attempt this validator derived itself, so no Prepare is ever built for a candidate a member did not declare itself ready for.
 func (x *ConsensusManager) PlanHandoffV3(next *types.RootTrustBaseV1, proposal *evmassign.Proposal, receipts []byte) (abdrc.HandoffApprovalMsg, error) {
+	// an operator entry point runs in one published consensus context, never during an in-process epoch switch (#1086)
+	var out abdrc.HandoffApprovalMsg
+	err := x.operator(func() (err error) {
+		out, err = x.opPlanHandoffV3(next, proposal, receipts)
+		return err
+	})
+	return out, err
+}
+
+func (x *ConsensusManager) opPlanHandoffV3(next *types.RootTrustBaseV1, proposal *evmassign.Proposal, receipts []byte) (abdrc.HandoffApprovalMsg, error) {
 	if x.q3 == nil {
 		return abdrc.HandoffApprovalMsg{}, fmt.Errorf("%w: no Q3 history", ErrHandoffApproval)
 	}
@@ -330,6 +354,11 @@ func (x *ConsensusManager) v3CandidateFromState(next *types.RootTrustBaseV1, sta
 // itself a member of the successor, since only a successor member stages for its own readiness. Staging never signs and never activates:
 // the plan itself is checked again in full, against this validator's own state, when it is endorsed.
 func (x *ConsensusManager) StageV3Candidate(body []byte, candidate [32]byte, attempt uint64, preimage []byte) error {
+	// an operator entry point runs in one published consensus context, never during an in-process epoch switch (#1086)
+	return x.operator(func() error { return x.opStageV3Candidate(body, candidate, attempt, preimage) })
+}
+
+func (x *ConsensusManager) opStageV3Candidate(body []byte, candidate [32]byte, attempt uint64, preimage []byte) error {
 	if x.q3 == nil {
 		return fmt.Errorf("%w: no Q3 history", ErrHandoffApproval)
 	}

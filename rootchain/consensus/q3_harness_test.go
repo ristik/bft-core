@@ -75,6 +75,8 @@ type q3Replica struct {
 	wrapSigner func(abcrypto.Signer) abcrypto.Signer
 	// tune, when set, changes the consensus parameters of the node (#886: the timer and round rate of a phase)
 	tune func(*Parameters)
+	// switchFor, when set, gives the manager an in-process epoch switch built over the replica as opened (#1086)
+	switchFor func(*q3Replica) EpochSwitch
 }
 
 func newQ3Replica(t *testing.T, f *q3fixture.Fixture, node *testutils.TestNode) *q3Replica {
@@ -138,6 +140,9 @@ func (r *q3Replica) open(withQ3 bool) error {
 	if withQ3 {
 		require.NoError(t, trust.BindSigningAuthority(rt))
 		opts = append(opts, WithQ3(rt))
+		if r.switchFor != nil {
+			opts = append(opts, WithEpochSwitch(r.switchFor(r)))
+		}
 	}
 	var rootNet RootNet = r.net
 	if r.link != nil {

@@ -64,6 +64,14 @@ func (p *posSubmissions) add(s posSubmission, now uint64) error {
 	return nil
 }
 
+// reset drops every waiting submission: the in-process epoch switch (#1086) starts the successor with none, as a restart does (the
+// operator submits again).
+func (p *posSubmissions) reset() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.items = nil
+}
+
 func (p *posSubmissions) expireLocked(now uint64) {
 	kept := p.items[:0]
 	for _, it := range p.items {
@@ -104,6 +112,11 @@ func (p *posSubmissions) len() int {
 // to, for a leader to order. The witness is retained here, where the leader and the voters pull it from; the control is signed with this
 // validator's root key and sent to every root node, this one included.
 func (x *ConsensusManager) SubmitPosControl(ctx context.Context, control drctypes.PosControl, witness []byte) error {
+	// an operator entry point runs in one published consensus context, never during an in-process epoch switch (#1086)
+	return x.operator(func() error { return x.opSubmitPosControl(ctx, control, witness) })
+}
+
+func (x *ConsensusManager) opSubmitPosControl(ctx context.Context, control drctypes.PosControl, witness []byte) error {
 	if sha256.Sum256(witness) != control.WitnessHash {
 		return fmt.Errorf("%w: the witness is not the one the control commits to", ErrPosSubmission)
 	}
@@ -195,16 +208,17 @@ func (x *ConsensusManager) onPosControlSubmission(_ context.Context, msg *abdrc.
 		x.posPrefetching.Add(-1)
 		return err
 	}
+	gen := x.contextGen()
 	go func() {
 		defer x.posPrefetching.Add(-1)
-		x.prefetchPosWitness(store, sub)
+		x.prefetchPosWitness(store, sub, gen)
 	}()
 	return nil
 }
 
 // prefetchPosWitness pulls the witness of a queued submission from its submitter (then the other root nodes), within the same bounds
 // as the voters' pull, and drops the submission when it cannot be had. It runs off the consensus loop.
-func (x *ConsensusManager) prefetchPosWitness(store *storage.BlockStore, s posSubmission) {
+func (x *ConsensusManager) prefetchPosWitness(store *storage.BlockStore, s posSubmission, gen uint64) {
 	budget := 5 * time.Second
 	if x.params != nil && x.params.LocalTimeout > 0 {
 		budget = x.params.LocalTimeout / 2
@@ -221,7 +235,9 @@ func (x *ConsensusManager) prefetchPosWitness(store *storage.BlockStore, s posSu
 	}
 	if err != nil {
 		x.log.Warn("submitted control dropped: its witness cannot be had", "submitter", s.signer, "error", err)
-		x.posQueue.drop(s.key)
+		if x.contextOpen(gen) == nil { // a fetch of a replaced context (#1086) drops nothing of the successor's queue
+			x.posQueue.drop(s.key)
+		}
 	}
 }
 

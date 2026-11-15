@@ -439,16 +439,46 @@ class Laptop:
                   '--jwt-secret', '/jwt/jwt.hex', '--execution-genesis-hash', genesis_hash, '--execution-code-hash', code_hash, '--out', '/tmp/receipt.json')
         return {'text': self.exec(f'root{j}', 'cat', '/tmp/receipt.json').stdout}
 
-    def root_epoch(self):
-        """The root's epoch: its committed certificate's (q3/signers) or, for a follower that holds none (422), its installed one (q3/status activeEpoch)."""
+    def root_status(self):
+        """The root's q3/status answer, or None while it does not answer."""
         try:
-            code, body = self.root_post('/api/v1/q3/signers')
-            if code == 200:
-                return json.loads(body).get('epoch')
             code, body = self.root_post('/api/v1/q3/status')
-            return json.loads(body).get('activeEpoch') if code == 200 else None
+            return json.loads(body) if code == 200 else None
         except (Failure, ValueError, subprocess.TimeoutExpired):
             return None
+
+    def root_epoch(self):
+        """The root's epoch: its committed certificate's (q3/signers) or, for a follower that holds none (422), its installed one from q3/status, which for
+        an image that reports its in-process switch (bft-core#1086) is only a published one (handoff.status_epoch), never a raw activeEpoch."""
+        epoch = self.signers_epoch()
+        if epoch is not None:
+            return epoch
+        status = self.root_status()
+        return handoff.status_epoch(status) if status is not None else None
+
+    def signers_epoch(self):
+        """The epoch of the root's committed certificate (q3/signers), or None while it holds none (a follower, a synthetic anchor) or does not answer."""
+        try:
+            code, body = self.root_post('/api/v1/q3/signers')
+            return json.loads(body).get('epoch') if code == 200 else None
+        except (Failure, ValueError, subprocess.TimeoutExpired):
+            return None
+
+    def install_complete(self, epoch, tries=3):
+        """bft-core#1086: whether the root has installed `epoch`, and the q3/status answer that showed it (None when q3/status never answered). Every status
+        answer that establishes it passes the switch check (handoff.switch_complete: a switch-aware image only by its published Running or Following state);
+        an unavailable status is not evidence: it is asked again, and without an answer only a committed certificate of the epoch counts."""
+        for attempt in range(tries):
+            status = self.root_status()
+            if status is not None:
+                complete = handoff.switch_complete(status, epoch)
+                if complete is not None:
+                    return complete, status
+                # an older image: its committed certificate, else (a follower) the installed epoch of this same answer
+                return self.signers_epoch() == epoch or status.get('activeEpoch') == epoch, status
+            if attempt + 1 < tries:
+                time.sleep(0.5)
+        return self.signers_epoch() == epoch, None
 
     def wait(self, what, probe, seconds, every=3):
         deadline, last = time.monotonic() + seconds, None
@@ -469,8 +499,17 @@ class Laptop:
         record fetcher installed before the Q3 recovery) in the pinned image; without it every restart fails in the recovery: the root stays down,
         nothing is rolled back (fail closed)."""
         epoch, j = int(epoch), self.entity
-        if self.root_epoch() == epoch:
-            return {'already': True}
+        # bft-core#1086: a root that reports a switch state is installed only once that state is published Running or Following in the epoch, never
+        # from its raw activeEpoch (Switching or Faulted can show the target epoch); one that reports none (an older image) is judged as before
+        complete, status = self.install_complete(epoch)
+        if complete:
+            return handoff.installed_result(status, epoch) if (status or {}).get('switch') else {'already': True}
+        # a member of the old committee (not a follower there) may be switching at its own commit, as may a root whose status did not answer; a joiner
+        # (a follower) never switches, and an older image does not: both are restarted
+        if status is None or ((status.get('switch') or {}) and not status.get('follower')):
+            switch = handoff.switched_in_process(self.root_status, epoch)
+            if switch is not None:
+                return {'already': True, 'inProcess': True, 'switchMs': switch.get('tookMs')}
         override = self.home / f'compose.install-epoch-{epoch}.json'
         if not override.exists():
             override.write_text(json.dumps(handoff.install_override(self.compose(), epoch), indent=1) + '\n')

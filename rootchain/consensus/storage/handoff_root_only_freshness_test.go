@@ -41,7 +41,7 @@ func TestARequestOfTheClosedEpochIsNotCertifiedAfterARootOnlyActivation(t *testi
 	installTestFrozenShardKeyed(t, s, frozenParent, key)
 	evm := types.PartitionShardID{PartitionID: 8, ShardID: (types.ShardID{}).Key()}
 	// the shard's committed certificate is of the closing root epoch, as every certificate certified in it is
-	s.blockTree.Root().ShardState.States[evm].LastCR.UC.UnicitySeal.Epoch = 1
+	s.tree().Root().ShardState.States[evm].LastCR.UC.UnicitySeal.Epoch = 1
 	predecessor := make([]byte, 32)
 	s.handoffAuth = testRecordAuthority{predecessor: predecessor}
 	body := bytes.Repeat([]byte{1}, 32)
@@ -65,7 +65,7 @@ func TestARequestOfTheClosedEpochIsNotCertifiedAfterARootOnlyActivation(t *testi
 		require.NoError(t, err)
 	}
 	zero := make([]byte, 32)
-	tr, err := s.blockTree.Root().ShardState.States[evm].TR.Hash()
+	tr, err := s.tree().Root().ShardState.States[evm].TR.Hash()
 	require.NoError(t, err)
 	record := func(kind string, round uint64) evmroot.OrderedHandoffRecord {
 		r := evmroot.OrderedHandoffRecord{Network: 5, Epoch: 1, OrderedRound: round, PredecessorBodyID: predecessor, NextBodyID: body,
@@ -87,7 +87,7 @@ func TestARequestOfTheClosedEpochIsNotCertifiedAfterARootOnlyActivation(t *testi
 	h := mustBlock(t, s, 4)
 	add(1, 5, evmroot.OrderedHandoffRecord{})
 	suffix := mustBlock(t, s, 5)
-	_, err = s.blockTree.Commit(&rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 5, ParentRoundNumber: 4, Epoch: 1},
+	_, err = s.tree().Commit(&rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 5, ParentRoundNumber: 4, Epoch: 1},
 		LedgerCommitInfo: &types.UnicitySeal{Version: 1, RootChainRoundNumber: 4, Epoch: 1, Hash: h.RootHash}})
 	require.NoError(t, err)
 	checkpoint := &abdrc.CommittedBlock{Block: suffix.BlockData, Control: suffix.ShardState.Control,
@@ -104,7 +104,7 @@ func TestARequestOfTheClosedEpochIsNotCertifiedAfterARootOnlyActivation(t *testi
 
 	// the request the shard built on its certificate of the closed epoch, delivered fresh after the activation: it matches the shard's
 	// committed context in everything a root-only activation leaves unchanged
-	si := s.blockTree.Root().ShardState.States[evm]
+	si := s.tree().Root().ShardState.States[evm]
 	require.EqualValues(t, 1, si.LastCR.UC.GetRootEpoch())
 	request := func(on *ShardInfo) *rctypes.IRChangeReq {
 		ir := &types.InputRecord{Version: 1, RoundNumber: on.LastCR.Technical.Round, Epoch: on.LastCR.Technical.Epoch, PreviousHash: bytes.Clone(on.RootHash),
@@ -127,10 +127,10 @@ func TestARequestOfTheClosedEpochIsNotCertifiedAfterARootOnlyActivation(t *testi
 	require.ErrorIs(t, err, ErrRequestBeforeActivation)
 	add(2, 8, evmroot.OrderedHandoffRecord{})
 	first := mustBlock(t, s, 7)
-	_, err = s.blockTree.Commit(&rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 8, ParentRoundNumber: 7, Epoch: 2},
+	_, err = s.tree().Commit(&rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 8, ParentRoundNumber: 7, Epoch: 2},
 		LedgerCommitInfo: &types.UnicitySeal{Version: 1, RootChainRoundNumber: 7, Epoch: 2, Hash: first.RootHash}})
 	require.NoError(t, err)
-	recertified := s.blockTree.Root().ShardState.States[evm]
+	recertified := s.tree().Root().ShardState.States[evm]
 	require.EqualValues(t, 2, recertified.LastCR.UC.GetRootEpoch(), "the first ordinary block recertified the shard in epoch 2")
 
 	// a request built on the recertification is certified
