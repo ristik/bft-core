@@ -257,7 +257,7 @@ class InstallAtOnce(unittest.TestCase):
         self.events, self.lock = [], threading.Lock()
         self.commits_at = {1: 1, 2: 3, 3: 1, 4: 1}   # the probe at which each old root first serves its own commit (root 2: its third; 0: never)
         self.probes = {i: 0 for i in (1, 2, 3, 4, 5)}
-        self.installed, self.running, self.overlap = set(), 0, 0
+        self.installed, self.running, self.overlap, self.completed = set(), 0, 0, []
         d = object.__new__(hd.Drive)
         d.gen, d.target, d.work, d.root_rpc = gen, 3, gen / 'work', 'http://root'
         d.old, d.new, d.joiners = [1, 2, 3, 4], [1, 2, 3, 4, 5], {5}
@@ -296,6 +296,8 @@ class InstallAtOnce(unittest.TestCase):
         with self.lock:
             self.running -= 1
             self.installed.add(i)
+            self.completed.append(i)
+            self.events.append(('done', i))
         return {}
 
     def test_each_root_is_stopped_only_with_evidence_and_they_install_at_once(self):
@@ -305,12 +307,19 @@ class InstallAtOnce(unittest.TestCase):
             self.assertEqual(self.journal.value('install', 'evidence', sub=f'root{i}'), 'own', f'root {i} installs from its own commit')
         two = self.events.index(('install', 2))
         self.assertGreaterEqual(self.events[:two].count(('probe', 2)), 2, 'root 2 was not stopped while it lacked the commit and no root had installed')
-        self.assertIn(self.journal.value('install', 'evidence', sub='root2'), {'own', 'root1', 'root3', 'root4'})
+        self.assertIn(self.journal.value('install', 'evidence', sub='root2'), {'own', 'root1', 'root3', 'root4', 'root5'})
         self.assertGreaterEqual(self.overlap, 3, 'the roots with the commit are installed at the same time, not one by one')
         joiner = self.events.index(('install', 5))
-        self.assertTrue(any(kind == 'install' and i != 5 for kind, i in self.events[:joiner]))
-        self.assertIn(self.journal.value('install', 'evidence', sub='root5'), {'root1', 'root2', 'root3', 'root4'},
-                      'a joiner installs only once a root that installed the epoch serves it')
+        self.assertFalse(any(kind == 'install' and i != 5 for kind, i in self.events[:joiner]),
+                         'bft-core#1082: the joiner installs before any incumbent is stopped')
+        self.assertIn(self.journal.value('install', 'evidence', sub='root5'), {f'root{i} (running)' for i in (1, 2, 3, 4)},
+                      'from an old root that holds the commit and keeps running until the joiner is done')
+        first_old = min(self.events.index(('install', i)) for i in (1, 2, 3, 4))
+        self.assertIn(5, self.installed_at(first_old), 'the incumbents restart only once the joiner has installed')
+
+    def installed_at(self, index):
+        """The roots whose install completed before event `index` (install() records the start, installed is the completion)."""
+        return set(self.completed[:len([e for e in self.events[:index] if e[0] == 'done'])])
 
     def test_no_commit_anywhere_stops_no_root(self):
         self.commits_at = {1: 0, 2: 0, 3: 0, 4: 0}   # no old root ever serves the target: the handoff is not committed
@@ -325,13 +334,31 @@ class InstallAtOnce(unittest.TestCase):
         self.drive.step_install(self.journal)
         three = self.events.index(('install', 3))
         self.assertTrue(any(kind == 'install' and i in (1, 2, 4) for kind, i in self.events[:three]), 'after another root has installed')
-        self.assertIn(self.journal.value('install', 'evidence', sub='root3'), {'root1', 'root2', 'root4'})
+        self.assertIn(self.journal.value('install', 'evidence', sub='root3'), {'root1', 'root2', 'root4', 'root5'})
 
     def test_a_resumed_install_skips_the_installed_roots(self):
         for i in (1, 2, 3, 4, 5):
             self.journal.write('install', 'done', sub=f'root{i}')
         self.drive.step_install(self.journal)
         self.assertEqual(self.events, [], 'nothing is probed or installed again')
+
+
+class CommitteeReadiness(unittest.TestCase):
+    """bft-core#1082: a member is ready when it reports the target epoch, membership and no member missing (POST /api/v1/committee)."""
+
+    def drive(self, answer, status=200):
+        d = object.__new__(hd.Drive)
+        d.target = 9
+        d.transport = unittest.mock.Mock(post=lambda i, path, body: (status, json.dumps(answer).encode()))
+        return d
+
+    def test_only_a_member_of_the_target_with_nothing_missing_is_ready(self):
+        ready = {'epoch': 9, 'member': True, 'connected': ['a', 'b'], 'missing': []}
+        self.assertEqual(self.drive(ready).committee_connected(5), ready)
+        self.assertIsNone(self.drive({**ready, 'missing': ['b']}).committee_connected(5), 'a member it cannot reach')
+        self.assertIsNone(self.drive({**ready, 'epoch': 8}).committee_connected(5), 'the old epoch')
+        self.assertIsNone(self.drive({**ready, 'member': False}).committee_connected(5), 'not a member')
+        self.assertIsNone(self.drive(ready, status=404).committee_connected(5), 'a root without the endpoint')
 
 
 class AdvanceAtOnce(unittest.TestCase):

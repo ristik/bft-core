@@ -340,6 +340,57 @@ func (m *MemberProtector) Set(ctx context.Context, ids []peer.ID) {
 	}
 }
 
+// Maintain keeps the protected set connected until ctx ends (#1082): every interval it dials each protected member it holds no connection
+// to, one dial per member at a time, each bounded by dialTimeout. It is the outbound half of reaching a member that cannot be dialled: a
+// node behind NAT or an isolated bridge dials the others itself, and they reach it over that connection (libp2p opens a stream on any
+// existing connection, whichever side dialled it). A member that restarts is dialled again within one interval of coming back: the dial
+// bypasses the swarm's per-address backoff, which would otherwise hold a just-restarted member unreachable for seconds.
+func (m *MemberProtector) Maintain(ctx context.Context, interval, dialTimeout time.Duration) {
+	inflight := map[peer.ID]bool{}
+	var mu sync.Mutex
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		for _, id := range m.Disconnected() {
+			mu.Lock()
+			busy := inflight[id]
+			inflight[id] = true
+			mu.Unlock()
+			if busy {
+				continue
+			}
+			go func(id peer.ID) {
+				// past the swarm's dial backoff: a member that was dialled while it restarted is in backoff for 5 s and more, and every send
+				// to it fails with "dial backoff" meanwhile; the keeper's own interval is the pacing
+				dial, cancel := context.WithTimeout(network.WithForceDirectDial(ctx, "committee member"), dialTimeout)
+				defer cancel()
+				_ = m.p.host.Connect(dial, peer.AddrInfo{ID: id, Addrs: m.p.host.Peerstore().Addrs(id)})
+				mu.Lock()
+				delete(inflight, id)
+				mu.Unlock()
+			}(id)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
+
+// Disconnected is the protected members this node holds no connection to.
+func (m *MemberProtector) Disconnected() []peer.ID {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []peer.ID
+	for id := range m.protected {
+		if m.p.host.Network().Connectedness(id) != network.Connected {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
 // Protected is the member set currently protected (for status and tests).
 func (m *MemberProtector) Protected() []peer.ID {
 	m.mu.Lock()
