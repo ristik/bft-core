@@ -317,7 +317,8 @@ so there is no split-depth limit. Then, in order:
    is performed. (An implementation that calls a UC verifier with a nil expected hash must still hash the UC's actual
    ShardConfHash into the leaf; it never substitutes nil or zero for it.) Every EVM-certificate failure is `DepositUC`:
    encoding, network, epoch interval, structure, partition/shard, folds and quorum, for deposit and seal receipts
-   alike. The one exception is `NoEntryForEpoch`, which keeps its retryable name.
+   alike. The one exception is `NoEntryForEpoch`, which keeps its retryable name in wallets (on chain it is `DepositUC`
+too; Section 11.3).
 3. `H_E(headerRLP) == UC.InputRecord.blockHash` and `header.stateRoot == UC.InputRecord.hash` (`DepositHeader`).
    This is the certificate of the block that **executed** the deposit, not of its parent. `headerRLP` is the Cancun
    execution header of the pinned Unicity execution profile (the go-ethereum v1.14.11 `types.Header` Cancun shape): the canonical RLP list of exactly 20 fields, in order,
@@ -563,14 +564,18 @@ it returns the authenticated `(D, eta, a, asset, recipient, v)` of the returned 
 4. The root's `J` (Section 6.2, in its order).
 5. Root first, every token of the walk: mint fields (`MintShape`, `MintType`, `MintData`), `NoTransfers`, then the mint
    and each transfer in order (`CDMismatch`, `DeadlineMismatch`, the unlock rules, `DeadlineExpired`, `RepeatedSID`,
-   then its inclusion proof: `UnsupportedCertificateEncoding`, `SealNetwork`/`NoEntryForEpoch`/`SealEpoch`,
-   `CertStructure`, `SealRoot`, `QuorumNotMet`, `InclusionProof`, `ReferenceTime`; each UC under Section 11.3 for
-   partition `aggregatorPartition`), each intermediate transfer's recipient (`BurnNotFinal`) and data
+   then its inclusion proof: the UC in the per-UC order of Section 11.3 for partition `aggregatorPartition`, then
+   `InclusionProof`, `ReferenceTime`), each intermediate transfer's recipient (`BurnNotFinal`) and data
    (`TransferData`); a parent's terminal split burn (`SplitBurn`, `SplitManifest`); after each child, its allocation
    edge (`SplitProof`, `SplitSum`).
 6. The part's terminal burn: `NotBurn`, `ReturnData`, `ReturnIndex`, `ReturnDomain`, `ReturnAsset`, `ReturnAmount`,
    `ReturnRecipient`, `BurnReason`. `R.asset` is compared against the `a_UCT` constant.
 7. `btid` and `eta` (Section 8.2); return.
+
+**Verifier batching (on chain).** The verifier puts UC claims into the fewest `0x0100` `CERT_BATCH_V2` calls. It flushes
+the pending claims before raising any later rule and before returning, so a certificate failure is always reported
+before a rule that follows it in the order above. If a call returns false, the verifier re-checks the claims one at a
+time, in order, and reports the earliest failure.
 
 The vault and the verifier are separate deliverables behind this interface (NB2-04, #1100, and NB2-05, #1101). The
 internal division of the verifier into Solidity and existing generic primitives (`0x0100` certificate batch, `0x0102`
@@ -587,6 +592,14 @@ is the EntryID of the authenticated genesis trust-base entry and `Γ.network` th
 history from the chain's permanent seal registry through the generic certificate primitive, at any certificate age.
 A later rotation never invalidates an earlier certificate. The deployment-binding and chain-continuity assumption of
 Section 6.2 applies to every EVM UC judged here: deposit receipts and seal receipts alike.
+
+**Per-UC order (frozen).** `UnsupportedCertificateEncoding`, `SealNetwork`, `CertStructure`, `SealRoot`, then the
+authority verdict: the epoch entry, the root round inside its interval, and quorum. On chain the `0x0100`
+`CERT_BATCH_V2` primitive returns one bool covering the epoch entry, the round interval, the network and quorum, and
+the seal registry exposes no epoch table to Solidity, so the authority verdict has one on-chain name: `QuorumNotMet`
+for an aggregator UC and `DepositUC` for the EVM UC. Wallets, which hold the bundle, refine it into `NoEntryForEpoch`
+(retryable: fetch newer entries and retry), `SealEpoch` and `QuorumNotMet`; `SealEpoch` and `NoEntryForEpoch` are
+wallet-side names only.
 
 ## 12. Wallet rules that affect safety
 
@@ -806,7 +819,11 @@ Every rule has one name. NB2-03 (#1099) uses `Err<Name>` as the Go sentinel; the
 
 `Unlock` and `MinterKey` are dropped: under the frozen unlock order (recovery with the supplied ID, then key equality)
 a recovered signature always verifies, and no input reaches either. The scalar-level checks (0, 1, n-1, n, 2^256-1)
-keep their names (`UnlockScalars`, `UnlockRecovery`).
+keep their names (`UnlockScalars`, `UnlockRecovery`). On chain, recovery IDs 2 and 3 are always `UnlockKey`, because
+`ecrecover` takes only parity 0/1.
+
+**Wallet and on-chain names.** `SealEpoch` and `NoEntryForEpoch` are wallet-side only. On chain a failed authority
+verdict is `QuorumNotMet` for an aggregator UC and `DepositUC` for the EVM UC (Section 11.3).
 
 ### 14.5 Redemption (vault)
 
@@ -838,6 +855,9 @@ identically, for `SegmentSealed` seal receipts:
 - a UC of the wrong partition, the wrong shard, or another root deployment (`DepositUC`);
 - InputRecord tampering (`DepositUC`) and header tampering (`DepositHeader`);
 - the old arity-7 `DepositProof` with a PDR, rejected (`Shape`).
+
+Where the wallet name and the on-chain name of a rule differ (the authority verdict of Section 11.3, recovery IDs 2
+and 3), a vector carries both: its rule name and an `onChainError` field with the on-chain name.
 
 It MUST also contain:
 
@@ -948,6 +968,7 @@ mirroring Section 11.1; boolean acceptance is unchanged.
 | Astra ruling 2026-11-15: drop the PDR (`briefs/astra-ruling-nb2-drop-pdr-answer.md`) | Section 6.1 (arity 6), 6.2 step 2 and the deployment-binding paragraph, 11.3, 12.2, 14.2, 14.7; protocol 9 |
 | Astra spec review 2026-11-15 (`briefs/astra-review-1110-nb2-spec-answer.md`) | F1 §12.5, §14.7; F2 §4.1; F3 §3, §14.7, profile `nativeCodec`; F4 plug-ins `protocol/trust-base.md`, §11.3; F5 §5.1, §12.1; F6 §2, §15; F7 §9.2, §10, §15; F8 §17 and the model; parser contract §3 (depth), §6.1–6.2 (header, `justificationBytes`) |
 | NB2-06 wallet RPC contract (#1102) | §12.7, `EvidencePruned` in §14.6 |
+| NB2-05 on-chain verifier (#1101) | §11.2 (per-UC order, batching), §11.3 (authority verdict), §14.4 (on-chain names, `UnlockKey`), §14.7 (`onChainError`) |
 | NB2-02 bake-off (#1098, unicity-pos-contracts#80) | Preamble, §4.1 (`K`, `B`, admitted set), §9.2, §10, §10.4 (sort), §12.4 (`gasReserve`), §14.7, §15 (values, measured table, capacity) |
 | NB2-03 reference defaults (#1099) | §6.2 (`DepositUC` scope, header), §3 (amount names, depth), §4.1 (test set, asset/ty/aid, `BadConfig` indices), §11.1 (reentrancy), §11.2 (check order), §14.4, §14.6 (`ImplausibleIndex`), §14.7 (vector file) |
 | Corrections confirmed (30M test profile, encoded-length limit, `2K - 1` scan, high index can strand) | Sections 4.3 (`userGasLimit` from the production profile), 12.5, 12.4, 12.2 |
