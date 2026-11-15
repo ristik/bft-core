@@ -656,7 +656,7 @@ and `P_max = floor((L_max - L_T - L_O) / (65 + 32h))`:
   complete encoded transaction or a conservative upper bound. An old seal receipt consumes capacity before the burn.
   If it leaves insufficient reserve, obtain a newer authenticated receipt or refuse. Freshness and future inclusion
   remain availability assumptions: even this check does not guarantee redemption against an indefinitely stale view
-  or arbitrary subsequent traffic.
+  or arbitrary subsequent traffic. `L_T` before the burn is a conservative upper bound: the held evidence plus the burn transfer with its exact `R`, its CD, and an inclusion proof at the decoder bounds (an RSMT path of up to 256 siblings and an aggregator UC up to 24 KiB).
 - At redemption, refuse to submit (`CapacityExceeded`) if `P > P_max` or the gas exceeds `userGasLimit`. In this
   release that burn cannot be redeemed until limits change; it is not recoverable by the wallet.
 
@@ -676,7 +676,7 @@ A wallet builds every piece of evidence from the ordinary execution RPC behind t
 
 | Need | Method(s) | Notes |
 |---|---|---|
-| Certificate of block `N` | `eth_getBlockByNumber(N+1, false)`, then `unicity_getSealCompanionV1(hash(N+1))` | `companion.witnesses[0]` is `evmUC`, the canonical native UC that certifies block `N` (`IR.blockHash = hash(N)`, `IR.hash = stateRoot(N)`). `witnesses[1]` is its technical record, which the wallet does not use. Block `N+1` must name `hash(N)` as its parent. The UC is served once the child block exists, about one round after `N`. Witness 0 of block N's own companion is the certificate of N-1, the one that authorized building N, and is never deposit evidence for N. If witness 0 of N+1's companion does not name `hash(N)` and `stateRoot(N)`, the wallet refuses (`DepositHeader` would reject it anyway) and does not substitute another certificate. |
+| Certificate of block `N` | `eth_getBlockByNumber(N+1, false)`, then `unicity_getSealCompanionV1(hash(N+1))` | Success is exactly `{"status":"found","companion":{...}}` (ureth `SealCompanionLookup`, serde `tag = "status"`, camelCase; the other statuses are `"unavailable"` with `horizon` and `"unknown"`, below). `companion.witnesses[0]` is `evmUC`, the canonical native UC that certifies block `N` (`IR.blockHash = hash(N)`, `IR.hash = stateRoot(N)`). `witnesses[1]` is its technical record, which the wallet does not use. Block `N+1` must name `hash(N)` as its parent. The UC is served once the child block exists, about one round after `N`. Witness 0 of block N's own companion is the certificate of N-1, the one that authorized building N, and is never deposit evidence for N. If witness 0 of N+1's companion does not name `hash(N)` and `stateRoot(N)`, the wallet refuses (`DepositHeader` would reject it anyway) and does not substitute another certificate. |
 | Header of block `N` | `eth_getBlockByHash(hash(N), false)` | The wallet re-encodes the header fields as `headerRLP` and requires `H_E(headerRLP) = hash(N)`. |
 | Receipt-trie path | `eth_getTransactionReceipt(tx)` for `txIndex` and the receipt-local `logIndex`; `eth_getBlockReceipts(hash(N))` | The wallet rebuilds the receipt trie, requires its root to equal `header.receiptsRoot`, and takes the root-to-leaf path for key `RLP(txIndex)`. `logIndex` is the log's position in its own receipt, not the block-level `logIndex` of the RPC log object. |
 | `SegmentSealed` logs (newest seal, 12.2; history, 12.3) | `eth_getLogs({address: vault20, topics: [[topic0(SegmentSealed)], ...], fromBlock, toBlock})` | Paged as described below. The newest seal pages backwards from `eth_blockNumber`, and the history pages forwards from the manifest's `deploymentBlock`. `topics[1]` may list wanted segment indices as `u256(j)` values. |
@@ -991,6 +991,7 @@ mirroring Section 11.1; boolean acceptance is unchanged.
 | Astra spec review 2026-11-15 (`briefs/astra-review-1110-nb2-spec-answer.md`) | F1 §12.5, §14.7; F2 §4.1; F3 §3, §14.7, profile `nativeCodec`; F4 plug-ins `protocol/trust-base.md`, §11.3; F5 §5.1, §12.1; F6 §2, §15; F7 §9.2, §10, §15; F8 §17 and the model; parser contract §3 (depth), §6.1–6.2 (header, `justificationBytes`) |
 | NB2-06 wallet RPC contract (#1102) | §12.7, `EvidencePruned` in §14.6 |
 | NB2-05 on-chain verifier (#1101) | §11.2 (per-UC order, batching), §11.3 (authority verdict), §14.4 (on-chain names), §14.7 (`onChainError`) |
+| NB2-07 TypeScript wallet (#1103) | §12.5 (`L_T` upper bound), §12.7 (companion status `"found"`) |
 | Astra delta review 2026-11-15 (`briefs/astra-review-1110-r2-answer.md`) | P2-1: §7, §14.4 (NB2 unlock restriction, owner ruling), §12.6, §14.7; P2-2: §14.6 `SealReceipt`, §14.7 |
 | NB2-02 bake-off (#1098, unicity-pos-contracts#80) | Preamble, §4.1 (`K`, `B`, admitted set), §9.2, §10, §10.4 (sort), §12.4 (`gasReserve`), §14.7, §15 (values, measured table, capacity) |
 | NB2-03 reference defaults (#1099) | §6.2 (`DepositUC` scope, header), §3 (amount names, depth), §4.1 (test set, asset/ty/aid, `BadConfig` indices), §11.1 (reentrancy), §11.2 (check order), §14.4, §14.6 (`ImplausibleIndex`), §14.7 (vector file) |
