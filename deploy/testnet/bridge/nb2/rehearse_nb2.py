@@ -209,7 +209,9 @@ class NB2Rehearsal(Rehearsal):
         big = json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'eth_call', 'params': [{'to': size, 'data': '0x' + '00' * (gw['MAX_RAW_TX_BODY'] // 2 - 200)}, 'latest']}).encode()
         s1, _ = self.rpc(big, PROXY_IPS[0] + '42')
         s2, t2 = self.rpc(big + b' ' * (gw['MAX_RAW_TX_BODY'] - len(big) + 1), PROXY_IPS[0] + '43')
-        self.expect(s1 == 200 and s2 == 413, f'the gateway reads an eth_call body of {len(big)} bytes and refuses one over {gw["MAX_RAW_TX_BODY"]} (413)', f'{s1} {s2} {t2[:120]}')
+        # above the bound the gateway answers 413 from the declared length and closes without reading: the client may see the 413 or a broken pipe
+        refused = s2 == 413 or (s2 == 0 and ('Pipe' in t2 or 'Reset' in t2))
+        self.expect(s1 == 200 and refused, f'the gateway reads an eth_call body of {len(big)} bytes and refuses one over {gw["MAX_RAW_TX_BODY"]} (413, unread)', f'{s1} {s2} {t2[:120]}')
         res['gatewayBody'] = {'accepted': len(big), 'refusedAbove': gw['MAX_RAW_TX_BODY']}
         # user gas: a transaction with gasLimit = userGasLimit is included; one above it (up to the block gas limit) is observed, not assumed
         gc = self.address('gascap')
