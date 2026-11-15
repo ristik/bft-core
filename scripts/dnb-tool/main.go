@@ -1,33 +1,24 @@
-// Command dnb-tool derives the DN-B lane's bridge deployment inputs from a running (or just generated) B1 devnet:
+// Command dnb-tool holds the operator tools of the bridge deployment that stay with native bridge v2 (docs/design/native-bridge-v2.md):
 //
-//	dnb-tool deployment --identities genesis-identities.json --b1-profile b1-profile.json --agg-conf shard-conf-7_0.json --out deployment.json
+//	dnb-tool trust-bundle --trust-base trust-base.json --out trust-base.bundle.cbor --out-pin genesis-entry-id.hex
+//	dnb-tool b1check --request req.bin --trust-base trust-base.json --profile b1-profile.json --clock N
+//	dnb-tool deployment --identities genesis-identities.json --agg-conf shard-conf-7_0.json --out deployment.json
+//	dnb-tool pdr --full-shard-conf shard-conf.json --out pdr.cbor
 //
-// The deployment document is what unicity-pos-contracts script/BridgeDeploy.s.sol reads beside the genesis identity document.
+// deployment and pdr serve only the combined CI lane's protocol 6/7 bridge deploy until that lane is migrated; the lock-proof
+// commands (lockproof, lockproof-serve) were removed with that bridge (bft-core#1106).
 package main
 
 import (
-	"bytes"
-	"context"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
-	"math/big"
-	"net/http"
 	"os"
 	"strings"
-	"time"
 
-	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
-	gethtypes "github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/crypto"
-	"github.com/ethereum/go-ethereum/rlp"
-	"github.com/unicitynetwork/bft-core/archive"
 	"github.com/unicitynetwork/bft-core/b1ref"
-	"github.com/unicitynetwork/bft-core/bridgeprofile"
 	"github.com/unicitynetwork/bft-core/q3format"
 	"github.com/unicitynetwork/bft-core/utb"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -35,7 +26,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: dnb-tool deployment ...")
+		fmt.Fprintln(os.Stderr, "usage: dnb-tool deployment|trust-bundle|pdr|b1check ...")
 		os.Exit(2)
 	}
 	var err error
@@ -44,14 +35,10 @@ func main() {
 		err = deployment(os.Args[2:])
 	case "trust-bundle":
 		err = trustBundle(os.Args[2:])
-	case "b1check":
-		err = b1check(os.Args[2:])
 	case "pdr":
 		err = pdr(os.Args[2:])
-	case "lockproof":
-		err = lockProof(os.Args[2:])
-	case "lockproof-serve":
-		err = lockProofServe(os.Args[2:])
+	case "b1check":
+		err = b1check(os.Args[2:])
 	default:
 		err = fmt.Errorf("unknown command %q", os.Args[1])
 	}
@@ -59,6 +46,43 @@ func main() {
 		fmt.Fprintln(os.Stderr, "dnb-tool:", err)
 		os.Exit(1)
 	}
+}
+
+// The protocol 6/7 deployment document of the combined CI lane (scripts/lib/agg-lib.sh, scripts/reth-paired-devnet.sh), which still
+// deploys that bridge from its pinned contracts. bridgeprofile was removed (bft-core#1106); the three values it supplied are inlined
+// here byte for byte (TestDeploymentBytesArePinned). Remove deployment and pdr when the lane leaves the protocol 6/7 bridge.
+
+// emptyPrefixShard is the one-byte native encoding of the empty shard prefix (depth 0): 0x80, not the empty byte string.
+var emptyPrefixShard = []byte{0x80}
+
+// semanticProfileHash is the SHA-256 of the protocol 7 semantic profile artifact (bridgeprofile/testdata/semantic-profile.json,
+// native-bridge-plugins protocol/vectors/config/semantic-profile.json before bft-core#1106).
+const semanticProfileHash = "0xbdca358b6e1a64fa9161b4947020090876573d5f0b0f9786532de3d5d384324a"
+
+// policyBody is the partition policy body C(b("UNICITY_BR_AGG_PARTITION"), 2, partition): canonical CBOR, a 3-array of a byte
+// string and two unsigned integers.
+func policyBody(partition uint32) []byte {
+	const domain = "UNICITY_BR_AGG_PARTITION"
+	out := append([]byte{0x83}, cborHead(2, uint64(len(domain)))...)
+	out = append(out, domain...)
+	out = append(out, cborHead(0, 2)...)
+	return append(out, cborHead(0, uint64(partition))...)
+}
+
+// cborHead is the shortest CBOR head of major type major and argument n.
+func cborHead(major byte, n uint64) []byte {
+	m := major << 5
+	switch {
+	case n < 24:
+		return []byte{m | byte(n)}
+	case n <= 0xff:
+		return []byte{m | 24, byte(n)}
+	case n <= 0xffff:
+		return []byte{m | 25, byte(n >> 8), byte(n)}
+	case n <= 0xffffffff:
+		return []byte{m | 26, byte(n >> 24), byte(n >> 16), byte(n >> 8), byte(n)}
+	}
+	return []byte{m | 27, byte(n >> 56), byte(n >> 48), byte(n >> 40), byte(n >> 32), byte(n >> 24), byte(n >> 16), byte(n >> 8), byte(n)}
 }
 
 type identities struct {
@@ -107,17 +131,15 @@ func deployment(args []string) error {
 			return fmt.Errorf("shard configuration %s belongs to partition %d, not %d", path, conf.PartitionID, partition)
 		}
 	}
-	pol := bridgeprofile.NewPolicy(partition)
-	semantic := sha256.Sum256(bridgeprofile.SemanticProfileJSON())
 	doc := map[string]any{
 		"network":             *network,
 		"rootGenesis":         id.RootGenesisID,
 		"executionGenesis":    id.EVMGenesisHash,
 		"evmPartition":        *evmPartition,
-		"evmShard":            hexutil.Encode(bridgeprofile.EmptyPrefixShard),
-		"semanticProfileHash": hexutil.Encode(semantic[:]),
+		"evmShard":            hexutil.Encode(emptyPrefixShard),
+		"semanticProfileHash": semanticProfileHash,
 		"b1ProfileHash":       id.ProfileHash,
-		"policyBody":          hexutil.Encode(pol.Bytes()),
+		"policyBody":          hexutil.Encode(policyBody(partition)),
 	}
 	enc, err := json.MarshalIndent(doc, "", "  ")
 	if err != nil {
@@ -127,9 +149,10 @@ func deployment(args []string) error {
 }
 
 // trustBundle writes the release bundle of the deployment's trust-base history at its genesis (the entry a root is started with,
-// ubft trust-base utb-genesis) and its genesis EntryID: the trust input of the bridge profile (protocol 5) and its pin. The bundle
-// holds the genesis only: a lock certified after a root epoch change needs the later entries (the plug-in reports ErrNoEntryForEpoch,
-// retryable), so past an epoch change give the plug-in the exported history (ubft trust-base utb-export) instead; its pin is unchanged.
+// ubft trust-base utb-genesis) and its genesis EntryID: the trust input of native bridge v2 (Γ.rootGenesis32 and the wallets' trust input,
+// deploy/testnet/bridge/nb2/deploy_nb2.py) and its pin. The bundle holds the genesis only: past a root epoch change give the wallet the
+// exported history (ubft trust-base utb-export) instead; its pin is unchanged. The bundle is checked to install under its pin with the
+// installation budget of a release bundle (trustBundleLimits, as nb2ref.LoadTrustInput).
 func trustBundle(args []string) error {
 	fs := flag.NewFlagSet("trust-bundle", flag.ContinueOnError)
 	in := fs.String("trust-base", "", "the genesis (epoch 1) trust base JSON")
@@ -150,7 +173,11 @@ func trustBundle(args []string) error {
 	if err != nil {
 		return err
 	}
-	bundle, err := bridgeprofile.TrustBundle(genesis)
+	enc, err := types.Cbor.Marshal(genesis)
+	if err != nil {
+		return err
+	}
+	bundle, err := types.EncodeTrustBaseBundle([][]byte{enc})
 	if err != nil {
 		return err
 	}
@@ -158,7 +185,7 @@ func trustBundle(args []string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := bridgeprofile.LoadTrustInput(bundle, id); err != nil {
+	if err := checkTrustBundle(bundle, id); err != nil {
 		return fmt.Errorf("the bundle is not a loadable trust input: %w", err)
 	}
 	if err := os.WriteFile(*out, bundle, 0o644); err != nil { // #nosec G306 -- public configuration
@@ -167,206 +194,21 @@ func trustBundle(args []string) error {
 	return os.WriteFile(*outPin, []byte(hex.EncodeToString(id[:])+"\n"), 0o644) // #nosec G306 -- public configuration
 }
 
-// lockProof assembles the LockProof (bridgeprofile.LockProof) of vault.lockDigest[nonce] at a certified EVM block: the archived resulting
-// certificate and header of that block, the full shard configuration the certificate commits to, and the account and storage proof nodes the
-// paired client serves for the block.
-func lockProof(args []string) error {
-	fs := flag.NewFlagSet("lockproof", flag.ContinueOnError)
-	archiveDir := fs.String("archive", "", "a validator's immutable archive v2 directory")
-	blockHashText := fs.String("block-hash", "", "the certified block that holds the lock")
-	ethURL := fs.String("eth-url", "", "the paired client's plain endpoint")
-	vaultText := fs.String("vault", "", "vault address")
-	nonce := fs.Uint64("nonce", 0, "lock nonce")
-	var fullConfs shardConfs
-	fs.Var(&fullConfs, "full-shard-conf", "the EVM shard's full configuration (as registered with the root chain); repeat it for each shard epoch's")
-	confDir := fs.String("shard-conf-dir", "", "a directory of shard-conf-<epoch>.json files (a handoff's), read again when a block names a configuration not held")
-	trustBundlePath := fs.String("trust-bundle", "", "the trust-base release bundle (trust-bundle)")
-	cfgHash := fs.String("cfg", "", "the vault's CFG")
-	out := fs.String("out", "", "output path")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	src, err := newLockProofSource(context.Background(), *archiveDir, *ethURL, *vaultText, fullConfs, *confDir, *trustBundlePath, *cfgHash)
+// trustBundleLimits is the installation budget of a release bundle (nb2ref's trustBundleLimits).
+var trustBundleLimits = types.TrustBaseLimits{MaxBytes: 1 << 20, MaxEntries: 1 << 16}
+
+// checkTrustBundle is the installation check of nb2ref.LoadTrustInput: the bundle decodes within the budget, its genesis is the pin, and the
+// history verifies from it.
+func checkTrustBundle(bundle []byte, pin [32]byte) error {
+	b, err := types.DecodeTrustBaseBundle(bundle, trustBundleLimits)
 	if err != nil {
 		return err
 	}
-	lp, err := src.build(context.Background(), common.HexToHash(*blockHashText), *nonce)
-	if err != nil {
-		return err
+	if id, err := b.Entries[0].EntryID(); err != nil || id != pin {
+		return fmt.Errorf("the bundle's genesis EntryID is not the pin")
 	}
-	return os.WriteFile(*out, lp, 0o644) // #nosec G306 -- public proof
+	return types.VerifyTrustBaseBundle(b, pin)
 }
-
-// lockProofSource holds what every lock proof of one deployment shares (the shard configurations, the trust-base ID, the vault and its CFG); build reads
-// one block's certificate and header from the archive and the lock's storage proof from the paired client. Between calls it keeps only the archive
-// locator's Contexts (a locator, never evidence).
-//
-// The EVM shard's configuration changes at each shard epoch (a PoS handoff advances the shard authorities): a block is proven under the configuration
-// its own certificate commits to (ShardConfHash), chosen from the operator's explicit configurations and its handoff directory (confSet), so a lock
-// made before a handoff and one made after it are both served, and a configuration published after the endpoint started is found without a
-// restart (#996).
-type lockProofSource struct {
-	archive     *archiveLocator
-	ethURL      string
-	vault       common.Address
-	cfg         [32]byte
-	confs       *confSet // CBOR PDR by its SHA-256 (the hash a UC's ShardConfHash names)
-	trustBaseID [32]byte
-}
-
-// shardConfs is the repeatable --full-shard-conf flag.
-type shardConfs []string
-
-func (c *shardConfs) String() string     { return strings.Join(*c, ",") }
-func (c *shardConfs) Set(v string) error { *c = append(*c, v); return nil }
-
-// loadPDRs reads each explicit full shard configuration (JSON) and keys its CBOR encoding by SHA-256. Any failure is a startup failure; at
-// least one is required unless a configuration directory is given.
-func loadPDRs(paths []string, haveDir bool) (map[[32]byte][]byte, error) {
-	if len(paths) == 0 && !haveDir {
-		return nil, errors.New("no --full-shard-conf or --shard-conf-dir given")
-	}
-	pdrs := make(map[[32]byte][]byte, len(paths))
-	for _, p := range paths {
-		raw, err := os.ReadFile(p) // #nosec G304 -- operator-given configuration files
-		if err != nil {
-			return nil, err
-		}
-		if len(raw) > maxConfFileBytes {
-			return nil, fmt.Errorf("%s: larger than %d bytes", p, maxConfFileBytes)
-		}
-		pdr, err := encodeConf(raw)
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", p, err)
-		}
-		pdrs[sha256.Sum256(pdr)] = pdr
-	}
-	return pdrs, nil
-}
-
-// errNotFound marks a request for a block the archive does not (yet) hold or a nonce with no lock at that block.
-var errNotFound = errors.New("not found")
-
-// archiveRescanEvery bounds how often a lookup that misses rereads the archive directory for Contexts not yet seen.
-const archiveRescanEvery = 10 * time.Second
-
-func newLockProofSource(ctx context.Context, archiveDir, ethURL, vaultText string, fullConfs []string, confDir, trustBundlePath, cfgHash string) (*lockProofSource, error) {
-	confs, err := newConfSet(fullConfs, confDir)
-	if err != nil {
-		return nil, err
-	}
-	bundle, err := os.ReadFile(trustBundlePath)
-	if err != nil {
-		return nil, err
-	}
-	// trustBaseId is the genesis EntryID of the history the bundle carries
-	decoded, err := types.DecodeTrustBaseBundle(bundle, types.TrustBaseLimits{MaxBytes: 1 << 20, MaxEntries: 1 << 16})
-	if err != nil {
-		return nil, err
-	}
-	tbID, err := decoded.Entries[0].EntryID()
-	if err != nil {
-		return nil, err
-	}
-	store, err := archive.Open(archiveDir)
-	if err != nil {
-		return nil, err
-	}
-	locator, err := newArchiveLocator(ctx, archiveDir, store, archiveRescanEvery)
-	if err != nil {
-		return nil, err
-	}
-	s := &lockProofSource{archive: locator, ethURL: ethURL, vault: common.HexToAddress(vaultText), confs: confs, trustBaseID: tbID}
-	copy(s.cfg[:], common.HexToHash(cfgHash).Bytes())
-	return s, nil
-}
-
-func (s *lockProofSource) build(ctx context.Context, blockHash common.Hash, nonce uint64) ([]byte, error) {
-	_, rec, err := s.archive.locate(ctx, blockHash)
-	if errors.Is(err, errNotFound) {
-		return nil, fmt.Errorf("%w: the archive holds no receipt-complete record of block %s", errNotFound, blockHash)
-	}
-	if err != nil {
-		return nil, err
-	}
-	var hdr gethtypes.Header
-	if err := rlp.DecodeBytes(rec.Header, &hdr); err != nil || hdr.Hash() != blockHash {
-		return nil, fmt.Errorf("archived header is not block %s", blockHash)
-	}
-	var uc types.UnicityCertificate
-	if err := types.Cbor.Unmarshal(rec.ResultingUC, &uc); err != nil {
-		return nil, err
-	}
-	pdr, err := s.confs.lookup(ctx, uc.ShardConfHash)
-	if err != nil {
-		return nil, err
-	}
-	slot := crypto.Keccak256Hash(common.LeftPadBytes(new(big.Int).SetUint64(nonce).Bytes(), 32), common.LeftPadBytes([]byte{5}, 32))
-	raw, err := rpcCall(ctx, s.ethURL, "eth_getProof", []any{s.vault, []common.Hash{slot}, map[string]any{"blockHash": blockHash}})
-	var refused *rpcError
-	if errors.As(err, &refused) {
-		// the client answered and refused: typically a block older than its proof window (--rpc.eth-proof-window)
-		return nil, fmt.Errorf("%w: the paired client serves no eth_getProof at block %s (%w)", errNotFound, blockHash, err)
-	}
-	if err != nil {
-		return nil, err
-	}
-	var proof struct {
-		Address      common.Address  `json:"address"`
-		AccountProof []hexutil.Bytes `json:"accountProof"`
-		StorageProof []struct {
-			Value *hexutil.Big    `json:"value"`
-			Proof []hexutil.Bytes `json:"proof"`
-		} `json:"storageProof"`
-	}
-	if err := json.Unmarshal(raw, &proof); err != nil {
-		return nil, err
-	}
-	if proof.Address != s.vault || len(proof.StorageProof) != 1 {
-		return nil, fmt.Errorf("unexpected eth_getProof answer")
-	}
-	if v := proof.StorageProof[0].Value; v == nil || v.ToInt().Sign() == 0 {
-		return nil, fmt.Errorf("%w: no lock with nonce %d at block %s", errNotFound, nonce, blockHash)
-	}
-	lp := bridgeprofile.LockProof{TrustBaseID: s.trustBaseID, PDR: pdr, UC: bytes.Clone(rec.ResultingUC), Header: bytes.Clone(rec.Header), Cfg: s.cfg}
-	for _, n := range proof.AccountProof {
-		lp.AccountNodes = append(lp.AccountNodes, []byte(n))
-	}
-	for _, n := range proof.StorageProof[0].Proof {
-		lp.StorageNodes = append(lp.StorageNodes, []byte(n))
-	}
-	return lp.Bytes(), nil
-}
-
-func rpcCall(ctx context.Context, url, method string, params []any) (json.RawMessage, error) {
-	body, _ := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	var out struct {
-		Result json.RawMessage `json:"result"`
-		Error  *struct{ Message string }
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, err
-	}
-	if out.Error != nil {
-		return nil, &rpcError{method: method, message: out.Error.Message}
-	}
-	return out.Result, nil
-}
-
-// rpcError is a JSON-RPC error answer (the client was reached and refused), as distinct from a transport failure.
-type rpcError struct{ method, message string }
-
-func (e *rpcError) Error() string { return e.method + ": " + e.message }
 
 // pdr writes the canonical CBOR of the EVM shard's full configuration: the artifact a lock proof carries and the manifest pins.
 func pdr(args []string) error {

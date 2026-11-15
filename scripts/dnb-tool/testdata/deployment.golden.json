@@ -1,0 +1,10 @@
+{
+  "b1ProfileHash": "0xaceb50b0781ac725e97240e1c5b63578bb0ada57954e81da0eadef9de412700a",
+  "evmPartition": 8,
+  "evmShard": "0x80",
+  "executionGenesis": "0x3787b85ff54e3e288d86eae2604039d1d23fb18df47298d9c3a5834d84e52227",
+  "network": 3,
+  "policyBody": "0x835818554e49434954595f42525f4147475f504152544954494f4e0207",
+  "rootGenesis": "0x29301d6cc59804fbc13e1b54e9af3a38d38bd65b2b0d73ad78a292288350e33d",
+  "semanticProfileHash": "0xbdca358b6e1a64fa9161b4947020090876573d5f0b0f9786532de3d5d384324a"
+}
