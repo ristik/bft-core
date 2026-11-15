@@ -76,22 +76,20 @@ def driver(gen, *args, env_file=None):
 
 
 def effective_argv(name, service):
-    """What Compose runs for SERVICE: its entrypoint followed by its command. Each may be a list or a string (split as a shell would); anything else,
-    or no entrypoint, is refused: the manifest judges the arguments the container gets, not only the entrypoint."""
-    import shlex
-
-    def part(field, required):
-        v = service.get(field)
-        if v is None:
-            if required:
-                raise SystemExit(f'{name} has no {field}: the manifest cannot judge what it runs')
-            return []
-        if isinstance(v, str):
-            return shlex.split(v)
-        if isinstance(v, list) and all(isinstance(x, str) for x in v):
-            return list(v)
-        raise SystemExit(f'{name}\'s {field} is neither a list of strings nor a string ({type(v).__name__}): refused')
-    return part('entrypoint', True) + part('command', False)
+    """The arguments SERVICE runs with, in the only form generate.py writes: `entrypoint` a list of plain strings and no `command`. Nothing else is
+    accepted, so the manifest never has to emulate Compose (its string splitting, escapes or ${VAR} interpolation): a `command`, a string
+    entrypoint, or any argument holding `$`, a backslash or a quote is refused."""
+    if service.get('command') not in (None, [], ''):
+        raise SystemExit(f'{name} sets a command: generate.py writes none, and the manifest judges the entrypoint alone (refused)')
+    ep = service.get('entrypoint')
+    if ep is None:
+        raise SystemExit(f'{name} has no entrypoint: the manifest cannot judge what it runs')
+    if not isinstance(ep, list) or not all(isinstance(x, str) for x in ep):
+        raise SystemExit(f'{name}\'s entrypoint is not a list of strings ({type(ep).__name__}): refused')
+    odd = [x for x in ep if any(c in x for c in '$\\\'"')]
+    if odd:
+        raise SystemExit(f'{name}\'s entrypoint has arguments Compose would rewrite (interpolation, escapes or quotes): {odd[:3]} (refused)')
+    return list(ep)
 
 
 def validator_pins(name, command, b1):

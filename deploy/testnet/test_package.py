@@ -1988,26 +1988,38 @@ class NB2Release(unittest.TestCase):
             'no ureth4':dict(ureth4=None),                                                                    # a missing validator
             'differ':dict(ureth3=['unicity-reth','node','--txpool.max-tx-gas=60000000','--txpool.max-tx-input-bytes=8388608']),
         }
-        # Compose appends `command` to the entrypoint: only ureth3's command turns proof serving off and companion pruning on
-        def with_command(cmd): return {**self.services(),'ureth3':{'entrypoint':list(u),'command':cmd}}
-        command_cases={'list':['--unicity.no-proof-source','--unicity.companion-retention-depth=1000'],
-                       'string':'--unicity.no-proof-source --unicity.companion-retention-depth=1000',
-                       'pruning only':['--unicity.companion-retention-depth=1000']}
         with tempfile.TemporaryDirectory() as tmp:
             g=self.generation(tmp)
             for want,changed in cases.items():
                 with self.subTest(want):
                     with self.assertRaisesRegex(SystemExit,want.strip()): self.build(*g,services=self.services(**changed))
-            for what,cmd in command_cases.items():
-                with self.subTest(command=what):
-                    with self.assertRaisesRegex(SystemExit,'ureth3 is not a full proof source'): self.build(*g,services=with_command(cmd))
-            with self.assertRaisesRegex(SystemExit,'neither a list'): self.build(*g,services=with_command({'x':1}))   # an unsupported form fails closed
-            with self.assertRaisesRegex(SystemExit,'no entrypoint'): self.build(*g,services={**self.services(),'ureth2':{'command':list(u)}})
-            # a harmless command is judged with the entrypoint: the pins may come from it
-            ok={**self.services(),'ureth2':{'entrypoint':['unicity-reth','node'],'command':'--txpool.max-tx-gas=60000000 --txpool.max-tx-input-bytes=4194304'}}
-            self.assertEqual(self.build(*g,services=ok)['limits']['poolMaxTxInputBytes']['value'],4194304)
+            # only the form generate.py writes is judged: an entrypoint list of plain strings and no command (Compose's splitting, escapes and
+            # ${VAR} interpolation are never emulated). sol's reproductions, each on ureth3 only:
+            refused={
+                'command list':({'entrypoint':list(u),'command':['--unicity.no-proof-source','--unicity.companion-retention-depth=1000']},'sets a command'),
+                'command string':({'entrypoint':list(u),'command':'--unicity.no-proof-source --unicity.companion-retention-depth=1000'},'sets a command'),
+                'backslash':({'entrypoint':u+['--unicity.no-\\proof-source']},'would rewrite'),
+                'interpolation in a list':({'entrypoint':u+['${NO_PROOF}']},'would rewrite'),
+                'interpolation in a string':({'entrypoint':' '.join(u)+' ${NO_PROOF}'},'not a list of strings'),
+                'quote':({'entrypoint':u+['"--unicity.no-proof-source"']},'would rewrite'),
+                'string entrypoint':({'entrypoint':' '.join(u)},'not a list of strings'),
+                'no entrypoint':({'command':list(u)},'sets a command'),
+            }
+            for what,(svc,want) in refused.items():
+                with self.subTest(form=what):
+                    with self.assertRaisesRegex(SystemExit,want): self.build(*g,services={**self.services(),'ureth3':svc})
+            with self.assertRaisesRegex(SystemExit,'no entrypoint'): self.build(*g,services={**self.services(),'ureth3':{}})
             # ureth1 alone being healthy is not enough, and every validator healthy passes
             self.assertEqual(self.build(*g)['limits']['poolMaxTxInputBytes']['value'],4194304)
+    def test_the_ureth_services_generate_py_writes_are_accepted(self):
+        m=self.module()
+        with tempfile.TemporaryDirectory() as tmp:
+            out=Path(tmp)/'tn-fixture';out.mkdir()
+            images={k:'sha256:'+'a'*64 for k in ['node','rpc','guard','signer']}
+            cfg=generate.topology(out,4,{'root':['r%d'%i for i in range(4)],'evm':['e%d'%i for i in range(4)]},images,'captcha',
+                                  ['--unicity.network-id=3','--txpool.max-tx-gas=60000000','--txpool.max-tx-input-bytes=4194304'],123456)
+        for i in range(1,5):
+            self.assertEqual(m.effective_argv(f'ureth{i}',cfg['services'][f'ureth{i}']),cfg['services'][f'ureth{i}']['entrypoint'])
     def test_another_image_than_the_recorded_one_is_refused(self):
         with tempfile.TemporaryDirectory() as tmp:
             gen,art,record=self.generation(tmp)
