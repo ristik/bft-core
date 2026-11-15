@@ -285,7 +285,6 @@ class Drive(rehearse.Rehearsal):
     remote, require, allow_excluding = {}, frozenset(), False   # set by __init__ (remote_entity.load): defaults for a Drive made without it
 
     cold_restore = False   # set by __init__: the explicit cold bootstrap (wipe, pin, replay) instead of the follower
-    _bundle_lock = threading.Lock()   # the entities advance in parallel and share the bundle files
 
     def __init__(self, generation, cast, ubft, restore_pin=None, joiners=None, require=(), allow_excluding=False, funder=None, cold_restore=False):
         generation = Path(generation).resolve()
@@ -893,25 +892,6 @@ class Drive(rehearse.Rehearsal):
         os.chmod(tmp, 0o600)
         os.chown(tmp, 10001, 10001)
         os.rename(tmp, kept)
-
-    def activation_bundles(self, after):
-        """The roots' activation bundles of epochs after..target (q3/bundle of root 1, which serves every epoch it installed from its journal), each kept
-        once as network/handoff/q3-bundle-<N>.cbor for every authority to read. They are evidence, not trust: an authority verifies each one itself
-        from its own pin (bft-core#1085), so a bundle written here and a bundle from anywhere else are refused or accepted alike."""
-        files = []
-        with self._bundle_lock:
-            for epoch in range(int(after) + 1, self.target + 1):
-                path = self.work / f'q3-bundle-{epoch}.cbor'
-                if not path.exists():
-                    status, body = self.transport.post(1, '/api/v1/q3/bundle', json.dumps({'epoch': epoch}).encode())
-                    self.expect(status == 200, f'root 1 serves the activation bundle of epoch {epoch}', body[:200].decode(errors='replace'))
-                    raw = bytes.fromhex(json.loads(body)['bundle'])
-                    tmp = path.with_name(f'.{path.name}.tmp')
-                    tmp.write_bytes(raw)
-                    os.chmod(tmp, 0o644)
-                    os.replace(tmp, path)
-                files.append(path)
-        return files
 
     def advance_entity(self, i, shard_epoch, journal):
         """Entity i's switch as sub-steps (advance/entity<i>/...), each resumable. The authority refuses a repeated advance (signingauthority/advance.go), so its

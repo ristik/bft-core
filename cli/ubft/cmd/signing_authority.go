@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"crypto"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -209,7 +210,10 @@ func signingAuthorityRun(ctx context.Context, flags *signingAuthorityRunFlags) e
 }
 
 // lineageOptions are the authority options of the lineage flags: the pinned genesis (#1085) and the explicit recovery policy.
-func (flags *signingAuthorityRunFlags) lineageOptions(log interface{ Warn(string, ...any) }) ([]signingauthority.Option, error) {
+func (flags *signingAuthorityRunFlags) lineageOptions(log interface {
+	Info(string, ...any)
+	Warn(string, ...any)
+}) ([]signingauthority.Option, error) {
 	if flags.LineageGenesis == "" {
 		if flags.LineageUTB || flags.UncheckedAdvance {
 			return nil, errors.New("--lineage-utb-genesis and --recovery-unchecked-advance need --lineage-genesis-trust-base")
@@ -221,6 +225,12 @@ func (flags *signingAuthorityRunFlags) lineageOptions(log interface{ Warn(string
 	if err != nil {
 		return nil, fmt.Errorf("loading the lineage genesis trust base: %w", err)
 	}
+	id, err := genesis.Hash(crypto.SHA256)
+	if err != nil {
+		return nil, fmt.Errorf("hashing the lineage genesis trust base: %w", err)
+	}
+	// what the lineage starts from, stated at start: a UTB chain's first activation extends only a lineage pinned with --lineage-utb-genesis (#1091)
+	log.Info("signing authority lineage pinned", "genesis", hex.EncodeToString(id), "network", genesis.NetworkID, "utbGenesis", flags.LineageUTB)
 	opts := []signingauthority.Option{signingauthority.WithLineage(genesis, flags.LineageUTB)}
 	if flags.UncheckedAdvance {
 		log.Warn("signing authority admits the operator-trusted advance-epoch (--recovery-unchecked-advance): a recovery policy")

@@ -465,3 +465,25 @@ func TestARetiredAuthorityAttestsNoPossession(t *testing.T) {
 	close(done)
 	wg.Wait()
 }
+
+// bft-core#1091: on a UTB chain the authority advances when its lineage is pinned as a UTB genesis, and refuses the activation (changing
+// nothing) when it is not.
+func TestAUTBChainAdvancesOnlyAUTBPinnedAuthority(t *testing.T) {
+	f := q3fixture.New(t, q3fixture.Options{UTB: true})
+	require.True(t, f.UTB)
+	a := proofAuthority(t, f, 0) // pinned WithLineage(f.Old, f.UTB)
+	res, err := a.AdvanceWithProof(context.Background(), bundleOf(t, f))
+	require.NoError(t, err)
+	require.True(t, res.Advanced)
+
+	conf := f.ShardConf
+	b, err := New(Enrollment{AuthorityID: "b", NodeID: conf.Validators[0].NodeID, NetworkID: conf.NetworkID, PartitionID: conf.PartitionID, ShardID: conf.ShardID,
+		ShardEpoch: conf.Epoch, RootEpoch: PinRootEpoch(1), Profile: ProfileLegacyBCRv1}, currentTrust{base: f.Old}, WithLineage(f.Old, false))
+	require.NoError(t, err)
+	giveKey(t, b, f.GenesisEVM[0].Signer)
+	require.NoError(t, b.CompleteEnrollment(conf))
+	_, err = b.AdvanceWithProof(context.Background(), bundleOf(t, f))
+	require.ErrorIs(t, err, ErrLineageUnverified)
+	require.ErrorContains(t, err, "UTB envelope")
+	require.EqualValues(t, 1, b.Status().RootEpoch)
+}

@@ -1,8 +1,12 @@
 package activationproof_test
 
 import (
+	"os"
 	"testing"
 	"time"
+
+	"github.com/unicitynetwork/bft-go-base/types"
+	"github.com/unicitynetwork/bft-go-base/util"
 
 	"github.com/stretchr/testify/require"
 
@@ -67,4 +71,27 @@ func TestTheBundleDecodersAgree(t *testing.T) {
 		_, _, errB := q3active.DecodeBundle(bad)
 		require.Equal(t, errB == nil, errA == nil, "the same bytes are refused by both")
 	}
+}
+
+// bft-core#1091: the genesis trust base and the first activation bundle of a real --utb generation (tn-pos-staging-20261115i): its roots
+// activate epoch 2 with the UTB tuple, which extends only a lineage whose genesis epoch is a UTB epoch. An authority pinned to the same
+// trust base without --lineage-utb-genesis refuses it, as all four did on staging (they were started from a compose without the flag).
+func TestARealUTBGenerationsFirstActivationExtendsOnlyAUTBLineage(t *testing.T) {
+	tb, err := util.ReadJsonFile("testdata/utb-generation-trust-base.json", &types.RootTrustBaseV1{})
+	require.NoError(t, err)
+	raw, err := os.ReadFile("testdata/utb-generation-bundle-2.cbor")
+	require.NoError(t, err)
+
+	l, err := activationproof.NewLineage(tb, true)
+	require.NoError(t, err)
+	next, step, err := l.Extend(raw)
+	require.NoError(t, err, "the UTB lineage verifies the roots' first activation")
+	require.EqualValues(t, 2, step.Epoch)
+	require.EqualValues(t, 2, next.Tip())
+
+	plain, err := activationproof.NewLineage(tb, false)
+	require.NoError(t, err)
+	_, _, err = plain.Extend(raw)
+	require.ErrorIs(t, err, activationproof.ErrLineage)
+	require.ErrorContains(t, err, "UTB envelope of the body's tuple differs from its predecessor epoch's", "the staging refusal, reproduced")
 }
