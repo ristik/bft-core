@@ -194,7 +194,7 @@ class BridgePos:
         subprocess.run(['docker', 'rm', '-f', name], capture_output=True)
         subprocess.run(['docker', 'run', '-d', '--rm', '--name', name, '--network', validators_network(self.gen), '--user', '10001:10001', '--read-only',
                         '-e', f'UPSTREAM=http://{agg.hostname}:{port}', '-e', f'PORT={port}', '-e', 'OUT=/rec/pages.jsonl', '-v', f'{rec}:/rec',
-                        '-v', f'{Path(__file__).resolve().parent / "trust_recorder.mjs"}:/opt/trust_recorder.mjs:ro', '--entrypoint', 'node', bridge_image(),
+                        '-v', f'{Path(__file__).resolve().parent / "trust_recorder.mjs"}:/opt/trust_recorder.mjs:ro', '--entrypoint', 'node', bridge_image(self.gen),
                         '/opt/trust_recorder.mjs'], check=True, capture_output=True, text=True)
         try:
             self.wait('the trust recorder to listen', lambda: 'listening' in subprocess.run(['docker', 'logs', name], capture_output=True, text=True).stdout, 60)

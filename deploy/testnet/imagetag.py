@@ -8,11 +8,14 @@ import subprocess
 import tempfile
 
 IMMUTABLE = re.compile(r'(sha256:[0-9a-f]{64}|[^\s@]+@sha256:[0-9a-f]{64})')
+IMAGE_ID = re.compile(r'sha256:[0-9a-f]{64}')
 
 
 def immutable_tag(kind, pin, image_id):
     """The tag a build leaves on its image (bft-core#1092): per pin and per image, so no later build can move it and leave a generation's image
     dangling (a prune would delete it). Everything the package records and runs names the image by its ID, never by a tag."""
+    if not IMAGE_ID.fullmatch(image_id):   # a containerd image store can hand back a manifest digest or a name: refused, never split
+        raise SystemExit(f'not a local image ID: {image_id!r} (docker build --iidfile)')
     return f'tnops-{kind}:{pin}-{image_id.split(":", 1)[1][:12]}'
 
 
@@ -23,6 +26,10 @@ def build(kind, pin, *args):
         iid = pathlib.Path(tmp) / 'iid'
         subprocess.run(['docker', 'build', '--iidfile', str(iid), *args], check=True)
         image_id = iid.read_text().strip()
+    # the iidfile of a containerd image store can name a manifest digest: the local image it resolves to must be that very ID
+    resolved = subprocess.run(['docker', 'image', 'inspect', '--format={{.Id}}', image_id], capture_output=True, text=True)
+    if not IMAGE_ID.fullmatch(image_id) or resolved.returncode != 0 or resolved.stdout.strip() != image_id:
+        raise SystemExit(f'docker build --iidfile gave {image_id!r}, which is not a local image ID ({resolved.stdout.strip() or resolved.stderr.strip()[-120:]})')
     tag = immutable_tag(kind, pin, image_id)
     existing = subprocess.run(['docker', 'image', 'inspect', '--format={{.Id}}', tag], capture_output=True, text=True)
     if existing.returncode == 0 and existing.stdout.strip() != image_id:
