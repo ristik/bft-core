@@ -63,6 +63,7 @@ import operator_rpc
 import rehearse
 import remote_entity
 
+JOINER_FIRST_SECONDS = 180   # how long the incumbents wait for the joiners' installs (bft-core#1082) before the step fails with them still running
 INSTALL_GATE_SECONDS = 120  # how long a root waits for verified evidence of the activation before the install step fails closed: the root is left
                             # running, never stopped without evidence it can install from (bft-core#1080, astra on #1084)
 LIFETIME = 16384            # storage.ResultReservationLifetimeProgress: a result not prepared within this many registry progress rounds is rejected by the roots
@@ -284,7 +285,6 @@ class Drive(rehearse.Rehearsal):
     remote, require, allow_excluding = {}, frozenset(), False   # set by __init__ (remote_entity.load): defaults for a Drive made without it
 
     cold_restore = False   # set by __init__: the explicit cold bootstrap (wipe, pin, replay) instead of the follower
-    _bundle_lock = threading.Lock()   # the entities advance in parallel and share the bundle files
 
     def __init__(self, generation, cast, ubft, restore_pin=None, joiners=None, require=(), allow_excluding=False, funder=None, cold_restore=False):
         generation = Path(generation).resolve()
@@ -771,7 +771,15 @@ class Drive(rehearse.Rehearsal):
                 return j
         return None
 
-    def await_install_evidence(self, i, installed):
+    def running_source(self, candidates):
+        """An old root that has not been stopped yet and serves the activation from its own committed state, or None. The drive keeps every old
+        root running until the joiners have installed (step_install), so it stays the joiners' source while they do."""
+        for j in sorted(candidates):
+            if self.serves_own_activation(j):
+                return j
+        return None
+
+    def await_install_evidence(self, i, installed, running_sources=None):
         """The install gate (bft-core#1080; astra on #1084: fail closed, never on elapsed time). Root i is stopped only when it can install from
         verified, retained evidence of the activation:
           - a root of the committee being left that serves the activation from its OWN committed state (it holds the commit, and its stores keep it
@@ -784,12 +792,29 @@ class Drive(rehearse.Rehearsal):
             if own and self.serves_own_activation(i):
                 return 'own'
             source = self.installed_source(i, installed())
+            if source is None and running_sources is not None:
+                source = self.running_source(running_sources())
+                return f'root{source} (running)' if source is not None else None
             return f'root{source}' if source is not None else None
         try:
             return self.wait(f'root {i} has verified evidence of epoch {self.target} to install from', ready, INSTALL_GATE_SECONDS, every=0.2)
         except rehearse.Failure as error:
             raise rehearse.Failure(f'root {i} is left running: neither it nor an installed root serves the activation of epoch {self.target} '
                                    f'(the handoff is not committed, or no root installed it yet): {str(error)[-300:]}') from None
+
+    def install_one(self, journal, i, files, base, source):
+        if i in self.remote:
+            return journal.run('install', lambda: {**(self.remote[i].install_root(self.target) or {}), 'evidence': source}, sub=f'root{i}')
+        return journal.run('install', lambda: {**self.install_root(i, files, base), 'evidence': source}, sub=f'root{i}')
+
+    def committee_connected(self, i):
+        """Root i's own view of its committee (bft-core#1082, POST /api/v1/committee): a member of the target epoch, connected to every other
+        member. A joiner behind NAT is reachable only over connections it opened, so this is its readiness to lead and to collect votes."""
+        status, body = self.transport.post(i, '/api/v1/committee', b'{}')
+        if status != 200:
+            return None
+        view = json.loads(body)
+        return view if view.get('epoch') == self.target and view.get('member') and not view.get('missing') else None
 
     def step_install(self, journal):
         override = self.gen / f'compose.install-epoch-{self.target}.json'
@@ -800,14 +825,43 @@ class Drive(rehearse.Rehearsal):
         roots = sorted(set(self.old) | set(self.new))
         def installed():
             return {j for j in roots if journal.done('install', f'root{j}')}
+        # bft-core#1082: the joiners install FIRST, from an old root that holds the commit and is not stopped until they are done, so a joiner is up
+        # (keeping its committee connected: it dials the others itself) before the incumbents restart into the new epoch and its first rounds
+        # can reach it. Installed after them, a joiner behind NAT came up after those rounds, and its leader slots timed out (2 x 10 s on staging).
+        joiners = sorted(set(self.new) - set(self.old))
+        # each joiner's outcome: None while it installs, True once installed, False when it failed; the incumbents restart only once every
+        # joiner installed (astra on #1088): a failed or slow joiner leaves them, and so the joiner's source, running, and the step fails
+        outcome = {j: (True if journal.done('install', f'root{j}') else None) for j in joiners}
+        settled = threading.Condition()
+        def joiner_outcome(j, ok):
+            with settled:
+                outcome[j] = ok
+                settled.notify_all()
+        def joiners_installed():
+            with settled:
+                settled.wait_for(lambda: all(v is not None for v in outcome.values()) or False in outcome.values(), timeout=JOINER_FIRST_SECONDS)
+                failed = sorted(j for j, v in outcome.items() if v is False)
+                running = sorted(j for j, v in outcome.items() if v is None)
+            if failed or running:
+                why = f'the install of joiner root(s) {failed} failed' if failed else f'joiner root(s) {running} did not install within {JOINER_FIRST_SECONDS} s'
+                raise rehearse.Failure(f'{why}: the incumbents are left running (they are its source of the activation and its committee); '
+                                       f'inspect the joiner, then run the drive again')
         def install(i):
             # sequential installs cost ~2.5 s per root before the new committee's first leader (the lowest node id) was up; at once they cost one restart
             if journal.done('install', f'root{i}'):
                 return journal.run('install', lambda: {}, sub=f'root{i}')   # skipped, echoed
+            if i in joiners:
+                ok = False
+                try:
+                    source = self.await_install_evidence(i, installed, running_sources=lambda: set(self.old) - installed())
+                    result = self.install_one(journal, i, files, base, source)
+                    ok = True
+                    return result
+                finally:
+                    joiner_outcome(i, ok)
             source = self.await_install_evidence(i, installed)
-            if i in self.remote:
-                return journal.run('install', lambda: {**(self.remote[i].install_root(self.target) or {}), 'evidence': source}, sub=f'root{i}')
-            return journal.run('install', lambda: {**self.install_root(i, files, base), 'evidence': source}, sub=f'root{i}')
+            joiners_installed()   # bft-core#1082: never restart an incumbent before the joiners are up
+            return self.install_one(journal, i, files, base, source)
         parallel({i: (lambda i=i: install(i)) for i in roots})
         for i in sorted(set(roots) - set(self.new)):   # a leaver installs the epoch (it holds the commit) but certifies nothing in it: it is a follower there
             self.wait(f'the leaving root {i} installed epoch {self.target}', lambda i=i: self.follower_epoch(i) == self.target or self.root_epoch(i, self.transport) == self.target, 300, every=0.5)
@@ -838,25 +892,6 @@ class Drive(rehearse.Rehearsal):
         os.chmod(tmp, 0o600)
         os.chown(tmp, 10001, 10001)
         os.rename(tmp, kept)
-
-    def activation_bundles(self, after):
-        """The roots' activation bundles of epochs after..target (q3/bundle of root 1, which serves every epoch it installed from its journal), each kept
-        once as network/handoff/q3-bundle-<N>.cbor for every authority to read. They are evidence, not trust: an authority verifies each one itself
-        from its own pin (bft-core#1085), so a bundle written here and a bundle from anywhere else are refused or accepted alike."""
-        files = []
-        with self._bundle_lock:
-            for epoch in range(int(after) + 1, self.target + 1):
-                path = self.work / f'q3-bundle-{epoch}.cbor'
-                if not path.exists():
-                    status, body = self.transport.post(1, '/api/v1/q3/bundle', json.dumps({'epoch': epoch}).encode())
-                    self.expect(status == 200, f'root 1 serves the activation bundle of epoch {epoch}', body[:200].decode(errors='replace'))
-                    raw = bytes.fromhex(json.loads(body)['bundle'])
-                    tmp = path.with_name(f'.{path.name}.tmp')
-                    tmp.write_bytes(raw)
-                    os.chmod(tmp, 0o644)
-                    os.replace(tmp, path)
-                files.append(path)
-        return files
 
     def advance_entity(self, i, shard_epoch, journal):
         """Entity i's switch as sub-steps (advance/entity<i>/...), each resumable. The authority refuses a repeated advance (signingauthority/advance.go), so its
@@ -893,25 +928,6 @@ class Drive(rehearse.Rehearsal):
             else:
                 journal.run('advance', lambda: self.follow_joiner(i, self.target, promoted=True) or {}, sub=f'{unit}/follow')   # the same follower, started again on its retained state
             return {'joiner': True}
-        if healthy(self.authority_status(i)).get('lineagePinned'):
-            # bft-core#1085: the authority verifies the activation itself from its pinned lineage, and the one operation also issues the next
-            # session (a rerun is a no-op that only repairs a missing credential); the drive supplies the roots' bundles and checks the result
-            def proof():
-                status = self.authority_status(i)
-                self.keep_credential(i)
-                # from the lineage tip on, and always the target's: a resume after the authority accepted it (its tip already the target) replays
-                # it, a no-op that lets the one operation repair the session and credential (astra on #1087)
-                files = self.activation_bundles(min(status.get('lineageEpoch') or 1, self.target - 1))
-                report = json.loads(self.exec_in(f'authority{i}', 'ubft', 'signing-authority', 'advance-with-proof', *OPERATOR,
-                                                 *[a for f in files for a in ('--proof', f'/network/handoff/{f.name}')],
-                                                 '--out', '/authority/client.cred', '--client-socket', '/authority/client.sock'))
-                status = healthy(self.authority_status(i))
-                self.expect(not report.get('retired') and advanced(status), f'authority {i} verified and holds root epoch {self.target} and shard epoch {shard_epoch}',
-                            str(report)[:300])
-                return {'generation': status.get('generation'), 'steps': len(report.get('steps') or []), 'sessionIssued': report.get('sessionIssued')}
-            journal.run('advance', proof, sub=f'{unit}/advance-with-proof')
-            journal.run('advance', lambda: self.compose('start', f'shard{i}') and {}, sub=f'{unit}/shard-start')
-            return {'proof': True}
         def advance():
             status = healthy(self.authority_status(i))
             if advanced(status):
@@ -960,17 +976,6 @@ class Drive(rehearse.Rehearsal):
             else:
                 journal.run('advance', lambda: self.follow_joiner(i, self.target, promoted=True) or {}, sub=f'{unit}/follow')
             return {'joiner': True, 'remote': True}
-        if healthy(remote.authority_status()).get('lineagePinned'):
-            def proof():   # bft-core#1085, as for a host entity: the laptop's authority verifies the bundles itself
-                files = self.activation_bundles(min(remote.authority_status().get('lineageEpoch') or 1, self.target - 1))   # the target's always (a resume replays it)
-                remote.put({f'handoff/{f.name}': f for f in files})
-                report = remote.authority_step('advance-with-proof', self.target, shard_epoch)
-                status = healthy(remote.authority_status())
-                self.expect(advanced(status), f'authority {i} (laptop) verified and holds root epoch {self.target} and shard epoch {shard_epoch}', str(report)[:300])
-                return {'generation': status.get('generation')}
-            journal.run('advance', proof, sub=f'{unit}/advance-with-proof')
-            journal.run('advance', lambda: remote.authority_step('shard-start', self.target, shard_epoch) and {}, sub=f'{unit}/shard-start')
-            return {'remote': True, 'proof': True}
         def advance():
             status = healthy(remote.authority_status())
             if advanced(status):
@@ -1161,6 +1166,8 @@ class Drive(rehearse.Rehearsal):
         transport = self.transport
         for i in sorted(self.new):
             self.wait(f'root {i} certifies at epoch {self.target}', lambda i=i: self.root_epoch(i, transport) == self.target, 300, every=1)
+        for i in sorted(self.new):   # bft-core#1082: every member, a joiner behind NAT included, holds connections to the whole committee
+            self.wait(f'root {i} is connected to its whole committee of epoch {self.target}', lambda i=i: self.committee_connected(i), 120, every=1)
         epochs = {i: self.root_epoch(i, transport) for i in self.new}
         self.expect(all(e == self.target for e in epochs.values()), f'every elected root certifies at epoch {self.target}', str(epochs))
         for i in sorted(set(self.old) & set(self.new)):

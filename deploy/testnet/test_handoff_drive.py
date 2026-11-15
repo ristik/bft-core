@@ -220,75 +220,6 @@ class AdvanceResume(unittest.TestCase):
         self.assertNotIn('advance-epoch', [v for _, v in self.fake.calls])
 
 
-class ProofAuthority(FakeAuthority):
-    """An authority with a lineage pin (bft-core#1085): it answers lineagePinned, and advance-with-proof verifies (here: accepts) the bundles and
-    issues the next session in one order."""
-
-    def __init__(self, auth, retire=False):
-        super().__init__(auth)
-        self.retire, self.lineage = retire, 1
-
-    def exec_in(self, service, *command, binary=False):
-        verb = command[2]
-        if verb == 'status':
-            self.calls.append((service, verb))
-            return json.dumps({'rootEpoch': self.root_epoch, 'shardEpoch': self.shard_epoch, 'generation': self.generation, 'enrollmentComplete': True,
-                               'faulted': False, 'keyLost': False, 'lineagePinned': True, 'lineageEpoch': self.lineage})
-        if verb == 'advance-with-proof':
-            proofs = tuple(a for a in command if a.startswith('/network/handoff/q3-bundle-'))
-            self.calls.append((service, verb, proofs))
-            for flag in ('--proof', '--out', '--client-socket'):   # the real command's required flags (TestTheAdvanceWithProofCommandRequires...)
-                if flag not in command:
-                    raise hd.rehearse.Failure(f'{service}: advance-with-proof: exit 1: required flag(s) "{flag[2:]}" not set')
-            if self.retire:
-                return json.dumps({'steps': [{}], 'retired': True})
-            if self.root_epoch != 3:
-                self.root_epoch, self.shard_epoch, self.generation, self.lineage = 3, 2, self.generation + 2, 3
-                (self.auth / 'client.cred').write_text(f'session {self.generation}')
-            return json.dumps({'steps': [{}], 'advanced': True, 'sessionIssued': True})
-        return super().exec_in(service, *command, binary=binary)
-
-
-class AdvanceWithProof(unittest.TestCase):
-    run_entity, tearDown = AdvanceResume.run_entity, AdvanceResume.tearDown
-
-    def setUp(self):
-        AdvanceResume.setUp(self)
-        self.fake = ProofAuthority(self.auth)
-        self.drive.exec_in = self.fake.exec_in
-        self.drive.activation_bundles = lambda after: [Path(f'/x/q3-bundle-{e}.cbor') for e in range(after + 1, 4)]
-        self.drive.expect = lambda condition, what, detail='': (_ for _ in ()).throw(hd.rehearse.Failure(what)) if not condition else None
-
-    def test_a_pinned_authority_is_advanced_by_proof_in_one_order(self):
-        self.run_entity()
-        proofs = [c for c in self.fake.calls if c[1] == 'advance-with-proof']
-        self.assertEqual(proofs, [('authority1', 'advance-with-proof', ('/network/handoff/q3-bundle-2.cbor', '/network/handoff/q3-bundle-3.cbor'))],
-                         'every bundle after its lineage tip, in epoch order')
-        verbs = [c[1] for c in self.fake.calls]
-        self.assertNotIn('advance-epoch', verbs, 'the operator-trusted advance is not used')
-        self.assertNotIn('replace-session', verbs, 'the session comes with the proof advance')
-        self.assertEqual(self.shard, ['start'])
-        self.assertEqual((self.auth / 'client.cred.pre-epoch-3').read_text(), 'session 1')
-        self.run_entity()
-        self.assertEqual(len([c for c in self.fake.calls if c[1] == 'advance-with-proof']), 1, 'a finished entity is not advanced again')
-
-    def test_a_resume_after_the_authority_accepted_the_target_replays_it(self):
-        # the drive died after the authority published the advance (and maybe the session and credential), before the journal row: the
-        # authority's lineage tip is already the target, and the rerun still passes the target's bundle (an empty --proof list is refused)
-        self.fake.root_epoch, self.fake.shard_epoch, self.fake.lineage = 3, 2, 3
-        self.journal.write('advance', 'start', sub='entity1/advance-with-proof')
-        self.run_entity()
-        proofs = [c for c in self.fake.calls if c[1] == 'advance-with-proof']
-        self.assertEqual(proofs, [('authority1', 'advance-with-proof', ('/network/handoff/q3-bundle-3.cbor',))])
-        self.assertTrue(self.journal.done('advance', 'entity1/advance-with-proof'))
-
-    def test_an_elected_entity_that_the_authority_retires_stops_the_drive(self):
-        self.fake.retire = True
-        with self.assertRaises(hd.rehearse.Failure):
-            self.run_entity()
-        self.assertEqual(self.shard, [])
-
-
 class Parallel(unittest.TestCase):
     def test_every_job_runs_at_once_and_a_failure_is_raised_after_all_finished(self):
         barrier, finished = threading.Barrier(3, timeout=5), []
@@ -326,7 +257,7 @@ class InstallAtOnce(unittest.TestCase):
         self.events, self.lock = [], threading.Lock()
         self.commits_at = {1: 1, 2: 3, 3: 1, 4: 1}   # the probe at which each old root first serves its own commit (root 2: its third; 0: never)
         self.probes = {i: 0 for i in (1, 2, 3, 4, 5)}
-        self.installed, self.running, self.overlap = set(), 0, 0
+        self.installed, self.running, self.overlap, self.completed = set(), 0, 0, []
         d = object.__new__(hd.Drive)
         d.gen, d.target, d.work, d.root_rpc = gen, 3, gen / 'work', 'http://root'
         d.old, d.new, d.joiners = [1, 2, 3, 4], [1, 2, 3, 4, 5], {5}
@@ -365,6 +296,8 @@ class InstallAtOnce(unittest.TestCase):
         with self.lock:
             self.running -= 1
             self.installed.add(i)
+            self.completed.append(i)
+            self.events.append(('done', i))
         return {}
 
     def test_each_root_is_stopped_only_with_evidence_and_they_install_at_once(self):
@@ -374,12 +307,19 @@ class InstallAtOnce(unittest.TestCase):
             self.assertEqual(self.journal.value('install', 'evidence', sub=f'root{i}'), 'own', f'root {i} installs from its own commit')
         two = self.events.index(('install', 2))
         self.assertGreaterEqual(self.events[:two].count(('probe', 2)), 2, 'root 2 was not stopped while it lacked the commit and no root had installed')
-        self.assertIn(self.journal.value('install', 'evidence', sub='root2'), {'own', 'root1', 'root3', 'root4'})
+        self.assertIn(self.journal.value('install', 'evidence', sub='root2'), {'own', 'root1', 'root3', 'root4', 'root5'})
         self.assertGreaterEqual(self.overlap, 3, 'the roots with the commit are installed at the same time, not one by one')
         joiner = self.events.index(('install', 5))
-        self.assertTrue(any(kind == 'install' and i != 5 for kind, i in self.events[:joiner]))
-        self.assertIn(self.journal.value('install', 'evidence', sub='root5'), {'root1', 'root2', 'root3', 'root4'},
-                      'a joiner installs only once a root that installed the epoch serves it')
+        self.assertFalse(any(kind == 'install' and i != 5 for kind, i in self.events[:joiner]),
+                         'bft-core#1082: the joiner installs before any incumbent is stopped')
+        self.assertIn(self.journal.value('install', 'evidence', sub='root5'), {f'root{i} (running)' for i in (1, 2, 3, 4)},
+                      'from an old root that holds the commit and keeps running until the joiner is done')
+        first_old = min(self.events.index(('install', i)) for i in (1, 2, 3, 4))
+        self.assertIn(5, self.installed_at(first_old), 'the incumbents restart only once the joiner has installed')
+
+    def installed_at(self, index):
+        """The roots whose install completed before event `index` (install() records the start, installed is the completion)."""
+        return set(self.completed[:len([e for e in self.events[:index] if e[0] == 'done'])])
 
     def test_no_commit_anywhere_stops_no_root(self):
         self.commits_at = {1: 0, 2: 0, 3: 0, 4: 0}   # no old root ever serves the target: the handoff is not committed
@@ -394,13 +334,57 @@ class InstallAtOnce(unittest.TestCase):
         self.drive.step_install(self.journal)
         three = self.events.index(('install', 3))
         self.assertTrue(any(kind == 'install' and i in (1, 2, 4) for kind, i in self.events[:three]), 'after another root has installed')
-        self.assertIn(self.journal.value('install', 'evidence', sub='root3'), {'root1', 'root2', 'root4'})
+        self.assertIn(self.journal.value('install', 'evidence', sub='root3'), {'root1', 'root2', 'root4', 'root5'})
+
+    def test_a_failed_joiner_install_leaves_every_incumbent_running(self):
+        real = self.drive.remote[5].install
+        def failing(i):
+            if i == 5:
+                raise hd.rehearse.Failure('the joiner root did not come up')
+            return real(i)
+        self.drive.remote[5].install = failing
+        self.drive.install_root = lambda i, files, base: failing(i)
+        with self.assertRaisesRegex(hd.rehearse.Failure, 'did not come up|left running'):
+            self.drive.step_install(self.journal)
+        self.assertEqual([e for e in self.events if e[0] == 'install'], [], 'astra on #1088: no incumbent restarts after a failed joiner install')
+
+    def test_a_slow_joiner_install_leaves_every_incumbent_running(self):
+        def slow(i):
+            if i == 5:
+                time.sleep(1.0)
+                return {}
+            return self.install(i)
+        self.drive.remote[5].install = slow
+        self.drive.install_root = lambda i, files, base: slow(i)
+        with unittest.mock.patch.object(hd, 'JOINER_FIRST_SECONDS', 0.3):
+            with self.assertRaisesRegex(hd.rehearse.Failure, 'left running'):
+                self.drive.step_install(self.journal)
+        self.assertEqual([e for e in self.events if e[0] == 'install'], [], 'no incumbent restarts while the joiner is still installing')
+        self.assertTrue(self.journal.done('install', 'root5'), 'the joiner itself completed')
 
     def test_a_resumed_install_skips_the_installed_roots(self):
         for i in (1, 2, 3, 4, 5):
             self.journal.write('install', 'done', sub=f'root{i}')
         self.drive.step_install(self.journal)
         self.assertEqual(self.events, [], 'nothing is probed or installed again')
+
+
+class CommitteeReadiness(unittest.TestCase):
+    """bft-core#1082: a member is ready when it reports the target epoch, membership and no member missing (POST /api/v1/committee)."""
+
+    def drive(self, answer, status=200):
+        d = object.__new__(hd.Drive)
+        d.target = 9
+        d.transport = unittest.mock.Mock(post=lambda i, path, body: (status, json.dumps(answer).encode()))
+        return d
+
+    def test_only_a_member_of_the_target_with_nothing_missing_is_ready(self):
+        ready = {'epoch': 9, 'member': True, 'connected': ['a', 'b'], 'missing': []}
+        self.assertEqual(self.drive(ready).committee_connected(5), ready)
+        self.assertIsNone(self.drive({**ready, 'missing': ['b']}).committee_connected(5), 'a member it cannot reach')
+        self.assertIsNone(self.drive({**ready, 'epoch': 8}).committee_connected(5), 'the old epoch')
+        self.assertIsNone(self.drive({**ready, 'member': False}).committee_connected(5), 'not a member')
+        self.assertIsNone(self.drive(ready, status=404).committee_connected(5), 'a root without the endpoint')
 
 
 class AdvanceAtOnce(unittest.TestCase):

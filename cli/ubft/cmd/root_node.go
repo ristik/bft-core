@@ -85,6 +85,7 @@ type (
 		HandoffProfile           bool
 		InstallHandoffEpoch      uint64
 		InstallHandoffWait       time.Duration // how long an install waits for a root peer to serve an epoch this root does not hold itself (#1080)
+		CommitteeWarmup          time.Duration // how long a member waits for its committee to be connected before its first round (#1082)
 		// RecordsPublicReads serves record reads (never cuts) of the records feed to any peer under recordsfeed.DefaultPublicLimits (#1048)
 		RecordsPublicReads bool
 		Q3Lane             bool // the Q3 acceptance lane: a verified Q3 history, the install journal and the V3 handoff pipeline
@@ -165,6 +166,8 @@ func rootNodeRunCmd(baseFlags *baseFlags) *cobra.Command {
 	cmd.Flags().Uint64Var(&flags.InstallHandoffEpoch, "install-handoff-epoch", 0, "fetch and verify this successor epoch before starting profile-2 consensus")
 	cmd.Flags().DurationVar(&flags.InstallHandoffWait, "install-handoff-wait", installWaitDefault, "with --install-handoff-epoch: how long to keep asking the root peers "+
 		"for an epoch this root has not committed itself (a peer serves it once it has committed it); 0 asks once")
+	cmd.Flags().DurationVar(&flags.CommitteeWarmup, "committee-warmup", committeeWarmupDefault, "how long a member of the installed root committee waits, "+
+		"before its first round, for every other member to be connected (it dials them itself and keeps them connected; a member down costs at most this, once)")
 	cmd.Flags().BoolVar(&flags.RecordsPublicReads, "records-public-reads", true, "serve the retained source-log records (never the cuts) to any peer, under a bounded public budget: a root "+
 		"that is not a member of this root's committees (one that catches up several epochs behind) completes its checkpoints' record prefixes from it (--profile-3)")
 	cmd.Flags().BoolVar(&flags.Q3Lane, "q3-lane", false, "run the Q3 acceptance lane: verified Q3 history, install journal and V3 handoffs (requires --profile-3)")
@@ -530,6 +533,15 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		}
 	}
 
+	// #1082: after the activations this process installed and before its first round in the installed epoch, a member keeps the rest of
+	// the committee connected (it dials them itself, so a member that cannot be dialled is reached too) and waits a bounded warm-up for it
+	var committee *rootCommittee
+	if installed, tbErr := trustBaseStore.GetByEpoch(cm.InstalledRootEpoch()); tbErr == nil && installed != nil {
+		committee = keepRootCommittee(ctx, log, host, installed, flags.CommitteeWarmup)
+	} else {
+		log.Warn("no installed root trust to keep the committee of", "epoch", cm.InstalledRootEpoch(), "error", tbErr)
+	}
+
 	node, err := rootchain.New(
 		host,
 		partitionNet,
@@ -569,6 +581,9 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		mux.HandleFunc("PUT /api/v1/trustbases", trustBasesPutHandler(flags.HandoffProfile, trustBaseStore.Store))
 		mux.HandleFunc("GET /api/v1/trustbases", getTrustBaseHandler(trustBaseStore, obs))
 		mux.HandleFunc("GET /api/v1/roundInfo", getRoundInfoHandler(cm.GetState, obs))
+		if committee != nil {
+			mux.HandleFunc("POST /api/v1/committee", q3Endpoint(func(context.Context, json.RawMessage) (any, error) { return committee.status(), nil }))
+		}
 		if flags.HandoffProfile {
 			mux.HandleFunc("POST /api/v1/handoff/plan", rootHandoffPlanHandler(cm))
 			mux.HandleFunc("POST /api/v1/handoff/intent", rootHandoffIntentHandler(cm))
