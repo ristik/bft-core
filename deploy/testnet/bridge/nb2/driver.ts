@@ -22,7 +22,7 @@
  *   replay W LABEL         the paid redemption again: the exact calldata re-sent, and the wallet's own refusal
  *   rotate W N [--prepare|--pay]   N small returns by wallet W (prepared ahead: deposit, mint, burn; then paid in a burst)
  *   mutations W LABEL      isolated mutations of one burned part, judged by the plug-in and by the deployed verifier
- *   faults W LABEL         fault injection of the native primitives and the helper by eth_simulateV1 overrides (validator 1 directly)
+ *   faults W LABEL         fault injection of the native primitives and the helper by eth_call state overrides (validator 1 directly)
  *   admission              the production and test builds admit only their own (K, B)
  *   state                  the vault's state() and the custody inputs
  */
@@ -57,7 +57,7 @@ const WORK = process.env.NB2_WORK ?? '/work/nb2';
 interface Lane {
   rpc: string; // the public gateway
   agg: string; // the gateway's /aggregator route
-  direct: string; // validator 1's execution client, for eth_simulateV1 only (fault injection is an operator check, not a wallet step)
+  direct: string; // validator 1's execution client, for the fault-injection eth_call overrides only (an operator check, not a wallet step)
   release: string;
   trustBundle: string;
   trustPin: string;
@@ -960,13 +960,25 @@ async function mutations(w: Wallet, label: string): Promise<void> {
   out(`mutations-${label}`, res);
 }
 
-// ---- fault injection by eth_simulateV1 (validator 1 directly: an operator check of the deployed bytecode, not a wallet path) -------------
+// ---- fault injection by eth_call state overrides (validator 1 directly: an operator check of the deployed bytecode, not a wallet path) -------------
 
+/**
+ * The calls with state overrides on validator 1 (eth_call's third parameter; `movePrecompileToAddress` moves a native primitive away so that
+ * code can stand in for it). eth_simulateV1 is not usable on ureth: its block executor refuses a simulated block without bound inputs.
+ */
 async function simulate(calls: { to: string; data: string }[], overrides: Record<string, unknown>): Promise<{ ok: boolean; rule: string; returnData: string; gasUsed?: string }[]> {
-  const r = await direct.call<{ calls: { status: string; returnData: string; gasUsed: string; error?: { message: string; data?: string } }[] }[]>('eth_simulateV1', [{
-    blockStateCalls: [{ stateOverrides: overrides, calls: calls.map((c) => ({ ...c, gas: '0x3938700' })) }], validation: false,
-  }, 'latest']);
-  return r[0].calls.map((c) => ({ ok: c.status === '0x1', rule: c.status === '0x1' ? 'success' : ruleOf(unhex(c.error?.data ?? c.returnData ?? '0x')), returnData: c.returnData.slice(0, 74), gasUsed: c.gasUsed }));
+  const res: { ok: boolean; rule: string; returnData: string; gasUsed?: string }[] = [];
+  for (const c of calls) {
+    try {
+      const r = await direct.call<string>('eth_call', [{ ...c, gas: '0x3938700' }, 'latest', overrides]);
+      res.push({ ok: true, rule: 'success', returnData: r.slice(0, 74) });
+    } catch (e) {
+      if (!(e instanceof RpcError) || e.code === 0) throw e;
+      const d = revertDataOf(e);
+      res.push({ ok: false, rule: d === null ? `error:${e.message.slice(0, 120)}` : ruleOf(d), returnData: d === null ? '' : hx(d).slice(0, 74) });
+    }
+  }
+  return res;
 }
 
 async function faults(w: Wallet, label: string): Promise<void> {

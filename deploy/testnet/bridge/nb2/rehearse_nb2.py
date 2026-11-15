@@ -21,7 +21,7 @@ built from this checkout) is the independent verifier.
   evidence      scripts/nb2-evidence/stage.sh (#1102) against the real vault: a Deposited receipt proof and the newest SegmentSealed receipt, Go-verified
   verifier      the deployed verifier against the plug-in and the Go reference on every burned part, byte for byte (origin only, transfer, split,
                 nested, typed and legacy receipts, 16 and 17 claims); isolated mutations (each certificate's seal, RSMT paths, unlock recovery IDs 2
-                and 3, canonical encoding) judged by all three; fault injection of 0x0100, 0x0102 and the helper's code (eth_simulateV1)
+                and 3, canonical encoding) judged by all three; fault injection of 0x0100, 0x0102 and the helper's code (eth_call state overrides)
   gas           real transaction gas of the returns (long, nested, claims), with the measured refusals
   boundary      the capacity boundary: a token at the largest transfer history the preflight admits, returned; one transfer more refused before
                 the burn (CapacityPreflight), reported as the documented limit, not as recovery
