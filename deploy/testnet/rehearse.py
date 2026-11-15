@@ -327,7 +327,7 @@ class Rehearsal:
             raise Failure(f'{method} through the public gateway: {status} {text}')
         return json.loads(text).get('result')
 
-    def wait(self, what, probe, seconds):
+    def wait(self, what, probe, seconds, every=3):
         deadline = time.monotonic() + seconds
         last = None
         while time.monotonic() < deadline:
@@ -337,7 +337,7 @@ class Rehearsal:
                     return last
             except Exception as error:   # services start in any order; a probe that raises is "not yet"
                 last = error
-            time.sleep(3)
+            time.sleep(every)
         raise Failure(f'{what}: not within {seconds} s (last: {last})')
 
     def cast_run(self, *args):
