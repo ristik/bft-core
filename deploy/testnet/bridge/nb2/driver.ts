@@ -732,7 +732,12 @@ async function rotate(w: Wallet, n: number, mode: string | undefined): Promise<v
   const segs: unknown[] = [];
   for (const l of take) {
     const id = unhex((await w.returnRecord(l)).returnId);
-    const r = await w.bridge.submitRedeem(id, w.signer);
+    let r = await w.bridge.submitRedeem(id, w.signer);
+    // a payment is 'pending' until its block's certificate is served (the child block exists): reconcile until it is verified
+    for (let i = 0; r.state === 'pending' && i < 60; i++) {
+      await sleep(2000);
+      r = await w.bridge.reconcile(id);
+    }
     if (r.state !== 'paid') throw new Error(`small return ${l}: ${r.state}`);
     segs.push((await vaultState()).segment);
   }
