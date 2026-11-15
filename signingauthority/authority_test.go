@@ -446,7 +446,7 @@ func TestAuthorityOffersNoGenericSigningOrKeyImport(t *testing.T) {
 		methods = append(methods, at.Method(i).Name)
 	}
 	require.ElementsMatch(t, []string{
-		"AdvanceEpoch", "Authenticate", "Close", "CompleteEnrollment", "Enrollment", "MarkUntrusted", "Release", "ReplaceSession",
+		"AdvanceEpoch", "AdvanceWithProof", "Authenticate", "Close", "CompleteEnrollment", "Enrollment", "MarkUntrusted", "Release", "ReplaceSession",
 		"Reserve", "RetainResponse", "Sign", "SignDelegationPossession", "SignElectionPoP", "SignHandoffPoP", "SigningPublicKey", "Status",
 	}, methods,
 		"this authority admits structured requests only: no generic signing, key import, key export or journal load")

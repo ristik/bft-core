@@ -97,6 +97,25 @@ func (o *OperatorClient) AdvanceEpoch(ctx context.Context, conf *types.Partition
 	return err
 }
 
+// AdvanceWithProof hands the authority one root activation bundle (the root's staged q3active.Bundle encoding), which it verifies
+// against its own lineage before it changes anything (#1085). An advance fences the old client credential; issue a new session before
+// resuming. Send the bundles of several epochs one call each, in epoch order.
+func (o *OperatorClient) AdvanceWithProof(ctx context.Context, bundle []byte) (signingauthority.AdvanceResult, error) {
+	if len(bundle) == 0 {
+		return signingauthority.AdvanceResult{}, fmt.Errorf("%w: no activation bundle", signingauthority.ErrLineageUnverified)
+	}
+	answer, err := o.ex.call(ctx, opAdvanceWithProof, bundle)
+	if err != nil {
+		return signingauthority.AdvanceResult{}, err
+	}
+	var wire advanceResultPayload
+	if err := types.Cbor.Unmarshal(answer, &wire); err != nil {
+		return signingauthority.AdvanceResult{}, fmt.Errorf("decoding the advance result: %w", err)
+	}
+	return signingauthority.AdvanceResult{Epoch: wire.Epoch, Replay: wire.Replay, Advanced: wire.Advanced, Retired: wire.Retired,
+		RootEpoch: wire.RootEpoch, ShardEpoch: wire.ShardEpoch, LineageEpoch: wire.LineageEpoch}, nil
+}
+
 // SignHandoffPoP asks the authority for the possession proof its own key owes a coupled handoff: the one signing operation
 // outside certification, narrow and domain-separated (see signingauthority.SignHandoffPoP). It is an operator operation: the shard
 // node's client channel refuses it.
@@ -176,6 +195,7 @@ func (o *OperatorClient) Status(ctx context.Context) (signingauthority.Status, e
 		Generation: wire.Generation, ReservedRound: wire.ReservedRound,
 		HasReservation: wire.HasReservation, ResponseRetained: wire.ResponseRetained,
 		Faulted: wire.Faulted, KeyLost: wire.KeyLost,
+		LineagePinned: wire.LineagePinned, LineageEpoch: wire.LineageEpoch, Retired: wire.Retired, SessionIssued: wire.SessionIssued,
 	}, nil
 }
 

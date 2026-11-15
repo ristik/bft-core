@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"github.com/unicitynetwork/bft-core/activationproof"
 	"math"
 	"sync"
 
@@ -67,6 +68,49 @@ type Authority struct {
 	irBase      uint64
 	irBaseKnown bool
 	irAckSeen   bool
+
+	// lineage is the authority's own authenticated root history (#1085): nil for an authority enrolled without a lineage pin, which
+	// advances only by the operator-trusted AdvanceEpoch. With a pin, AdvanceWithProof is the advance and AdvanceEpoch is a recovery
+	// route admitted only when uncheckedAdvance was configured. Guarded by mu; replaced, never mutated.
+	lineage          *activationproof.Lineage
+	uncheckedAdvance bool
+	// retired latches once an authenticated activation no longer names this node with this authority's key: the history is installed,
+	// nothing is signed and no session is issued again within this lifetime (re-entry is a new enrollment with a new key).
+	retired bool
+	// sessionIssued is whether a session was issued since the last scope change: an advance fences the client, and the operator's
+	// single advance operation issues the next session only when this is false (a crash between the two is then repaired by a rerun).
+	sessionIssued bool
+	// advancing serialises proof advances: verification runs outside mu (so signing is not held up by it), and a second proof
+	// advance meanwhile is refused rather than queued.
+	advancing sync.Mutex
+}
+
+// Option configures an authority at New.
+type Option func(*Authority) error
+
+// WithLineage pins the authority's root lineage to the deployment's genesis root trust base (utb: the chain is a UTB chain). The
+// authority then advances by AdvanceWithProof, verifying every activation itself from this pin.
+func WithLineage(genesis *types.RootTrustBaseV1, utb bool) Option {
+	return func(a *Authority) error {
+		l, err := activationproof.NewLineage(genesis, utb)
+		if err != nil {
+			return err
+		}
+		if l.Network() != a.enroll.NetworkID {
+			return fmt.Errorf("the lineage pin is for network %d, the authority is enrolled for %d", l.Network(), a.enroll.NetworkID)
+		}
+		a.lineage = l
+		return nil
+	}
+}
+
+// WithUncheckedAdvance admits the operator-trusted AdvanceEpoch on an authority with a lineage pin: a recovery policy, stated
+// explicitly when the authority is started, never a default.
+func WithUncheckedAdvance() Option {
+	return func(a *Authority) error {
+		a.uncheckedAdvance = true
+		return nil
+	}
 }
 
 // irEpochAdmitted is the rule above for an input-record epoch against the enrolled shard epoch.
@@ -121,7 +165,7 @@ func (s Session) Generation() uint64 { return s.generation }
 // configuration that names this key cannot exist before the key does. The public key is available
 // at once, the configuration is stated afterwards with CompleteEnrollment, and every other field is
 // fixed here.
-func New(enroll Enrollment, trust TrustBases) (*Authority, error) {
+func New(enroll Enrollment, trust TrustBases, opts ...Option) (*Authority, error) {
 	if len(enroll.SigningKeyFingerprint) != 0 {
 		return nil, errors.New("signingauthority: enrollment names a signing key, and this profile has no key-import path: it generates a key per authority lifetime")
 	}
@@ -146,7 +190,13 @@ func New(enroll Enrollment, trust TrustBases) (*Authority, error) {
 	fingerprint := sha256.Sum256(pub)
 	enroll = enroll.clone()
 	enroll.SigningKeyFingerprint = fingerprint[:]
-	return &Authority{enroll: enroll, trust: trust, signer: signer, instance: instance}, nil
+	a := &Authority{enroll: enroll, trust: trust, signer: signer, instance: instance}
+	for _, opt := range opts {
+		if err := opt(a); err != nil {
+			return nil, fmt.Errorf("signingauthority: %w", err)
+		}
+	}
+	return a, nil
 }
 
 // Enrollment returns a copy of the immutable scope this authority signs for.
@@ -204,6 +254,9 @@ func (a *Authority) ReplaceSession() (Session, error) {
 		// for. Issuing a session first would hand out a credential for work that is refused anyway.
 		return Session{}, fmt.Errorf("%w: no session is issued before the shard configuration is stated", ErrEnrollmentIncomplete)
 	}
+	if a.retired {
+		return Session{}, fmt.Errorf("%w: the successor configuration does not name this authority's key", ErrRetired)
+	}
 	if a.generation == math.MaxUint64 {
 		// Exhaustion disables admission rather than wrapping: a wrapped generation would admit a
 		// token that was fenced long ago (§5).
@@ -211,6 +264,7 @@ func (a *Authority) ReplaceSession() (Session, error) {
 		return Session{}, fmt.Errorf("%w: the generation space is exhausted", ErrStateUntrusted)
 	}
 	a.generation++
+	a.sessionIssued = true
 	return Session{authority: a.instance, generation: a.generation}, nil
 }
 
@@ -315,6 +369,13 @@ type Status struct {
 	ResponseRetained bool
 	Faulted          bool
 	KeyLost          bool
+	// LineagePinned says the authority verifies its advances itself (AdvanceWithProof); LineageEpoch is the last root epoch its own
+	// lineage holds (zero without a pin). Retired is the latched non-signing state of a removed validator; SessionIssued whether a session
+	// was issued since the last scope change.
+	LineagePinned bool
+	LineageEpoch  uint64
+	Retired       bool
+	SessionIssued bool
 }
 
 // Status reports what this authority is holding.
@@ -330,6 +391,10 @@ func (a *Authority) Status() Status {
 		ResponseRetained: a.rec.releasable,
 		Faulted:          a.state != healthActive,
 		KeyLost:          a.signer == nil,
+		LineagePinned:    a.lineage != nil,
+		LineageEpoch:     a.lineageEpochLocked(),
+		Retired:          a.retired,
+		SessionIssued:    a.sessionIssued,
 	}
 }
 
@@ -359,6 +424,9 @@ func (a *Authority) admitLocked(s Session) error {
 	}
 	if s.generation == 0 || s.generation != a.generation {
 		return fmt.Errorf("%w: session %d, current generation is %d", ErrFenced, s.generation, a.generation)
+	}
+	if a.retired {
+		return fmt.Errorf("%w: this authority signs nothing further", ErrRetired)
 	}
 	return nil
 }
@@ -570,10 +638,14 @@ func (a *Authority) Authenticate(ctx context.Context, req Request) (*Authorizati
 	a.mu.Lock()
 	enroll, trust, hasKey, scopeVersion := a.enroll.clone(), a.trust, a.signer != nil, a.scopeVersion
 	irBase, irBaseKnown, irAckSeen := a.irBase, a.irBaseKnown, a.irAckSeen
+	retired := a.retired
 	a.mu.Unlock()
 
 	if !hasKey {
 		return nil, fmt.Errorf("%w: this authority has no key for %s", ErrKeyLost, enroll.NodeID)
+	}
+	if retired {
+		return nil, fmt.Errorf("%w: the successor configuration does not name this authority's key", ErrRetired)
 	}
 	if !enroll.complete() {
 		return nil, fmt.Errorf("%w: no shard configuration has been stated, so no certificate's configuration can be checked", ErrEnrollmentIncomplete)

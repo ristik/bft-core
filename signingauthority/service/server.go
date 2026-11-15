@@ -382,11 +382,7 @@ func (s *Server) clientOp(ctx context.Context, session signingauthority.Session,
 		copy(digest[:], wire.Digest)
 		return s.authority.Release(session, wire.Round, digest)
 	case opRestoreStatus:
-		status := s.authority.Status()
-		return types.Cbor.Marshal(statusPayload{RootEpoch: status.RootEpoch, ShardEpoch: status.ShardEpoch,
-			Generation: status.Generation, ReservedRound: status.ReservedRound,
-			HasReservation: status.HasReservation, ResponseRetained: status.ResponseRetained,
-			Faulted: status.Faulted, KeyLost: status.KeyLost})
+		return types.Cbor.Marshal(statusPayloadOf(s.authority.Status()))
 	}
 	return nil, fmt.Errorf("%w: %s", errWrongEndpoint, operation)
 }
@@ -419,6 +415,24 @@ func (s *Server) operatorOp(ctx context.Context, operation op, payload []byte) (
 		s.hasSession = false
 		s.credential = nil
 		return nil, nil
+	case opAdvanceWithProof:
+		// the proof is the payload's bytes and nothing else: the authority verifies it against its own lineage (#1085). Serialised with
+		// replaceSession under the server's lock, so an advance that fences the client also drops the credential the server admits.
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		res, err := s.authority.AdvanceWithProof(ctx, payload)
+		if err != nil {
+			s.log.Warn("refusing an activation proof", slog.String("err", err.Error()))
+			return nil, err
+		}
+		if res.Advanced || (res.Retired && s.hasSession) {
+			s.hasSession = false
+			s.credential = nil
+		}
+		s.log.Info("activation proof accepted", slog.Uint64("epoch", res.Epoch), slog.Bool("replay", res.Replay), slog.Bool("advanced", res.Advanced),
+			slog.Bool("retired", res.Retired), slog.Uint64("rootEpoch", res.RootEpoch), slog.Uint64("shardEpoch", res.ShardEpoch), slog.Uint64("lineageEpoch", res.LineageEpoch))
+		return types.Cbor.Marshal(advanceResultPayload{Epoch: res.Epoch, Replay: res.Replay, Advanced: res.Advanced, Retired: res.Retired,
+			RootEpoch: res.RootEpoch, ShardEpoch: res.ShardEpoch, LineageEpoch: res.LineageEpoch})
 	case opSignHandoffPoP:
 		var wire handoffPoPPayload
 		if err := types.Cbor.Unmarshal(payload, &wire); err != nil {
@@ -514,13 +528,7 @@ func (s *Server) operatorOp(ctx context.Context, operation op, payload []byte) (
 	case opReplaceSession:
 		return s.replaceSession()
 	case opStatus, opRestoreStatus:
-		status := s.authority.Status()
-		return types.Cbor.Marshal(statusPayload{
-			RootEpoch: status.RootEpoch, ShardEpoch: status.ShardEpoch,
-			Generation: status.Generation, ReservedRound: status.ReservedRound,
-			HasReservation: status.HasReservation, ResponseRetained: status.ResponseRetained,
-			Faulted: status.Faulted, KeyLost: status.KeyLost,
-		})
+		return types.Cbor.Marshal(statusPayloadOf(s.authority.Status()))
 	case opEnrollment:
 		enrollment, err := types.Cbor.Marshal(s.authority.Enrollment())
 		if err != nil {
