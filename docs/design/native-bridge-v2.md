@@ -303,7 +303,21 @@ proof is carried. An RPC log listing or a transaction inclusion proof alone is n
 
 Token, predicate, transfer, certification and inclusion-proof wire formats are the SDK's, unchanged (`protocol/interop.md`
 "SDK wire" lists them byte for byte, with the strict unlock-recovery, time and refresh rules of protocol 7, which carry
-over unchanged). Owners are signature predicates; the first burn is terminal.
+over unchanged). Owners are signature predicates; the first burn is terminal. For reading this document:
+
+```
+P     = tag(39032, [1, b(encode_uint(type)), b(params)])    // type 1: signature, params key33; type 2: burn, params H_U(R)
+M     = tag(39041, [2, network, P0, b(salt32), b(ty32), b(J), b(data), e])
+T     = tag(39045, [2, Pnext, b(mask32), dataOrNull, e])
+CD    = tag(39031, [2, Psource, b(sourceHash32), b(txHash32), e, b(unlock65)])
+Token = tag(39040, [2, [M, proof0], [[T1, proof1], ...]])
+proof = tag(39033, [1, CD, t, b(bitmap32 || siblings32...), UC])
+txHash = H_U(exact tagged M or T bytes)        sid = H_U(C(Psource, b(sourceHash32)))
+```
+
+Each transaction is certified by the aggregator through its inclusion proof, whose UC is judged under Section 11.3.
+Intermediate transfers carry null data; a token ends either in its split-manifest burn or, for the returned part, in
+the return burn of Section 8.
 
 Splits use the SDK's burn-and-mint `TokenSplit` with the protocol 6 lineage formats, unchanged: manifest
 `tag(39046, [b(root32)])`, allocation tree leaves `H_U(0x10 || key32 || data32 || u256(v))`, nodes
