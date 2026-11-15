@@ -165,7 +165,8 @@ class ImageTags(unittest.TestCase):
         ok={'services':{'root1':{'image':self.ID}}}
         self.assertIs(generate.immutable(ok),ok)
         source=(Path(__file__).parent/'generate.py').read_text()
-        self.assertEqual(source.count("write(out/'compose.yaml',immutable(topology("),2,'every compose.yaml the generator writes is checked')
+        self.assertEqual(source.count("=immutable(topology("),2,'every compose.yaml the generator writes is checked')
+        self.assertIn("write(out/'compose.yaml',boot)",source); self.assertIn("write(out/'compose.yaml',final)",source)
     def test_build_tags_by_id_and_never_moves_a_tag(self):
         import imagetag
         calls=[]; present={}; resolves={}
@@ -271,6 +272,37 @@ class UtbProfile(unittest.TestCase):
                 state=[m for m in cfg['services']['%s%d'%(part,i)]['volumes'] if m.endswith(':/state')]
                 self.assertEqual(len(state),1,'the store lives on the entity\'s persistent volume')
                 self.assertNotIn(':ro',state[0])
+    def boot(self,n,pin):
+        """the compose main() starts the authorities from (only the arguments known before the genesis: no ureth flags, no PoS)"""
+        with tempfile.TemporaryDirectory() as tmp:
+            out=Path(tmp)/'tn-fixture';out.mkdir()
+            return generate.topology(out,n,{'root':['r%d'%i for i in range(n)],'evm':['e%d'%i for i in range(n)]},self.images,'captcha',utb=pin)
+    def test_every_authority_is_pinned_to_the_utb_lineage(self):
+        for i in (1,2,3,4):
+            entry=self.topo(4,self.PIN)['services']['authority%d'%i]['entrypoint']
+            self.assertEqual(entry[entry.index('--lineage-genesis-trust-base')+1],'/network/trust-base.json')
+            self.assertIn('--lineage-utb-genesis',entry,'bft-core#1091: a UTB chain\'s authority verifies the first activation only with the UTB genesis')
+            plain=self.topo(4,None)['services']['authority%d'%i]['entrypoint']
+            self.assertNotIn('--lineage-utb-genesis',plain)
+    def test_the_authorities_are_started_with_the_entrypoints_of_the_final_compose(self):
+        # bft-core#1091: the authorities were started from a first compose written without the UTB pin and never recreated
+        generate.check_authorities_unchanged(self.boot(4,self.PIN),self.topo(4,self.PIN),4)
+        with self.assertRaisesRegex(RuntimeError,'never recreated'):
+            generate.check_authorities_unchanged(self.boot(4,None),self.topo(4,self.PIN),4)
+        # astra on #1090: the whole service, not only its arguments
+        import copy
+        for field,change in (('image',lambda svc: svc.__setitem__('image','sha256:'+'b'*64)),
+                             ('volumes',lambda svc: svc.__setitem__('volumes',[v.replace('./network:','./network-other:') for v in svc['volumes']])),
+                             ('command',lambda svc: svc.__setitem__('command',['--extra'])),
+                             ('environment',lambda svc: svc.__setitem__('environment',{'UBFT_LINEAGE_UTB_GENESIS':'false'})),
+                             ('entrypoint',lambda svc: svc['entrypoint'].append('--recovery-unchecked-advance'))):
+            final=copy.deepcopy(self.topo(4,self.PIN))
+            change(final['services']['authority3'])
+            with self.assertRaisesRegex(RuntimeError,r"authority3 .*\b"+field+r"\b",msg=field):
+                generate.check_authorities_unchanged(self.boot(4,self.PIN),final,4)
+        source=(Path(generate.__file__)).read_text()
+        self.assertRegex(source,r"boot=immutable\(topology\([^\n]*utb=utb_pin",'main() starts the authorities from a compose that carries the UTB pin')
+        self.assertIn('check_authorities_unchanged(boot,final,a.validators)',source)
     def test_the_aggregator_gets_the_pin_and_a_writable_store_of_its_own(self):
         agg=self.topo(4,self.PIN)['services']['aggregator']
         env=agg['environment']

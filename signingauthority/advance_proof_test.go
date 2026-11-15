@@ -300,6 +300,109 @@ func TestALaggingLineageCatchesUpAndAuthenticatesTheProvisionedTip(t *testing.T)
 	require.ErrorIs(t, err, ErrContextMismatch)
 }
 
+// bft-core#1114: a member that joins at root epoch 3 has its authority provisioned with the epoch-3 trust before that epoch activates
+// (it attests possession for the handoff), so the trust's boundary is a guess: in a UTB chain the activation round is fixed only by the
+// old committee's commit. Its lineage, pinned at the genesis, catches up through epoch 2, authenticates the provisioned epoch-3
+// committee and from then on holds the lineage's epoch-3 trust, and the next handoff advances it to epoch 4. A provisioned trust of
+// the same epoch whose committee is not the lineage's is still refused.
+func TestAJoinedMemberAuthenticatesItsProvisionedCommitteeAndAdvances(t *testing.T) {
+	f1 := q3fixture.New(t, q3fixture.Options{UTB: true})
+	f2 := q3fixture.New(t, q3fixture.Options{UTB: true, After: f1})
+	f3 := q3fixture.New(t, q3fixture.Options{UTB: true, After: f2})
+	lineage3 := f2.History.Tip().Projection()
+	require.EqualValues(t, 3, lineage3.Epoch)
+	prepared := func(edit func(tb *types.RootTrustBaseV1)) *types.RootTrustBaseV1 {
+		tb := f2.History.Tip().Projection()
+		tb.EpochStart = 400000 // the drive's prepare-time boundary (handoff_drive.epoch_start), not the committed activation round
+		require.NotEqual(t, lineage3.EpochStart, tb.EpochStart)
+		if edit != nil {
+			edit(tb)
+		}
+		return tb
+	}
+	joiner := func(t *testing.T, provisioned *types.RootTrustBaseV1) *Authority {
+		a := proofAuthority(t, f1, 0)
+		a.mu.Lock()
+		a.enroll.RootEpoch = PinRootEpoch(3)
+		a.trust = currentTrust{base: provisioned}
+		a.mu.Unlock()
+		res, err := a.AdvanceWithProof(context.Background(), bundleOf(t, f1))
+		require.NoError(t, err, "the earlier proof extends the lineage")
+		require.False(t, res.Advanced)
+		require.EqualValues(t, 2, res.LineageEpoch)
+		return a
+	}
+
+	t.Run("the next handoff", func(t *testing.T) {
+		a := joiner(t, prepared(nil))
+		gen := a.Status().Generation
+		res, err := a.AdvanceWithProof(context.Background(), bundleOf(t, f2))
+		require.NoError(t, err, "the provisioned committee is the lineage's")
+		require.False(t, res.Advanced)
+		require.False(t, res.Replay)
+		require.EqualValues(t, 3, res.RootEpoch)
+		require.EqualValues(t, 3, res.LineageEpoch)
+		require.Equal(t, gen, res.Generation, "the scope is unchanged: no fence")
+		require.True(t, a.Status().SessionIssued)
+		held, err := a.trust.GetByEpoch(context.Background(), 3)
+		require.NoError(t, err)
+		require.Equal(t, lineage3.EpochStart, held.EpochStart, "the authority holds the lineage's boundary from now on")
+
+		res, err = a.AdvanceWithProof(context.Background(), bundleOf(t, f3))
+		require.NoError(t, err)
+		require.True(t, res.Advanced)
+		require.EqualValues(t, 4, res.RootEpoch)
+		require.EqualValues(t, 4, res.LineageEpoch)
+		// the drive's resume sends the target's bundle again: a replay
+		res, err = a.AdvanceWithProof(context.Background(), bundleOf(t, f3))
+		require.NoError(t, err)
+		require.True(t, res.Replay)
+	})
+
+	t.Run("a held trust whose boundary is not the lineage's is refused at the advance from it", func(t *testing.T) {
+		a := joiner(t, prepared(nil))
+		_, err := a.AdvanceWithProof(context.Background(), bundleOf(t, f2))
+		require.NoError(t, err)
+		a.mu.Lock()
+		a.trust = currentTrust{base: prepared(nil)}
+		a.mu.Unlock()
+		_, err = a.AdvanceWithProof(context.Background(), bundleOf(t, f3))
+		require.ErrorIs(t, err, ErrContextMismatch)
+		require.EqualValues(t, 3, a.Status().RootEpoch)
+	})
+
+	other := q3fixture.New(t, q3fixture.Options{UTB: true, After: f1, Weights: []uint64{5, 2, 1, 1}}).History.Tip().Projection()
+	require.EqualValues(t, 3, other.Epoch)
+	different := map[string]*types.RootTrustBaseV1{
+		"another epoch-3 committee": other,
+		"a member's key": prepared(func(tb *types.RootTrustBaseV1) {
+			tb.RootNodes[0].SigKey = bytes.Clone(tb.RootNodes[1].SigKey)
+		}),
+		"a member's weight": prepared(func(tb *types.RootTrustBaseV1) { tb.RootNodes[0].Stake++ }),
+		"the threshold":     prepared(func(tb *types.RootTrustBaseV1) { tb.QuorumThreshold++ }),
+		"the network":       prepared(func(tb *types.RootTrustBaseV1) { tb.NetworkID++ }),
+		"a member listed twice for one left out": prepared(func(tb *types.RootTrustBaseV1) {
+			n := tb.RootNodes[0]
+			tb.RootNodes[1] = &types.NodeInfo{NodeID: n.NodeID, SigKey: bytes.Clone(n.SigKey), Stake: n.Stake}
+		}),
+		"a member fewer": prepared(func(tb *types.RootTrustBaseV1) { tb.RootNodes = tb.RootNodes[1:] }),
+	}
+	for name, provisioned := range different {
+		t.Run(name, func(t *testing.T) {
+			a := joiner(t, provisioned)
+			before := a.Status()
+			_, err := a.AdvanceWithProof(context.Background(), bundleOf(t, f2))
+			require.ErrorIs(t, err, ErrContextMismatch)
+			require.Equal(t, before, a.Status(), "nothing changes: the lineage stays at 2")
+			held, err := a.trust.GetByEpoch(context.Background(), 3)
+			require.NoError(t, err)
+			require.Same(t, provisioned, held)
+			_, err = a.AdvanceWithProof(context.Background(), bundleOf(t, f3))
+			require.ErrorIs(t, err, ErrLineageUnverified, "and the next epoch does not follow the lineage's tip")
+		})
+	}
+}
+
 func TestTheUncheckedAdvanceIsRecoveryOnly(t *testing.T) {
 	f := q3fixture.New(t, q3fixture.Options{})
 	next := f.History.Tip().Projection()
@@ -464,4 +567,26 @@ func TestARetiredAuthorityAttestsNoPossession(t *testing.T) {
 	}
 	close(done)
 	wg.Wait()
+}
+
+// bft-core#1091: on a UTB chain the authority advances when its lineage is pinned as a UTB genesis, and refuses the activation (changing
+// nothing) when it is not.
+func TestAUTBChainAdvancesOnlyAUTBPinnedAuthority(t *testing.T) {
+	f := q3fixture.New(t, q3fixture.Options{UTB: true})
+	require.True(t, f.UTB)
+	a := proofAuthority(t, f, 0) // pinned WithLineage(f.Old, f.UTB)
+	res, err := a.AdvanceWithProof(context.Background(), bundleOf(t, f))
+	require.NoError(t, err)
+	require.True(t, res.Advanced)
+
+	conf := f.ShardConf
+	b, err := New(Enrollment{AuthorityID: "b", NodeID: conf.Validators[0].NodeID, NetworkID: conf.NetworkID, PartitionID: conf.PartitionID, ShardID: conf.ShardID,
+		ShardEpoch: conf.Epoch, RootEpoch: PinRootEpoch(1), Profile: ProfileLegacyBCRv1}, currentTrust{base: f.Old}, WithLineage(f.Old, false))
+	require.NoError(t, err)
+	giveKey(t, b, f.GenesisEVM[0].Signer)
+	require.NoError(t, b.CompleteEnrollment(conf))
+	_, err = b.AdvanceWithProof(context.Background(), bundleOf(t, f))
+	require.ErrorIs(t, err, ErrLineageUnverified)
+	require.ErrorContains(t, err, "UTB envelope")
+	require.EqualValues(t, 1, b.Status().RootEpoch)
 }
