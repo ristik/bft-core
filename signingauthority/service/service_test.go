@@ -64,7 +64,10 @@ func socketDir(t *testing.T) string {
 
 func newFixture(t *testing.T) *fixture { return newFixtureWithLog(t, nil) }
 
-func newFixtureWithLog(t *testing.T, log *slog.Logger) *fixture {
+func newFixtureWithLog(t *testing.T, log *slog.Logger) *fixture { return newFixtureWith(t, log, nil) }
+
+// newFixtureWith builds the fixture with authority options; pin, when set, is given the fixture's own trust base as its lineage pin.
+func newFixtureWith(t *testing.T, log *slog.Logger, options func(tb *types.RootTrustBaseV1) []signingauthority.Option) *fixture {
 	t.Helper()
 	rootSigner, err := abcrypto.NewInMemorySecp256K1Signer()
 	require.NoError(t, err)
@@ -90,7 +93,7 @@ func newFixtureWithLog(t *testing.T, log *slog.Logger) *fixture {
 		AuthorityID: "authority-1", NodeID: "node-1", NetworkID: 5, PartitionID: testPartitionID,
 		ShardID: types.ShardID{}, ShardEpoch: 0, RootEpoch: signingauthority.PinRootEpoch(1),
 		ShardConfHash: confHash, Profile: signingauthority.ProfileLegacyBCRv1,
-	}, staticTrust{tb: tb})
+	}, staticTrust{tb: tb}, fixtureOptions(options, tb)...)
 	require.NoError(t, err)
 	t.Cleanup(authority.Close)
 
@@ -396,7 +399,7 @@ func TestTheClientOffersSigningAndReadOnlyRestoreStatus(t *testing.T) {
 	for i := 0; i < reflect.TypeOf(&OperatorClient{}).NumMethod(); i++ {
 		operatorMethods = append(operatorMethods, reflect.TypeOf(&OperatorClient{}).Method(i).Name)
 	}
-	require.ElementsMatch(t, []string{"AdvanceEpoch", "Close", "CompleteEnrollment", "Enrollment", "ReplaceSession", "SignDelegationPossession", "SignElectionPoP", "SignHandoffPoP", "Status"}, operatorMethods,
+	require.ElementsMatch(t, []string{"AdvanceEpoch", "AdvanceWithProof", "Close", "CompleteEnrollment", "Enrollment", "ReplaceSession", "SignDelegationPossession", "SignElectionPoP", "SignHandoffPoP", "Status"}, operatorMethods,
 		"and the control plane signs nothing but the three possession messages (its own key, each recomputed from typed inputs), never a certification")
 }
 
@@ -985,4 +988,11 @@ func TestAZeroTimeoutReloadingClientSharesOneDefaultBudget(t *testing.T) {
 	defer cancel2()
 	d2, _ := ctx2.Deadline()
 	require.Less(t, time.Until(d2), 2*time.Second, "an earlier caller deadline is kept")
+}
+
+func fixtureOptions(options func(*types.RootTrustBaseV1) []signingauthority.Option, tb *types.RootTrustBaseV1) []signingauthority.Option {
+	if options == nil {
+		return nil
+	}
+	return options(tb)
 }

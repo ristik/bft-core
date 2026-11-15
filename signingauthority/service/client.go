@@ -131,7 +131,8 @@ func (c *Client) RestoreStatus(ctx context.Context) (signingauthority.Status, er
 	return signingauthority.Status{RootEpoch: wire.RootEpoch, ShardEpoch: wire.ShardEpoch,
 		Generation: wire.Generation, ReservedRound: wire.ReservedRound,
 		HasReservation: wire.HasReservation, ResponseRetained: wire.ResponseRetained,
-		Faulted: wire.Faulted, KeyLost: wire.KeyLost}, nil
+		Faulted: wire.Faulted, KeyLost: wire.KeyLost,
+		LineagePinned: wire.LineagePinned, LineageEpoch: wire.LineageEpoch, Retired: wire.Retired, SessionIssued: wire.SessionIssued}, nil
 }
 
 func encodeRequest(req signingauthority.Request) ([]byte, error) {

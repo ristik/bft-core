@@ -70,7 +70,16 @@ const (
 	// opSignElectionPoP and opSignDelegationPossession ask for the two EVM possession signatures of the P85 contracts. Operator channel only.
 	opSignElectionPoP          op = 107
 	opSignDelegationPossession op = 108
+	// opAdvanceWithProof is the proof-verified advance (#1085): one root activation bundle, which the authority verifies against its own
+	// lineage. Operator channel only. It is bounded by the frame like every message: one activation per call.
+	opAdvanceWithProof op = 109
 )
+
+// MaxAdvanceProofBytes is the largest activation bundle one opAdvanceWithProof can carry: the frame less an allowance for the request's
+// own fields. It is the bound in force for a signing authority (activationproof.MaxBundleBytes, the envelope's own 16 MiB, is looser); a
+// root's one-activation bundle of a committee of the profile's 16 members is a small fraction of it. The operator CLI checks a proof file
+// against it before reading the file.
+const MaxAdvanceProofBytes = MaxFrameBytes - 4*1024
 
 func (o op) servedToClient() bool {
 	switch o {
@@ -82,7 +91,8 @@ func (o op) servedToClient() bool {
 
 func (o op) servedToOperator() bool {
 	switch o {
-	case opReplaceSession, opStatus, opEnrollment, opCompleteEnrollment, opAdvanceEpoch, opSignHandoffPoP, opSignElectionPoP, opSignDelegationPossession:
+	case opReplaceSession, opStatus, opEnrollment, opCompleteEnrollment, opAdvanceEpoch, opSignHandoffPoP, opSignElectionPoP, opSignDelegationPossession,
+		opAdvanceWithProof:
 		return true
 	}
 	return false
@@ -116,6 +126,8 @@ func (o op) String() string {
 		return "sign-election-pop"
 	case opSignDelegationPossession:
 		return "sign-delegation-possession"
+	case opAdvanceWithProof:
+		return "advance-with-proof"
 	}
 	return fmt.Sprintf("unknown(%d)", uint64(o))
 }
@@ -170,6 +182,42 @@ type statusPayload struct {
 	KeyLost          bool
 	RootEpoch        uint64
 	ShardEpoch       uint64
+	// the proof-verified advance (#1085); an authority before it answers statusPayloadV2
+	LineagePinned bool
+	LineageEpoch  uint64
+	Retired       bool
+	SessionIssued bool
+}
+
+// statusPayloadV2 is the layout with the epochs and before the lineage fields.
+type statusPayloadV2 struct {
+	_                struct{} `cbor:",toarray"`
+	Generation       uint64
+	ReservedRound    uint64
+	HasReservation   bool
+	ResponseRetained bool
+	Faulted          bool
+	KeyLost          bool
+	RootEpoch        uint64
+	ShardEpoch       uint64
+}
+
+func statusPayloadOf(st signingauthority.Status) statusPayload {
+	return statusPayload{RootEpoch: st.RootEpoch, ShardEpoch: st.ShardEpoch, Generation: st.Generation, ReservedRound: st.ReservedRound,
+		HasReservation: st.HasReservation, ResponseRetained: st.ResponseRetained, Faulted: st.Faulted, KeyLost: st.KeyLost,
+		LineagePinned: st.LineagePinned, LineageEpoch: st.LineageEpoch, Retired: st.Retired, SessionIssued: st.SessionIssued}
+}
+
+// advanceResultPayload answers opAdvanceWithProof.
+type advanceResultPayload struct {
+	_            struct{} `cbor:",toarray"`
+	Epoch        uint64
+	Replay       bool
+	Advanced     bool
+	Retired      bool
+	RootEpoch    uint64
+	ShardEpoch   uint64
+	LineageEpoch uint64
 }
 
 // statusPayloadV1 is the first status layout, before the root and shard epochs were added: the six fields an authority built before
@@ -194,6 +242,11 @@ func decodeStatus(raw []byte) (statusPayload, error) {
 	currentErr := types.Cbor.Unmarshal(raw, &current)
 	if currentErr == nil {
 		return current, nil
+	}
+	var v2 statusPayloadV2
+	if err := types.Cbor.Unmarshal(raw, &v2); err == nil {
+		return statusPayload{Generation: v2.Generation, ReservedRound: v2.ReservedRound, HasReservation: v2.HasReservation, ResponseRetained: v2.ResponseRetained,
+			Faulted: v2.Faulted, KeyLost: v2.KeyLost, RootEpoch: v2.RootEpoch, ShardEpoch: v2.ShardEpoch}, nil
 	}
 	var v1 statusPayloadV1
 	if err := types.Cbor.Unmarshal(raw, &v1); err != nil {

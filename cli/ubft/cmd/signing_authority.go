@@ -61,6 +61,7 @@ Deployment order:
 	cmd.AddCommand(signingAuthorityNodeInfoCmd(baseFlags))
 	cmd.AddCommand(signingAuthorityCompleteEnrollmentCmd(baseFlags))
 	cmd.AddCommand(signingAuthorityAdvanceEpochCmd(baseFlags))
+	cmd.AddCommand(signingAuthorityAdvanceWithProofCmd(baseFlags))
 	cmd.AddCommand(signingAuthorityReplaceSessionCmd(baseFlags))
 	cmd.AddCommand(signingAuthorityStatusCmd(baseFlags))
 	return cmd
@@ -81,6 +82,11 @@ type signingAuthorityRunFlags struct {
 	ShardID     string
 	ShardEpoch  uint64
 	RootEpoch   uint64
+
+	// the lineage pin of the proof-verified advance (#1085)
+	LineageGenesis   string
+	LineageUTB       bool
+	UncheckedAdvance bool
 }
 
 func signingAuthorityRunCmd(baseFlags *baseFlags) *cobra.Command {
@@ -106,6 +112,11 @@ key exists: the authority starts pending and admits no client until complete-enr
 	cmd.Flags().StringVar(&flags.ShardID, "shard-id", "0x80", "the shard id in hex format with 0x prefix")
 	cmd.Flags().Uint64Var(&flags.ShardEpoch, "shard-epoch", 0, "the shard configuration epoch this authority signs for; a later epoch is refused, not followed")
 	cmd.Flags().Uint64Var(&flags.RootEpoch, "root-epoch", 0, "the root trust epoch this authority signs for; a later epoch is refused, not followed")
+	cmd.Flags().StringVar(&flags.LineageGenesis, "lineage-genesis-trust-base", "", "the deployment's genesis root trust base (epoch 1): the pin this "+
+		"authority verifies every activation from (advance-with-proof). Without it the authority advances only by the operator-trusted advance-epoch")
+	cmd.Flags().BoolVar(&flags.LineageUTB, "lineage-utb-genesis", false, "with --lineage-genesis-trust-base: the chain is a UTB chain (its genesis epoch endorses the signed trust-base entry)")
+	cmd.Flags().BoolVar(&flags.UncheckedAdvance, "recovery-unchecked-advance", false, "with --lineage-genesis-trust-base: also admit the operator-trusted "+
+		"advance-epoch, a recovery policy (it installs the operator's trust and configuration with structural checks only)")
 	for _, name := range []string{"client-socket", "operator-socket", "operator-credential", "authority-id", "node-id", "network-id", "partition-id", "shard-epoch", "root-epoch", "trust-base"} {
 		if err := cmd.MarkFlagRequired(name); err != nil {
 			panic(err)
@@ -145,12 +156,16 @@ func signingAuthorityRun(ctx context.Context, flags *signingAuthorityRunFlags) e
 		return fmt.Errorf("failed to parse shard id: %w", err)
 	}
 
+	opts, err := flags.lineageOptions(log)
+	if err != nil {
+		return err
+	}
 	// The key is generated here. The enrollment has no configuration hash yet, on purpose.
 	authority, err := signingauthority.New(signingauthority.Enrollment{
 		AuthorityID: flags.AuthorityID, NodeID: flags.NodeID, NetworkID: types.NetworkID(flags.NetworkID),
 		PartitionID: types.PartitionID(flags.PartitionID), ShardID: shardID, ShardEpoch: flags.ShardEpoch,
 		RootEpoch: signingauthority.PinRootEpoch(flags.RootEpoch), Profile: signingauthority.ProfileLegacyBCRv1,
-	}, trust)
+	}, trust, opts...)
 	if err != nil {
 		return err
 	}
@@ -191,6 +206,27 @@ func signingAuthorityRun(ctx context.Context, flags *signingAuthorityRunFlags) e
 		return nil
 	})
 	return g.Wait()
+}
+
+// lineageOptions are the authority options of the lineage flags: the pinned genesis (#1085) and the explicit recovery policy.
+func (flags *signingAuthorityRunFlags) lineageOptions(log interface{ Warn(string, ...any) }) ([]signingauthority.Option, error) {
+	if flags.LineageGenesis == "" {
+		if flags.LineageUTB || flags.UncheckedAdvance {
+			return nil, errors.New("--lineage-utb-genesis and --recovery-unchecked-advance need --lineage-genesis-trust-base")
+		}
+		log.Warn("signing authority without a lineage pin: it advances only by the operator-trusted advance-epoch (pass --lineage-genesis-trust-base)")
+		return nil, nil
+	}
+	genesis, err := util.ReadJsonFile(flags.LineageGenesis, &types.RootTrustBaseV1{})
+	if err != nil {
+		return nil, fmt.Errorf("loading the lineage genesis trust base: %w", err)
+	}
+	opts := []signingauthority.Option{signingauthority.WithLineage(genesis, flags.LineageUTB)}
+	if flags.UncheckedAdvance {
+		log.Warn("signing authority admits the operator-trusted advance-epoch (--recovery-unchecked-advance): a recovery policy")
+		opts = append(opts, signingauthority.WithUncheckedAdvance())
+	}
+	return opts, nil
 }
 
 type signingAuthorityOperatorFlags struct {
@@ -342,6 +378,144 @@ func signingAuthorityAdvanceEpochCmd(baseFlags *baseFlags) *cobra.Command {
 	return cmd
 }
 
+/*
+advance-with-proof is the operator's one local operation per entity (#1085): it hands the authority the root activation bundles, one call
+each in epoch order, and the authority verifies each against its own lineage before it changes anything; then, when the scope changed or
+no session has been issued since it last changed, it replaces the session and writes the new client credential. Rerunning it with the
+same bundles is a no-op that only repairs a missing credential, so a crash between the advance and the credential is repaired by a rerun.
+*/
+func signingAuthorityAdvanceWithProofCmd(baseFlags *baseFlags) *cobra.Command {
+	flags := &signingAuthorityOperatorFlags{baseFlags: baseFlags}
+	var proofs []string
+	var out, clientSocket string
+	cmd := &cobra.Command{
+		Use:   "advance-with-proof",
+		Short: "Advance the authority by root activation bundles it verifies itself, then issue the next client credential",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			operator, err := flags.operator()
+			if err != nil {
+				return err
+			}
+			defer func() { _ = operator.Close() }()
+			current := func(ctx context.Context) error { return checkClientCredential(ctx, clientSocket, out, flags.Timeout) }
+			report, err := advanceWithProof(cmd.Context(), operator, proofs, out, current)
+			if err != nil {
+				return err
+			}
+			encoder := json.NewEncoder(cmd.OutOrStdout())
+			encoder.SetIndent("", "  ")
+			return encoder.Encode(report)
+		},
+	}
+	flags.addOperatorFlags(cmd)
+	cmd.Flags().StringArrayVar(&proofs, "proof", nil, "a root activation bundle file (the q3/bundle encoding), repeated in epoch order")
+	cmd.Flags().StringVar(&out, "out", "", "path of the client credential file written when a session is issued; an existing file is replaced")
+	cmd.Flags().StringVar(&clientSocket, "client-socket", "", "the authority's client socket: a session already issued is checked with the credential in --out, "+
+		"and replaced when that credential is fenced or missing (a lost replacement answer, or a crash before the credential was written)")
+	_ = cmd.MarkFlagRequired("proof")
+	_ = cmd.MarkFlagRequired("client-socket")
+	_ = cmd.MarkFlagRequired("out")
+	return cmd
+}
+
+// advanceWithProofReport is what advance-with-proof prints.
+type advanceWithProofReport struct {
+	Steps         []signingauthority.AdvanceResult `json:"steps"`
+	Advanced      bool                             `json:"advanced"`
+	Retired       bool                             `json:"retired"`
+	SessionIssued bool                             `json:"sessionIssued"`
+	RootEpoch     uint64                           `json:"rootEpoch"`
+	ShardEpoch    uint64                           `json:"shardEpoch"`
+	LineageEpoch  uint64                           `json:"lineageEpoch"`
+}
+
+// advanceOperator is the part of the operator client advance-with-proof uses.
+type advanceOperator interface {
+	AdvanceWithProof(ctx context.Context, bundle []byte) (signingauthority.AdvanceResult, error)
+	Status(ctx context.Context) (signingauthority.Status, error)
+	ReplaceSession(ctx context.Context) ([]byte, error)
+}
+
+// checkClientCredential asks the authority's client socket for its status with the credential in path: nil when that credential is the
+// admitted one.
+func checkClientCredential(ctx context.Context, socket, path string, timeout time.Duration) error {
+	credential, err := readCredentialFile(path)
+	if err != nil {
+		return err
+	}
+	client, err := service.NewClient(service.ClientConfig{Dial: service.UnixDialer(socket), Credential: credential, Timeout: timeout})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = client.Close() }()
+	_, err = client.RestoreStatus(ctx)
+	return err
+}
+
+func advanceWithProof(ctx context.Context, operator advanceOperator, proofs []string, out string, current func(context.Context) error) (advanceWithProofReport, error) {
+	var report advanceWithProofReport
+	status, err := operator.Status(ctx)
+	if err != nil {
+		return report, err
+	}
+	if len(proofs) == 0 {
+		return report, errors.New("no activation bundle: pass at least the target epoch's (a resume replays it)")
+	}
+	if current == nil {
+		return report, errors.New("no check of the current client credential")
+	}
+	for _, path := range proofs {
+		info, err := os.Stat(path)
+		if err != nil {
+			return report, err
+		}
+		if info.Size() > service.MaxAdvanceProofBytes {
+			return report, fmt.Errorf("%s: %d bytes, an activation proof is at most %d", path, info.Size(), service.MaxAdvanceProofBytes)
+		}
+		raw, err := os.ReadFile(path) // #nosec G304 -- operator-supplied proof path
+		if err != nil {
+			return report, err
+		}
+		res, err := operator.AdvanceWithProof(ctx, raw)
+		if err != nil {
+			return report, fmt.Errorf("%s: %w", path, err)
+		}
+		report.Steps = append(report.Steps, res)
+		report.Advanced = report.Advanced || res.Advanced
+	}
+	if status, err = operator.Status(ctx); err != nil {
+		return report, err
+	}
+	report.Retired, report.RootEpoch, report.ShardEpoch, report.LineageEpoch = status.Retired, status.RootEpoch, status.ShardEpoch, status.LineageEpoch
+	// the session is issued when none was since the scope last changed, or when the one issued is not the credential in --out (its
+	// answer was lost, or the file was never written): success is never reported without --out holding the admitted credential
+	issue := !status.Retired && !status.SessionIssued
+	if !issue && !status.Retired {
+		if err := current(ctx); err != nil {
+			if !errors.Is(err, signingauthority.ErrFenced) && !errors.Is(err, os.ErrNotExist) {
+				return report, fmt.Errorf("checking the current client credential: %w", err)
+			}
+			issue = true // issued, but its credential never reached the file
+		}
+	}
+	if issue {
+		credential, err := operator.ReplaceSession(ctx)
+		if err != nil {
+			return report, err
+		}
+		if err := writeCredentialFile(out, credential, true); err != nil {
+			return report, fmt.Errorf("the session was replaced, so the previous credential is fenced, but the new one could not be written (run again): %w", err)
+		}
+		report.SessionIssued = true
+	}
+	if !status.Retired {
+		if err := current(ctx); err != nil {
+			return report, fmt.Errorf("the credential in %s is not the admitted one: %w", out, err)
+		}
+	}
+	return report, nil
+}
+
 func signingAuthorityReplaceSessionCmd(baseFlags *baseFlags) *cobra.Command {
 	flags := &signingAuthorityOperatorFlags{baseFlags: baseFlags}
 	var out string
@@ -395,6 +569,10 @@ type signingAuthorityStatus struct {
 	ResponseRetained      bool   `json:"responseRetained"`
 	Faulted               bool   `json:"faulted"`
 	KeyLost               bool   `json:"keyLost"`
+	LineagePinned         bool   `json:"lineagePinned"`
+	LineageEpoch          uint64 `json:"lineageEpoch"`
+	Retired               bool   `json:"retired"`
+	SessionIssued         bool   `json:"sessionIssued"`
 }
 
 func signingAuthorityStatusCmd(baseFlags *baseFlags) *cobra.Command {
@@ -425,6 +603,7 @@ func signingAuthorityStatusCmd(baseFlags *baseFlags) *cobra.Command {
 				SigningKeyFingerprint: hex.EncodeToString(fingerprint[:]),
 				Generation:            status.Generation, HasReservation: status.HasReservation, ReservedRound: status.ReservedRound,
 				ResponseRetained: status.ResponseRetained, Faulted: status.Faulted, KeyLost: status.KeyLost,
+				LineagePinned: status.LineagePinned, LineageEpoch: status.LineageEpoch, Retired: status.Retired, SessionIssued: status.SessionIssued,
 			}
 			if enrollment.RootEpoch != nil {
 				out.RootEpoch = *enrollment.RootEpoch

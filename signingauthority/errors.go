@@ -95,3 +95,15 @@ var (
 
 // ErrNoHashSigner is an authority whose key cannot sign a 32-byte digest: the EVM possession proofs need the key's raw ECDSA over a keccak digest.
 var ErrNoHashSigner = errors.New("signing-key-cannot-sign-a-digest")
+
+// Errors of the proof-verified advance (#1085).
+var (
+	// ErrRetired is an authority whose validator an authenticated activation removed: it signs nothing further in this lifetime.
+	ErrRetired = errors.New("signing-retired")
+	// ErrRecoveryOnly is the operator-trusted advance asked of an authority that verifies its own lineage, without the recovery policy.
+	ErrRecoveryOnly = errors.New("signing-advance-recovery-only")
+	// ErrLineageUnverified is an activation proof the authority could not verify from its own pin and tip.
+	ErrLineageUnverified = errors.New("signing-lineage-unverified")
+	// ErrAdvanceBusy is a proof advance asked while another is being verified.
+	ErrAdvanceBusy = errors.New("signing-advance-busy")
+)

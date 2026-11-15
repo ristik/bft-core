@@ -88,7 +88,7 @@ func TestStatusFromAnAuthorityBuiltBeforeTheEpochsReadsWithZeroEpochs(t *testing
 	}
 }
 
-// Only the two layouts the client knows are accepted: any other length (a future layout, damage, a different message) is refused.
+// Only the three layouts the client knows are accepted (six fields, eight with the epochs, twelve with the lineage of #1085): any other length (a future layout, damage, a different message) is refused.
 // Every array is built from correctly typed fields in the status order, so length is the only thing a refused one gets wrong: the
 // same builder's six- and eight-field arrays decode.
 func TestStatusDecoderRefusesEveryUnknownLayout(t *testing.T) {
@@ -99,12 +99,12 @@ func TestStatusDecoderRefusesEveryUnknownLayout(t *testing.T) {
 	require.EqualValues(t, 2, decoded.RootEpoch)
 	require.EqualValues(t, 3, decoded.ShardEpoch)
 
-	fields := []any{uint64(7), uint64(12), true, false, true, false, uint64(2), uint64(3), uint64(4), uint64(5), uint64(6)}
+	fields := []any{uint64(7), uint64(12), true, false, true, false, uint64(2), uint64(3), true, uint64(4), false, true, uint64(6)}
 	for n := 0; n <= len(fields); n++ {
 		raw, err := types.Cbor.Marshal(fields[:n])
 		require.NoError(t, err)
 		_, err = decodeStatus(raw)
-		if n == 6 || n == 8 {
+		if n == 6 || n == 8 || n == 12 {
 			require.NoError(t, err, "%d fields: a known layout", n)
 			continue
 		}

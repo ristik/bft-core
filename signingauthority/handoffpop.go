@@ -55,6 +55,9 @@ func (a *Authority) SignHandoffPoP(req HandoffPoPRequest) (evmassign.PoP, error)
 	if a.state != healthActive {
 		return evmassign.PoP{}, ErrStateUntrusted
 	}
+	if a.retired {
+		return evmassign.PoP{}, fmt.Errorf("%w: a retired authority attests no possession", ErrRetired)
+	}
 	enroll := a.enroll
 	succ := req.Successor
 	if err := a.checkPoPBinding(succ, req.NodeID, req.Context); err != nil {
