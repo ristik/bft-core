@@ -225,16 +225,16 @@ func VerifyReceiptLog(c *Config, t *TrustInput, p *DepositProof) (*ReceiptLog, e
 		return nil, ErrLogIndex
 	}
 	out := &ReceiptLog{Address: [20]byte(l.kids[0].str), Data: l.kids[2].str}
+	if out.Address != c.Vault { // the emitter before the topics (section 6.2 step 5)
+		if err := fail(ErrLogEmitter); err != nil {
+			return nil, err
+		}
+	}
 	for _, tp := range l.kids[1].kids {
 		if tp.list || len(tp.str) != 32 {
 			return nil, ErrLogTopics
 		}
 		out.Topics = append(out.Topics, [32]byte(tp.str))
-	}
-	if out.Address != c.Vault {
-		if err := fail(ErrLogEmitter); err != nil {
-			return nil, err
-		}
 	}
 	return out, nil
 }

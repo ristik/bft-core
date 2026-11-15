@@ -122,11 +122,12 @@ func (g *gen) sealReceipts() error {
 			}
 			vec.Inner = inner.Name
 		} else {
-			vec.Segment, vec.HeadAfter = sr.Segment.Index, h32(sr.Segment.After)
-			vec.BurnIndex, _ = BurnIndex(w.Cfg, sr)
+			vec.Result = sealResult(w.Cfg, sr)
 		}
 		g.f.Seal = append(g.f.Seal, vec)
 	}
+	g.f.Seal = append(g.f.Seal, SealReceiptVector{ID: g.id("no-seal-receipt"), Deployment: "k4", Note: "no receipt held: a = 0, start head H_0",
+		NoReceipt: true, Receipt: Hex{}, Result: sealResult(w.Cfg, nil)})
 	return nil
 }
 
@@ -166,7 +167,7 @@ func (g *gen) gapProofs() error {
 			vec.IDs = append(vec.IDs, h32(x))
 		}
 		if !valid {
-			vec.Expect = Expect{Error: "BadGapProof", Args: []string{"0"}}
+			vec.Expect = expectOf(&PositionError{Rule: ErrBadGapProof, Position: 0})
 		}
 		g.f.Gap = append(g.f.Gap, vec)
 		return nil
@@ -253,10 +254,11 @@ func (g *gen) folds() error {
 		if err == nil && x != stored {
 			err = ErrChainMismatch
 		}
-		if got := expectOf(err); got.Error != want.Error || argStr(got.Args) != argStr(want.Args) {
+		got := expectOf(err)
+		if got.Error != want.Error || argStr(got.Args) != argStr(want.Args) {
 			return fmt.Errorf("fold %s: got %v want %v", id, got, want)
 		}
-		g.f.Folds = append(g.f.Folds, FoldVector{ID: g.id(id), Domain: h32(d), K: k, Eta: h32(eta), Start: a, History: history, StoredHead: h32(stored), Expect: want})
+		g.f.Folds = append(g.f.Folds, FoldVector{ID: g.id(id), Domain: h32(d), K: k, Eta: h32(eta), Start: a, History: history, StoredHead: h32(stored), Expect: got})
 		return nil
 	}
 	h0 := GenesisHead(d, k)
@@ -298,7 +300,7 @@ func (g *gen) folds() error {
 		return fmt.Errorf("fold paid: %v", err)
 	}
 	g.f.Folds = append(g.f.Folds, FoldVector{ID: g.id("fold-paid-in-segment-1"), Domain: h32(d), K: k, Eta: h32(paidEta), Start: 0, History: paidHist,
-		StoredHead: h32(segs[1].After), Expect: Expect{Error: "BadGapProof", Args: []string{"1"}}})
+		StoredHead: h32(segs[1].After), Expect: expectOf(err)})
 	return nil
 }
 
@@ -311,11 +313,15 @@ func (g *gen) segmentLogs() error {
 	ev := sealEvents(v)
 	d, k := w.Cfg.Domain(), w.Cfg.K
 	add := func(id string, j uint64, before [32]byte, data []byte, want string) error {
-		_, err := CheckSegmentLog(d, k, j, before, data)
+		seg, err := CheckSegmentLog(d, k, j, before, data)
 		if e := checkExpect(id, err, want); e != nil {
 			return e
 		}
-		g.f.SegmentLogs = append(g.f.SegmentLogs, SegmentLogVector{ID: g.id(id), Domain: h32(d), K: k, Segment: j, ExpectBefore: h32(before), Data: data, Expect: expectOf(err)})
+		vec := SegmentLogVector{ID: g.id(id), Domain: h32(d), K: k, Segment: j, ExpectBefore: h32(before), Data: data, Expect: expectOf(err)}
+		if seg != nil {
+			vec.Root, vec.HeadAfter = h32(seg.Root), h32(seg.After)
+		}
+		g.f.SegmentLogs = append(g.f.SegmentLogs, vec)
 		return nil
 	}
 	data := SegmentSealedData(ev[1].Before, ev[1].After, ev[1].IDs)
@@ -351,7 +357,8 @@ func (g *gen) wallet() error {
 		if e := checkExpect(id, err, want); e != nil {
 			return e
 		}
-		g.f.Wallet.Capacity = append(g.f.Wallet.Capacity, CapacityVector{ID: g.id(id), Stage: stage, LMax: lMax, LT: lT, LO: lO, K: k, PMax: MaxProofs(lMax, lT, lO, k),
+		pMax, base := MaxProofs(lMax, lT, lO, k)
+		g.f.Wallet.Capacity = append(g.f.Wallet.Capacity, CapacityVector{ID: g.id(id), Stage: stage, LMax: lMax, LT: lT, LO: lO, K: k, PMax: pMax, BaseFits: base,
 			A: a, CObs: cObs, Reserve: reserve, GasBase: gasBase, GasPerProof: gasPerProof, Proofs: p, GasLimit: gas, UserGasLimit: user, Expect: expectOf(err)})
 		return nil
 	}
@@ -387,6 +394,13 @@ func (g *gen) wallet() error {
 		cap("capacity-preflight-evidence-too-large", "preflight", 131072, 131072, 0, 64, 0, 0, 1, 0, 0, 1, 0, 30_000_000, "CapacityPreflight"),
 		cap("capacity-redeem-ok", "redemption", 524288, 20480, 400, 64, 0, 0, 0, 1958, 0, 0, 29_000_000, 30_000_000, ""),
 		cap("capacity-redeem-proofs", "redemption", 524288, 20480, 400, 64, 0, 0, 0, 1959, 0, 0, 29_000_000, 30_000_000, "CapacityExceeded"),
+		cap("capacity-preflight-oversized-base-no-history", "preflight", 100, 101, 0, 64, 0, 0, 0, 0, 0, 0, 0, 30_000_000, "CapacityPreflight"),
+		cap("capacity-preflight-exact-base-no-history", "preflight", 100, 60, 40, 64, 0, 0, 0, 0, 0, 0, 0, 30_000_000, ""),
+		cap("capacity-preflight-size-overflow", "preflight", 524288, ^uint64(0), 1, 64, 0, 0, 64, 0, 0, 1, 0, 30_000_000, "CapacityPreflight"),
+		cap("capacity-preflight-owed-overflow", "preflight", 524288, 1000, 0, 64, 0, ^uint64(0), 64, 0, 0, 0, 0, 30_000_000, "CapacityPreflight"),
+		cap("capacity-redeem-oversized-base-no-history", "redemption", 100, 101, 0, 64, 0, 0, 0, 0, 0, 0, 0, 1, "CapacityExceeded"),
+		cap("capacity-redeem-exact-base-no-history", "redemption", 100, 60, 40, 64, 0, 0, 0, 0, 0, 0, 0, 1, ""),
+		cap("capacity-redeem-size-overflow", "redemption", 524288, ^uint64(0), 1, 64, 0, 0, 0, 1, 0, 0, 0, 1, "CapacityExceeded"),
 		cap("capacity-redeem-gas", "redemption", 524288, 20480, 400, 64, 0, 0, 0, 10, 0, 0, 30_000_001, 30_000_000, "CapacityExceeded"),
 		sr("state-read-ok", true, 70, 10, 64, ""),
 		sr("state-read-jump", true, 75, 10, 64, "ImplausibleIndex"),

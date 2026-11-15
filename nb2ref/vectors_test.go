@@ -65,7 +65,14 @@ func trustOf(t *testing.T, d *Deployment) *TrustInput {
 }
 
 func sameExpect(got, want Expect) bool {
-	return got.Error == want.Error && strings.Join(got.Args, ",") == strings.Join(want.Args, ",")
+	return got.Error == want.Error && strings.Join(got.Args, ",") == strings.Join(want.Args, ",") && got.OnChain == want.OnChain &&
+		string(got.Revert) == string(want.Revert)
+}
+
+func sameJSON(a, b any) bool {
+	x, _ := json.Marshal(a)
+	y, _ := json.Marshal(b)
+	return string(x) == string(y)
 }
 
 // TestVectorReplay replays every vector from the file's bytes.
@@ -109,9 +116,19 @@ func TestVectorReplay(t *testing.T) {
 		}
 	}
 	for _, v := range f.Seal {
-		_, err := VerifySealReceipt(cfg[v.Deployment], trust[v.Deployment], v.Receipt)
+		if v.NoReceipt {
+			if !sameJSON(sealResult(cfg[v.Deployment], nil), v.Result) {
+				t.Errorf("seal %s: burn index without a receipt differs", v.ID)
+			}
+			continue
+		}
+		sr, err := VerifySealReceipt(cfg[v.Deployment], trust[v.Deployment], v.Receipt)
 		if !sameExpect(expectOf(err), v.Expect) || (err != nil && RuleName(errorsUnwrapOnce(err)) != v.Inner) {
 			t.Errorf("seal %s: %v", v.ID, err)
+			continue
+		}
+		if err == nil && (v.Result == nil || !sameJSON(sealResult(cfg[v.Deployment], sr), v.Result)) {
+			t.Errorf("seal %s: positive result (segment, heads, identifiers, burn index, start head) differs", v.ID)
 		}
 	}
 	for _, v := range f.Gap {
@@ -135,9 +152,12 @@ func TestVectorReplay(t *testing.T) {
 		}
 	}
 	for _, v := range f.SegmentLogs {
-		_, err := CheckSegmentLog([32]byte(v.Domain), v.K, v.Segment, [32]byte(v.ExpectBefore), v.Data)
+		seg, err := CheckSegmentLog([32]byte(v.Domain), v.K, v.Segment, [32]byte(v.ExpectBefore), v.Data)
 		if !sameExpect(expectOf(err), v.Expect) {
 			t.Errorf("segment log %s: %v", v.ID, err)
+		}
+		if err == nil && (seg.Root != [32]byte(v.Root) || seg.After != [32]byte(v.HeadAfter)) {
+			t.Errorf("segment log %s: root or head differs", v.ID)
 		}
 	}
 	for _, v := range f.Vault {
@@ -152,7 +172,8 @@ func TestVectorReplay(t *testing.T) {
 		} else {
 			err = CapacityExceeded(v.LMax, v.LT, v.LO, v.K, v.Proofs, v.GasLimit, v.UserGasLimit)
 		}
-		if !sameExpect(expectOf(err), v.Expect) || MaxProofs(v.LMax, v.LT, v.LO, v.K) != v.PMax {
+		pMax, base := MaxProofs(v.LMax, v.LT, v.LO, v.K)
+		if !sameExpect(expectOf(err), v.Expect) || pMax != v.PMax || base != v.BaseFits {
 			t.Errorf("capacity %s: %v", v.ID, err)
 		}
 	}
@@ -217,6 +238,9 @@ func replayVault(t *testing.T, f *VectorFile, v VaultVector, stopAt *Rule) (erro
 		}
 		if string(a) != string(b) {
 			t.Errorf("vault %s step %d: events differ", v.ID, i)
+		}
+		if state := StateOf(vt); v.Steps[i].State == nil || !sameJSON(state, *v.Steps[i].State) {
+			t.Errorf("vault %s step %d: state (accounting word, tag words, heads, buffers) differs", v.ID, i)
 		}
 	}
 	if stopAt == nil {
@@ -320,27 +344,34 @@ AssetMismatch ClaimMismatch BadRecipient ZeroAmount LiabilityUnderflow SegmentCo
 BadFirstOwner LiabilityCap DepositCounterExhausted BadConfig
 SealReceipt SegmentLog CapacityPreflight CapacityExceeded ImplausibleIndex EvidencePruned`)
 
-// structural are the rules whose check is the decoding itself (or a shape without which the rest of the relation is undefined):
-// removing them is not a meaningful single-check deletion. Each still has its isolated negative vector.
-var structural = map[string]string{
-	"Truncated": "decoder", "Trailing": "decoder", "NonCanonical": "decoder", "Shape": "decoder", "Tag": "decoder", "Version": "decoder",
-	"Length": "decoder", "IntRange": "decoder", "InputTooLarge": "decoder", "ConfigShape": "decoder", "Predicate": "decoder",
-	"SplitJustif": "decoder", "SplitManifest": "decoder (no root to allocate against)", "UnsupportedCertificateEncoding": "decoder",
-	"ReceiptType": "decoder (no receipt to read)", "SegmentLog": "wallet decoder", "BadConfig": "constructor decoder",
-	"MintReason": "the walk has no root without it", "NoTransfers": "a token without a final transfer has no burn to judge",
-	"BurnNotFinal": "the next transfer has no signing key", "NotBurn": "a part without a burn has no return data",
-	"ReturnData": "no R to judge", "ReceiptPath": "no receipt without a path", "LogIndex": "no log to read",
-	"SealNetwork": "no entry to verify under", "NoEntryForEpoch": "no entry to verify under",
-	"BadHistoryLength": "no proofs to fold", "BadGapProof": "a refused proof derives no root; folding on would fail as ChainMismatch",
-	"FutureIndex":     "a > c makes e = a + P > c, so StaleEndpoint refuses it next",
-	"VerifierRefused": "no verdict", "VerifierBadReturn": "no verdict", "LiabilityUnderflow": "a negative liability is unrepresentable",
-	"Reentrancy":  "the inner call would see the identifier just paid (AlreadyPaid): the guard is not the only barrier in the model",
-	"SealReceipt": "wrapper of the inner rule", "CapacityPreflight": "pure arithmetic", "CapacityExceeded": "pure arithmetic",
-	"ImplausibleIndex": "pure arithmetic", "EvidencePruned": "a provider answer, no relation",
+// exempt are the rules TestDisableEachCheck does not remove, by category. A rule named here still has its isolated negative
+// vector; only the "remove it and some vector passes" demonstration does not apply.
+var exempt = map[string]string{
+	// decoder: the check is the decoding itself; without it there is no value to continue with.
+	"Truncated": "decoder", "Trailing": "decoder", "NonCanonical": "decoder", "Shape": "decoder", "Tag": "decoder",
+	"Version": "decoder", "Length": "decoder", "IntRange": "decoder", "InputTooLarge": "decoder", "ConfigShape": "decoder",
+	"Predicate": "decoder", "SplitJustif": "decoder", "SplitManifest": "decoder", "UnsupportedCertificateEncoding": "decoder",
+	"ReceiptType": "decoder", "SegmentLog": "decoder", "BadConfig": "decoder",
+	// semantic: removing the check leaves no well-defined next step (no root, no burn, no receipt, no key, no verdict).
+	"MintReason": "semantic: the walk has no root", "NoTransfers": "semantic: no final transfer to judge",
+	"BurnNotFinal": "semantic: the next transfer has no signing key", "NotBurn": "semantic: no return data",
+	"ReturnData": "semantic: no R", "ReceiptPath": "semantic: no receipt without a path", "LogIndex": "semantic: no log",
+	"SealNetwork": "semantic: no history to select from", "NoEntryForEpoch": "semantic: no entry to verify under",
+	"VerifierRefused": "semantic: no verdict", "VerifierBadReturn": "semantic: no verdict",
+	// redundant: another check of the frozen order refuses the same input next.
+	"BadHistoryLength": "redundant: no proofs to fold", "BadGapProof": "redundant: the fold then fails as ChainMismatch",
+	"FutureIndex": "redundant: a > c makes e > c, so StaleEndpoint follows",
+	"Reentrancy":  "redundant: the inner call sees the identifier just paid (AlreadyPaid)",
+	// arithmetic: a pure function of its inputs; its vectors are its whole specification.
+	"LiabilityUnderflow": "arithmetic: a negative liability is unrepresentable", "CapacityPreflight": "arithmetic",
+	"CapacityExceeded": "arithmetic", "ImplausibleIndex": "arithmetic",
+	// wallet: wrappers and provider answers.
+	"SealReceipt": "wallet: wraps the inner rule", "EvidencePruned": "wallet: a provider answer",
 }
 
-// TestDisableEachCheck removes each semantic check alone and requires at least one of its negative vectors to be accepted
-// then: the check is load-bearing, and the vector isolates it.
+// TestDisableEachCheck gives one load-bearing example per rule: for every rule outside exempt it switches that rule's sentinel
+// off (at every site bearing the name) and requires at least one of the rule's negative vectors to be accepted then. It is not a
+// site-by-site mutation test of every check.
 func TestDisableEachCheck(t *testing.T) {
 	f := decoded(t)
 	defer func() { disabled = nil }()
@@ -357,7 +388,7 @@ func TestDisableEachCheck(t *testing.T) {
 	sort.Strings(names)
 	for _, name := range names {
 		r := RuleByName(name)
-		if r == nil || (structural[name] != "" && os.Getenv("NB2_DISABLE_ALL") == "") {
+		if r == nil || (exempt[name] != "" && os.Getenv("NB2_DISABLE_ALL") == "") {
 			continue
 		}
 		disabled = map[*Rule]bool{r: true}

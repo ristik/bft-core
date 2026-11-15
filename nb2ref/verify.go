@@ -19,7 +19,8 @@ import (
 //  4. The root's J (section 6.2, in its order).
 //  5. Root first, every token of the walk: mint fields (MintShape, MintType, MintData), NoTransfers, then mint and each transfer
 //     in order (CDMismatch, DeadlineMismatch, the unlock rules, DeadlineExpired, RepeatedSID, then its inclusion proof:
-//     UnsupportedCertificateEncoding, SealNetwork/NoEntryForEpoch/SealEpoch, CertStructure, SealRoot, QuorumNotMet,
+//     UnsupportedCertificateEncoding, SealNetwork, CertStructure, SealRoot, NoEntryForEpoch/SealEpoch, QuorumNotMet (on chain
+//     the last three are one boolean and report QuorumNotMet),
 //     InclusionProof, ReferenceTime), each intermediate transfer's recipient (BurnNotFinal) and data (TransferData); a parent's
 //     terminal split burn (SplitBurn, SplitManifest); after each child, its allocation edge (SplitProof, SplitSum).
 //  6. The part's terminal burn: NotBurn, ReturnData, ReturnIndex, ReturnDomain, ReturnAsset, ReturnAmount, ReturnRecipient,

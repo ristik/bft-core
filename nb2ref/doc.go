@@ -21,8 +21,9 @@
 //     the frozen order, against an unbounded paid-set reference that never calls the gap verifier (model.go).
 //
 // Every rejection rule of section 14 is one sentinel (errors.go); errors.Is matches exactly the rules an error names. A test
-// seam (disabled) removes one semantic check at a time; TestDisableEachCheck shows that each such removal lets one of the
-// rule's negative vectors pass.
+// seam (disabled) switches one rule's sentinel off at every site bearing its name; TestDisableEachCheck shows, for every rule
+// outside its listed decoder, semantic, redundant, arithmetic and wallet exemptions, one negative vector that then passes. That
+// is one load-bearing example per rule, not a site-by-site mutation proof.
 //
 // The vector file is regenerated, reproducibly, by
 //

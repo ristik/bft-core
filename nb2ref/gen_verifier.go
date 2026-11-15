@@ -229,9 +229,8 @@ func (g *gen) verifier() error {
 			b := t.Bytes()
 			return replaceOnce(b, []byte{0x83, 0x02, 0x82}, []byte{0x83, 0x18, 0x02, 0x82})
 		}}},
-		{id: "NonCanonical-float", want: "NonCanonical", o: directOpts{MutEv: func(t *Token) []byte {
-			pairs := tokenPairs(t)
-			return CTag(TagToken, CArr(CUint(TokenVersion), CArr(t.mintRaw, t.MintProof.Bytes()), CArr(pairs...), []byte{0xf9, 0x00, 0x00}))
+		{id: "NonCanonical-float", note: "the token version replaced in place by a half-precision float", want: "NonCanonical", o: directOpts{MutEv: func(t *Token) []byte {
+			return replaceOnce(t.Bytes(), []byte{0x83, 0x02, 0x82}, []byte{0x83, 0xf9, 0x40, 0x00, 0x82})
 		}}},
 		{id: "Shape-token-arity", want: "Shape", o: directOpts{MutEv: func(t *Token) []byte {
 			return CTag(TagToken, CArr(CUint(TokenVersion), CArr(t.mintRaw, t.MintProof.Bytes()), CArr(tokenPairs(t)...), CNull))
@@ -298,6 +297,10 @@ func (g *gen) verifier() error {
 		{id: "ReceiptStatus", note: "failed transaction", want: "ReceiptStatus", o: directOpts{Dep: ReceiptOpts{Type: 2, MutReceipt: func(r *RawReceipt) { r.Status = []byte{} }}}},
 		{id: "LogIndex", want: "LogIndex", o: directOpts{Dep: ReceiptOpts{FillerLogs: 1, MutProof: func(p *DepositProof) { p.LogIndex = 2 }}}},
 		{id: "LogEmitter", note: "the same log from another contract", want: "LogEmitter", o: directOpts{Dep: ReceiptOpts{MutLog: func(l *RawLog) { l.Address = Recipient20("impostor") }}}},
+		{id: "LogEmitter-before-topics", note: "a wrong emitter and a 31-byte topic: the emitter is checked first", want: "LogEmitter", o: directOpts{Dep: ReceiptOpts{MutLog: func(l *RawLog) {
+			l.Address = Recipient20("impostor")
+			l.RawTopics = [][]byte{TopicDeposited[:], l.Topics[1][1:]}
+		}}}},
 		{id: "LogTopics-other-number", note: "a copied commitment under another deposit number: J says n, the log n+1", want: "LogTopics", o: directOpts{Dep: ReceiptOpts{MutLog: func(l *RawLog) {
 			l.Topics[1] = u256u(new(big.Int).SetBytes(l.Topics[1][:]).Uint64() + 1)
 		}}}},
@@ -390,6 +393,9 @@ func (g *gen) verifier() error {
 		}}},
 		{id: "SealRoot", note: "the IR timestamp changed after sealing", want: "SealRoot", o: directOpts{MutDraft: func(d *Draft) {
 			d.Cert = map[int]CertOpts{1: {Tamper: func(uc *types.UnicityCertificate) { uc.InputRecord.Timestamp++ }}}
+		}}},
+		{id: "SealRoot-before-epoch", note: "multi-fault: the IR changed after sealing and the seal names an epoch the history does not hold; SealRoot is checked first", want: "SealRoot", o: directOpts{MutDraft: func(d *Draft) {
+			d.Cert = map[int]CertOpts{1: {Seal: &SealOpts{Network: DevNetwork, Epoch: 3, RootRound: 3 * RotationRound}, Tamper: func(uc *types.UnicityCertificate) { uc.InputRecord.Timestamp++ }}}
 		}}},
 		{id: "QuorumNotMet", want: "QuorumNotMet", o: directOpts{MutDraft: func(d *Draft) { d.Cert = map[int]CertOpts{1: {Committee: oneSigner}} }}},
 		{id: "UnsupportedCertificateEncoding-duplicate-signer", note: "a signature map with one signer key twice", want: "UnsupportedCertificateEncoding", o: directOpts{MutDraft: func(d *Draft) {

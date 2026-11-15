@@ -57,18 +57,25 @@ func BurnIndex(c *Config, newest *SealReceipt) (a uint64, startHead [32]byte) {
 	return newest.Segment.Index + 1, newest.Segment.After
 }
 
-// MaxProofs is P_max = floor((L_max - L_T - L_O) / (65 + 32h)), zero when the framing alone exceeds L_max.
-func MaxProofs(lMax, lT, lO, k uint64) uint64 {
-	if lT+lO >= lMax {
-		return 0
+// MaxProofs is P_max = floor((L_max - L_T - L_O) / (65 + 32h)) with checked arithmetic. baseFits is false when the return
+// without history does not fit (L_T > L_max or L_O > L_max - L_T); then no proof count fits, not even zero.
+func MaxProofs(lMax, lT, lO, k uint64) (pMax uint64, baseFits bool) {
+	if lT > lMax || lO > lMax-lT {
+		return 0, false
 	}
-	return (lMax - lT - lO) / uint64(65+32*bits.TrailingZeros64(k))
+	return (lMax - lT - lO) / uint64(65+32*bits.TrailingZeros64(k)), true
 }
 
-// Preflight is the before-burn capacity input (section 12.5 as amended by astra's review, finding 1): the index a chosen by
-// section 12.2, a current endpoint estimate cObs >= a, the encoded size of the complete prospective return transaction
-// without its history (lT evidence including the burn and its certification, lO all other framing) and the gas the return
-// would need with P proofs (expected cost plus gasReserve), which the wallet estimates conservatively.
+// fitsProofs reports whether the return with p proofs fits L_max.
+func fitsProofs(lMax, lT, lO, k, p uint64) bool {
+	pMax, ok := MaxProofs(lMax, lT, lO, k)
+	return ok && p <= pMax
+}
+
+// Preflight is the before-burn capacity input (section 12.5): the index a chosen by section 12.2, a current endpoint estimate
+// cObs >= a, the encoded size of the complete prospective return transaction without its history (lT evidence including the
+// burn and its certification, lO all other framing, both covering the complete encoding, padding and every component bound;
+// this arithmetic cannot establish those) and the gas the return would need with P proofs (expected cost plus gasReserve).
 type Preflight struct {
 	LMax, LT, LO, K  uint64
 	A, CObs, Reserve uint64
@@ -76,14 +83,19 @@ type Preflight struct {
 	UserGasLimit     uint64
 }
 
-// CapacityPreflight refuses the burn unless the return fits L_max and userGasLimit with the history already owed from a
-// (P_now = cObs - a) plus returnReserveSegments proofs. An old seal receipt consumes capacity before the burn.
+// CapacityPreflight refuses the burn unless the complete return fits L_max and userGasLimit with the history already owed from
+// a (P_now = cObs - a) plus returnReserveSegments proofs, zero history included. An old seal receipt consumes capacity before
+// the burn.
 func CapacityPreflight(p Preflight) error {
 	if p.CObs < p.A {
 		return ErrCapacityPreflight
 	}
-	need := p.CObs - p.A + p.Reserve
-	if need < p.Reserve || MaxProofs(p.LMax, p.LT, p.LO, p.K) < need {
+	owed := p.CObs - p.A
+	if owed > ^uint64(0)-p.Reserve {
+		return ErrCapacityPreflight
+	}
+	need := owed + p.Reserve
+	if !fitsProofs(p.LMax, p.LT, p.LO, p.K, need) {
 		return ErrCapacityPreflight
 	}
 	if p.GasAt == nil || p.GasAt(need) > p.UserGasLimit {
@@ -92,10 +104,10 @@ func CapacityPreflight(p Preflight) error {
 	return nil
 }
 
-// CapacityExceeded is the at-redemption refusal: P > P_max, or the gas limit (expected cost plus gasReserve) above
-// userGasLimit.
+// CapacityExceeded is the at-redemption refusal: the complete return with P proofs does not fit L_max (zero proofs included),
+// or the gas limit (expected cost plus gasReserve) is above userGasLimit.
 func CapacityExceeded(lMax, lT, lO, k, p, gasLimit, userGasLimit uint64) error {
-	if p > MaxProofs(lMax, lT, lO, k) || gasLimit > userGasLimit {
+	if !fitsProofs(lMax, lT, lO, k, p) || gasLimit > userGasLimit {
 		return ErrCapacityExceeded
 	}
 	return nil
