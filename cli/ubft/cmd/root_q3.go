@@ -83,9 +83,11 @@ func installQ3Epochs(ctx context.Context, log *slog.Logger, host handoffdelivery
 		bundle, err := provider.Q3Bundle(ctx, epoch)
 		if err != nil {
 			var fetchErr error
-			if bundle, fetchErr = awaitFromRootPeers(ctx, retry, peers, func(id peer.ID) (q3active.Bundle, error) {
+			// each answer is authenticated against this root's history and install checks before it is chosen (Authenticate stages
+			// nothing), so one peer serving an invalid bundle cannot mask a later honest one; Activate then re-verifies the chosen one
+			if bundle, fetchErr = awaitFromRootPeers(ctx, retry, peers, func(ctx context.Context, id peer.ID) (q3active.Bundle, error) {
 				return q3delivery.Request(ctx, host, id, epoch)
-			}, installWaitLogger(log, "activation", epoch)); fetchErr != nil {
+			}, rt.Authenticate, installWaitLogger(log, "activation", epoch)); fetchErr != nil {
 				return fmt.Errorf("no root peer served verified activation of epoch %d: %w", epoch, errors.Join(fetchErr, errNoQ3Bundle))
 			}
 		}

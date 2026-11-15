@@ -511,9 +511,9 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 			}
 		}
 		for epoch := cm.InstalledRootEpoch() + 1; q3rt == nil && epoch <= flags.InstallHandoffEpoch; epoch++ {
-			bundle, fetchErr := awaitFromRootPeers(ctx, retry, peers, func(id peer.ID) (handoffdelivery.Bundle, error) {
+			bundle, fetchErr := awaitFromRootPeers(ctx, retry, peers, func(ctx context.Context, id peer.ID) (handoffdelivery.Bundle, error) {
 				return handoffdelivery.Request(ctx, host, id, epoch)
-			}, installWaitLogger(log, "handoff bundle", epoch))
+			}, cm.CheckEpochBundle, installWaitLogger(log, "handoff bundle", epoch))
 			if fetchErr != nil {
 				return fmt.Errorf("no root peer served verified handoff epoch %d: %w", epoch, fetchErr)
 			}

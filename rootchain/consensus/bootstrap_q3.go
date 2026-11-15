@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/handoff"
 	"github.com/unicitynetwork/bft-core/handoffdelivery"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
@@ -34,6 +35,87 @@ var (
 	ErrNoCheckpoint = errors.New("handoff snapshot is not a checkpoint")
 )
 
+// checkedQ3Epoch is what checkVerifiedEpoch established and InstallVerifiedEpoch installs from.
+type checkedQ3Epoch struct {
+	v          evmroot.VerifiedHandoff
+	g          evmroot.EpochGenesis
+	cfg        q3format.ProtocolConfig
+	oldID      []byte
+	oldSigning votesig.Config
+}
+
+// CheckVerifiedEpoch runs every check InstallVerifiedEpoch makes before it writes anything, and writes nothing: the candidate against the
+// committed record, the old epoch's commit proof under its own keys and scheme, the snapshot against the proof, and a coupled assignment
+// against this store's committed history. An install that fetches its bundle from a root peer runs it on each answer (with the history's
+// authentication, q3active.Runtime.Authenticate), so a peer serving an invalid bundle is passed over for the next one instead of failing the
+// install. It does not need a stopped manager; the install still re-runs every check.
+func (x *ConsensusManager) CheckVerifiedEpoch(entry q3format.Entry, proof handoff.OldCommitProof, head *abdrc.CommittedBlock, candidate []byte) error {
+	if x.params.NetworkProfileVersion != storage.ProfileHandoff {
+		return fmt.Errorf("%w: not the handoff profile", ErrNotStopped)
+	}
+	_, err := x.checkVerifiedEpoch(entry, proof, head, candidate)
+	return err
+}
+
+func (x *ConsensusManager) checkVerifiedEpoch(entry q3format.Entry, proof handoff.OldCommitProof, head *abdrc.CommittedBlock, candidate []byte) (checkedQ3Epoch, error) {
+	v, g, ok := entry.Handoff()
+	if !ok {
+		return checkedQ3Epoch{}, ErrNotVerifiedEpoch
+	}
+	cfg, _ := entry.Config() // an entry with a handoff is an activation: it has its tuple
+	switch {
+	case len(candidate) == 0 && !entry.RootOnly(): // the committed candidate is an assignment: omitting its preimage must not turn it into a root-only install
+		return checkedQ3Epoch{}, fmt.Errorf("%w: the committed candidate is not the root-only operator candidate", ErrQ3Candidate)
+	case len(candidate) != 0 && entry.RootOnly():
+		return checkedQ3Epoch{}, fmt.Errorf("%w: the committed candidate is the root-only operator candidate", ErrQ3Candidate)
+	case len(candidate) != 0:
+		// the whole chain record <- body <- change-record hash <- candidate digest <- preimage, the entry's own committee and the
+		// mirrored coupling, under the weighted rules: nothing about the candidate is taken from the caller
+		// (the version only labels the activation built to check)
+		if _, err := storage.ActivationFromVerifiedV3(entry, v.Record, candidate, x.params.HashAlgorithm, 1); err != nil {
+			return checkedQ3Epoch{}, errors.Join(ErrQ3Candidate, err)
+		}
+	}
+	if head == nil || len(head.ShardInfo) == 0 {
+		return checkedQ3Epoch{}, fmt.Errorf("%w: no shards", ErrNoCheckpoint)
+	}
+	old, err := x.trustBaseStore.GetByEpoch(v.Epoch)
+	if err != nil {
+		return checkedQ3Epoch{}, fmt.Errorf("old root trust lineage: %w", err)
+	}
+	oldID, err := old.Hash(crypto.SHA256)
+	if err != nil {
+		return checkedQ3Epoch{}, err
+	}
+	oldSigning, err := x.trustBaseStore.SigningConfig(v.Epoch)
+	if err != nil {
+		return checkedQ3Epoch{}, fmt.Errorf("old root trust lineage: %w", err)
+	}
+	verified, err := handoff.VerifyOldCommitProofSigning(proof, old, oldSigning)
+	if err != nil {
+		return checkedQ3Epoch{}, fmt.Errorf("old handoff commit proof: %w", err)
+	}
+	if !bytes.Equal(verified.RecordID[:], v.RecordID) { // the record commits to its body, boundary and control state, and the proof's QC to its root
+		return checkedQ3Epoch{}, fmt.Errorf("%w: the proof is not the one that activated the epoch", ErrNotVerifiedEpoch)
+	}
+	first := head.ShardInfo[0]
+	if _, err := handoffdelivery.VerifySnapshot(proof, verified, head, first.Partition, first.Shard, first.ShardConfHash); err != nil {
+		return checkedQ3Epoch{}, err
+	}
+	if len(candidate) != 0 {
+		if err := x.blockStore.ValidateCommittedAssignment(head, v.Record, entry.BodyEncoding(), candidate,
+			func(epoch uint64) (storage.VerifiedActivation, bool) {
+				if x.q3 == nil {
+					return nil, false
+				}
+				return x.q3.Activated(epoch)
+			}); err != nil {
+			return checkedQ3Epoch{}, errors.Join(ErrQ3Candidate, err)
+		}
+	}
+	return checkedQ3Epoch{v: v, g: g, cfg: cfg, oldID: oldID, oldSigning: oldSigning}, nil
+}
+
 // InstallVerifiedEpoch installs the first epoch of a Q3 activation. Every fact it installs (the epoch, its weights and threshold,
 // the activation boundary, the anchor identity and the signing configuration) is taken from the verified history's entry, never
 // from the proof, the snapshot or the caller: the proof and the native snapshot are only re-authenticated against that entry. The
@@ -50,61 +132,11 @@ func (x *ConsensusManager) InstallVerifiedEpoch(entry q3format.Entry, proof hand
 	if x.pacemaker.GetCurrentRound() != 0 {
 		return nil, fmt.Errorf("%w: consensus is running", ErrNotStopped)
 	}
-	v, g, ok := entry.Handoff()
-	if !ok {
-		return nil, ErrNotVerifiedEpoch
-	}
-	cfg, _ := entry.Config() // an entry with a handoff is an activation: it has its tuple
-	switch {
-	case len(candidate) == 0 && !entry.RootOnly(): // the committed candidate is an assignment: omitting its preimage must not turn it into a root-only install
-		return nil, fmt.Errorf("%w: the committed candidate is not the root-only operator candidate", ErrQ3Candidate)
-	case len(candidate) != 0 && entry.RootOnly():
-		return nil, fmt.Errorf("%w: the committed candidate is the root-only operator candidate", ErrQ3Candidate)
-	case len(candidate) != 0:
-		// the whole chain record <- body <- change-record hash <- candidate digest <- preimage, the entry's own committee and the
-		// mirrored coupling, under the weighted rules: nothing about the candidate is taken from the caller
-		// (the version only labels the activation built to check)
-		if _, err := storage.ActivationFromVerifiedV3(entry, v.Record, candidate, x.params.HashAlgorithm, 1); err != nil {
-			return nil, errors.Join(ErrQ3Candidate, err)
-		}
-	}
-	if head == nil || len(head.ShardInfo) == 0 {
-		return nil, fmt.Errorf("%w: no shards", ErrNoCheckpoint)
-	}
-	old, err := x.trustBaseStore.GetByEpoch(v.Epoch)
-	if err != nil {
-		return nil, fmt.Errorf("old root trust lineage: %w", err)
-	}
-	oldID, err := old.Hash(crypto.SHA256)
+	c, err := x.checkVerifiedEpoch(entry, proof, head, candidate)
 	if err != nil {
 		return nil, err
 	}
-	oldSigning, err := x.trustBaseStore.SigningConfig(v.Epoch)
-	if err != nil {
-		return nil, fmt.Errorf("old root trust lineage: %w", err)
-	}
-	verified, err := handoff.VerifyOldCommitProofSigning(proof, old, oldSigning)
-	if err != nil {
-		return nil, fmt.Errorf("old handoff commit proof: %w", err)
-	}
-	if !bytes.Equal(verified.RecordID[:], v.RecordID) { // the record commits to its body, boundary and control state, and the proof's QC to its root
-		return nil, fmt.Errorf("%w: the proof is not the one that activated the epoch", ErrNotVerifiedEpoch)
-	}
-	first := head.ShardInfo[0]
-	if _, err := handoffdelivery.VerifySnapshot(proof, verified, head, first.Partition, first.Shard, first.ShardConfHash); err != nil {
-		return nil, err
-	}
-	if len(candidate) != 0 {
-		if err := x.blockStore.ValidateCommittedAssignment(head, v.Record, entry.BodyEncoding(), candidate,
-			func(epoch uint64) (storage.VerifiedActivation, bool) {
-				if x.q3 == nil {
-					return nil, false
-				}
-				return x.q3.Activated(epoch)
-			}); err != nil {
-			return nil, errors.Join(ErrQ3Candidate, err)
-		}
-	}
+	v, g, cfg, oldID, oldSigning := c.v, c.g, c.cfg, c.oldID, c.oldSigning
 	projected := entry.Projection()
 	projected.PreviousEntryHash = oldID
 	signing := votesig.Config{Scheme: cfg.SigningScheme, Network: cfg.Network, Genesis: cfg.Genesis, UTB: cfg.UTB()}

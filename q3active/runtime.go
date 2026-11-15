@@ -302,6 +302,55 @@ func (r *Runtime) resolve(a q3install.Activation) (q3format.Entry, handoff.OldCo
 	return e, p, b, err
 }
 
+// RootChecker is implemented by a root sink that can run its install checks without installing anything (consensus.CheckVerifiedEpoch).
+type RootChecker interface {
+	CheckVerifiedEpoch(entry q3format.Entry, proof handoff.OldCommitProof, head *abdrc.CommittedBlock, candidate []byte) error
+}
+
+// Authenticate checks a bundle as Activate would and changes nothing: the envelope against this runtime's history (the journal's own
+// check, which derives the activation record), and, when the attached root sink offers them, the root's install checks (the commit
+// proof under the old epoch's keys, the snapshot, a coupled candidate). An install that takes its bundle from a root peer authenticates
+// each answer, so a peer serving a decodable but invalid bundle is passed over for the next one (#1080 review). It stages nothing:
+// Activate re-runs every check.
+func (r *Runtime) Authenticate(b Bundle) error {
+	raw, err := EncodeBundle(b)
+	if err != nil {
+		return err
+	}
+	_, env, err := DecodeBundle(raw)
+	if err != nil {
+		return err
+	}
+	if len(env.Links) == 0 {
+		return fmt.Errorf("%w: no link", ErrBundle)
+	}
+	claim := env.Links[len(env.Links)-1].Claim
+	if err := r.verify(raw, claim); err != nil {
+		return errors.Join(ErrBundle, err)
+	}
+	p := r.parts.Load()
+	if p == nil {
+		return nil
+	}
+	checker, ok := p.Root.(RootChecker)
+	if !ok {
+		return nil
+	}
+	next, err := r.History().VerifyEnvelope(env)
+	if err != nil {
+		return errors.Join(ErrBundle, err)
+	}
+	e, err := next.ForEpoch(claim.Epoch)
+	if err != nil {
+		return errors.Join(ErrBundle, err)
+	}
+	proof, err := activatingProof(env)
+	if err != nil {
+		return err
+	}
+	return checker.CheckVerifiedEpoch(e, proof, b.Snapshot, b.Candidate)
+}
+
 // Activate is the only way an activation starts: it authenticates the bundle against the history, then the journal stages it and
 // carries every participant to completion in the section 4 order. It returns nil only after the completion marker is durable and
 // the epoch is admitted.

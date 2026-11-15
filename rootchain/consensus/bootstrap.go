@@ -19,6 +19,7 @@ import (
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/trustbase"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
 	"github.com/unicitynetwork/bft-core/trusthistorystore"
 	"github.com/unicitynetwork/bft-core/utb"
 	basetypes "github.com/unicitynetwork/bft-go-base/types"
@@ -49,75 +50,11 @@ func (x *ConsensusManager) InstallEpochBundle(incoming handoffdelivery.Bundle) (
 	if x.params.NetworkProfileVersion != storage.ProfileHandoff || x.pacemaker.GetCurrentRound() != 0 {
 		return nil, errors.New("epoch genesis requires stopped profile-2 consensus")
 	}
-	if !x.recoveryProfile2 || x.recoveryHistory == nil {
-		return nil, fmt.Errorf("epoch genesis requires profile 2 recovery: %w", abdrc.ErrRecoveryEpoch)
-	}
-	old, err := x.trustBaseStore.GetByEpoch(proof.Record.Epoch)
-	if err != nil {
-		return nil, fmt.Errorf("old root trust lineage: %w", err)
-	}
-	prior, err := x.recoveryHistory.ByEpoch(proof.Record.Epoch)
-	if err != nil {
-		return nil, fmt.Errorf("old root trust lineage: %w", err)
-	}
-	var predecessor []byte
-	if prior.V1 != nil {
-		predecessor, err = old.Hash(crypto.SHA256)
-	} else if prior.V2 != nil {
-		predecessor = prior.BodyID[:]
-	} else {
-		return nil, errors.New("handoff predecessor has no verified trust body")
-	}
-	if err != nil || !bytes.Equal(predecessor, proof.Record.PredecessorBodyID) {
-		return nil, errors.New("handoff predecessor differs from verified old trust base")
-	}
-	oldID, err := old.Hash(crypto.SHA256)
+	c, err := x.checkEpochBundle(incoming)
 	if err != nil {
 		return nil, err
 	}
-	// the old epoch's commit QC is verified by that epoch's own rule, in the wire form the epoch signs with
-	oldSigning, err := x.trustBaseStore.SigningConfig(proof.Record.Epoch)
-	if err != nil {
-		return nil, fmt.Errorf("old root trust lineage: %w", err)
-	}
-	verified, err := handoff.VerifyOldCommitProofSigning(proof, old, oldSigning)
-	if err != nil {
-		return nil, fmt.Errorf("old handoff commit proof: %w", err)
-	}
-	v := evmroot.VerifiedHandoff{RecordID: bytes.Clone(verified.RecordID[:]), Root: bytes.Clone(verified.StateRoot[:]),
-		ControlDigest: bytes.Clone(verified.ControlDigest[:]), OrderRound: verified.OrderRound,
-		CommitSealRound: verified.CommitSealRound, Epoch: verified.SignerEpoch, Record: proof.Record}
-	g, err := evmroot.DeriveEpochGenesis(v, body)
-	if err != nil {
-		return nil, fmt.Errorf("derive epoch genesis: %w", err)
-	}
-	for _, member := range body.Members {
-		if _, err := peer.Decode(member.NodeID); err != nil {
-			return nil, fmt.Errorf("invalid successor node ID %q: %w", member.NodeID, err)
-		}
-	}
-	nodes := make([]*basetypes.NodeInfo, len(body.Members))
-	for i, member := range body.Members {
-		nodes[i] = &basetypes.NodeInfo{NodeID: member.NodeID, SigKey: bytes.Clone(member.ConsensusKey), Stake: member.Weight}
-	}
-	projected, err := quorumweight.NewTrustBase(old.NetworkID, nodes, basetypes.WithEpoch(g.Epoch),
-		basetypes.WithEpochStart(g.Start), basetypes.WithQuorumThreshold(body.RootThreshold), basetypes.WithPreviousTrustBaseHash(oldID))
-	if err != nil {
-		return nil, fmt.Errorf("project successor root committee: %w", err)
-	}
-	projected.StateHash = bytes.Clone(body.StateSummary)
-	projected.ChangeRecordHash = bytes.Clone(body.ChangeRecordHash)
-	bodyID := body.Identity()
-	interval := m2contract.TrustInterval{Body: body, Activation: evmroot.ActivatedTrustBase{
-		BodyIdentity: bodyID[:], EpochStart: g.Start, ActivationCommitID: bytes.Clone(verified.RecordID[:])}}
-	bundle := handoffdelivery.Bundle{Proof: proof, Body: body, Snapshot: head, Candidate: bytes.Clone(candidate)}
-	if head == nil || len(head.ShardInfo) == 0 {
-		return nil, errors.New("handoff snapshot has no shards")
-	}
-	first := head.ShardInfo[0]
-	if _, err := verifyHandoffBundle(x.trustBaseStore, bundle, old, first.Partition, first.Shard, first.ShardConfHash); err != nil {
-		return nil, err
-	}
+	old, oldSigning, v, g, projected, bodyID, interval, bundle := c.old, c.oldSigning, c.v, c.g, c.projected, c.bodyID, c.interval, c.bundle
 	if archive, ok := x.blockStore.GetDB().(handoffBundleArchive); ok {
 		if err := retainEquivalentHandoffBundle(x.trustBaseStore, archive, g.Epoch, bundle, old, g.ID()); err != nil {
 			return nil, err
@@ -194,6 +131,105 @@ func (x *ConsensusManager) InstallEpochBundle(incoming handoffdelivery.Bundle) (
 	x.t2Timeouts = t2Timeouts
 	x.epochAnchor = a
 	return a, nil
+}
+
+// checkedEpochBundle is what checkEpochBundle established and InstallEpochBundle installs from.
+type checkedEpochBundle struct {
+	old        *basetypes.RootTrustBaseV1
+	oldSigning votesig.Config
+	v          evmroot.VerifiedHandoff
+	g          evmroot.EpochGenesis
+	projected  *basetypes.RootTrustBaseV1
+	bodyID     [32]byte
+	interval   m2contract.TrustInterval
+	bundle     handoffdelivery.Bundle
+}
+
+// CheckEpochBundle runs every check InstallEpochBundle makes before it writes anything, and writes nothing: the old commit proof under
+// the verified old trust lineage and its own epoch's scheme, the derived epoch genesis, the successor committee and the bundle's
+// snapshot. An install that fetches its bundle from a root peer runs it on each answer, so a peer serving an invalid bundle is passed over
+// for the next one instead of failing the install. It does not need a stopped manager; the install still re-runs every check.
+func (x *ConsensusManager) CheckEpochBundle(incoming handoffdelivery.Bundle) error {
+	if x.params.NetworkProfileVersion != storage.ProfileHandoff {
+		return errors.New("epoch genesis requires profile-2 consensus")
+	}
+	_, err := x.checkEpochBundle(incoming)
+	return err
+}
+
+func (x *ConsensusManager) checkEpochBundle(incoming handoffdelivery.Bundle) (checkedEpochBundle, error) {
+	proof, head, body, candidate := incoming.Proof, incoming.Snapshot, incoming.Body, incoming.Candidate
+	if !x.recoveryProfile2 || x.recoveryHistory == nil {
+		return checkedEpochBundle{}, fmt.Errorf("epoch genesis requires profile 2 recovery: %w", abdrc.ErrRecoveryEpoch)
+	}
+	old, err := x.trustBaseStore.GetByEpoch(proof.Record.Epoch)
+	if err != nil {
+		return checkedEpochBundle{}, fmt.Errorf("old root trust lineage: %w", err)
+	}
+	prior, err := x.recoveryHistory.ByEpoch(proof.Record.Epoch)
+	if err != nil {
+		return checkedEpochBundle{}, fmt.Errorf("old root trust lineage: %w", err)
+	}
+	var predecessor []byte
+	if prior.V1 != nil {
+		predecessor, err = old.Hash(crypto.SHA256)
+	} else if prior.V2 != nil {
+		predecessor = prior.BodyID[:]
+	} else {
+		return checkedEpochBundle{}, errors.New("handoff predecessor has no verified trust body")
+	}
+	if err != nil || !bytes.Equal(predecessor, proof.Record.PredecessorBodyID) {
+		return checkedEpochBundle{}, errors.New("handoff predecessor differs from verified old trust base")
+	}
+	oldID, err := old.Hash(crypto.SHA256)
+	if err != nil {
+		return checkedEpochBundle{}, err
+	}
+	// the old epoch's commit QC is verified by that epoch's own rule, in the wire form the epoch signs with
+	oldSigning, err := x.trustBaseStore.SigningConfig(proof.Record.Epoch)
+	if err != nil {
+		return checkedEpochBundle{}, fmt.Errorf("old root trust lineage: %w", err)
+	}
+	verified, err := handoff.VerifyOldCommitProofSigning(proof, old, oldSigning)
+	if err != nil {
+		return checkedEpochBundle{}, fmt.Errorf("old handoff commit proof: %w", err)
+	}
+	v := evmroot.VerifiedHandoff{RecordID: bytes.Clone(verified.RecordID[:]), Root: bytes.Clone(verified.StateRoot[:]),
+		ControlDigest: bytes.Clone(verified.ControlDigest[:]), OrderRound: verified.OrderRound,
+		CommitSealRound: verified.CommitSealRound, Epoch: verified.SignerEpoch, Record: proof.Record}
+	g, err := evmroot.DeriveEpochGenesis(v, body)
+	if err != nil {
+		return checkedEpochBundle{}, fmt.Errorf("derive epoch genesis: %w", err)
+	}
+	for _, member := range body.Members {
+		if _, err := peer.Decode(member.NodeID); err != nil {
+			return checkedEpochBundle{}, fmt.Errorf("invalid successor node ID %q: %w", member.NodeID, err)
+		}
+	}
+	nodes := make([]*basetypes.NodeInfo, len(body.Members))
+	for i, member := range body.Members {
+		nodes[i] = &basetypes.NodeInfo{NodeID: member.NodeID, SigKey: bytes.Clone(member.ConsensusKey), Stake: member.Weight}
+	}
+	projected, err := quorumweight.NewTrustBase(old.NetworkID, nodes, basetypes.WithEpoch(g.Epoch),
+		basetypes.WithEpochStart(g.Start), basetypes.WithQuorumThreshold(body.RootThreshold), basetypes.WithPreviousTrustBaseHash(oldID))
+	if err != nil {
+		return checkedEpochBundle{}, fmt.Errorf("project successor root committee: %w", err)
+	}
+	projected.StateHash = bytes.Clone(body.StateSummary)
+	projected.ChangeRecordHash = bytes.Clone(body.ChangeRecordHash)
+	bodyID := body.Identity()
+	interval := m2contract.TrustInterval{Body: body, Activation: evmroot.ActivatedTrustBase{
+		BodyIdentity: bodyID[:], EpochStart: g.Start, ActivationCommitID: bytes.Clone(verified.RecordID[:])}}
+	bundle := handoffdelivery.Bundle{Proof: proof, Body: body, Snapshot: head, Candidate: bytes.Clone(candidate)}
+	if head == nil || len(head.ShardInfo) == 0 {
+		return checkedEpochBundle{}, errors.New("handoff snapshot has no shards")
+	}
+	first := head.ShardInfo[0]
+	if _, err := verifyHandoffBundle(x.trustBaseStore, bundle, old, first.Partition, first.Shard, first.ShardConfHash); err != nil {
+		return checkedEpochBundle{}, err
+	}
+	return checkedEpochBundle{old: old, oldSigning: oldSigning, v: v, g: g, projected: projected, bodyID: bodyID,
+		interval: interval, bundle: bundle}, nil
 }
 
 type handoffBundleArchive interface {
