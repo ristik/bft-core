@@ -75,6 +75,25 @@ def driver(gen, *args, env_file=None):
     return out.stdout
 
 
+def effective_argv(name, service):
+    """What Compose runs for SERVICE: its entrypoint followed by its command. Each may be a list or a string (split as a shell would); anything else,
+    or no entrypoint, is refused: the manifest judges the arguments the container gets, not only the entrypoint."""
+    import shlex
+
+    def part(field, required):
+        v = service.get(field)
+        if v is None:
+            if required:
+                raise SystemExit(f'{name} has no {field}: the manifest cannot judge what it runs')
+            return []
+        if isinstance(v, str):
+            return shlex.split(v)
+        if isinstance(v, list) and all(isinstance(x, str) for x in v):
+            return list(v)
+        raise SystemExit(f'{name}\'s {field} is neither a list of strings nor a string ({type(v).__name__}): refused')
+    return part('entrypoint', True) + part('command', False)
+
+
 def validator_pins(name, command, b1):
     """One validator's execution client as the manifest requires it: a full proof source (none of NOT_PROOF_SOURCE, in either flag form), a pinned pool
     byte limit at or above L_max, and the pool gas cap at the profile's ordinary capacity. Returns (pool bytes, pool gas)."""
@@ -103,9 +122,9 @@ def build(gen, record, image_id, services):
     per = {}
     for i in range(1, package['validators'] + 1):
         name = f'ureth{i}'
-        if name not in services or 'entrypoint' not in services[name]:
+        if not isinstance(services.get(name), dict):
             raise SystemExit(f'compose.yaml has no {name}: the manifest describes every validator\'s pool')
-        per[name] = validator_pins(name, services[name]['entrypoint'], b1)
+        per[name] = validator_pins(name, effective_argv(name, services[name]), b1)
     if len(set(per.values())) != 1:
         raise SystemExit(f'the validators\' pools differ ({per}): one admission policy per deployment')
     pool, pool_gas = next(iter(per.values()))

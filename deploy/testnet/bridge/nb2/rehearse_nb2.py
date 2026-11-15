@@ -648,13 +648,16 @@ def main():
     except Exception:
         code = 1
     finally:
-        r.say('RESULT ' + ' '.join(f'{n}={s}' for n, s, _ in r.results))
-        (a.evidence / 'nb2-result.json').write_text(json.dumps({'generation': r.gen.name, 'stages': r.results}, indent=2) + '\n')
+        # the keys go whatever reporting does: the RESULT line and the result file can fail (a full disk), the deletion still runs
         try:
-            r.finalize_keys(a.keep_keys)
-        except OSError as error:
-            r.say(f'  the driver keys could not be deleted: {error}')
-            code = 1
+            r.say('RESULT ' + ' '.join(f'{n}={s}' for n, s, _ in r.results))
+            (a.evidence / 'nb2-result.json').write_text(json.dumps({'generation': r.gen.name, 'stages': r.results}, indent=2) + '\n')
+        finally:
+            try:
+                r.finalize_keys(a.keep_keys)
+            except OSError as error:
+                print(f'the driver keys could not be deleted: {error}', file=sys.stderr)
+                code = 1
     return code
 
 

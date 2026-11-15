@@ -1988,11 +1988,24 @@ class NB2Release(unittest.TestCase):
             'no ureth4':dict(ureth4=None),                                                                    # a missing validator
             'differ':dict(ureth3=['unicity-reth','node','--txpool.max-tx-gas=60000000','--txpool.max-tx-input-bytes=8388608']),
         }
+        # Compose appends `command` to the entrypoint: only ureth3's command turns proof serving off and companion pruning on
+        def with_command(cmd): return {**self.services(),'ureth3':{'entrypoint':list(u),'command':cmd}}
+        command_cases={'list':['--unicity.no-proof-source','--unicity.companion-retention-depth=1000'],
+                       'string':'--unicity.no-proof-source --unicity.companion-retention-depth=1000',
+                       'pruning only':['--unicity.companion-retention-depth=1000']}
         with tempfile.TemporaryDirectory() as tmp:
             g=self.generation(tmp)
             for want,changed in cases.items():
                 with self.subTest(want):
                     with self.assertRaisesRegex(SystemExit,want.strip()): self.build(*g,services=self.services(**changed))
+            for what,cmd in command_cases.items():
+                with self.subTest(command=what):
+                    with self.assertRaisesRegex(SystemExit,'ureth3 is not a full proof source'): self.build(*g,services=with_command(cmd))
+            with self.assertRaisesRegex(SystemExit,'neither a list'): self.build(*g,services=with_command({'x':1}))   # an unsupported form fails closed
+            with self.assertRaisesRegex(SystemExit,'no entrypoint'): self.build(*g,services={**self.services(),'ureth2':{'command':list(u)}})
+            # a harmless command is judged with the entrypoint: the pins may come from it
+            ok={**self.services(),'ureth2':{'entrypoint':['unicity-reth','node'],'command':'--txpool.max-tx-gas=60000000 --txpool.max-tx-input-bytes=4194304'}}
+            self.assertEqual(self.build(*g,services=ok)['limits']['poolMaxTxInputBytes']['value'],4194304)
             # ureth1 alone being healthy is not enough, and every validator healthy passes
             self.assertEqual(self.build(*g)['limits']['poolMaxTxInputBytes']['value'],4194304)
     def test_another_image_than_the_recorded_one_is_refused(self):
@@ -2056,6 +2069,26 @@ class NB2DriverKeys(unittest.TestCase):
             self.assertIn('driver keys are deleted',console)
             code,_=self.run_main(m,gen,Path(tmp)/'ev3','--stages','fund')   # a complete standalone run
             self.assertEqual(code,0);self.assertFalse((gen/'bridge/nb2/driver.env').exists(),'a successful run deletes its keys')
+    def test_the_keys_are_deleted_when_reporting_itself_fails(self):
+        m=self.module()
+        with tempfile.TemporaryDirectory() as tmp, patch.object(m.NB2Rehearsal,'fund',lambda r: self.write_keys(r)):
+            gen=self.generation(tmp)
+            # the result file cannot be written (a directory in its place)
+            ev=Path(tmp)/'ev1';(ev/'nb2-result.json').mkdir(parents=True)
+            with self.assertRaises(IsADirectoryError): self.run_main(m,gen,ev,'--stages','fund')
+            self.assertFalse((gen/'bridge/nb2/driver.env').exists(),'a failing result write still deletes the keys')
+            # the RESULT log line fails
+            real=m.NB2Rehearsal.say
+            def say(r,text):
+                if text.startswith('RESULT'): raise OSError(28,'No space left on device')
+                return real(r,text)
+            with patch.object(m.NB2Rehearsal,'say',say):
+                with self.assertRaises(OSError): self.run_main(m,gen,Path(tmp)/'ev2','--stages','fund')
+            self.assertFalse((gen/'bridge/nb2/driver.env').exists(),'a failing RESULT line still deletes the keys')
+            # and --keep-keys still keeps them through a reporting failure
+            with patch.object(m.NB2Rehearsal,'say',say):
+                with self.assertRaises(OSError): self.run_main(m,gen,Path(tmp)/'ev3','--stages','fund','--keep-keys')
+            self.assertTrue((gen/'bridge/nb2/driver.env').exists())
     def test_no_key_is_given_to_a_command_line(self):
         src=(Path(__file__).parent/'bridge/nb2/rehearse_nb2.py').read_text()
         self.assertNotIn('--private-key',src);self.assertNotIn('self.key(',src)
