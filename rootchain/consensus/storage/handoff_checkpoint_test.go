@@ -26,7 +26,7 @@ func commitRound(t *testing.T, s *BlockStore, round uint64) {
 	// the committed block carries the QC that certified it, as a running root's does
 	b.Qc = &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: round, ParentRoundNumber: b.GetParentRound(), Epoch: 1, CurrentRootHash: b.RootHash},
 		LedgerCommitInfo: &types.UnicitySeal{Version: 1, RootChainRoundNumber: round - 1, Epoch: 1}}
-	_, err = s.blockTree.Commit(&rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: round + 1, ParentRoundNumber: round, Epoch: 1},
+	_, err = s.tree().Commit(&rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: round + 1, ParentRoundNumber: round, Epoch: 1},
 		LedgerCommitInfo: &types.UnicitySeal{Version: 1, RootChainRoundNumber: round, Epoch: 1, Hash: b.RootHash}})
 	require.NoError(t, err)
 }
@@ -50,7 +50,7 @@ func newCommittedHandoff(t *testing.T, later int, beforeCommit ...func(BoltDB)) 
 	installTestFrozenShard(t, s, bytes.Repeat([]byte{0x42}, 32))
 	zero := make([]byte, 32)
 	body, frozen := bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{2}, 32)
-	tr, err := s.blockTree.Root().ShardState.States[types.PartitionShardID{PartitionID: 8, ShardID: (types.ShardID{}).Key()}].TR.Hash()
+	tr, err := s.tree().Root().ShardState.States[types.PartitionShardID{PartitionID: 8, ShardID: (types.ShardID{}).Key()}].TR.Hash()
 	require.NoError(t, err)
 	addProfileBlock(t, s, 2, [][]byte{record("prepare", 2, 7, zero, body, zero)})
 	addProfileBlock(t, s, 3, [][]byte{record("freeze", 3, 7, frozen, body, zero)})
@@ -82,8 +82,8 @@ func checkpointBytes(t *testing.T, s *BlockStore) []byte {
 func TestRootsWithDifferentCommitTimingsServeTheSameCheckpoint(t *testing.T) {
 	early := newCommittedHandoff(t, 0) // the record's block is still the committed root
 	late := newCommittedHandoff(t, 3)  // three empty blocks have committed since
-	require.EqualValues(t, 4, early.s.blockTree.Root().GetRound())
-	require.EqualValues(t, 7, late.s.blockTree.Root().GetRound())
+	require.EqualValues(t, 4, early.s.tree().Root().GetRound())
+	require.EqualValues(t, 7, late.s.tree().Root().GetRound())
 	a, b := checkpointBytes(t, early.s), checkpointBytes(t, late.s)
 	require.Equal(t, a, b)
 
@@ -140,7 +140,7 @@ func TestWithoutAStoredCheckpointTheCurrentCommittedRootIsServed(t *testing.T) {
 	installTestFrozenShard(t, s, bytes.Repeat([]byte{0x42}, 32))
 	zero := make([]byte, 32)
 	body, frozen := bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{2}, 32)
-	tr, err := s.blockTree.Root().ShardState.States[types.PartitionShardID{PartitionID: 8, ShardID: (types.ShardID{}).Key()}].TR.Hash()
+	tr, err := s.tree().Root().ShardState.States[types.PartitionShardID{PartitionID: 8, ShardID: (types.ShardID{}).Key()}].TR.Hash()
 	require.NoError(t, err)
 	addProfileBlock(t, s, 2, [][]byte{record("prepare", 2, 7, zero, body, zero)})
 	addProfileBlock(t, s, 3, [][]byte{record("freeze", 3, 7, frozen, body, zero)})
@@ -220,12 +220,12 @@ func TestARootRecoveredWithTheCarrierAsHeadServesTheCanonicalCheckpoint(t *testi
 	donor := newCommittedHandoff(t, 0)
 	want := checkpointBytes(t, donor.s)
 	recovered := recoverFrom(t, donor)
-	require.EqualValues(t, 4, recovered.blockTree.Root().GetRound())
+	require.EqualValues(t, 4, recovered.tree().Root().GetRound())
 	require.Equal(t, want, checkpointBytes(t, recovered))
 
 	addProfileBlock(t, recovered, 5, nil)
 	commitRound(t, recovered, 5)
-	require.EqualValues(t, 5, recovered.blockTree.Root().GetRound())
+	require.EqualValues(t, 5, recovered.tree().Root().GetRound())
 	require.Equal(t, want, checkpointBytes(t, recovered), "a later commit does not change what it serves")
 }
 
@@ -233,9 +233,9 @@ func TestARootRecoveredWithTheCarrierAsHeadServesTheCanonicalCheckpoint(t *testi
 // serves the current root, which would be a non-canonical copy that the bundle archive then keeps for good.
 func TestARootRecoveredPastTheCarrierRefusesToServeTheCheckpoint(t *testing.T) {
 	donor := newCommittedHandoff(t, 2)
-	require.EqualValues(t, 6, donor.s.blockTree.Root().GetRound())
+	require.EqualValues(t, 6, donor.s.tree().Root().GetRound())
 	recovered := recoverFrom(t, donor)
-	require.EqualValues(t, 6, recovered.blockTree.Root().GetRound())
+	require.EqualValues(t, 6, recovered.tree().Root().GetRound())
 	_, _, _, err := recovered.HandoffCheckpoint()
 	require.ErrorIs(t, err, ErrHandoffRecord)
 	// while a root that committed it serves it
@@ -272,7 +272,7 @@ func TestARecapturedCheckpointIsComparedBySignatureStrippedIdentity(t *testing.T
 	h := newCommittedHandoff(t, 0)
 	store := h.s.storage.(BoltDB)
 	sink := &logSink{}
-	h.s.blockTree.log = slog.New(slog.NewTextHandler(sink, nil))
+	h.s.tree().log = slog.New(slog.NewTextHandler(sink, nil))
 	stored, err := store.HandoffCheckpoint(2)
 	require.NoError(t, err)
 	require.NotEmpty(t, stored)
@@ -286,7 +286,7 @@ func TestARecapturedCheckpointIsComparedBySignatureStrippedIdentity(t *testing.T
 		return raw
 	}
 	t.Run("the identical bytes are silent", func(t *testing.T) {
-		h.s.blockTree.compareWithStoredCheckpoint(2, store, stored)
+		h.s.tree().compareWithStoredCheckpoint(2, store, stored)
 		require.Zero(t, sink.errors())
 	})
 	t.Run("another signature subset of the same certificates is silent", func(t *testing.T) {
@@ -310,7 +310,7 @@ func TestARecapturedCheckpointIsComparedBySignatureStrippedIdentity(t *testing.T
 		b, err := checkpointIdentity(other)
 		require.NoError(t, err)
 		require.Equal(t, a, b, "the identity ignores signatures")
-		h.s.blockTree.compareWithStoredCheckpoint(2, store, other)
+		h.s.tree().compareWithStoredCheckpoint(2, store, other)
 		require.Zero(t, sink.errors())
 	})
 	t.Run("another subset of the signatures of scheme 2 certificates is silent: both signature maps are witnesses", func(t *testing.T) {
@@ -347,13 +347,13 @@ func TestARecapturedCheckpointIsComparedBySignatureStrippedIdentity(t *testing.T
 			"garbage":           []byte("not a checkpoint"),
 		} {
 			before := sink.errors()
-			h.s.blockTree.compareWithStoredCheckpoint(2, store, raw)
+			h.s.tree().compareWithStoredCheckpoint(2, store, raw)
 			require.Equal(t, before+1, sink.errors(), name)
 		}
 	})
 	t.Run("nothing stored yet is silent, and storing again never refuses or replaces", func(t *testing.T) {
 		before := sink.errors()
-		h.s.blockTree.compareWithStoredCheckpoint(9, store, []byte("anything")) // no checkpoint for epoch 9
+		h.s.tree().compareWithStoredCheckpoint(9, store, []byte("anything")) // no checkpoint for epoch 9
 		require.Equal(t, before, sink.errors())
 		require.NoError(t, store.StoreHandoffCheckpoint(2, []byte("different bytes")), "a second store is still a no-op, not a refusal")
 		after, err := store.HandoffCheckpoint(2)

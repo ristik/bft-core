@@ -67,14 +67,14 @@ func Test_Chain_QCOfAnotherTimestampIsNotAttached(t *testing.T) {
 	}
 
 	highBefore := c.store.GetHighQc()
-	rootBefore := c.store.blockTree.root.data.GetRound()
+	rootBefore := c.store.tree().root.data.GetRound()
 	_, err = c.store.ProcessQc(qc)
 	require.ErrorContains(t, err, "does not certify the local block")
 	require.Same(t, highBefore, c.store.GetHighQc(), "the high QC did not change")
 	b, err := c.store.Block(round)
 	require.NoError(t, err)
 	require.Nil(t, b.Qc)
-	require.EqualValues(t, rootBefore, c.store.blockTree.root.data.GetRound(), "nothing was committed")
+	require.EqualValues(t, rootBefore, c.store.tree().root.data.GetRound(), "nothing was committed")
 
 	// reopen the database of the node
 	bolt, ok := c.store.storage.(BoltDB)
@@ -128,7 +128,7 @@ func Test_Chain_StaleQCIsCheckedAgainstTheRetainedBlock(t *testing.T) {
 		c.next()
 	}
 	high := c.store.GetHighQc()
-	root := c.store.blockTree.root.data
+	root := c.store.tree().root.data
 	require.Less(t, root.GetRound(), high.GetRound())
 	require.Greater(t, root.GetRound(), uint64(1), "round 1 is pruned")
 

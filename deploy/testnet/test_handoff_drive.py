@@ -7,6 +7,7 @@ import time
 import unittest
 import unittest.mock
 
+import handoff
 import handoff_drive as hd
 
 
@@ -39,6 +40,69 @@ class Rules(unittest.TestCase):
         self.assertEqual(hd.parse_joiners(['5=5', '9=6']), {'5': 5, '9': 6})
         with self.assertRaises(Exception):
             hd.parse_joiners(['five=5'])
+
+
+class InProcessSwitch(unittest.TestCase):
+    """bft-core#1086: a staying root that switched in process is not restarted; anything else is installed by the restart."""
+    def answers(self, *views):
+        views, asked = list(views), []
+        def status():
+            asked.append(1)
+            return views.pop(0) if len(views) > 1 else views[0]
+        clock = iter(range(0, 1000)).__next__
+        return status, asked, clock
+
+    def test_a_switched_root_is_not_restarted(self):
+        status, asked, clock = self.answers({'activeEpoch': 2, 'switch': {'phase': 'switching', 'epoch': 1, 'target': 3}},
+                                            {'activeEpoch': 3, 'switch': {'phase': 'running', 'epoch': 3, 'target': 3, 'tookMs': 40}})
+        self.assertEqual(handoff.switched_in_process(status, 3, wait=10, sleep=lambda s: None, clock=clock)['tookMs'], 40)
+        self.assertEqual(len(asked), 2)
+
+    def test_a_leaver_that_switched_is_following(self):
+        status, _, clock = self.answers({'activeEpoch': 3, 'follower': True, 'switch': {'phase': 'following', 'epoch': 3, 'target': 3}})
+        self.assertIsNotNone(handoff.switched_in_process(status, 3, wait=10, sleep=lambda s: None, clock=clock))
+
+    def test_an_older_image_or_a_disabled_switch_is_restarted_at_once(self):
+        status, asked, clock = self.answers({'activeEpoch': 2})
+        self.assertIsNone(handoff.switched_in_process(status, 3, wait=10, sleep=lambda s: None, clock=clock))
+        self.assertEqual(len(asked), 1)
+
+    def test_a_faulted_switch_is_restarted_at_once(self):
+        status, asked, clock = self.answers({'activeEpoch': 3, 'switch': {'phase': 'faulted', 'epoch': 2, 'target': 3}})
+        self.assertIsNone(handoff.switched_in_process(status, 3, wait=10, sleep=lambda s: None, clock=clock))
+        self.assertEqual(len(asked), 1)
+
+    def test_a_root_that_does_not_switch_in_time_is_restarted(self):
+        status, asked, clock = self.answers({'activeEpoch': 2, 'switch': {'phase': 'running', 'epoch': 2}})
+        self.assertIsNone(handoff.switched_in_process(status, 3, wait=5, sleep=lambda s: None, clock=clock))
+        self.assertGreater(len(asked), 1)
+
+    def test_a_root_that_does_not_answer_is_asked_again(self):
+        status, _, clock = self.answers(None, {'activeEpoch': 3, 'switch': {'phase': 'running', 'epoch': 3}})
+        self.assertIsNone(handoff.switched_in_process(status, 3, wait=10, sleep=lambda s: None, clock=clock), 'no switch reported: not a switching root')
+
+
+class InProcessSwitchInstall(unittest.TestCase):
+    def drive(self, status):
+        d = object.__new__(hd.Drive)
+        d.gen, d.target, d.old, d.new = Path('/nonexistent'), 3, [1, 2], [1, 3]
+        d.root_epoch = lambda i, transport=None: 2
+        d.transport = None
+        d.q3_status = status
+        return d
+
+    def test_a_staying_root_that_switched_is_not_restarted(self):
+        d = self.drive(lambda i: {'activeEpoch': 3, 'switch': {'phase': 'running', 'epoch': 3, 'target': 3, 'tookMs': 35}})
+        with unittest.mock.patch('subprocess.run', side_effect=AssertionError('restarted')):
+            self.assertEqual(d.install_root(1, [], []), {'already': True, 'inProcess': True, 'switchMs': 35})
+
+    def test_a_joiner_is_never_waited_for(self):
+        asked = []
+        d = self.drive(lambda i: asked.append(i) or {'activeEpoch': 3, 'switch': {'phase': 'running', 'epoch': 3}})
+        with unittest.mock.patch('subprocess.run', side_effect=RuntimeError('restart')):
+            with self.assertRaisesRegex(RuntimeError, 'restart'):
+                d.install_root(3, [], [])
+        self.assertEqual(asked, [], 'a joiner (not in the old committee) installs by the restart without asking')
 
 
 class JournalResume(unittest.TestCase):
@@ -426,6 +490,8 @@ class BackupAndAckBlock(unittest.TestCase):
             d.expect = lambda *a, **k: None
             d.wait = lambda *a, **k: True
             d.root_listens = lambda *a: True
+            d.old, d.new = [1], [1]
+            d.q3_status = lambda i: {'activeEpoch': 2}   # an image that does not switch in process (bft-core#1086): restarted
             with unittest.mock.patch('subprocess.run', side_effect=lambda cmd, **k: (__import__('shutil').copytree(cmd[2], cmd[3], symlinks=True) if cmd[0] == 'cp' else None)
                                      or unittest.mock.Mock(returncode=0, stderr='')):
                 d.install_root(1, [], [])

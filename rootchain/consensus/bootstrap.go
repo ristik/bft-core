@@ -47,7 +47,7 @@ func (x *ConsensusManager) InstallEpochGenesis(proof handoff.OldCommitProof, hea
 // only then is the anchor installed.
 func (x *ConsensusManager) InstallEpochBundle(incoming handoffdelivery.Bundle) (*rctypes.EpochAnchor, error) {
 	proof, head, body, candidate := incoming.Proof, incoming.Snapshot, incoming.Body, incoming.Candidate
-	if x.params.NetworkProfileVersion != storage.ProfileHandoff || x.pacemaker.GetCurrentRound() != 0 {
+	if x.params.NetworkProfileVersion != storage.ProfileHandoff || x.pacemaker.GetCurrentRound() != 0 || x.workerRunning.Load() {
 		return nil, errors.New("epoch genesis requires stopped profile-2 consensus")
 	}
 	c, err := x.checkEpochBundle(incoming)

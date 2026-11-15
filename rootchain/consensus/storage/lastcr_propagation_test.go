@@ -89,7 +89,7 @@ func committedRepeatUCScenario(t *testing.T, withSibling bool) {
 	}
 	viewBefore := resolve(b10)
 
-	_, err = s.blockTree.Commit(&rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 9, ParentRoundNumber: 8, Epoch: 2},
+	_, err = s.tree().Commit(&rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 9, ParentRoundNumber: 8, Epoch: 2},
 		LedgerCommitInfo: &types.UnicitySeal{Version: 1, NetworkID: 5, RootChainRoundNumber: 8, Epoch: 2, Timestamp: 1_008, Hash: b8.RootHash}})
 	require.NoError(t, err)
 
@@ -131,7 +131,7 @@ func committedRepeatUCScenario(t *testing.T, withSibling bool) {
 	}
 	if withSibling {
 		// the sibling 11 (parent 7, below the committed 8) is persisted but belongs to a pruned fork: the reopen starts without it
-		_, err := reopened.blockTree.FindBlock(11)
+		_, err := reopened.tree().FindBlock(11)
 		require.Error(t, err, "the abandoned fork is not part of the reopened tree")
 	}
 }

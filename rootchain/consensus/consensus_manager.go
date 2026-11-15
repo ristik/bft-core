@@ -82,6 +82,7 @@ type (
 	certRequest struct {
 		ircr IRChangeRequest
 		rsc  trace.SpanContext
+		gen  uint64 // the consensus context the request was made in (#1086): another context's worker drops it
 	}
 
 	ConsensusManager struct {
@@ -115,8 +116,9 @@ type (
 		irReqVerifier      *IRChangeReqVerifier
 		t2Timeouts         *PartitionTimeoutGenerator
 		// viewResolver selects the view-aware branch (Q2-C2) for leader admission, timeouts and payload generation. Production
-		// leaves it nil: the legacy round-only dispatch stays selected.
-		viewResolver ViewResolver
+		// leaves it nil: the legacy round-only dispatch stays selected. It is selected again by an in-process epoch switch while the
+		// shard-facing node runs, so it is read through resolver().
+		viewResolver atomic.Pointer[viewResolverRef]
 		// votes need to be buffered when CM will be the next leader (so other nodes
 		// will send votes to it) but it hasn't got the proposal yet, so it can't process
 		// the votes. voteBuffer maps author id to vote, so we do not buffer same vote
@@ -153,6 +155,17 @@ type (
 		// handoffIntent is the operator plan this validator holds for the leader to order a Prepare for: unsigned, naming no parent.
 		handoffIntent *abdrc.HandoffApprovalMsg
 		handoffAborts map[handoffAbortKey]*pendingHandoffAbort
+
+		// the in-process epoch switch (#1086, epoch_switch.go): the process's switch, the barrier (held by a switch from Switching until
+		// the successor is published; the operator entry points hold its read side), the context generation, the published switch state,
+		// and two loop-owned fields: the committed root last evaluated as a trigger and the messages of the next epoch parked for it
+		switcher           EpochSwitch
+		ctxMu              sync.RWMutex
+		ctxGen             atomic.Uint64
+		switchCtx          atomic.Pointer[switchContext]
+		workerRunning      atomic.Bool
+		switchCheckedRound uint64
+		future             futureMessages
 
 		log    *slog.Logger
 		tracer trace.Tracer
@@ -347,6 +360,8 @@ func NewConsensusManager(
 			bStore.SetUTBRetention(utbRetentionFor(optional.UTBStore))
 		}
 	}
+	// the in-process epoch switch's fence is in front of every signature (#1086); without a switch it never refuses
+	safetyOptions = append(safetyOptions, WithSigningFence(func(epoch uint64) error { return manager.signingFence(epoch) }))
 	if optional.Q3 != nil {
 		safetyOptions = append(safetyOptions, WithActivationGate(optional.Q3))
 		// a Q3 deployment's committee is the authenticated trust base of the epoch: a node it does not name (a joiner before its activation, a
@@ -410,6 +425,7 @@ func NewConsensusManager(
 		recoveryHistory:  optional.RecoveryHistory,
 		witnesses:        optional.Witnesses,
 		q3:               optional.Q3,
+		switcher:         optional.EpochSwitch,
 		epochAnchor:      installedAnchor,
 		log:              log,
 		tracer:           observe.Tracer("cm.distributed"),
@@ -513,6 +529,12 @@ func (x *ConsensusManager) RequestCertification(ctx context.Context, cr IRChange
 	ctx, span := x.tracer.Start(ctx, "ConsensusManager.RequestCertification")
 	defer span.End()
 
+	// a request made during an in-process epoch switch waits for the successor context; one made before it is dropped by the
+	// successor's worker (its generation), as a restart loses it (#1086)
+	if err := x.awaitContext(ctx); err != nil {
+		return err
+	}
+	gen := x.contextGen()
 	if x.recovery.InRecovery() {
 		return fmt.Errorf("node is in recovery: %s", x.recovery)
 	}
@@ -520,7 +542,7 @@ func (x *ConsensusManager) RequestCertification(ctx context.Context, cr IRChange
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
-	case x.certReqCh <- certRequest{ircr: cr, rsc: trace.SpanContextFromContext(ctx)}:
+	case x.certReqCh <- certRequest{ircr: cr, rsc: trace.SpanContextFromContext(ctx), gen: gen}:
 	}
 	return nil
 }
@@ -540,62 +562,98 @@ func (x *ConsensusManager) Run(ctx context.Context) error {
 			x.frontier.stopOnce.Do(func() { close(x.frontier.stopped) })
 		}()
 	}
+	// A committed activation that this root switches into in process (#1086) ends the worker; the successor's worker is started by the
+	// same code, from the durable state the install left. Any failure of the switch ends Run: the process exits to its recovery.
+	for {
+		sw, err := x.runWorker(ctx)
+		if sw == nil {
+			x.log.InfoContext(ctx, "exited distributed consensus manager main loop", logger.Error(err))
+			return err
+		}
+		if err != nil { // the worker did not stop cleanly at the barrier (the process is stopping)
+			x.faultSwitch(sw, err)
+			return err
+		}
+		if err := x.switchEpoch(ctx, sw); err != nil {
+			return err
+		}
+	}
+}
+
+// runWorker runs one consensus context: the start-up of the pacemaker and leader, the loop and the certificate sender. It returns the
+// switch the loop raised the barrier for, once both have stopped, or the error that ended them.
+func (x *ConsensusManager) runWorker(ctx context.Context) (*errEpochSwitch, error) {
+	x.workerRunning.Store(true)
+	defer x.workerRunning.Store(false)
 	g, ctx := errgroup.WithContext(ctx)
+	drain := make(chan struct{})
+	var sw *errEpochSwitch
 
 	g.Go(func() error {
 		defer x.pacemaker.Stop()
-		vote, err := x.blockStore.ReadLastVote()
-		if err != nil {
-			return fmt.Errorf("last vote read failed: %w", err)
+		err := x.startAndLoop(ctx)
+		if errors.As(err, &sw) {
+			close(drain) // the sender delivers what it holds and returns; the group's context stays up meanwhile
+			return nil
 		}
-		hQc := x.blockStore.GetHighQc()
-		lastTC, err := x.blockStore.GetLastTC()
-		if err != nil {
-			return fmt.Errorf("failed to read last TC from block store: %w", err)
-		}
-		highRound := hQc.GetRound()
-		if x.epochAnchor != nil {
-			if hQc != nil && hQc.VoteInfo.Epoch != x.epochAnchor.Epoch {
-				return errors.New("old QC cannot start successor pacemaker")
-			}
-			if lastTC != nil && (lastTC.Timeout == nil || lastTC.Timeout.Epoch != x.epochAnchor.Epoch) {
-				return errors.New("old TC cannot start successor pacemaker")
-			}
-			highRound = max(highRound, x.epochAnchor.Slot)
-		}
-		logRecoveredVote(ctx, x.log, vote)
-		x.pacemaker.Reset(ctx, highRound, lastTC, vote)
-
-		// Now that we have a better idea of current round, let's see if we need to update our trust base.
-		x.updateTrustBase()
-
-		err = x.leaderSelector.UpdateWithTrustBase(x.trustBase.Load(), x.pacemaker.GetCurrentRound())
-		if err != nil {
-			return fmt.Errorf("failed to update leader from trust base: %w", err)
-		}
-
-		leader, err := x.leaderSelector.GetLeaderForRound(x.pacemaker.GetCurrentRound())
-		if err != nil {
-			// start CM even if leader selection failed
-			x.log.WarnContext(ctx, "Failed to select leader when starting consensus manager", logger.Error(err))
-		}
-		x.log.InfoContext(ctx, fmt.Sprintf("CM starting, leader is %s", leader))
-		if x.frontier != nil && !x.frontier.faulted.Load() {
-			x.frontier.eligible.Store(true)
-		}
-		// The first round of an anchored epoch is entered with neither a QC nor a TC, and the pacemaker's maturity event belongs to the
-		// leader of the NEXT round, so nothing else makes its leader propose: the epoch would begin with a round timeout (#559).
-		if x.epochAnchor != nil && x.pacemaker.GetCurrentRound() == x.epochAnchor.Slot+1 {
-			x.processNewRoundEvent(ctx)
-		}
-		return x.loop(ctx)
+		return err
 	})
 
-	g.Go(func() error { return x.sendCertificates(ctx) })
+	g.Go(func() error { return x.sendCertificatesUntil(ctx, drain) })
 
 	err := g.Wait()
-	x.log.InfoContext(ctx, "exited distributed consensus manager main loop", logger.Error(err))
-	return err
+	return sw, err
+}
+
+// startAndLoop is the start of a consensus context, exactly as at a process start, and then the loop.
+func (x *ConsensusManager) startAndLoop(ctx context.Context) error {
+	vote, err := x.blockStore.ReadLastVote()
+	if err != nil {
+		return fmt.Errorf("last vote read failed: %w", err)
+	}
+	hQc := x.blockStore.GetHighQc()
+	lastTC, err := x.blockStore.GetLastTC()
+	if err != nil {
+		return fmt.Errorf("failed to read last TC from block store: %w", err)
+	}
+	highRound := hQc.GetRound()
+	if x.epochAnchor != nil {
+		if hQc != nil && hQc.VoteInfo.Epoch != x.epochAnchor.Epoch {
+			return errors.New("old QC cannot start successor pacemaker")
+		}
+		if lastTC != nil && (lastTC.Timeout == nil || lastTC.Timeout.Epoch != x.epochAnchor.Epoch) {
+			return errors.New("old TC cannot start successor pacemaker")
+		}
+		highRound = max(highRound, x.epochAnchor.Slot)
+	}
+	logRecoveredVote(ctx, x.log, vote)
+	x.pacemaker.Reset(ctx, highRound, lastTC, vote)
+
+	// Now that we have a better idea of current round, let's see if we need to update our trust base.
+	x.updateTrustBase()
+
+	err = x.leaderSelector.UpdateWithTrustBase(x.trustBase.Load(), x.pacemaker.GetCurrentRound())
+	if err != nil {
+		return fmt.Errorf("failed to update leader from trust base: %w", err)
+	}
+
+	leader, err := x.leaderSelector.GetLeaderForRound(x.pacemaker.GetCurrentRound())
+	if err != nil {
+		// start CM even if leader selection failed
+		x.log.WarnContext(ctx, "Failed to select leader when starting consensus manager", logger.Error(err))
+	}
+	x.log.InfoContext(ctx, fmt.Sprintf("CM starting, leader is %s", leader))
+	if x.frontier != nil && !x.frontier.faulted.Load() {
+		x.frontier.eligible.Store(true)
+	}
+	// The first round of an anchored epoch is entered with neither a QC nor a TC, and the pacemaker's maturity event belongs to the
+	// leader of the NEXT round, so nothing else makes its leader propose: the epoch would begin with a round timeout (#559).
+	if x.epochAnchor != nil && x.pacemaker.GetCurrentRound() == x.epochAnchor.Slot+1 {
+		x.processNewRoundEvent(ctx)
+	}
+	// the successor's messages that arrived before this root switched into its epoch (#1086), through the ordinary handlers
+	x.replayFuture(ctx)
+	return x.loop(ctx)
 }
 
 func (x *ConsensusManager) loop(ctx context.Context) error {
@@ -612,6 +670,10 @@ func (x *ConsensusManager) loop(ctx context.Context) error {
 		x.backoff = backoffShadowFromEnv(x.params.LocalTimeout)
 	}
 	for {
+		// a committed activation this root switches into ends the context here, before anything else is handled in it (#1086)
+		if err := x.checkEpochSwitch(ctx); err != nil {
+			return err
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -636,7 +698,10 @@ func (x *ConsensusManager) loop(ctx context.Context) error {
 			x.profile.observe(msg, time.Since(handled))
 		case req := <-x.certReqCh:
 			ctx := trace.ContextWithRemoteSpanContext(ctx, req.rsc)
-			if err := x.onPartitionIRChangeReq(ctx, &req.ircr); err != nil {
+			if req.gen != x.contextGen() {
+				// counted before an in-process epoch switch: the successor never certifies it (the shard requests again, #1086)
+				x.log.DebugContext(ctx, "certification request of a replaced consensus context dropped", logger.Shard(req.ircr.Partition, req.ircr.Shard))
+			} else if err := x.onPartitionIRChangeReq(ctx, &req.ircr); err != nil {
 				x.log.WarnContext(ctx, "failed to process IR change request from partition", logger.Error(err), logger.Shard(req.ircr.Partition, req.ircr.Shard))
 			}
 		case event := <-x.pacemaker.StatusEvents():
@@ -696,6 +761,11 @@ func (x *ConsensusManager) handleRootNetMsg(ctx context.Context, msg any) (rErr 
 		span.End()
 	}(time.Now())
 
+	// a proposal, vote or timeout of the next epoch, sent by a member that switched into it first, waits for this root's own switch
+	// unverified; it is handled by the successor's worker or dropped (#1086)
+	if x.parkFuture(msg) {
+		return nil
+	}
 	switch mt := msg.(type) {
 	case *abdrc.IrChangeReqMsg:
 		return x.onIRChangeMsg(ctx, mt)
@@ -933,30 +1003,52 @@ func (x *ConsensusManager) HandoffCandidate(bodyID []byte) ([]byte, error) {
 
 // SetViewResolver selects the view-aware branch of the leader's buffer, timeouts and proposal payload. Production selects it only through
 // SelectRequestHistory (a Q3 deployment); otherwise the legacy dispatch stays.
-func (x *ConsensusManager) SetViewResolver(r ViewResolver) { x.viewResolver = r }
+func (x *ConsensusManager) SetViewResolver(r ViewResolver) {
+	if r == nil {
+		x.viewResolver.Store(nil)
+		return
+	}
+	x.viewResolver.Store(&viewResolverRef{r})
+}
+
+// viewResolverRef holds the selected resolver for an atomic pointer.
+type viewResolverRef struct{ r ViewResolver }
+
+// resolver is the selected view resolver, nil while the legacy dispatch is selected.
+func (x *ConsensusManager) resolver() ViewResolver {
+	if ref := x.viewResolver.Load(); ref != nil {
+		return ref.r
+	}
+	return nil
+}
 
 // RequestView resolves the authenticated view the node's collector admits the shard's certification requests under, for the next
 // proposal round and the collection purpose (which may name a committed successor before its activation round: the view is then
 // collection-only). enabled is false while the view-aware branch is not selected, so the collector keeps the committed ShardInfo.
 // A node in recovery refuses, like ShardInfo.
 func (x *ConsensusManager) RequestView(partition types.PartitionID, shard types.ShardID) (*storage.RequestRoundView, bool, error) {
-	if x.viewResolver == nil {
+	if err := x.awaitContext(context.Background()); err != nil { // during an in-process epoch switch: the successor's view (#1086)
+		return nil, true, err
+	}
+	resolver := x.resolver()
+	if resolver == nil {
 		return nil, false, nil
 	}
 	if x.recovery.InRecovery() {
 		return nil, true, fmt.Errorf("%w: %w: node is in recovery: %s", ErrViewRecovery, storage.ErrAssignmentHistory, x.recovery)
 	}
-	view, err := x.viewResolver.ResolveView(partition, shard, x.pacemaker.GetCurrentRound()+1, storage.PurposeCollect)
+	view, err := resolver.ResolveView(partition, shard, x.pacemaker.GetCurrentRound()+1, storage.PurposeCollect)
 	return view, true, err
 }
 
 // bufferIRChange buffers an IR change request of the next proposal, under the view resolved for it when the view-aware branch is
 // selected, else by the legacy round-only verification.
 func (x *ConsensusManager) bufferIRChange(req *drctypes.IRChangeReq) error {
-	if x.viewResolver == nil || req == nil {
+	resolver := x.resolver()
+	if resolver == nil || req == nil {
 		return x.irReqBuffer.Add(x.pacemaker.GetCurrentRound(), req, x.irReqVerifier)
 	}
-	view, err := x.viewResolver.ResolveView(req.Partition, req.Shard, x.pacemaker.GetCurrentRound()+1, storage.PurposeCertify)
+	view, err := resolver.ResolveView(req.Partition, req.Shard, x.pacemaker.GetCurrentRound()+1, storage.PurposeCertify)
 	if err != nil {
 		return fmt.Errorf("resolving the request view: %w", err)
 	}
@@ -1487,6 +1579,16 @@ The idea is not to block CM until validator consumes the certificates, ie to
 send the UCs in an async fashion.
 */
 func (x *ConsensusManager) sendCertificates(ctx context.Context) error {
+	return x.sendCertificatesUntil(ctx, nil)
+}
+
+// certificateDrainBound bounds how long a stopping worker spends delivering the certificates it still holds (#1086).
+const certificateDrainBound = time.Second
+
+// sendCertificatesUntil is sendCertificates that also ends when drain is closed: the worker stops at an in-process epoch switch
+// (#1086). It then delivers what it holds, the certificates of the commit that ended the epoch among them, within a bound, and
+// returns nil; a restart would lose them, the switch need not.
+func (x *ConsensusManager) sendCertificatesUntil(ctx context.Context, drain <-chan struct{}) error {
 	// pending certificates, to be consumed by the validator.
 	// access to it is "serialized" ie we either update it with
 	// new certs sent by CM or we feed it's content to validator
@@ -1525,6 +1627,28 @@ func (x *ConsensusManager) sendCertificates(ctx context.Context) error {
 				cancel()
 				<-stopped
 			}
+		case <-drain:
+			stopFeed()
+			select {
+			case nm := <-x.ucSink: // the batch of the last commit, if the loop handed it over just before it stopped
+				for _, uc := range nm {
+					certs[types.PartitionShardID{PartitionID: uc.Partition, ShardID: uc.Shard.Key()}] = uc
+				}
+			default:
+			}
+			bound := time.NewTimer(certificateDrainBound)
+			defer bound.Stop()
+			for _, uc := range certs {
+				select {
+				case x.certResultCh <- uc:
+				case <-bound.C:
+					x.log.WarnContext(ctx, "certificates of the old epoch not delivered at the in-process epoch switch", "left", len(certs))
+					return nil
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
+			return nil
 		case <-ctx.Done():
 			return ctx.Err()
 		}
@@ -1661,8 +1785,8 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 	// time out every shard, and a retained request reaching this leader for the next slot would lose to that pending change and wait for
 	// the next live run. A leader-local choice of payload: validity does not change.
 	if !oldSuffix && !x.recoveryRunStart(round) {
-		if x.viewResolver != nil {
-			timedOutShards, err = x.t2Timeouts.GetT2TimeoutsView(round, branch, x.viewResolver, switching)
+		if resolver := x.resolver(); resolver != nil {
+			timedOutShards, err = x.t2Timeouts.GetT2TimeoutsView(round, branch, resolver, switching)
 		} else {
 			timedOutShards, err = x.t2Timeouts.GetT2Timeouts(round, branch, switching)
 		}
@@ -1688,9 +1812,9 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 	if len(handoffRecords) != 0 {
 		payload.HandoffRecords = handoffRecords
 	} else if !oldSuffix {
-		if x.viewResolver != nil {
+		if resolver := x.resolver(); resolver != nil {
 			var perr error
-			if payload, perr = x.irReqBuffer.GeneratePayloadView(round, timedOutShards, inProgress, x.viewResolver, x.irReqVerifier); perr != nil {
+			if payload, perr = x.irReqBuffer.GeneratePayloadView(round, timedOutShards, inProgress, resolver, x.irReqVerifier); perr != nil {
 				x.log.WarnContext(ctx, "cannot resolve the request views of the proposal", logger.Error(perr))
 				return
 			}
@@ -2220,6 +2344,10 @@ func (x *ConsensusManager) pendingStaged() *stagedEVMMembers {
 }
 
 func (x *ConsensusManager) ShardInfo(partition types.PartitionID, shard types.ShardID) (*storage.ShardInfo, error) {
+	// the shard-facing node reads one context: during an in-process epoch switch it waits for the successor's (#1086)
+	if err := x.awaitContext(context.Background()); err != nil {
+		return nil, err
+	}
 	if x.recovery.InRecovery() {
 		return nil, fmt.Errorf("node is in recovery: %s", x.recovery)
 	}

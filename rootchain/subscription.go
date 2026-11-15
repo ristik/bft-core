@@ -20,6 +20,7 @@ const responsesPerSubscription = 2
 type Subscriptions struct {
 	mu     sync.RWMutex
 	subs   map[partitionShard]map[peer.ID]int
+	shards map[partitionShard]types.ShardID // the shard identifier of each subscribed key, for Retain
 	sender func(ctx context.Context, cr *certification.CertificationResponse, receivers ...peer.ID) error
 
 	// sending tracks the goroutines spawned by Send. Without it those goroutines
@@ -43,6 +44,7 @@ type Subscriptions struct {
 func NewSubscriptions(sender func(ctx context.Context, cr *certification.CertificationResponse, receivers ...peer.ID) error, obs Observability) (*Subscriptions, error) {
 	r := &Subscriptions{
 		subs:   map[partitionShard]map[peer.ID]int{},
+		shards: map[partitionShard]types.ShardID{},
 		sender: sender,
 		log:    obs.Logger(),
 	}
@@ -71,6 +73,7 @@ func (s *Subscriptions) Subscribe(partition types.PartitionID, shard types.Shard
 	if _, found := s.subs[id]; !found {
 		s.subs[id] = make(map[peer.ID]int)
 	}
+	s.shards[id] = shard
 	s.subs[id][peerID] = responsesPerSubscription
 	return nil
 }
@@ -113,6 +116,26 @@ func (s *Subscriptions) Send(ctx context.Context, cr *certification.Certificatio
 			s.bcRespSent.Add(ctx, int64(len(recipients)), observability.Shard(cr.Partition, cr.Shard))
 		}
 	}()
+}
+
+// Retain keeps only the subscriptions keep accepts. The node revalidates every subscription when the root epoch changes in process
+// (#1086): a subscription made under the previous epoch's shard assignment is kept only while its node is still a validator of the shard.
+func (s *Subscriptions) Retain(keep func(partition types.PartitionID, shard types.ShardID, id peer.ID) bool) (dropped int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key, subs := range s.subs {
+		shard, ok := s.shards[key]
+		if !ok {
+			continue
+		}
+		for id := range subs {
+			if !keep(key.partition, shard, id) {
+				delete(subs, id)
+				dropped++
+			}
+		}
+	}
+	return dropped
 }
 
 /*

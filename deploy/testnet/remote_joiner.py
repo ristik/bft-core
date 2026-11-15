@@ -438,6 +438,14 @@ class Laptop:
                   '--jwt-secret', '/jwt/jwt.hex', '--execution-genesis-hash', genesis_hash, '--execution-code-hash', code_hash, '--out', '/tmp/receipt.json')
         return {'text': self.exec(f'root{j}', 'cat', '/tmp/receipt.json').stdout}
 
+    def root_status(self):
+        """The root's q3/status answer, or None while it does not answer."""
+        try:
+            code, body = self.root_post('/api/v1/q3/status')
+            return json.loads(body) if code == 200 else None
+        except (Failure, ValueError, subprocess.TimeoutExpired):
+            return None
+
     def root_epoch(self):
         """The root's epoch: its committed certificate's (q3/signers) or, for a follower that holds none (422), its installed one (q3/status activeEpoch)."""
         try:
@@ -470,6 +478,12 @@ class Laptop:
         epoch, j = int(epoch), self.entity
         if self.root_epoch() == epoch:
             return {'already': True}
+        # bft-core#1086: a member of the old committee (not a follower there) may switch into the epoch inside its process at its own commit; a joiner (a
+        # follower) never does, and is restarted at once
+        if not (self.root_status() or {}).get('follower'):
+            switch = handoff.switched_in_process(self.root_status, epoch)
+            if switch is not None:
+                return {'already': True, 'inProcess': True, 'switchMs': switch.get('tookMs')}
         override = self.home / f'compose.install-epoch-{epoch}.json'
         if not override.exists():
             override.write_text(json.dumps(handoff.install_override(self.compose(), epoch), indent=1) + '\n')
