@@ -231,6 +231,7 @@ class NB2Rehearsal(Rehearsal):
 
     # --- fund ------------------------------------------------------------------------------------------------------------------
     def fund(self):
+        self.nb2.mkdir(parents=True, exist_ok=True)
         env = self.nb2 / 'driver.env'
         if not env.exists():
             env.touch()
