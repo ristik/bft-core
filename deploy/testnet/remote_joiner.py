@@ -496,19 +496,6 @@ class Laptop:
         if step == 'shard-start':
             self.dc('start', f'shard{j}')
             return {'started': True}
-        if step == 'advance-with-proof':
-            # bft-core#1085: the bundles the drive put into network/handoff, from the authority's own lineage tip to the target, verified by the
-            # authority itself; the one operation also issues the next session when one is due (a rerun only repairs a missing credential)
-            status = json.loads(self.exec(auth, 'ubft', 'signing-authority', 'status', *OPERATOR).stdout)
-            # from the lineage tip on, and always the target's: a resume after the authority accepted it replays it (a no-op that repairs the credential)
-            proofs = [f'/network/handoff/q3-bundle-{e}.cbor' for e in range(min(int(status.get('lineageEpoch') or 1), epoch - 1) + 1, epoch + 1)]
-            kept = f'/authority/client.cred.pre-epoch-{epoch}'
-            self.exec(auth, 'sh', '-c', f'test -e {kept} || (cp /authority/client.cred {kept}.tmp && chmod 600 {kept}.tmp && mv {kept}.tmp {kept})')
-            done = self.exec(auth, 'ubft', 'signing-authority', 'advance-with-proof', *OPERATOR, *[a for f in proofs for a in ('--proof', f)],
-                             '--out', '/authority/client.cred', '--client-socket', '/authority/client.sock', check=False)
-            if done.returncode:
-                raise Failure(f'{step}: exit {done.returncode}: {(done.stdout + done.stderr).strip()[-300:]}')
-            return json.loads(done.stdout)
         if step not in ('complete-enrollment', 'advance-epoch', 'replace-session'):
             raise Failure(f'{step}: not an authority order')
         if step == 'complete-enrollment':
