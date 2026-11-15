@@ -176,3 +176,20 @@ func TestEachPeerHasARateBudget(t *testing.T) {
 	now = now.Add(time.Second)
 	require.True(t, s.reservePeer(a), "the budget refills at its rate")
 }
+
+// A cancelled request (an install that gives up, #1081 review) ends at once, not at the request deadline: the stream is reset when the
+// context ends, and a root that never answers cannot hold the requester.
+func TestACancelledRequestEndsAtOnce(t *testing.T) {
+	server := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
+	server.RegisterProtocolHandler(Protocol, func(s libp2pnetwork.Stream) {
+		_, _ = io.Copy(io.Discard, s) // reads the request and never answers
+	})
+	client := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
+	client.Network().Peerstore().AddAddrs(server.ID(), server.MultiAddresses(), peerstore.PermanentAddrTTL)
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(200*time.Millisecond, cancel)
+	started := time.Now()
+	_, err := Request(ctx, client, server.ID(), 2)
+	require.Error(t, err)
+	require.Less(t, time.Since(started), 3*time.Second, "not the %s request deadline", requestDeadline)
+}
