@@ -34,6 +34,7 @@ import { sha256 } from '@noble/hashes/sha2.js';
 import { AggregatorClient } from '@unicitylabs/state-transition-sdk/lib/api/AggregatorClient.js';
 import { CertificationData } from '@unicitylabs/state-transition-sdk/lib/api/CertificationData.js';
 import { StateId } from '@unicitylabs/state-transition-sdk/lib/api/StateId.js';
+import { UnicityCertificate } from '@unicitylabs/state-transition-sdk/lib/api/bft/UnicityCertificate.js';
 
 import { concat, eq, toHex } from '../../../packages/native-bridge-plugin/src/bytes.js';
 import {
@@ -45,6 +46,7 @@ import {
 import { appendTransfer, headOf, transferRequest, localOwner, freshMask } from '../../../packages/native-bridge-plugin/src/nb2/tokenops.js';
 import { signaturePredicate, encodeProof, type Token } from '../../../packages/native-bridge-plugin/src/nb2/token.js';
 import { HE, HU } from '../../../packages/native-bridge-plugin/src/nb2/crypto.js';
+import { decodeReceiptBacking } from '../../../packages/native-bridge-plugin/src/nb2/deposit.js';
 import { u256 } from '../../../packages/native-bridge-plugin/src/nb2/cbor.js';
 import { TrustInput } from '../../../packages/native-bridge-plugin/src/trust.js';
 import { refreshAll } from '../../../tester/trust.js';
@@ -876,20 +878,41 @@ function mutationsOf(ev: Uint8Array): Mutation[] {
   const proofs = [t.mintProof, ...t.proofs];
   const ms: Mutation[] = [];
   const at = (part: Uint8Array): number => find(ev, part);
-  // each certificate in check order: a byte of its seal signature flipped (an invalid claim at that position)
-  proofs.forEach((p, i) => {
-    const o = at(p.uc);
-    if (o < 0) return;
-    // the signatures are the last bytes of the UC (the seal's signature map closes the UC): flip one near the end
-    ms.push({ name: `uc${i}-signature`, evidence: flipByte(ev, o + p.uc.length - 3) });
-  });
-  // the first certificate's mutations of the seal network, round and epoch fields: flipped bytes inside the UC (localised, not re-signed)
+  // each certificate (the EVM UC inside J first, then every inclusion proof's UC): every seal signature broken (below quorum: an invalid
+  // claim at that position), and one signature broken (a bad signature counts zero; the others still reach quorum: accepted)
+  const sigsOf = (uc: Uint8Array): Uint8Array[] => {
+    const w = UnicityCertificate.fromCBOR(uc).unicitySeal.witnesses as unknown as Map<unknown, unknown> | null;
+    if (w === null) return [];
+    return [...w.values()].map((v) => (v instanceof Uint8Array ? v : (v as { bytes?: Uint8Array }).bytes ?? (v as { encode: () => Uint8Array }).encode()));
+  };
+  const breakSigs = (uc: Uint8Array, n: number): Uint8Array | null => {
+    const o = at(uc);
+    if (o < 0) return null;
+    const c = Uint8Array.from(ev);
+    let k = 0;
+    for (const sig of sigsOf(uc)) {
+      if (k >= n) break;
+      const so = find(c.subarray(o, o + uc.length), sig);
+      if (so < 0) return null;
+      c[o + so + 10] ^= 0x01;
+      k++;
+    }
+    return k > 0 ? c : null;
+  };
+  const evmUc = (() => { try { return decodeReceiptBacking(t.mint.justification!).proof.uc; } catch { return null; } })();
+  const ucs: [string, Uint8Array][] = [...(evmUc ? [['evm-uc', evmUc] as [string, Uint8Array]] : []), ...proofs.map((p, i) => [`uc${i}`, p.uc] as [string, Uint8Array])];
+  for (const [n, uc] of ucs) {
+    const all = breakSigs(uc, 1 << 30);
+    if (all) ms.push({ name: `${n}-all-signatures`, evidence: all });
+  }
+  for (const [n, uc] of [ucs[0], ucs[ucs.length - 1]]) {
+    const one = breakSigs(uc, 1);
+    if (one) ms.push({ name: `${n}-one-signature`, evidence: one });
+  }
+  // the last certificate's seal fields: a byte early in the UC (its structure, not a signature)
   const p0 = proofs[proofs.length - 1];
   const o0 = at(p0.uc);
-  if (o0 >= 0) {
-    ms.push({ name: 'uc-last-early-byte', evidence: flipByte(ev, o0 + 12) });
-    ms.push({ name: 'uc-last-middle-byte', evidence: flipByte(ev, o0 + (p0.uc.length >> 1)) });
-  }
+  if (o0 >= 0) ms.push({ name: 'uc-last-early-byte', evidence: flipByte(ev, o0 + 12) });
   // membership paths (the last inclusion proof): a sibling, the bitmap, the leaf's reference time
   const last = proofs[proofs.length - 1];
   if (last.siblings.length > 0) {

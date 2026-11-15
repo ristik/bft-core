@@ -425,10 +425,13 @@ class NB2Rehearsal(Rehearsal):
         for label in ('c17x', 'd1a'):
             d('mutations', 'main', label)
             t = self.compare(f'mutations-{label}')
-            accepted = [k for k, v in t.items() if v['solidity'].startswith('0x')]
+            # one broken signature of four still leaves a quorum: those variants must be accepted by all three, every other one refused
+            accepted = [k for k, v in t.items() if v['solidity'].startswith('0x') != k.endswith('-one-signature')]
             disagree = [k for k, v in t.items() if not v['agree']]
             self.say(f'  mutations of {label}: ' + ', '.join(f'{k}={v["solidity"]}' for k, v in t.items()))
-            self.expect(not accepted, f'{label}: no mutation is accepted by the deployed verifier', json.dumps(accepted))
+            self.expect(not accepted, f'{label}: every mutation is refused by the deployed verifier, except one broken signature of a seal (the other signatures still reach quorum)', json.dumps(accepted))
+            allsig = sorted(k for k in t if k.endswith('-all-signatures'))
+            self.say(f'  {label}: every certificate position with all its signatures broken: ' + ', '.join(f'{k.split("-")[0]}={t[k]["solidity"]}' for k in allsig))
             self.expect(not disagree, f'{label}: the plug-in, the deployed verifier and Go name the same rule for every mutation', json.dumps({k: t[k] for k in disagree}))
         d('faults', 'main', 'd1a')
         f = self.outfile('faults-d1a')
