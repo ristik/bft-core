@@ -4,7 +4,7 @@ its scope (#1085), and the shard node's installer, which shares the candidate an
 
 Everything is verified from a pin the verifier was enrolled with (the deployment's genesis root trust base and whether its chain is
 a UTB chain), extended only by activation bundles the verifier authenticates itself, one epoch at a time. A bundle is the root's
-staged activation (q3active.Bundle): the envelope whose last link is the activation, the old committee's committed checkpoint and the
+staged activation (Bundle, the q3active.Bundle encoding): the envelope whose last link is the activation, the old committee's committed checkpoint and the
 committed candidate preimage. Nothing here takes a result, a projection or a configuration from whoever supplies the bundle.
 */
 package activationproof
@@ -20,7 +20,7 @@ import (
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/handoff"
 	"github.com/unicitynetwork/bft-core/handoffdelivery"
-	"github.com/unicitynetwork/bft-core/q3active"
+	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/q3format"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
@@ -93,7 +93,43 @@ type Step struct {
 	Replay bool
 	Entry  q3format.Entry
 	Proof  handoff.OldCommitProof
-	Bundle q3active.Bundle
+	Bundle Bundle
+}
+
+// Bundle is the root's staged activation in its canonical encoding, the one q3active.Bundle encodes: the envelope, the old committee's
+// committed checkpoint and the committed candidate preimage. It is decoded here rather than by q3active so that a verifier outside the
+// root (the signing authority) does not depend on the root's install runtime and stores (TestTheBundleDecodersAgree keeps them one format).
+type Bundle struct {
+	_         struct{} `cbor:",toarray"`
+	Envelope  []byte
+	Snapshot  *abdrc.CommittedBlock
+	Candidate []byte
+}
+
+// DecodeBundle accepts exactly one canonical encoding, with the envelope decoded and its last link naming the activation (as
+// q3active.DecodeBundle).
+func DecodeBundle(raw []byte) (Bundle, q3format.Envelope, error) {
+	var b Bundle
+	if len(raw) == 0 || len(raw) > q3format.MaxEnvelopeBytes {
+		return b, q3format.Envelope{}, fmt.Errorf("%w: %d bytes", ErrLineage, len(raw))
+	}
+	if err := types.Cbor.Unmarshal(raw, &b); err != nil {
+		return Bundle{}, q3format.Envelope{}, fmt.Errorf("%w: %v", ErrLineage, err)
+	}
+	if again, err := types.Cbor.Marshal(b); err != nil || !bytes.Equal(again, raw) {
+		return Bundle{}, q3format.Envelope{}, fmt.Errorf("%w: the bundle is not canonical", ErrLineage)
+	}
+	if len(b.Envelope) == 0 || b.Snapshot == nil {
+		return Bundle{}, q3format.Envelope{}, fmt.Errorf("%w: an envelope and a snapshot are required", ErrLineage)
+	}
+	env, err := q3format.DecodeEnvelope(b.Envelope)
+	if err != nil {
+		return Bundle{}, q3format.Envelope{}, errors.Join(ErrLineage, err)
+	}
+	if len(env.Links) == 0 {
+		return Bundle{}, q3format.Envelope{}, fmt.Errorf("%w: the envelope has no link", ErrLineage)
+	}
+	return b, env, nil
 }
 
 // Extend authenticates one bundle against the lineage and returns the lineage it extends to, leaving l unchanged. A bundle for an epoch
@@ -103,7 +139,7 @@ func (l *Lineage) Extend(raw []byte) (*Lineage, Step, error) {
 	if len(raw) == 0 || len(raw) > MaxBundleBytes {
 		return nil, Step{}, fmt.Errorf("%w: a bundle of %d bytes", ErrLineage, len(raw))
 	}
-	b, env, err := q3active.DecodeBundle(raw)
+	b, env, err := DecodeBundle(raw)
 	if err != nil {
 		return nil, Step{}, errors.Join(ErrLineage, err)
 	}
