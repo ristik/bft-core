@@ -46,7 +46,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent))
 sys.path.insert(0, str(HERE.parent.parent))
-from rehearse import PROXY_IPS, Failure, Rehearsal   # noqa: E402
+from rehearse import PROXY_IPS, PUBLIC_RPC, Failure, Rehearsal   # noqa: E402
 import release_nb2   # noqa: E402
 
 WALLETS = ('main', 'rot', 'big', 'size', 'gascap')
@@ -373,7 +373,7 @@ class NB2Rehearsal(Rehearsal):
         t = rel['deployment']['test']
         tx = '0x' + bytes.fromhex(self.outfile('deposit-root')['tx'][2:]).hex()
         env = dict(os.environ, K='4', NB2_EVIDENCE_OUT=str(self.evidence / 'nb2/stage-sh'), NB2_EVIDENCE_FORWARDED_FOR=PROXY_IPS[0] + '50')
-        out = subprocess.run(['bash', str(HERE.parent.parent.parent.parent / 'scripts/nb2-evidence/stage.sh'), 'http://127.0.0.1:8545/', str(self.nb2 / 'public/trust-base.bundle.cbor'),
+        out = subprocess.run(['bash', str(HERE.parent.parent.parent.parent / 'scripts/nb2-evidence/stage.sh'), f'http://{PUBLIC_RPC}/', str(self.nb2 / 'public/trust-base.bundle.cbor'),
                               str(self.nb2 / 'public/trust-base.genesis.entryid'), t['vault']['address'], tx, str(rel['pins']['deploymentBlock'])], text=True, capture_output=True, env=env,
                              cwd=HERE.parent.parent.parent.parent)
         self.say(out.stdout[-3000:] + out.stderr[-2000:])
@@ -520,7 +520,7 @@ class NB2Rehearsal(Rehearsal):
         self.expect(seals == list(range(len(seals))) and int(st['segment']) == len(seals), f'segments 0..{len(seals) - 1} sealed once each, in order; the vault is at segment {st["segment"]}')
         # the Go reference folds the whole log history from the deployment block (stage.sh's segments command)
         env = dict(os.environ, NB2_EVIDENCE_FORWARDED_FOR=PROXY_IPS[0] + '51')
-        seg = subprocess.run([str(self.nb2_evidence), 'segments', '-rpc', 'http://127.0.0.1:8545/', '-emitter', vault, '-from', str(t['vault']['block']), '-start', '0'],
+        seg = subprocess.run([str(self.nb2_evidence), 'segments', '-rpc', f'http://{PUBLIC_RPC}/', '-emitter', vault, '-from', str(t['vault']['block']), '-start', '0'],
                              text=True, capture_output=True, env=env)
         self.expect(seg.returncode == 0 and len(seg.stdout.splitlines()) == len(seals), f'Go reads the {len(seals)} segment logs in order', seg.stderr[-300:])
         (self.evidence / 'nb2/custody.json').write_text(json.dumps({'deposits': len(deposits), 'D': D, 'payouts': len(paid), 'P': P, 'Q': st['outstanding'], 'balance': bal,

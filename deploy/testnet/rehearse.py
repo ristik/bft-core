@@ -35,7 +35,7 @@ import pos_owner
 import pos_reject
 import pos_sample
 
-PUBLIC_RPC = '127.0.0.1:8545'
+PUBLIC_RPC = os.environ.get('TN_PUBLIC_RPC', '127.0.0.1:8545')   # a generation co-hosted beside another publishes its gateway elsewhere (its compose.yaml ports)
 
 # How long the survivors may take to mine a transaction while one validator is down (pod_restart). 240 s is what the PoA package (root epoch 1) needs many times over.
 # Rotated epochs (pos-restart, pos-restart-2) wait the design's one-stage ceiling for a fault transition (bft-core #886, briefs: 360 s), so a red there means that ceiling was
