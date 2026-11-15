@@ -40,7 +40,7 @@ func decodeNames(list []string) []peer.ID {
 // FrontierPolicy is the frontier policy of a derived archive policy under its durable migration state: the replicas, the lineage
 // accepted on historical records, and the retained holders counted for promised copies (and readable through the availability check).
 func FrontierPolicy(ctx context.Context, c configuredprogress.Context, subject archive.Context, host shardnode.EvidenceHost, limits Limits,
-	replicas []peer.ID, digest [32]byte, m configuredprogress.ArchiveMigration) frontier.Policy {
+	replicas []peer.ID, digest [32]byte, m configuredprogress.ArchiveMigration, readBacks *ReadBackCache) frontier.Policy {
 	readable := slices.Clone(replicas)
 	for _, id := range decodeNames(m.Retained) {
 		if !slices.Contains(readable, id) {
@@ -50,7 +50,7 @@ func FrontierPolicy(ctx context.Context, c configuredprogress.Context, subject a
 	// The availability checker outlives the operation that installs it (a catch-up's Advance among them, whose context is canceled when it
 	// returns): it keeps the values of ctx but never its cancellation. Each read-back is bounded by the transport limits.
 	return frontier.Policy{Context: subject, Eligible: names(replicas), PolicyDigest: digest, Historical: slices.Clone(m.Lineage), Retained: slices.Clone(m.Retained),
-		Binding: CertifiedBinding{Context: c, Subject: subject}, Availability: ReplicaAvailability{Context: context.WithoutCancel(ctx), Host: host, Replicas: readable, Limits: limits}}
+		Binding: CertifiedBinding{Context: c, Subject: subject}, Availability: ReplicaAvailability{Context: context.WithoutCancel(ctx), Host: host, Replicas: readable, Limits: limits, ReadBacks: readBacks}}
 }
 
 // EnableDerivedFrontier adopts the given snapshot's derived policy durably in the journal and enables (or switches) the journal's frontier
@@ -69,7 +69,7 @@ func EnableDerivedFrontier(ctx context.Context, journal *configuredprogress.Stor
 	if m.Digest != snap.Digest || !slices.Equal(m.Replicas, names(snap.Replicas)) {
 		return m, fmt.Errorf("%w: the adopted archive policy is not the snapshot's", ErrConfig)
 	}
-	fp := FrontierPolicy(ctx, c, subject, host, transport, snap.Replicas, snap.Digest, m)
+	fp := FrontierPolicy(ctx, c, subject, host, transport, snap.Replicas, snap.Digest, m, policy.ReadBacks())
 	err = journal.ReplaceFrontierPolicy(ctx, c, limits, fp)
 	if errors.Is(err, configuredprogress.ErrSettings) {
 		err = journal.EnableFrontier(ctx, c, limits, fp)
@@ -207,7 +207,7 @@ func (w *FrontierWorker) ensureBundles(ctx context.Context) error {
 // first, so the in-memory set never names fewer holders than the journal counts. Runs under w.advancing.
 func (w *FrontierWorker) setMigration(ctx context.Context, m configuredprogress.ArchiveMigration) error {
 	if !slices.Equal(names(w.retained), m.Retained) {
-		fp := FrontierPolicy(ctx, w.Context, w.Subject, w.Host, w.TransportLimits, w.Replicas, w.PolicyDigest, m)
+		fp := FrontierPolicy(ctx, w.Context, w.Subject, w.Host, w.TransportLimits, w.Replicas, w.PolicyDigest, m, w.readBacks())
 		if err := w.Journal.ReplaceFrontierPolicy(ctx, w.Context, w.Limits, fp); err != nil {
 			return err
 		}

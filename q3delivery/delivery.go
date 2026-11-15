@@ -215,6 +215,9 @@ func Request(ctx context.Context, host Host, root peer.ID, epoch uint64) (q3acti
 		return q3active.Bundle{}, fmt.Errorf("q3delivery: root stream: %w", err)
 	}
 	defer stream.Close()
+	// the stream deadline below bounds the exchange in time; a cancelled context (an install that gives up) resets the stream at once
+	stopReset := context.AfterFunc(ctx, func() { _ = stream.Reset() })
+	defer stopReset()
 	if deadline, ok := ctx.Deadline(); ok {
 		if err := stream.SetDeadline(deadline); err != nil {
 			return q3active.Bundle{}, err
