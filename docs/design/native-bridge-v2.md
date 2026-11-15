@@ -129,7 +129,8 @@ Limits that stay visible:
   transfer's data, `data`). Within one unit the top-level item is at depth 0 and each array, map or tag opening adds 1
   for its children; a container whose children would sit at depth above 16 is `InputTooLarge`. A byte-string-wrapped
   child is scanned afresh from depth 0, so lineage depth never accumulates. The scan of `evidence` includes the inline
-  aggregator UCs (their native codec bounds apply in addition).
+  aggregator UCs (their native codec bounds apply in addition). UC size bounds (profile `limits`): the EVM receipt UC
+  `evmUcBytes` 16,384 (Section 6.2); each aggregator UC `aggregatorUcBytes` 24,576 (`b1ref.MaxUCBytes`).
 - `H_U` is SHA-256 (the Unicity hash). `H_E` is EVM `keccak256`. They are distinct functions and never substituted.
 - `||` is byte concatenation. `u8`, `u16`, `u64` are fixed-width big-endian integers. `u256(x)` is the 32-byte
   big-endian word. Identifiers compare as unsigned 256-bit big-endian integers.
@@ -300,7 +301,7 @@ The root mint is the SDK mint `M = tag(39041, [2, network, P0, b(salt_n), b(ty),
 ### 6.2 Verification (wallet, recipient and on-chain verifier alike)
 
 Decode strictly and bound before any cryptography (bounds in the profile JSON: `justificationBytes` 65536,
-`ucBytes` 16384, `headerBytes` 2048, `receiptNodes` 65, `receiptBranchNodeBytes` 1024,
+`evmUcBytes` 16384 for `evmUC`, `headerBytes` 2048, `receiptNodes` 65, `receiptBranchNodeBytes` 1024,
 `receiptLeafNodeBytes` 49152). `justificationBytes` bounds the encoded receipt-backed root reason `J` (tag 39051,
 including its `DepositProof`) only. It does not apply to a split justification (`SplitJ`, tag 39044), which embeds its
 whole parent token and grows with the lineage: a `SplitJ` is bounded only by the enclosing evidence, `L_max` and gas,
@@ -656,7 +657,7 @@ and `P_max = floor((L_max - L_T - L_O) / (65 + 32h))`:
   complete encoded transaction or a conservative upper bound. An old seal receipt consumes capacity before the burn.
   If it leaves insufficient reserve, obtain a newer authenticated receipt or refuse. Freshness and future inclusion
   remain availability assumptions: even this check does not guarantee redemption against an indefinitely stale view
-  or arbitrary subsequent traffic. `L_T` before the burn is a conservative upper bound: the held evidence plus the burn transfer with its exact `R`, its CD, and an inclusion proof at the decoder bounds (an RSMT path of up to 256 siblings and an aggregator UC up to 24 KiB).
+  or arbitrary subsequent traffic. `L_T` before the burn is a conservative upper bound: the held evidence plus the burn transfer with its exact `R`, its CD, and an inclusion proof at the decoder bounds (an RSMT path of up to 256 siblings and an aggregator UC up to `aggregatorUcBytes` = 24,576 bytes, `b1ref.MaxUCBytes`).
 - At redemption, refuse to submit (`CapacityExceeded`) if `P > P_max` or the gas exceeds `userGasLimit`. In this
   release that burn cannot be redeemed until limits change; it is not recoverable by the wallet.
 
