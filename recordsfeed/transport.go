@@ -469,3 +469,13 @@ func (r RoleRemote) Cut(ctx context.Context, key CutKey) (Cut, error) {
 func (r RoleRemote) Records(ctx context.Context, from uint64, max int) ([]rootrecords.Record, error) {
 	return r.remote().Records(ctx, from, max)
 }
+
+// Peers is who the remote asks for the node's current role (PeerRemote): the prefetch scheduler admits each request against that peer.
+func (r RoleRemote) Peers() []peer.ID { return r.peers() }
+
+// CutFrom asks only the given peer for the cut.
+func (r RoleRemote) CutFrom(ctx context.Context, id peer.ID, key CutKey) (Cut, error) {
+	return P2PRemote{Opener: r.Opener, Roots: []peer.ID{id}}.Cut(ctx, key)
+}
+
+var _ PeerRemote = RoleRemote{}

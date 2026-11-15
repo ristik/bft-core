@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -74,15 +75,19 @@ func (p q3BundleProvider) Q3Bundle(ctx context.Context, epoch uint64) (q3active.
 // installQ3Epochs activates every successor epoch up to the target, each from this node's own committed evidence when it holds it and
 // otherwise from a root peer, and always through the runtime's journal: nothing a peer serves is trusted before the runtime has verified
 // it against the history and every participant has installed it.
-func installQ3Epochs(ctx context.Context, host handoffdelivery.Host, peers []peer.AddrInfo, rt *q3active.Runtime, cm *consensus.ConsensusManager, target uint64) error {
+//
+// A root that does not hold the committed checkpoint itself waits for a peer that does (#1080): see awaitFromRootPeers.
+func installQ3Epochs(ctx context.Context, log *slog.Logger, host handoffdelivery.Host, peers []peer.AddrInfo, rt *q3active.Runtime, cm *consensus.ConsensusManager, target uint64, retry installRetry) error {
 	provider := q3BundleProvider{cm: cm, rt: rt}
 	for epoch := cm.InstalledRootEpoch() + 1; epoch <= target; epoch++ {
 		bundle, err := provider.Q3Bundle(ctx, epoch)
 		if err != nil {
 			var fetchErr error
-			if bundle, fetchErr = fetchFromRootPeers(peers, func(id peer.ID) (q3active.Bundle, error) {
+			// each answer is authenticated against this root's history and install checks before it is chosen (Authenticate stages
+			// nothing), so one peer serving an invalid bundle cannot mask a later honest one; Activate then re-verifies the chosen one
+			if bundle, fetchErr = awaitFromRootPeers(ctx, retry, peers, func(ctx context.Context, id peer.ID) (q3active.Bundle, error) {
 				return q3delivery.Request(ctx, host, id, epoch)
-			}); fetchErr != nil {
+			}, rt.Authenticate, installWaitLogger(log, "activation", epoch)); fetchErr != nil {
 				return fmt.Errorf("no root peer served verified activation of epoch %d: %w", epoch, errors.Join(fetchErr, errNoQ3Bundle))
 			}
 		}
@@ -94,6 +99,19 @@ func installQ3Epochs(ctx context.Context, host handoffdelivery.Host, peers []pee
 }
 
 var errNoQ3Bundle = errors.New("activation bundle unavailable")
+
+// installWaitLogger reports an install that waits for a root peer: the first refusal, then about every tenth, so a long wait is visible
+// without a line per attempt.
+func installWaitLogger(log *slog.Logger, what string, epoch uint64) func(int, error) {
+	if log == nil {
+		return nil
+	}
+	return func(attempt int, err error) {
+		if attempt == 1 || attempt%10 == 0 {
+			log.Info("no root peer serves the "+what+" of the epoch yet: asking again (#1080)", "epoch", epoch, "attempt", attempt, "error", err)
+		}
+	}
+}
 
 // rootHandoffQ3Planner is the V3 plan of the operator endpoint, implemented by a manager wired to a verified Q3 history.
 type rootHandoffQ3Planner interface {

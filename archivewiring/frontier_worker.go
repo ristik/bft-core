@@ -43,7 +43,10 @@ type FrontierWorker struct {
 	Log             *slog.Logger
 	// Finalized bounds pruning to the execution head this node has actually
 	// committed. An archive copy can arrive before local EL finality does.
-	Finalized          func(context.Context) (shardnode.BlockRef, error)
+	Finalized func(context.Context) (shardnode.BlockRef, error)
+	// ReadBacks is the batched read-back cache an advance fills and the journal's frontier policy reads (its ReplicaAvailability.ReadBacks):
+	// Policy's when nil. Without either, every block is read back singly.
+	ReadBacks          *ReadBackCache
 	adoptAt            map[[32]byte]time.Time // when the replicas were last probed for another representation of a blocked block (bft-core#876)
 	auditCursor        uint64
 	lastCapacityWarn   time.Time
@@ -104,6 +107,14 @@ func (w *FrontierWorker) Pass(ctx context.Context) error {
 		w.Log.LogAttrs(ctx, slog.LevelDebug, "archive: frontier worker pass", attrs...)
 	}
 	return err
+}
+
+// readBacks is the cache the worker shares with the journal's frontier policy, nil when none is configured.
+func (w *FrontierWorker) readBacks() *ReadBackCache {
+	if w.ReadBacks != nil {
+		return w.ReadBacks
+	}
+	return w.Policy.ReadBacks()
 }
 
 func (w *FrontierWorker) configValid() bool {
@@ -207,9 +218,17 @@ func (w *FrontierWorker) advance(ctx context.Context, mark func(string), max int
 	}
 	var coveredEntries []coveredEntry
 	stopped := "no certified block above the frontier anchor"
-	availability := ReplicaAvailability{Context: ctx, Host: w.Host, Replicas: w.Replicas, Limits: w.TransportLimits}
+	readBacks := w.readBacks()
+	availability := ReplicaAvailability{Context: ctx, Host: w.Host, Replicas: w.Replicas, Limits: w.TransportLimits, ReadBacks: readBacks}
 	unreachable := make(map[int]bool) // replicas that failed a read-back in this pass: not asked again for later blocks
-	for _, entry := range certifiedEntries(image) {
+	certified := certifiedEntries(image)
+	if readBacks != nil {
+		// The planned run is read back from the acknowledging replicas in chain reads (bft-core#1071) before the loop below checks it block
+		// by block; the read-backs stand for single reads only within this advance.
+		defer readBacks.clear()
+		w.readBackPlanned(ctx, readBacks, image, certified, height, finalized, max)
+	}
+	for _, entry := range certified {
 		if entry.Candidate.Number <= height {
 			continue
 		}
@@ -310,6 +329,35 @@ func (w *FrontierWorker) advance(ctx context.Context, mark func(string), max int
 		return fmt.Errorf("frontier advance: %w", err)
 	}
 	return w.Journal.PruneFrontier(ctx, w.Context, w.Limits)
+}
+
+// readBackPlanned reads back, in chain reads, the run advance is about to check: the consecutive certified blocks above the anchor at
+// height, at or below local finality, at most max of them, from the replicas an acknowledgment names first (the first two; a third is
+// asked singly only when one of them lacks a copy). A run of one block gains nothing over the single read and is left to it.
+func (w *FrontierWorker) readBackPlanned(ctx context.Context, cache *ReadBackCache, image configuredprogress.JournalSnapshot, certified []configuredprogress.JournalEntry, height uint64, finalized shardnode.BlockRef, max int) {
+	if w.Host == nil || len(w.Replicas) < replicaCopies {
+		return
+	}
+	var run [][32]byte
+	next := height + 1
+	for _, entry := range certified {
+		if entry.Candidate.Number < next {
+			continue
+		}
+		if entry.Candidate.Number != next || w.Finalized != nil && entry.Candidate.Number > finalized.Number || len(entry.Candidate.Hash) != 32 || len(run) == max {
+			break
+		}
+		run = append(run, [32]byte(entry.Candidate.Hash))
+		next++
+	}
+	if len(run) < 2 {
+		return
+	}
+	var stop [32]byte
+	if image.Frontier != nil && image.Frontier.Anchor != nil {
+		stop = image.Frontier.Anchor.Subject.BlockHash
+	}
+	readBackRun(ctx, cache, w.Host, w.Replicas[:replicaCopies], w.Subject, run, stop, w.TransportLimits)
 }
 
 // warnCapacity logs once a minute while the hot journal is at or above capacityWarnPercent of any limit. The hard limits stop admission,

@@ -47,3 +47,24 @@ func TestALongLineageExtendsWithoutCopyingAndKeepsEveryEpoch(t *testing.T) {
 	_, err = l.Trust(epochs + 1)
 	require.ErrorIs(t, err, activationproof.ErrLineage)
 }
+
+// activationproof decodes the root's bundle itself (the signing authority must not depend on the root's install runtime, whose stores
+// import the consensus storage); the two decoders accept the same bytes and the same contents.
+func TestTheBundleDecodersAgree(t *testing.T) {
+	f := q3fixture.New(t, q3fixture.Options{Assignment: true})
+	raw, err := q3active.EncodeBundle(q3active.Bundle{Envelope: f.EnvelopeBytes, Snapshot: f.Snapshot, Candidate: f.Candidate})
+	require.NoError(t, err)
+	a, envA, err := activationproof.DecodeBundle(raw)
+	require.NoError(t, err)
+	b, envB, err := q3active.DecodeBundle(raw)
+	require.NoError(t, err)
+	require.Equal(t, b.Envelope, a.Envelope)
+	require.Equal(t, b.Snapshot, a.Snapshot)
+	require.Equal(t, b.Candidate, a.Candidate)
+	require.Equal(t, len(envB.Links), len(envA.Links))
+	for _, bad := range [][]byte{nil, raw[:len(raw)-1], append(append([]byte(nil), raw...), 0)} {
+		_, _, errA := activationproof.DecodeBundle(bad)
+		_, _, errB := q3active.DecodeBundle(bad)
+		require.Equal(t, errB == nil, errA == nil, "the same bytes are refused by both")
+	}
+}
