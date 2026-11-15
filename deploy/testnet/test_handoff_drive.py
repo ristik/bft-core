@@ -336,6 +336,32 @@ class InstallAtOnce(unittest.TestCase):
         self.assertTrue(any(kind == 'install' and i in (1, 2, 4) for kind, i in self.events[:three]), 'after another root has installed')
         self.assertIn(self.journal.value('install', 'evidence', sub='root3'), {'root1', 'root2', 'root4', 'root5'})
 
+    def test_a_failed_joiner_install_leaves_every_incumbent_running(self):
+        real = self.drive.remote[5].install
+        def failing(i):
+            if i == 5:
+                raise hd.rehearse.Failure('the joiner root did not come up')
+            return real(i)
+        self.drive.remote[5].install = failing
+        self.drive.install_root = lambda i, files, base: failing(i)
+        with self.assertRaisesRegex(hd.rehearse.Failure, 'did not come up|left running'):
+            self.drive.step_install(self.journal)
+        self.assertEqual([e for e in self.events if e[0] == 'install'], [], 'astra on #1088: no incumbent restarts after a failed joiner install')
+
+    def test_a_slow_joiner_install_leaves_every_incumbent_running(self):
+        def slow(i):
+            if i == 5:
+                time.sleep(1.0)
+                return {}
+            return self.install(i)
+        self.drive.remote[5].install = slow
+        self.drive.install_root = lambda i, files, base: slow(i)
+        with unittest.mock.patch.object(hd, 'JOINER_FIRST_SECONDS', 0.3):
+            with self.assertRaisesRegex(hd.rehearse.Failure, 'left running'):
+                self.drive.step_install(self.journal)
+        self.assertEqual([e for e in self.events if e[0] == 'install'], [], 'no incumbent restarts while the joiner is still installing')
+        self.assertTrue(self.journal.done('install', 'root5'), 'the joiner itself completed')
+
     def test_a_resumed_install_skips_the_installed_roots(self):
         for i in (1, 2, 3, 4, 5):
             self.journal.write('install', 'done', sub=f'root{i}')

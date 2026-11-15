@@ -32,9 +32,13 @@ So a member of the installed epoch, before it starts consensus in it (after the 
 A root that is not a member of the installed epoch (a follower, a leaver) keeps no committee: it never dials a committee it is not in.
 */
 
+// committeeKeep paces the keeper (astra on #1088): a member is retried every 250 ms for the first 30 s (the handoff, when every root
+// restarts), then with exponential backoff capped at 10 s with jitter; a host starts at most 8 dials per tick (32/s) and holds at most
+// network.MaxMemberDials in flight, however large the committee.
+var committeeKeep = network.MaintainConfig{Interval: 250 * time.Millisecond, RapidWindow: 30 * time.Second, BackoffMax: 10 * time.Second,
+	DialTimeout: 5 * time.Second, PerTick: 8}
+
 const (
-	committeeKeepInterval = 250 * time.Millisecond
-	committeeDialTimeout  = 5 * time.Second
 	// committeeWarmupDefault bounds the wait before the first round: the members of a parallel install come up within about one restart of
 	// each other.
 	committeeWarmupDefault = 3 * time.Second
@@ -79,7 +83,7 @@ func keepRootCommittee(ctx context.Context, log *slog.Logger, host *network.Peer
 	}
 	c.keeper = host.NewMemberProtector("root-committee")
 	c.keeper.Set(ctx, members)
-	go c.keeper.Maintain(ctx, committeeKeepInterval, committeeDialTimeout)
+	go c.keeper.Maintain(ctx, committeeKeep)
 	start := time.Now()
 	deadline := time.NewTimer(warmup)
 	defer deadline.Stop()

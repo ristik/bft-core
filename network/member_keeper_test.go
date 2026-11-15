@@ -2,8 +2,12 @@ package network
 
 import (
 	"context"
+	"errors"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/libp2p/go-libp2p/core/crypto"
 
 	libp2pnetwork "github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -59,7 +63,7 @@ func TestAMemberThatCannotBeDialledIsReachedOverItsOwnOutboundConnection(t *test
 
 	keeper := joiner.NewMemberProtector("root-committee")
 	keeper.Set(ctx, []peer.ID{host.ID()})
-	go keeper.Maintain(ctx, 100*time.Millisecond, 2*time.Second)
+	go keeper.Maintain(ctx, MaintainConfig{Interval: 100 * time.Millisecond, RapidWindow: time.Minute, DialTimeout: 2 * time.Second})
 	require.Eventually(t, func() bool { return len(keeper.Disconnected()) == 0 }, 5*time.Second, 20*time.Millisecond)
 	took, err := reach(ctx, host, joiner.ID(), time.Second)
 	require.NoError(t, err, "the host reaches the joiner over the joiner's own connection")
@@ -90,4 +94,140 @@ func mustAddr(t *testing.T, s string) ma.Multiaddr {
 	a, err := ma.NewMultiaddr(s)
 	require.NoError(t, err)
 	return a
+}
+
+// keeperLoad runs a protector over n unreachable members with a fake dial, and records every attempt.
+type keeperLoad struct {
+	mu      sync.Mutex
+	at      map[peer.ID][]time.Time
+	running int
+	peak    int
+	total   int
+}
+
+func (l *keeperLoad) connect(block time.Duration) func(ctx context.Context, ai peer.AddrInfo) error {
+	return func(ctx context.Context, ai peer.AddrInfo) error {
+		l.mu.Lock()
+		l.at[ai.ID] = append(l.at[ai.ID], time.Now())
+		l.total++
+		l.running++
+		l.peak = max(l.peak, l.running)
+		l.mu.Unlock()
+		defer func() { l.mu.Lock(); l.running--; l.mu.Unlock() }()
+		if block > 0 { // a blackhole: the dial hangs until its timeout
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return errors.New("connection refused") // a fast refusal
+	}
+}
+
+func newKeeperLoad(t *testing.T, ctx context.Context, n int, block time.Duration) (*MemberProtector, *keeperLoad) {
+	t.Helper()
+	p := keeperPeer(t, ctx, "/ip4/127.0.0.1/tcp/0", generateKeyPair(t), nil)
+	t.Cleanup(func() { _ = p.Close() })
+	l := &keeperLoad{at: map[peer.ID][]time.Time{}}
+	m := p.NewMemberProtector("load")
+	m.connect = l.connect(0)
+	ids := make([]peer.ID, n)
+	for i := range ids {
+		ids[i] = generatePeerID(t)
+	}
+	m.Set(ctx, ids)
+	if block > 0 {
+		require.Eventually(t, func() bool { m.dialMu.Lock(); defer m.dialMu.Unlock(); return len(m.inflight) == 0 }, time.Second, time.Millisecond)
+		m.dialMu.Lock()
+		m.connect = l.connect(block)
+		m.dialMu.Unlock()
+		l.mu.Lock()
+		l.total, l.at = 0, map[peer.ID][]time.Time{} // only Maintain's dials are measured
+		l.mu.Unlock()
+	}
+	return m, l
+}
+
+func generatePeerID(t *testing.T) peer.ID {
+	t.Helper()
+	keys := generateKeyPair(t)
+	priv, err := crypto.UnmarshalSecp256k1PrivateKey(keys.PrivateKey)
+	require.NoError(t, err)
+	id, err := peer.IDFromPrivateKey(priv)
+	require.NoError(t, err)
+	return id
+}
+
+// astra on #1088: 127 members that refuse at once must not be dialled at full rate forever. Inside the rapid window a member is retried
+// every tick, but no tick starts more than PerTick dials; after it each member backs off (capped, jittered).
+func TestTheKeeperBacksOffAndKeepsItsBudgetWith127FastRefusals(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m, l := newKeeperLoad(t, ctx, 127, 0)
+	cfg := MaintainConfig{Interval: 20 * time.Millisecond, RapidWindow: 300 * time.Millisecond, BackoffMax: 400 * time.Millisecond, DialTimeout: time.Second, PerTick: 128}
+	start := time.Now()
+	go m.Maintain(ctx, cfg)
+	time.Sleep(1500 * time.Millisecond)
+	cancel()
+	windowEnd := start.Add(cfg.RapidWindow)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for id, at := range l.at {
+		after := 0
+		for _, ts := range at {
+			if ts.After(windowEnd.Add(cfg.Interval)) {
+				after++
+			}
+		}
+		// after the window a failing member waits at least BackoffMax/2 (the jitter's floor) between attempts: <= 1.2 s / 200 ms + 1
+		require.LessOrEqual(t, after, 7, "member %s: %d attempts after the rapid window", id, after)
+	}
+	t.Logf("127 refusing members, 1.5 s: %d dials in all", l.total)
+}
+
+func TestTheKeeperBoundsDialsPerTickAndInFlightWithBlackholedMembers(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m, l := newKeeperLoad(t, ctx, 127, time.Hour)
+	cfg := MaintainConfig{Interval: 20 * time.Millisecond, RapidWindow: time.Minute, DialTimeout: 100 * time.Millisecond, PerTick: 8}
+	go m.Maintain(ctx, cfg)
+	time.Sleep(time.Second)
+	cancel()
+	l.mu.Lock()
+	peak, total := l.peak, l.total
+	l.mu.Unlock()
+	require.LessOrEqual(t, peak, MaxMemberDials, "never more than the host's budget in flight")
+	// each 100 ms dial holds its slot: at most MaxMemberDials per 100 ms, plus the warm-up's
+	require.LessOrEqual(t, total, MaxMemberDials*12, "dials in a second")
+	t.Logf("127 blackholed members, 1 s: %d dials, %d at most in flight", total, peak)
+
+	time.Sleep(200 * time.Millisecond)
+	l.mu.Lock()
+	after := l.total
+	l.mu.Unlock()
+	time.Sleep(300 * time.Millisecond)
+	l.mu.Lock()
+	require.Equal(t, after, l.total, "a cancelled keeper starts no dial")
+	l.mu.Unlock()
+}
+
+func TestASuccessfulDialAndANewSetResetTheRetryState(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m, l := newKeeperLoad(t, ctx, 3, 0)
+	cfg := MaintainConfig{Interval: 10 * time.Millisecond, RapidWindow: 0, BackoffMax: time.Hour, DialTimeout: time.Second}
+	go m.Maintain(ctx, cfg)
+	require.Eventually(t, func() bool { m.dialMu.Lock(); defer m.dialMu.Unlock(); return len(m.retry) == 3 }, 2*time.Second, 5*time.Millisecond)
+	m.dialMu.Lock()
+	for _, st := range m.retry {
+		require.Greater(t, st.next, time.Now(), "backed off")
+	}
+	m.dialMu.Unlock()
+	m.Set(ctx, m.Protected())
+	m.dialMu.Lock()
+	require.Empty(t, m.retry, "a new set restarts the schedule")
+	m.dialMu.Unlock()
+	m.dialMu.Lock()
+	m.connect = func(context.Context, peer.AddrInfo) error { return nil }
+	m.dialMu.Unlock()
+	_ = l
+	require.Eventually(t, func() bool { m.dialMu.Lock(); defer m.dialMu.Unlock(); return len(m.retry) == 0 }, 2*time.Second, 5*time.Millisecond)
 }

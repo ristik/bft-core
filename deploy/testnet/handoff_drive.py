@@ -63,7 +63,7 @@ import operator_rpc
 import rehearse
 import remote_entity
 
-JOINER_FIRST_SECONDS = 180   # how long the incumbents wait for the joiners' installs (bft-core#1082); a remote install fetches its bundles over the tunnel
+JOINER_FIRST_SECONDS = 180   # how long the incumbents wait for the joiners' installs (bft-core#1082) before the step fails with them still running
 INSTALL_GATE_SECONDS = 120  # how long a root waits for verified evidence of the activation before the install step fails closed: the root is left
                             # running, never stopped without evidence it can install from (bft-core#1080, astra on #1084)
 LIFETIME = 16384            # storage.ResultReservationLifetimeProgress: a result not prepared within this many registry progress rounds is rejected by the roots
@@ -829,32 +829,39 @@ class Drive(rehearse.Rehearsal):
         # (keeping its committee connected: it dials the others itself) before the incumbents restart into the new epoch and its first rounds
         # can reach it. Installed after them, a joiner behind NAT came up after those rounds, and its leader slots timed out (2 x 10 s on staging).
         joiners = sorted(set(self.new) - set(self.old))
-        joiners_done = threading.Event()
-        pending = {j for j in joiners if not journal.done('install', f'root{j}')}
-        if not pending:
-            joiners_done.set()
-        pending_lock = threading.Lock()
-        def joiner_finished(j):
-            with pending_lock:
-                pending.discard(j)
-                if not pending:
-                    joiners_done.set()
+        # each joiner's outcome: None while it installs, True once installed, False when it failed; the incumbents restart only once every
+        # joiner installed (astra on #1088): a failed or slow joiner leaves them, and so the joiner's source, running, and the step fails
+        outcome = {j: (True if journal.done('install', f'root{j}') else None) for j in joiners}
+        settled = threading.Condition()
+        def joiner_outcome(j, ok):
+            with settled:
+                outcome[j] = ok
+                settled.notify_all()
+        def joiners_installed():
+            with settled:
+                settled.wait_for(lambda: all(v is not None for v in outcome.values()) or False in outcome.values(), timeout=JOINER_FIRST_SECONDS)
+                failed = sorted(j for j, v in outcome.items() if v is False)
+                running = sorted(j for j, v in outcome.items() if v is None)
+            if failed or running:
+                why = f'the install of joiner root(s) {failed} failed' if failed else f'joiner root(s) {running} did not install within {JOINER_FIRST_SECONDS} s'
+                raise rehearse.Failure(f'{why}: the incumbents are left running (they are its source of the activation and its committee); '
+                                       f'inspect the joiner, then run the drive again')
         def install(i):
             # sequential installs cost ~2.5 s per root before the new committee's first leader (the lowest node id) was up; at once they cost one restart
             if journal.done('install', f'root{i}'):
                 return journal.run('install', lambda: {}, sub=f'root{i}')   # skipped, echoed
             if i in joiners:
+                ok = False
                 try:
                     source = self.await_install_evidence(i, installed, running_sources=lambda: set(self.old) - installed())
-                    return self.install_one(journal, i, files, base, source)
+                    result = self.install_one(journal, i, files, base, source)
+                    ok = True
+                    return result
                 finally:
-                    joiner_finished(i)
+                    joiner_outcome(i, ok)
             source = self.await_install_evidence(i, installed)
-            if not joiners_done.wait(JOINER_FIRST_SECONDS):
-                # its own evidence is enough for it; a joiner still installing then takes the activation from an installed root (#1081 waits)
-                self.say(f'  the joiners have not installed within {JOINER_FIRST_SECONDS} s: root {i} is installed anyway (it holds the commit itself)')
+            joiners_installed()   # bft-core#1082: never restart an incumbent before the joiners are up
             return self.install_one(journal, i, files, base, source)
-        parallel({i: (lambda i=i: install(i)) for i in roots})
         parallel({i: (lambda i=i: install(i)) for i in roots})
         for i in sorted(set(roots) - set(self.new)):   # a leaver installs the epoch (it holds the commit) but certifies nothing in it: it is a follower there
             self.wait(f'the leaving root {i} installed epoch {self.target}', lambda i=i: self.follower_epoch(i) == self.target or self.root_epoch(i, self.transport) == self.target, 300, every=0.5)

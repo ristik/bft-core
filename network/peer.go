@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"sync"
 	"time"
 
@@ -293,14 +294,37 @@ type MemberProtector struct {
 	mu        sync.Mutex
 	protected map[peer.ID]struct{}
 	cancel    context.CancelFunc
+
+	// the dialling of Set's warm-up and of Maintain, shared (#1082, astra on #1088): one dial per member at a time, a per-host budget of
+	// concurrent dials, and each member's retry state, reset by a successful dial and by Set (an authenticated change of the set)
+	dialMu      sync.Mutex
+	inflight    map[peer.ID]bool
+	retry       map[peer.ID]*memberRetry
+	windowStart time.Time
+	sem         chan struct{}
+	connect     func(ctx context.Context, ai peer.AddrInfo) error // the host's Connect; a test replaces it
 }
+
+type memberRetry struct {
+	failures int
+	next     time.Time
+}
+
+// MaxMemberDials is the per-host bound on concurrent member dials (Set's warm-up and Maintain together); MemberDialTimeout bounds one of
+// Set's warm-up dials (Maintain's are bounded by its own configuration).
+const (
+	MaxMemberDials    = 16
+	MemberDialTimeout = 5 * time.Second
+)
 
 // NewMemberProtector is a protector of the member set under tag.
 func (p *Peer) NewMemberProtector(tag string) *MemberProtector {
-	return &MemberProtector{p: p, tag: tag, protected: map[peer.ID]struct{}{}}
+	return &MemberProtector{p: p, tag: tag, protected: map[peer.ID]struct{}{}, inflight: map[peer.ID]bool{}, retry: map[peer.ID]*memberRetry{},
+		windowStart: time.Now(), sem: make(chan struct{}, MaxMemberDials), connect: p.host.Connect}
 }
 
-// Set makes ids the protected, warmed member set. A dial runs at most until ctx ends or the next Set.
+// Set makes ids the protected, warmed member set. A dial runs at most until ctx ends or the next Set. A new set restarts the members'
+// retry state and Maintain's rapid-reconnect window.
 func (m *MemberProtector) Set(ctx context.Context, ids []peer.ID) {
 	cm := m.p.host.ConnManager()
 	m.mu.Lock()
@@ -331,44 +355,59 @@ func (m *MemberProtector) Set(ctx context.Context, ids []peer.ID) {
 			dial = append(dial, id)
 		}
 	}
+	m.dialMu.Lock()
+	m.retry, m.windowStart = map[peer.ID]*memberRetry{}, time.Now()
+	m.dialMu.Unlock()
 	warm, cancel := context.WithCancel(ctx)
 	m.cancel = cancel
 	for _, id := range dial {
-		go func(id peer.ID) {
-			_ = m.p.host.Connect(warm, peer.AddrInfo{ID: id, Addrs: m.p.host.Peerstore().Addrs(id)})
-		}(id)
+		m.startDial(warm, id, nil) // a member it cannot start now (budget, or a dial in flight) is Maintain's to retry
 	}
 }
 
-// Maintain keeps the protected set connected until ctx ends (#1082): every interval it dials each protected member it holds no connection
-// to, one dial per member at a time, each bounded by dialTimeout. It is the outbound half of reaching a member that cannot be dialled: a
-// node behind NAT or an isolated bridge dials the others itself, and they reach it over that connection (libp2p opens a stream on any
-// existing connection, whichever side dialled it). A member that restarts is dialled again within one interval of coming back: the dial
-// bypasses the swarm's per-address backoff, which would otherwise hold a just-restarted member unreachable for seconds.
-func (m *MemberProtector) Maintain(ctx context.Context, interval, dialTimeout time.Duration) {
-	inflight := map[peer.ID]bool{}
-	var mu sync.Mutex
-	ticker := time.NewTicker(interval)
+// MaintainConfig paces Maintain.
+type MaintainConfig struct {
+	// Interval is the tick; inside RapidWindow (from the start, or the last Set) a member is retried every tick.
+	Interval    time.Duration
+	RapidWindow time.Duration
+	// BackoffMax caps the exponential backoff after the window (Interval doubled per failure, with jitter of +-50%).
+	BackoffMax time.Duration
+	// DialTimeout bounds one dial; PerTick is how many dials one tick may start (with MaxMemberDials in flight at most).
+	DialTimeout time.Duration
+	PerTick     int
+}
+
+// Maintain keeps the protected set connected until ctx ends (#1082): it dials each protected member it holds no connection to, one dial
+// per member at a time, within the host's dial budget. It is the outbound half of reaching a member that cannot be dialled: a node
+// behind NAT or an isolated bridge dials the others itself, and they reach it over that connection (libp2p opens a stream on any existing
+// connection, whichever side dialled it). Inside the rapid window (the handoff: every root has just restarted) a member is retried every
+// tick, past the swarm's per-address dial backoff, which would otherwise hold a just-restarted member unreachable for 5 s and more; after
+// it, a member that keeps failing is retried with capped exponential backoff and jitter. A successful dial resets its state.
+func (m *MemberProtector) Maintain(ctx context.Context, cfg MaintainConfig) {
+	if cfg.Interval <= 0 {
+		cfg.Interval = 250 * time.Millisecond
+	}
+	if cfg.PerTick <= 0 {
+		cfg.PerTick = MaxMemberDials
+	}
+	ticker := time.NewTicker(cfg.Interval)
 	defer ticker.Stop()
 	for {
-		for _, id := range m.Disconnected() {
-			mu.Lock()
-			busy := inflight[id]
-			inflight[id] = true
-			mu.Unlock()
-			if busy {
-				continue
+		now := time.Now()
+		started := 0
+		missing := m.Disconnected()
+		rand.Shuffle(len(missing), func(i, j int) { missing[i], missing[j] = missing[j], missing[i] })
+		for _, id := range missing {
+			if started >= cfg.PerTick {
+				break
 			}
-			go func(id peer.ID) {
-				// past the swarm's dial backoff: a member that was dialled while it restarted is in backoff for 5 s and more, and every send
-				// to it fails with "dial backoff" meanwhile; the keeper's own interval is the pacing
-				dial, cancel := context.WithTimeout(network.WithForceDirectDial(ctx, "committee member"), dialTimeout)
-				defer cancel()
-				_ = m.p.host.Connect(dial, peer.AddrInfo{ID: id, Addrs: m.p.host.Peerstore().Addrs(id)})
-				mu.Lock()
-				delete(inflight, id)
-				mu.Unlock()
-			}(id)
+			m.dialMu.Lock()
+			st := m.retry[id]
+			due := st == nil || !now.Before(st.next)
+			m.dialMu.Unlock()
+			if due && m.startDial(ctx, id, &cfg) {
+				started++
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -376,6 +415,64 @@ func (m *MemberProtector) Maintain(ctx context.Context, interval, dialTimeout ti
 		case <-ticker.C:
 		}
 	}
+}
+
+// startDial dials id in the background unless a dial of it is in flight or the host's budget is spent; it reports whether it started one.
+// pace is Maintain's (a forced, bounded dial; a failure schedules the member's next attempt), nil for Set's warm-up (an ordinary dial).
+func (m *MemberProtector) startDial(ctx context.Context, id peer.ID, pace *MaintainConfig) bool {
+	m.dialMu.Lock()
+	if m.inflight[id] {
+		m.dialMu.Unlock()
+		return false
+	}
+	select {
+	case m.sem <- struct{}{}:
+	default:
+		m.dialMu.Unlock()
+		return false
+	}
+	m.inflight[id] = true
+	connect := m.connect
+	m.dialMu.Unlock()
+	go func() {
+		defer func() { <-m.sem }()
+		dial, timeout := ctx, MemberDialTimeout
+		if pace != nil {
+			dial = network.WithForceDirectDial(dial, "committee member")
+			if pace.DialTimeout > 0 {
+				timeout = pace.DialTimeout
+			}
+		}
+		dial, cancel := context.WithTimeout(dial, timeout)
+		defer cancel()
+		err := connect(dial, peer.AddrInfo{ID: id, Addrs: m.p.host.Peerstore().Addrs(id)})
+		m.dialMu.Lock()
+		defer m.dialMu.Unlock()
+		delete(m.inflight, id)
+		if err == nil {
+			delete(m.retry, id)
+			return
+		}
+		if pace == nil {
+			return // Set's warm-up: Maintain owns the retry schedule
+		}
+		st := m.retry[id]
+		if st == nil {
+			st = &memberRetry{}
+			m.retry[id] = st
+		}
+		st.failures++
+		delay := pace.Interval
+		if time.Since(m.windowStart) >= pace.RapidWindow {
+			delay = pace.Interval << min(st.failures, 16)
+			if pace.BackoffMax > 0 && delay > pace.BackoffMax {
+				delay = pace.BackoffMax
+			}
+			delay = delay/2 + time.Duration(rand.Int64N(int64(delay)+1)) // +-50% jitter
+		}
+		st.next = time.Now().Add(delay)
+	}()
+	return true
 }
 
 // Disconnected is the protected members this node holds no connection to.
