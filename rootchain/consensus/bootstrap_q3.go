@@ -130,7 +130,8 @@ func (x *ConsensusManager) InstallVerifiedEpoch(entry q3format.Entry, proof hand
 	if x.params.NetworkProfileVersion != storage.ProfileHandoff {
 		return nil, fmt.Errorf("%w: not the handoff profile", ErrNotStopped)
 	}
-	if x.pacemaker.GetCurrentRound() != 0 {
+	// stopped: never started, or the worker stopped at an in-process epoch switch's barrier and quiesced (#1086)
+	if x.pacemaker.GetCurrentRound() != 0 || x.workerRunning.Load() {
 		return nil, fmt.Errorf("%w: consensus is running", ErrNotStopped)
 	}
 	c, err := x.checkVerifiedEpoch(entry, proof, head, candidate)

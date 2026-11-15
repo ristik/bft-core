@@ -63,7 +63,7 @@ func TestActivationRefusesAConfigurationThatDoesNotStartAtTheCommittedActivation
 	h := f.commitAssignment(t)
 	_, err := f.store.InstallEpochAnchor(h.head, h.verified, h.genesis)
 	require.NoError(t, err)
-	root := f.store.blockTree.Root()
+	root := f.store.tree().Root()
 	configs, err := f.orch.ShardConfigs(7)
 	require.NoError(t, err)
 	record := h.commit
@@ -90,7 +90,7 @@ func TestFirstBlockOfAnEpochWithAnAnchorOffTheCommittedActivationIsRefused(t *te
 	h := f.commitAssignment(t)
 	anchor, err := f.store.InstallEpochAnchor(h.head, h.verified, h.genesis)
 	require.NoError(t, err)
-	root := f.store.blockTree.Root()
+	root := f.store.tree().Root()
 	require.EqualValues(t, 6, root.GetRound())
 
 	shifted := *root
@@ -174,7 +174,7 @@ func TestFirstBlockOfAnEpochAfterARestartReloadsTheAnchorFromTheDatabase(t *test
 	// A restart: a fresh store over the same database. The anchor is the persisted root, loaded rather than passed in memory.
 	restarted, err := New(crypto.SHA256, f.store.storage, f.orch, logger.New(t), ProfileHandoff)
 	require.NoError(t, err)
-	root := restarted.blockTree.Root()
+	root := restarted.tree().Root()
 	require.EqualValues(t, anchor.Slot, root.GetRound(), "the anchor is reloaded as the root")
 	require.True(t, isEpochAnchorRoot(root), "and it is still recognized as an epoch anchor")
 	got := f.addSuccessorBlock(t, restarted, 8, root.BlockData.Anchor)

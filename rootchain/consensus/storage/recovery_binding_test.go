@@ -30,7 +30,7 @@ func Test_RecoveryBinding_Accepts(t *testing.T) {
 		require.EqualValues(t, 1, sm.CommittedHead.GetRound())
 		bs, _, err := c.recoverInto(sm)
 		require.NoError(t, err)
-		require.EqualValues(t, 1, bs.blockTree.root.data.GetRound())
+		require.EqualValues(t, 1, bs.tree().root.data.GetRound())
 	})
 
 	t.Run("every head of a run with changed and unchanged shards and an epoch transition", func(t *testing.T) {
@@ -41,7 +41,7 @@ func Test_RecoveryBinding_Accepts(t *testing.T) {
 			sm := received(t, c.state())
 			bs, _, err := c.recoverInto(sm)
 			require.NoError(t, err, "head round %d (step %d)", sm.CommittedHead.GetRound(), i)
-			require.Equal(t, c.store.blockTree.root.data.RootHash, bs.blockTree.root.data.RootHash)
+			require.Equal(t, c.store.tree().root.data.RootHash, bs.tree().root.data.RootHash)
 		}
 	})
 
@@ -67,10 +67,10 @@ func Test_RecoveryBinding_Accepts(t *testing.T) {
 		var transition bool
 		for _, changed := range [][]types.PartitionID{nil, nil, {1}, {1}, {1}, {1}, {1}} {
 			c.next(changed...)
-			si := c.store.blockTree.root.data.ShardState.States[types.PartitionShardID{PartitionID: 1, ShardID: types.ShardID{}.Key()}]
+			si := c.store.tree().root.data.ShardState.States[types.PartitionShardID{PartitionID: 1, ShardID: types.ShardID{}.Key()}]
 			if si != nil && si.TR.Epoch == 1 && si.IR.Epoch == 0 && si.Fees != nil {
 				bs, _, err := c.recoverInto(received(t, c.state()))
-				require.NoError(t, err, "head round %d", c.store.blockTree.root.data.GetRound())
+				require.NoError(t, err, "head round %d", c.store.tree().root.data.GetRound())
 				_ = bs
 				transition = transition || si.ShardConfHash != nil
 			}

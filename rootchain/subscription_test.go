@@ -354,3 +354,25 @@ func Test_Subscriptions_QuotaStarvesANonSubmittingNode(t *testing.T) {
 	subs.Wait()
 	require.Equal(t, before+1, sent.Load(), "and delivery resumes only after a fresh subscription")
 }
+
+// An in-process epoch switch keeps the subscriptions; Retain drops those of nodes the successor's shard state does not name (#1086).
+func Test_Subscriptions_Retain(t *testing.T) {
+	subs, err := NewSubscriptions(func(context.Context, *certification.CertificationResponse, ...peer.ID) error { return nil }, observability.Default(t))
+	require.NoError(t, err)
+	t.Cleanup(subs.Wait)
+	stays, leaves, other := generateNodeID(t), generateNodeID(t), generateNodeID(t)
+	require.NoError(t, subs.Subscribe(1, types.ShardID{}, stays.String()))
+	require.NoError(t, subs.Subscribe(1, types.ShardID{}, leaves.String()))
+	require.NoError(t, subs.Subscribe(2, types.ShardID{}, other.String()))
+	var asked []types.PartitionID
+	dropped := subs.Retain(func(p types.PartitionID, s types.ShardID, id peer.ID) bool {
+		require.Equal(t, types.ShardID{}, s)
+		asked = append(asked, p)
+		return id != leaves
+	})
+	require.Equal(t, 1, dropped)
+	require.ElementsMatch(t, []types.PartitionID{1, 1, 2}, asked)
+	require.Contains(t, subs.subs[partitionShard{1, types.ShardID{}.Key()}], stays)
+	require.NotContains(t, subs.subs[partitionShard{1, types.ShardID{}.Key()}], leaves)
+	require.Contains(t, subs.subs[partitionShard{2, types.ShardID{}.Key()}], other)
+}

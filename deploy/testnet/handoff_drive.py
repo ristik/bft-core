@@ -706,6 +706,14 @@ class Drive(rehearse.Rehearsal):
             self.remote[i].info['shardCaughtUp'] = current
             self.remote[i].save()
 
+    def q3_status(self, i):
+        """Root i's q3/status answer, or None while it does not answer."""
+        try:
+            status, body = self.transport.post(i, '/api/v1/q3/status', b'{}')
+            return json.loads(body) if status == 200 else None
+        except (handoff_ops.HandoffError, ValueError):
+            return None
+
     def follower_epoch(self, i):
         """The installed epoch of a root that holds no quorum certificate (a follower: q3/signers answers 422), from q3/status."""
         try:
@@ -740,8 +748,20 @@ class Drive(rehearse.Rehearsal):
 
     def install_root(self, i, files, base):
         """rehearse.pos_install for one root: stop, keep the stores (once), recreate with the install flag, wait for its listener."""
-        if self.root_epoch(i, self.transport) == self.target:
+        # bft-core#1086: a root that reports a switch state is installed only once it is published Running or Following in the target, never from an
+        # epoch it shows while Switching or Faulted; one that reports none (an older image) is judged by its committed certificate as before
+        status = self.q3_status(i)
+        complete = handoff.switch_complete(status, self.target)
+        if complete:
+            return handoff.installed_result(status, self.target)
+        if complete is None and self.root_epoch(i, self.transport) == self.target:
             return {'already': True}
+        if i in self.old and i in self.new:
+            # bft-core#1086: a staying root switches into the epoch inside its process at its own commit; only one that does not (an older image, a faulted
+            # switch, no own evidence) is restarted
+            switch = handoff.switched_in_process(lambda: self.q3_status(i), self.target)
+            if switch is not None:
+                return {'already': True, 'inProcess': True, 'switchMs': switch.get('tookMs')}
         subprocess.run(['docker', 'compose', *base, 'stop', f'root{i}'], check=True, capture_output=True)
         state, backup = self.gen / f'validator{i}' / 'root', self.gen / f'validator{i}' / f'root.pre-epoch-{self.target}'
         if not backup.exists():
