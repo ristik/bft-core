@@ -3,8 +3,9 @@
 Run: python3 docs/design/models/nb2_segments.py
 
 Part 1 is the model cited by the design's validation record (briefs/native-bridge-checkpoint-segments-design-v2.md,
-"Validation record"), recovered verbatim in logic from the session that produced it: the sorted circular-gap tree,
-index-only burns with unsigned starting heads, and the v2 per-bucket layout. It must print 12672 gap cases, 18914
+"Validation record"), recovered from the session that produced it; the one change is that the historical-proof check now
+runs before the recent-buffer scan, as in the spec's section 11.1 (boolean acceptance is unchanged). It covers the
+sorted circular-gap tree, index-only burns with unsigned starting heads, and the v2 per-bucket layout. It must print 12672 gap cases, 18914
 replay/forged-header checks and 48 sealed segments.
 
 Part 2 adds the position-tag layout of review amendment R2 (the spec's baseline), the seal-receipt index rule of R1 and
@@ -12,7 +13,10 @@ the packed accounting word of R2, and runs both layouts on one workload: every a
 head must be equal, and both must match an unbounded reference paid set.
 
 Scope: SHA-256 stands in for keccak256 and CBOR is absent, so these are not production vectors (NB2-03, #1099, owns
-those). No EVM, no gas, no token verification: the "verifier" here is the identity on (eta, a).
+those). The model validates the replay relation and buffer bookkeeping under an ideal verifier (the identity on
+(eta, a)) and assumed-authentic seal receipts. It does not execute deposit/receipt verification, amount accounting,
+payout rollback or error classification, and says nothing about gas. The archive the harness retains is witness-
+generation data, not proposed vault storage. Packed-field tests check representation isolation only.
 """
 
 from copy import deepcopy
@@ -97,6 +101,21 @@ def unpack(v):
     return v & MASK64, (v >> 64) & 255, [(v >> (72 + 8 * b)) & 255 for b in range(16)]
 
 
+def historical(v, x, a, e, start, ps):
+    """Fold the gap proofs of segments a..e-1 from the unsigned start head to the stored head H_e (P = 0: no head)."""
+    if not ps:
+        return start is None
+    r = start
+    if not isinstance(r, bytes):
+        return False
+    for j, pr in enumerate(ps, a):
+        root = gap_root(x, v.k, pr)
+        if root is None:
+            return False
+        r = H(b'archive', w(j), r, root)
+    return r == v.heads[e]
+
+
 class Vault:
     """v2 layout: per-bucket slot arrays, generation/count metadata words W0, W1."""
 
@@ -133,21 +152,14 @@ class Vault:
         c, p, ms = self.state()
         if not 0 <= a <= c or e not in ([c, c - 1] if c else [0]) or e != a + len(ps):
             return False
+        # Historical proofs first, then the recent buffers (spec section 11.1 order).
+        if not historical(self, x, a, e, start, ps):
+            return False
         b = x >> 252
         for q in ([p, 1 - p] if e == c - 1 else [p]):
             if x in self.slots[q][b][:ms[q][2][b]]:
                 return False
-        if not ps:
-            return start is None
-        r = start
-        if not isinstance(r, bytes):
-            return False
-        for j, pr in enumerate(ps, a):
-            root = gap_root(x, self.k, pr)
-            if root is None:
-                return False
-            r = H(b'archive', w(j), r, root)
-        return r == self.heads[e]
+        return True
 
     def pay(self, real_x, real_a, claim_x, wi):
         if not self.early(claim_x, wi):
@@ -303,23 +315,15 @@ class TagVault:
         m = field(self.A, M_SHIFT, M_BITS)
         if not 0 <= a <= c or e not in ([c, c - 1] if c else [0]) or e != a + len(ps):
             return False
+        if not historical(self, x, a, e, start, ps):
+            return False
         b = self.bucket(x)
         p = c % 2
         for q, pop in ([(p, m), (1 - p, self.k)] if e == c - 1 else [(p, m)]):
             for i in range(pop):
                 if self.tag(q, i) == b and self.S[q][i] == x:
                     return False
-        if not ps:
-            return start is None
-        r = start
-        if not isinstance(r, bytes):
-            return False
-        for j, pr in enumerate(ps, a):
-            root = gap_root(x, self.k, pr)
-            if root is None:
-                return False
-            r = H(b'archive', w(j), r, root)
-        return r == self.heads[e]
+        return True
 
     def pay(self, real_x, real_a, claim_x, wi):
         if not self.early(claim_x, wi):
