@@ -143,7 +143,7 @@ def next_open_result(open_result, done):
     return open_result if open_result != '0x' + '00' * 32 and open_result != done else None
 
 
-FAUCET = '127.0.0.1:8088'
+FAUCET = os.environ.get('TN_FAUCET', '127.0.0.1:8088')   # with TN_PUBLIC_RPC: a co-hosted generation's faucet port
 PROXY_IPS = ('203.0.113.', '198.51.100.')   # documentation ranges: the client addresses the nginx in front would have set in X-Forwarded-For
 
 

@@ -401,6 +401,7 @@ function envelope(file: string): void {
   const delay = (perSecond: number): number => Number(payments) / perSecond;
   const env = {
     model: 'native-bridge-plugins MeasuredGasModel (measured-nb2-05); bytes from MEASURED_VERIFIER',
+    assumptions: 'an estimate, not an admission rule: it assumes the measured token shape (1,026 bytes and 3 seal signatures per hop). Real tokens with larger inclusion proofs or more signatures reach userGasLimit sooner, and the wallet preflight (section 12.5) on the actual token is what admits a burn. Live on the K = 4 lane: 204 batch-certified transfers (about 1,485 bytes per hop, 4 signatures) were the largest admitted history.',
     K, gapProofBytes: Number(gp), maxEncodedTxBytes: pins.maxEncodedTxBytes, userGasLimit: pins.userGasLimit, gasReserve: pins.gasReserve, returnReserveSegments: reserve,
     preBurnBurnBound: { bytes: burnPairBound(64), gas: gasOf(0, 0, 0n, true) - gasOf(0, 0, 0n, false) },
     largestToken: shapes,
