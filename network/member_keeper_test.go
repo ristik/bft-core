@@ -114,9 +114,13 @@ func (l *keeperLoad) connect(block time.Duration) func(ctx context.Context, ai p
 		l.peak = max(l.peak, l.running)
 		l.mu.Unlock()
 		defer func() { l.mu.Lock(); l.running--; l.mu.Unlock() }()
-		if block > 0 { // a blackhole: the dial hangs until its timeout
-			<-ctx.Done()
-			return ctx.Err()
+		if block > 0 { // a blackhole: the dial hangs for block, or until its timeout
+			select {
+			case <-time.After(block):
+				return errors.New("i/o timeout")
+			case <-ctx.Done():
+				return ctx.Err()
+			}
 		}
 		return errors.New("connection refused") // a fast refusal
 	}
@@ -230,4 +234,89 @@ func TestASuccessfulDialAndANewSetResetTheRetryState(t *testing.T) {
 	m.dialMu.Unlock()
 	_ = l
 	require.Eventually(t, func() bool { m.dialMu.Lock(); defer m.dialMu.Unlock(); return len(m.retry) == 0 }, 2*time.Second, 5*time.Millisecond)
+}
+
+// astra on #1088 r2: Set alone (the shard prewarm runs no Maintain) still warms EVERY member through the bounded budget: the members over
+// the budget wait for a slot instead of being dropped.
+func TestSetAloneWarmsEveryMemberWithinTheBudget(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p := keeperPeer(t, ctx, "/ip4/127.0.0.1/tcp/0", generateKeyPair(t), nil)
+	defer func() { _ = p.Close() }()
+	l := &keeperLoad{at: map[peer.ID][]time.Time{}}
+	m := p.NewMemberProtector("shard-members")
+	m.connect = l.connect(150 * time.Millisecond)
+	ids := make([]peer.ID, 40)
+	for i := range ids {
+		ids[i] = generatePeerID(t)
+	}
+	m.Set(ctx, ids)
+	require.Eventually(t, func() bool { l.mu.Lock(); defer l.mu.Unlock(); return len(l.at) == len(ids) }, 3*time.Second, 10*time.Millisecond,
+		"every member is dialled once a slot frees")
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	require.LessOrEqual(t, l.peak, MaxMemberDials)
+}
+
+// A superseding Set cancels the warm-up it replaces: its dials in flight end, its members still waiting are never dialled, and the new
+// set's members are.
+func TestASupersedingSetCancelsTheWarmupItReplaces(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p := keeperPeer(t, ctx, "/ip4/127.0.0.1/tcp/0", generateKeyPair(t), nil)
+	defer func() { _ = p.Close() }()
+	l := &keeperLoad{at: map[peer.ID][]time.Time{}}
+	m := p.NewMemberProtector("root-committee")
+	m.connect = l.connect(time.Hour)
+	old := make([]peer.ID, 32)
+	for i := range old {
+		old[i] = generatePeerID(t)
+	}
+	m.Set(ctx, old)
+	require.Eventually(t, func() bool { l.mu.Lock(); defer l.mu.Unlock(); return l.running == MaxMemberDials }, 2*time.Second, 5*time.Millisecond)
+	next := make([]peer.ID, 8)
+	for i := range next {
+		next[i] = generatePeerID(t)
+	}
+	m.Set(ctx, next)
+	require.Eventually(t, func() bool {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		for _, id := range next {
+			if len(l.at[id]) == 0 {
+				return false
+			}
+		}
+		return true
+	}, 2*time.Second, 5*time.Millisecond, "the new set's members are dialled once the old dials are cancelled")
+	time.Sleep(200 * time.Millisecond)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	dialled := 0
+	for _, id := range old {
+		dialled += len(l.at[id])
+	}
+	require.Equal(t, MaxMemberDials, dialled, "no member of the replaced set is dialled after the replacement")
+}
+
+// The budget is the host's: two protectors of one peer (a shard node's shard-members and root-committee) share it.
+func TestTwoProtectorsOfOnePeerShareTheBudget(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p := keeperPeer(t, ctx, "/ip4/127.0.0.1/tcp/0", generateKeyPair(t), nil)
+	defer func() { _ = p.Close() }()
+	l := &keeperLoad{at: map[peer.ID][]time.Time{}}
+	for _, tag := range []string{"shard-members", "root-committee"} {
+		m := p.NewMemberProtector(tag)
+		m.connect = l.connect(time.Hour)
+		ids := make([]peer.ID, 24)
+		for i := range ids {
+			ids[i] = generatePeerID(t)
+		}
+		m.Set(ctx, ids)
+	}
+	time.Sleep(300 * time.Millisecond)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	require.Equal(t, MaxMemberDials, l.peak, "16 in flight for the whole host, not per protector")
 }

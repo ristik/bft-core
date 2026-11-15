@@ -67,6 +67,10 @@ type (
 		host host.Host
 		conf *PeerConfiguration
 		dht  *dht.IpfsDHT
+
+		// memberDials is the host-wide budget of member dials (MaxMemberDials), shared by every MemberProtector of this peer
+		memberDialsOnce sync.Once
+		memberDials     chan struct{}
 	}
 )
 
@@ -301,7 +305,6 @@ type MemberProtector struct {
 	inflight    map[peer.ID]bool
 	retry       map[peer.ID]*memberRetry
 	windowStart time.Time
-	sem         chan struct{}
 	connect     func(ctx context.Context, ai peer.AddrInfo) error // the host's Connect; a test replaces it
 }
 
@@ -310,7 +313,8 @@ type memberRetry struct {
 	next     time.Time
 }
 
-// MaxMemberDials is the per-host bound on concurrent member dials (Set's warm-up and Maintain together); MemberDialTimeout bounds one of
+// MaxMemberDials is the host-wide bound on concurrent member dials: every MemberProtector of one Peer (a shard node keeps two) shares it,
+// Set's warm-up and Maintain alike. MemberDialTimeout bounds one of
 // Set's warm-up dials (Maintain's are bounded by its own configuration).
 const (
 	MaxMemberDials    = 16
@@ -320,7 +324,7 @@ const (
 // NewMemberProtector is a protector of the member set under tag.
 func (p *Peer) NewMemberProtector(tag string) *MemberProtector {
 	return &MemberProtector{p: p, tag: tag, protected: map[peer.ID]struct{}{}, inflight: map[peer.ID]bool{}, retry: map[peer.ID]*memberRetry{},
-		windowStart: time.Now(), sem: make(chan struct{}, MaxMemberDials), connect: p.host.Connect}
+		windowStart: time.Now(), connect: p.host.Connect}
 }
 
 // Set makes ids the protected, warmed member set. A dial runs at most until ctx ends or the next Set. A new set restarts the members'
@@ -360,9 +364,25 @@ func (m *MemberProtector) Set(ctx context.Context, ids []peer.ID) {
 	m.dialMu.Unlock()
 	warm, cancel := context.WithCancel(ctx)
 	m.cancel = cancel
-	for _, id := range dial {
-		m.startDial(warm, id, nil) // a member it cannot start now (budget, or a dial in flight) is Maintain's to retry
-	}
+	// the warm-up of every member, drained through the host's budget: a member waits for a free slot, never dropped (astra on #1088 r2).
+	// A superseding Set or the end of ctx cancels warm, which stops the drain and every dial of this warm-up still in flight.
+	go func() {
+		for _, id := range dial {
+			if warm.Err() != nil {
+				return
+			}
+			if m.p.host.Network().Connectedness(id) == network.Connected {
+				continue
+			}
+			m.startDial(warm, id, nil)
+		}
+	}()
+}
+
+// memberDialSlots is the peer's host-wide member dial budget.
+func (p *Peer) memberDialSlots() chan struct{} {
+	p.memberDialsOnce.Do(func() { p.memberDials = make(chan struct{}, MaxMemberDials) })
+	return p.memberDials
 }
 
 // MaintainConfig paces Maintain.
@@ -417,25 +437,41 @@ func (m *MemberProtector) Maintain(ctx context.Context, cfg MaintainConfig) {
 	}
 }
 
-// startDial dials id in the background unless a dial of it is in flight or the host's budget is spent; it reports whether it started one.
-// pace is Maintain's (a forced, bounded dial; a failure schedules the member's next attempt), nil for Set's warm-up (an ordinary dial).
+// startDial dials id in the background unless a dial of it is in flight; it reports whether it started one. pace is Maintain's (a
+// forced, bounded dial; a failure schedules the member's next attempt, and a spent budget skips the member until a later tick); nil is
+// Set's warm-up (an ordinary bounded dial, which waits for a free slot of the budget until ctx ends).
 func (m *MemberProtector) startDial(ctx context.Context, id peer.ID, pace *MaintainConfig) bool {
+	slots := m.p.memberDialSlots()
 	m.dialMu.Lock()
-	if m.inflight[id] {
-		m.dialMu.Unlock()
+	busy := m.inflight[id]
+	m.dialMu.Unlock()
+	if busy {
 		return false
 	}
-	select {
-	case m.sem <- struct{}{}:
-	default:
+	if pace != nil {
+		select {
+		case slots <- struct{}{}:
+		default:
+			return false
+		}
+	} else {
+		select {
+		case slots <- struct{}{}:
+		case <-ctx.Done():
+			return false
+		}
+	}
+	m.dialMu.Lock()
+	if m.inflight[id] { // another dial of it started while this one waited for its slot
 		m.dialMu.Unlock()
+		<-slots
 		return false
 	}
 	m.inflight[id] = true
 	connect := m.connect
 	m.dialMu.Unlock()
 	go func() {
-		defer func() { <-m.sem }()
+		defer func() { <-slots }()
 		dial, timeout := ctx, MemberDialTimeout
 		if pace != nil {
 			dial = network.WithForceDirectDial(dial, "committee member")
