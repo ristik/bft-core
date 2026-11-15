@@ -261,7 +261,7 @@ h3_restart_roots() {
     done
     for p in "${pids[@]}"; do wait "$p" || rc=1; done
     [ "$rc" = 0 ] || return 1
-    m2_wait_root_epoch "$(h3_first_root)" "$epoch"
+    m2_wait_root_epoch "${H3_WAIT_ROOT:-$(h3_first_root)}" "$epoch"
     return
   fi
   for i in $H3_ROOTS; do
@@ -272,7 +272,7 @@ h3_restart_roots() {
     m2_archive_root_state "$i" "$epoch" || return 1
     m2_start_root "$i" "$epoch" "$boot" || return 1
   done
-  m2_wait_root_epoch "$(h3_first_root)" "$epoch"
+  m2_wait_root_epoch "${H3_WAIT_ROOT:-$(h3_first_root)}" "$epoch"   # H3_WAIT_ROOT: a member of the epoch when only some roots restart (bft-core#1086)
 }
 
 # reth_trust / reth_untrust (definitions only): every lane that reaches h3_start_reth needs them, not only the paired devnet that sources them first

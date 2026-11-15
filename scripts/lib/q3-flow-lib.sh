@@ -37,7 +37,7 @@ PY
 }
 
 # ---- the root's verified Q3 endpoints (local operator API) --------------------------------------------------------------------------------------
-q3_signers_of() { curl -fsS -X POST -H 'content-type: application/json' -d '{}' "$(h3_rpc_url "$1")/api/v1/q3/signers"; }   # {epoch,round,scheme,signers,signedTotal,threshold,quorum}
+q3_signers_of() { curl -fsS -m 5 -X POST -H 'content-type: application/json' -d '{}' "$(h3_rpc_url "$1")/api/v1/q3/signers"; }   # {epoch,round,scheme,signers,signedTotal,threshold,quorum}
 
 q3_weight_of() { # entity: the weight at its position in Q3_ENTITIES (the entities of the handoff in hand, default 1 2 3 4)
   local k=1 e
@@ -175,8 +175,14 @@ q3_install_roots() {
     [ -z "$d" ] || [ "$before" = "$prev" ] || { echo "root $r reports a certificate of epoch ${before:-?} before its install restart into $epoch" >&2; return 1; }
   done
   echo "epoch $epoch install: switched in process: ${Q3_SWITCHED:-none}; restarted: ${Q3_RESTARTED:-none}"
+  # a lane that expects these roots to switch in process proves it: one of them restarted instead fails the step
+  for r in ${Q3_EXPECT_SWITCHED:-}; do
+    case " $Q3_SWITCHED " in *" $r "*) ;; *) echo "root $r was expected to switch into epoch $epoch in process, but is restarted (q3/status: $(q3_status_of "$r" 2>/dev/null || echo unavailable))" >&2; return 1 ;; esac
+  done
   [ -n "$Q3_RESTARTED" ] || return 0
-  H3_ROOTS=$Q3_RESTARTED H3_BOOT_ROOT=$(echo "$Q3_SWITCHED" | awk '{print $1}') h3_restart_roots "$epoch" || { echo "root restart into epoch $epoch failed" >&2; return 1; }
+  local switched_root; switched_root=$(echo "$Q3_SWITCHED" | awk '{print $1}')
+  # the restarted roots bootstrap to a switched root and the restart waits on it, a member of the epoch, not on a restarted leaver
+  H3_ROOTS=$Q3_RESTARTED H3_BOOT_ROOT=$switched_root H3_WAIT_ROOT=$switched_root h3_restart_roots "$epoch" || { echo "root restart into epoch $epoch failed" >&2; return 1; }
 }
 
 q3_install_n() { # epoch: the installation barrier of epoch N (q3_install_roots), then its first certificate
