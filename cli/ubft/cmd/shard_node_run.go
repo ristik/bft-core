@@ -2356,19 +2356,19 @@ func openRecordCuts(journal string) (recordsfeed.CutStore, error) {
 // recordsPrefetch tells the pair's root-record source which origins a fetched suffix's verification will ask for (bft-core#1071): the
 // cut of each entry's authorizing certificate is fetched ahead, several at a time, instead of one round trip per block while the entries
 // are verified one by one. Nil without a records feed.
-func recordsPrefetch(vc *engineapi.VerifierContext) func(context.Context, []shardnode.JournalFetchEntry) {
+func recordsPrefetch(vc *engineapi.VerifierContext) func(context.Context, []shardnode.JournalFetchEntry) func() {
 	if vc == nil {
 		return nil
 	}
-	return func(ctx context.Context, entries []shardnode.JournalFetchEntry) {
+	return func(ctx context.Context, entries []shardnode.JournalFetchEntry) func() {
 		if vc.B1 == nil {
-			return
+			return func() {}
 		}
 		source, ok := vc.B1.Records.(interface {
-			Prefetch(context.Context, []recordsfeed.CutKey)
+			Prefetch(context.Context, []recordsfeed.CutKey) func()
 		})
 		if !ok {
-			return
+			return func() {}
 		}
 		keys := make([]recordsfeed.CutKey, 0, len(entries))
 		for _, e := range entries {
@@ -2376,7 +2376,7 @@ func recordsPrefetch(vc *engineapi.VerifierContext) func(context.Context, []shar
 				keys = append(keys, key)
 			}
 		}
-		source.Prefetch(ctx, keys)
+		return source.Prefetch(ctx, keys)
 	}
 }
 

@@ -303,12 +303,14 @@ func TestRecoveryPrefixShapes(t *testing.T) {
 		cu := &fakeCatchUp{net: p}
 		r.ArchiveCatchUp = cu
 		var prefetched [][]uint64 // what the page's verification is about to read is announced before the first entry is verified (#1071)
-		r.Prefetch = func(_ context.Context, entries []shardnode.JournalFetchEntry) {
+		released := 0
+		r.Prefetch = func(_ context.Context, entries []shardnode.JournalFetchEntry) func() {
 			var hs []uint64
 			for _, entry := range entries {
 				hs = append(hs, entry.Block.Number)
 			}
 			prefetched = append(prefetched, hs)
+			return func() { released++ }
 		}
 		head, err := r.Recover(context.Background(), nil)
 		require.NoError(t, err)
@@ -320,6 +322,7 @@ func TestRecoveryPrefixShapes(t *testing.T) {
 			announced = append(announced, hs...)
 		}
 		require.Subset(t, announced, []uint64{2, 3, 4, 5, 6}, "every block fetched from the archive is announced before its verification")
+		require.Equal(t, len(prefetched), released, "every announced batch is ended")
 		require.True(t, cu.dropped, "a consumed plan is dropped")
 	})
 }

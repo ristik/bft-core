@@ -98,8 +98,8 @@ func TestEachOriginsCutIsFetchedOnce(t *testing.T) {
 	require.ErrorIs(t, err, ErrAuth, "another tree root under the same round is another key, and the remote's cut does not lead to it")
 }
 
-// Prefetched cuts arrive several at a time, so a page of blocks verified one by one waits about one round trip per prefetchStreams
-// blocks, and a mirror is never asked for more than prefetchStreams cuts at once.
+// Prefetched cuts arrive several at a time, so a page of blocks verified one by one waits less than a round trip per block, and a remote
+// is never asked for more than prefetchPerPeer speculative cuts at once.
 func TestPrefetchedCutsSpareARoundTripPerBlock(t *testing.T) {
 	const n, rtt = 64, 50 * time.Millisecond
 	c := buildChain(t, 3)
@@ -117,11 +117,9 @@ func TestPrefetchedCutsSpareARoundTripPerBlock(t *testing.T) {
 	took := time.Since(started)
 	t.Logf("%d origins at %s RTT in %s, %d cut fetches, at most %d at once", n, rtt, took, remote.cuts.Load(), remote.peak.Load())
 	require.EqualValues(t, n, remote.cuts.Load(), "each cut fetched once")
-	require.LessOrEqual(t, remote.peak.Load(), int64(prefetchStreams), "bounded fetches in flight")
-	require.Less(t, took, time.Duration(n)*rtt/2, "one round trip per block was %s", time.Duration(n)*rtt)
-	src.mu.Lock()
-	require.Empty(t, src.prefetched, "every prefetched cut was used once and retained as verified")
-	src.mu.Unlock()
+	require.LessOrEqual(t, remote.peak.Load(), int64(prefetchPerPeer), "bounded fetches in flight to the one remote")
+	require.Less(t, took, time.Duration(n)*rtt*3/4, "one round trip per block was %s", time.Duration(n)*rtt)
+	require.Zero(t, src.prefetch.stats().entries, "every prefetched cut was used once and retained as verified")
 }
 
 // A prefetched cut is a locator, never evidence: a mirror that substitutes one is not believed, the cursor is asked again of the remotes,
@@ -165,11 +163,7 @@ func TestAFailedPrefetchLeavesTheCursorToTheRemotes(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	src.Prefetch(ctx, keys)
 	cancel()
-	require.Eventually(t, func() bool {
-		src.mu.Lock()
-		defer src.mu.Unlock()
-		return len(src.prefetched) == 0
-	}, 5*time.Second, 10*time.Millisecond, "canceled prefetches are dropped")
+	require.Eventually(t, func() bool { return src.prefetch.stats().entries == 0 }, 5*time.Second, 10*time.Millisecond, "canceled prefetches are dropped")
 	remote.rtt = 0
 	_, err := src.Cursor(context.Background(), obs[0])
 	require.NoError(t, err)
@@ -199,7 +193,7 @@ func TestCursorRateProfile(t *testing.T) {
 		}
 		t.Logf("rtt %-5s two fetches per block   %7.1f blocks/s", rtt, float64(n)/time.Since(started).Seconds())
 		for _, prefetch := range []bool{false, true} {
-			src := NewSource(&slowRemote{cut: cut, records: c.records, rtt: rtt})
+			src := NewSource(newPeerFake(cut, c.records, rtt, 4)) // four mirrors, as a staging joiner has
 			started := time.Now()
 			for page := 0; page < n; page += 64 {
 				if prefetch {

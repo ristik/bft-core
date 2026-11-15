@@ -39,6 +39,12 @@ func (r *ExecutionRecovery) replayPrefix(ctx context.Context, c recoveryChain, h
 	l := r.limits()
 	blocks, used := 0, int64(0)
 	cur := f
+	var releasePrefetch func()
+	defer func() {
+		if releasePrefetch != nil {
+			releasePrefetch()
+		}
+	}()
 	for cur.Number < c.base.Number {
 		if err := ctx.Err(); err != nil {
 			return fmt.Errorf("%w: replaying archived history to height %d: %w", ErrRecoveryUnavailable, c.base.Number, err)
@@ -49,7 +55,10 @@ func (r *ExecutionRecovery) replayPrefix(ctx context.Context, c recoveryChain, h
 			return err
 		}
 		if r.Prefetch != nil {
-			r.Prefetch(ctx, entries)
+			if releasePrefetch != nil {
+				releasePrefetch() // the previous source's batch is done
+			}
+			releasePrefetch = r.Prefetch(ctx, entries)
 		}
 		fin, last := cur, cur
 		stop := ""
