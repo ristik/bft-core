@@ -15,12 +15,16 @@ It drives OPERATOR.md 5b for the election's reserved result, the same sequence t
                sign-pop, assemble, submit-pops and finalize (skipped when the election already holds the publication), the published assignment
   propose      the roots' candidate, every successor entity's readiness receipt made by its own root, then `handoff_ops.py propose` (plan, intent, endorse) to the
                committee being left
-  install      root by root: stop, keep its stores as root.pre-epoch-N, recreate it with the install override (handoff.install_override); then the activation record
-  advance      the shard configuration of the activated shard epoch published to network/handoff/, then per entity: shard stopped, authority advance-epoch and
-               replace-session (a joiner: complete-enrollment and the restore of its shard node), shard started. The authority is NEVER restarted or recreated
+  install      every root at once (#1080 latency): a root of the committee being left first serves the new epoch's activation from its OWN committed state
+               (q3/bundle), so none is stopped before it holds the commit and the old committee keeps its quorum until then; then each is stopped, its stores
+               kept as root.pre-epoch-N and recreated with the install override (handoff.install_override); then the activation record
+  advance      the shard configuration of the activated shard epoch published to network/handoff/, then every entity at once: authority advance-epoch and
+               replace-session (a joiner: complete-enrollment and the restore of its shard node), shard started if it is not running. It starts as soon as
+               the roots are installed: a shard cannot sign in the new epoch before its authority has advanced, so the new committee's first certificate
+               and these checks no longer wait for each other. The authority is NEVER restarted or recreated
   lockproof    with the bridge overlay: the lock-proof endpoint rescans network/handoff (#996, --shard-conf-dir) and is only checked; without that flag it is
                recreated (the pre-#996 procedure)
-  verify       every root at E+1, the result Acknowledged and the EVM block that acknowledged it, the served /api/v1/trustbases history verifying to E+1 (with
+  verify       every elected root certifies at E+1 (waited for here, off the advance's path), every incumbent shard logged the activation, the result Acknowledged and the EVM block that acknowledged it, the served /api/v1/trustbases history verifying to E+1 (with
                --utb), blocks still produced, recordCursor == recordCount
 
 Every step and sub-step is a row of <generation>/handoff/log.jsonl (event "drive", with the result and the target epoch; handoff_ops.py writes its plan/intent/
@@ -38,6 +42,7 @@ second drive started meanwhile exits 5 (BUSY) and changes nothing. --funder DIR 
 account instead of the faucet account, whose nonces belong to the public faucet's signer.
 """
 import argparse
+import concurrent.futures
 import datetime
 import hashlib
 import json
@@ -56,6 +61,8 @@ import operator_rpc
 import rehearse
 import remote_entity
 
+INSTALL_GATE_SECONDS = 60   # how long a root of the committee being left may take to commit the handoff itself before it is installed anyway (its install then
+                            # asks its peers, bft-core#1080)
 LIFETIME = 16384            # storage.ResultReservationLifetimeProgress: a result not prepared within this many registry progress rounds is rejected by the roots
 MIN_WINDOW_ROUNDS = 1800    # default margin: the steps up to the Prepare take ~10 min; at ~2 rounds/s this is ~15 min
 ZERO = '0x' + '00' * 32
@@ -182,6 +189,19 @@ class Journal:
         self.write(step, 'done', sub, seconds=seconds, **detail)
         self.echo(f'done  {label} in {seconds} s' + (f' {json.dumps(detail, sort_keys=True)}' if detail else ''))
         return detail
+
+
+def parallel(jobs):
+    """Run the callables of `jobs` ({key: fn}) at once and wait for every one; the first failure (in key order) is raised once all have finished, so no job
+    is left running behind a failed step. Returns {key: result}."""
+    if not jobs:
+        return {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(jobs)) as pool:
+        futures = {key: pool.submit(fn) for key, fn in jobs.items()}
+    failed = [f.exception() for _, f in sorted(futures.items()) if f.exception() is not None]
+    if failed:
+        raise failed[0]
+    return {key: f.result() for key, f in futures.items()}
 
 
 def norm_hex(value):
@@ -730,8 +750,23 @@ class Drive(rehearse.Rehearsal):
             os.rename(partial, backup)
         run = subprocess.run(['docker', 'compose', *files, 'up', '-d', '--no-deps', '--force-recreate', f'root{i}'], text=True, capture_output=True)
         self.expect(run.returncode == 0, f'root {i} recreated with the install flag', run.stderr.strip()[-400:])
-        self.wait(f'root {i} listens again', lambda: self.root_listens(i, self.transport), 120)
+        self.wait(f'root {i} listens again', lambda: self.root_listens(i, self.transport), 120, every=0.2)
         return {'backup': str(backup)}
+
+    def serves_own_activation(self, i):
+        """Whether root i serves the target epoch's activation bundle from its own state (q3/bundle: the committed checkpoint into the epoch, or the bundle
+        it staged at its install). A root restarted before it holds it has to fetch it from a peer that does (bft-core#1080)."""
+        status, _ = self.transport.post(i, '/api/v1/q3/bundle', json.dumps({'epoch': self.target}).encode())
+        return status == 200
+
+    def await_own_activation(self, i):
+        """The install gate of a root of the committee being left: it is stopped only once it holds the commit itself. Stopping it earlier takes it out of
+        the old committee while that committee still has the commit to make (every round it would have led times out), and its install then waits for a
+        peer. A root that has not committed within INSTALL_GATE_SECONDS is installed anyway: its install asks its peers."""
+        try:
+            self.wait(f'root {i} holds the commit of epoch {self.target}', lambda: self.serves_own_activation(i), INSTALL_GATE_SECONDS, every=0.2)
+        except rehearse.Failure as error:
+            self.say(f'  root {i} does not serve epoch {self.target} from its own state ({str(error)[-200:]}): installed anyway, it asks its peers')
 
     def step_install(self, journal):
         override = self.gen / f'compose.install-epoch-{self.target}.json'
@@ -740,26 +775,28 @@ class Drive(rehearse.Rehearsal):
         base = handoff_ops.compose_files(self.gen)
         files = base + ['-f', str(override)]
         roots = sorted(set(self.old) | set(self.new))
-        for i in roots:
+        def install(i):
+            # sequential installs cost ~2.5 s per root before the new committee's first leader (the lowest node id) was up; at once they cost one restart
+            if journal.done('install', f'root{i}'):
+                return journal.run('install', lambda: {}, sub=f'root{i}')   # skipped, echoed
+            if i in self.old:
+                self.await_own_activation(i)
             if i in self.remote:
-                journal.run('install', lambda i=i: self.remote[i].install_root(self.target), sub=f'root{i}')
-                continue
-            journal.run('install', lambda i=i: self.install_root(i, files, base), sub=f'root{i}')
-        for i in sorted(self.new):
-            self.wait(f'root {i} certifies at epoch {self.target}', lambda i=i: self.root_epoch(i, self.transport) == self.target, 300)
+                return journal.run('install', lambda: self.remote[i].install_root(self.target), sub=f'root{i}')
+            return journal.run('install', lambda: self.install_root(i, files, base), sub=f'root{i}')
+        parallel({i: (lambda i=i: install(i)) for i in roots})
         for i in sorted(set(roots) - set(self.new)):   # a leaver installs the epoch (it holds the commit) but certifies nothing in it: it is a follower there
-            self.wait(f'the leaving root {i} installed epoch {self.target}', lambda i=i: self.follower_epoch(i) == self.target or self.root_epoch(i, self.transport) == self.target, 300)
+            self.wait(f'the leaving root {i} installed epoch {self.target}', lambda i=i: self.follower_epoch(i) == self.target or self.root_epoch(i, self.transport) == self.target, 300, every=0.5)
         self.exec_in('root1', 'ubft', 'root', 'handoff', 'q3-activation', '--root-rpc', self.root_rpc, '--epoch', str(self.target), '--out', '/tmp/activation.json')
         record = json.loads(self.exec_in('root1', 'cat', '/tmp/activation.json'))
         (self.evh() / f'activation-record-{self.target}.json').write_text(json.dumps(record, indent=1) + '\n')
         self.expect(record.get('epoch') == self.target and record.get('signingScheme') == 2, f'the activation record is epoch {self.target} under scheme 2', str(record)[:200])
         self.expect(record.get('v3BodyId') == (self.work / 'v3-body-id.txt').read_text().strip(), 'the activation record names the candidate\'s V3 body id')
-        for i in sorted(set(self.old) & set(self.new)):
-            def activated(i=i):
-                logs = self.remote[i].logs(f'shard{i}') if i in self.remote else self.compose('logs', '--no-color', '--since', '30m', f'shard{i}', check=False)
-                return any('"message":"handoff activated"' in line and f'"rootEpoch":{self.target},' in line for line in logs.splitlines())
-            self.wait(f'shard {i} logs the activation of root epoch {self.target}', activated, 120)
         return {'activationRound': record['activationRound'], 'v3BodyId': record['v3BodyId']}
+
+    def shard_logged_activation(self, i):
+        logs = self.remote[i].logs(f'shard{i}') if i in self.remote else self.compose('logs', '--no-color', '--since', '30m', f'shard{i}', check=False)
+        return any('"message":"handoff activated"' in line and f'"rootEpoch":{self.target},' in line for line in logs.splitlines())
 
     def authority_status(self, i):
         """`signing-authority status` of entity i (its enrollment: rootEpoch, shardEpoch, enrollmentComplete, generation, faulted, keyLost)."""
@@ -878,8 +915,10 @@ class Drive(rehearse.Rehearsal):
         return {'remote': True}
 
     def step_advance(self, journal):
-        transport = self.transport
-        self.expect(all(self.root_epoch(i, transport) == self.target for i in self.new), f'every elected root certifies at epoch {self.target}')
+        # the roots have installed (step install): the activation is verified and committed, and the EVM shard has been frozen since the Prepare, so
+        # nothing is left for an authority to sign in the old epoch. The new committee's first certificate is NOT waited for: until an authority has
+        # advanced, its shard can sign nothing in the new epoch (signing-context-mismatch), so waiting here only adds to the block gap.
+        self.expect(journal.done('install'), f'every root installed epoch {self.target}')
         shard_epoch = journal.value('advance', 'shardEpoch', sub='shard-conf') or self.successor_shard_epoch()
         def publish():
             self.exec_in('root1', 'ubft', 'q3', 'shard-conf', '--root-rpc', self.root_rpc, '--epoch', str(shard_epoch), '--out', '/tmp/shard-conf.json')
@@ -892,8 +931,8 @@ class Drive(rehearse.Rehearsal):
             subprocess.run(['chmod', '-R', 'a+rX', str(self.work)], check=True)
             return {'shardEpoch': shard_epoch}
         journal.run('advance', publish, sub='shard-conf')
-        for i in self.new:
-            journal.run('advance', lambda i=i: self.advance_entity(i, shard_epoch, journal), sub=f'entity{i}')
+        # every entity at once: each order touches only that entity's authority and shard (~2 s each, which in turn were the tail of the block gap)
+        parallel({i: (lambda i=i: journal.run('advance', lambda: self.advance_entity(i, shard_epoch, journal), sub=f'entity{i}')) for i in self.new})
         return {'shardEpoch': shard_epoch}
 
     def follow_joiner(self, i, epoch, promoted):
@@ -1047,8 +1086,12 @@ class Drive(rehearse.Rehearsal):
 
     def step_verify(self, result, journal):
         transport = self.transport
+        for i in sorted(self.new):
+            self.wait(f'root {i} certifies at epoch {self.target}', lambda i=i: self.root_epoch(i, transport) == self.target, 300, every=1)
         epochs = {i: self.root_epoch(i, transport) for i in self.new}
         self.expect(all(e == self.target for e in epochs.values()), f'every elected root certifies at epoch {self.target}', str(epochs))
+        for i in sorted(set(self.old) & set(self.new)):
+            self.wait(f'shard {i} logs the activation of root epoch {self.target}', lambda i=i: self.shard_logged_activation(i), 120)
         state = self.wait(f'the election records {result[:10]}.. Acknowledged', lambda: self.result_words(result)[0] == rehearse.RESULT_ACKNOWLEDGED, 600)
         head = int(self.call('eth_blockNumber'), 16)
         block, why = self.ack_block(result, head)

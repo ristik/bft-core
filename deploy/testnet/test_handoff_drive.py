@@ -2,6 +2,8 @@
 import json
 from pathlib import Path
 import tempfile
+import threading
+import time
 import unittest
 import unittest.mock
 
@@ -216,6 +218,121 @@ class AdvanceResume(unittest.TestCase):
         with self.assertRaises(hd.Refused):
             self.run_entity()
         self.assertNotIn('advance-epoch', [v for _, v in self.fake.calls])
+
+
+class Parallel(unittest.TestCase):
+    def test_every_job_runs_at_once_and_a_failure_is_raised_after_all_finished(self):
+        barrier, finished = threading.Barrier(3, timeout=5), []
+        def job(name, fail=False):
+            barrier.wait()   # a sequential run would break the barrier
+            time.sleep(0.05 if fail else 0.2)
+            finished.append(name)
+            if fail:
+                raise hd.rehearse.Failure(f'{name} failed')
+        with self.assertRaisesRegex(hd.rehearse.Failure, 'b failed'):
+            hd.parallel({'a': lambda: job('a'), 'b': lambda: job('b', True), 'c': lambda: job('c')})
+        self.assertEqual(sorted(finished), ['a', 'b', 'c'], 'no job is left running behind the failure')
+        self.assertEqual(hd.parallel({1: lambda: 'x', 2: lambda: 'y'}), {1: 'x', 2: 'y'})
+        self.assertEqual(hd.parallel({}), {})
+
+
+class FakeRemote:
+    def __init__(self, install):
+        self.install = install
+
+    def install_root(self, target):
+        return self.install(5)
+
+
+class InstallAtOnce(unittest.TestCase):
+    """step_install (bft-core#1080): a root of the committee being left is stopped only once it serves the activation from its own state, and the roots are
+    installed at once, not one by one."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        gen = Path(self.dir.name)
+        (gen / 'work').mkdir()
+        (gen / 'work' / 'v3-body-id.txt').write_text('ab' * 32)
+        self.events, self.lock = [], threading.Lock()
+        self.serving = {1: 0, 2: 3, 3: 0, 4: 0}   # root 2 commits the handoff only at its third probe
+        self.probes = {i: 0 for i in self.serving}
+        self.barrier = threading.Barrier(5, timeout=5)
+        d = object.__new__(hd.Drive)
+        d.gen, d.target, d.work, d.root_rpc = gen, 3, gen / 'work', 'http://root'
+        d.old, d.new, d.joiners = [1, 2, 3, 4], [1, 2, 3, 4, 5], {5}
+        d.remote = {5: FakeRemote(self.install)}
+        d.say = lambda text: None
+        d.evh = lambda: gen
+        d.install_root = lambda i, files, base: self.install(i)
+        d.serves_own_activation = self.serves
+        record = {'epoch': 3, 'signingScheme': 2, 'v3BodyId': 'ab' * 32, 'activationRound': 99}
+        d.exec_in = lambda service, *command, binary=False: json.dumps(record) if command[0] == 'cat' else ''
+        self.drive = d
+        self.journal = hd.Journal(gen / 'handoff' / 'log.jsonl', '0xr', 3, echo=lambda line: None)
+        for target, value in (('handoff_ops.load_compose', {}), ('handoff_ops.compose_files', []), ('handoff.install_override', {})):
+            patcher = unittest.mock.patch(f'handoff_drive.{target}', return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def serves(self, i):
+        with self.lock:
+            self.probes[i] += 1
+            self.events.append(('probe', i))
+            return self.probes[i] >= self.serving[i]
+
+    def install(self, i):
+        with self.lock:
+            self.events.append(('install', i))
+        self.barrier.wait()   # every root is being installed at the same time
+        return {}
+
+    def test_each_old_root_is_gated_on_its_own_commit_and_all_install_at_once(self):
+        self.assertEqual(self.drive.step_install(self.journal), {'activationRound': 99, 'v3BodyId': 'ab' * 32})
+        installs = [i for kind, i in self.events if kind == 'install']
+        self.assertEqual(sorted(installs), [1, 2, 3, 4, 5])
+        for i in (1, 2, 3, 4):
+            first_install = self.events.index(('install', i))
+            self.assertIn(('probe', i), self.events[:first_install], f'root {i} is stopped only after it served the activation itself')
+        self.assertEqual(self.probes[2], 3, 'root 2 waited for its own commit')
+        self.assertNotIn(('probe', 5), self.events, 'a joiner holds no commit of the old epoch: it is not gated')
+        for i in (1, 2, 3, 4, 5):
+            self.assertTrue(self.journal.done('install', f'root{i}'))
+
+    def test_a_root_that_never_commits_is_installed_anyway(self):
+        self.serving[3] = 10 ** 6
+        with unittest.mock.patch.object(hd, 'INSTALL_GATE_SECONDS', 0.5):
+            self.drive.step_install(self.journal)
+        self.assertIn(('install', 3), self.events, 'its install asks its peers (bft-core#1080)')
+
+    def test_a_resumed_install_skips_the_installed_roots(self):
+        for i in (1, 2, 3, 4, 5):
+            self.journal.write('install', 'done', sub=f'root{i}')
+        self.barrier = threading.Barrier(1)
+        self.drive.step_install(self.journal)
+        self.assertEqual(self.events, [], 'nothing is probed or installed again')
+
+
+class AdvanceAtOnce(unittest.TestCase):
+    def test_every_entity_advances_at_once_without_waiting_for_the_new_certificate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gen = Path(tmp)
+            (gen / 'work').mkdir()
+            d = object.__new__(hd.Drive)
+            d.gen, d.target, d.work, d.new, d.root_rpc = gen, 3, gen / 'work', [1, 2, 3, 4], 'http://root'
+            d.say = lambda text: None
+            d.root_epoch = lambda i, transport=None: self.fail('the advance does not wait for the new epoch\'s certificate')
+            d.transport = None
+            conf = {'epoch': 2, 'partitionId': 8}
+            d.exec_in = lambda service, *command, binary=False: json.dumps(conf) if command[0] == 'cat' else ''
+            journal = hd.Journal(gen / 'handoff' / 'log.jsonl', '0xr', 3, echo=lambda line: None)
+            journal.write('install', 'done')
+            journal.write('advance', 'done', sub='shard-conf', shardEpoch=2)
+            barrier, advanced = threading.Barrier(4, timeout=5), []
+            d.advance_entity = lambda i, shard_epoch, journal: barrier.wait() is not None and advanced.append((i, shard_epoch)) or {}
+            self.assertEqual(d.step_advance(journal), {'shardEpoch': 2})
+            self.assertEqual(sorted(advanced), [(1, 2), (2, 2), (3, 2), (4, 2)])
+            self.assertTrue(all(journal.done('advance', f'entity{i}') for i in (1, 2, 3, 4)))
 
 
 class BackupAndAckBlock(unittest.TestCase):
