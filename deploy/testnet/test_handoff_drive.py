@@ -245,8 +245,8 @@ class FakeRemote:
 
 
 class InstallAtOnce(unittest.TestCase):
-    """step_install (bft-core#1080): a root of the committee being left is stopped only once it serves the activation from its own state, and the roots are
-    installed at once, not one by one."""
+    """step_install (bft-core#1080; astra on #1084): a root is stopped only with verified evidence to install from (its own commit, or a root that has
+    already installed the epoch), the roots are installed at once, and without evidence nothing is stopped."""
 
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
@@ -255,9 +255,9 @@ class InstallAtOnce(unittest.TestCase):
         (gen / 'work').mkdir()
         (gen / 'work' / 'v3-body-id.txt').write_text('ab' * 32)
         self.events, self.lock = [], threading.Lock()
-        self.serving = {1: 0, 2: 3, 3: 0, 4: 0}   # root 2 commits the handoff only at its third probe
-        self.probes = {i: 0 for i in self.serving}
-        self.barrier = threading.Barrier(5, timeout=5)
+        self.commits_at = {1: 1, 2: 3, 3: 1, 4: 1}   # the probe at which each old root first serves its own commit (root 2: its third; 0: never)
+        self.probes = {i: 0 for i in (1, 2, 3, 4, 5)}
+        self.installed, self.running, self.overlap = set(), 0, 0
         d = object.__new__(hd.Drive)
         d.gen, d.target, d.work, d.root_rpc = gen, 3, gen / 'work', 'http://root'
         d.old, d.new, d.joiners = [1, 2, 3, 4], [1, 2, 3, 4, 5], {5}
@@ -274,41 +274,62 @@ class InstallAtOnce(unittest.TestCase):
             patcher = unittest.mock.patch(f'handoff_drive.{target}', return_value=value)
             patcher.start()
             self.addCleanup(patcher.stop)
+        patcher = unittest.mock.patch.object(hd, 'INSTALL_GATE_SECONDS', 2)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def serves(self, i):
+        """q3/bundle of root i: an installed root serves its staged activation; an old root serves its own commit from its commits_at-th probe."""
         with self.lock:
             self.probes[i] += 1
             self.events.append(('probe', i))
-            return self.probes[i] >= self.serving[i]
+            if i in self.installed:
+                return True
+            return i in self.commits_at and self.probes[i] >= self.commits_at[i] > 0
 
     def install(self, i):
         with self.lock:
             self.events.append(('install', i))
-        self.barrier.wait()   # every root is being installed at the same time
+            self.running += 1
+            self.overlap = max(self.overlap, self.running)
+        time.sleep(0.2)
+        with self.lock:
+            self.running -= 1
+            self.installed.add(i)
         return {}
 
-    def test_each_old_root_is_gated_on_its_own_commit_and_all_install_at_once(self):
+    def test_each_root_is_stopped_only_with_evidence_and_they_install_at_once(self):
         self.assertEqual(self.drive.step_install(self.journal), {'activationRound': 99, 'v3BodyId': 'ab' * 32})
-        installs = [i for kind, i in self.events if kind == 'install']
-        self.assertEqual(sorted(installs), [1, 2, 3, 4, 5])
-        for i in (1, 2, 3, 4):
-            first_install = self.events.index(('install', i))
-            self.assertIn(('probe', i), self.events[:first_install], f'root {i} is stopped only after it served the activation itself')
-        self.assertEqual(self.probes[2], 3, 'root 2 waited for its own commit')
-        self.assertNotIn(('probe', 5), self.events, 'a joiner holds no commit of the old epoch: it is not gated')
-        for i in (1, 2, 3, 4, 5):
-            self.assertTrue(self.journal.done('install', f'root{i}'))
+        self.assertEqual(sorted(i for kind, i in self.events if kind == 'install'), [1, 2, 3, 4, 5])
+        for i in (1, 3, 4):
+            self.assertEqual(self.journal.value('install', 'evidence', sub=f'root{i}'), 'own', f'root {i} installs from its own commit')
+        two = self.events.index(('install', 2))
+        self.assertGreaterEqual(self.events[:two].count(('probe', 2)), 2, 'root 2 was not stopped while it lacked the commit and no root had installed')
+        self.assertIn(self.journal.value('install', 'evidence', sub='root2'), {'own', 'root1', 'root3', 'root4'})
+        self.assertGreaterEqual(self.overlap, 3, 'the roots with the commit are installed at the same time, not one by one')
+        joiner = self.events.index(('install', 5))
+        self.assertTrue(any(kind == 'install' and i != 5 for kind, i in self.events[:joiner]))
+        self.assertIn(self.journal.value('install', 'evidence', sub='root5'), {'root1', 'root2', 'root3', 'root4'},
+                      'a joiner installs only once a root that installed the epoch serves it')
 
-    def test_a_root_that_never_commits_is_installed_anyway(self):
-        self.serving[3] = 10 ** 6
-        with unittest.mock.patch.object(hd, 'INSTALL_GATE_SECONDS', 0.5):
+    def test_no_commit_anywhere_stops_no_root(self):
+        self.commits_at = {1: 0, 2: 0, 3: 0, 4: 0}   # no old root ever serves the target: the handoff is not committed
+        with self.assertRaisesRegex(hd.rehearse.Failure, 'left running'):
             self.drive.step_install(self.journal)
-        self.assertIn(('install', 3), self.events, 'its install asks its peers (bft-core#1080)')
+        self.assertEqual([e for e in self.events if e[0] == 'install'], [], 'the old committee is not dismantled')
+        for i in (1, 2, 3, 4, 5):
+            self.assertFalse(self.journal.done('install', f'root{i}'))
+
+    def test_a_root_without_the_commit_waits_for_an_installed_source(self):
+        self.commits_at[3] = 0   # root 3 never commits it itself
+        self.drive.step_install(self.journal)
+        three = self.events.index(('install', 3))
+        self.assertTrue(any(kind == 'install' and i in (1, 2, 4) for kind, i in self.events[:three]), 'after another root has installed')
+        self.assertIn(self.journal.value('install', 'evidence', sub='root3'), {'root1', 'root2', 'root4'})
 
     def test_a_resumed_install_skips_the_installed_roots(self):
         for i in (1, 2, 3, 4, 5):
             self.journal.write('install', 'done', sub=f'root{i}')
-        self.barrier = threading.Barrier(1)
         self.drive.step_install(self.journal)
         self.assertEqual(self.events, [], 'nothing is probed or installed again')
 

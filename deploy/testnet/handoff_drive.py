@@ -15,9 +15,10 @@ It drives OPERATOR.md 5b for the election's reserved result, the same sequence t
                sign-pop, assemble, submit-pops and finalize (skipped when the election already holds the publication), the published assignment
   propose      the roots' candidate, every successor entity's readiness receipt made by its own root, then `handoff_ops.py propose` (plan, intent, endorse) to the
                committee being left
-  install      every root at once (#1080 latency): a root of the committee being left first serves the new epoch's activation from its OWN committed state
-               (q3/bundle), so none is stopped before it holds the commit and the old committee keeps its quorum until then; then each is stopped, its stores
-               kept as root.pre-epoch-N and recreated with the install override (handoff.install_override); then the activation record
+  install      every root at once (#1080 latency), each only once it has verified evidence to install from: a root of the committee being left once it
+               serves the new epoch's activation from its OWN committed state (q3/bundle), a joiner (or an old root without the commit) once a root that has
+               already installed the epoch serves it. No root is stopped on elapsed time: without evidence it is left running and the step fails. Then each
+               is stopped, its stores kept as root.pre-epoch-N and recreated with the install override (handoff.install_override); then the activation record
   advance      the shard configuration of the activated shard epoch published to network/handoff/, then every entity at once: authority advance-epoch and
                replace-session (a joiner: complete-enrollment and the restore of its shard node), shard started if it is not running. It starts as soon as
                the roots are installed: a shard cannot sign in the new epoch before its authority has advanced, so the new committee's first certificate
@@ -61,8 +62,8 @@ import operator_rpc
 import rehearse
 import remote_entity
 
-INSTALL_GATE_SECONDS = 60   # how long a root of the committee being left may take to commit the handoff itself before it is installed anyway (its install then
-                            # asks its peers, bft-core#1080)
+INSTALL_GATE_SECONDS = 120  # how long a root waits for verified evidence of the activation before the install step fails closed: the root is left
+                            # running, never stopped without evidence it can install from (bft-core#1080, astra on #1084)
 LIFETIME = 16384            # storage.ResultReservationLifetimeProgress: a result not prepared within this many registry progress rounds is rejected by the roots
 MIN_WINDOW_ROUNDS = 1800    # default margin: the steps up to the Prepare take ~10 min; at ~2 rounds/s this is ~15 min
 ZERO = '0x' + '00' * 32
@@ -759,14 +760,34 @@ class Drive(rehearse.Rehearsal):
         status, _ = self.transport.post(i, '/api/v1/q3/bundle', json.dumps({'epoch': self.target}).encode())
         return status == 200
 
-    def await_own_activation(self, i):
-        """The install gate of a root of the committee being left: it is stopped only once it holds the commit itself. Stopping it earlier takes it out of
-        the old committee while that committee still has the commit to make (every round it would have led times out), and its install then waits for a
-        peer. A root that has not committed within INSTALL_GATE_SECONDS is installed anyway: its install asks its peers."""
+    def installed_source(self, i, installed):
+        """A root other than i that has completed its install of the target epoch in this drive (`installed`, journal rows) and serves the activation
+        (q3/bundle: the bundle its install journal staged and verified), or None. It is never stopped again by this drive, so it stays the source
+        that a root without the commit installs from."""
+        for j in sorted(set(installed) - {i}):
+            if self.serves_own_activation(j):
+                return j
+        return None
+
+    def await_install_evidence(self, i, installed):
+        """The install gate (bft-core#1080; astra on #1084: fail closed, never on elapsed time). Root i is stopped only when it can install from
+        verified, retained evidence of the activation:
+          - a root of the committee being left that serves the activation from its OWN committed state (it holds the commit, and its stores keep it
+            across the restart). Stopping it earlier would take it out of the old committee while that committee may still have the commit to make;
+          - otherwise (a joiner, or an old root that has not committed it) only once a root that has already installed the epoch serves it.
+        Without either within INSTALL_GATE_SECONDS the root is left running and the step fails: an old committee with no commit is never dismantled
+        into installers that nobody can serve."""
+        own = i in self.old
+        def ready():
+            if own and self.serves_own_activation(i):
+                return 'own'
+            source = self.installed_source(i, installed())
+            return f'root{source}' if source is not None else None
         try:
-            self.wait(f'root {i} holds the commit of epoch {self.target}', lambda: self.serves_own_activation(i), INSTALL_GATE_SECONDS, every=0.2)
+            return self.wait(f'root {i} has verified evidence of epoch {self.target} to install from', ready, INSTALL_GATE_SECONDS, every=0.2)
         except rehearse.Failure as error:
-            self.say(f'  root {i} does not serve epoch {self.target} from its own state ({str(error)[-200:]}): installed anyway, it asks its peers')
+            raise rehearse.Failure(f'root {i} is left running: neither it nor an installed root serves the activation of epoch {self.target} '
+                                   f'(the handoff is not committed, or no root installed it yet): {str(error)[-300:]}') from None
 
     def step_install(self, journal):
         override = self.gen / f'compose.install-epoch-{self.target}.json'
@@ -775,15 +796,16 @@ class Drive(rehearse.Rehearsal):
         base = handoff_ops.compose_files(self.gen)
         files = base + ['-f', str(override)]
         roots = sorted(set(self.old) | set(self.new))
+        def installed():
+            return {j for j in roots if journal.done('install', f'root{j}')}
         def install(i):
             # sequential installs cost ~2.5 s per root before the new committee's first leader (the lowest node id) was up; at once they cost one restart
             if journal.done('install', f'root{i}'):
                 return journal.run('install', lambda: {}, sub=f'root{i}')   # skipped, echoed
-            if i in self.old:
-                self.await_own_activation(i)
+            source = self.await_install_evidence(i, installed)
             if i in self.remote:
-                return journal.run('install', lambda: self.remote[i].install_root(self.target), sub=f'root{i}')
-            return journal.run('install', lambda: self.install_root(i, files, base), sub=f'root{i}')
+                return journal.run('install', lambda: {**(self.remote[i].install_root(self.target) or {}), 'evidence': source}, sub=f'root{i}')
+            return journal.run('install', lambda: {**self.install_root(i, files, base), 'evidence': source}, sub=f'root{i}')
         parallel({i: (lambda i=i: install(i)) for i in roots})
         for i in sorted(set(roots) - set(self.new)):   # a leaver installs the epoch (it holds the commit) but certifies nothing in it: it is a follower there
             self.wait(f'the leaving root {i} installed epoch {self.target}', lambda i=i: self.follower_epoch(i) == self.target or self.root_epoch(i, self.transport) == self.target, 300, every=0.5)
