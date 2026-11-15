@@ -480,7 +480,7 @@ class Laptop:
             self.one(self.node_image, ['-c', 'cp -a /state/. /backup/'], [f'{self.vol("root")}:/state:ro', f'{backup}:/backup'], user='0:0', entrypoint='sh')
         self.dc('up', '-d', '--no-deps', '--force-recreate', f'root{j}', extra=[override])
         # an install of many epochs fetches every activation bundle through the tunnel before the operator listener starts
-        self.wait(f'root {j} listens again', lambda: self.root_post('/api/v1/q3/signers')[0] in (200, 400, 409, 422, 503), 900)
+        self.wait(f'root {j} listens again', lambda: self.root_post('/api/v1/q3/signers')[0] in (200, 400, 409, 422, 503), 900, every=0.5)
         return {'backup': backup}
 
     def op_authority_status(self):
