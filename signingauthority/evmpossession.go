@@ -42,6 +42,10 @@ func (a *Authority) ethSigner() (hashSigner, []byte, error) {
 	if a.state != healthActive {
 		return nil, nil, ErrStateUntrusted
 	}
+	if a.retired {
+		// the shared signer of the election and delegation possessions: a retired key attests nothing it could not sign for
+		return nil, nil, ErrRetired
+	}
 	hs, ok := a.signer.(hashSigner)
 	if !ok {
 		return nil, nil, ErrNoHashSigner

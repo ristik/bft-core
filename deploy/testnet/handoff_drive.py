@@ -899,7 +899,9 @@ class Drive(rehearse.Rehearsal):
             def proof():
                 status = self.authority_status(i)
                 self.keep_credential(i)
-                files = self.activation_bundles(status.get('lineageEpoch') or 1)
+                # from the lineage tip on, and always the target's: a resume after the authority accepted it (its tip already the target) replays
+                # it, a no-op that lets the one operation repair the session and credential (astra on #1087)
+                files = self.activation_bundles(min(status.get('lineageEpoch') or 1, self.target - 1))
                 report = json.loads(self.exec_in(f'authority{i}', 'ubft', 'signing-authority', 'advance-with-proof', *OPERATOR,
                                                  *[a for f in files for a in ('--proof', f'/network/handoff/{f.name}')],
                                                  '--out', '/authority/client.cred', '--client-socket', '/authority/client.sock'))
@@ -960,7 +962,7 @@ class Drive(rehearse.Rehearsal):
             return {'joiner': True, 'remote': True}
         if healthy(remote.authority_status()).get('lineagePinned'):
             def proof():   # bft-core#1085, as for a host entity: the laptop's authority verifies the bundles itself
-                files = self.activation_bundles((remote.authority_status().get('lineageEpoch') or 1))
+                files = self.activation_bundles(min(remote.authority_status().get('lineageEpoch') or 1, self.target - 1))   # the target's always (a resume replays it)
                 remote.put({f'handoff/{f.name}': f for f in files})
                 report = remote.authority_step('advance-with-proof', self.target, shard_epoch)
                 status = healthy(remote.authority_status())

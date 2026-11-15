@@ -397,10 +397,7 @@ func signingAuthorityAdvanceWithProofCmd(baseFlags *baseFlags) *cobra.Command {
 				return err
 			}
 			defer func() { _ = operator.Close() }()
-			var current func(context.Context) error
-			if clientSocket != "" {
-				current = func(ctx context.Context) error { return checkClientCredential(ctx, clientSocket, out, flags.Timeout) }
-			}
+			current := func(ctx context.Context) error { return checkClientCredential(ctx, clientSocket, out, flags.Timeout) }
 			report, err := advanceWithProof(cmd.Context(), operator, proofs, out, current)
 			if err != nil {
 				return err
@@ -413,9 +410,10 @@ func signingAuthorityAdvanceWithProofCmd(baseFlags *baseFlags) *cobra.Command {
 	flags.addOperatorFlags(cmd)
 	cmd.Flags().StringArrayVar(&proofs, "proof", nil, "a root activation bundle file (the q3/bundle encoding), repeated in epoch order")
 	cmd.Flags().StringVar(&out, "out", "", "path of the client credential file written when a session is issued; an existing file is replaced")
-	cmd.Flags().StringVar(&clientSocket, "client-socket", "", "the authority's client socket: when given, a session already issued is checked with the credential in --out, "+
-		"and replaced when that credential is fenced or missing (a crash after the session was issued and before its credential was written)")
+	cmd.Flags().StringVar(&clientSocket, "client-socket", "", "the authority's client socket: a session already issued is checked with the credential in --out, "+
+		"and replaced when that credential is fenced or missing (a lost replacement answer, or a crash before the credential was written)")
 	_ = cmd.MarkFlagRequired("proof")
+	_ = cmd.MarkFlagRequired("client-socket")
 	_ = cmd.MarkFlagRequired("out")
 	return cmd
 }
@@ -460,7 +458,20 @@ func advanceWithProof(ctx context.Context, operator advanceOperator, proofs []st
 	if err != nil {
 		return report, err
 	}
+	if len(proofs) == 0 {
+		return report, errors.New("no activation bundle: pass at least the target epoch's (a resume replays it)")
+	}
+	if current == nil {
+		return report, errors.New("no check of the current client credential")
+	}
 	for _, path := range proofs {
+		info, err := os.Stat(path)
+		if err != nil {
+			return report, err
+		}
+		if info.Size() > service.MaxAdvanceProofBytes {
+			return report, fmt.Errorf("%s: %d bytes, an activation proof is at most %d", path, info.Size(), service.MaxAdvanceProofBytes)
+		}
 		raw, err := os.ReadFile(path) // #nosec G304 -- operator-supplied proof path
 		if err != nil {
 			return report, err
@@ -476,8 +487,10 @@ func advanceWithProof(ctx context.Context, operator advanceOperator, proofs []st
 		return report, err
 	}
 	report.Retired, report.RootEpoch, report.ShardEpoch, report.LineageEpoch = status.Retired, status.RootEpoch, status.ShardEpoch, status.LineageEpoch
+	// the session is issued when none was since the scope last changed, or when the one issued is not the credential in --out (its
+	// answer was lost, or the file was never written): success is never reported without --out holding the admitted credential
 	issue := !status.Retired && !status.SessionIssued
-	if !issue && !status.Retired && current != nil {
+	if !issue && !status.Retired {
 		if err := current(ctx); err != nil {
 			if !errors.Is(err, signingauthority.ErrFenced) && !errors.Is(err, os.ErrNotExist) {
 				return report, fmt.Errorf("checking the current client credential: %w", err)
@@ -494,6 +507,11 @@ func advanceWithProof(ctx context.Context, operator advanceOperator, proofs []st
 			return report, fmt.Errorf("the session was replaced, so the previous credential is fenced, but the new one could not be written (run again): %w", err)
 		}
 		report.SessionIssued = true
+	}
+	if !status.Retired {
+		if err := current(ctx); err != nil {
+			return report, fmt.Errorf("the credential in %s is not the admitted one: %w", out, err)
+		}
 	}
 	return report, nil
 }

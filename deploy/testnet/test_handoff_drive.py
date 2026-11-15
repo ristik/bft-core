@@ -235,7 +235,11 @@ class ProofAuthority(FakeAuthority):
             return json.dumps({'rootEpoch': self.root_epoch, 'shardEpoch': self.shard_epoch, 'generation': self.generation, 'enrollmentComplete': True,
                                'faulted': False, 'keyLost': False, 'lineagePinned': True, 'lineageEpoch': self.lineage})
         if verb == 'advance-with-proof':
-            self.calls.append((service, verb, tuple(a for a in command if a.startswith('/network/handoff/q3-bundle-'))))
+            proofs = tuple(a for a in command if a.startswith('/network/handoff/q3-bundle-'))
+            self.calls.append((service, verb, proofs))
+            for flag in ('--proof', '--out', '--client-socket'):   # the real command's required flags (TestTheAdvanceWithProofCommandRequires...)
+                if flag not in command:
+                    raise hd.rehearse.Failure(f'{service}: advance-with-proof: exit 1: required flag(s) "{flag[2:]}" not set')
             if self.retire:
                 return json.dumps({'steps': [{}], 'retired': True})
             if self.root_epoch != 3:
@@ -267,6 +271,16 @@ class AdvanceWithProof(unittest.TestCase):
         self.assertEqual((self.auth / 'client.cred.pre-epoch-3').read_text(), 'session 1')
         self.run_entity()
         self.assertEqual(len([c for c in self.fake.calls if c[1] == 'advance-with-proof']), 1, 'a finished entity is not advanced again')
+
+    def test_a_resume_after_the_authority_accepted_the_target_replays_it(self):
+        # the drive died after the authority published the advance (and maybe the session and credential), before the journal row: the
+        # authority's lineage tip is already the target, and the rerun still passes the target's bundle (an empty --proof list is refused)
+        self.fake.root_epoch, self.fake.shard_epoch, self.fake.lineage = 3, 2, 3
+        self.journal.write('advance', 'start', sub='entity1/advance-with-proof')
+        self.run_entity()
+        proofs = [c for c in self.fake.calls if c[1] == 'advance-with-proof']
+        self.assertEqual(proofs, [('authority1', 'advance-with-proof', ('/network/handoff/q3-bundle-3.cbor',))])
+        self.assertTrue(self.journal.done('advance', 'entity1/advance-with-proof'))
 
     def test_an_elected_entity_that_the_authority_retires_stops_the_drive(self):
         self.fake.retire = True

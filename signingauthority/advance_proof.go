@@ -37,7 +37,13 @@ successor certificate is not needed: the old committee's committed activation au
 it still needs its own certificate under the installed context.
 
 Verification runs outside the authority's lock, so signing continues meanwhile; the result is published under the lock, and only if
-nothing changed since the snapshot it was verified against. The high-water record and the input-record acknowledgement state are kept
+nothing changed since the snapshot it was verified against. A retired authority produces no signature of any kind: certification, the
+handoff possession proof and the EVM election and delegation possessions are all refused (ErrRetired, under the lock).
+
+What this does not do: the scope an authority starts in (its enrollment and the root trust of its first epoch) is still provisioned by
+the operator, and an authority pinned at a late epoch can sign in that scope before its lineage has caught up to it. The lineage
+authenticates that scope at the first proof advance FROM it (sameTrust, and the checkpoint against the held configuration), not
+retrospectively before its first signature. It removes operator trust from every advance, not from the bootstrap. The high-water record and the input-record acknowledgement state are kept
 (publishScopeLocked, as for AdvanceEpoch), and the advance fences the client: the next session is the operator's to issue, as before.
 */
 
@@ -53,6 +59,10 @@ type AdvanceResult struct {
 	Retired bool
 	// RootEpoch and ShardEpoch are the scope after the call; LineageEpoch the lineage's tip.
 	RootEpoch, ShardEpoch, LineageEpoch uint64
+	// Generation is the client generation after the call. An advance or a retirement fences every session up to it: a server that
+	// admits a session of a generation at or below it drops that credential, and keeps one issued later (by a replacement that raced the
+	// verification and landed after the publication).
+	Generation uint64
 }
 
 // AdvanceWithProof verifies one activation bundle (q3active.Bundle encoding) against this authority's own lineage and, when it is the
@@ -92,6 +102,9 @@ func (a *Authority) AdvanceWithProof(ctx context.Context, bundle []byte) (Advanc
 		return AdvanceResult{}, fmt.Errorf("%w: no shard configuration has been stated", ErrEnrollmentIncomplete)
 	}
 	current := *enroll.RootEpoch
+	if a.advanceHook != nil {
+		a.advanceHook()
+	}
 
 	next, step, err := lineage.Extend(bundle)
 	if err != nil {
@@ -160,6 +173,7 @@ func (a *Authority) AdvanceWithProof(ctx context.Context, bundle []byte) (Advanc
 		result.Advanced = true
 	}
 	result.RootEpoch, result.ShardEpoch, result.LineageEpoch = pinnedRootEpoch(a.enroll.RootEpoch), a.enroll.ShardEpoch, a.lineage.Tip()
+	result.Generation = a.generation
 	return result, nil
 }
 

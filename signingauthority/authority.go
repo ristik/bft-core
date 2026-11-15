@@ -83,6 +83,18 @@ type Authority struct {
 	// advancing serialises proof advances: verification runs outside mu (so signing is not held up by it), and a second proof
 	// advance meanwhile is refused rather than queued.
 	advancing sync.Mutex
+	// advanceHook, when set (WithAdvanceHook), is called once a proof advance has taken its snapshot and before it verifies anything,
+	// outside every lock: the seam fault-injection tests pause verification at.
+	advanceHook func()
+}
+
+// WithAdvanceHook calls hook at the start of every proof verification, outside the authority's locks. It changes no decision; it exists
+// so that a test can hold a verification in progress and observe what stays available meanwhile.
+func WithAdvanceHook(hook func()) Option {
+	return func(a *Authority) error {
+		a.advanceHook = hook
+		return nil
+	}
 }
 
 // Option configures an authority at New.

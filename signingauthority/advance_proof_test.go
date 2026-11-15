@@ -73,7 +73,8 @@ func TestARootOnlyActivationAdvancesTheScopeAndAReplayIsANoOp(t *testing.T) {
 
 	res, err := a.AdvanceWithProof(context.Background(), bundleOf(t, f))
 	require.NoError(t, err)
-	require.Equal(t, AdvanceResult{Epoch: 2, Advanced: true, RootEpoch: 2, ShardEpoch: before.ShardEpoch, LineageEpoch: 2}, res)
+	require.Equal(t, AdvanceResult{Epoch: 2, Advanced: true, RootEpoch: 2, ShardEpoch: before.ShardEpoch, LineageEpoch: 2, Generation: before.Generation + 1}, res,
+		"the generation every session up to which the advance fenced")
 	after := a.Status()
 	require.True(t, after.LineagePinned)
 	require.Equal(t, uint64(2), after.RootEpoch)
@@ -398,4 +399,69 @@ func errorsIsAny(err error, targets ...error) bool {
 
 func activatedOf(f *q3fixture.Fixture) (evmassign.Candidate, *types.PartitionDescriptionRecord, error) {
 	return evmassign.ActivatedFromPreimage(f.Candidate, f.Proof.Record.ActivationRound)
+}
+
+// A retired authority signs nothing of any kind (astra on #1087): the handoff possession proof and the EVM election and delegation
+// possessions are refused as well as certification, after a real proof-driven retirement, and also when the retirement races them.
+func TestARetiredAuthorityAttestsNoPossession(t *testing.T) {
+	f := coupledFixture(t)
+	kept, dropped := keptAndDropped(t, f)
+	ctx := context.Background()
+	requests := func(a *Authority) (HandoffPoPRequest, ElectionPoPRequest, DelegationPossessionRequest) {
+		pub, err := a.SigningPublicKey()
+		require.NoError(t, err)
+		e := a.Enrollment()
+		succ := f.ShardConf
+		handoff := HandoffPoPRequest{Domain: evmassign.PoPDomain, NodeID: e.NodeID, Successor: succ,
+			Context: evmassign.PoPContext{Network: uint64(e.NetworkID), Attempt: 2, Predecessor: [32]byte{1}}}
+		election := ElectionPoPRequest{Attempt: 3}
+		delegation := DelegationPossessionRequest{Network: [32]byte{7}, Request: evmassign.DelegationRequest{Id: 5, Generation: 1, Expiry: 1_000_000_000,
+			Binding: evmassign.DelegationBinding{EvmKey: pub}}}
+		return handoff, election, delegation
+	}
+	signAll := func(a *Authority) []error {
+		h, e, d := requests(a)
+		_, errH := a.SignHandoffPoP(h)
+		_, errE := a.SignElectionPoP(e)
+		_, errD := a.SignDelegationPossession(d)
+		return []error{errH, errE, errD}
+	}
+
+	control := proofAuthority(t, f, kept)
+	for i, err := range signAll(control) {
+		require.NotErrorIs(t, err, ErrRetired, "operation %d of an active authority", i)
+	}
+	retired := proofAuthority(t, f, dropped)
+	res, err := retired.AdvanceWithProof(ctx, bundleOf(t, f))
+	require.NoError(t, err)
+	require.True(t, res.Retired)
+	for i, err := range signAll(retired) {
+		require.ErrorIs(t, err, ErrRetired, "operation %d after the retirement", i)
+	}
+
+	racing := proofAuthority(t, f, dropped)
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-done:
+					return
+				default:
+					signAll(racing)
+				}
+			}
+		}()
+	}
+	res, err = racing.AdvanceWithProof(ctx, bundleOf(t, f))
+	require.NoError(t, err)
+	require.True(t, res.Retired)
+	for i, err := range signAll(racing) {
+		require.ErrorIs(t, err, ErrRetired, "operation %d once the retirement is published", i)
+	}
+	close(done)
+	wg.Wait()
 }

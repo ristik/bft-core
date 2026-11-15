@@ -75,6 +75,12 @@ const (
 	opAdvanceWithProof op = 109
 )
 
+// MaxAdvanceProofBytes is the largest activation bundle one opAdvanceWithProof can carry: the frame less an allowance for the request's
+// own fields. It is the bound in force for a signing authority (activationproof.MaxBundleBytes, the envelope's own 16 MiB, is looser); a
+// root's one-activation bundle of a committee of the profile's 16 members is a small fraction of it. The operator CLI checks a proof file
+// against it before reading the file.
+const MaxAdvanceProofBytes = MaxFrameBytes - 4*1024
+
 func (o op) servedToClient() bool {
 	switch o {
 	case opReserve, opSign, opRetainResponse, opRelease, opRestoreStatus:

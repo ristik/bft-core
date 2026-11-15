@@ -37,15 +37,18 @@ var (
 	ErrShard = errors.New("activationproof: the activation does not carry this shard's configuration")
 )
 
-// MaxBundleBytes bounds one bundle; the transport's frame bounds it further.
+// MaxBundleBytes bounds one bundle here: the envelope's own bound. A transport bounds it further (the signing authority's operator frame
+// is ~2 MiB, see service.MaxAdvanceProofBytes); a root's one-activation bundle is far below either.
 const MaxBundleBytes = q3format.MaxEnvelopeBytes
 
 // Lineage is a verifier's own authenticated root history: the Q3 history rooted at its pinned genesis, and for every epoch the root
 // trust base a certificate of that epoch is verified with, hash-chained the way a root installs it (PreviousEntryHash is the
-// predecessor's hash). It is immutable: Extend returns a new one.
+// predecessor's hash). It is immutable and persistent: Extend returns a new tip node that points at the lineage it extends, so an
+// extension copies nothing, and the trust of the tip and its predecessor (all an advance reads) is found in one or two steps.
 type Lineage struct {
-	hist  *q3format.History
-	trust []*types.RootTrustBaseV1 // trust[i] is epoch hist.FirstEpoch()+i
+	hist     *q3format.History // the history through this node's epoch: its tip is this node's entry
+	prevHash []byte            // the PreviousEntryHash of this epoch's trust base
+	parent   *Lineage          // the lineage this one extends; nil at the genesis
 }
 
 // NewLineage starts a lineage at the deployment's genesis root trust base (epoch 1). utb says the chain is a UTB chain.
@@ -60,7 +63,7 @@ func NewLineage(genesis *types.RootTrustBaseV1, utb bool) (*Lineage, error) {
 	if utb {
 		h = h.WithUTBGenesis()
 	}
-	return &Lineage{hist: h, trust: []*types.RootTrustBaseV1{h.Tip().Projection()}}, nil
+	return &Lineage{hist: h, prevHash: bytes.Clone(genesis.PreviousEntryHash)}, nil
 }
 
 // Tip is the last epoch the lineage holds.
@@ -71,16 +74,15 @@ func (l *Lineage) Network() types.NetworkID { return types.NetworkID(l.hist.Netw
 
 // Trust is the root trust base of an epoch the lineage holds (a copy).
 func (l *Lineage) Trust(epoch uint64) (*types.RootTrustBaseV1, error) {
-	first := l.hist.FirstEpoch()
-	if epoch < first || epoch-first >= uint64(len(l.trust)) {
+	n := l
+	for n != nil && n.Tip() > epoch {
+		n = n.parent
+	}
+	if n == nil || n.Tip() != epoch {
 		return nil, fmt.Errorf("%w: epoch %d is not in the lineage (tip %d)", ErrLineage, epoch, l.Tip())
 	}
-	e, err := l.hist.ForEpoch(epoch)
-	if err != nil {
-		return nil, errors.Join(ErrLineage, err)
-	}
-	tb := e.Projection()
-	tb.PreviousEntryHash = bytes.Clone(l.trust[epoch-first].PreviousEntryHash)
+	tb := n.hist.Tip().Projection()
+	tb.PreviousEntryHash = bytes.Clone(n.prevHash)
 	return tb, nil
 }
 
@@ -129,15 +131,15 @@ func (l *Lineage) Extend(raw []byte) (*Lineage, Step, error) {
 	if step.Replay {
 		return l, step, nil
 	}
-	prev := l.trust[len(l.trust)-1]
+	prev, err := l.Trust(tip)
+	if err != nil {
+		return nil, Step{}, err
+	}
 	prevID, err := prev.Hash(crypto.SHA256)
 	if err != nil {
 		return nil, Step{}, err
 	}
-	tb := entry.Projection()
-	tb.PreviousEntryHash = prevID
-	trust := append(append([]*types.RootTrustBaseV1(nil), l.trust...), tb)
-	return &Lineage{hist: next, trust: trust}, step, nil
+	return &Lineage{hist: next, prevHash: prevID, parent: l}, step, nil
 }
 
 // Transition is what an activation installs for one shard: the full configuration hash it certifies from the activation, and the

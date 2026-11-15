@@ -416,18 +416,24 @@ func (s *Server) operatorOp(ctx context.Context, operation op, payload []byte) (
 		s.credential = nil
 		return nil, nil
 	case opAdvanceWithProof:
-		// the proof is the payload's bytes and nothing else: the authority verifies it against its own lineage (#1085). Serialised with
-		// replaceSession under the server's lock, so an advance that fences the client also drops the credential the server admits.
-		s.mu.Lock()
-		defer s.mu.Unlock()
+		// The proof is the payload's bytes and nothing else: the authority verifies it against its own lineage (#1085). The server's lock
+		// is NOT held meanwhile: client credential lookups (every Reserve, Sign, Retain, Release) go on during a verification, and a second
+		// proof reaches the authority's own serialisation and is refused at once (ErrAdvanceBusy) instead of queueing here. The authority
+		// is the signing guard: its publication bumps the generation, which fences every session up to it whatever the server holds. The
+		// server then drops the credential it admits only if that session is one the publication fenced (a generation at or below the
+		// result's); a session a concurrent replacement issued after the publication is newer and is kept.
 		res, err := s.authority.AdvanceWithProof(ctx, payload)
 		if err != nil {
 			s.log.Warn("refusing an activation proof", slog.String("err", err.Error()))
 			return nil, err
 		}
-		if res.Advanced || (res.Retired && s.hasSession) {
-			s.hasSession = false
-			s.credential = nil
+		if res.Advanced || res.Retired {
+			s.mu.Lock()
+			if s.hasSession && s.session.Generation() <= res.Generation {
+				s.hasSession = false
+				s.credential = nil
+			}
+			s.mu.Unlock()
 		}
 		s.log.Info("activation proof accepted", slog.Uint64("epoch", res.Epoch), slog.Bool("replay", res.Replay), slog.Bool("advanced", res.Advanced),
 			slog.Bool("retired", res.Retired), slog.Uint64("rootEpoch", res.RootEpoch), slog.Uint64("shardEpoch", res.ShardEpoch), slog.Uint64("lineageEpoch", res.LineageEpoch))
