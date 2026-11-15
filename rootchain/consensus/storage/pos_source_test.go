@@ -190,7 +190,7 @@ func TestCommitRetainsTheProjectedRecords(t *testing.T) {
 	require.Zero(t, n, "an uncommitted block's records are not retained")
 
 	// commit block 9 (its parent path covers rounds 8 and 9)
-	_, err = s.blockTree.Commit(&rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 10, ParentRoundNumber: 9, Epoch: 2},
+	_, err = s.tree().Commit(&rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 10, ParentRoundNumber: 9, Epoch: 2},
 		LedgerCommitInfo: &types.UnicitySeal{Version: 1, RootChainRoundNumber: 9, Epoch: 2, Hash: mustBlock(t, s, 9).RootHash}})
 	require.NoError(t, err)
 	n, err = db.RecordCount()
@@ -301,22 +301,22 @@ func TestCommitRefusesToDropProjectedRecords(t *testing.T) {
 		Qc:      &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 7, Epoch: 2, CurrentRootHash: b7.RootHash}}},
 		mockIRVerifier{verify: func(uint64, *rctypes.IRChangeReq) (*types.InputRecord, error) { return ack, nil }})
 	require.NoError(t, err)
-	rootBefore := s.blockTree.Root().GetRound()
+	rootBefore := s.tree().Root().GetRound()
 
 	db := f.store.storage.(BoltDB)
-	s.blockTree.blocksDB = hiddenRecords{PersistentStore: db}
+	s.tree().blocksDB = hiddenRecords{PersistentStore: db}
 	qc := &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 9, ParentRoundNumber: 8, Epoch: 2},
 		LedgerCommitInfo: &types.UnicitySeal{Version: 1, RootChainRoundNumber: 8, Epoch: 2, Hash: mustBlock(t, s, 8).RootHash}}
-	_, err = s.blockTree.Commit(qc)
+	_, err = s.tree().Commit(qc)
 	require.ErrorIs(t, err, ErrNoRecordStore)
-	require.Equal(t, rootBefore, s.blockTree.Root().GetRound(), "the block did not become the root")
+	require.Equal(t, rootBefore, s.tree().Root().GetRound(), "the block did not become the root")
 	n, err := db.RecordCount()
 	require.NoError(t, err)
 	require.Zero(t, n)
 
 	// a block without records still commits on such a store
-	s.blockTree.blocksDB = db
-	_, err = s.blockTree.Commit(qc)
+	s.tree().blocksDB = db
+	_, err = s.tree().Commit(qc)
 	require.NoError(t, err)
 }
 

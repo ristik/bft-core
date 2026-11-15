@@ -128,6 +128,26 @@ func (x *Pacemaker) Stop() {
 	x.stopRoundClock()
 }
 
+// Quiesce stops the round clock and returns the pacemaker to the state NewPacemaker leaves it in: no round, no QC or TC, no vote sent
+// and no vote collected, and no event pending. The in-process epoch switch (#1086) calls it on a stopped consensus loop, so that the
+// successor is started by Reset exactly as at a process start; nothing of the old epoch's round survives in it.
+func (x *Pacemaker) Quiesce() {
+	x.stopRoundClock()
+	x.stopRoundClock = func() { /* NOP until the next round starts */ }
+	select {
+	case <-x.statusChan:
+	default:
+	}
+	x.status.Store(uint32(pmsRoundNone))
+	x.lastQcToCommitRound = 0
+	x.lastRoundTC = nil
+	x.currentQC = nil
+	x.voteSent = nil
+	x.timeoutVote = nil
+	x.pendingVotes.Reset()
+	x.currentRound.Store(0)
+}
+
 func (x *Pacemaker) LastRoundTC() *types.TimeoutCert {
 	return x.lastRoundTC
 }

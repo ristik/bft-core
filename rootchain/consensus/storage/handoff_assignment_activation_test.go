@@ -74,7 +74,7 @@ func (f *assignmentFixture) commitAssignment(t *testing.T) committedAssignment {
 		f.afterFreeze(t)
 	}
 
-	frozen := f.store.blockTree.Root().ShardState.States[f.shard]
+	frozen := f.store.tree().Root().ShardState.States[f.shard]
 	activated, err := evmassign.Activate(f.succ, b.freeze.ActivationRound)
 	require.NoError(t, err)
 	tr, err := successorTechnicalRecord(frozen, activated, crypto.SHA256)
@@ -97,7 +97,7 @@ func (f *assignmentFixture) commitAssignment(t *testing.T) committedAssignment {
 
 	h := addProfileBlock(t, f.store, 4, [][]byte{commit.Bytes()})
 	suffix := addProfileBlock(t, f.store, 5, nil)
-	_, err = f.store.blockTree.Commit(&rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 5, ParentRoundNumber: 4, Epoch: 1},
+	_, err = f.store.tree().Commit(&rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 5, ParentRoundNumber: 4, Epoch: 1},
 		LedgerCommitInfo: &types.UnicitySeal{Version: 1, RootChainRoundNumber: 4, Epoch: 1, Hash: h.RootHash}})
 	require.NoError(t, err)
 	head := &abdrc.CommittedBlock{Block: suffix.BlockData, Control: suffix.ShardState.Control,
@@ -352,7 +352,7 @@ func TestAbortThenRetryWithAnotherAssignmentInstallsOnlyTheRetry(t *testing.T) {
 	commit.Kind, commit.OrderedRound, commit.SuccessorTRHash = "commit", 7, mustTRHash2(t, &tr)
 	f.addAt(t, 7, commit.Bytes())
 	suffix := f.addAt(t, 8)
-	_, err = f.store.blockTree.Commit(&rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 8, ParentRoundNumber: 7, Epoch: 1},
+	_, err = f.store.tree().Commit(&rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 8, ParentRoundNumber: 7, Epoch: 1},
 		LedgerCommitInfo: &types.UnicitySeal{Version: 1, RootChainRoundNumber: 7, Epoch: 1, Hash: mustBlock(t, f.store, 7).RootHash}})
 	require.NoError(t, err)
 	head := &abdrc.CommittedBlock{Block: suffix.BlockData, Control: suffix.ShardState.Control,
@@ -480,7 +480,7 @@ func TestActivationRefusesACheckpointWhoseCommittedRecordIsNotTheDerivedOne(t *t
 	h := f.commitAssignment(t)
 	_, err := f.store.InstallEpochAnchor(h.head, h.verified, h.genesis)
 	require.NoError(t, err)
-	root := f.store.blockTree.Root()
+	root := f.store.tree().Root()
 	configs, err := f.orch.ShardConfigs(7)
 	require.NoError(t, err)
 	record := h.commit
@@ -499,7 +499,7 @@ func TestAssignmentActivationRefusesADerivedRecordThatIsNotH(t *testing.T) {
 	f := newAssignmentFixture(t)
 	f.useRealOrchestration(t)
 	h := f.commitAssignment(t)
-	root := f.store.blockTree.Root()
+	root := f.store.tree().Root()
 	wrong := h.commit
 	wrong.SuccessorTRHash = bytes.Repeat([]byte{0x99}, 32)
 	fresh := freshOrchestration(t, f)

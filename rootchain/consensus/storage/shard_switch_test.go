@@ -319,7 +319,7 @@ func TestSwitchingShardsForBlockIsThePlanFromTheProposalParent(t *testing.T) {
 	_, err = s.SwitchingShardsForBlock(77, 30)
 	require.Error(t, err, "an unknown parent is an error, not an empty plan")
 
-	root := s.blockTree.Root()
+	root := s.tree().Root()
 	root.ShardState.Control.Phase = "committed"
 	set, err = s.SwitchingShardsForBlock(1, 30)
 	require.NoError(t, err)

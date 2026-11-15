@@ -20,8 +20,10 @@ import (
 
 type (
 	BlockStore struct {
-		hash          crypto.Hash // hash algorithm
-		blockTree     *BlockTree
+		hash crypto.Hash // hash algorithm
+		// treeRef is the block tree. An epoch install (InstallEpochAnchor) replaces it while an in-process epoch switch (#1086) runs
+		// with the operator and records readers live, so it is read through tree().
+		treeRef       atomic.Pointer[BlockTree]
 		storage       PersistentStore
 		orchestration Orchestration
 		profile       uint64
@@ -80,14 +82,13 @@ func New(hashAlgo crypto.Hash, db PersistentStore, orchestration Orchestration, 
 		return nil, fmt.Errorf("initializing block tree: %w", err)
 	}
 	blTree.log = log
-	return &BlockStore{
+	return withTree(&BlockStore{
 		hash:          hashAlgo,
-		blockTree:     blTree,
 		storage:       db,
 		orchestration: orchestration,
 		profile:       profile,
 		log:           log,
-	}, nil
+	}, blTree), nil
 }
 
 // ErrRefusedBeforeWrite marks a recovery state that NewFromState or NewFromAnchorState refused before writing anything: the store is as it
@@ -152,14 +153,13 @@ func newFromHead(hash crypto.Hash, block *abdrc.CommittedBlock, db PersistentSto
 			return nil, fmt.Errorf("capturing the handoff checkpoint of the recovered head: %w", err)
 		}
 	}
-	return &BlockStore{
+	return withTree(&BlockStore{
 		hash:          hash,
-		blockTree:     blTree,
 		storage:       db,
 		orchestration: orchestration,
 		profile:       profile,
 		log:           log,
-	}, nil
+	}, blTree), nil
 }
 
 /*
@@ -216,7 +216,7 @@ ends up being committed.
 func (x *BlockStore) IsChangeInProgress(branch uint64, partition types.PartitionID, shard types.ShardID) *types.InputRecord {
 	k := types.PartitionShardID{PartitionID: partition, ShardID: shard.Key()}
 	// go through the blocks of the branch and make sure that there is no change in progress for this shard
-	for _, b := range x.blockTree.Branch(branch) {
+	for _, b := range x.tree().Branch(branch) {
 		if _, ok := b.ShardState.Changed[k]; ok {
 			return b.ShardState.States[k].IR
 		}
@@ -233,7 +233,7 @@ func (x *BlockStore) ClosureControls(parentRound, epoch, round uint64) ([]rctype
 	if x.profile != ProfileHandoff || !svc.mandatory() {
 		return nil, nil
 	}
-	parent, err := x.blockTree.FindBlock(parentRound)
+	parent, err := x.tree().FindBlock(parentRound)
 	if err != nil {
 		return nil, err
 	}
@@ -274,7 +274,7 @@ func (x *BlockStore) ClosureControls(parentRound, epoch, round uint64) ([]rctype
 // trial-executes the whole block, so a disagreement costs a Retirement, never a block. A child that certifies a newer EVM block does not
 // change the tuple of its own Retirement.
 func (x *BlockStore) RetirementParent(parentRound, round uint64) (EVMParent, bool, error) {
-	parent, err := x.blockTree.FindBlock(parentRound)
+	parent, err := x.tree().FindBlock(parentRound)
 	if err != nil {
 		return EVMParent{}, false, err
 	}
@@ -308,7 +308,7 @@ func (x *BlockStore) RetirementParent(parentRound, round uint64) (EVMParent, boo
 // ordered: no P85 state, an epoch anchor, a pending acknowledgement, a frozen tracker, a live handoff, no usable EVM record. The context is
 // only a proposal: the leader trial-executes the whole block and every voter applies the full rule.
 func (x *BlockStore) RejectionParent(parentRound, round uint64) (RejectionContext, bool, error) {
-	parent, err := x.blockTree.FindBlock(parentRound)
+	parent, err := x.tree().FindBlock(parentRound)
 	if err != nil {
 		return RejectionContext{}, false, err
 	}
@@ -344,13 +344,13 @@ func (x *BlockStore) RejectionParent(parentRound, round uint64) (RejectionContex
 
 // RejectionResolved reports whether the branch ending at parentRound has resolved the election result (closed or acknowledged it).
 func (x *BlockStore) RejectionResolved(parentRound uint64, resultID [32]byte) bool {
-	parent, err := x.blockTree.FindBlock(parentRound)
+	parent, err := x.tree().FindBlock(parentRound)
 	return err == nil && resolvedIn(parent, resultID)
 }
 
 // RejectionCommitted reports whether the committed root has resolved the election result.
 func (x *BlockStore) RejectionCommitted(resultID [32]byte) bool {
-	return resolvedIn(x.blockTree.Root(), resultID)
+	return resolvedIn(x.tree().Root(), resultID)
 }
 
 func resolvedIn(b *ExecutedBlock, resultID [32]byte) bool {
@@ -363,7 +363,7 @@ func resolvedIn(b *ExecutedBlock, resultID [32]byte) bool {
 
 // RetirementOrdered reports whether the branch ending at parentRound has ordered a Retirement of the generation.
 func (x *BlockStore) RetirementOrdered(parentRound, id, generation uint64) bool {
-	parent, err := x.blockTree.FindBlock(parentRound)
+	parent, err := x.tree().FindBlock(parentRound)
 	if err != nil {
 		return false
 	}
@@ -372,7 +372,7 @@ func (x *BlockStore) RetirementOrdered(parentRound, id, generation uint64) bool 
 
 // RetirementCommitted reports whether the committed root has ordered a Retirement of the generation.
 func (x *BlockStore) RetirementCommitted(id, generation uint64) bool {
-	return retirementIn(x.blockTree.Root(), id, generation)
+	return retirementIn(x.tree().Root(), id, generation)
 }
 
 func retirementIn(b *ExecutedBlock, id, generation uint64) bool {
@@ -413,7 +413,7 @@ func (x *BlockStore) Witness(hash [32]byte) ([]byte, error) {
 // whether an optional control it would include makes the block invalid before it signs the proposal. Nothing is stored. The parent
 // block is only read: extendWithAuthority builds the child on a copy of the parent's state, which Add relies on for forks as well.
 func (x *BlockStore) TrialExecute(block *rctypes.BlockData, verifier IRChangeReqVerifier) error {
-	parent, err := x.blockTree.FindBlock(block.GetParentRound())
+	parent, err := x.tree().FindBlock(block.GetParentRound())
 	if err != nil {
 		return fmt.Errorf("trial: parent round %d: %w", block.GetParentRound(), err)
 	}
@@ -427,7 +427,7 @@ func (x *BlockStore) TrialExecute(block *rctypes.BlockData, verifier IRChangeReq
 // ControlCut is the retained control cut of the committed root block of the round: its control state and the path of its leaf in that
 // block's unicity tree.
 func (x *BlockStore) ControlCut(key CutKey) (ControlCut, error) {
-	return x.blockTree.ControlCut(key)
+	return x.tree().ControlCut(key)
 }
 
 // Records returns up to max records of the retained source log from the index.
@@ -483,8 +483,17 @@ func (x *BlockStore) LeaderInputs() LeaderInputs {
 // LeaderHead is the committed head a leader lookup reads: its round, ring and whether its control state is terminal, so no further sample
 // can exist in its epoch.
 func (x *BlockStore) LeaderHead() (round uint64, state *rctypes.LeaderState, sealed bool) {
-	root := x.blockTree.Root()
+	root := x.tree().Root()
 	return root.GetRound(), root.ShardState.Leader, root.ShardState.Control != nil && root.ShardState.Control.Phase == "committed"
+}
+
+// tree is the current block tree.
+func (x *BlockStore) tree() *BlockTree { return x.treeRef.Load() }
+
+// withTree sets the store's block tree.
+func withTree(x *BlockStore, t *BlockTree) *BlockStore {
+	x.treeRef.Store(t)
+	return x
 }
 
 func (x *BlockStore) GetDB() PersistentStore {
@@ -501,7 +510,7 @@ func (x *BlockStore) ProcessQc(qc *rctypes.QuorumCert) ([]*certification.Certifi
 	// short circuit, so that a stale QC cannot authorize anything built on a mismatching block. A QC of pruned history
 	// (no retained block) stays a no-op.
 	if qc.VoteInfo != nil {
-		if b, err := x.blockTree.FindBlock(qc.GetRound()); err == nil {
+		if b, err := x.tree().FindBlock(qc.GetRound()); err == nil {
 			if err = CheckQcOfBlock(qc, b); err != nil {
 				return nil, fmt.Errorf("qc does not certify the local block of round %d: %w", qc.GetRound(), err)
 			}
@@ -531,7 +540,7 @@ func (x *BlockStore) ProcessQc(qc *rctypes.QuorumCert) ([]*certification.Certifi
 		}
 	}
 	// add Qc to block tree
-	if err := x.blockTree.InsertQc(qc); err != nil {
+	if err := x.tree().InsertQc(qc); err != nil {
 		return nil, fmt.Errorf("failed to insert QC into block tree: %w", err)
 	}
 	// If the QC does not serve as commit QC, then we are done.
@@ -542,11 +551,11 @@ func (x *BlockStore) ProcessQc(qc *rctypes.QuorumCert) ([]*certification.Certifi
 		return nil, nil
 	}
 	// If the QC commits a state committed block becomes the new root
-	ucs, err := x.blockTree.Commit(qc, x.log)
+	ucs, err := x.tree().Commit(qc, x.log)
 	if err != nil {
 		return nil, fmt.Errorf("committing new root block: %w", err)
 	}
-	x.logHandoffOutcome(x.blockTree.Root())
+	x.logHandoffOutcome(x.tree().Root())
 	return ucs, nil
 }
 
@@ -590,7 +599,7 @@ func (x *BlockStore) Add(block *rctypes.BlockData, verifier IRChangeReqVerifier)
 	}
 	// verify that block for the round does not exist yet
 	// if block already exists, then check that it is the same block by comparing block hash
-	if b, err := x.blockTree.FindBlock(block.GetRound()); err == nil && b != nil {
+	if b, err := x.tree().FindBlock(block.GetRound()); err == nil && b != nil {
 		b1h, err := b.BlockData.Hash(crypto.SHA256)
 		if err != nil {
 			return nil, fmt.Errorf("add block failed: cannot compute existing block's hash: %w", err)
@@ -606,7 +615,7 @@ func (x *BlockStore) Add(block *rctypes.BlockData, verifier IRChangeReqVerifier)
 		return nil, fmt.Errorf("add block failed: different block for round %v is already in store", block.Round)
 	}
 	// block was not present, check parent block (QC round) is stored (if not node needs to recover)
-	parentBlock, err := x.blockTree.FindBlock(block.GetParentRound())
+	parentBlock, err := x.tree().FindBlock(block.GetParentRound())
 	if err != nil {
 		return nil, fmt.Errorf("add block failed: parent round %v not found, recover", block.Qc.VoteInfo.RoundNumber)
 	}
@@ -640,7 +649,7 @@ func (x *BlockStore) Add(block *rctypes.BlockData, verifier IRChangeReqVerifier)
 			if err != nil {
 				return nil, err
 			}
-			committed := x.blockTree.Root()
+			committed := x.tree().Root()
 			if committed == nil || committed.ShardState.States[key] == nil || committed.ShardState.States[key].IR == nil ||
 				!bytes.Equal(committed.ShardState.States[key].IR.BlockHash, control.FrozenParent) {
 				return nil, ErrHandoffRecord
@@ -687,20 +696,20 @@ func (x *BlockStore) Add(block *rctypes.BlockData, verifier IRChangeReqVerifier)
 		}
 	}
 	// append new block
-	if err = x.blockTree.Add(exeBlock); err != nil {
+	if err = x.tree().Add(exeBlock); err != nil {
 		return nil, fmt.Errorf("adding block to the tree: %w", err)
 	}
 	return exeBlock.RootHash, nil
 }
 
 func (x *BlockStore) GetHighQc() *rctypes.QuorumCert {
-	return x.blockTree.HighQc()
+	return x.tree().HighQc()
 }
 
 // SuffixParent reports whether an old-epoch proposal extends a branch that
 // already contains a committed handoff record.
 func (x *BlockStore) SuffixParent(parentRound, epoch uint64) (bool, error) {
-	parent, err := x.blockTree.FindBlock(parentRound)
+	parent, err := x.tree().FindBlock(parentRound)
 	if err != nil {
 		return false, err
 	}
@@ -718,19 +727,19 @@ func (x *BlockStore) SuffixParent(parentRound, epoch uint64) (bool, error) {
 // Callers that need consensus serialization must invoke it from the manager's
 // serialized loop; this method does not provide freshness or authority.
 func (x *BlockStore) ReadFrontierStorageView(partition types.PartitionID, shard types.ShardID) (*FrontierStorageView, error) {
-	if x == nil || x.blockTree == nil {
+	if x == nil || x.tree() == nil {
 		return nil, errors.New("block store is unavailable")
 	}
-	return x.blockTree.ReadFrontierStorageView(partition, shard)
+	return x.tree().ReadFrontierStorageView(partition, shard)
 }
 
 // ReadFrontierCutSnapshot returns owned raw data and freshly generated
 // membership paths for the current committed root.
 func (x *BlockStore) ReadFrontierCutSnapshot(partition types.PartitionID, shard types.ShardID) (*FrontierCutSnapshot, error) {
-	if x == nil || x.blockTree == nil {
+	if x == nil || x.tree() == nil {
 		return nil, fmt.Errorf("block store is unavailable")
 	}
-	return x.blockTree.ReadFrontierCutSnapshot(partition, shard)
+	return x.tree().ReadFrontierCutSnapshot(partition, shard)
 }
 
 func (x *BlockStore) GetLastTC() (*rctypes.TimeoutCert, error) {
@@ -741,7 +750,7 @@ func (x *BlockStore) GetCertificate(id types.PartitionID, shard types.ShardID) (
 	x.lock.RLock()
 	defer x.lock.RUnlock()
 
-	committedBlock := x.blockTree.Root()
+	committedBlock := x.tree().Root()
 	key := types.PartitionShardID{PartitionID: id, ShardID: shard.Key()}
 	if si, ok := committedBlock.ShardState.States[key]; ok {
 		return si.LastCR, nil
@@ -753,7 +762,7 @@ func (x *BlockStore) GetCertificates() []*types.UnicityCertificate {
 	x.lock.RLock()
 	defer x.lock.RUnlock()
 
-	committedBlock := x.blockTree.Root()
+	committedBlock := x.tree().Root()
 	ucs := make([]*types.UnicityCertificate, 0, len(committedBlock.ShardState.States))
 	for _, v := range committedBlock.ShardState.States {
 		if v.LastCR != nil {
@@ -767,7 +776,7 @@ func (x *BlockStore) ShardInfo(partition types.PartitionID, shard types.ShardID)
 	x.lock.RLock()
 	defer x.lock.RUnlock()
 
-	committedBlock := x.blockTree.Root()
+	committedBlock := x.tree().Root()
 	key := types.PartitionShardID{PartitionID: partition, ShardID: shard.Key()}
 	if si, ok := committedBlock.ShardState.States[key]; ok {
 		return si
@@ -787,7 +796,7 @@ type committedRootID struct {
 func (x *BlockStore) CommittedShardParent(partition types.PartitionID, shard types.ShardID) (*ShardInfo, []byte, error) {
 	x.lock.RLock()
 	defer x.lock.RUnlock()
-	root := x.blockTree.Root()
+	root := x.tree().Root()
 	id, err := x.committedID(root)
 	if err != nil {
 		return nil, nil, err
@@ -811,7 +820,7 @@ func (x *BlockStore) committedID(root *ExecutedBlock) ([]byte, error) {
 }
 
 func (x *BlockStore) GetState() (*abdrc.StateMsg, error) {
-	return x.blockTree.CurrentState()
+	return x.tree().CurrentState()
 }
 
 func (x *BlockStore) HandoffBody(id []byte) ([]byte, error) {
@@ -843,18 +852,27 @@ func (x *BlockStore) HandoffCandidate(id []byte) ([]byte, error) {
 	return archive.HandoffCandidate(id)
 }
 
+// CommittedHandoff is the committed root's committed handoff record and the root's round (BlockTree.CommittedHandoff); ok is false
+// outside the handoff profile.
+func (x *BlockStore) CommittedHandoff() (evmroot.OrderedHandoffRecord, uint64, bool) {
+	if x.profile != ProfileHandoff {
+		return evmroot.OrderedHandoffRecord{}, 0, false
+	}
+	return x.tree().CommittedHandoff()
+}
+
 func (x *BlockStore) HandoffCheckpoint() (*abdrc.CommittedBlock, *types.UnicityTreeCertificate, evmroot.OrderedHandoffRecord, error) {
 	if x.profile != ProfileHandoff {
 		return nil, nil, evmroot.OrderedHandoffRecord{}, ErrNetworkProfile
 	}
-	return x.blockTree.HandoffCheckpoint()
+	return x.tree().HandoffCheckpoint()
 }
 
 func (x *BlockStore) CommittedFrozenParent(parent []byte) bool {
 	if x.profile != ProfileHandoff {
 		return false
 	}
-	root := x.blockTree.Root()
+	root := x.tree().Root()
 	configs, err := x.orchestration.ShardConfigs(root.GetRound())
 	if err != nil {
 		return false
@@ -876,7 +894,7 @@ func (x *BlockStore) FrozenShardForBlock(parentRound, blockRound uint64) (types.
 	if x.profile != ProfileHandoff {
 		return zero, false, nil
 	}
-	parent, err := x.blockTree.FindBlock(round)
+	parent, err := x.tree().FindBlock(round)
 	if err != nil {
 		return zero, false, err
 	}
@@ -897,7 +915,7 @@ func (x *BlockStore) FrozenShardForBlock(parentRound, blockRound uint64) (types.
 // view or selects any payload; the executor refuses a block that carries one (ErrShardSwitching). A parent that is a committed handoff's
 // terminal suffix executes nothing, so nothing switches.
 func (x *BlockStore) SwitchingShardsForBlock(parentRound, blockRound uint64) (ShardSet, error) {
-	parent, err := x.blockTree.FindBlock(parentRound)
+	parent, err := x.tree().FindBlock(parentRound)
 	if err != nil {
 		return nil, err
 	}
@@ -933,7 +951,7 @@ func switchingShards(state ShardStates, configs map[types.PartitionShardID]*type
 // CertifiedEVMShardAt selects the sole EVM shard with the verified parent at
 // the given root round. Ambiguous or non-EVM matches fail closed.
 func (x *BlockStore) CertifiedEVMShardAt(round uint64, frozenParent []byte) (types.PartitionShardID, error) {
-	parent, err := x.blockTree.FindBlock(round)
+	parent, err := x.tree().FindBlock(round)
 	if err != nil {
 		return types.PartitionShardID{}, err
 	}
@@ -949,7 +967,7 @@ Block returns block for given round.
 When store doesn't have block for the round it returns error.
 */
 func (x *BlockStore) Block(round uint64) (*ExecutedBlock, error) {
-	return x.blockTree.FindBlock(round)
+	return x.tree().FindBlock(round)
 }
 
 // StoreLastVote stores last sent vote message by this node

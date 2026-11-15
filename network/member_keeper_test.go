@@ -217,12 +217,15 @@ func TestASuccessfulDialAndANewSetResetTheRetryState(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	m, l := newKeeperLoad(t, ctx, 3, 0)
+	// a frozen clock (#1117): the schedule is asserted against it, not against the wall clock, which a slow run overtakes
+	frozen := time.Now()
+	m.now = func() time.Time { return frozen }
 	cfg := MaintainConfig{Interval: 10 * time.Millisecond, RapidWindow: 0, BackoffMax: time.Hour, DialTimeout: time.Second}
 	go m.Maintain(ctx, cfg)
 	require.Eventually(t, func() bool { m.dialMu.Lock(); defer m.dialMu.Unlock(); return len(m.retry) == 3 }, 2*time.Second, 5*time.Millisecond)
 	m.dialMu.Lock()
 	for _, st := range m.retry {
-		require.Greater(t, st.next, time.Now(), "backed off")
+		require.True(t, st.next.After(frozen), "backed off")
 	}
 	m.dialMu.Unlock()
 	m.Set(ctx, m.Protected())

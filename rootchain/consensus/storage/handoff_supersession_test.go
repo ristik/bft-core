@@ -151,7 +151,7 @@ func TestSupersessionReplacesAnUnacknowledgedAssignmentOnTheSameParent(t *testin
 	require.NoError(t, err)
 	suffix, err := sup.addEpoch2(t, p.store, 11)
 	require.NoError(t, err)
-	_, err = p.store.blockTree.Commit(&rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 11, ParentRoundNumber: 10, Epoch: 2},
+	_, err = p.store.tree().Commit(&rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 11, ParentRoundNumber: 10, Epoch: 2},
 		LedgerCommitInfo: &types.UnicitySeal{Version: 1, RootChainRoundNumber: 10, Epoch: 2, Hash: mustBlock(t, p.store, 10).RootHash}})
 	require.NoError(t, err)
 	head := &abdrc.CommittedBlock{Block: suffix.BlockData, Control: suffix.ShardState.Control,

@@ -196,7 +196,7 @@ func Test_BlockStore_lateQcAfterTc(t *testing.T) {
 		b, err := bs.Block(3)
 		require.NoError(t, err)
 		require.EqualValues(t, 3, b.GetRound())
-		require.Len(t, bs.blockTree.allUncommittedNodes(), 2)
+		require.Len(t, bs.tree().allUncommittedNodes(), 2)
 		require.Equal(t, []uint64{3, 2, 1}, persistedRounds(t, bs.GetDB()))
 		require.Equal(t, qc2, bs.GetHighQc())
 		return bs, qc2, qcFor(3, 2, rh3, 0)
@@ -228,7 +228,7 @@ func Test_BlockStore_lateQcAfterTc(t *testing.T) {
 		bs, _, qc3 := setup(t)
 		_, err := bs.Add(&rctypes.BlockData{Round: 4, Payload: &rctypes.Payload{}, Qc: qc3}, irVer)
 		require.NoError(t, err)
-		require.Len(t, bs.blockTree.allUncommittedNodes(), 3)
+		require.Len(t, bs.tree().allUncommittedNodes(), 3)
 	})
 
 	t.Run("repeated TC is harmless", func(t *testing.T) {
@@ -246,7 +246,7 @@ func Test_BlockStore_lateQcAfterTc(t *testing.T) {
 	t.Run("TC for a round the node has no block for", func(t *testing.T) {
 		bs, _, _ := setup(t)
 		require.NoError(t, bs.ProcessTc(&rctypes.TimeoutCert{Timeout: &rctypes.Timeout{Round: 4}}))
-		require.Len(t, bs.blockTree.allUncommittedNodes(), 2)
+		require.Len(t, bs.tree().allUncommittedNodes(), 2)
 	})
 
 	t.Run("late QC after restart", func(t *testing.T) {
@@ -282,13 +282,13 @@ func Test_BlockStore_lateQcAfterTc(t *testing.T) {
 		// but before Commit has stored the new root
 		bs, _, qc3 := setup(t)
 		commitQc3 := qcFor(3, 2, qc3.VoteInfo.CurrentRootHash, 2)
-		require.NoError(t, bs.blockTree.InsertQc(commitQc3))
+		require.NoError(t, bs.tree().InsertQc(commitQc3))
 		bs = reload(t, bs)
-		require.EqualValues(t, 1, bs.blockTree.Root().GetRound())
+		require.EqualValues(t, 1, bs.tree().Root().GetRound())
 		// the QC is processed again and the commit is done
 		_, err := bs.ProcessQc(commitQc3)
 		require.NoError(t, err)
-		require.EqualValues(t, 2, bs.blockTree.Root().GetRound())
+		require.EqualValues(t, 2, bs.tree().Root().GetRound())
 		require.EqualValues(t, 3, bs.GetHighQc().GetRound())
 	})
 
@@ -300,7 +300,7 @@ func Test_BlockStore_lateQcAfterTc(t *testing.T) {
 		require.NoError(t, err)
 		// node can be restarted while there are multiple branches
 		bs = reload(t, bs)
-		require.Len(t, bs.blockTree.allUncommittedNodes(), 3)
+		require.Len(t, bs.tree().allUncommittedNodes(), 3)
 		qc4 := qcFor(4, 2, rh4, 0)
 		_, err = bs.ProcessQc(qc4)
 		require.NoError(t, err)
@@ -315,7 +315,7 @@ func Test_BlockStore_lateQcAfterTc(t *testing.T) {
 		// ...until QC for round 5 commits round 4
 		_, err = bs.ProcessQc(qcFor(5, 4, nil, 4))
 		require.NoError(t, err)
-		require.EqualValues(t, 4, bs.blockTree.Root().GetRound())
+		require.EqualValues(t, 4, bs.tree().Root().GetRound())
 		require.Equal(t, []uint64{5, 4}, persistedRounds(t, bs.GetDB()))
 
 		_, err = bs.Block(3)
@@ -414,7 +414,7 @@ func TestHandleQcError(t *testing.T) {
 
 func TestBlockStoreAdd(t *testing.T) {
 	bStore := initBlockStoreFromGenesis(t, nil)
-	rBlock := bStore.blockTree.Root()
+	rBlock := bStore.tree().Root()
 	mockBlockVer := mockIRVerifier{
 		verify: func(round uint64, irChReq *rctypes.IRChangeReq) (*types.InputRecord, error) {
 			luc, err := bStore.GetCertificate(irChReq.Partition, irChReq.Shard)
@@ -515,7 +515,7 @@ func TestBlockStoreAdd(t *testing.T) {
 	rh, err = bStore.Add(block, mockBlockVer)
 	require.NoError(t, err)
 	require.Nil(t, rh)
-	rBlock = bStore.blockTree.Root()
+	rBlock = bStore.tree().Root()
 	// block in round 2 becomes root
 	require.Equal(t, uint64(2), rBlock.BlockData.Round)
 	hQc := bStore.GetHighQc()
@@ -571,7 +571,7 @@ func Test_BlockStore_StateRoundtrip(t *testing.T) {
 	}
 	storeA := c.store
 	// the state message does not carry the "changed" marks
-	clear(storeA.blockTree.root.data.ShardState.Changed)
+	clear(storeA.tree().root.data.ShardState.Changed)
 	state := c.state()
 	require.NotNil(t, state)
 
@@ -581,10 +581,10 @@ func Test_BlockStore_StateRoundtrip(t *testing.T) {
 	require.NotNil(t, storeB)
 
 	// two stores should have the same state now
-	require.Equal(t, storeA.blockTree.root.data.ShardState.States, storeB.blockTree.root.data.ShardState.States)
-	require.Equal(t, storeA.blockTree.root.data.ShardState.Changed, storeB.blockTree.root.data.ShardState.Changed)
-	require.Equal(t, storeA.blockTree.root.data.RootHash, storeB.blockTree.root.data.RootHash, "root hash")
-	require.Equal(t, storeA.blockTree.highQc, storeB.blockTree.highQc)
+	require.Equal(t, storeA.tree().root.data.ShardState.States, storeB.tree().root.data.ShardState.States)
+	require.Equal(t, storeA.tree().root.data.ShardState.Changed, storeB.tree().root.data.ShardState.Changed)
+	require.Equal(t, storeA.tree().root.data.RootHash, storeB.tree().root.data.RootHash, "root hash")
+	require.Equal(t, storeA.tree().highQc, storeB.tree().highQc)
 	for _, p := range []types.PartitionID{1, 2} {
 		siA, siB := storeA.ShardInfo(p, types.ShardID{}), storeB.ShardInfo(p, types.ShardID{})
 		require.NotNil(t, siA)
@@ -603,7 +603,7 @@ func Test_BlockStore_RecoveredShardWithoutCertificateIsRefused(t *testing.T) {
 	shardConf := newShardConf(t)
 	shardConf.Validators = []*types.NodeInfo{node.NodeInfo(t)}
 	storeA := initBlockStoreFromGenesis(t, shardConf)
-	clear(storeA.blockTree.root.data.ShardState.Changed)
+	clear(storeA.tree().root.data.ShardState.Changed)
 	state, err := storeA.GetState()
 	require.NoError(t, err)
 	raw, err := types.Cbor.Marshal(state)
@@ -618,7 +618,7 @@ func Test_BlockStore_RecoveredShardWithoutCertificateIsRefused(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 	consistentGenesisRoot(t, storeA, &received)
-	require.NoError(t, db.WriteBlock(storeA.blockTree.root.data, true))
+	require.NoError(t, db.WriteBlock(storeA.tree().root.data, true))
 	_, err = NewFromState(crypto.SHA256, received.CommittedHead, db, storeA.orchestration, logger.New(t))
 	require.ErrorIs(t, err, ErrRefusedBeforeWrite)
 	require.ErrorContains(t, err, "last response")
@@ -630,7 +630,7 @@ func Test_BlockStore_RecoveredShardWithoutCertificateIsRefused(t *testing.T) {
 func Test_BlockStore_RecoveredShardWithoutCertificateAndInconsistentEpoch(t *testing.T) {
 	shardConf := newShardConf(t)
 	storeA := initBlockStoreFromGenesis(t, shardConf)
-	clear(storeA.blockTree.root.data.ShardState.Changed)
+	clear(storeA.tree().root.data.ShardState.Changed)
 	state, err := storeA.GetState()
 	require.NoError(t, err)
 	raw, err := types.Cbor.Marshal(state)
@@ -656,7 +656,7 @@ func Test_BlockStore_RecoveredShardWithoutCertificateAndInconsistentEpoch(t *tes
 	confs, err := storeB.orchestration.ShardConfigs(3)
 	require.NoError(t, err)
 	require.NotPanics(t, func() {
-		_, err := storeB.blockTree.root.data.ShardState.nextBlock(confs, crypto.SHA256)
+		_, err := storeB.tree().root.data.ShardState.nextBlock(confs, crypto.SHA256)
 		require.Error(t, err)
 		require.ErrorContains(t, err, fmt.Sprintf("creating ShardInfo %s - %s of the next epoch", siB.PartitionID, siB.ShardID))
 	})
@@ -850,7 +850,7 @@ func TestBlockStore_LateQcAfterTc(t *testing.T) {
 		rh2 := add(t, bs, 2, bs.GetHighQc())
 		rh3 := add(t, bs, 3, qcFor(2, 1, rh2, nil))
 		require.NoError(t, bs.ProcessTc(tcFor(3)))
-		require.Contains(t, roundsOf(bs.blockTree.allUncommittedNodes()), uint64(3), "the timed-out block stays in the tree: its round can still get a QC")
+		require.Contains(t, roundsOf(bs.tree().allUncommittedNodes()), uint64(3), "the timed-out block stays in the tree: its round can still get a QC")
 		return bs, rh2, rh3
 	}
 
@@ -866,7 +866,7 @@ func TestBlockStore_LateQcAfterTc(t *testing.T) {
 		// the next leader extends the late QC
 		_, err = bs.Add(&rctypes.BlockData{Round: 4, Payload: &rctypes.Payload{}, Qc: qc3}, irVer)
 		require.NoError(t, err)
-		require.Contains(t, roundsOf(bs.blockTree.allUncommittedNodes()), uint64(3))
+		require.Contains(t, roundsOf(bs.tree().allUncommittedNodes()), uint64(3))
 	})
 
 	t.Run("a repeated TC is harmless", func(t *testing.T) {
@@ -885,7 +885,7 @@ func TestBlockStore_LateQcAfterTc(t *testing.T) {
 		require.NoError(t, err)
 		_, err = bs.ProcessQc(qcFor(5, 4, nil, b4))
 		require.NoError(t, err)
-		require.EqualValues(t, 4, bs.blockTree.Root().GetRound())
+		require.EqualValues(t, 4, bs.tree().Root().GetRound())
 		_, err = bs.Block(3)
 		require.ErrorContains(t, err, "block for round 3 not found")
 	})
@@ -905,12 +905,12 @@ func Test_BlockStore_StateRecoveryCompletesTheCommittedSourceLog(t *testing.T) {
 	recs := chainOf(3)
 	head := func(t *testing.T) *abdrc.CommittedBlock {
 		storeA := profileStore(t)
-		clear(storeA.blockTree.root.data.ShardState.Changed)
-		storeA.blockTree.root.data.ShardState.Control.Pos = stateOver(recs).Bytes()
-		ut, _, err := storeA.blockTree.root.data.ShardState.UnicityTree(crypto.SHA256)
+		clear(storeA.tree().root.data.ShardState.Changed)
+		storeA.tree().root.data.ShardState.Control.Pos = stateOver(recs).Bytes()
+		ut, _, err := storeA.tree().root.data.ShardState.UnicityTree(crypto.SHA256)
 		require.NoError(t, err)
-		storeA.blockTree.root.data.RootHash = ut.RootHash()
-		storeA.blockTree.root.data.CommitQc.LedgerCommitInfo.Hash = ut.RootHash()
+		storeA.tree().root.data.RootHash = ut.RootHash()
+		storeA.tree().root.data.CommitQc.LedgerCommitInfo.Hash = ut.RootHash()
 		state, err := storeA.GetState()
 		require.NoError(t, err)
 		return state.CommittedHead
@@ -1019,7 +1019,7 @@ func (f *flakyFetcher) Records(ctx context.Context, from uint64, max int) ([]roo
 // carry QCs that certify the state root it really has, in the store and in the head that is sent.
 func consistentGenesisRoot(t *testing.T, s *BlockStore, received *abdrc.StateMsg) {
 	t.Helper()
-	root := s.blockTree.root.data
+	root := s.tree().root.data
 	root.Qc.VoteInfo.CurrentRootHash = root.RootHash
 	root.Qc.LedgerCommitInfo.Hash = root.RootHash
 	root.CommitQc.LedgerCommitInfo.Hash = root.RootHash

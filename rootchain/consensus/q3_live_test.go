@@ -39,17 +39,28 @@ type q3Live struct {
 	lostSig  map[observedKey][]byte // and its signature
 	cancel   map[int]context.CancelFunc
 	done     map[int]chan error
+	// tap, when set, sees every message the network delivers (#1086)
+	tap atomic.Pointer[func(from peer.ID, msg any)]
 }
 
 func newQ3Live(t *testing.T) *q3Live {
 	t.Helper()
-	f := q3fixture.New(t, q3fixture.Options{Assignment: true})
+	return newQ3LiveWith(t, q3fixture.Options{Assignment: true}, nil)
+}
+
+// newQ3LiveWith is newQ3Live over a fixture of the given options; prepare, when set, configures each replica before it is opened.
+func newQ3LiveWith(t *testing.T, o q3fixture.Options, prepare func(int, *q3Replica)) *q3Live {
+	t.Helper()
+	f := q3fixture.New(t, o)
 	c := &q3Live{t: t, f: f, net: newSkewedNet(t), observed: map[observedKey]map[string]struct{}{}, lost: map[observedKey]string{}, lostSig: map[observedKey][]byte{},
 		cancel: map[int]context.CancelFunc{}, done: map[int]chan error{}}
 	c.cfg = votesig.Config{Scheme: votesig.SchemeDomainBound, Network: q3fixture.Network, Genesis: f.Genesis}
-	for _, n := range f.NewNodes {
+	for i, n := range f.NewNodes {
 		r := newQ3Replica(t, f, n)
 		r.link, r.durable = c.net.connect(n.PeerConf.ID), true
+		if prepare != nil {
+			prepare(i, r)
+		}
 		r.mustOpen(true)
 		t.Cleanup(r.close)
 		c.replicas = append(c.replicas, r)
@@ -69,6 +80,9 @@ func newQ3Live(t *testing.T) *q3Live {
 				c.cutOn.Store("")
 				return true
 			}
+		}
+		if tap := c.tap.Load(); tap != nil {
+			(*tap)(from, msg)
 		}
 		c.observe(msg)
 		return false

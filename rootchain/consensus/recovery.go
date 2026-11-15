@@ -41,6 +41,13 @@ func (rs *recoveryState) Clear() any {
 	return msg
 }
 
+// reset forgets everything, as a new recoveryState: the in-process epoch switch (#1086) starts the successor with no recovery pending.
+func (rs *recoveryState) reset() {
+	rs.m.Lock()
+	defer rs.m.Unlock()
+	rs.toRound, rs.triggerMsg, rs.sent = 0, nil, time.Time{}
+}
+
 func (rs *recoveryState) Set(trigger any) (map[string]hex.Bytes, error) {
 	toRound, signatures, err := msgToRecoveryInfo(trigger)
 	if err != nil {

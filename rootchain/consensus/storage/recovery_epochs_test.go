@@ -44,7 +44,7 @@ func recoverEveryHead(t *testing.T, c *testChain, steps [][]types.PartitionID) {
 		head := sm.CommittedHead.GetRound()
 		bs, _, err := c.recoverInto(sm)
 		require.NoError(t, err, "step %d, head round %d, changed %v", i, head, changed)
-		require.Equal(t, c.store.blockTree.root.data.RootHash, bs.blockTree.root.data.RootHash)
+		require.Equal(t, c.store.tree().root.data.RootHash, bs.tree().root.data.RootHash)
 		if overlap {
 			continue
 		}
@@ -78,7 +78,7 @@ func Test_RecoveryEpochs_StaggeredEpochStarts(t *testing.T) {
 		for i, ch := range [][]types.PartitionID{nil, nil, {1, 2}, {1, 2}, {1, 2}, {1, 2}, {1, 2}, {1, 2}, {1, 2}, {1, 2}, {1, 2}} {
 			c.next(ch...)
 			_, _, err := c.recoverInto(received(t, c.state()))
-			require.NoError(t, err, "run %d step %d head %d", run, i, c.store.blockTree.root.data.GetRound())
+			require.NoError(t, err, "run %d step %d head %d", run, i, c.store.tree().root.data.GetRound())
 		}
 	}
 }
