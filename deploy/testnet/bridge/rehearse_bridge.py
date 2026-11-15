@@ -58,7 +58,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 from rehearse import PROXY_IPS, Failure, Rehearsal   # noqa: E402  (the package's recorder and helpers)
-from deploy_bridge import TAG, validators_network   # noqa: E402
+from deploy_bridge import image as bridge_image, validators_network   # noqa: E402  the bridge image by its recorded ID (#1092)
 import release   # noqa: E402
 from bridge_pos import BridgePos   # noqa: E402
 from sdk_clients import SdkClients   # noqa: E402
@@ -148,7 +148,7 @@ class BridgeRehearsal(SdkClients, BridgePos, Rehearsal):
         out = subprocess.run(['docker', 'run', '--rm', '--read-only', '--network', validators_network(self.gen), '--user', '10001:10001',
                               '--env-file', str(self.gen / 'bridge/driver.env'), '-e', 'HOME=/tmp/home', *env, '--tmpfs', '/tmp',
                               '-v', f'{self.gen / "bridge"}:/work', '-v', f'{self.gen / "validator1/archive"}:/archive:ro',
-                              TAG, 'npx', '--no-install', 'tsx', DRIVER, *args], text=True, capture_output=True)
+                              bridge_image(self.gen), 'npx', '--no-install', 'tsx', DRIVER, *args], text=True, capture_output=True)
         self.say('  ' + '\n  '.join((out.stdout + out.stderr).strip().splitlines()[-25:]))
         if out.returncode != 0:
             raise Failure(f'the driver failed: {args[0]}')
@@ -162,7 +162,7 @@ class BridgeRehearsal(SdkClients, BridgePos, Rehearsal):
         extra = [x for k, v in (env or {}).items() for x in ('-e', f'{k}={v}')]
         out = subprocess.run(['docker', 'run', '--rm', '--read-only', '--network', validators_network(self.gen), '--user', '10001:10001', '-e', 'HOME=/tmp/home', *extra, *docker_args,
                               '--tmpfs', '/tmp', '-v', f'{work / "public"}:/work/public:ro', '-v', f'{work / wallet}:/work/{wallet}',
-                              '-v', f'{work / key}:/work/tester.key:ro', TAG, 'npx', '--no-install', 'tsx', TESTER, *args, '--wallet', f'/work/{wallet}'],
+                              '-v', f'{work / key}:/work/tester.key:ro', bridge_image(self.gen), 'npx', '--no-install', 'tsx', TESTER, *args, '--wallet', f'/work/{wallet}'],
                              text=True, capture_output=True)
         text = (out.stdout + out.stderr).strip()
         self.say('  $ bridge-tester ' + ' '.join(args) + '\n    ' + '\n    '.join(text.splitlines()[-12:]))

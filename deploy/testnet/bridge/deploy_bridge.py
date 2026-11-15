@@ -24,8 +24,47 @@ import release
 
 ETH = 'http://ureth1:8545'
 GATEWAY = 'http://rpc:8545'   # the package's public gateway (gateway.py) as the validators network names it
-TAG = 'tnops-bridge:verified'
+ARTIFACTS = Path(__file__).resolve().parent.parent / 'artifacts'
+RECORD = 'bridge/bridge-image.json'   # the generation's own record of its bridge image, written by its deploy
 CONTRACTS = '/opt/bridge/contracts'
+
+
+def recorded_image(gen):
+    """The bridge image a generation was deployed with: its own record (GENERATION/bridge/bridge-image.json), else, for a generation deployed before
+    that record existed, the lock-proof service's image in its compose.bridge.yaml; None for a generation not deployed yet."""
+    if gen is None:
+        return None
+    own = Path(gen) / RECORD
+    if own.is_file():
+        return json.loads(own.read_text())['image']
+    overlay_file = Path(gen) / 'compose.bridge.yaml'
+    if overlay_file.is_file():
+        return json.loads(overlay_file.read_text()).get('services', {}).get('lockproof', {}).get('image')
+    return None
+
+
+def image(gen=None):
+    """The bridge tools image by ID (bft-core#1092), never through a tag a later build can move. A deployed generation keeps the image it was
+    deployed with (recorded_image), so a later rebuild for another pin never changes an older generation's tools. Only a generation being deployed
+    takes the current artifacts/bridge-images.json, which must have been built from the node images' bft pin (bft-core#1075). The image must be
+    present locally."""
+    import overlay
+    found = recorded_image(gen)
+    if found is None:
+        record = json.loads((ARTIFACTS / 'bridge-images.json').read_text())
+        found = overlay.bridge_image(record, json.loads((ARTIFACTS.parent / 'pins.json').read_text()))
+    elif not overlay.IMAGE_ID.fullmatch(str(found)):
+        raise SystemExit(f'{gen}: the recorded bridge image {found!r} is not an image ID')
+    if subprocess.run(['docker', 'image', 'inspect', found], capture_output=True).returncode != 0:
+        raise SystemExit(f'the bridge image {found} is not in the local image store: rebuild it (build-bridge-image.py)')
+    return found
+
+
+def record_image(gen, found):
+    """Written once, at the generation's deploy: the bridge image its tools and lock-proof endpoint keep using after later rebuilds."""
+    own = Path(gen) / RECORD
+    if not own.is_file():
+        own.write_text(json.dumps({'image': found}, indent=2) + '\n')
 
 
 def validators_network(gen):
@@ -40,7 +79,7 @@ def tools(gen, *args, capture=False):
     # backup.py restores plain files and directories only
     cmd = ['docker', 'run', '--rm', '--read-only', '--network', validators_network(gen), '--user', f'{os.getuid()}:{os.getgid()}', '-e', 'HOME=/tmp/home',
            '-v', f'{gen / "network"}:/gen/network:ro', '-v', f'{gen / "faucet-secrets"}:/gen/faucet-secrets:ro', '-v', f'{gen / "bridge"}:/work',
-           '--tmpfs', '/tmp', '-w', '/work', TAG, *args]
+           '--tmpfs', '/tmp', '-w', '/work', image(gen), *args]
     return subprocess.run(cmd, check=True, text=True, capture_output=capture).stdout
 
 
@@ -111,9 +150,10 @@ def main():
     if a.tester_redeem_eth_url:
         tester['redeemEthUrl'] = a.tester_redeem_eth_url
     (public / 'tester-config.json').write_text(json.dumps(tester, indent=2) + '\n')
-    image = subprocess.check_output(['docker', 'image', 'inspect', '--format={{.Id}}', TAG], text=True).strip()
+    bridge = image(gen)
+    record_image(gen, bridge)
     ureth = json.loads((gen / 'compose.yaml').read_text())['services']['ureth1']['entrypoint']
-    manifest_doc = release.build(gen, lambda *args: tools(gen, *args, capture=True), image, ureth, release.gateway_limits())
+    manifest_doc = release.build(gen, lambda *args: tools(gen, *args, capture=True), bridge, ureth, release.gateway_limits())
     (public / 'bridge-release.json').write_text(json.dumps(manifest_doc, indent=2) + '\n')
     if os.getuid() == 0:   # the package's services run as 10001 (the lock-proof endpoint reads the trust bundle here)
         subprocess.run(['chown', '-R', '10001:10001', str(work)], check=True)

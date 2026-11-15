@@ -149,6 +149,16 @@ def utb_aggregator_environment(pin, variant):
         return {'UTB_GENESIS_FILE':UTB_GENESIS_FILE,'UTB_GENESIS_ID':pin,'UTB_ENTRIES_DB':UTB_AGGREGATOR_DIR+'/utb-entries.db'}
     raise ValueError('unknown UTB aggregator variant '+repr(variant))
 
+def immutable(compose):
+    """A generated compose document, refused if any service names its image by a tag (bft-core#1092): a tag can be moved by a later build, which
+    leaves this generation's image dangling and deletable. Images are named by ID (sha256:...) or by a digest-pinned reference."""
+    import imagetag
+    mutable = imagetag.mutable_images(compose)
+    if mutable:
+        raise SystemExit(f'refusing a compose file whose services {", ".join(mutable)} name a mutable image tag: use the image IDs of build-images.py')
+    return compose
+
+
 def write(path, obj):
     path.write_text(json.dumps(obj, indent=2) + '\n')
 
@@ -390,7 +400,7 @@ def main():
             # the authorities are started from THIS compose and never recreated (their keys exist only in their memory): every argument their
             # entrypoint takes, the UTB lineage pin included, must be known here already (bft-core#1091: started without --lineage-utb-genesis,
             # every authority of a --utb generation refused the first activation); main() checks the final compose names the same entrypoints
-            boot=topology(out,a.validators,{'root':roots,'evm':evms},records['images'],a.captcha_sitekey,utb=utb_pin,payout=a.faucet_payout,subnets=subnets,root_cpus=a.root_cpus)
+            boot=immutable(topology(out,a.validators,{'root':roots,'evm':evms},records['images'],a.captcha_sitekey,utb=utb_pin,payout=a.faucet_payout,subnets=subnets,root_cpus=a.root_cpus))
             write(out/'compose.yaml',boot)
             def authority(i,*args):
                 auth=out/f'validator{i}/auth'
@@ -530,7 +540,7 @@ def main():
             trusted_proxy_ip=subnets['faucet']['gateway'],**faucet['network'])
         write(out/'network/network.json',network)
         flags=[*flags,'--unicity.genesis-commitment='+genesis_commitment(json.loads((home/'genesis.json').read_text()))]
-        final=topology(out,a.validators,{'root':roots,'evm':evms},records['images'],a.captcha_sitekey,flags,max_gas,bool(genesis),a.rpc_bind,utb_pin,a.utb_aggregator,payout=a.faucet_payout,subnets=subnets,root_cpus=a.root_cpus)
+        final=immutable(topology(out,a.validators,{'root':roots,'evm':evms},records['images'],a.captcha_sitekey,flags,max_gas,bool(genesis),a.rpc_bind,utb_pin,a.utb_aggregator,payout=a.faucet_payout,subnets=subnets,root_cpus=a.root_cpus))
         if not a.offline_validation:
             check_authorities_unchanged(boot,final,a.validators)
         write(out/'compose.yaml',final)
