@@ -75,21 +75,59 @@ def driver(gen, *args, env_file=None):
     return out.stdout
 
 
+# The exact keys generate.py's topology() writes for an execution client (and joiner.py clones). A ureth service with any other key (extends, command,
+# a merge, anything new) is refused: the manifest judges the generated form only and never resolves Compose's inheritance or merging.
+URETH_KEYS = frozenset({'cap_drop', 'cpus', 'entrypoint', 'image', 'logging', 'mem_limit', 'networks', 'pids_limit', 'read_only', 'restart', 'security_opt',
+                        'stop_grace_period', 'tmpfs', 'volumes'})
+URETH_SERVICE = re.compile(r'^ureth\d+$')
+
+
 def effective_argv(name, service):
-    """The arguments SERVICE runs with, in the only form generate.py writes: `entrypoint` a list of plain strings and no `command`. Nothing else is
-    accepted, so the manifest never has to emulate Compose (its string splitting, escapes or ${VAR} interpolation): a `command`, a string
-    entrypoint, or any argument holding `$`, a backslash or a quote is refused."""
-    if service.get('command') not in (None, [], ''):
-        raise SystemExit(f'{name} sets a command: generate.py writes none, and the manifest judges the entrypoint alone (refused)')
-    ep = service.get('entrypoint')
-    if ep is None:
-        raise SystemExit(f'{name} has no entrypoint: the manifest cannot judge what it runs')
+    """The arguments SERVICE runs with, in the only form generate.py writes: exactly its keys (URETH_KEYS), `entrypoint` a list of plain strings. Anything
+    else is refused, so Compose is never emulated: no extends or command, no string entrypoint, no argument holding `$`, a backslash or a quote."""
+    if not isinstance(service, dict) or set(service) != URETH_KEYS:
+        extra = sorted(set(service) - URETH_KEYS) if isinstance(service, dict) else []
+        missing = sorted(URETH_KEYS - set(service)) if isinstance(service, dict) else []
+        raise SystemExit(f'{name} is not the generated service form (extra keys {extra}, missing {missing}): refused')
+    ep = service['entrypoint']
     if not isinstance(ep, list) or not all(isinstance(x, str) for x in ep):
         raise SystemExit(f'{name}\'s entrypoint is not a list of strings ({type(ep).__name__}): refused')
     odd = [x for x in ep if any(c in x for c in '$\\\'"')]
     if odd:
         raise SystemExit(f'{name}\'s entrypoint has arguments Compose would rewrite (interpolation, escapes or quotes): {odd[:3]} (refused)')
     return list(ep)
+
+
+def active_services(gen):
+    """Every execution-client service of the generation's Compose files: compose.yaml, and every override beside it (compose*.json/yaml: the joiner and
+    restore overrides handoff_ops.compose_files selects, the install-epoch ones, the protocol 6/7 bridge overlay). Only the joiner override may add an
+    execution client (the joiner's clone of a genesis one, a new name); no override may touch one the base defines, and no other override may define
+    one at all: Compose would merge them, and the manifest judges whole generated services only."""
+    import sys
+    if str(TESTNET) not in sys.path:
+        sys.path.insert(0, str(TESTNET))
+    import handoff_ops
+    gen = Path(gen)
+    base = json.loads((gen / 'compose.yaml').read_text()).get('services', {})
+    out = {n: s for n, s in base.items() if URETH_SERVICE.match(n)}
+    overrides = sorted((p for p in gen.iterdir() if p.is_file() and p.name.startswith('compose') and p.name != 'compose.yaml' and p.suffix in ('.json', '.yaml', '.yml')),
+                       key=lambda p: (p.name != handoff_ops.JOINER_OVERRIDE, p.name))   # the joiner override first, as compose_files orders it
+    for path in overrides:
+        try:
+            services = json.loads(path.read_text()).get('services', {})
+        except ValueError:
+            raise SystemExit(f'{path.name} is not the generated JSON form: the manifest cannot judge it (refused)')
+        if not isinstance(services, dict):
+            raise SystemExit(f'{path.name}: services is not a mapping')
+        for name, svc in services.items():
+            if not URETH_SERVICE.match(name):
+                continue
+            if name in out:
+                raise SystemExit(f'{path.name} overrides {name}, which an earlier file defines: an override may not alter an execution client (refused)')
+            if path.name != handoff_ops.JOINER_OVERRIDE:
+                raise SystemExit(f'{path.name} defines {name}: only the joiner override adds an execution client (refused)')
+            out[name] = svc
+    return out
 
 
 def validator_pins(name, command, b1):
@@ -119,9 +157,9 @@ def build(gen, record, image_id, services):
     b1 = json.loads(profile_bytes)
     per = {}
     for i in range(1, package['validators'] + 1):
-        name = f'ureth{i}'
-        if not isinstance(services.get(name), dict):
-            raise SystemExit(f'compose.yaml has no {name}: the manifest describes every validator\'s pool')
+        if not isinstance(services.get(f'ureth{i}'), dict):
+            raise SystemExit(f'compose.yaml has no ureth{i}: the manifest describes every validator\'s pool')
+    for name in sorted((n for n in services if URETH_SERVICE.match(n)), key=lambda n: int(n[5:])):   # the genesis validators and any joiner's
         per[name] = validator_pins(name, effective_argv(name, services[name]), b1)
     if len(set(per.values())) != 1:
         raise SystemExit(f'the validators\' pools differ ({per}): one admission policy per deployment')

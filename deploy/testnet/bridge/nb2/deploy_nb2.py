@@ -150,8 +150,8 @@ def main():
 
     bridge = image(gen)
     record_image(gen, bridge)
-    services = json.loads((gen / 'compose.yaml').read_text())['services']
-    doc = release_nb2.build(gen, record, bridge, services)   # every validator's execution client is checked, not only validator 1's
+    services = release_nb2.active_services(gen)   # every execution client of every Compose file the package selects (base, joiner and restore overrides)
+    doc = release_nb2.build(gen, record, bridge, services)
     lane = {'rpc': a.gateway, 'agg': a.gateway + '/aggregator', 'direct': ETH, 'release': '/work/nb2/public/nb2-release.json',
             'trustBundle': '/work/nb2/public/trust-base.bundle.cbor', 'trustPin': '/work/nb2/public/trust-base.genesis.entryid', 'unit': str(UNIT_WEI),
             'verifier': primary['verifier']['address'], 'helper': primary['helper']['address'],

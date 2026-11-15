@@ -1954,12 +1954,17 @@ class NB2Release(unittest.TestCase):
                 'profileHash':'0x'+'a9'*32,'vectorsDigest':'9b'*32}
         return gen,art,record
     URETH=['unicity-reth','node','--txpool.max-tx-gas=60000000','--txpool.max-tx-input-bytes=4194304']   # the B1 profile's ureth flags (ubft engine-api b1-profile)
+    def svc(self,entrypoint=None,**extra):
+        """One execution-client service in generate.py's form (every key topology() writes), with ENTRYPOINT and EXTRA keys."""
+        base={'cap_drop':['ALL'],'cpus':1.0,'entrypoint':list(entrypoint if entrypoint is not None else self.URETH),'image':'sha256:'+'a'*64,'logging':{},'mem_limit':'1536m',
+              'networks':{'validators':{}},'pids_limit':128,'read_only':True,'restart':'unless-stopped','security_opt':[],'stop_grace_period':'60s','tmpfs':[],'volumes':[]}
+        return {**base,**extra}
     def services(self,**changed):
         """compose.yaml services of the 4 validators' execution clients, with ureth<i>=COMMAND replaced (None: the service is missing)."""
-        out={f'ureth{i}':{'entrypoint':list(self.URETH)} for i in range(1,5)}
+        out={f'ureth{i}':self.svc() for i in range(1,5)}
         for name,command in changed.items():
             if command is None: out.pop(name)
-            else: out[name]={'entrypoint':command}
+            else: out[name]=self.svc(command)
         return out
     def build(self,gen,art,record,services=None):
         m=self.module()
@@ -1993,24 +1998,70 @@ class NB2Release(unittest.TestCase):
             for want,changed in cases.items():
                 with self.subTest(want):
                     with self.assertRaisesRegex(SystemExit,want.strip()): self.build(*g,services=self.services(**changed))
-            # only the form generate.py writes is judged: an entrypoint list of plain strings and no command (Compose's splitting, escapes and
-            # ${VAR} interpolation are never emulated). sol's reproductions, each on ureth3 only:
+            # only the form generate.py writes is judged: exactly its keys, an entrypoint list of plain strings (Compose's splitting, escapes,
+            # ${VAR} interpolation and extends are never emulated). sol's reproductions, each on ureth3 only:
+            cmd=['--unicity.no-proof-source','--unicity.companion-retention-depth=1000']
             refused={
-                'command list':({'entrypoint':list(u),'command':['--unicity.no-proof-source','--unicity.companion-retention-depth=1000']},'sets a command'),
-                'command string':({'entrypoint':list(u),'command':'--unicity.no-proof-source --unicity.companion-retention-depth=1000'},'sets a command'),
-                'backslash':({'entrypoint':u+['--unicity.no-\\proof-source']},'would rewrite'),
-                'interpolation in a list':({'entrypoint':u+['${NO_PROOF}']},'would rewrite'),
-                'interpolation in a string':({'entrypoint':' '.join(u)+' ${NO_PROOF}'},'not a list of strings'),
-                'quote':({'entrypoint':u+['"--unicity.no-proof-source"']},'would rewrite'),
-                'string entrypoint':({'entrypoint':' '.join(u)},'not a list of strings'),
-                'no entrypoint':({'command':list(u)},'sets a command'),
+                'command list':(self.svc(command=cmd),'not the generated service form'),
+                'command string':(self.svc(command=' '.join(cmd)),'not the generated service form'),
+                'extends (an inherited command)':(self.svc(extends={'file':'other.json','service':'evil'}),'not the generated service form'),
+                'an x- merge key':(self.svc(**{'x-merge':{'command':cmd}}),'not the generated service form'),
+                'a key missing':({k:v for k,v in self.svc().items() if k!='image'},'not the generated service form'),
+                'backslash':(self.svc(u+['--unicity.no-\\proof-source']),'would rewrite'),
+                'interpolation in a list':(self.svc(u+['${NO_PROOF}']),'would rewrite'),
+                'interpolation in a string':({**self.svc(),'entrypoint':' '.join(u)+' ${NO_PROOF}'},'not a list of strings'),
+                'quote':(self.svc(u+['"--unicity.no-proof-source"']),'would rewrite'),
             }
             for what,(svc,want) in refused.items():
                 with self.subTest(form=what):
                     with self.assertRaisesRegex(SystemExit,want): self.build(*g,services={**self.services(),'ureth3':svc})
-            with self.assertRaisesRegex(SystemExit,'no entrypoint'): self.build(*g,services={**self.services(),'ureth3':{}})
+            # a joiner's execution client (ureth5, cloned by joiner.py) is a validator too: judged like the genesis ones
+            with self.assertRaisesRegex(SystemExit,'ureth5 is not a full proof source'): self.build(*g,services={**self.services(),'ureth5':self.svc(u+['--unicity.no-proof-source'])})
             # ureth1 alone being healthy is not enough, and every validator healthy passes
             self.assertEqual(self.build(*g)['limits']['poolMaxTxInputBytes']['value'],4194304)
+    def write_compose(self,gen,base,joiner=None,restore=None):
+        (gen/'compose.yaml').write_text(json.dumps({'services':base}))
+        for name,doc in (('compose.joiner.json',joiner),('compose.joiner-restore.json',restore)):
+            if doc is not None: (gen/name).write_text(json.dumps({'services':doc}))
+    def test_every_compose_file_the_package_selects_is_judged(self):
+        m=self.module();u=self.URETH
+        with tempfile.TemporaryDirectory() as tmp:
+            gen,art,record=self.generation(tmp)
+            self.write_compose(gen,self.services())
+            self.assertEqual(sorted(m.active_services(gen)),['ureth1','ureth2','ureth3','ureth4'])
+            # an override that adds --unicity.no-proof-source to a genesis validator (Compose would merge it in): refused
+            self.write_compose(gen,self.services(),joiner={'ureth2':{'entrypoint':u+['--unicity.no-proof-source']}})
+            with self.assertRaisesRegex(SystemExit,'overrides ureth2'): m.active_services(gen)
+            self.write_compose(gen,self.services(),joiner={'ureth2':{'command':['--unicity.no-proof-source']}})
+            with self.assertRaisesRegex(SystemExit,'overrides ureth2'): m.active_services(gen)
+            # the joiner's own execution client is added, and judged by build
+            self.write_compose(gen,self.services(),joiner={'ureth5':self.svc(u+['--unicity.no-proof-source']),'shard5':{'entrypoint':['ubft']}})
+            svc=m.active_services(gen)
+            self.assertEqual(sorted(svc),['ureth1','ureth2','ureth3','ureth4','ureth5'])
+            with self.assertRaisesRegex(SystemExit,'ureth5 is not a full proof source'): self.build(gen,art,record,services=svc)
+            self.write_compose(gen,self.services(),joiner={'ureth5':self.svc()})
+            self.assertIn('ureth5',self.build(gen,art,record,services=m.active_services(gen))['limits']['poolMaxTxInputBytes']['source'])
+            # the restore override never touches an execution client
+            self.write_compose(gen,self.services(),joiner={'ureth5':self.svc()},restore={'ureth5':{'entrypoint':u+['--unicity.no-proof-source']}})
+            with self.assertRaisesRegex(SystemExit,'overrides ureth5'): m.active_services(gen)
+            self.write_compose(gen,self.services(),joiner={'ureth5':self.svc()},restore={'shard5':{'entrypoint':['ubft','shard-node']}})
+            self.assertEqual(len(m.active_services(gen)),5)
+            # every other override beside compose.yaml (an install-epoch one, the bridge overlay) may not define an execution client
+            (gen/'compose.install-epoch-2.json').write_text(json.dumps({'services':{'root1':{'entrypoint':['ubft']}}}))
+            self.assertEqual(len(m.active_services(gen)),5)
+            (gen/'compose.install-epoch-3.json').write_text(json.dumps({'services':{'ureth6':self.svc()}}))
+            with self.assertRaisesRegex(SystemExit,'only the joiner override'): m.active_services(gen)
+            (gen/'compose.install-epoch-3.json').unlink();(gen/'compose.extra.yaml').write_text('services:\n  ureth2:\n    command: [--unicity.no-proof-source]\n')
+            with self.assertRaisesRegex(SystemExit,'not the generated JSON form'): m.active_services(gen)
+    def test_the_key_allowlist_is_what_topology_writes(self):
+        m=self.module()
+        with tempfile.TemporaryDirectory() as tmp:
+            out=Path(tmp)/'tn-fixture';out.mkdir()
+            images={k:'sha256:'+'a'*64 for k in ['node','rpc','guard','signer']}
+            cfg=generate.topology(out,4,{'root':['r%d'%i for i in range(4)],'evm':['e%d'%i for i in range(4)]},images,'captcha',['--x=1'],123456)
+        for i in range(1,5):
+            self.assertEqual(set(cfg['services'][f'ureth{i}']),set(m.URETH_KEYS),'release_nb2.URETH_KEYS must be exactly the keys topology() writes')
+        self.assertEqual(set(self.svc()),set(m.URETH_KEYS))   # the fixture is the generated form too
     def test_the_ureth_services_generate_py_writes_are_accepted(self):
         m=self.module()
         with tempfile.TemporaryDirectory() as tmp:
