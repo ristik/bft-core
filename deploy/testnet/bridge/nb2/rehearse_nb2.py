@@ -293,7 +293,7 @@ class NB2Rehearsal(Rehearsal):
         vault = self.release()['deployment']['test']['vault']['address']
         main = self.address('main')
         bal0 = self.balance(main)
-        d('rotate', 'rot', '16', '--prepare')     # sixteen small returns, burned ahead and paid in bursts
+        d('rotate', 'rot', '20', '--prepare')     # twenty small returns, burned ahead and paid in bursts
         (self.nb2 / 'tmp').mkdir(exist_ok=True)
         s0 = self.state()
         d('burn', 'main', 'p60')
@@ -302,6 +302,7 @@ class NB2Rehearsal(Rehearsal):
         d('replay', 'main', 'p60')
         r = self.outfile('replay-p60')
         self.expect(r['exactCalldata'].startswith('AlreadyPaid') and r['wallet']['state'] == 'paid', 'the 60\'s replay in the recent buffers: AlreadyPaid, and the wallet reconciles to the payment without a send', json.dumps(r))
+        d('rotate', 'rot', '4', '--pay')           # one rotation: the 15 is burned at a newer index than the 60
         d('burn', 'main', 'p15')
         d('verdicts', 'main', 'p15')
         d('redeem', 'main', 'p15', '--hold')

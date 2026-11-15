@@ -509,6 +509,13 @@ async function preflight(w: Wallet, label: string): Promise<void> {
 
 async function burn(w: Wallet, label: string, recipient?: string): Promise<void> {
   const e = w.entry(label);
+  if (e.returnId) {
+    const rec = await w.bridge.journal.ret(e.returnId);
+    if (rec !== null && ['burned', 'submitted', 'paid'].includes(rec.status)) {
+      log(`  ${label} is already burned (${rec.status}): resumed`);
+      return;
+    }
+  }
   const token = w.token(label);
   const plan = await w.bridge.planReturn(token, recipientOf(w, recipient), w.signer.address);
   w.update(label, { returnId: hx(plan.returnId) });
@@ -578,6 +585,10 @@ async function simulateRule(from: Uint8Array, calldata: Uint8Array, gas: bigint,
 async function redeem(w: Wallet, label: string, mode?: string): Promise<void> {
   const rec = await w.returnRecord(label);
   const id = unhex(rec.returnId);
+  if (rec.status === 'paid' && mode !== '--stale' && mode !== '--low-gas') {
+    log(`  ${label} is already paid: resumed`);
+    return;
+  }
   const before = await vaultState();
   const res: Record<string, unknown> = { label, mode: mode ?? 'normal', stateBefore: before };
   if (mode === '--hold') {
@@ -663,7 +674,7 @@ async function replay(w: Wallet, label: string): Promise<void> {
     res.forgedGapProof = await simulateRule(w.signer.address, redeemCalldata(evidence, eta, a, forged), 10_000_000n);
   }
   out(`replay-${label}${evicted ? '-evicted' : ''}`, res);
-  log(`  replay of ${label} (${evicted ? 'evicted' : 'in the recent buffers'}):`, JSON.stringify(res));
+  log(`  replay of ${label} (${evicted ? 'evicted' : 'in the recent buffers'}):`, JSON.stringify(res, (_k, x) => (typeof x === 'bigint' ? x.toString() : x instanceof Uint8Array ? hx(x) : x)));
 }
 
 /** The segment in which a paid return was paid: the vault's segment index at the Paid block (from the block's state). */
@@ -696,7 +707,14 @@ async function rotate(w: Wallet, n: number, mode: string | undefined): Promise<v
   const idx = JSON.parse(existsSync(join(w.dir, 'tokens.json')) ? readFileSync(join(w.dir, 'tokens.json'), 'utf8') : '{}') as Record<string, TokenEntry>;
   if (mode !== '--pay') {
     const base = Object.keys(idx).filter((k) => /^r[0-9]+$/.test(k)).length;
-    for (let i = 0; i < n; i++) {
+    let ready = 0;
+    for (const l of w.labels()) {
+      if (!/^r[0-9]+$/.test(l)) continue;
+      const rec = await w.returnRecord(l).catch(() => null);
+      if (rec !== null && rec.status === 'burned') ready++;
+    }
+    // top up to n burned, unpaid small returns (a rerun keeps what an earlier one prepared)
+    for (let i = 0; i < n - ready; i++) {
       const l = `r${base + i}`;
       await deposit(w, l, 1n, undefined);
       await burn(w, l);
