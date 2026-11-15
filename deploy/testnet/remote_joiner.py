@@ -57,7 +57,8 @@ NETWORK_FILES = ('genesis.json', 'trust-base.json', 'full-shard-conf.json', 'agg
 VOLUMES = ('root', 'evm', 'auth', 'ureth', 'archive', 'jwt', 'network', 'wallet', 'tools', 'work')
 PRIVATE = ('root', 'evm', 'auth', 'ureth', 'archive', 'jwt', 'wallet', 'work')
 ROOT_POSTS = ('/api/v1/q3/signers', '/api/v1/q3/status', '/api/v1/handoff/plan', '/api/v1/handoff/intent', '/api/v1/handoff/endorse',
-              '/api/v1/handoff/evm-assignment/context')
+              '/api/v1/handoff/evm-assignment/context', '/api/v1/committee',   # the drive's verify asks every member's root (bft-core#1082)
+              '/api/v1/q3/bundle')   # whether an installed root serves the new epoch's activation itself (bft-core#1080)
 def subnet(project):
     """The laptop's validators network: 10.231.<n>.0/24 with n from the project name (two generations' joiner projects may exist side by side, one stopped),
     never one of the host's 172.x container networks (their announced addresses are not dialable here)."""
