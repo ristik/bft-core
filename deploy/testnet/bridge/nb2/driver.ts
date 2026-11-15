@@ -279,6 +279,8 @@ class CountingRpc {
   }
 }
 
+const js = (v: unknown): string => JSON.stringify(v, (_k, x) => (typeof x === 'bigint' ? x.toString() : x instanceof Uint8Array ? hx(x) : x));
+
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 async function retry<T>(what: string, f: () => Promise<T>, tries = 120, ms = 2_000): Promise<T> {
@@ -594,7 +596,7 @@ async function simulateRule(from: Uint8Array, calldata: Uint8Array, gas: bigint,
 async function redeem(w: Wallet, label: string, mode?: string): Promise<void> {
   const rec = await w.returnRecord(label);
   const id = unhex(rec.returnId);
-  if (rec.status === 'paid' && mode !== '--stale' && mode !== '--low-gas') {
+  if (rec.status === 'paid') {
     log(`  ${label} is already paid: resumed`);
     return;
   }
@@ -625,8 +627,8 @@ async function redeem(w: Wallet, label: string, mode?: string): Promise<void> {
     const low = (rtx.gasLimit - pins.gasReserve) / 2n;
     const sent = await sendRedeemRaw(w, rtx.calldata, low);
     const mid = await vaultState();
-    res.lowGas = { gasLimit: low, hash: sent.hash, status: sent.receipt.status, gasUsed: sent.receipt.gasUsed, stateAfter: mid, unchanged: JSON.stringify(mid) === JSON.stringify(before) };
-    log(`  ${label}: redeem with gas ${low} -> status ${sent.receipt.status}; vault unchanged: ${(res.lowGas as Record<string, unknown>).unchanged}`);
+    res.lowGas = { gasLimit: low, hash: sent.hash, status: sent.receipt.status, gasUsed: sent.receipt.gasUsed, stateAfter: mid, unchanged: js(mid) === js(before) };
+    log(`  ${label}: redeem with gas ${low} -> status ${sent.receipt.status} (gas used ${sent.receipt.gasUsed}); vault unchanged: ${(res.lowGas as Record<string, unknown>).unchanged}`);
   }
   const t0 = Date.now();
   let r = await w.bridge.submitRedeem(id, w.signer);
