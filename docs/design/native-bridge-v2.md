@@ -4,12 +4,10 @@ Status: **frozen specification, development profile, not activated** (NB2-01, #1
 protocol 6/7 bridge (lock records, per-lock accounting, `0x0104`/`0x0105` kernels) for all new work. There is no
 migration from, compatibility with or dual decoding of protocol 6/7; NB2-10 (#1106) removes it.
 
-Everything below is fixed byte for byte, except the few values marked
-
-> **PARAM** *name*: candidates, default. **Fixed by #1098.**
-
-which the gas bake-off (NB2-02, #1098) replaces with measured choices. A PARAM changes numbers and widths, never the
-encodings around them. The companion byte contract for wallets is `protocol/interop.md` in native-bridge-plugins; it
+Everything below is fixed byte for byte. The values the gas bake-off (NB2-02, #1098) was to choose are now fixed by its
+measurements (ristik/unicity-pos-contracts#80, `bench/nb2/README.md` and `RESULTS.md`): `K = 64`, `B = 16`, position-tag
+recent buffers, the circular-gap commitment and `gasReserve` 500,000 (Section 15). The remaining **PARAM** marks are
+deployment values (`L_max`, `Qmax`, `returnReserveSegments`), pinned by NB2-09 (#1105) and the owner. The companion byte contract for wallets is `protocol/interop.md` in native-bridge-plugins; it
 carries the same bytes. If the two ever differ, this document is the reference and the difference is a bug.
 
 Section 1 is the plain-language picture. Sections 3 to 13 are the rules. Section 14 lists every rejection rule by name.
@@ -35,7 +33,7 @@ deposit into this vault.
 redemption segment in which the vault may pay it. The wallet reads `a` from a verified `SegmentSealed` receipt, so it
 can never be in the future.
 
-**Redeem.** The vault keeps the identifiers of recent payments in two small buffers. Every K payments (default 64) the
+**Redeem.** The vault keeps the identifiers of recent payments in two small buffers. Every K payments (K = 64) the
 current buffer is **sealed**: sorted, hashed into a Merkle tree of the gaps between consecutive identifiers, chained to
 the previous segments and published in one `SegmentSealed` event. A redemption proves "not paid in sealed segments
 `a` to now" with one short gap proof per segment, built by the wallet from public events. The vault checks the two
@@ -173,16 +171,17 @@ Limits that stay visible:
       b(semanticProfileHash32), // SHA-256 of the exact bytes of plug-ins protocol/profile.json (below)
       b(verifier20),            // token verifier address
       b(verifierCodeHash32),    // EXTCODEHASH of the verifier
-      K,                        // uint, PARAM
-      B,                        // uint, PARAM
+      K,                        // uint, 64 in production (test builds: 4 or 8)
+      B,                        // uint, 16 in production (test builds: 2 or 4)
       b(Qmax))                  // Amount, 1 <= Qmax <= 2^144 - 1 (Section 9.1)
 D = H_U(Γ)
 ```
 
 Arity 19. Every listed width is exact. `(K, B)` must lie in the admitted set, and the vault and verifier reject
-anything else: production builds admit only `K` in {32, 64, 128} and `B` in {8, 16, 32} with `B <= K`, so the largest
-admitted `K` is 128. A test build admits the separate test set `K` in {4, 8}, `B` in {2, 4} instead (the vectors use
-it), never both. `D` is the deployment domain: a reset or a new vault has a new `D`, even on a reused chain
+anything else: production builds admit only `(K, B) = (64, 16)`. A test build admits the separate test set `K` in
+{4, 8} × `B` in {2, 4} instead (the NB2-03 vectors use it), never both. `K` and `B` are constructor immutables of the
+vault (measured by #1098 at 170–350 gas per payment, about 7,000 per seal and 1.9 KB of code against compile-time
+constants); the `m < K` storage rule of Section 11.1 holds for every admitted `K`. `D` is the deployment domain: a reset or a new vault has a new `D`, even on a reused chain
 ID.
 
 `semanticProfileHash32` is SHA-256 of the exact published UTF-8 bytes of `protocol/profile.json`, including whitespace
@@ -190,7 +189,7 @@ and its final newline. Do not parse and reserialize or canonicalize JSON before 
 normative artifacts through their exact-file SHA-256 digests. Regenerate those digests and the profile digest after any
 normative edit.
 
-> **PARAM** `K`: {32, 64, 128}, default 64. `B`: {8, 16, 32}, default 16. **Fixed by #1098.**
+Fixed by #1098 (measured): `K = 64`, `B = 16` (`h = 6`, 4-bit tags, one tag word per buffer).
 
 The vault constructor receives the exact bytes of Γ, rejects them unless `vault20 == address(this)`,
 `chainId == block.chainid`, `verifier20.codehash == verifierCodeHash32`, `asset32`, `ty32` and `aid32` each equal their
@@ -425,40 +424,29 @@ neighbouring field. `c` never exceeds `2^48 - 1` (`SegmentCounterExhausted()`), 
 `p = c mod 2` names the current buffer, `1 - p` the previous one. `H_c` is the current archive head, `H_{c-1}` the
 previous one (invalid at `c = 0`). At construction `A = 0`, `H_0` is set (Section 10.3) and nothing else is written.
 
-### 9.2 Recent buffers: position tags (baseline)
+### 9.2 Recent buffers: position tags
 
 `S_p[i]` for `0 <= i < K` is the `i`-th identifier paid into buffer `p` in arrival order. The tag words `T_p` hold one
 `log2 B`-bit tag per position: `tag_p(i) = bucket(S_p[i])`. With `t = floor(256 / log2 B)` tags per word, tag `i` is in
 word `floor(i / t)` at bit offset `log2 B * (i mod t)` (least significant first).
 
-| K \ B | 8 | 16 | 32 |
-|---|---:|---:|---:|
-| 32 | 1 word | 1 | 1 |
-| 64 | 1 | 1 | 2 |
-| 128 | 2 | 2 | 3 |
+At `K = 64, B = 16` (and for every test-set pair) each buffer has exactly one tag word.
 
 The live entries of buffer `p` are positions `i < pop(p)`, with `pop(current) = m` and `pop(previous) = K` when
 `c > 0`. Cells and tags at or beyond the population are stale and ignored; nothing is ever cleared. Identifier storage
 is bounded by `2K` slots (128 at `K = 64`), plus `2 * words(K, B)` tag words.
 
-> **PARAM** recent-buffer layout: {position tags (this section), v2 sparse per-bucket arrays with generation/count
-> words}, default **position tags**. Storage slot numbering is not part of the wire contract: wallets use views,
-> events and receipts only. **Fixed by #1098.** Selecting a different storage layout changes only internal
-> representation and measured costs. All candidates preserve the externally admitted bounds `n <= 2^56-1`,
-> `c <= 2^48-1` and `Qmax <= 2^144-1`, together with the same ABI and logical state transitions. Wider physical fields
-> do not authorize wider values. A later change to external bounds requires a separately versioned
-> profile/specification amendment. A shared-slot bucket arena is a #1098 experiment, not an admitted encoding.
+The recent-buffer layout is position tags, fixed by #1098 (measured against v2's sparse per-bucket arrays). Storage
+slot numbering is not part of the wire contract: wallets use views, events and receipts only. The externally admitted
+bounds are `n <= 2^56-1`, `c <= 2^48-1` and `Qmax <= 2^144-1`; wider physical fields would not authorize wider values,
+and a later change to external bounds requires a separately versioned profile/specification amendment.
 
 ## 10. Segments and the gap commitment
 
-> **PARAM** segment commitment: {sorted circular-gap tree (this section), compressed radix, adjacent-leaf multiproof},
-> default **circular-gap tree**. **Fixed by #1098.** The archive chain of 10.3 and the event of 13.2 do not depend on
-> this choice; only `M_j` and the proof format of 10.2 do.
-
-Sections 10.1–10.2, history sizing and the capacity formula currently instantiate circular gaps only. Selecting another
-commitment requires replacing all of those definitions, updating the profile digest and supplying cross-implementation
-vectors before the selected profile is frozen. No current decoder may guess an alternative history format from
-calldata.
+The segment commitment is the sorted circular-gap tree, fixed by #1098 (measured against compressed-radix and
+adjacent-leaf multiproof candidates). Sections 10.1–10.2, history sizing and the capacity formula instantiate it. A
+later change of commitment requires a separately versioned profile that replaces all of those definitions, with
+cross-implementation vectors; no decoder may guess an alternative history format from calldata.
 
 ### 10.1 Sorted circular-gap tree
 
@@ -500,9 +488,10 @@ H_{j+1} = H_E(ARCHIVE_STEP || D || u64(j) || H_j || M_j)                   // 13
 When a payment is the `K`-th of the current segment (`m + 1 == K` before it is recorded), in the same transaction and
 before the payout call:
 
-1. Read `S_p[0 .. K-1]`, distribute by tag, sort within each bucket (insertion sort for short buckets, a bounded
-   worst-case sort such as heapsort for long ones: one bucket can hold all `K`), and concatenate buckets in increasing
-   order. Assert strict increase and that every identifier lies in its tagged bucket.
+1. Read `S_p[0 .. K-1]`, distribute by tag, sort within each bucket with a bounded worst-case sort (one bucket can
+   hold all `K`), and concatenate buckets in increasing order. #1098 measured a hybrid (insertion-sorted 8-element
+   chunks, then bottom-up merges with `MCOPY`) at about half the cost of heapsort; any sort with the same output is
+   conforming. Assert strict increase and that every identifier lies in its tagged bucket.
 2. Compute `M_c` and `H_{c+1}`; emit `SegmentSealed(c, H_c, H_{c+1}, z_0 || ... || z_{K-1})`.
 3. Set `H_{c-1} <- H_c`, `H_c <- H_{c+1}`, `c <- c + 1`, `m <- 0`. The full buffer becomes the previous one; the old
    previous buffer becomes current without clearing.
@@ -629,11 +618,14 @@ inclusion is tolerated, two make the endpoint stale and the wallet rebuilds the 
 
 ### 12.4 Gas-limit reserve
 
-Every redemption's gas limit is the expected cost plus `gasReserve`, the worst sealing surcharge plus the worst recent
-scan (`2K - 1` cold identifier reads), because intervening payments can make any transaction the sealing one.
+Every redemption's gas limit is the expected cost plus `gasReserve`, because intervening payments can make any
+transaction the sealing one or the worst scan. `gasReserve` is the measured envelope: the most expensive redeem call
+minus the cheapest, including first-generation segments (0 and 1), rounded up. It is not the sum of the two worst
+cases, which cannot both fall on one call at full cost.
 
-> **PARAM** `gasReserve`: planning value **620,000** at `K = 64, B = 16` (sealing 180,000 to 350,000 plus a
-> 266,700-gas worst scan). **Fixed by #1098** from the measured concentrated-bucket worst case.
+**`gasReserve` = 500,000** (fixed by #1098, `K = 64, B = 16`, optimizer runs 200). Measured: worst sealing surcharge
+229,830; worst recent scan (`2K - 2` cold identifier reads) 282,548; worst single call 487,339; envelope 433,765 in
+steady state and 453,641 including segments 0 and 1. The earlier 620,000 planning value is withdrawn.
 
 ### 12.5 Size preflight
 
@@ -852,7 +844,7 @@ It MUST also contain:
 - a positive token whose inline aggregator UC carries a nonempty signature map (native codec, Section 3);
 - the stale-index capacity case: `K = 64`, `L_max = 512 KiB`, 20 KiB evidence, 2 KiB framing (`P_max = 1952`), `c = 2500`
   and `a = 0` (no seal receipt offered): `CapacityPreflight` before the burn, although `P_max >= returnReserveSegments`;
-- a seal at the largest admitted `K` (128 in production, 8 in the test set): the `K`-th payment seals and stores
+- a seal at the largest admitted `K` (64 in production, 8 in the test set): the `K`-th payment seals and stores
   `m = 0`, never `m = K`;
 - byte-small, gas-oversized token evidence that fits `L_max` but exceeds `userGasLimit` with zero history:
   `CapacityPreflight`;
@@ -860,26 +852,46 @@ It MUST also contain:
   than 16 accepted because each `SplitJ` is its own unit) and for `justificationBytes` (root `J` at the bound and one byte over; a `SplitJ` above it
   accepted).
 
-## 15. Parameters left for #1098, and open owner decisions
+## 15. Parameters, measurements and open owner decisions
 
-| Parameter | Candidates | Default here | Decided by |
+| Parameter | Candidates measured | Value | Decided by |
 |---|---|---|---|
-| `K` | 32, 64, 128 | 64 | #1098 |
-| `B` | 8, 16, 32 | 16 | #1098 |
-| Recent-buffer layout | position tags; v2 sparse buckets (shared arena: experiment only) | position tags | #1098 |
-| Segment commitment | circular-gap tree; compressed radix; adjacent-leaf multiproof | circular-gap tree | #1098 |
-| `gasReserve` | measured worst seal + worst scan | 620,000 | #1098 |
-| `L_max` (manifest) | 128 KiB, 512 KiB | 512 KiB | owner, measured by #1105 |
-| `Qmax` (Γ) | `<= 2^144 - 1` | deployment choice | #1105 |
-| `returnReserveSegments` (manifest) | any | 64 | #1105 |
+| `K` | 32, 64, 128 | **64** (constructor immutable) | #1098 (measured) |
+| `B` | 8, 16, 32 | **16** (constructor immutable) | #1098 (measured) |
+| Recent-buffer layout | position tags; v2 sparse buckets | **position tags** | #1098 (measured) |
+| Segment commitment | circular-gap tree; compressed radix; adjacent-leaf multiproof | **circular-gap tree** | #1098 (measured) |
+| `gasReserve` | measured envelope | **500,000** | #1098 (measured) |
+| `L_max` (manifest) | 128 KiB, 512 KiB | 512 KiB (PARAM) | owner, measured by #1105 |
+| `Qmax` (Γ) | `<= 2^144 - 1` | deployment choice (PARAM) | #1105 |
+| `returnReserveSegments` (manifest) | any | 64 (PARAM) | #1105 |
+
+**Measured costs** (#1098: position tags, circular-gap tree, `K`/`B` immutables, `K = 64, B = 16`, Solidity optimizer
+runs 200; replay and settlement only, excluding token evidence and the verifier; the full grid is in
+ristik/unicity-pos-contracts#80 `bench/nb2/RESULTS.md`):
+
+| Operation | Gas | Calldata |
+|---|---:|---:|
+| Typical payment (`m = K/2`) | 63,791 | |
+| Previous endpoint | 78,083 | |
+| Seal, uniform | 299,630 | |
+| Seal, one-bucket adversarial | 342,766 | |
+| `P = 1` | 72,852 | 708 B |
+| `P = 10` | 126,393 | 3,012 B |
+| `P = 100` | 661,926 | 26,148 B |
+| Per segment | 5,950 | 257 B |
+| Deposit, first | 48,758 | |
+| Deposit, steady | 31,670 | |
 
 Open owner decisions (recorded in `briefs/owner-questions.md` with these defaults):
 
 1. **Continuation before real value.** Default: a real-value deployment requires NB2-12 (#1108) or an explicit owner
    acceptance of the capacity limit of Section 12.5; test deployments ship without it.
 2. **Encoded-transaction limit.** Default: pin 512 KiB in the deployment's pool and RPC configuration, falling back to
-   128 KiB if #1105 finds that RPC bodies or peer propagation cannot carry it. At `K = 64` with 20 KiB of evidence this
-   is about 1,952 segments (124,928 intervening payments) against 422 at 128 KiB.
+   128 KiB if #1105 finds that RPC bodies or peer propagation cannot carry it. At `K = 64` (257 B per segment) with
+   20 KiB of evidence and 2 KiB of framing, the byte bound is `P_max = 1,952` segments (124,928 intervening payments)
+   against 422 at 128 KiB. At the measured 5,950 gas per segment, 1,952 segments cost about 11.7M gas of replay alone
+   (before token verification and evidence calldata), so on most deployments `userGasLimit` binds before 512 KiB does;
+   the Section 12.5 preflight checks both.
 3. **No per-receipt code proof.** Default: the deposit proof carries no account proof of the vault's code; `D` and the
    manifest's runtime code hash authenticate the deployment (Section 6.2).
 4. **Mint admission before real value (#1039 / ISS-01).** Default: a compatible end-to-end mint-admission remedy remains
@@ -928,14 +940,15 @@ mirroring Section 11.1; boolean acceptance is unchanged.
 | Review item | Landed in |
 |---|---|
 | R1: authenticate the index with a `SegmentSealed` receipt | Section 12.2; the receipt container is `DepositProof` (6.1); wallet refusal `SealReceipt` (14.6); time-anchor alternative dropped (Section 19) |
-| R2: position tags instead of per-bucket arrays | Sections 9.1 (accounting word with `c` and `m`) and 9.2 (tag words), baseline; v2 sparse layout kept as the #1098 comparison (PARAM in 9.2); model part 2 |
+| R2: position tags instead of per-bucket arrays | Sections 9.1 (accounting word with `c` and `m`) and 9.2 (tag words), adopted; v2 sparse layout measured as the comparison and not selected by #1098; model part 2 |
 | R3: pin the transaction-size limit before deciding on continuation | `L_max` in the manifest (4.3), size preflight (12.5), owner decisions 1 and 2 (Section 15) |
 | Note: the model is not saved | Section 17, `docs/design/models/nb2_segments.py` |
-| Note: gas-limit reserve as a number | Section 12.4, `gasReserve` 620,000 (PARAM) |
+| Note: gas-limit reserve as a number | Section 12.4, `gasReserve` 500,000 (measured by #1098) |
 | Note: check order of redeem step 3 | Section 11.1: historical proofs (step 3) before the recent scan (step 4); the order is frozen so errors classify deterministically |
 | Astra ruling 2026-11-15: drop the PDR (`briefs/astra-ruling-nb2-drop-pdr-answer.md`) | Section 6.1 (arity 6), 6.2 step 2 and the deployment-binding paragraph, 11.3, 12.2, 14.2, 14.7; protocol 9 |
 | Astra spec review 2026-11-15 (`briefs/astra-review-1110-nb2-spec-answer.md`) | F1 §12.5, §14.7; F2 §4.1; F3 §3, §14.7, profile `nativeCodec`; F4 plug-ins `protocol/trust-base.md`, §11.3; F5 §5.1, §12.1; F6 §2, §15; F7 §9.2, §10, §15; F8 §17 and the model; parser contract §3 (depth), §6.1–6.2 (header, `justificationBytes`) |
 | NB2-06 wallet RPC contract (#1102) | §12.7, `EvidencePruned` in §14.6 |
+| NB2-02 bake-off (#1098, unicity-pos-contracts#80) | Preamble, §4.1 (`K`, `B`, admitted set), §9.2, §10, §10.4 (sort), §12.4 (`gasReserve`), §14.7, §15 (values, measured table, capacity) |
 | NB2-03 reference defaults (#1099) | §6.2 (`DepositUC` scope, header), §3 (amount names, depth), §4.1 (test set, asset/ty/aid, `BadConfig` indices), §11.1 (reentrancy), §11.2 (check order), §14.4, §14.6 (`ImplausibleIndex`), §14.7 (vector file) |
 | Corrections confirmed (30M test profile, encoded-length limit, `2K - 1` scan, high index can strand) | Sections 4.3 (`userGasLimit` from the production profile), 12.5, 12.4, 12.2 |
 
@@ -952,4 +965,4 @@ hierarchies or MMRs over segments, issuance evidence outside the hashed mint.
   (agre workspace, 2026-11-15); this document supersedes both for implementation.
 - Unchanged token and split wire: native-bridge-plugins `protocol/interop.md`; `docs/design/bridge-split-lineage-spec.md`.
 - EVM certification and offline event proofs: `docs/pos/specification/evm-partition.tex`.
-- Gas primitives: EIP-2028, EIP-2200, EIP-2929, EIP-1153 (Cancun). All gas figures here are planning values; #1098 measures.
+- Gas primitives: EIP-2028, EIP-2200, EIP-2929, EIP-1153 (Cancun). Gas figures are #1098's measurements where marked (Sections 12.4, 15); the rest are planning values.
