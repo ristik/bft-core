@@ -262,11 +262,14 @@ class NB2Rehearsal(Rehearsal):
 
     def circulate(self):
         d = self.driver
-        d('deposit', 'main', 'root', '100')
-        d('transfer', 'main', 'root', 't1', '1')
-        d('split', 'main', 't1', '2', 'p60=60', 'p40=40')
-        d('split', 'main', 'p40', '3', 'p15=15', 'p25=25')
-        d('transfer', 'main', 'p25', 'p25b', '0')
+        L = self.L
+        d('deposit', 'main', L('root'), '100')
+        d('transfer', 'main', L('root'), L('t1'), '1')
+        d('split', 'main', L('t1'), '2', f'{L("p60")}=60', f'{L("p40")}=40')
+        d('split', 'main', L('p40'), '3', f'{L("p15")}=15', f'{L("p25")}=25')
+        d('transfer', 'main', L('p25'), L('p25b'), '0')
+        if self.prefix:   # a second pass of the 100 scenario: the other tokens exist already
+            return
         self.legacy_deposit('main', 'legacy', 3)          # origin only, legacy receipt
         d('deposit', 'main', 'one', '2')
         d('transfer', 'main', 'one', 'one1', '1')          # one transfer
@@ -288,65 +291,78 @@ class NB2Rehearsal(Rehearsal):
         self.driver('state')
         return self.outfile('state')
 
+    def L(self, label):
+        """A scenario label with this run's prefix (--prefix: a second pass of the 100 scenario on the same generation)."""
+        return self.prefix + label
+
     def returns(self):
-        d = self.driver
+        d, L = self.driver, self.L
+        p60, p15, p25 = L('p60'), L('p15'), L('p25b')
+        name = {p60: '60', p15: '15', p25: '25'}
         vault = self.release()['deployment']['test']['vault']['address']
         main = self.address('main')
         bal0 = self.balance(main)
         d('rotate', 'rot', '20', '--prepare')     # twenty small returns, burned ahead and paid in bursts
         (self.nb2 / 'tmp').mkdir(exist_ok=True)
         s0 = self.state()
-        d('burn', 'main', 'p60')
-        d('verdicts', 'main', 'p60')
-        d('redeem', 'main', 'p60')
-        d('replay', 'main', 'p60')
-        r = self.outfile('replay-p60')
-        self.expect(r['exactCalldata'].startswith('AlreadyPaid') and r['wallet']['state'] == 'paid', 'the 60\'s replay in the recent buffers: AlreadyPaid, and the wallet reconciles to the payment without a send', json.dumps(r))
-        d('rotate', 'rot', '4', '--pay')           # one rotation: the 15 is burned at a newer index than the 60
-        d('burn', 'main', 'p15')
-        d('verdicts', 'main', 'p15')
-        d('redeem', 'main', 'p15', '--hold')
-        d('rotate', 'rot', '8', '--pay')           # two rotations at K = 4
-        d('redeem', 'main', 'p15', '--stale')
-        r = self.outfile('redeem-p15-stale')
-        self.expect(r['simulated'].startswith('StaleEndpoint') and r['staleTx']['status'] == '0x0' and r['result'] == 'paid',
-                    f'the 15\'s witness made stale by two rotations is refused (StaleEndpoint, its transaction reverted), then paid after refresh', json.dumps({k: r[k] for k in ('heldEndpoint', 'segmentNow', 'simulated', 'staleTx', 'result')}, default=str))
-        d('replay', 'main', 'p60')
-        r = self.outfile('replay-p60-evicted')
-        self.expect(r['evicted'] and r.get('historyPaidInSegment') is not None and r['wallet']['state'] == 'paid' and not r['exactCalldata'].startswith('success')
-                    and not r['forgedGapProof'].startswith('success') and not r['zeroHistory'].startswith('success'),
-                    'the 60\'s replay after its payment left the recent buffers: the wallet finds it paid in a sealed segment; the old calldata, a zero history and a forged gap proof are all refused', json.dumps(r))
-        d('burn', 'main', 'p25b')
-        d('verdicts', 'main', 'p25b')
-        d('redeem', 'main', 'p25b', '--low-gas')
-        r = self.outfile('redeem-p25b-low-gas')
-        self.expect(r['lowGas']['status'] == '0x0' and r['lowGas']['unchanged'] and r['result'] == 'paid', 'the 25\'s redeem with a too-low gas limit reverts and leaves the vault unchanged; the wallet\'s retry is paid', json.dumps(r['lowGas'], default=str))
-        d('replay', 'main', 'p25b')
-        d('replay', 'main', 'p15')
-        for part in ('p15', 'p25b'):
+
+        def recent(part):
+            d('replay', 'main', part)
             r = self.outfile(f'replay-{part}')
-            self.expect(not r['evicted'] and r['exactCalldata'].startswith('AlreadyPaid') and r['wallet']['state'] == 'paid', f'the {part[1:3]}\'s replay in the recent buffers: AlreadyPaid; the wallet sends nothing', json.dumps(r))
-        d('rotate', 'rot', '8', '--pay')           # two more rotations: every part's payment has left the recent buffers
-        for part in ('p15', 'p25b'):
+            self.expect(not r['evicted'] and r['exactCalldata'].startswith('AlreadyPaid') and r['wallet']['state'] == 'paid' and r['wallet']['sends'] == 1,
+                        f'the {name[part]}\'s replay while in the recent buffers: AlreadyPaid; the wallet reconciles to the payment without a send', json.dumps(r))
+
+        def evicted(part):
             d('replay', 'main', part)
             r = self.outfile(f'replay-{part}-evicted')
-            self.expect(r['evicted'] and r.get('historyPaidInSegment') is not None and not r['exactCalldata'].startswith('success') and not r['forgedGapProof'].startswith('success')
-                        and not r['zeroHistory'].startswith('success'), f'the {part[1:3]}\'s replay after eviction: refused by the wallet and by the vault', json.dumps(r))
+            self.expect(r['evicted'] and r.get('historyPaidInSegment') is not None and r['wallet']['state'] == 'paid' and not r['exactCalldata'].startswith('success')
+                        and not r['forgedGapProof'].startswith('success') and not r['zeroHistory'].startswith('success'),
+                        f'the {name[part]}\'s replay after its payment left the recent buffers: the wallet\'s builder finds it in sealed segment {r.get("historyPaidInSegment")}; '
+                        f'the old calldata ({r["exactCalldata"]}), a zero history ({r["zeroHistory"]}) and a forged gap proof ({r.get("forgedGapProof")}) are refused', json.dumps(r))
+
+        d('burn', 'main', p60)
+        d('verdicts', 'main', p60)
+        d('redeem', 'main', p60)
+        recent(p60)
+        d('rotate', 'rot', '4', '--pay')           # one rotation: the 15 is burned at a newer index than the 60
+        d('burn', 'main', p15)
+        d('verdicts', 'main', p15)
+        d('redeem', 'main', p15, '--hold')
+        d('rotate', 'rot', '8', '--pay')           # two rotations at K = 4
+        d('redeem', 'main', p15, '--stale')
+        r = self.outfile(f'redeem-{p15}-stale')
+        self.expect(r['simulated'].startswith('StaleEndpoint') and r['staleTx']['status'] == '0x0' and r['result'] == 'paid',
+                    'the 15\'s witness made stale by two rotations is refused (StaleEndpoint, its transaction reverted), then paid after refresh', json.dumps({k: r[k] for k in ('heldEndpoint', 'segmentNow', 'simulated', 'staleTx', 'result')}, default=str))
+        recent(p15)
+        evicted(p60)
+        d('burn', 'main', p25)
+        d('verdicts', 'main', p25)
+        d('redeem', 'main', p25, '--low-gas')
+        r = self.outfile(f'redeem-{p25}-low-gas')
+        self.expect(r['lowGas']['status'] == '0x0' and r['lowGas']['unchanged'] and r['result'] == 'paid', 'the 25\'s redeem with a too-low gas limit reverts and leaves the vault unchanged; the wallet\'s retry is paid', json.dumps(r['lowGas'], default=str))
+        recent(p25)
+        d('rotate', 'rot', '8', '--pay')           # two more rotations: every part's payment has left the recent buffers
+        evicted(p15)
+        evicted(p25)
         # 100 paid: the three parts, each once, to the main key
         paid = {}
-        for part in ('p60', 'p15', 'p25b'):
-            out = self.outfile(f'redeem-{part}' + ('-stale' if part == 'p15' else '-low-gas' if part == 'p25b' else ''))
-            receipt = self.call('eth_getTransactionReceipt', ['0x' + bytes.fromhex(out['paid']['tx'][2:]).hex()])
-            logs = [l for l in receipt['logs'] if l['address'].lower() == vault.lower() and l['topics'][0] == self.cast_run('keccak', 'Paid(bytes32,address,uint256)')]
-            self.expect(len(logs) == 1, f'{part}: one Paid')
-            paid[part] = int(logs[0]['data'], 16)
+        topic = self.cast_run('keccak', 'Paid(bytes32,address,uint256)')
+        for part, outname in ((p60, f'redeem-{p60}'), (p15, f'redeem-{p15}-stale'), (p25, f'redeem-{p25}-low-gas')):
+            out = self.outfile(outname)
+            receipt = self.call('eth_getTransactionReceipt', [out['paid']['tx']])
+            logs = [x for x in receipt['logs'] if x['address'].lower() == vault.lower() and x['topics'][0] == topic]
+            self.expect(len(logs) == 1 and logs[0]['topics'][2][-40:].lower() == main.lower()[2:], f'{name[part]}: one Paid, to the main key')
+            paid[name[part]] = int(logs[0]['data'], 16)
         unit = int(self.lane_json()['unit'])
-        self.expect(sum(paid.values()) == 100 * unit and paid == {'p60': 60 * unit, 'p15': 15 * unit, 'p25b': 25 * unit}, 'exactly 100 units paid: 60 + 15 + 25', json.dumps(paid))
+        self.expect(paid == {'60': 60 * unit, '15': 15 * unit, '25': 25 * unit}, 'exactly 100 units paid: 60 + 15 + 25', json.dumps(paid))
         s1 = self.state()
         self.expect(int(s1['segment']) >= int(s0['segment']) + 2, f'the segments rotated at least twice meanwhile ({s0["segment"]} -> {s1["segment"]})')
-        # indices: each part burned with its own index
-        idx = {p: self.outfile(f'burn-{p}')['a'] for p in ('p60', 'p15', 'p25b')}
+        idx = {name[p]: self.outfile(f'burn-{p}')['a'] for p in (p60, p15, p25)}
         self.expect(len(set(idx.values())) == 3, f'each part has its own index a: {idx}')
+        names = [f'burn-{p}' for p in (p60, p15, p25)] + [f'redeem-{p60}', f'hold-{p15}', f'redeem-{p15}-stale', f'redeem-{p25}-low-gas'] + \
+                [f'replay-{p}' for p in (p60, p15, p25)] + [f'replay-{p}-evicted' for p in (p60, p15, p25)] + [f'verdicts-{p}' for p in (p60, p15, p25)]
+        self.keep(*names)
+        (self.evidence / 'nb2' / f'paid{self.prefix}.json').write_text(json.dumps({'paid': paid, 'mainBalanceDelta': self.balance(main) - bal0, 'segments': [s0['segment'], s1['segment']], 'indices': idx}, indent=2) + '\n')
         # an ambiguous broadcast (#1121): the redeem reaches validator 1 first, so the gateway's relay sees "already known" beside the others' hash and
         # answers 503 "broadcast may be partial"; the wallet must not resend blindly but poll the receipt of the hash it computed
         d('burn', 'main', 'legacy')
@@ -355,9 +371,7 @@ class NB2Rehearsal(Rehearsal):
         r = self.outfile('redeem-legacy')
         self.expect(r['result'] == 'paid' and r['broadcasts']['ambiguous'] >= 1 and len(r['sends']) == 1,
                     'the gateway answered 503 (partial broadcast) and the wallet found the payment by receipt polling, with one send', json.dumps(r['broadcasts']))
-        self.keep(*[f'burn-{p}' for p in ('p60', 'p15', 'p25b', 'legacy')], 'redeem-p60', 'hold-p15', 'redeem-p15-stale', 'redeem-p25b-low-gas', 'redeem-legacy',
-                  'replay-p60', 'replay-p60-evicted', 'replay-p25b', 'replay-p15', 'replay-p15-evicted', 'replay-p25b-evicted', 'verdicts-p60', 'verdicts-p15', 'verdicts-p25b', 'verdicts-legacy')
-        (self.evidence / 'nb2/paid.json').write_text(json.dumps({'paid': paid, 'mainBalanceDelta': self.balance(main) - bal0, 'segments': [s0['segment'], s1['segment']], 'indices': idx}, indent=2) + '\n')
+        self.keep('burn-legacy', 'redeem-legacy', 'verdicts-legacy')
 
     # --- evidence (#1102) --------------------------------------------------------------------------------------------------------
     def evidence_stage(self):
@@ -552,6 +566,7 @@ def main():
     p.add_argument('--cast', default='cast')
     p.add_argument('--nb2-evidence', required=True, type=Path, help='nb2-evidence built from this checkout (go build -o BIN ./scripts/nb2-evidence)')
     p.add_argument('--stages', default=','.join(s for s, _ in STAGES if s not in POS_STAGES))
+    p.add_argument('--prefix', default='', help='label prefix of the 100 scenario (circulate, returns): a second, clean pass on the same generation')
     p.add_argument('--long-transfers', type=int, default=40, help='transfers of the long-history part (one aggregator batch, so at most 254)')
     a = p.parse_args()
     if not 1 <= a.long_transfers <= 254:
@@ -564,6 +579,7 @@ def main():
     r = NB2Rehearsal(a.generation, a.evidence, a.cast)
     r.nb2_evidence = a.nb2_evidence.resolve()
     r.long_transfers = a.long_transfers
+    r.prefix = a.prefix
     (a.evidence / 'nb2').mkdir(parents=True, exist_ok=True)
     order = ['fund'] + [s for s in wanted if s != 'fund'] if 'fund' in wanted else wanted
     methods = dict(STAGES)
