@@ -21,10 +21,6 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
 PINS = json.loads((HERE / 'pins.json').read_text())
 FEE = '0x00000000000000000000000000000000000000fe'
-# The encoded-transaction limit of every validator's pool (L_max, native bridge v2 section 4.3; NB2-09 #1105): reth's default is 128 KiB of the
-# whole encoded non-blob transaction. 512 KiB is the owner-question default (fallback 128 KiB); the gateway's large bodies (gateway.py
-# MAX_RAW_TX_BODY, 4.5 MiB) carry 2 L_max + 64 KiB, and the nb2 release manifest reads the value from compose.yaml.
-MAX_TX_INPUT_BYTES = 512 << 10
 
 # The testnet profile's churn budget (owner decision 19, briefs/p85-churn-bound-note.md): D <= 1/2, the full normalized weight distance between consecutive
 # committees. A small committee needs it: replacing one of four equal-weight validators is D = 1/2 (the DEV default, 1/4, admits none). The strict-third turnover
@@ -242,8 +238,7 @@ def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, wit
             '--http','--http.addr','0.0.0.0','--http.port','8545','--http.api','eth,net,web3,debug',   # debug: the paired shard node reads debug_getRawHeader for the parent registry witness (without it no validator can lead a round after the first); the validator network is internal and the public gateway allow-lists methods
             '--rpc.eth-proof-window','64','--disable-discovery','--ipcdisable',
             '--log.file.max-files','0',   # no log file: the root filesystem is read-only (reth wants $HOME/.cache/reth/logs) and Docker's json-file driver already rotates stdout
-            '--engine.persistence-threshold','64','--builder.gaslimit',str(max_gas),'--unicity.fee-collector',FEE,
-            '--txpool.max-tx-input-bytes',str(MAX_TX_INPUT_BYTES),*ureth_flags],
+            '--engine.persistence-threshold','64','--builder.gaslimit',str(max_gas),'--unicity.fee-collector',FEE,*ureth_flags],
             ['./validator%d/ureth:/state'%i,'./validator%d/jwt:/jwt:ro'%i,network], memory='1536m',cpu=1.0)
         peers = root_boot + ''.join(',/dns4/shard%d/tcp/9000/p2p/%s'%(j,ids['evm'][j-1]) for j in range(1,n+1) if j!=i)
         service('shard%d'%i, node, ['ubft','shard-node','run','--home','/state','--executor','engine-api',

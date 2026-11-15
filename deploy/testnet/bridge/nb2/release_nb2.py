@@ -10,7 +10,8 @@ its DeploymentPins (native-bridge-plugins nb2 bridge.ts) and `envelope` for its 
   profile     the semantic profile hash (SHA-256 of the plug-ins' protocol/profile.json, in Γ) and the vectors digest (nb2-vectors.json.sha256)
   pins        section 4.3: gamma, build, vaultRuntimeCodeHash, maxEncodedTxBytes, userGasLimit, gasReserve, returnReserveSegments, deploymentBlock,
               stateReadOnly
-  limits      each pinned limit with its source: the encoded-transaction limit (ureth --txpool.max-tx-input-bytes in compose.yaml), the user gas
+  limits      each pinned limit with its source: L_max and the path's limits (the pools' --txpool.max-tx-input-bytes and --txpool.max-tx-gas from
+              the B1 profile's ureth flags, the gateway body), the user gas
               capacity (b1-profile ordinaryCapacity) and the block gas limit, the gateway's bodies, log window and answer cap, retention
   envelope    from the limits by the plug-in's measured gas model (driver.ts envelope): the largest token, the proofs beside it, the return delay
 """
@@ -26,6 +27,10 @@ TESTNET = HERE.parent.parent
 ARTIFACTS = TESTNET / 'artifacts'
 NBP = '/opt/bridge/native-bridge-plugins'
 
+# L_max, the wallets' pinned encoded-transaction limit (spec section 4.3; owner-question default 512 KiB, fallback 128 KiB). It must lie within
+# every limit of the path: each validator's pool (--txpool.max-tx-input-bytes, set by the B1 profile's ureth flags: 4 MiB at this bft pin, twice
+# the protocol 6/7 envelope) and the gateway's eth_sendRawTransaction body (2 L_max + 64 KiB, section 12.7).
+L_MAX = 512 << 10
 GAS_RESERVE = 500_000   # spec section 12.4, fixed by #1098
 RETURN_RESERVE_SEGMENTS = 64   # spec section 12.5 default (PARAM, #1105)
 STATE_READ_ONLY = False   # the lanes use seal receipts (section 12.2); a plain state() read is not evidence here
@@ -35,7 +40,14 @@ NOT_PROOF_SOURCE = ('--unicity.no-proof-source', '--unicity.companion-retention-
 
 
 def flag(command, name):
-    return command[command.index(name) + 1] if name in command else None
+    """The value of NAME in a container command, as `NAME VALUE` or `NAME=VALUE` (the B1 profile's ureth flags); the last one counts, as clap's."""
+    found = None
+    for i, w in enumerate(command):
+        if w == name and i + 1 < len(command):
+            found = command[i + 1]
+        elif w.startswith(name + '='):
+            found = w.split('=', 1)[1]
+    return found
 
 
 def gateway_limits():
@@ -70,14 +82,20 @@ def build(gen, record, image_id, ureth_command):
         raise SystemExit(f'artifacts/bridge-images.json records {images["images"]["bridge"]}, but the deploy ran {image_id}')
     profile_bytes = (gen / 'network/b1-profile.json').read_bytes()
     b1 = json.loads(profile_bytes)
-    lmax = flag(ureth_command, '--txpool.max-tx-input-bytes')
-    if lmax is None:
-        raise SystemExit('compose.yaml runs ureth without --txpool.max-tx-input-bytes: the encoded-transaction limit is not pinned')
+    pool = flag(ureth_command, '--txpool.max-tx-input-bytes')
+    pool_gas = flag(ureth_command, '--txpool.max-tx-gas')
+    if pool is None:
+        raise SystemExit('compose.yaml runs ureth without --txpool.max-tx-input-bytes: the pool\'s encoded-transaction limit is reth\'s default, not pinned')
+    if pool_gas is None or int(pool_gas) != b1['ordinaryCapacity']:
+        raise SystemExit(f'ureth --txpool.max-tx-gas {pool_gas} is not the profile\'s ordinary capacity {b1["ordinaryCapacity"]}')
+    pool = int(pool)
+    if pool < L_MAX:
+        raise SystemExit(f'the pool admits {pool} encoded bytes, below L_max {L_MAX}')
     bad = [f for f in NOT_PROOF_SOURCE if f in ureth_command]
     if bad:
         raise SystemExit(f'validator 1\'s ureth is not a full proof source ({bad}): wallets could not fetch their evidence')
     gw = gateway_limits()
-    lmax = int(lmax)
+    lmax = L_MAX
     if gw['MAX_RAW_TX_BODY'] < 2 * lmax + (64 << 10):
         raise SystemExit(f'the gateway\'s eth_sendRawTransaction body bound {gw["MAX_RAW_TX_BODY"]} is below 2 L_max + 64 KiB (section 12.7)')
     primary = record['deployments'][record['primary']]
@@ -101,7 +119,10 @@ def build(gen, record, image_id, ureth_command):
                   'refresh': 'GET /api/v1/trustbases on the gateway (the SDK trust-base path)'},
         'pins': pins,
         'limits': {
-            'maxEncodedTxBytes': {'value': lmax, 'source': 'compose.yaml ureth --txpool.max-tx-input-bytes (generate.py MAX_TX_INPUT_BYTES): every validator\'s pool admits a non-blob transaction up to this encoded length'},
+            'maxEncodedTxBytes': {'value': lmax, 'source': 'release_nb2.py L_MAX (owner-question default, spec section 15): the wallets\' limit; within the pool and the gateway limits below'},
+            'poolMaxTxInputBytes': {'value': pool, 'source': 'compose.yaml ureth --txpool.max-tx-input-bytes, from the B1 profile\'s ureth flags (ubft cli/ubft/cmd/b1_activation.go urethTxInputBytes)'},
+            'poolMaxTxGas': {'value': int(pool_gas), 'source': 'compose.yaml ureth --txpool.max-tx-gas: the profile\'s ordinary capacity (a transaction above userGasLimit is refused at admission)'},
+            'gatewayMaxRawTxBytes': {'value': (gw['MAX_RAW_TX_BODY'] - (64 << 10)) // 2, 'source': 'gateway.py MAX_RAW_TX_BODY: the largest encoded transaction its body carries as hex with framing (below the pool\'s)'},
             'userGasLimit': {'value': b1['ordinaryCapacity'], 'source': 'network/b1-profile.json ordinaryCapacity: the block gas available to user transactions (max_gas - system_gas)'},
             'blockGasLimit': {'value': b1['maxGas'], 'source': 'network/b1-profile.json maxGas (ureth --builder.gaslimit): ordinary capacity plus the system reservation'},
             'gasReserve': {'value': GAS_RESERVE, 'source': 'spec section 12.4 (#1098)'},

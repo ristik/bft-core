@@ -145,8 +145,6 @@ class B1Layout(unittest.TestCase):
                 svc=cfg['services']
                 self.assertEqual(svc['ureth%d'%i]['entrypoint'][-2:],['--unicity.network-id','3'])
                 self.assertEqual(svc['ureth%d'%i]['entrypoint'][svc['ureth%d'%i]['entrypoint'].index('--builder.gaslimit')+1],'123456')
-                # NB2-09 (#1105): every validator's pool admits encoded transactions up to L_max = 512 KiB
-                self.assertEqual(svc['ureth%d'%i]['entrypoint'][svc['ureth%d'%i]['entrypoint'].index('--txpool.max-tx-input-bytes')+1],str(512<<10))
                 shard=svc['shard%d'%i]['entrypoint']
                 self.assertEqual(shard[shard.index('--b1-profile')+1],'/network/b1-profile.json')
                 self.assertIn('--q3-lane',shard);self.assertNotIn('--registry-layout',shard)
@@ -1955,7 +1953,7 @@ class NB2Release(unittest.TestCase):
         record={'primary':'test','deployments':{'test':pair('test',4,2),'production':pair('production',64,16)},'deployer':'0x'+'ee'*20,'trustPin':'0x'+'99'*32,
                 'profileHash':'0x'+'a9'*32,'vectorsDigest':'9b'*32}
         return gen,art,record
-    URETH=['unicity-reth','node','--txpool.max-tx-input-bytes','524288']
+    URETH=['unicity-reth','node','--txpool.max-tx-gas=60000000','--txpool.max-tx-input-bytes=4194304']   # the B1 profile's ureth flags (ubft engine-api b1-profile)
     def build(self,gen,art,record,ureth=None):
         m=self.module()
         with patch.object(m,'ARTIFACTS',art):
@@ -1963,6 +1961,7 @@ class NB2Release(unittest.TestCase):
     def test_the_pins_are_the_wallets_deployment_pins(self):
         with tempfile.TemporaryDirectory() as tmp:
             r=self.build(*self.generation(tmp))
+        self.assertEqual(r['limits']['poolMaxTxInputBytes']['value'],4194304);self.assertEqual(r['limits']['poolMaxTxGas']['value'],60000000)
         self.assertEqual(r['pins'],{'gamma':'0x93tt','build':'test','vaultRuntimeCodeHash':'0x'+'a1'*32,'maxEncodedTxBytes':524288,'userGasLimit':'60000000',
                                     'gasReserve':'500000','returnReserveSegments':64,'deploymentBlock':12,'stateReadOnly':False})
         self.assertEqual(r['deployment']['production']['K'],64);self.assertEqual(r['deployment']['firstBlock'],11)
@@ -1975,7 +1974,8 @@ class NB2Release(unittest.TestCase):
             g=self.generation(tmp)
             with self.assertRaisesRegex(SystemExit,'max-tx-input-bytes'): self.build(*g,ureth=['unicity-reth','node'])
             with self.assertRaisesRegex(SystemExit,'proof source'): self.build(*g,ureth=self.URETH+['--unicity.no-proof-source'])
-            with self.assertRaisesRegex(SystemExit,'2 L_max'): self.build(*g,ureth=['unicity-reth','node','--txpool.max-tx-input-bytes',str(4<<20)])
+            with self.assertRaisesRegex(SystemExit,'pool admits'): self.build(*g,ureth=['unicity-reth','node','--txpool.max-tx-gas=60000000','--txpool.max-tx-input-bytes=131072'])
+            with self.assertRaisesRegex(SystemExit,'max-tx-gas'): self.build(*g,ureth=['unicity-reth','node','--txpool.max-tx-gas=50000000','--txpool.max-tx-input-bytes=4194304'])
     def test_another_image_than_the_recorded_one_is_refused(self):
         with tempfile.TemporaryDirectory() as tmp:
             gen,art,record=self.generation(tmp)

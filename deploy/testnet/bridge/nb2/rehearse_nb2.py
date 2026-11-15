@@ -180,17 +180,16 @@ class NB2Rehearsal(Rehearsal):
         res = {'maxEncodedTxBytes': lmax, 'userGasLimit': ugl}
         size = self.address('size')
         nonce = int(self.call('eth_getTransactionCount', [size, 'pending']), 16)
-        # one byte over: refused by every validator's pool, directly and through the gateway
-        over = self.sized_tx('size', nonce, lmax + 1)
+        # one byte over the pools' own limit (the B1 profile's --txpool.max-tx-input-bytes, above L_max): refused by every validator's pool
+        pool = rel['limits']['poolMaxTxInputBytes']['value']
+        over = self.sized_tx('size', nonce, pool + 1)
         refusals = {}
         for i in range(1, self.n + 1):
             r = self.inner_big(i, 'eth_sendRawTransaction', [over])
             refusals[i] = (r.get('error') or {}).get('message', 'ACCEPTED')
         self.expect(all('ACCEPTED' != m and ('size' in m.lower() or 'oversized' in m.lower() or 'max' in m.lower()) for m in refusals.values()),
-                    f'a transaction of {lmax + 1} encoded bytes is refused by every validator\'s pool', json.dumps(refusals))
-        status, text = self.rpc({'jsonrpc': '2.0', 'id': 1, 'method': 'eth_sendRawTransaction', 'params': [over]}, PROXY_IPS[0] + '40')
-        self.expect('error' in text.lower() and status in (200, 400, 502, 503), 'and through the gateway', f'{status} {text[:200]}')
-        res['overBy1'] = {'validators': refusals, 'gateway': [status, text[:300]]}
+                    f'a transaction of {pool + 1} encoded bytes (one over the pools\' limit) is refused by every validator\'s pool', json.dumps(refusals))
+        res['overPoolBy1'] = {'bytes': pool + 1, 'validators': refusals}
         # exactly L_max: admitted by every pool through the gateway (2 L_max hex bytes of body), included, and every validator holds the block
         exact = self.sized_tx('size', nonce, lmax)
         t0 = time.monotonic()
@@ -221,21 +220,10 @@ class NB2Rehearsal(Rehearsal):
         r = self.wait('the userGasLimit transaction is mined', lambda: self.call('eth_getTransactionReceipt', [h]), 300)
         res['atUserGasLimit'] = {'tx': h, 'status': r['status'], 'block': int(r['blockNumber'], 16)}
         self.expect(r['status'] == '0x1', f'a transaction with gas limit {ugl} (userGasLimit) is included')
-        block_limit = int(rel['limits']['blockGasLimit']['value'])
         above = self.cast_run('mktx', '--private-key', self.key('gascap'), '--legacy', '--nonce', str(gnonce + 1), '--gas-price', str(price), '--gas-limit', str(ugl + 1), '--chain', str(self.chain_id), '--value', '1', size)
-        reply = self.inner_reply('http://ureth1:8545', 'eth_sendRawTransaction', [above])
-        outcome = {'gasLimit': ugl + 1, 'blockGasLimit': block_limit, 'pool': reply.get('error', {}).get('message') if reply.get('error') else 'accepted'}
-        if 'result' in reply:
-            head = int(self.call('eth_blockNumber'), 16)
-            try:
-                rr = self.wait('a transaction above userGasLimit is mined (or not)', lambda: self.call('eth_getTransactionReceipt', [reply['result']]), 90)
-                outcome['included'] = int(rr['blockNumber'], 16)
-            except Failure:
-                outcome['included'] = None
-                outcome['blocksWaited'] = int(self.call('eth_blockNumber'), 16) - head
-                # the stuck transaction is replaced so that the account is usable again (a wallet that set such a limit would wait forever)
-                fix = self.cast_run('mktx', '--private-key', self.key('gascap'), '--legacy', '--nonce', str(gnonce + 1), '--gas-price', str(price * 3), '--gas-limit', '21000', '--chain', str(self.chain_id), '--value', '1', size)
-                outcome['replacedBy'] = self.call('eth_sendRawTransaction', [fix])
+        replies = {i: self.inner_reply(f'http://ureth{i}:8545', 'eth_sendRawTransaction', [above]) for i in range(1, self.n + 1)}
+        outcome = {'gasLimit': ugl + 1, 'validators': {i: (r.get('error') or {}).get('message', 'ACCEPTED') for i, r in replies.items()}}
+        self.expect(all(v != 'ACCEPTED' for v in outcome['validators'].values()), f'a transaction with gas limit {ugl + 1} is refused at admission by every pool (--txpool.max-tx-gas)', json.dumps(outcome))
         res['aboveUserGasLimit'] = outcome
         self.say(f'  above userGasLimit: {json.dumps(outcome)}')
         (self.evidence / 'nb2').mkdir(parents=True, exist_ok=True)
