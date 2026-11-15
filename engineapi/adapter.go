@@ -728,6 +728,9 @@ func (a *Adapter) buildDerived(ctx context.Context, p shardnode.RoundParams, der
 
 	state := ForkchoiceStateV1{HeadBlockHash: parentHash32, SafeBlockHash: parentHash32, FinalizedBlockHash: parentHash32}
 	buildInput := sealBuildInput(derived)
+	if buildInput.Witnesses, err = encodeSealCompanionWitnesses(derived.Observation.Certificate(), derived.Observation.TechnicalRecord()); err != nil {
+		return "", fmt.Errorf("engineapi: build: %w", err)
+	}
 	if buildInput.Pair, err = a.pairBuildBinding(ctx, derived, parentHeader, attrs); err != nil {
 		return "", fmt.Errorf("engineapi: pair binding for the build: %w", err)
 	}
@@ -790,13 +793,15 @@ func (a *Adapter) Seal(ctx context.Context, id shardnode.BuildID) (shardnode.Blo
 	// (including the beacon-root update) may change state, and M1 must advance EVM
 	// height through idle periods. The payload still needs its normal seal companion.
 
-	// ureth deliberately returns witnesses empty (D2 §"The authentication lifecycle": witnesses are
-	// verifier-owned and the execution client holds no trust base), so the leader supplies them before
-	// dissemination; without them a follower has nothing to authenticate. rootInput and provenance
-	// come back from ureth and are left as they are. The list is exactly [bound certificate, bound
+	// Witnesses are verifier-owned (D2 §"The authentication lifecycle": the execution client holds no
+	// trust base), so the leader supplies them for dissemination from its own authenticated build
+	// context; without them a follower has nothing to authenticate. rootInput and provenance come
+	// back from ureth and are left as they are. The list is exactly [bound certificate, bound
 	// technical record] — see SealCompanionWitnessCount for why both travel and why the length is
 	// fixed. The pair was authenticated by Build, so an encoding failure here is a local fault and is
-	// surfaced rather than turned into an unfilled companion no follower could authenticate.
+	// surfaced rather than turned into an unfilled companion no follower could authenticate. Build
+	// handed ureth the same list to retain with the companion it stored for this block (wallet
+	// evidence and restart admission read it back); the disseminated list is always this node's own.
 	witnesses, err := encodeSealCompanionWitnesses(bc.certificate, bc.technicalRecord)
 	if err != nil {
 		return shardnode.Block{}, fmt.Errorf("engineapi: sealing round: %w", err)

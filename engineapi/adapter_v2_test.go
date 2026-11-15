@@ -300,6 +300,11 @@ func TestAdapterV2BootstrapBuildSendsCanonicalInput(t *testing.T) {
 	require.Equal(t, data32(want.Commitment), attrs.Commitment)
 	require.Equal(t, DeriveAttributesV2(want.Input, ParentHeader{}, a.feeCollector), attrs.PayloadAttributesV3)
 	require.Equal(t, data20(a.feeCollector), attrs.SuggestedFeeRecipient)
+	// The build hands ureth the authenticated [certificate, technical record] to retain with the companion of the block it builds.
+	uc, tr, err := decodeSealCompanionWitnesses(captured.Witnesses)
+	require.NoError(t, err)
+	require.Equal(t, params.AuthorizingCertificate, uc)
+	require.Equal(t, params.AuthorizingTechnicalRecord, tr)
 	firstAttrs, firstInput := attrs, captured
 	changed := params
 	changed.Timestamp = params.Timestamp + 42

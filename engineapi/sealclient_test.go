@@ -110,6 +110,12 @@ func TestSealBuildInputVector(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, `{"b1Update":"0x","records":"0x","rootInput":"0xdead","transitions":["0xaa","0xbbcc"]}`, string(populated))
+
+	// Witnesses are optional on ureth's side and omitted when empty, so an input without them is exactly the envelope above; present,
+	// they follow the binding.
+	witnessed, err := json.Marshal(SealBuildInput{RootInput: data{0xde, 0xad}, Pair: data{0x80}, Witnesses: []data{{0x0a}, {0x0b, 0x0c}}})
+	require.NoError(t, err)
+	require.Equal(t, `{"b1Update":"0x","records":"0x","rootInput":"0xdead","transitions":[],"pairBinding":"0x80","witnesses":["0x0a","0x0b0c"]}`, string(witnessed))
 }
 
 func TestForkchoiceUpdatedWithSealV1SendsMethodAndThreeParams(t *testing.T) {

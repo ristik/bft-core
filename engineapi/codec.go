@@ -182,6 +182,11 @@ type SealBuildInput struct {
 	Pair data `json:"-"`
 	// PairEmpty sends the binding field present but empty: the missing-evidence control, which must reach the client's own guard.
 	PairEmpty bool `json:"-"`
+	// Witnesses are the build's authenticated [bound certificate, bound technical record] (encodeSealCompanionWitnesses), handed to the
+	// execution client only to be retained: ureth attaches them unchanged to the companion it stores for the block it builds, so the
+	// leader's own client serves the parent block's certificate (unicity_getSealCompanionV1: wallet evidence, restart admission) exactly
+	// as a follower's does. Omitted when empty; a ureth without the optional field refuses it (deny_unknown_fields).
+	Witnesses []data `json:"witnesses,omitempty"`
 }
 
 // MarshalJSON normalizes a nil transitions slice to an empty array, for the
@@ -198,12 +203,14 @@ func (s SealBuildInput) MarshalJSON() ([]byte, error) {
 		RootInput   data   `json:"rootInput"`
 		Transitions []data `json:"transitions"`
 		pairWire
+		Witnesses []data `json:"witnesses,omitempty"`
 	}{
 		B1Update:    s.B1Update,
 		RootRecords: s.RootRecords,
 		RootInput:   s.RootInput,
 		Transitions: transitions,
 		pairWire:    pairWire{PairBinding: pairField(s.Pair, s.PairEmpty)},
+		Witnesses:   s.Witnesses,
 	})
 }
 
