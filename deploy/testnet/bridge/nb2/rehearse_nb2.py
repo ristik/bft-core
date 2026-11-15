@@ -436,8 +436,14 @@ class NB2Rehearsal(Rehearsal):
         d('faults', 'main', 'd1a')
         f = self.outfile('faults-d1a')
         self.expect(f['baseline'].get('ok'), 'fault injection baseline: the simulated verifier accepts the part', json.dumps(f['baseline']))
-        refused = {k: v.get('rule') for k, v in f.items() if k != 'baseline'}
-        self.expect(all(v and v != 'success' for k, v in refused.items() if k != 'cert-batch-true'), 'a missing, reverting, false or malformed 0x0100 or 0x0102 answer, and replaced or removed helper code, each refuse', json.dumps(refused))
+        helper = self.cast_run('keccak', 'HelperCodeMismatch()')[:10]
+        self.expect(all(f[k].get('returnData', '').startswith(helper) for k in ('helper-code-replaced', 'helper-code-removed')),
+                    f'the verifier refuses a replaced or removed receipt helper (HelperCodeMismatch(), {helper}): its code hash is pinned, not only its address', json.dumps({k: f[k] for k in ('helper-code-replaced', 'helper-code-removed')}))
+        # ureth's eth_call ignores movePrecompileToAddress (even for 0x02) and its eth_simulateV1 refuses unbound blocks: a native primitive
+        # cannot be replaced over RPC at this pin. Recorded, not claimed: those cases stay with the forge doubles (pos#82).
+        injected = {k: f[k].get('returnData') != f['baseline'].get('returnData') for k in f if k.startswith(('cert-batch', 'membership'))}
+        self.say(f'  native-primitive overrides applied by this ureth: {json.dumps(injected)}')
+        (self.evidence / 'nb2/faults-note.json').write_text(json.dumps({'precompileOverridesApplied': injected, 'note': 'ureth 10552af2 eth_call ignores movePrecompileToAddress; eth_simulateV1 refuses a block without bound inputs'}, indent=2) + '\n')
         self.keep('faults-d1a', 'mutations-c17x', 'mutations-d1a', 'verdicts-one1-d1a-c16x-c17x-longx')
 
     # --- gas -------------------------------------------------------------------------------------------------------------------------
