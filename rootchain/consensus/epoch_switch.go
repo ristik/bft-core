@@ -7,6 +7,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/logger"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
@@ -206,6 +207,21 @@ func (x *ConsensusManager) awaitContext(ctx context.Context) error {
 	return ErrSwitching
 }
 
+// shardFacing runs a read of the shard-facing node (ShardInfo, RequestView, the admission of a certification request) against one
+// published context: it waits (bounded) for a pending switch, then holds the barrier's read side while it reads, so a switch waits for
+// a read in flight and no read observes a context being replaced. fn must not wait for the consensus worker.
+func (x *ConsensusManager) shardFacing(ctx context.Context, fn func() error) error {
+	if err := x.awaitContext(ctx); err != nil {
+		return err
+	}
+	x.ctxMu.RLock()
+	defer x.ctxMu.RUnlock()
+	if s := x.switchCtx.Load(); s != nil && (s.Phase == SwitchSwitching || s.Phase == SwitchFaulted) {
+		return ErrSwitching
+	}
+	return fn()
+}
+
 // operator runs an operator entry point (a plan, an intent, an endorsement, an abort, a staged candidate, a submitted control) against
 // one published context: it holds the barrier's read side, so a switch waits for it to finish and it never runs during a switch. The
 // operation must not wait for the consensus loop.
@@ -275,6 +291,7 @@ type switchDecline struct {
 
 func (x *ConsensusManager) declineSwitch(target uint64, reason string) {
 	x.switchDeclined.Store(&switchDecline{target: target, reason: reason})
+	x.dropFuture() // nothing parked for a successor this root does not switch into is kept
 }
 
 // newcomers are the members of the successor that the installed epoch does not name.
@@ -335,6 +352,11 @@ func (x *ConsensusManager) switchEpoch(ctx context.Context, sw *errEpochSwitch) 
 	if got := x.InstalledRootEpoch(); got != sw.to || x.epochAnchor == nil || x.epochAnchor.Epoch != sw.to {
 		return fmt.Errorf("in-process install of epoch %d left epoch %d installed", sw.to, got)
 	}
+	// the successor's pacemaker, trust base and leader are restored while still fenced, so the published context is a started one; its
+	// first proposal, the parked messages and the loop follow the publication (runWorker)
+	if err := x.startContext(ctx); err != nil {
+		return fmt.Errorf("starting epoch %d: %w", sw.to, err)
+	}
 	phase := SwitchRunning
 	if x.safety.member(sw.to) != nil {
 		phase = SwitchFollowing
@@ -388,6 +410,8 @@ func (x *ConsensusManager) faultSwitch(sw *errEpochSwitch, err error) {
 		close(prev.done)
 	}
 	x.ctxMu.Unlock()
+	x.pacemaker.Stop() // a successor's clock started before the failure stops; nothing signs anyway
+	x.dropFuture()
 	x.log.Error("in-process epoch switch failed: signing stays fenced and the process exits to its recovery", "epoch", sw.from, "target", sw.to,
 		logger.Error(err))
 }
@@ -397,18 +421,63 @@ func (x *ConsensusManager) faultSwitch(sw *errEpochSwitch, err error) {
 // not know the successor's trust yet) and are dropped unless the root switches, after which they are handled by the successor's
 // worker through the ordinary handlers, which verify everything. Without them a member that commits a few milliseconds after the first
 // successor leader would miss its first proposal and the round would time out. Owned by the consensus loop.
+//
+// What is retained is bounded by the authenticated transport, never by what a message claims (#1086 review): only a message whose
+// sender the network authenticated (MessageOrigins) is kept, only from a root of the installed committee or of the staged successor,
+// only when it claims that sender as its author, within a per-message wire size, a per-sender count and byte allowance and an aggregate
+// byte budget, and for at most futureMessageTTL. A declined switch drops them all.
 type futureMessages struct {
-	epoch    uint64
-	items    []any
-	byAuthor map[string]int
+	epoch  uint64
+	items  []parkedMessage
+	bytes  uint64
+	byPeer map[peer.ID]parkedShare
+}
+
+type parkedMessage struct {
+	msg  any
+	from peer.ID
+	size uint64
+	at   time.Time
+}
+
+type parkedShare struct {
+	n     int
+	bytes uint64
 }
 
 const (
-	maxFutureMessages          = 64
-	maxFutureMessagesPerAuthor = 8
+	maxFutureMessageBytes    = 2 << 20  // one parked message's wire frame
+	maxFutureBytesPerPeer    = 2 << 20  // what one authenticated sender may have parked
+	maxFutureMessagesPerPeer = 8        // and in how many messages (a proposal, votes and timeouts of the first rounds)
+	maxFutureBytes           = 64 << 20 // all parked messages: every sender of a committee of up to 32 has its full allowance
+	futureMessageTTL         = 30 * time.Second
 )
 
-// futureEpochOf is the epoch and author a proposal, vote or timeout claims, unverified.
+// MessageOrigins is implemented by a root network that authenticates the sender of each received message (network.LibP2PNetwork): once
+// TrackOrigins is called, TakeOrigin returns, and forgets, the authenticated remote peer and the wire frame size of every message it
+// delivers. The manager enables it when it may switch epoch in process, and takes the origin of every message it receives.
+type MessageOrigins interface {
+	TrackOrigins()
+	TakeOrigin(msg any) (from peer.ID, size uint64, ok bool)
+}
+
+// messageOrigin is the authenticated origin of a received message; known is false when the network does not tell it.
+type messageOrigin struct {
+	from  peer.ID
+	size  uint64
+	known bool
+}
+
+func (x *ConsensusManager) takeOrigin(msg any) messageOrigin {
+	if x.origins == nil {
+		return messageOrigin{}
+	}
+	from, size, ok := x.origins.TakeOrigin(msg)
+	return messageOrigin{from: from, size: size, known: ok}
+}
+
+// futureEpochOf is the epoch and author a proposal, vote or timeout claims, unverified; ok is false for any other message or a
+// proposal, vote or timeout without its round data.
 func futureEpochOf(msg any) (epoch uint64, author string, ok bool) {
 	switch m := msg.(type) {
 	case *abdrc.ProposalMsg:
@@ -416,7 +485,7 @@ func futureEpochOf(msg any) (epoch uint64, author string, ok bool) {
 			return m.Block.Epoch, m.Block.Author, true
 		}
 	case *abdrc.VoteMsg:
-		if m.VoteInfo != nil {
+		if m.VoteInfo != nil && m.LedgerCommitInfo != nil {
 			return m.VoteInfo.Epoch, m.Author, true
 		}
 	case *abdrc.TimeoutMsg:
@@ -427,8 +496,21 @@ func futureEpochOf(msg any) (epoch uint64, author string, ok bool) {
 	return 0, "", false
 }
 
-// parkFuture keeps a message of the next epoch while this root may still switch into it; it reports whether it took the message.
-func (x *ConsensusManager) parkFuture(msg any) bool {
+// knownRoot reports whether the authenticated sender is a root of the installed committee or of the successor staged here.
+func (x *ConsensusManager) knownRoot(id peer.ID) bool {
+	if tb := x.trustBase.Load(); tb != nil {
+		for _, n := range tb.RootNodes {
+			if n != nil && n.NodeID == id.String() {
+				return true
+			}
+		}
+	}
+	return x.IsStagedRoot(id.String())
+}
+
+// parkFuture decides on a message of the next epoch: it reports whether the message was one (it is then kept, or dropped as it would
+// have been refused); any other message is handled as before.
+func (x *ConsensusManager) parkFuture(msg any, origin messageOrigin, now time.Time) bool {
 	if x.switcher == nil || x.q3 == nil {
 		return false
 	}
@@ -439,15 +521,50 @@ func (x *ConsensusManager) parkFuture(msg any) bool {
 	}
 	f := &x.future
 	if f.epoch != epoch {
-		*f = futureMessages{epoch: epoch, byAuthor: map[string]int{}}
+		*f = futureMessages{epoch: epoch, byPeer: map[peer.ID]parkedShare{}}
 	}
-	if len(f.items) >= maxFutureMessages || f.byAuthor[author] >= maxFutureMessagesPerAuthor {
-		return true // over the bound: dropped, as it would have been refused
+	f.expire(now)
+	switch {
+	case !origin.known:
+		return true // not authenticated by the transport: refused, as before
+	case author != origin.from.String() || !x.knownRoot(origin.from):
+		return true // a sender that is not a root, or a message it did not author
+	case origin.size == 0 || origin.size > maxFutureMessageBytes || f.bytes+origin.size > maxFutureBytes:
+		return true
 	}
-	f.items = append(f.items, msg)
-	f.byAuthor[author]++
+	share := f.byPeer[origin.from]
+	if share.n >= maxFutureMessagesPerPeer || share.bytes+origin.size > maxFutureBytesPerPeer {
+		return true
+	}
+	f.items = append(f.items, parkedMessage{msg: msg, from: origin.from, size: origin.size, at: now})
+	f.bytes += origin.size
+	f.byPeer[origin.from] = parkedShare{n: share.n + 1, bytes: share.bytes + origin.size}
 	return true
 }
+
+// expire drops the parked messages older than futureMessageTTL.
+func (f *futureMessages) expire(now time.Time) {
+	kept := f.items[:0]
+	for _, m := range f.items {
+		if now.Sub(m.at) <= futureMessageTTL {
+			kept = append(kept, m)
+			continue
+		}
+		f.bytes -= m.size
+		share := f.byPeer[m.from]
+		if share.n--; share.n <= 0 {
+			delete(f.byPeer, m.from)
+		} else {
+			share.bytes -= m.size
+			f.byPeer[m.from] = share
+		}
+	}
+	clear(f.items[len(kept):])
+	f.items = kept
+}
+
+// dropFuture forgets every parked message.
+func (x *ConsensusManager) dropFuture() { x.future = futureMessages{} }
 
 // replayFuture hands the parked messages of the now installed epoch to the ordinary handlers, once, and drops the rest.
 func (x *ConsensusManager) replayFuture(ctx context.Context) {
@@ -456,9 +573,9 @@ func (x *ConsensusManager) replayFuture(ctx context.Context) {
 	if f.epoch == 0 || f.epoch != x.InstalledRootEpoch() {
 		return
 	}
-	for _, msg := range f.items {
-		if err := x.handleRootNetMsg(ctx, msg); err != nil {
-			x.log.DebugContext(ctx, fmt.Sprintf("replaying a %T parked before the switch", msg), logger.Error(err))
+	for _, m := range f.items {
+		if err := x.handleRootNetMsg(ctx, m.msg); err != nil {
+			x.log.DebugContext(ctx, fmt.Sprintf("replaying a %T parked before the switch", m.msg), logger.Error(err))
 		}
 	}
 }

@@ -18,7 +18,9 @@ import (
 	"github.com/unicitynetwork/bft-core/q3active"
 	"github.com/unicitynetwork/bft-core/q3format"
 	"github.com/unicitynetwork/bft-core/q3install"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	drctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
+	"github.com/unicitynetwork/bft-go-base/types"
 )
 
 // The in-process epoch switch (#1086). The q3 fixture's replicas open on the old epoch's committed checkpoint: epoch 1 is installed and
@@ -120,7 +122,7 @@ func TestInProcessSwitchStayersCommitTheSuccessorWithoutATimeout(t *testing.T) {
 		o    q3fixture.Options
 		late []int // stayers that are online but whose process reaches the commit late (their queue holds the successor's first messages)
 	}{
-		{name: "root-only, unit weights", o: q3fixture.Options{}},
+		{name: "root-only, weighted 6,1,1,1", o: q3fixture.Options{}},
 		{name: "coupled, weighted 6,1,1,1", o: q3fixture.Options{Assignment: true}},
 		{name: "two stayers commit 600 ms after the first switched", o: q3fixture.Options{}, late: []int{1, 2}},
 	} {
@@ -473,31 +475,164 @@ func TestInProcessSwitchBarrier(t *testing.T) {
 	require.EqualValues(t, 2, m.SwitchState().Epoch)
 }
 
-// Messages of the next epoch wait, bounded, for this root's own switch and are replayed only into that epoch.
-func TestInProcessSwitchParksTheNextEpochsMessagesBounded(t *testing.T) {
+// Messages of the next epoch wait for this root's own switch only within the bounds of their authenticated sender (#1086 review): the
+// transport's peer, not the claimed author; a root of the installed or staged committee; a per-message wire size; a per-sender count and
+// byte allowance; an aggregate budget; a lifetime. They are replayed only into that epoch, and a declined switch drops them.
+func TestInProcessSwitchParksTheNextEpochsMessagesWithinTheirSendersBounds(t *testing.T) {
 	f := q3fixture.New(t, q3fixture.Options{})
 	r := openAlone(t, f, 0, func(r *q3Replica) { r.switchFor = ownSwitch })
 	m := r.manager
 	require.EqualValues(t, 1, m.InstalledRootEpoch())
-	proposal := func(epoch uint64, author string) *abdrc.ProposalMsg {
-		return &abdrc.ProposalMsg{Block: &drctypes.BlockData{Epoch: epoch, Author: author}}
+	now := time.Now()
+	member := func(i int) peer.ID { return f.OldNodes[i].PeerConf.ID }
+	proposal := func(epoch uint64, author peer.ID) *abdrc.ProposalMsg {
+		return &abdrc.ProposalMsg{Block: &drctypes.BlockData{Epoch: epoch, Author: author.String()}}
 	}
-	require.False(t, m.parkFuture(proposal(1, "a")), "the installed epoch is handled")
-	require.False(t, m.parkFuture(proposal(3, "a")), "two epochs ahead is refused as before")
-	require.False(t, m.parkFuture(&abdrc.StateMsg{}), "only proposals, votes and timeouts wait")
-	for i := 0; i < 2*maxFutureMessagesPerAuthor; i++ {
-		require.True(t, m.parkFuture(proposal(2, "a")))
-	}
-	require.Len(t, m.future.items, maxFutureMessagesPerAuthor, "per author")
-	for i := 0; i < 2*maxFutureMessages; i++ {
-		require.True(t, m.parkFuture(&abdrc.VoteMsg{VoteInfo: &drctypes.RoundInfo{Epoch: 2}, Author: string(rune('A' + i%60))}))
-	}
-	require.Len(t, m.future.items, maxFutureMessages, "in all")
-	m.replayFuture(context.Background()) // epoch 2 is not installed: dropped
-	require.Empty(t, m.future.items)
+	from := func(id peer.ID, size uint64) messageOrigin { return messageOrigin{from: id, size: size, known: true} }
+	parked := func() int { return len(m.future.items) }
+
+	require.False(t, m.parkFuture(proposal(1, member(1)), from(member(1), 10), now), "the installed epoch is handled")
+	require.False(t, m.parkFuture(proposal(3, member(1)), from(member(1), 10), now), "two epochs ahead is refused as before")
+	require.False(t, m.parkFuture(&abdrc.StateMsg{}, from(member(1), 10), now), "only proposals, votes and timeouts wait")
+
+	t.Run("not authenticated by the transport", func(t *testing.T) {
+		require.True(t, m.parkFuture(proposal(2, member(1)), messageOrigin{}, now))
+		require.Zero(t, parked())
+	})
+	t.Run("forged author: the claim is not the authenticated sender", func(t *testing.T) {
+		require.True(t, m.parkFuture(proposal(2, member(2)), from(member(1), 10), now))
+		require.Zero(t, parked())
+	})
+	t.Run("an outsider", func(t *testing.T) {
+		outsider := testutilsNodeID(t)
+		require.True(t, m.parkFuture(proposal(2, outsider), from(outsider, 10), now))
+		require.Zero(t, parked())
+	})
+	t.Run("oversized", func(t *testing.T) {
+		require.True(t, m.parkFuture(proposal(2, member(1)), from(member(1), maxFutureMessageBytes+1), now))
+		require.True(t, m.parkFuture(proposal(2, member(1)), from(member(1), 0), now))
+		require.Zero(t, parked())
+	})
+	t.Run("a sender's allowance", func(t *testing.T) {
+		for i := 0; i < 2*maxFutureMessagesPerPeer; i++ {
+			require.True(t, m.parkFuture(proposal(2, member(1)), from(member(1), 1), now))
+		}
+		require.Equal(t, maxFutureMessagesPerPeer, parked(), "per sender, by count")
+		require.True(t, m.parkFuture(proposal(2, member(2)), from(member(2), maxFutureBytesPerPeer), now))
+		require.True(t, m.parkFuture(proposal(2, member(2)), from(member(2), 1), now))
+		require.Equal(t, maxFutureMessagesPerPeer+1, parked(), "per sender, by bytes")
+		require.False(t, m.parkFuture(&abdrc.VoteMsg{VoteInfo: &drctypes.RoundInfo{Epoch: 2}, Author: member(3).String()}, from(member(3), 1), now),
+			"a vote without its commit info is malformed: not parked, refused by the handler as before")
+		require.Equal(t, maxFutureMessagesPerPeer+1, parked())
+	})
+	t.Run("the aggregate budget", func(t *testing.T) {
+		m.dropFuture()
+		m.parkFuture(proposal(2, member(1)), from(member(1), 1), now) // the epoch's buffer
+		m.future.bytes = maxFutureBytes - 1                           // as if the other senders had filled it
+		require.True(t, m.parkFuture(proposal(2, member(2)), from(member(2), 2), now))
+		require.Equal(t, 1, parked(), "a full budget takes nothing more")
+		require.LessOrEqual(t, m.future.bytes, uint64(maxFutureBytes))
+	})
+	t.Run("a lifetime", func(t *testing.T) {
+		m.dropFuture()
+		require.True(t, m.parkFuture(proposal(2, member(1)), from(member(1), 1000), now))
+		require.True(t, m.parkFuture(proposal(2, member(2)), from(member(2), 1000), now.Add(futureMessageTTL+time.Second)))
+		require.Equal(t, 1, parked(), "the expired one is gone")
+		require.EqualValues(t, 1000, m.future.bytes)
+		require.NotContains(t, m.future.byPeer, member(1))
+	})
+	t.Run("a declined switch drops them", func(t *testing.T) {
+		require.NotZero(t, parked())
+		m.declineSwitch(2, "joiners")
+		require.Zero(t, parked())
+		require.Zero(t, m.future.bytes)
+	})
+	t.Run("replayed only into their epoch", func(t *testing.T) {
+		require.True(t, m.parkFuture(proposal(2, member(1)), from(member(1), 1), now))
+		m.replayFuture(context.Background()) // epoch 2 is not installed: dropped
+		require.Zero(t, parked())
+	})
 
 	noSwitch := openAlone(t, f, 1, nil)
-	require.False(t, noSwitch.manager.parkFuture(proposal(2, "a")), "a manager that never switches parks nothing")
+	require.False(t, noSwitch.manager.parkFuture(proposal(2, member(1)), from(member(1), 1), now), "a manager that never switches parks nothing")
+}
+
+func testutilsNodeID(t *testing.T) peer.ID {
+	t.Helper()
+	f := q3fixture.New(t, q3fixture.Options{})
+	return f.NewNodes[joinerIndex].PeerConf.ID
+}
+
+// The shard-facing barrier is a read-side critical section: a read already in flight holds the switch back, and the published
+// successor is a started one (its pacemaker past the anchor, its leader and request context restored) before any worker runs in it.
+func TestInProcessSwitchShardFacingReadsSeeOneStartedContext(t *testing.T) {
+	f := q3fixture.New(t, q3fixture.Options{})
+	t.Run("a read in flight holds the barrier", func(t *testing.T) {
+		r := openAlone(t, f, 0, nil)
+		m := r.manager
+		inside, release := make(chan struct{}), make(chan struct{})
+		m.SetViewResolver(blockingResolver{inside: inside, release: release})
+		read := make(chan error, 1)
+		go func() {
+			_, _, err := m.RequestView(f.ShardConf.PartitionID, f.ShardConf.ShardID)
+			read <- err
+		}()
+		<-inside
+		raised := make(chan struct{})
+		go func() {
+			_ = m.enterSwitching(1, 2, evmroot.OrderedHandoffRecord{Epoch: 1, Kind: "commit"}, fixedCapture{})
+			close(raised)
+		}()
+		select {
+		case <-raised:
+			t.Fatal("the switch raised its barrier under a shard-facing read in flight")
+		case <-time.After(150 * time.Millisecond):
+		}
+		require.Nil(t, m.switchCtx.Load())
+		close(release)
+		require.NoError(t, <-read)
+		<-raised
+		require.Equal(t, SwitchSwitching, m.SwitchState().Phase)
+		m.faultSwitch(&errEpochSwitch{from: 1, to: 2}, errors.New("test end"))
+	})
+	t.Run("published means started", func(t *testing.T) {
+		paused, resume := make(chan struct{}), make(chan struct{})
+		r := openAlone(t, f, 0, func(r *q3Replica) { r.switchFor = ownSwitch })
+		m := r.manager
+		m.switchPublished = func() {
+			close(paused)
+			<-resume
+		}
+		_, done := runAlone(t, r)
+		<-paused // published, the successor's worker not running yet
+		s := m.SwitchState()
+		require.Equal(t, SwitchRunning, s.Phase)
+		require.EqualValues(t, 2, s.Epoch)
+		require.EqualValues(t, m.epochAnchor.Slot+1, m.pacemaker.GetCurrentRound(), "the pacemaker is restored before the publication")
+		leader, err := m.leaderSelector.GetLeaderForRound(m.pacemaker.GetCurrentRound())
+		require.NoError(t, err)
+		require.NotEmpty(t, leader)
+		si, err := m.ShardInfo(f.ShardConf.PartitionID, f.ShardConf.ShardID)
+		require.NoError(t, err)
+		require.NotNil(t, si)
+		close(resume)
+		select {
+		case err := <-done:
+			t.Fatalf("Run ended: %v", err)
+		case <-time.After(100 * time.Millisecond):
+		}
+	})
+}
+
+// blockingResolver resolves nothing until released, signalling when a resolution is in flight.
+type blockingResolver struct {
+	inside, release chan struct{}
+}
+
+func (b blockingResolver) ResolveView(types.PartitionID, types.ShardID, uint64, storage.RequestPurpose) (*storage.RequestRoundView, error) {
+	close(b.inside)
+	<-b.release
+	return nil, nil
 }
 
 // The successor's first certification requests are counted in its own context: a request of the replaced context is dropped by
@@ -548,7 +683,8 @@ func TestInProcessSwitchAccountsForEveryManagerField(t *testing.T) {
 	kept := []string{"timeoutVerify", "shadow", "backoff", "msgSeq", "profile", "certCacheStart", "certReqCh", "certResultCh", "ucSink", "params", "id", "net",
 		"trustBaseStore", "safety", "blockStore", "orchestration", "viewResolver", "frontier", "recoveryProfile2", "utbPrevious", "utbStore", "evidence",
 		"utbConfig", "recoveryHistory", "stageRecovery", "proposalRequestCheck", "posPrefetching", "witnesses", "q3", "primaryWitness",
-		"approvalSink", "judgeHook", "handoffMu", "switcher", "ctxMu", "ctxGen", "switchCtx", "workerRunning", "future", "switchDeclined", "log", "tracer",
+		"approvalSink", "judgeHook", "handoffMu", "switcher", "ctxMu", "ctxGen", "switchCtx", "workerRunning", "future", "switchDeclined", "origins",
+		"switchPublished", "log", "tracer",
 		"leaderCnt", "execMsgCnt", "execMsgDur", "voteCnt", "proposedCR", "qcSize", "qcVoters", "susVotes", "recoveryReq", "frontierFault", "addBlockDur"}
 	reset := []string{"pacemaker", "voteBuffer", "recovery", "irReqBuffer", "retained", "leaderCheckedRound", "switchCheckedRound", "posQueue",
 		"primaryCache", "v3Planned", "q3Staged", "q3StagedEVM"}
@@ -568,4 +704,67 @@ func TestInProcessSwitchAccountsForEveryManagerField(t *testing.T) {
 	}
 	require.Empty(t, known, "classified fields the manager does not have")
 	_ = q3install.ErrIncomplete
+}
+
+// The acceptance case of the default trigger (#1086 review): a re-weighting of the same committee (no joiner), every member with the
+// production switch (joiners not allowed), and old-epoch work in flight across the switch on every member: shard-facing reads,
+// certification requests counted in the old epoch, and operator calls. Every member switches in process, the successor commits at round
+// speed with no timeout vote, nothing of the old epoch is signed after the switch, and nothing races (-race).
+func TestInProcessSwitchDefaultTriggerWithOldEpochWorkInFlight(t *testing.T) {
+	c := newQ3LiveWith(t, q3fixture.Options{NoJoiner: true, Weights: []uint64{3, 2, 2, 2}}, func(_ int, r *q3Replica) {
+		r.switchFor = func(r *q3Replica) EpochSwitch {
+			return &Q3EpochSwitch{Runtime: r.rt, Bundle: func(context.Context, uint64) (q3active.Bundle, error) { return r.bundle(), nil }}
+		}
+	})
+	require.Len(t, c.replicas, 4)
+	require.Empty(t, newcomers(nodeIDs(c.f), c.f.Old), "the successor has no joiner")
+	ctx, stop := context.WithCancel(context.Background())
+	var work sync.WaitGroup
+	admitted := make([]int, len(c.replicas))
+	for i, r := range c.replicas {
+		require.NoError(t, r.rt.Recover(context.Background()))
+		m := r.manager
+		work.Add(1)
+		go func() {
+			defer work.Done()
+			for ctx.Err() == nil {
+				_, _ = m.ShardInfo(c.f.ShardConf.PartitionID, c.f.ShardConf.ShardID)
+				_, _, _ = m.RequestView(c.f.ShardConf.PartitionID, c.f.ShardConf.ShardID)
+				_, _ = m.Q3Status()
+				_, _ = m.PlanV3Candidate(nil, nil)
+				rctx, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
+				if m.RequestCertification(rctx, IRChangeRequest{Partition: c.f.ShardConf.PartitionID, Shard: c.f.ShardConf.ShardID, Reason: Quorum, RootEpoch: 1}) == nil {
+					admitted[i]++
+				}
+				cancel()
+			}
+		}()
+	}
+	traffic := tapTraffic(c)
+	start := time.Now()
+	for i := range c.replicas {
+		c.start(i)
+	}
+	took := awaitSuccessorCommit(t, c, start, LocalTimeout*time.Millisecond)
+	stop()
+	work.Wait()
+	t.Logf("every member committed a successor block %v after the start; old-epoch requests handed to the workers: %v", took, admitted)
+	require.Less(t, took, LocalTimeout*time.Millisecond/2, "no round of the successor timed out on the way")
+	traffic.mu.Lock()
+	require.Empty(t, traffic.timeouts[2], "no timeout vote of the successor epoch")
+	for _, epochs := range traffic.byAuthor {
+		for _, e := range epochs {
+			require.EqualValues(t, 2, e, "nothing of the old epoch is signed after the switch")
+		}
+	}
+	traffic.mu.Unlock()
+	for i, r := range c.replicas {
+		s := r.manager.SwitchState()
+		require.Equal(t, SwitchRunning, s.Phase, "member %d", i)
+		require.EqualValues(t, 2, s.Epoch, "member %d", i)
+		require.EqualValues(t, 2, s.Target, "member %d switched in process with the default switch", i)
+		require.Zero(t, s.Declined, "member %d", i)
+		t.Logf("member %d switched in %v", i, s.Took)
+		require.NoError(t, r.rt.Gate(context.Background(), c.f.Claim))
+	}
 }

@@ -167,6 +167,8 @@ type (
 		switchCheckedRound uint64
 		future             futureMessages
 		switchDeclined     atomic.Pointer[switchDecline]
+		origins            MessageOrigins // the network's authenticated senders, tracked while the manager may switch epoch in process
+		switchPublished    func()         // test seam: runs after a switch published its successor, before the successor's worker starts
 
 		log    *slog.Logger
 		tracer trace.Tracer
@@ -434,6 +436,14 @@ func NewConsensusManager(
 
 	// Probably not the correct trust base, but we start with it and update as we discover current round
 	consensusManager.trustBase.Store(trustBase)
+	// what a manager that may switch epoch in process keeps of the next epoch's unverified messages is accounted to their authenticated
+	// senders (#1086 review); every received message's origin is then taken by the loop
+	if optional.EpochSwitch != nil {
+		if origins, ok := net.(MessageOrigins); ok {
+			origins.TrackOrigins()
+			consensusManager.origins = origins
+		}
+	}
 
 	if err := consensusManager.initMetrics(observe); err != nil {
 		return nil, fmt.Errorf("initializing metrics: %w", err)
@@ -530,14 +540,18 @@ func (x *ConsensusManager) RequestCertification(ctx context.Context, cr IRChange
 	ctx, span := x.tracer.Start(ctx, "ConsensusManager.RequestCertification")
 	defer span.End()
 
-	// a request made during an in-process epoch switch waits for the successor context; one made before it is dropped by the
-	// successor's worker (its generation), as a restart loses it (#1086)
-	if err := x.awaitContext(ctx); err != nil {
+	// admitted in one published context, whose generation it carries: a request made during an in-process epoch switch waits for the
+	// successor's, and one admitted before it is dropped by the successor's worker, as a restart loses it (#1086). The barrier's read
+	// side is not held while the request waits for the worker.
+	var gen uint64
+	if err := x.shardFacing(ctx, func() error {
+		gen = x.contextGen()
+		if x.recovery.InRecovery() {
+			return fmt.Errorf("node is in recovery: %s", x.recovery)
+		}
+		return nil
+	}); err != nil {
 		return err
-	}
-	gen := x.contextGen()
-	if x.recovery.InRecovery() {
-		return fmt.Errorf("node is in recovery: %s", x.recovery)
 	}
 
 	select {
@@ -565,8 +579,9 @@ func (x *ConsensusManager) Run(ctx context.Context) error {
 	}
 	// A committed activation that this root switches into in process (#1086) ends the worker; the successor's worker is started by the
 	// same code, from the durable state the install left. Any failure of the switch ends Run: the process exits to its recovery.
+	started := false
 	for {
-		sw, err := x.runWorker(ctx)
+		sw, err := x.runWorker(ctx, started)
 		if sw == nil {
 			x.log.InfoContext(ctx, "exited distributed consensus manager main loop", logger.Error(err))
 			return err
@@ -578,12 +593,17 @@ func (x *ConsensusManager) Run(ctx context.Context) error {
 		if err := x.switchEpoch(ctx, sw); err != nil {
 			return err
 		}
+		started = true // the switch started the successor's context before it published it
+		if x.switchPublished != nil {
+			x.switchPublished()
+		}
 	}
 }
 
-// runWorker runs one consensus context: the start-up of the pacemaker and leader, the loop and the certificate sender. It returns the
-// switch the loop raised the barrier for, once both have stopped, or the error that ended them.
-func (x *ConsensusManager) runWorker(ctx context.Context) (*errEpochSwitch, error) {
+// runWorker runs one consensus context: the start-up of the pacemaker and leader (unless started: an in-process switch started it before
+// publishing it), the loop and the certificate sender. It returns the switch the loop raised the barrier for, once both have stopped, or
+// the error that ended them.
+func (x *ConsensusManager) runWorker(ctx context.Context, started bool) (*errEpochSwitch, error) {
 	x.workerRunning.Store(true)
 	defer x.workerRunning.Store(false)
 	g, ctx := errgroup.WithContext(ctx)
@@ -592,7 +612,7 @@ func (x *ConsensusManager) runWorker(ctx context.Context) (*errEpochSwitch, erro
 
 	g.Go(func() error {
 		defer x.pacemaker.Stop()
-		err := x.startAndLoop(ctx)
+		err := x.startAndLoop(ctx, started)
 		if errors.As(err, &sw) {
 			close(drain) // the sender delivers what it holds and returns; the group's context stays up meanwhile
 			return nil
@@ -606,8 +626,22 @@ func (x *ConsensusManager) runWorker(ctx context.Context) (*errEpochSwitch, erro
 	return sw, err
 }
 
-// startAndLoop is the start of a consensus context, exactly as at a process start, and then the loop.
-func (x *ConsensusManager) startAndLoop(ctx context.Context) error {
+// startAndLoop is the start of a consensus context, exactly as at a process start (startContext, unless started), then its first actions
+// (beginContext) and the loop.
+func (x *ConsensusManager) startAndLoop(ctx context.Context, started bool) error {
+	if !started {
+		if err := x.startContext(ctx); err != nil {
+			return err
+		}
+	}
+	x.beginContext(ctx)
+	return x.loop(ctx)
+}
+
+// startContext restores the context's pacemaker, trust base and leader from durable state, as at a process start: the recovered vote and
+// TC, and the round after max(high QC, anchor slot). It signs and sends nothing. An in-process switch runs it while still fenced, before
+// the successor is published (#1086).
+func (x *ConsensusManager) startContext(ctx context.Context) error {
 	vote, err := x.blockStore.ReadLastVote()
 	if err != nil {
 		return fmt.Errorf("last vote read failed: %w", err)
@@ -644,6 +678,12 @@ func (x *ConsensusManager) startAndLoop(ctx context.Context) error {
 		x.log.WarnContext(ctx, "Failed to select leader when starting consensus manager", logger.Error(err))
 	}
 	x.log.InfoContext(ctx, fmt.Sprintf("CM starting, leader is %s", leader))
+	return nil
+}
+
+// beginContext is the first activity of a started, published context: the frontier serves again, the leader of the anchor's first round
+// proposes, and the successor's messages parked before an in-process switch are handled.
+func (x *ConsensusManager) beginContext(ctx context.Context) {
 	if x.frontier != nil && !x.frontier.faulted.Load() {
 		x.frontier.eligible.Store(true)
 	}
@@ -654,7 +694,6 @@ func (x *ConsensusManager) startAndLoop(ctx context.Context) error {
 	}
 	// the successor's messages that arrived before this root switched into its epoch (#1086), through the ordinary handlers
 	x.replayFuture(ctx)
-	return x.loop(ctx)
 }
 
 func (x *ConsensusManager) loop(ctx context.Context) error {
@@ -683,6 +722,11 @@ func (x *ConsensusManager) loop(ctx context.Context) error {
 				return fmt.Errorf("root network received channel has been closed")
 			}
 			x.log.LogAttrs(ctx, logger.LevelTrace, fmt.Sprintf("received %T", msg), logger.Data(msg))
+			// a proposal, vote or timeout of the next epoch, sent by a member that switched into it first, waits for this root's own
+			// switch unverified, within the bounds its authenticated sender has; it is handled by the successor's worker or dropped (#1086)
+			if x.parkFuture(msg, x.takeOrigin(msg), time.Now()) {
+				continue
+			}
 			x.msgSeq++
 			x.shadow.begin(msg, x.msgSeq, x.pacemaker.GetCurrentRound())
 			handled := time.Now()
@@ -762,11 +806,6 @@ func (x *ConsensusManager) handleRootNetMsg(ctx context.Context, msg any) (rErr 
 		span.End()
 	}(time.Now())
 
-	// a proposal, vote or timeout of the next epoch, sent by a member that switched into it first, waits for this root's own switch
-	// unverified; it is handled by the successor's worker or dropped (#1086)
-	if x.parkFuture(msg) {
-		return nil
-	}
 	switch mt := msg.(type) {
 	case *abdrc.IrChangeReqMsg:
 		return x.onIRChangeMsg(ctx, mt)
@@ -1027,19 +1066,25 @@ func (x *ConsensusManager) resolver() ViewResolver {
 // proposal round and the collection purpose (which may name a committed successor before its activation round: the view is then
 // collection-only). enabled is false while the view-aware branch is not selected, so the collector keeps the committed ShardInfo.
 // A node in recovery refuses, like ShardInfo.
-func (x *ConsensusManager) RequestView(partition types.PartitionID, shard types.ShardID) (*storage.RequestRoundView, bool, error) {
-	if err := x.awaitContext(context.Background()); err != nil { // during an in-process epoch switch: the successor's view (#1086)
-		return nil, true, err
+func (x *ConsensusManager) RequestView(partition types.PartitionID, shard types.ShardID) (view *storage.RequestRoundView, enabled bool, err error) {
+	// resolved in one published context, under the barrier's read side: an in-process epoch switch waits for a resolution in flight,
+	// and one asked during a switch is resolved in the successor's started context (#1086)
+	enabled = true
+	if serr := x.shardFacing(context.Background(), func() error {
+		resolver := x.resolver()
+		if resolver == nil {
+			enabled = false
+			return nil
+		}
+		if x.recovery.InRecovery() {
+			return fmt.Errorf("%w: %w: node is in recovery: %s", ErrViewRecovery, storage.ErrAssignmentHistory, x.recovery)
+		}
+		view, err = resolver.ResolveView(partition, shard, x.pacemaker.GetCurrentRound()+1, storage.PurposeCollect)
+		return nil
+	}); serr != nil {
+		return nil, true, serr
 	}
-	resolver := x.resolver()
-	if resolver == nil {
-		return nil, false, nil
-	}
-	if x.recovery.InRecovery() {
-		return nil, true, fmt.Errorf("%w: %w: node is in recovery: %s", ErrViewRecovery, storage.ErrAssignmentHistory, x.recovery)
-	}
-	view, err := resolver.ResolveView(partition, shard, x.pacemaker.GetCurrentRound()+1, storage.PurposeCollect)
-	return view, true, err
+	return view, enabled, err
 }
 
 // bufferIRChange buffers an IR change request of the next proposal, under the view resolved for it when the view-aware branch is
@@ -2345,14 +2390,17 @@ func (x *ConsensusManager) pendingStaged() *stagedEVMMembers {
 }
 
 func (x *ConsensusManager) ShardInfo(partition types.PartitionID, shard types.ShardID) (*storage.ShardInfo, error) {
-	// the shard-facing node reads one context: during an in-process epoch switch it waits for the successor's (#1086)
-	if err := x.awaitContext(context.Background()); err != nil {
+	// the shard-facing node reads one published context, under the barrier's read side (#1086)
+	var si *storage.ShardInfo
+	if err := x.shardFacing(context.Background(), func() error {
+		if x.recovery.InRecovery() {
+			return fmt.Errorf("node is in recovery: %s", x.recovery)
+		}
+		si = x.blockStore.ShardInfo(partition, shard)
+		return nil
+	}); err != nil {
 		return nil, err
 	}
-	if x.recovery.InRecovery() {
-		return nil, fmt.Errorf("node is in recovery: %s", x.recovery)
-	}
-	si := x.blockStore.ShardInfo(partition, shard)
 	if si == nil {
 		return nil, fmt.Errorf("unknown partition %s shard %s", partition, shard.String())
 	}

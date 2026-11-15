@@ -1687,3 +1687,48 @@ class ExpectationRetry(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class InstallRootAfterAnInProcessSwitch(unittest.TestCase):
+    """bft-core#1086 (astra on #1095): op_install_root takes a root that reports a switch state as installed only once that state is published Running or
+    Following in the target; Switching or Faulted with the target as activeEpoch goes to the (evidence-gated) restart."""
+
+    def laptop(self, status):
+        lap = rj.Laptop.__new__(rj.Laptop)
+        lap.entity, lap.home = 5, Path(tempfile.mkdtemp())
+        lap.restarted = []
+        lap.root_post = lambda path, body=b'{}', timeout=10: (422, b'{}') if path == '/api/v1/q3/signers' else (200, json.dumps(status).encode())
+        lap.compose = lambda: {'services': {'root5': {'entrypoint': ['ubft', 'root-node', 'run']}}}
+        lap.dc = lambda *a, **k: lap.restarted.append(a)
+        lap.vol = lambda name: f'p_{name}'
+        lap.one = lambda *a, **k: None
+        lap.wait = lambda *a, **k: True
+        return lap
+
+    def install(self, status):
+        lap = self.laptop(status)
+        with unittest.mock.patch.object(rj, 'run', return_value=unittest.mock.Mock(returncode=0)), \
+                unittest.mock.patch.object(rj.handoff, 'SWITCH_WAIT_SECONDS', 0), unittest.mock.patch.object(rj.handoff.time, 'sleep'):
+            return lap.op_install_root(3), lap.restarted
+
+    def test_a_published_switch_is_installed(self):
+        for phase in ('running', 'following'):
+            result, restarted = self.install({'activeEpoch': 3, 'switch': {'phase': phase, 'epoch': 3, 'target': 3, 'tookMs': 30}})
+            self.assertEqual(result, {'already': True, 'inProcess': True, 'switchMs': 30}, phase)
+            self.assertEqual(restarted, [], phase)
+
+    def test_switching_or_faulted_is_never_taken_from_the_raw_active_epoch(self):
+        for phase, epoch in (('switching', 2), ('faulted', 2)):
+            result, restarted = self.install({'activeEpoch': 3, 'switch': {'phase': phase, 'epoch': epoch, 'target': 3}})
+            self.assertNotIn('already', result, phase)
+            self.assertTrue(any('stop' in call for call in restarted), f'{phase}: the root is restarted (the drive gated it on evidence)')
+
+    def test_an_older_image_is_judged_by_its_epoch_as_before(self):
+        result, restarted = self.install({'activeEpoch': 3, 'follower': True})
+        self.assertEqual(result, {'already': True})
+        self.assertEqual(restarted, [])
+
+    def test_a_root_installed_by_an_earlier_restart_is_installed(self):
+        result, restarted = self.install({'activeEpoch': 3, 'switch': {'phase': 'running', 'epoch': 3}})
+        self.assertEqual(result, {'already': True})
+        self.assertEqual(restarted, [])

@@ -476,11 +476,16 @@ class Laptop:
         record fetcher installed before the Q3 recovery) in the pinned image; without it every restart fails in the recovery: the root stays down,
         nothing is rolled back (fail closed)."""
         epoch, j = int(epoch), self.entity
-        if self.root_epoch() == epoch:
+        # bft-core#1086: a root that reports a switch state is installed only once that state is published Running or Following in the epoch, never
+        # from its raw activeEpoch (Switching or Faulted can show the target epoch); one that reports none (an older image) is judged as before
+        status = self.root_status()
+        complete = handoff.switch_complete(status, epoch)
+        if complete:
+            return handoff.installed_result(status, epoch)
+        if complete is None and self.root_epoch() == epoch:
             return {'already': True}
-        # bft-core#1086: a member of the old committee (not a follower there) may switch into the epoch inside its process at its own commit; a joiner (a
-        # follower) never does, and is restarted at once
-        if not (self.root_status() or {}).get('follower'):
+        # a member of the old committee (not a follower there) may be switching at its own commit; a joiner (a follower) never does, and is restarted
+        if complete is False and not (status or {}).get('follower'):
             switch = handoff.switched_in_process(self.root_status, epoch)
             if switch is not None:
                 return {'already': True, 'inProcess': True, 'switchMs': switch.get('tookMs')}

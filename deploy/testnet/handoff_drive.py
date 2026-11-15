@@ -748,7 +748,13 @@ class Drive(rehearse.Rehearsal):
 
     def install_root(self, i, files, base):
         """rehearse.pos_install for one root: stop, keep the stores (once), recreate with the install flag, wait for its listener."""
-        if self.root_epoch(i, self.transport) == self.target:
+        # bft-core#1086: a root that reports a switch state is installed only once it is published Running or Following in the target, never from an
+        # epoch it shows while Switching or Faulted; one that reports none (an older image) is judged by its committed certificate as before
+        status = self.q3_status(i)
+        complete = handoff.switch_complete(status, self.target)
+        if complete:
+            return handoff.installed_result(status, self.target)
+        if complete is None and self.root_epoch(i, self.transport) == self.target:
             return {'already': True}
         if i in self.old and i in self.new:
             # bft-core#1086: a staying root switches into the epoch inside its process at its own commit; only one that does not (an older image, a faulted

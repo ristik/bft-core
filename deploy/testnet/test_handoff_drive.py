@@ -103,11 +103,19 @@ class InProcessSwitchInstall(unittest.TestCase):
 
     def test_a_joiner_is_never_waited_for(self):
         asked = []
-        d = self.drive(lambda i: asked.append(i) or {'activeEpoch': 3, 'switch': {'phase': 'running', 'epoch': 3}})
+        d = self.drive(lambda i: asked.append(i) or {'activeEpoch': 2, 'follower': True, 'switch': {'phase': 'running', 'epoch': 2}})
         with unittest.mock.patch('subprocess.run', side_effect=RuntimeError('restart')):
             with self.assertRaisesRegex(RuntimeError, 'restart'):
                 d.install_root(3, [], [])
-        self.assertEqual(asked, [], 'a joiner (not in the old committee) installs by the restart without asking')
+        self.assertEqual(asked, [3], 'a joiner (not in the old committee) is asked once and installed by the restart without waiting')
+
+    def test_switching_or_faulted_with_the_target_epoch_is_restarted(self):
+        for phase in ('switching', 'faulted'):
+            d = self.drive(lambda i: {'activeEpoch': 3, 'switch': {'phase': phase, 'epoch': 2, 'target': 3}})
+            d.root_epoch = lambda i, transport=None: 3
+            with unittest.mock.patch('subprocess.run', side_effect=RuntimeError('restart')), unittest.mock.patch.object(handoff, 'SWITCH_WAIT_SECONDS', 0):
+                with self.assertRaisesRegex(RuntimeError, 'restart', msg=phase):
+                    d.install_root(1, [], [])
 
 
 class JournalResume(unittest.TestCase):
