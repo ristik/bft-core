@@ -1540,6 +1540,42 @@ class PublicRPC(unittest.TestCase):
     def test_public_preserves_id(self):
         status,result=self.rpc('eth_sendRawTransaction')
         self.assertEqual((status,result['id']),(200,17))
+    def call(self, method, params, rid=1):
+        return self.send(json.dumps({'jsonrpc':'2.0','id':rid,'method':method,'params':params}))
+    def test_wallet_evidence_reads_are_public(self):
+        # bft-core#1102: the native bridge v2 wallet builds every proof from these, with no bridge-specific service
+        block='0x'+'11'*32
+        for method,params in [('eth_getBlockByHash',[block,False]),('eth_getBlockReceipts',[block]),('unicity_getSealCompanionV1',[block]),
+                              ('unicity_sealCompanionHorizonV1',[]),('eth_getLogs',[{'address':'0x'+'22'*20,'blockHash':block}])]:
+            self.assertEqual(self.call(method,params,9)[0],200,method)
+            self.assertEqual(self.relay.calls[-1],(method,params))
+    def test_log_queries_name_one_address_and_a_bounded_window(self):
+        self.server.rpc_limit=gateway.Limiter(1000,1000)   # this test is about the filter, not the limit
+        vault='0x'+'aB'*20
+        topics=[['0x'+'06'*32],['0x'+'00'*31+'05','0x'+'00'*31+'06']]
+        ok=[{'address':vault,'fromBlock':'0x0','toBlock':hex(gateway.LOG_BLOCK_RANGE-1),'topics':topics},
+            {'address':vault,'fromBlock':'0x10','toBlock':'0x10'},
+            {'address':vault,'blockHash':'0x'+'33'*32,'topics':[None,'0x'+'00'*32]}]
+        for f in ok:
+            self.assertEqual(self.call('eth_getLogs',[f])[0],200,f)
+        sent=len(self.relay.calls)
+        bad=[{'fromBlock':'0x0','toBlock':'0x1'},                                          # no address: every contract's logs
+             {'address':[vault,vault],'fromBlock':'0x0','toBlock':'0x1'},                  # a list of addresses
+             {'address':vault},                                                            # no window
+             {'address':vault,'fromBlock':'0x0','toBlock':hex(gateway.LOG_BLOCK_RANGE)},  # one block over the range
+             {'address':vault,'fromBlock':'0x5','toBlock':'0x4'},
+             {'address':vault,'fromBlock':'earliest','toBlock':'latest'},                 # tags: the window is fixed before it is asked for
+             {'address':vault,'fromBlock':'0x00','toBlock':'0x1'},                        # not a canonical quantity
+             {'address':vault,'fromBlock':'0x0','toBlock':'0x1','blockHash':'0x'+'33'*32},
+             {'address':vault,'fromBlock':'0x0','toBlock':'0x1','topics':'0x06'},
+             {'address':vault,'fromBlock':'0x0','toBlock':'0x1','extra':1}]
+        for f in bad:
+            status,result=self.call('eth_getLogs',[f])
+            self.assertEqual(status,400,f)
+            self.assertIn(str(gateway.LOG_BLOCK_RANGE),result['error'],'the refusal names the window a wallet pages by')
+        for params in [[],[ok[0],ok[0]],['0x1']]:
+            self.assertEqual(self.call('eth_getLogs',params)[0],400)
+        self.assertEqual(len(self.relay.calls),sent)
     def test_privileged_never_reaches_upstream(self):
         for method in ['admin_nodeInfo','engine_newPayloadV3','personal_sign','eth_sign','debug_traceTransaction','eth_sendTransaction']:
             self.assertEqual(self.rpc(method)[0],400)

@@ -4,7 +4,10 @@ Two public routes:
   POST /                    the execution chain's allow-listed methods (PUBLIC), through the relay to every validator. Bodies up to MAX_BODY,
                             except LARGE_METHODS up to MAX_RAW_TX_BODY: a bridge redemption carries its whole return proof (the 2 MiB direct
                             envelope is about 4.2 MB as hex), and a wallet checks it with eth_call and eth_estimateGas on the same calldata before
-                            it sends it; at most LARGE_SLOTS bodies above MAX_BODY are read at once.
+                            it sends it; at most LARGE_SLOTS bodies above MAX_BODY are read at once. The wallet evidence methods
+                            (WALLET_EVIDENCE: the native bridge v2 wallet RPC contract, docs/design/native-bridge-v2.md) are public reads;
+                            eth_getLogs must name one contract address and either a blockHash or an explicit numeric fromBlock..toBlock of
+                            at most LOG_BLOCK_RANGE blocks (a wallet pages through longer spans window by window).
   POST /aggregator          the aggregator's JSON-RPC (AGG_METHODS, the state-transition SDK's), bodies up to AGG_MAX_BODY, and
   GET  /api/v1/trustbases   the aggregator's signed trust-base pages (the SDK's refresh resolves this path against the aggregator URL's host):
                             both forwarded to AGG_URL unchanged, with their own rate limit. No authentication (testnet).
@@ -24,7 +27,12 @@ import urllib.request
 
 from faucet.relay import Relay
 
-PUBLIC = frozenset('eth_chainId eth_blockNumber eth_getBlockByNumber eth_getBalance eth_getTransactionCount eth_gasPrice eth_maxPriorityFeePerGas eth_estimateGas eth_call eth_getCode eth_getTransactionReceipt eth_getTransactionByHash eth_sendRawTransaction net_version web3_clientVersion'.split())
+# The reads a native bridge v2 wallet builds its evidence from (bft-core#1102): certified header evidence (the companion of the child block
+# carries the certificate of its parent), the block's receipts for the receipt-trie path, vault logs, and the companion retention horizon.
+WALLET_EVIDENCE = frozenset('eth_getBlockByHash eth_getBlockReceipts eth_getLogs unicity_getSealCompanionV1 unicity_sealCompanionHorizonV1'.split())
+PUBLIC = frozenset('eth_chainId eth_blockNumber eth_getBlockByNumber eth_getBalance eth_getTransactionCount eth_gasPrice eth_maxPriorityFeePerGas eth_estimateGas eth_call eth_getCode eth_getTransactionReceipt eth_getTransactionByHash eth_sendRawTransaction net_version web3_clientVersion'.split()) | WALLET_EVIDENCE
+LOG_BLOCK_RANGE = 10000     # the most blocks one eth_getLogs may span (toBlock - fromBlock + 1)
+LOG_FILTER_KEYS = frozenset({'address', 'topics', 'fromBlock', 'toBlock', 'blockHash'})
 MAX_BODY = 16384
 MAX_RAW_TX_BODY = 4718592   # 4.5 MiB: the 2 MiB envelope as hex in a redeem transaction, with its ABI and JSON framing
 # the methods that may carry a redemption's calldata: its send, and the call and the estimate a wallet makes first (their execution is bounded by the
@@ -35,6 +43,39 @@ AGG_METHODS = frozenset('certification_request get_inclusion_proof.v2 get_inclus
 AGG_MAX_BODY = 65536        # a 256-state get_inclusion_proofs.v1 batch is about 17 KB
 AGG_URL = os.environ.get('AGG_URL', 'http://aggregator:8080')
 AGG_TIMEOUT = 30            # the SDK's batch proof call may wait (waitMs) for its states
+
+
+def _quantity(v):
+    """An explicit hex block number (no tags: a window is fixed before it is asked for), else None."""
+    if not isinstance(v, str) or not v.startswith('0x') or not 2 < len(v) <= 18 or (len(v) > 3 and v[2] == '0'):
+        return None
+    try:
+        return int(v[2:], 16)
+    except ValueError:
+        return None
+
+
+def _address(v):
+    return isinstance(v, str) and len(v) == 42 and v.startswith('0x') and all(c in '0123456789abcdefABCDEF' for c in v[2:])
+
+
+def check_log_filter(params):
+    """Raise ValueError unless PARAMS is one bounded eth_getLogs filter: exactly one contract address, and a blockHash or an explicit numeric
+    fromBlock..toBlock of at most LOG_BLOCK_RANGE blocks. Topics are passed through (the body bound limits them)."""
+    if len(params) != 1 or not isinstance(params[0], dict) or not set(params[0]) <= LOG_FILTER_KEYS:
+        raise ValueError('log filter shape')
+    f = params[0]
+    if not _address(f.get('address')):
+        raise ValueError('log filter must name exactly one contract address')
+    if 'topics' in f and not isinstance(f['topics'], list):
+        raise ValueError('log filter topics')
+    if 'blockHash' in f:
+        if 'fromBlock' in f or 'toBlock' in f or not isinstance(f['blockHash'], str) or len(f['blockHash']) != 66:
+            raise ValueError('log filter block hash')
+        return
+    lo, hi = _quantity(f.get('fromBlock')), _quantity(f.get('toBlock'))
+    if lo is None or hi is None or hi < lo or hi - lo + 1 > LOG_BLOCK_RANGE:
+        raise ValueError('log filter range')
 
 
 class Limiter:
@@ -154,6 +195,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 raise ValueError('body size')
             if not isinstance(body.get('id'), (str, int, type(None))):
                 raise ValueError('id')
+            if body['method'] == 'eth_getLogs':
+                try:
+                    check_log_filter(body.get('params', []))
+                except ValueError as e:   # named, so a wallet knows to page: one address, a blockHash or at most LOG_BLOCK_RANGE blocks
+                    return self.reply(400, {'error': f'eth_getLogs: {e} (one address; blockHash, or numeric fromBlock..toBlock of at most {LOG_BLOCK_RANGE} blocks)'})
             try:
                 result = self.server.relay.call(body['method'], body.get('params', []))
                 result['id'] = body.get('id')
