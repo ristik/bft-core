@@ -37,8 +37,8 @@ type q4Site struct {
 }
 
 var q4LookupSites = []q4Site{
-	{Func: "Run", Arg: "x.pacemaker.GetCurrentRound()", Source: "local"},
-	{Func: "handlePacemakerEvent", Arg: "currentRound", Source: "local"}, // leaderAfter: the successor is overflow-checked
+	{Func: "startAndLoop", Arg: "x.pacemaker.GetCurrentRound()", Source: "local"}, // the start of every consensus context (Run, and the in-process epoch switch, #1086)
+	{Func: "handlePacemakerEvent", Arg: "currentRound", Source: "local"},          // leaderAfter: the successor is overflow-checked
 	{Func: "handlePacemakerEvent", Arg: "2", Source: "local"},
 	{Func: "onIRChangeMsg", Arg: "x.pacemaker.GetCurrentRound()", Source: "local"},
 	{Func: "onTimeoutMsg", Arg: "x.pacemaker.GetCurrentRound()", Source: "local"},

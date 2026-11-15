@@ -10,6 +10,7 @@ import (
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/logger"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
+	"github.com/unicitynetwork/bft-go-base/types"
 )
 
 // The in-process epoch switch (bft-core#1086). At the commit of a Q3 activation a root that stays in the committee changes to the
@@ -31,9 +32,10 @@ import (
 // Faulted: signing stays fenced and Run returns the error, so the process exits and its start-up recovery (the install journal's
 // Recover, or the install restart of the drive) takes over. A switch never resumes epoch E.
 //
-// Scope (PR 1 of #1086): the trigger is a root that is a member of both E and N and holds the activation's committed evidence itself.
-// A joiner (a follower of E), a leaver (not a member of N), a root whose own evidence is not available, and a root that is down at the
-// commit install across a restart as before.
+// Scope (PR 1 of #1086): the trigger is a root that is a member of both E and N and holds the activation's committed evidence itself,
+// of a successor without joiners. A joiner (a follower of E), a leaver (not a member of N), every member of a successor that has a
+// joiner (the joiner installs first, #1082), a root whose own evidence is not available, and a root that is down at the commit install
+// across a restart as before.
 
 // SwitchPhase is the phase of the in-process epoch switch.
 type SwitchPhase uint32
@@ -77,6 +79,10 @@ type SwitchState struct {
 	// Took is how long the last completed switch took from the barrier to the publication.
 	Took time.Duration
 	Err  string
+	// Declined is the target of a committed activation this root does not switch into in process (it installs across a restart), with
+	// the reason: follower, leaving, joiners, no own evidence.
+	Declined       uint64
+	DeclinedReason string
 }
 
 // switchContext is the published switch state and the channel closed when a pending switch ends (published or faulted).
@@ -135,10 +141,14 @@ func (e *errEpochSwitch) Error() string {
 
 // SwitchState reports the in-process switch's state. A manager that never switched reports Running in its installed epoch.
 func (x *ConsensusManager) SwitchState() SwitchState {
+	out := SwitchState{Phase: SwitchRunning, Epoch: x.InstalledRootEpoch()}
 	if s := x.switchCtx.Load(); s != nil {
-		return s.SwitchState
+		out = s.SwitchState
 	}
-	return SwitchState{Phase: SwitchRunning, Epoch: x.InstalledRootEpoch()}
+	if d := x.switchDeclined.Load(); d != nil && d.target > out.Epoch {
+		out.Declined, out.DeclinedReason = d.target, d.reason
+	}
+	return out
 }
 
 // contextGen is the generation of the published context.
@@ -228,20 +238,69 @@ func (x *ConsensusManager) checkEpochSwitch(ctx context.Context) error {
 	if err := x.safety.member(installed); err != nil {
 		x.log.InfoContext(ctx, "the epoch's handoff is committed; this root follows the epoch and installs the successor across a restart",
 			"epoch", installed, "target", target)
+		x.declineSwitch(target, "follower")
 		return nil
 	}
 	captured, err := x.switcher.Capture(ctx, target)
 	if err != nil {
 		x.log.WarnContext(ctx, "the epoch's handoff is committed but its activation could not be captured: the install restart is the fallback",
 			"epoch", installed, "target", target, logger.Error(err))
+		x.declineSwitch(target, "no own evidence")
 		return nil
 	}
-	if !slices.Contains(captured.Members(), x.id.String()) {
+	members := captured.Members()
+	if !slices.Contains(members, x.id.String()) {
 		x.log.InfoContext(ctx, "the epoch's handoff is committed and this root leaves the committee: the install restart makes it a follower",
 			"epoch", installed, "target", target)
+		x.declineSwitch(target, "leaving")
+		return nil
+	}
+	if joiners := newcomers(members, x.trustBase.Load()); len(joiners) != 0 && !switchesWithJoiners(x.switcher) {
+		// a joiner installs only once the commit exists, across its restart; started at once, the successor would time out the joiner's
+		// first leader slots until it is up (#1082). The drive installs the joiners first and then this root, as before.
+		x.log.InfoContext(ctx, "the epoch's handoff is committed and the successor has joiners: they install first and this root by the restart (#1082)",
+			"epoch", installed, "target", target, "joiners", joiners)
+		x.declineSwitch(target, "joiners")
 		return nil
 	}
 	return x.enterSwitching(installed, target, record, captured)
+}
+
+// switchDecline is a committed activation this root decided not to switch into in process, and why: what the drive reads to restart it
+// at once instead of waiting for a switch.
+type switchDecline struct {
+	target uint64
+	reason string
+}
+
+func (x *ConsensusManager) declineSwitch(target uint64, reason string) {
+	x.switchDeclined.Store(&switchDecline{target: target, reason: reason})
+}
+
+// newcomers are the members of the successor that the installed epoch does not name.
+func newcomers(members []string, installed *types.RootTrustBaseV1) []string {
+	known := map[string]bool{}
+	if installed != nil {
+		for _, n := range installed.RootNodes {
+			if n != nil {
+				known[n.NodeID] = true
+			}
+		}
+	}
+	var out []string
+	for _, m := range members {
+		if !known[m] {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// switchesWithJoiners reports whether the process's switch also switches into a successor that has joiners (a joiner that follows the old
+// epoch live and switches with it; PR 2 of #1086). The default does not.
+func switchesWithJoiners(s EpochSwitch) bool {
+	j, ok := s.(interface{ SwitchesWithJoiners() bool })
+	return ok && j.SwitchesWithJoiners()
 }
 
 // enterSwitching raises the barrier: it waits for the operator sections in flight, then publishes Switching(E, N, activation) under a

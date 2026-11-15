@@ -166,6 +166,7 @@ type (
 		workerRunning      atomic.Bool
 		switchCheckedRound uint64
 		future             futureMessages
+		switchDeclined     atomic.Pointer[switchDecline]
 
 		log    *slog.Logger
 		tracer trace.Tracer

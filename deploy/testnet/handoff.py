@@ -24,7 +24,7 @@ def switched_in_process(status, target, wait=SWITCH_WAIT_SECONDS, sleep=time.sle
     """bft-core#1086: the root's in-process switch into `target` (its q3/status `switch`, phase running or following, with the target installed), else None.
     `status` is the root's q3/status answer as a dict, or None while it does not answer. A root that reports no `switch` does not switch in process (an older
     image, or --in-process-epoch-switch=false): None at once. A switch that is still switching, or a root still in the old epoch, is asked again until `wait`
-    has passed; a faulted switch (the root exits to its recovery) is None at once. None means: install the root by the restart, through the same evidence gate."""
+    has passed; a faulted switch (the root exits to its recovery) and a declined one (a successor with joiners, a leaver, no own evidence) are None at once. None means: install the root by the restart, through the same evidence gate."""
     deadline = clock() + wait
     while True:
         view = status() or {}
@@ -33,7 +33,7 @@ def switched_in_process(status, target, wait=SWITCH_WAIT_SECONDS, sleep=time.sle
             return None
         if view.get('activeEpoch') == target and switch.get('epoch') == target and switch.get('phase') in ('running', 'following'):
             return switch
-        if switch.get('phase') == 'faulted' or clock() >= deadline:
+        if switch.get('phase') == 'faulted' or switch.get('declined') == target or clock() >= deadline:
             return None
         sleep(0.1)
 

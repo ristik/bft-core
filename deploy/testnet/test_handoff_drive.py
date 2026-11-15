@@ -72,6 +72,11 @@ class InProcessSwitch(unittest.TestCase):
         self.assertIsNone(handoff.switched_in_process(status, 3, wait=10, sleep=lambda s: None, clock=clock))
         self.assertEqual(len(asked), 1)
 
+    def test_a_declined_switch_is_restarted_at_once(self):
+        status, asked, clock = self.answers({'activeEpoch': 2, 'switch': {'phase': 'running', 'epoch': 2, 'declined': 3, 'declinedReason': 'joiners'}})
+        self.assertIsNone(handoff.switched_in_process(status, 3, wait=10, sleep=lambda s: None, clock=clock))
+        self.assertEqual(len(asked), 1, 'a successor with joiners: the drive restarts the root after the joiners, without waiting')
+
     def test_a_root_that_does_not_switch_in_time_is_restarted(self):
         status, asked, clock = self.answers({'activeEpoch': 2, 'switch': {'phase': 'running', 'epoch': 2}})
         self.assertIsNone(handoff.switched_in_process(status, 3, wait=5, sleep=lambda s: None, clock=clock))

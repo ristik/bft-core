@@ -21,7 +21,13 @@ type Q3EpochSwitch struct {
 	// After re-derives, once the activation is complete, what the process derives from the installed epoch at its start (the request
 	// history selection, the committee it keeps connected). Nil derives nothing.
 	After func(ctx context.Context, epoch uint64) error
+	// WithJoiners also switches into a successor that names a joiner. Off, the members of such a successor install across a restart, after
+	// the joiners (#1082): started at the commit, the successor would time out the first leader slots of a joiner that is not up yet.
+	WithJoiners bool
 }
+
+// SwitchesWithJoiners is WithJoiners.
+func (s *Q3EpochSwitch) SwitchesWithJoiners() bool { return s != nil && s.WithJoiners }
 
 // ErrNoOwnActivation is returned when this root holds no authenticated activation of its own for the epoch.
 var ErrNoOwnActivation = errors.New("consensus: no own authenticated activation to switch into")
