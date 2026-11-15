@@ -228,13 +228,20 @@ func TestArchiveCatchUpRateProfile(t *testing.T) {
 	}
 	unbounded := PublicBudget{Rate: 1e9, Burst: 1 << 30, GlobalRate: 1e9, GlobalBurst: 1 << 30, ByteRate: 1e12, ByteBurst: 1 << 40,
 		GlobalByteRate: 1e12, GlobalByteBurst: 1 << 40, MaxTrackedPeers: 16}
-	l := newLatencyFixtureBudget(t, n, &unbounded)
-	for _, rtt := range []time.Duration{0, 50 * time.Millisecond} {
-		source, exchanges := l.countedSource(t, rtt)
-		rate, errs := l.catchUp(t, source, 10*time.Second, 10*time.Minute)
-		require.Empty(t, errs)
-		t.Logf("rtt %-5s %d blocks at %7.1f blocks/s, %d exchanges", rtt, n, rate, exchanges.Load())
+	production := DefaultPublicBudget()
+	for _, budget := range []struct {
+		name   string
+		budget *PublicBudget
+	}{{"production budget", &production}, {"unbounded budget", &unbounded}} {
+		l := newLatencyFixtureBudget(t, n, budget.budget)
+		for _, rtt := range []time.Duration{0, 50 * time.Millisecond} {
+			source, exchanges := l.countedSource(t, rtt)
+			rate, errs := l.catchUp(t, source, 10*time.Second, 10*time.Minute)
+			require.Empty(t, errs)
+			t.Logf("%s, rtt %-5s %d blocks at %7.1f blocks/s, %d exchanges", budget.name, rtt, n, rate, exchanges.Load())
+		}
 	}
+	l := newLatencyFixtureBudget(t, n, &unbounded)
 	// the parts, per record
 	source := l.source(t, 0)
 	ctx := context.Background()
