@@ -332,3 +332,35 @@ func TestAFollowerDoesNotHandshakeAfterARootActivation(t *testing.T) {
 	time.Sleep(2*activationHandshakeEvery + 300*time.Millisecond)
 	require.Equal(t, before, net.handshakeCount())
 }
+
+// astra on #1076, in #1054: the catch-up handshake is part of the client's one handshake account. While it runs, the inactivity re-handshake
+// to the OLD committee does not double it, and answers of the old epoch (adopted nowhere: they are retired at admission) neither move the
+// progress clock nor stop the catch-up; only a certificate of the installed epoch does.
+func TestTheActivationCatchUpSharesTheHandshakePacingAndIgnoresOldEpochAnswers(t *testing.T) {
+	f := newConfBindingFixture(t)
+	old, next := newCommittee(t, f.signer), newCommittee(t, nil)
+	var installed atomic.Uint64
+	installed.Store(1)
+	store := &epochStore{byEpoch: map[uint64]*types.RootTrustBaseV1{1: f.tb, 2: next.tb}, installed: &installed}
+	net := &routeNet{received: make(chan any, 64), answer: func(to []peer.ID) *certification.CertificationResponse {
+		if len(to) > 0 && next.ids[to[0]] {
+			return nil // the new committee is still coming up: no answer
+		}
+		return f.respond(f.ucMine) // the old committee answers with the old epoch's certificate
+	}}
+	c := activationClient(t, f, net, store, BFTClientOptions{HandshakeNodes: 1, CertNodes: 1, HeartbeatInterval: 50 * time.Millisecond,
+		InactivityTimeout: 2 * time.Second})
+	runClient(t, c)
+	installed.Store(2)
+	require.Eventually(t, func() bool { in, _ := net.to(next); return in > 0 }, 5*time.Second, 5*time.Millisecond, "the catch-up starts")
+	delivered := c.Progress().Delivered()
+	oldBefore, _ := net.to(old)
+	time.Sleep(2500 * time.Millisecond) // beyond the inactivity timeout, within the catch-up's backoff
+	toNext, _ := net.to(next)
+	require.GreaterOrEqual(t, toNext, 2, "old-epoch answers do not stop the catch-up")
+	oldAfter, _ := net.to(old)
+	require.Equal(t, oldBefore, oldAfter, "the inactivity re-handshake is paced from the catch-up's handshakes: no doubling")
+	require.Equal(t, delivered, c.Progress().Delivered(), "an old epoch's certificate moves no progress clock")
+	e, _ := c.heldRootEpoch()
+	require.EqualValues(t, 1, e)
+}

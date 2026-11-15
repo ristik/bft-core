@@ -123,6 +123,10 @@ func (c *BFTClient) sendCatchUpHandshake(ctx context.Context, target uint64) err
 		return ErrFollower
 	}
 	msg := handshake.Handshake{PartitionID: c.partitionID, ShardID: c.shardID, NodeID: c.nodeID}
+	// one handshake account (astra on #1076): the inactivity re-handshake is paced from this one too, so the two never double up; the
+	// catch-up keeps its own backoff and ends only when a certificate of the installed epoch is held (never on the progress clock, which an
+	// old epoch's certificate, retired at admission, does not move)
+	c.lastHandshake.Store(time.Now().UnixNano())
 	if err := c.net.Send(ctx, msg, rootIDs...); err != nil {
 		return fmt.Errorf("sending the catch-up handshake: %w", err)
 	}

@@ -268,7 +268,7 @@ func TestTheTimedResendWaitsForAStalledDelivery(t *testing.T) {
 	f, c, net, _ := timedClient(t, BFTClientOptions{})
 	require.NoError(t, c.Submit(ctx, pendingRequest(f)))
 	when := due(c)
-	c.delivered.stamp(when.Add(-c.resendInterval() / 2))
+	c.clock().setDelivered(when.Add(-c.resendInterval() / 2))
 	c.resendStale(ctx, when)
 	require.Len(t, net.sent(), 1, "delivery is not stalled for the interval yet")
 	c.resendStale(ctx, when.Add(c.resendInterval()))

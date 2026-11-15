@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
-	"sync/atomic"
 	"time"
 
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
@@ -55,21 +54,10 @@ const (
 // re-send and the UC relay read one definition of a stalled delivery. The re-send is due only once delivery is stalled for the interval.
 type deliveryClock interface{ Delivered() time.Time }
 
-// lastDelivery is the client's own deliveryClock until #1054's progress clock replaces it (deliveries): noteAdoptedLocked stamps it on both
-// adoption paths. Zero is "nothing delivered yet", which is stalled.
-type lastDelivery struct{ at atomic.Int64 }
-
-func (d *lastDelivery) stamp(t time.Time) { d.at.Store(t.UnixNano()) }
-
-func (d *lastDelivery) Delivered() time.Time {
-	if n := d.at.Load(); n != 0 {
-		return time.Unix(0, n)
-	}
-	return time.Time{}
-}
-
-// deliveries is the clock the timed re-send reads.
-func (c *BFTClient) deliveries() deliveryClock { return &c.delivered }
+// deliveries is the clock the timed re-send reads: the client's progress clock (progress.go), which moves only on an adopted certificate
+// (a repeat included), never on an invalid, stale or duplicate one, so duplicate traffic cannot postpone a re-send. The UC relay reads the
+// same clock.
+func (c *BFTClient) deliveries() deliveryClock { return c.clock() }
 
 // errAttemptSuperseded refuses the send of an attempt that is no longer the current one of the current generation.
 var errAttemptSuperseded = errors.New("shardnode: the pending attempt was superseded before its send")
