@@ -163,18 +163,20 @@ def utb_node_flags(pin):
     if not re.fullmatch(r'0x[0-9a-f]{64}', pin): raise ValueError('the UTB genesis EntryID must be 0x followed by 64 lowercase hex digits')
     return ['--utb-genesis', UTB_GENESIS_FILE, '--utb-genesis-id', pin, '--utb-entries-db', UTB_ENTRIES_DB]
 
-def authority_entrypoints(compose, n):
-    """The entrypoints of the n authority services of a compose dictionary."""
-    return {i: compose['services'][f'authority{i}']['entrypoint'] for i in range(1, n+1)}
+def authority_services(compose, n):
+    """The n authority service definitions of a compose dictionary."""
+    return {i: compose['services'][f'authority{i}'] for i in range(1, n+1)}
 
 def check_authorities_unchanged(boot, final, n):
-    """The final compose must name exactly the authority entrypoints the generation started the authorities with: they are never recreated, so a
-    flag that only the final compose carries is a flag the running authorities do not have (bft-core#1091)."""
-    started, written = authority_entrypoints(boot, n), authority_entrypoints(final, n)
+    """The final compose must define exactly the authority services the generation started (bft-core#1091; astra on #1090: the whole service, image,
+    entrypoint, command, environment and mounts alike, not only its arguments): an authority is never recreated, so anything only the final compose
+    states is something the running authorities do not have. It does not attest the contents of the mounted files or the running containers."""
+    started, written = authority_services(boot, n), authority_services(final, n)
     for i in range(1, n+1):
         if started[i] != written[i]:
-            raise RuntimeError(f'authority{i} was started with {started[i]} but the final compose names {written[i]}: an authority is never recreated, '
-                               'so every argument it takes must be known when it is first started')
+            keys = sorted(k for k in set(started[i]) | set(written[i]) if started[i].get(k) != written[i].get(k))
+            raise RuntimeError(f'authority{i} was started with another service definition than the final compose names (differs in {keys}): an authority is '
+                               'never recreated, so everything it is started with must be known when it is first started')
 
 def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, with_pos=False, rpc_bind=operator_rpc.DEFAULT_BIND, utb=None, utb_aggregator='integration', *,
              payout=FAUCET_PAYOUT, subnets=None, root_cpus=ROOT_CPUS):
