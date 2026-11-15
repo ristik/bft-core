@@ -193,10 +193,8 @@ Fixed by #1098 (measured): `K = 64`, `B = 16` (`h = 6`, 4-bit tags, one tag word
 
 The vault constructor receives the exact bytes of Γ, rejects them unless `vault20 == address(this)`,
 `chainId == block.chainid`, `verifier20.codehash == verifierCodeHash32`, `asset32`, `ty32` and `aid32` each equal their
-Section 4.2 derivation, and `K`, `B`, `Qmax` are admitted, and then fixes `D` as an immutable. A refusal is
-`BadConfig(field)` with the index of the first failing Γ field, 0..18 (the domain literal is 0, `Qmax` 18): `chainId`
-is 5, `vault20` 9, `asset32` 10, `ty32` 11, `aid32` 12, `verifierCodeHash32` 15. Array-level failures (not an array of
-19, trailing bytes, any scan error) report 19. Γ's bytes stay readable through `config()`. The verifier is stateless and configuration
+Section 4.2 derivation, and `K`, `B`, `Qmax` are admitted, and then fixes `D` as an immutable. 
+A refusal is `BadConfig(field)`. Validation is staged, and the stage order is frozen. First the array: not an array of 19, trailing bytes, any scan error or more than 1024 bytes is 19. Then the fields in index order 0..18, reporting the first one that fails its own width, range and admitted-set rule. aggregatorPartition == evmPartition is field 8. (K, B) not admitted is 16 when K itself is not in the build's K set, and 17 otherwise. Only a Γ that decodes completely is checked against the deployment, in this order: asset32 (10), ty32 (11), aid32 (12), vault20 == address(this) (9), chainId == block.chainid (5), verifierCodeHash32 == EXTCODEHASH(verifier20) (15). Γ's bytes stay readable through `config()`. The verifier is stateless and configuration
 free: it receives Γ on every call (Section 11), which avoids a cycle between its code hash and Γ.
 
 ### 4.2 Asset identity
@@ -526,8 +524,10 @@ Order of checks, with the error each one raises:
    require `x` equal to the stored `H_e` (`ChainMismatch()`).
 4. Scan the current buffer, and also the previous buffer when `e == c - 1`: every live position whose tag equals
    `bucket(claimedEta)` must hold a different identifier, else `AlreadyPaid(claimedEta)`.
-5. `STATICCALL` the verifier (Section 11.2) with `(config(), evidence)`. A revert is
-   `VerifierRefused(revertData)`; return data other than exactly 192 canonical bytes is `VerifierBadReturn()`.
+5. `STATICCALL` the verifier (Section 11.2) with `(config(), evidence)`. A revert is `VerifierRefused(revertData)`
+   when the revert data is at most `MAX_VERIFIER_REVERT` = 1024 bytes. Longer revert data, and return data other than
+   exactly 192 canonical bytes, is `VerifierBadReturn()`. The vault reads `returndatasize()` before it copies anything
+   and never copies oversized data.
 6. Verdict checks: `domain == D` (`DomainMismatch()`), `asset == a_UCT` (`AssetMismatch()`),
    `(eta, minSegment) == (claimedEta, claimedStart)` (`ClaimMismatch()`), `recipient` nonzero and not the vault
    (`BadRecipient()`), `amount > 0` (`ZeroAmount()`), `amount <= Q` (`LiabilityUnderflow(Q, amount)`).
@@ -761,7 +761,7 @@ offset `0x60`, length `32K`, the sorted identifiers). Logs of failed transaction
 | `ChainMismatch()` | `0xa6226dc5` | redeem 3 |
 | `AlreadyPaid(bytes32 eta)` | `0xf4b76a0e` | redeem 4 |
 | `VerifierRefused(bytes reason)` | `0x3aa84d02` | redeem 5 |
-| `VerifierBadReturn()` | `0xf659e897` | redeem 5 |
+| `VerifierBadReturn()` | `0xf659e897` | redeem 5 (also: verifier revert data over 1024 bytes) |
 | `DomainMismatch()` | `0xce548c1e` | redeem 6 |
 | `AssetMismatch()` | `0x83c1010a` | redeem 6 |
 | `ClaimMismatch()` | `0x827768e8` | redeem 6 |
@@ -774,7 +774,10 @@ offset `0x60`, length `32K`, the sorted identifiers). Logs of failed transaction
 
 A wallet classifies a failed simulation by selector: `AlreadyPaid` means reconcile; `StaleEndpoint` means rebuild the
 history; `FutureIndex` means wait (it cannot arise from Section 12.2); `BadGapProof`/`ChainMismatch` means a wrong
-proof or start head, repairable without a new burn; `VerifierRefused` carries the verifier's rule.
+proof or start head, repairable without a new burn; `VerifierRefused` carries the verifier's rule. `VerifierBadReturn`
+means the verifier refused with revert data over 1024 bytes (or returned malformed data), so its rule was not relayed:
+the wallet calls `verifyReturn` directly (an `eth_call` to the verifier) or runs its own verifier to read the rule,
+rather than retrying the redemption unchanged.
 
 ## 14. Rejection rules
 
@@ -882,6 +885,12 @@ recovers the source key under the SDK relation), each expecting the same refusal
 implementation (Section 14.4), and a token vector whose lineage contains such an unlock, refused the same way.
 
 It MUST also contain:
+
+- verifier revert data of exactly 1024 bytes (`VerifierRefused` carrying it), 1025 bytes and 4096 bytes (both
+  `VerifierBadReturn`, with no oversized copy);
+- four multi-fault Γ cases for the frozen `BadConfig` stage order: an array-level fault together with a field fault
+  (19); two field faults (the lower index); a field fault together with a deployment mismatch (the field); two
+  deployment mismatches, for example a wrong `aid32` and a wrong `chainId` (12, the earlier deployment check);
 
 - a positive token whose inline aggregator UC carries a nonempty signature map (native codec, Section 3);
 - the stale-index capacity case: `K = 64`, `L_max = 512 KiB`, 20 KiB evidence, 2 KiB framing (`P_max = 1952`), `c = 2500`
@@ -992,6 +1001,7 @@ mirroring Section 11.1; boolean acceptance is unchanged.
 | NB2-06 wallet RPC contract (#1102) | §12.7, `EvidencePruned` in §14.6 |
 | NB2-05 on-chain verifier (#1101) | §11.2 (per-UC order, batching), §11.3 (authority verdict), §14.4 (on-chain names), §14.7 (`onChainError`) |
 | NB2-07 TypeScript wallet (#1103) | §12.5 (`L_T` upper bound), §12.7 (companion status `"found"`) |
+| Astra vault review (unicity-pos-contracts#81) | §4.1 (`BadConfig` stage order), §11.1 step 5 (`MAX_VERIFIER_REVERT`), §13.3, §14.7 |
 | Astra delta review 2026-11-15 (`briefs/astra-review-1110-r2-answer.md`) | P2-1: §7, §14.4 (NB2 unlock restriction, owner ruling), §12.6, §14.7; P2-2: §14.6 `SealReceipt`, §14.7 |
 | NB2-02 bake-off (#1098, unicity-pos-contracts#80) | Preamble, §4.1 (`K`, `B`, admitted set), §9.2, §10, §10.4 (sort), §12.4 (`gasReserve`), §14.7, §15 (values, measured table, capacity) |
 | NB2-03 reference defaults (#1099) | §6.2 (`DepositUC` scope, header), §3 (amount names, depth), §4.1 (test set, asset/ty/aid, `BadConfig` indices), §11.1 (reentrancy), §11.2 (check order), §14.4, §14.6 (`ImplausibleIndex`), §14.7 (vector file) |
