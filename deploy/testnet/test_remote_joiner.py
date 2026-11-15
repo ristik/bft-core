@@ -159,6 +159,17 @@ class FakeHost:
         return ok()
 
 
+class AgentPaths(unittest.TestCase):
+    def test_every_root_path_the_drive_posts_to_a_member_is_forwarded(self):
+        """The agent forwards only listed root operator paths; the drive's verify asks every member, the remote joiner included, for its committee
+        view (POST /api/v1/committee, bft-core#1082). A path the drive posts that the agent refuses stops a join at verify."""
+        import re
+        drive = (Path(__file__).parent / 'handoff_drive.py').read_text()
+        posted = set(re.findall(r"self\.transport\.post\(i, '(/api/v1/[^']+)'", drive)) | set(re.findall(r"transport\.post\(i, '(/api/v1/[^']+)'", drive))
+        self.assertIn('/api/v1/committee', posted)
+        self.assertEqual(posted - set(rj.ROOT_POSTS), set())
+
+
 class BridgeIsolation(unittest.TestCase):
     """start --isolate-bridge / --emulate-wan (bft-core#1075): on a shared Linux docker host the entity reaches only its own containers and the host's
     published addresses, from before its first container starts; the rules are found and removed by their comment only."""
