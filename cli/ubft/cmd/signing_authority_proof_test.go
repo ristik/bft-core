@@ -161,3 +161,33 @@ func TestTheAdvanceWithProofCommandRequiresProofOutAndClientSocket(t *testing.T)
 		require.ErrorContains(t, err, `"`+name+`" not set`, "without --%s", name)
 	}
 }
+
+// The pre-read size check is the operator frame's bound exactly: a proof of MaxAdvanceProofBytes is read and sent, one byte more is refused
+// before it is read (the largest legitimate activation, measured in the service tests, is far below it).
+type sizeOperator struct {
+	fakeAdvanceOperator
+	sent int
+}
+
+func (s *sizeOperator) AdvanceWithProof(ctx context.Context, bundle []byte) (signingauthority.AdvanceResult, error) {
+	s.sent = len(bundle)
+	return s.fakeAdvanceOperator.AdvanceWithProof(ctx, []byte("bundle"))
+}
+
+func TestThePreReadSizeCheckIsTheFrameBound(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cred := filepath.Join(dir, "client.cred")
+	op := &sizeOperator{fakeAdvanceOperator: fakeAdvanceOperator{status: signingauthority.Status{RootEpoch: 1}}}
+	at := filepath.Join(dir, "at.cbor")
+	require.NoError(t, os.WriteFile(at, make([]byte, service.MaxAdvanceProofBytes), 0o600))
+	_, err := advanceWithProof(ctx, op, []string{at}, cred, op.current(cred))
+	require.NoError(t, err)
+	require.Equal(t, service.MaxAdvanceProofBytes, op.sent)
+	over := filepath.Join(dir, "over.cbor")
+	require.NoError(t, os.WriteFile(over, make([]byte, service.MaxAdvanceProofBytes+1), 0o600))
+	op.sent = 0
+	_, err = advanceWithProof(ctx, op, []string{over}, cred, op.current(cred))
+	require.ErrorContains(t, err, "an activation proof is at most")
+	require.Zero(t, op.sent, "refused before it is read or sent")
+}
