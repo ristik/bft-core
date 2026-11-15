@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -277,4 +278,28 @@ func TestSignedWeightCountsVerifiedSignaturesOnly(t *testing.T) {
 	require.EqualValues(t, 3, signedWeight(e, seal))
 	seal.Signatures["stranger"] = seal.Signatures["a"]
 	require.EqualValues(t, 3, signedWeight(e, seal), "an unknown ID adds nothing")
+}
+
+// The native PDR's JSON form is lossy for an empty PartitionParams: `omitempty` drops the empty map, which decodes as nil, and the
+// CBOR (so the shard configuration hash) of nil differs from that of an empty map. A certificate is therefore made under the
+// configuration as the JSON file holds it (TestUCVerifyTwoShardsOfOnePartition); nb2ref.FixturePDR is not at fault.
+func TestPDRJSONDropsAnEmptyPartitionParams(t *testing.T) {
+	left, _ := types.ShardID{}.Split()
+	pdr := nb2ref.FixturePDR(nb2ref.DevNetwork, nb2ref.DevAggPartition, left, 0, "agg-0")
+	require.NotNil(t, pdr.PartitionParams)
+	require.Empty(t, pdr.PartitionParams)
+	enc, err := json.Marshal(pdr)
+	require.NoError(t, err)
+	var back types.PartitionDescriptionRecord
+	require.NoError(t, json.Unmarshal(enc, &back))
+	require.Nil(t, back.PartitionParams)
+	h1, err := pdr.Hash(crypto.SHA256)
+	require.NoError(t, err)
+	h2, err := back.Hash(crypto.SHA256)
+	require.NoError(t, err)
+	require.NotEqual(t, h1, h2, "the round trip changes the configuration hash")
+	back.PartitionParams = map[string]string{}
+	h3, err := back.Hash(crypto.SHA256)
+	require.NoError(t, err)
+	require.Equal(t, h1, h3, "and only through PartitionParams")
 }

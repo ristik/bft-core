@@ -31,6 +31,21 @@ func TestDeploymentBytesArePinned(t *testing.T) {
 	require.Equal(t, want, got)
 }
 
+// trust-bundle (deploy_nb2.py's trust input) writes the same release bundle and genesis EntryID as the dnb-tool built with
+// bridgeprofile (76d612b3f): the golden files are that binary's output on testdata/trust-base.json.
+func TestTrustBundleBytesArePinned(t *testing.T) {
+	dir := t.TempDir()
+	bundle, pin := filepath.Join(dir, "bundle.cbor"), filepath.Join(dir, "pin")
+	require.NoError(t, trustBundle([]string{"--trust-base", "testdata/trust-base.json", "--out", bundle, "--out-pin", pin}))
+	for got, want := range map[string]string{bundle: "testdata/trust-base.bundle.golden.cbor", pin: "testdata/trust-base.genesis.golden.entryid"} {
+		g, err := os.ReadFile(got)
+		require.NoError(t, err)
+		w, err := os.ReadFile(want)
+		require.NoError(t, err)
+		require.Equal(t, w, g, want)
+	}
+}
+
 func TestPolicyBodyEncodesEveryPartitionWidth(t *testing.T) {
 	prefix := "835818554e49434954595f42525f4147475f504152544954494f4e02"
 	for partition, tail := range map[uint32]string{7: "07", 23: "17", 24: "1818", 256: "190100", 1 << 16: "1a00010000"} {
