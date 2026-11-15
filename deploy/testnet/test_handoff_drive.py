@@ -220,6 +220,61 @@ class AdvanceResume(unittest.TestCase):
         self.assertNotIn('advance-epoch', [v for _, v in self.fake.calls])
 
 
+class ProofAuthority(FakeAuthority):
+    """An authority with a lineage pin (bft-core#1085): it answers lineagePinned, and advance-with-proof verifies (here: accepts) the bundles and
+    issues the next session in one order."""
+
+    def __init__(self, auth, retire=False):
+        super().__init__(auth)
+        self.retire, self.lineage = retire, 1
+
+    def exec_in(self, service, *command, binary=False):
+        verb = command[2]
+        if verb == 'status':
+            self.calls.append((service, verb))
+            return json.dumps({'rootEpoch': self.root_epoch, 'shardEpoch': self.shard_epoch, 'generation': self.generation, 'enrollmentComplete': True,
+                               'faulted': False, 'keyLost': False, 'lineagePinned': True, 'lineageEpoch': self.lineage})
+        if verb == 'advance-with-proof':
+            self.calls.append((service, verb, tuple(a for a in command if a.startswith('/network/handoff/q3-bundle-'))))
+            if self.retire:
+                return json.dumps({'steps': [{}], 'retired': True})
+            if self.root_epoch != 3:
+                self.root_epoch, self.shard_epoch, self.generation, self.lineage = 3, 2, self.generation + 2, 3
+                (self.auth / 'client.cred').write_text(f'session {self.generation}')
+            return json.dumps({'steps': [{}], 'advanced': True, 'sessionIssued': True})
+        return super().exec_in(service, *command, binary=binary)
+
+
+class AdvanceWithProof(unittest.TestCase):
+    run_entity, tearDown = AdvanceResume.run_entity, AdvanceResume.tearDown
+
+    def setUp(self):
+        AdvanceResume.setUp(self)
+        self.fake = ProofAuthority(self.auth)
+        self.drive.exec_in = self.fake.exec_in
+        self.drive.activation_bundles = lambda after: [Path(f'/x/q3-bundle-{e}.cbor') for e in range(after + 1, 4)]
+        self.drive.expect = lambda condition, what, detail='': (_ for _ in ()).throw(hd.rehearse.Failure(what)) if not condition else None
+
+    def test_a_pinned_authority_is_advanced_by_proof_in_one_order(self):
+        self.run_entity()
+        proofs = [c for c in self.fake.calls if c[1] == 'advance-with-proof']
+        self.assertEqual(proofs, [('authority1', 'advance-with-proof', ('/network/handoff/q3-bundle-2.cbor', '/network/handoff/q3-bundle-3.cbor'))],
+                         'every bundle after its lineage tip, in epoch order')
+        verbs = [c[1] for c in self.fake.calls]
+        self.assertNotIn('advance-epoch', verbs, 'the operator-trusted advance is not used')
+        self.assertNotIn('replace-session', verbs, 'the session comes with the proof advance')
+        self.assertEqual(self.shard, ['start'])
+        self.assertEqual((self.auth / 'client.cred.pre-epoch-3').read_text(), 'session 1')
+        self.run_entity()
+        self.assertEqual(len([c for c in self.fake.calls if c[1] == 'advance-with-proof']), 1, 'a finished entity is not advanced again')
+
+    def test_an_elected_entity_that_the_authority_retires_stops_the_drive(self):
+        self.fake.retire = True
+        with self.assertRaises(hd.rehearse.Failure):
+            self.run_entity()
+        self.assertEqual(self.shard, [])
+
+
 class Parallel(unittest.TestCase):
     def test_every_job_runs_at_once_and_a_failure_is_raised_after_all_finished(self):
         barrier, finished = threading.Barrier(3, timeout=5), []
