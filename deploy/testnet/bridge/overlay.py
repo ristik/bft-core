@@ -37,11 +37,14 @@ def hardened(**svc):
     return base
 
 
+IMAGE_ID = re.compile(r'sha256:[0-9a-f]{64}')
+
+
 def bridge_image(record, node_pins):
     """The verified bridge image of artifacts/bridge-images.json, refused unless its dnb-tool was built from the node images' bft pin: the lock-proof
     endpoint reads the validators' archives, so it must speak their layout (bft-core#1075)."""
     image = record.get('images', {}).get('bridge', '')
-    if not re.fullmatch(r'sha256:[0-9a-f]{64}', image):
+    if not IMAGE_ID.fullmatch(image):
         raise SystemExit('artifacts/bridge-images.json has no verified bridge image (build-bridge-image.py)')
     built = record.get('sources', {}).get('bft')
     if built != node_pins['bft']:
@@ -60,7 +63,12 @@ def main():
     n = manifest['validators']
     if not 1 <= a.archive_of <= n:
         raise SystemExit(f'--archive-of must be 1..{n}')
-    image = bridge_image(json.loads((HERE.parent / 'artifacts/bridge-images.json').read_text()), json.loads((HERE.parent / 'pins.json').read_text()))
+    # a deployed generation keeps its own bridge image (bridge-image.json, written by its deploy); only a new one takes the current record (#1092)
+    own = gen / 'bridge/bridge-image.json'
+    image = json.loads(own.read_text())['image'] if own.is_file() else \
+        bridge_image(json.loads((HERE.parent / 'artifacts/bridge-images.json').read_text()), json.loads((HERE.parent / 'pins.json').read_text()))
+    if not IMAGE_ID.fullmatch(image):
+        raise SystemExit(f'{own}: not an image ID')
     addr = json.loads((gen / 'bridge/bridge-addresses.json').read_text())
     i = a.archive_of
     services = {'lockproof': hardened(

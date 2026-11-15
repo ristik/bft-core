@@ -150,6 +150,106 @@ class B1Layout(unittest.TestCase):
                 root=svc['root%d'%i]['entrypoint']
                 self.assertIn('--q3-lane',root);self.assertIn('--b1-registry',root);self.assertEqual(root[root.index('--genesis-identities')+1],'/network/genesis-identities.json')
 
+class ImageTags(unittest.TestCase):
+    """bft-core#1092: images are tagged per pin and per ID, a tag is never moved, and nothing the package records or runs names an image by a tag."""
+    ID='sha256:'+'ab'*32; OTHER='sha256:'+'cd'*32
+    def test_mutable_images_are_found(self):
+        import imagetag
+        compose={'services':{'a':{'image':self.ID},'b':{'image':'mongo:7.0.45@sha256:'+'1'*64},'c':{'image':'tnops-node:verified'},
+                             'd':{'image':'prom/prometheus:v3.2.1'},'e':{'entrypoint':['x']}}}
+        self.assertEqual(imagetag.mutable_images(compose),['c','d'])
+        self.assertEqual(imagetag.immutable_tag('node','92ed0ce8c1ab',self.ID),'tnops-node:92ed0ce8c1ab-'+'ab'*6)
+    def test_generate_refuses_a_compose_with_a_tag(self):
+        with self.assertRaises(SystemExit) as e: generate.immutable({'services':{'rpc':{'image':'tnops-rpc:verified'},'root1':{'image':self.ID}}})
+        self.assertIn('rpc',str(e.exception))
+        ok={'services':{'root1':{'image':self.ID}}}
+        self.assertIs(generate.immutable(ok),ok)
+        source=(Path(__file__).parent/'generate.py').read_text()
+        self.assertEqual(source.count("write(out/'compose.yaml',immutable(topology("),2,'every compose.yaml the generator writes is checked')
+    def test_build_tags_by_id_and_never_moves_a_tag(self):
+        import imagetag
+        calls=[]; present={}; resolves={}
+        def run(cmd,check=False,capture_output=False,text=False,**kw):
+            calls.append(cmd)
+            if cmd[:2]==['docker','build']:
+                Path(cmd[cmd.index('--iidfile')+1]).write_text(self.ID+'\n')
+            if cmd[:3]==['docker','image','inspect']:
+                ref=cmd[-1]
+                if ref.startswith('sha256:'):   # the iidfile's ID resolves to itself (or, for a manifest digest, to the config ID)
+                    return subprocess.CompletedProcess(cmd,0,resolves.get(ref,ref)+'\n','')
+                return subprocess.CompletedProcess(cmd,0 if ref in present else 1,present.get(ref,''),'')
+            if cmd[:2]==['docker','tag']:
+                present[cmd[3]]=cmd[2]
+            return subprocess.CompletedProcess(cmd,0,'','')
+        with patch.object(imagetag.subprocess,'run',run):
+            image,tag=imagetag.build('node','92ed0ce8c1ab','ctx')
+            self.assertEqual((image,tag),(self.ID,'tnops-node:92ed0ce8c1ab-'+'ab'*6))
+            self.assertNotIn('-t',[w for c in calls if c[:2]==['docker','build'] for w in c],'no mutable tag at build time')
+            self.assertEqual(present,{tag:self.ID,'tnops-node:verified':self.ID})
+            present[tag]=self.OTHER   # the same tag on another image: refused, never moved
+            with self.assertRaises(SystemExit): imagetag.build('node','92ed0ce8c1ab','ctx')
+            present.clear(); resolves[self.ID]=self.OTHER   # a containerd manifest digest in the iidfile: it is not the local image's ID
+            with self.assertRaises(SystemExit) as e: imagetag.build('node','92ed0ce8c1ab','ctx')
+            self.assertIn('not a local image ID',str(e.exception))
+            self.assertEqual(present,{},'nothing tagged')
+        for bad in ('sha256:abc','registry/x@sha256:'+'1'*64,'tnops-node:verified'):
+            with self.assertRaises(SystemExit): imagetag.immutable_tag('node','92ed0ce8c1ab',bad)
+    def test_nothing_runs_an_image_through_a_tag(self):
+        here=Path(__file__).parent
+        for name in ('build-images.py','bridge/build-bridge-image.py','bridge/deploy_bridge.py','bridge/rehearse_bridge.py','bridge/bridge_pos.py','generate.py'):
+            source=(here/name).read_text()
+            self.assertNotIn(':verified',source,name)
+            self.assertNotRegex(source,r"\bTAG\b",name)
+        self.assertIn("'tags': tags",(here/'build-images.py').read_text())
+        self.assertIn("'tags': {'bridge': tag}",(here/'bridge/build-bridge-image.py').read_text())
+    def deploy_bridge(self):
+        import importlib.util
+        sys.path.insert(0,str(Path(__file__).parent/'bridge'))
+        spec=importlib.util.spec_from_file_location('deploy_bridge',Path(__file__).parent/'bridge/deploy_bridge.py'); db=importlib.util.module_from_spec(spec); spec.loader.exec_module(db)
+        return db
+    def test_the_bridge_tools_run_by_the_recorded_id(self):
+        db=self.deploy_bridge()
+        inspect=lambda rc: (lambda cmd,**kw: subprocess.CompletedProcess(cmd,rc,'',''))
+        with tempfile.TemporaryDirectory() as tmp:
+            art=Path(tmp)/'artifacts'; art.mkdir()
+            (Path(tmp)/'pins.json').write_text(json.dumps({'bft':'f'*40}))
+            # a record without 'tags' (written before #1092) still resolves by its ID
+            (art/'bridge-images.json').write_text(json.dumps({'sources':{'bft':'f'*40},'images':{'bridge':self.OTHER}}))
+            new=Path(tmp)/'tn-new'; (new/'bridge').mkdir(parents=True)
+            old=Path(tmp)/'tn-old'; (old/'bridge').mkdir(parents=True)
+            (old/'bridge/bridge-image.json').write_text(json.dumps({'image':self.ID}))
+            legacy=Path(tmp)/'tn-legacy'; (legacy/'bridge').mkdir(parents=True)
+            (legacy/'compose.bridge.yaml').write_text(json.dumps({'services':{'lockproof':{'image':'sha256:'+'ef'*32}}}))
+            with patch.object(db,'ARTIFACTS',art), patch.object(db.subprocess,'run',inspect(0)):
+                self.assertEqual(db.image(new),self.OTHER,'a generation being deployed takes the current record')
+                self.assertEqual(db.image(old),self.ID,'an older generation keeps its own image although a newer one is current')
+                self.assertEqual(db.image(legacy),'sha256:'+'ef'*32,'deployed before the record existed: its lock-proof image')
+                db.record_image(new,self.OTHER); db.record_image(new,self.ID)   # written once, at the deploy
+                self.assertEqual(json.loads((new/'bridge/bridge-image.json').read_text()),{'image':self.OTHER})
+                (old/'bridge/bridge-image.json').write_text(json.dumps({'image':'tnops-bridge:verified'}))
+                with self.assertRaises(SystemExit): db.image(old)
+            with patch.object(db,'ARTIFACTS',art), patch.object(db.subprocess,'run',inspect(1)):
+                with self.assertRaises(SystemExit) as e: db.image(new)
+                self.assertIn('not in the local image store',str(e.exception))
+        source=(Path(__file__).parent/'bridge/deploy_bridge.py').read_text()
+        self.assertIn('image(gen), *args]',source); self.assertIn('record_image(gen, bridge)',source)
+        for name in ('bridge/rehearse_bridge.py','bridge/bridge_pos.py'):
+            self.assertNotIn('bridge_image()',(Path(__file__).parent/name).read_text(),name)
+    def test_the_overlay_keeps_a_deployed_generations_image(self):
+        import importlib.util
+        spec=importlib.util.spec_from_file_location('overlay',Path(__file__).parent/'bridge/overlay.py'); ov=importlib.util.module_from_spec(spec); spec.loader.exec_module(ov)
+        with tempfile.TemporaryDirectory() as tmp:
+            gen=Path(tmp)/'tn-x'; (gen/'bridge').mkdir(parents=True); (gen/'network/handoff').mkdir(parents=True)
+            (gen/'manifest.json').write_text(json.dumps({'validators':4}))
+            (gen/'bridge/bridge-addresses.json').write_text(json.dumps({'BridgeVault':'0x'+'11'*20,'CFG':'0x'+'22'*32}))
+            (gen/'bridge/bridge-image.json').write_text(json.dumps({'image':self.ID}))
+            art=Path(tmp)/'artifacts'; art.mkdir(); (art/'bridge-images.json').write_text(json.dumps({'sources':{'bft':generate.PINS['bft']},'images':{'bridge':self.OTHER}}))
+            (Path(tmp)/'pins.json').write_text(json.dumps(generate.PINS))
+            with patch.object(ov,'HERE',Path(tmp)/'bridge'), patch.object(sys,'argv',['overlay.py',str(gen)]), patch('builtins.print'):
+                ov.main()
+            self.assertEqual(json.loads((gen/'compose.bridge.yaml').read_text())['services']['lockproof']['image'],self.ID)
+
+
 class UtbProfile(unittest.TestCase):
     """P1 live UTB source (briefs/pos-utb-live-source-plan.md, step 1): every root, shard node and the aggregator get the signed-history profile with the SAME pin,
     which is passed as its own argument next to the mounted genesis entry; without a pin the package is exactly the one without the profile."""
