@@ -253,7 +253,8 @@ h3_restart_roots() {
     # the others start CONCURRENTLY (m2_start_root waits 2-3 s per root for its listener, so one after the other the roots before the last could form the quorum and run the
     # switch while the last one is still starting). Any four of five can make a quorum, so the start of the last root is within the same few hundred milliseconds as the others'.
     local first pids=() rc=0 p; first=$(h3_first_root)
-    m2_start_root "$first" "$epoch" "" || return 1
+    # H3_BOOT_ROOT: a running root the restarted ones bootstrap to (roots that switched into the epoch in process, bft-core#1086)
+    m2_start_root "$first" "$epoch" "${H3_BOOT_ROOT:+$(m2_root_addr "$H3_BOOT_ROOT")}" || return 1
     for i in $H3_ROOTS; do
       [ "$i" != "$first" ] || continue
       ( m2_start_root "$i" "$epoch" "$(m2_root_addr "$first")" ) & pids+=($!)
@@ -264,7 +265,7 @@ h3_restart_roots() {
     return
   fi
   for i in $H3_ROOTS; do
-    prev=$(echo "$H3_ROOTS" | tr ' ' '\n' | grep -vx "$i" | head -1)
+    prev=${H3_BOOT_ROOT:-$(echo "$H3_ROOTS" | tr ' ' '\n' | grep -vx "$i" | head -1)}
     boot=$(m2_root_addr "$prev")
     stop_pidfile "test-nodes/root$i/pid" 'ubft root-node' || return 1
     for _ in $(seq 1 50); do lsof -nP -iTCP:"$(m2_rpc_port "$i")" -sTCP:LISTEN >/dev/null 2>&1 || break; sleep 0.2; done
