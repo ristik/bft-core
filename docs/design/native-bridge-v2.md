@@ -356,7 +356,8 @@ chain-authenticated historical authority.
 
 Token, predicate, transfer, certification and inclusion-proof wire formats are the SDK's, unchanged (`protocol/interop.md`
 "SDK wire" lists them byte for byte, with the strict unlock-recovery, time and refresh rules of protocol 7, which carry
-over unchanged). Owners are signature predicates; the first burn is terminal. For reading this document:
+over unchanged, except the NB2 unlock restriction of Section 14.4: recovery IDs 0 and 1 only). Owners are signature
+predicates; the first burn is terminal. For reading this document:
 
 ```
 P     = tag(39032, [1, b(encode_uint(type)), b(params)])    // type 1: signature, params key33; type 2: burn, params H_U(R)
@@ -665,6 +666,10 @@ Verify the token's full provenance before burning. Construct, persist and certif
 exact certified result before reporting success. After a timeout or an ambiguous submission, look for `Paid(eta)`
 before retrying; refresh stale history; never alter the certified burn or its index.
 
+When receiving a token intended for return, verify its whole lineage against the NB2 unlock restriction (Section
+14.4) and refuse or flag it if any unlock uses recovery ID 2 or 3. Otherwise a previous owner could hand the recipient
+a token that can never be returned.
+
 ### 12.7 Wallet RPC contract (NB2-06, #1102)
 
 A wallet builds every piece of evidence from the ordinary execution RPC behind the deployment's public gateway (one URL, JSON-RPC 2.0 POST, one request per call: no batches). There is no bridge-specific service. Nothing read here is trusted. Each item is verified offline (Sections 6.2, 12.2, 12.3), and a provider that withholds data can only delay the wallet.
@@ -821,8 +826,14 @@ Every rule has one name. NB2-03 (#1099) uses `Err<Name>` as the Go sentinel; the
 
 `Unlock` and `MinterKey` are dropped: under the frozen unlock order (recovery with the supplied ID, then key equality)
 a recovered signature always verifies, and no input reaches either. The scalar-level checks (0, 1, n-1, n, 2^256-1)
-keep their names (`UnlockScalars`, `UnlockRecovery`). On chain, recovery IDs 2 and 3 are always `UnlockKey`, because
-`ecrecover` takes only parity 0/1.
+keep their names (`UnlockScalars`, `UnlockRecovery`).
+
+**NB2 unlock restriction (versioned, protocol 9 profile artifact 5).** An NB2-eligible token's unlock signatures
+must all use recovery ID 0 or 1. Recovery IDs 2 and 3 are refused with `UnlockRecovery` in every implementation: wallets,
+provenance and token admission in the plug-ins, the Go reference and the Solidity verifier. This deliberately narrows
+the pinned SDK's unlock relation (which admits IDs 0..3) for bridge eligibility only; it is not unchanged SDK
+semantics and not an error-name mapping. A token whose lineage contains an ID 2 or 3 unlock remains a valid native
+token but cannot be returned through this bridge.
 
 **Wallet and on-chain names.** `SealEpoch` and `NoEntryForEpoch` are wallet-side only. On chain a failed authority
 verdict is `QuorumNotMet` for an aggregator UC and `DepositUC` for the EVM UC (Section 11.3).
@@ -836,8 +847,11 @@ verdict is `QuorumNotMet` for an aggregator UC and `DepositUC` for the EVM UC (S
 
 ### 14.6 Wallet refusals (no on-chain counterpart)
 
-`SealReceipt` (a seal receipt fails Section 6.2 steps 2 to 5 for `SegmentSealed`; the inner rule keeps its Section
-14.2 name, `DepositUC` for every EVM-certificate failure), `SegmentLog` (a `SegmentSealed` log has the wrong length,
+`SealReceipt` (a seal receipt fails Section 6.2 steps 2 to 5 for `SegmentSealed`; preserve the inner rule, including
+retryable `NoEntryForEpoch` when the wallet lacks the seal epoch after the earlier per-UC checks pass. Every other
+EVM-certificate failure has inner rule `DepositUC`. On `SealReceipt` wrapping `NoEntryForEpoch`, extend the
+authenticated trust-base history and retry; do not classify the receipt as invalid solely because that entry is
+unavailable), `SegmentLog` (a `SegmentSealed` log has the wrong length,
 order or chain link), `CapacityPreflight`, `CapacityExceeded`, `ImplausibleIndex` (on a `stateReadOnly` deployment, a
 `state()` read whose `c` lies outside `[verified, verified + maxJump]`, `verified` the wallet's last verified index and
 `maxJump` 64 by default; a `state()` read on a deployment without `stateReadOnly` is not evidence at all and is
@@ -856,10 +870,16 @@ identically, for `SegmentSealed` seal receipts:
 - an altered ShardConfHash without a new valid seal (`DepositUC`);
 - a UC of the wrong partition, the wrong shard, or another root deployment (`DepositUC`);
 - InputRecord tampering (`DepositUC`) and header tampering (`DepositHeader`);
-- the old arity-7 `DepositProof` with a PDR, rejected (`Shape`).
+- the old arity-7 `DepositProof` with a PDR, rejected (`Shape`);
+- an otherwise valid UC from an epoch absent from the supplied bundle: `NoEntryForEpoch` in wallets (retryable; for a
+  seal receipt, `SealReceipt` wrapping `NoEntryForEpoch`), `DepositUC` on chain; and a bad root together with an
+  absent epoch, which fails on the root first (Section 11.3 order).
 
-Where the wallet name and the on-chain name of a rule differ (the authority verdict of Section 11.3, recovery IDs 2
-and 3), a vector carries both: its rule name and an `onChainError` field with the on-chain name.
+Where a rejected authority verdict has different wallet and on-chain names under Section 11.3, a vector carries its
+wallet rule name and an `onChainError` field containing the on-chain name. An error-name mapping does not authorize an
+acceptance difference. Include primitive recovery vectors for valid and invalid recovery IDs 2 and 3 (a valid one
+recovers the source key under the SDK relation), each expecting the same refusal, `UnlockRecovery`, in every
+implementation (Section 14.4), and a token vector whose lineage contains such an unlock, refused the same way.
 
 It MUST also contain:
 
@@ -970,7 +990,8 @@ mirroring Section 11.1; boolean acceptance is unchanged.
 | Astra ruling 2026-11-15: drop the PDR (`briefs/astra-ruling-nb2-drop-pdr-answer.md`) | Section 6.1 (arity 6), 6.2 step 2 and the deployment-binding paragraph, 11.3, 12.2, 14.2, 14.7; protocol 9 |
 | Astra spec review 2026-11-15 (`briefs/astra-review-1110-nb2-spec-answer.md`) | F1 §12.5, §14.7; F2 §4.1; F3 §3, §14.7, profile `nativeCodec`; F4 plug-ins `protocol/trust-base.md`, §11.3; F5 §5.1, §12.1; F6 §2, §15; F7 §9.2, §10, §15; F8 §17 and the model; parser contract §3 (depth), §6.1–6.2 (header, `justificationBytes`) |
 | NB2-06 wallet RPC contract (#1102) | §12.7, `EvidencePruned` in §14.6 |
-| NB2-05 on-chain verifier (#1101) | §11.2 (per-UC order, batching), §11.3 (authority verdict), §14.4 (on-chain names, `UnlockKey`), §14.7 (`onChainError`) |
+| NB2-05 on-chain verifier (#1101) | §11.2 (per-UC order, batching), §11.3 (authority verdict), §14.4 (on-chain names), §14.7 (`onChainError`) |
+| Astra delta review 2026-11-15 (`briefs/astra-review-1110-r2-answer.md`) | P2-1: §7, §14.4 (NB2 unlock restriction, owner ruling), §12.6, §14.7; P2-2: §14.6 `SealReceipt`, §14.7 |
 | NB2-02 bake-off (#1098, unicity-pos-contracts#80) | Preamble, §4.1 (`K`, `B`, admitted set), §9.2, §10, §10.4 (sort), §12.4 (`gasReserve`), §14.7, §15 (values, measured table, capacity) |
 | NB2-03 reference defaults (#1099) | §6.2 (`DepositUC` scope, header), §3 (amount names, depth), §4.1 (test set, asset/ty/aid, `BadConfig` indices), §11.1 (reentrancy), §11.2 (check order), §14.4, §14.6 (`ImplausibleIndex`), §14.7 (vector file) |
 | Corrections confirmed (30M test profile, encoded-length limit, `2K - 1` scan, high index can strand) | Sections 4.3 (`userGasLimit` from the production profile), 12.5, 12.4, 12.2 |
