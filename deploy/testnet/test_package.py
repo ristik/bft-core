@@ -292,6 +292,17 @@ class UtbProfile(unittest.TestCase):
         generate.check_authorities_unchanged(self.boot(4,self.PIN),self.topo(4,self.PIN),4)
         with self.assertRaisesRegex(RuntimeError,'never recreated'):
             generate.check_authorities_unchanged(self.boot(4,None),self.topo(4,self.PIN),4)
+        # astra on #1090: the whole service, not only its arguments
+        import copy
+        for field,change in (('image',lambda svc: svc.__setitem__('image','sha256:'+'b'*64)),
+                             ('volumes',lambda svc: svc.__setitem__('volumes',[v.replace('./network:','./network-other:') for v in svc['volumes']])),
+                             ('command',lambda svc: svc.__setitem__('command',['--extra'])),
+                             ('environment',lambda svc: svc.__setitem__('environment',{'UBFT_LINEAGE_UTB_GENESIS':'false'})),
+                             ('entrypoint',lambda svc: svc['entrypoint'].append('--recovery-unchecked-advance'))):
+            final=copy.deepcopy(self.topo(4,self.PIN))
+            change(final['services']['authority3'])
+            with self.assertRaisesRegex(RuntimeError,r"authority3 .*\b"+field+r"\b",msg=field):
+                generate.check_authorities_unchanged(self.boot(4,self.PIN),final,4)
         source=(Path(generate.__file__)).read_text()
         self.assertRegex(source,r"boot=immutable\(topology\([^\n]*utb=utb_pin",'main() starts the authorities from a compose that carries the UTB pin')
         self.assertIn('check_authorities_unchanged(boot,final,a.validators)',source)

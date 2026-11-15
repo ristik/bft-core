@@ -204,9 +204,10 @@ func FixturePDR(network types.NetworkID, partition types.PartitionID, shard type
 
 // RawLog is one EVM log.
 type RawLog struct {
-	Address [20]byte
-	Topics  [][32]byte
-	Data    []byte
+	Address   [20]byte
+	Topics    [][32]byte
+	RawTopics [][]byte // replaces Topics when set: topics of any width, for malformed-log vectors
+	Data      []byte
 }
 
 // RawReceipt is one receipt's consensus fields; Type 0 is legacy. Status is the raw status string (0x01 for success).
@@ -227,6 +228,9 @@ func (r *RawReceipt) Encode() []byte {
 		for j, t := range l.Topics {
 			topics[j] = bytes.Clone(t[:])
 			bloom.Add(t[:])
+		}
+		if l.RawTopics != nil {
+			topics = l.RawTopics
 		}
 		logs[i] = []any{l.Address[:], topics, l.Data}
 	}

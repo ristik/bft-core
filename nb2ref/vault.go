@@ -152,7 +152,7 @@ func (v *Vault) Deposit(value *big.Int, firstOwner []byte, rho [32]byte) error {
 	}
 	room := new(big.Int).Sub(v.Cfg.Qmax, v.Q())
 	if value.Cmp(room) > 0 {
-		if err := fail(ErrLiabilityCap); err != nil {
+		if err := argsErr(ErrLiabilityCap, v.Q(), value, v.Cfg.Qmax); err != nil {
 			return err
 		}
 	}
@@ -207,11 +207,12 @@ func (v *Vault) Redeem(claimedEta [32]byte, claimedStart uint64, history []byte,
 	return res, nil
 }
 
-// AmountError carries the arguments of LiabilityCap, LiabilityUnderflow, FutureIndex, StaleEndpoint, BadHistoryLength,
-// AlreadyPaid and VerifierRefused for the vectors.
+// ArgsError carries the arguments of LiabilityCap, LiabilityUnderflow, FutureIndex, StaleEndpoint, BadHistoryLength,
+// AlreadyPaid and VerifierRefused: Vals as typed values (for the ABI revert data), Args as their vector strings.
 type ArgsError struct {
 	Rule *Rule
 	Args []string
+	Vals []any
 }
 
 func (e *ArgsError) Error() string { return e.Rule.Error() + fmt.Sprint(e.Args) }
@@ -221,7 +222,7 @@ func argsErr(r *Rule, args ...any) error {
 	if disabled[r] {
 		return nil
 	}
-	out := &ArgsError{Rule: r}
+	out := &ArgsError{Rule: r, Vals: args}
 	for _, a := range args {
 		switch x := a.(type) {
 		case [32]byte:
@@ -305,7 +306,11 @@ func (v *Vault) redeem(eta [32]byte, a uint64, history []byte, ver VerifierCall,
 			}
 		}
 	}
-	// 5. The verifier.
+	// 5. The verifier. A revert of at most MaxVerifierRevert bytes is VerifierRefused(revertData); a longer revert, like return data
+	// that is not exactly 192 canonical bytes, is VerifierBadReturn (the vault never copies unbounded revert data).
+	if ver.Revert != nil && len(ver.Revert) > MaxVerifierRevert {
+		return nil, ErrVerifierBadReturn
+	}
 	if ver.Revert != nil {
 		disabledRefused := disabled[ErrVerifierRefused]
 		delete(disabled, ErrVerifierRefused)
@@ -418,6 +423,9 @@ func (v *Vault) seal(p int) error {
 	v.A = put(put(v.A, shiftC, bitsC, new(big.Int).SetUint64(c+1)), shiftM, bitsM, new(big.Int))
 	return nil
 }
+
+// MaxVerifierRevert is MAX_VERIFIER_REVERT, the longest verifier revert the vault relays as VerifierRefused(revertData).
+const MaxVerifierRevert = 1024
 
 // decodeVerdictABI accepts exactly 192 canonical bytes: uint64 and address words with zero high bytes.
 func decodeVerdictABI(b []byte) (*Verdict, bool) {

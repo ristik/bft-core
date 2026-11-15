@@ -68,13 +68,10 @@ func (t *TrustInput) bind(c *Config) error {
 	return nil
 }
 
-// entryFor selects the entry of the seal's epoch: another network is SealNetwork; an epoch after the latest held entry is
-// NoEntryForEpoch (retryable); an epoch before the genesis, or a root round outside the epoch's interval
-// [start_e, start_{e+1}), is SealEpoch.
+// entryFor selects the entry of the seal's epoch (the network was checked first): an epoch after the latest held entry is
+// NoEntryForEpoch (retryable); an epoch before the genesis, or a root round outside the epoch's interval [start_e,
+// start_{e+1}), is SealEpoch.
 func (t *TrustInput) entryFor(seal *types.UnicitySeal) (*types.RootTrustBaseV2, error) {
-	if seal == nil || seal.NetworkID != t.Network() {
-		return nil, ErrSealNetwork
-	}
 	genesis, tip := t.Entries[0].Epoch, t.Entries[len(t.Entries)-1].Epoch
 	switch {
 	case seal.Epoch > tip:
@@ -110,13 +107,13 @@ func decodeUC(raw []byte) (*types.UnicityCertificate, error) {
 	return &uc, nil
 }
 
-// ucCheck is one UC verification: the entry of its seal epoch, its structure for the expected partition and shard
-// (CertStructure), the shard and unicity tree folds to the seal hash (SealRoot) and the seal quorum under that entry
-// (QuorumNotMet).
+// ucCheck is one UC verification, in the order the on-chain 0x0100 primitive can mirror (NB2-05 ruling 2026-11-15): the seal
+// network (SealNetwork), the structure for the expected partition and shard (CertStructure), the shard and unicity tree folds
+// to the seal hash (SealRoot), then the entry of the seal epoch and its interval (NoEntryForEpoch, SealEpoch) and the quorum
+// under that entry (QuorumNotMet). On chain the last three are one boolean.
 func (t *TrustInput) ucCheck(uc *types.UnicityCertificate, partition types.PartitionID, shard types.ShardID) error {
-	entry, err := t.entryFor(uc.UnicitySeal)
-	if err != nil {
-		return err
+	if uc.UnicitySeal == nil || uc.UnicitySeal.NetworkID != t.Network() {
+		return ErrSealNetwork
 	}
 	// No expected configuration hash is supplied (nil), but the UC's own 32-byte ShardConfHash stays inside the authenticated
 	// shard-tree leaf below, with its InputRecord and TRHash.
@@ -127,16 +124,20 @@ func (t *TrustInput) ucCheck(uc *types.UnicityCertificate, partition types.Parti
 	}
 	str, err := uc.ShardTreeCertificate.ComputeCertificateHash(uc.InputRecord, uc.TRHash, uc.ShardConfHash, stdcrypto.SHA256)
 	if err != nil {
-		return failf(ErrCertStructure, "%v", err)
+		return detail(ErrCertStructure, "%v", err)
 	}
 	utr, err := uc.UnicityTreeCertificate.EvalAuthPath(str, stdcrypto.SHA256)
 	if err != nil {
-		return failf(ErrCertStructure, "%v", err)
+		return detail(ErrCertStructure, "%v", err)
 	}
 	if !bytes.Equal(utr, uc.UnicitySeal.Hash) {
 		if err := fail(ErrSealRoot); err != nil {
 			return err
 		}
+	}
+	entry, err := t.entryFor(uc.UnicitySeal)
+	if err != nil {
+		return err
 	}
 	if err := uc.UnicitySeal.Verify(quorumweight.Checked(entry)); err != nil {
 		return failf(ErrQuorumNotMet, "%v", err)
@@ -158,7 +159,7 @@ func (t *TrustInput) VerifyEVMUC(raw []byte, c *Config) (*types.UnicityCertifica
 	}
 	if err := t.ucCheck(uc, types.PartitionID(c.EVMPartition), shard); err != nil {
 		if RuleOf(err) == ErrNoEntryForEpoch {
-			return nil, err
+			return nil, wrap(ErrNoEntryForEpoch, ErrDepositUC) // retryable; on chain it is DepositUC
 		}
 		if e := fail(ErrDepositUC); e != nil {
 			return nil, wrap(ErrDepositUC, err)
