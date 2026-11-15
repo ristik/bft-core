@@ -94,6 +94,10 @@ type Server struct {
 	hasSession bool
 	credential []byte
 
+	// advance is the authority's AdvanceWithProof; a test of the publication-versus-cleanup interleaving replaces it (it is never set
+	// outside this package's tests)
+	advance func(context.Context, []byte) (signingauthority.AdvanceResult, error)
+
 	closeOnce sync.Once
 	closed    chan struct{}
 	// lifetime is the parent of every dispatched operation, and Close cancels it. Closing a
@@ -422,7 +426,11 @@ func (s *Server) operatorOp(ctx context.Context, operation op, payload []byte) (
 		// is the signing guard: its publication bumps the generation, which fences every session up to it whatever the server holds. The
 		// server then drops the credential it admits only if that session is one the publication fenced (a generation at or below the
 		// result's); a session a concurrent replacement issued after the publication is newer and is kept.
-		res, err := s.authority.AdvanceWithProof(ctx, payload)
+		advance := s.authority.AdvanceWithProof
+		if s.advance != nil {
+			advance = s.advance
+		}
+		res, err := advance(ctx, payload)
 		if err != nil {
 			s.log.Warn("refusing an activation proof", slog.String("err", err.Error()))
 			return nil, err
