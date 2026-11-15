@@ -135,7 +135,8 @@ Limits that stay visible:
   Unchanged SDK tags: `39032` predicate, `39041` mint, `39045` transfer, `39031` certification data, `39040` token,
   `39033` inclusion proof, `39050` value, `39044` split justification, `39046` split manifest. The protocol 6/7 tags
   `39048` and `39049` are rejected wherever a v2 structure is expected.
-- `NATIVE_BRIDGE_PROTO_VERSION = 8`. Every structure below that carries a version carries `1`.
+- `NATIVE_BRIDGE_PROTO_VERSION = 9`. Every structure below that carries a version carries `1`. (Protocol 8 was the
+  first draft of this profile; its arity-7 `DepositProof` with a PDR is rejected, never accepted alongside.)
 
 ## 4. Configuration and domain
 
@@ -259,12 +260,13 @@ The vault never computes `salt_n` or `id_n`.
 
 ```
 J = tag(39051, [1, b(D), n, b(r), DepositProof])
-DepositProof = [1, b(evmPDR), b(evmUC), b(headerRLP), txIndex, logIndex, [b(receiptNodeRLP), ...]]
+DepositProof = [1, b(evmUC), b(headerRLP), txIndex, logIndex, [b(receiptNodeRLP), ...]]
 ```
 
-`J` has body arity 5 and `DepositProof` arity 7; `DepositProof` is inline, not byte-string wrapped. `n`, `txIndex`
-and `logIndex` are uints (`n` in `[1, 2^56-1]`, indices below `2^32`). `evmPDR` and `evmUC` are complete canonical
-native encodings (PartitionDescriptionRecord, UnicityCertificate). The receipt is not carried separately: it is the
+`J` has body arity 5. `DepositProof` has arity 6 and is inline, not byte-string wrapped; any other arity or version,
+including the arity-7 protocol 8 draft that carried a PDR, is rejected (`Shape`, `Version`). `n`, `txIndex` and
+`logIndex` are uints (`n` in `[1, 2^56-1]`, indices below `2^32`). `evmUC` is the complete canonical native
+UnicityCertificate encoding. The index, header and receipt bounds and rules below are unchanged. The receipt is not carried separately: it is the
 value of the final node of the receipt-trie path. The same `DepositProof` container, with the `SegmentSealed` event,
 is the **seal receipt proof** of Section 12.2.
 
@@ -274,13 +276,17 @@ The root mint is the SDK mint `M = tag(39041, [2, network, P0, b(salt_n), b(ty),
 ### 6.2 Verification (wallet, recipient and on-chain verifier alike)
 
 Decode strictly and bound before any cryptography (bounds in the profile JSON: `justificationBytes` 65536,
-`ucBytes` 16384, `pdrBytes` 16384, `headerBytes` 2048, `receiptNodes` 65, `receiptBranchNodeBytes` 1024,
+`ucBytes` 16384, `headerBytes` 2048, `receiptNodes` 65, `receiptBranchNodeBytes` 1024,
 `receiptLeafNodeBytes` 49152). Then, in order:
 
 1. `J.D == D` (`MintDomain`).
-2. Verify `evmUC` under the historical authority of its seal epoch (Section 11.3), for partition `evmPartition` and
-   shard `evmShard` (`DepositUC`). `H_U(evmPDR)` equals the UC's shard configuration hash and the PDR epoch equals the
-   input record epoch (`DepositPDR`).
+2. Verify `evmUC` under the authenticated historical root authority of its own seal epoch (Section 11.3), for exactly
+   Γ.`evmPartition` and Γ.`evmShard` (`DepositUC`). No independently expected shard-configuration hash is supplied.
+   The UC's own 32-byte ShardConfHash MUST remain part of the authenticated shard-tree leaf, together with its
+   InputRecord and TRHash; verify the complete shard/unicity paths and seal. All certificate structural, network,
+   epoch-interval and quorum checks remain mandatory. No PDR is supplied and no PDR-to-InputRecord epoch comparison
+   is performed. (An implementation that calls a UC verifier with a nil expected hash must still hash the UC's actual
+   ShardConfHash into the leaf; it never substitutes nil or zero for it.)
 3. `H_E(headerRLP) == UC.InputRecord.blockHash` and `header.stateRoot == UC.InputRecord.hash`, pinned header encoding
    (`DepositHeader`). This is the certificate of the block that **executed** the deposit, not of its parent.
 4. Verify the path under `header.receiptsRoot` with key `RLP(txIndex)`: canonical nodes, hash or embedded references,
@@ -298,6 +304,14 @@ Decode strictly and bound before any cryptography (bounds in the profile JSON: `
 The vault address and the immutable deployment are authenticated by `D` (which binds `vault20` and `chainId`) and by
 the manifest's runtime code hash; Cancun forbids redeploying different code at an address, so no per-receipt code
 proof is carried. An RPC log listing or a transaction inclusion proof alone is never deposit evidence.
+
+**Deployment binding and chain continuity.** Acceptance relies on the authenticated deployment binding Γ's root
+genesis, partition/shard and execution genesis to one continuous EVM history, whose authorized assignment changes
+preserve its execution identity and state. A configuration rotation does not change the authoritative vault address
+or invalidate earlier certified receipts. A chain reset or replacement is a new authenticated deployment/domain, not a
+continuation of this vault. D alone does not prove execution ancestry. Wallets MUST authenticate this deployment
+binding and its pinned vault code as required by Sections 4.3 and 12.1; the on-chain verifier uses the corresponding
+chain-authenticated historical authority.
 
 ## 7. Circulation and split lineage
 
@@ -519,7 +533,8 @@ epoch, by the upstream seal rule, as in protocol 7 (`protocol/trust-base.md` in 
 threshold `floor(2W/3) + 1` of that entry, root round inside the epoch's interval, an unknown signer or a non-canonical
 signature counts zero. Wallets hold the history and retry `NoEntryForEpoch`. On chain the verifier reads the same
 history from the chain's permanent seal registry through the generic certificate primitive, at any certificate age.
-A later rotation never invalidates an earlier certificate.
+A later rotation never invalidates an earlier certificate. The deployment-binding and chain-continuity assumption of
+Section 6.2 applies to every EVM UC judged here: deposit receipts and seal receipts alike.
 
 ## 12. Wallet rules that affect safety
 
@@ -532,7 +547,8 @@ the first owner. Submit `deposit`. Keep the deposit transaction hash; build `J` 
 
 Before burning, the wallet obtains the newest `SegmentSealed(j)` receipt it can, as a `DepositProof` container whose
 log is `SegmentSealed` (topics `[topic0(SegmentSealed), u256(j)]`, data per Section 13.2) from `vault20`, and verifies
-it offline exactly as Section 6.2 steps 2 to 5. It signs `a = j + 1` and keeps `headAfter = H_{j+1}` as the starting
+it offline exactly as Section 6.2 steps 2 to 5, under the same UC rule (no PDR, the UC's own ShardConfHash in the
+authenticated leaf, exact Γ partition and shard) and the same deployment-binding assumption. It signs `a = j + 1` and keeps `headAfter = H_{j+1}` as the starting
 head for a later redemption. If it holds no seal receipt, it signs `a = 0` (starting head `H_0`, computed).
 
 - The index can never be in the future: `c` never decreases and the receipt proves `c >= j + 1`.
@@ -650,7 +666,7 @@ Every rule has one name. NB2-03 (#1099) uses `Err<Name>` as the Go sentinel; the
 
 ### 14.2 Deposit evidence (Section 6.2)
 
-`MintDomain`, `DepositUC`, `DepositPDR`, `DepositHeader`, `ReceiptPath`, `ReceiptType`, `ReceiptStatus`, `LogIndex`,
+`MintDomain`, `DepositUC`, `DepositHeader`, `ReceiptPath`, `ReceiptType`, `ReceiptStatus`, `LogIndex`,
 `LogEmitter`, `LogTopics`, `LogData`, `SecretOpening`, `MintSalt`, `MintType`, `MintOwner`, `MintData`, and
 `MintReason` (the root mint's reason is not `tag(39051, ...)`).
 
@@ -688,6 +704,19 @@ Every rule has one name. NB2-03 (#1099) uses `Err<Name>` as the Go sentinel; the
 `SealReceipt` (a seal receipt fails Section 6.2 steps 2 to 5 for `SegmentSealed`), `SegmentLog` (a `SegmentSealed`
 log has the wrong length, order or chain link), `CapacityPreflight`, `CapacityExceeded`, `ImplausibleIndex` (a
 `stateReadOnly` read jumps beyond the wallet's verified bound).
+
+### 14.7 Required vectors (NB2-03, #1099)
+
+Besides one isolated negative vector per rule above, the vector file MUST contain, for deposit receipts and,
+identically, for `SegmentSealed` seal receipts:
+
+- valid receipts certified before and after an authorized validator rotation of the EVM shard (different
+  ShardConfHash and IR epoch), both accepted, each judged under its own seal epoch's historical authority, never
+  the latest committee;
+- an altered ShardConfHash without a new valid seal (`DepositUC`);
+- a UC of the wrong partition, the wrong shard, or another root deployment (`DepositUC`);
+- InputRecord tampering (`DepositUC`) and header tampering (`DepositHeader`);
+- the old arity-7 `DepositProof` with a PDR, rejected (`Shape`).
 
 ## 15. Parameters left for #1098, and open owner decisions
 
@@ -753,6 +782,7 @@ CBOR, so it is not a vector suite (NB2-03, #1099, produces those) and says nothi
 | Note: the model is not saved | Section 17, `docs/design/models/nb2_segments.py` |
 | Note: gas-limit reserve as a number | Section 12.4, `gasReserve` 620,000 (PARAM) |
 | Note: check order of redeem step 3 | Section 11.1: historical proofs (step 3) before the recent scan (step 4); the order is frozen so errors classify deterministically |
+| Astra ruling 2026-11-15: drop the PDR (`briefs/astra-ruling-nb2-drop-pdr-answer.md`) | Section 6.1 (arity 6), 6.2 step 2 and the deployment-binding paragraph, 11.3, 12.2, 14.2, 14.7; protocol 9 |
 | Corrections confirmed (30M test profile, encoded-length limit, `2K - 1` scan, high index can strand) | Sections 4.3 (`userGasLimit` from the production profile), 12.5, 12.4, 12.2 |
 
 ## 19. Deferred and dropped alternatives
