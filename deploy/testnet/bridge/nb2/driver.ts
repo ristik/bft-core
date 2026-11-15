@@ -533,8 +533,17 @@ async function verdicts(w: Wallet, labels: string[]): Promise<void> {
   for (const l of labels) {
     const ev = Uint8Array.from(readFileSync(evidenceFile(l)));
     const ts = await tsVerdict(w, ev);
-    const sol = await solidityVerdict(lane.verifier, pins.gamma, ev);
-    res[l] = { ts, solidity: sol, equal: ts.verdict !== undefined && ts.verdict === sol.verdict, file: `evidence/${l}.cbor` };
+    let sol = await solidityVerdict(lane.verifier, pins.gamma, ev);
+    // a burn just certified may refer to a root seal the EVM chain's registry has not imported yet: the on-chain verdict is then
+    // QuorumNotMet (indistinguishable from a bad quorum). Record the first answer and how long the registry took.
+    const first = sol;
+    const t0 = Date.now();
+    while (sol.verdict === undefined && ts.verdict !== undefined && Date.now() - t0 < 60_000) {
+      await sleep(1000);
+      sol = await solidityVerdict(lane.verifier, pins.gamma, ev);
+    }
+    res[l] = { ts, solidity: sol, firstSolidity: first, secondsToAccept: sol.verdict !== undefined && first.verdict === undefined ? (Date.now() - t0) / 1000 : 0,
+      equal: ts.verdict !== undefined && ts.verdict === sol.verdict, file: `evidence/${l}.cbor` };
     log(`  ${l}: plug-in ${ts.verdict ? ts.verdict.slice(0, 18) + '..' : ts.rule}, verifier ${sol.verdict ? sol.verdict.slice(0, 18) + '..' : sol.rule}`);
   }
   out(`verdicts-${labels.join('-')}`, res);
@@ -669,6 +678,8 @@ async function replay(w: Wallet, label: string): Promise<void> {
   // the best attempt a submitter could make without a valid gap proof: the current endpoint with every segment's proof taken from the
   // gap next to eta (the wallet's builder would refuse), and the zero-history claim at the burn's own index
   res.zeroHistory = await simulateRule(w.signer.address, redeemCalldata(evidence, eta, a, new Uint8Array()), 10_000_000n);
+  // the wallet's own history builder over the public segment logs a .. c-1 (what a fresh wallet holding this burn would run)
+  if ((st.segment as bigint) > a) res.historyPaidInSegment = (await segmentsOf(w, rec, a, st.segment as bigint, eta)).paid;
   if (evicted) {
     const forged = await forgedHistory(w, rec, eta, a, st.segment as bigint);
     res.forgedGapProof = await simulateRule(w.signer.address, redeemCalldata(evidence, eta, a, forged), 10_000_000n);
@@ -685,6 +696,21 @@ async function segmentOfPayment(rec: ReturnRecord): Promise<bigint> {
   // state(): deposits, segment, population, outstanding, head, previousHead; the payment went into the segment current before it,
   // or sealed it (population K - 1 before the payment)
   return BigInt(hx(st.subarray(32, 64)));
+}
+
+/** The checked segment logs a .. c-1 and where the wallet's builder finds `eta` paid (null: absent from every sealed segment). */
+async function segmentsOf(w: Wallet, rec: ReturnRecord, a: bigint, c: bigint, eta: Uint8Array): Promise<{ paid: bigint | null }> {
+  const { buildHistory, checkSegmentLog } = await import('../../../packages/native-bridge-plugin/src/nb2/segment.js');
+  const logs = await w.bridge.evm.segmentLogs(cfg.vault, big(rec.fromBlock), a, c);
+  const segs = [];
+  let before = unhex(rec.startHead);
+  for (const l of logs) {
+    const sg = checkSegmentLog(w.bridge.domain, cfg.K, BigInt(hx(l.topics[1])), before, l.data);
+    segs.push(sg);
+    before = sg.after;
+  }
+  const r = buildHistory(segs, eta, a, c, unhex(rec.startHead));
+  return { paid: r.paid === null ? null : BigInt(r.paid) };
 }
 
 /** A history whose every gap proof is the honest proof of a neighbouring identifier: it folds to some root but not the stored one. */

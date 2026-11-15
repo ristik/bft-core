@@ -313,7 +313,7 @@ class NB2Rehearsal(Rehearsal):
                     f'the 15\'s witness made stale by two rotations is refused (StaleEndpoint, its transaction reverted), then paid after refresh', json.dumps({k: r[k] for k in ('heldEndpoint', 'segmentNow', 'simulated', 'staleTx', 'result')}, default=str))
         d('replay', 'main', 'p60')
         r = self.outfile('replay-p60-evicted')
-        self.expect(r['evicted'] and r['walletBuild'] == 'AlreadyPaid' and r['wallet']['state'] == 'paid' and not r['exactCalldata'].startswith('success')
+        self.expect(r['evicted'] and r.get('historyPaidInSegment') is not None and r['wallet']['state'] == 'paid' and not r['exactCalldata'].startswith('success')
                     and not r['forgedGapProof'].startswith('success') and not r['zeroHistory'].startswith('success'),
                     'the 60\'s replay after its payment left the recent buffers: the wallet finds it paid in a sealed segment; the old calldata, a zero history and a forged gap proof are all refused', json.dumps(r))
         d('burn', 'main', 'p25b')
@@ -330,7 +330,7 @@ class NB2Rehearsal(Rehearsal):
         for part in ('p15', 'p25b'):
             d('replay', 'main', part)
             r = self.outfile(f'replay-{part}-evicted')
-            self.expect(r['evicted'] and r['walletBuild'] == 'AlreadyPaid' and not r['exactCalldata'].startswith('success') and not r['forgedGapProof'].startswith('success')
+            self.expect(r['evicted'] and r.get('historyPaidInSegment') is not None and not r['exactCalldata'].startswith('success') and not r['forgedGapProof'].startswith('success')
                         and not r['zeroHistory'].startswith('success'), f'the {part[1:3]}\'s replay after eviction: refused by the wallet and by the vault', json.dumps(r))
         # 100 paid: the three parts, each once, to the main key
         paid = {}
