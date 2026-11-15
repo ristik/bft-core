@@ -302,7 +302,7 @@ type MemberProtector struct {
 	// the dialling of Set's warm-up and of Maintain, shared (#1082, astra on #1088): one dial per member at a time, a per-host budget of
 	// concurrent dials, and each member's retry state, reset by a successful dial and by Set (an authenticated change of the set)
 	dialMu      sync.Mutex
-	inflight    map[peer.ID]bool
+	inflight    map[peer.ID]chan struct{} // the dial of a member in flight; closed when it completes
 	retry       map[peer.ID]*memberRetry
 	windowStart time.Time
 	connect     func(ctx context.Context, ai peer.AddrInfo) error // the host's Connect; a test replaces it
@@ -323,7 +323,7 @@ const (
 
 // NewMemberProtector is a protector of the member set under tag.
 func (p *Peer) NewMemberProtector(tag string) *MemberProtector {
-	return &MemberProtector{p: p, tag: tag, protected: map[peer.ID]struct{}{}, inflight: map[peer.ID]bool{}, retry: map[peer.ID]*memberRetry{},
+	return &MemberProtector{p: p, tag: tag, protected: map[peer.ID]struct{}{}, inflight: map[peer.ID]chan struct{}{}, retry: map[peer.ID]*memberRetry{},
 		windowStart: time.Now(), connect: p.host.Connect}
 }
 
@@ -368,15 +368,38 @@ func (m *MemberProtector) Set(ctx context.Context, ids []peer.ID) {
 	// A superseding Set or the end of ctx cancels warm, which stops the drain and every dial of this warm-up still in flight.
 	go func() {
 		for _, id := range dial {
-			if warm.Err() != nil {
-				return
-			}
-			if m.p.host.Network().Connectedness(id) == network.Connected {
-				continue
-			}
-			m.startDial(warm, id, nil)
+			m.warmOne(warm, id)
 		}
 	}()
+}
+
+// warmOne dials one member of a warm-up, or returns once it needs none: the warm-up was cancelled, the member left the set or is
+// connected. A dial of it still in flight (a replaced warm-up's, cancelled but not yet finished, or Maintain's) is waited for and the
+// member is then checked again (astra on #1088 r3): a superseding Set never loses a member to a dial that was about to end.
+func (m *MemberProtector) warmOne(warm context.Context, id peer.ID) {
+	for {
+		if warm.Err() != nil {
+			return
+		}
+		m.mu.Lock()
+		_, member := m.protected[id]
+		m.mu.Unlock()
+		if !member || m.p.host.Network().Connectedness(id) == network.Connected {
+			return
+		}
+		started, busy := m.startDial(warm, id, nil)
+		if started {
+			return
+		}
+		if busy == nil {
+			continue // it waited for a slot and found another dial of it begun meanwhile, or warm ended: checked again above
+		}
+		select {
+		case <-busy:
+		case <-warm.Done():
+			return
+		}
+	}
 }
 
 // memberDialSlots is the peer's host-wide member dial budget.
@@ -425,7 +448,10 @@ func (m *MemberProtector) Maintain(ctx context.Context, cfg MaintainConfig) {
 			st := m.retry[id]
 			due := st == nil || !now.Before(st.next)
 			m.dialMu.Unlock()
-			if due && m.startDial(ctx, id, &cfg) {
+			if !due {
+				continue
+			}
+			if ok, _ := m.startDial(ctx, id, &cfg); ok {
 				started++
 			}
 		}
@@ -437,37 +463,39 @@ func (m *MemberProtector) Maintain(ctx context.Context, cfg MaintainConfig) {
 	}
 }
 
-// startDial dials id in the background unless a dial of it is in flight; it reports whether it started one. pace is Maintain's (a
+// startDial dials id in the background unless a dial of it is in flight; it reports whether it started one, and, when one is in flight,
+// the channel that closes when that dial completes. pace is Maintain's (a
 // forced, bounded dial; a failure schedules the member's next attempt, and a spent budget skips the member until a later tick); nil is
 // Set's warm-up (an ordinary bounded dial, which waits for a free slot of the budget until ctx ends).
-func (m *MemberProtector) startDial(ctx context.Context, id peer.ID, pace *MaintainConfig) bool {
+func (m *MemberProtector) startDial(ctx context.Context, id peer.ID, pace *MaintainConfig) (bool, chan struct{}) {
 	slots := m.p.memberDialSlots()
 	m.dialMu.Lock()
 	busy := m.inflight[id]
 	m.dialMu.Unlock()
-	if busy {
-		return false
+	if busy != nil {
+		return false, busy
 	}
 	if pace != nil {
 		select {
 		case slots <- struct{}{}:
 		default:
-			return false
+			return false, nil
 		}
 	} else {
 		select {
 		case slots <- struct{}{}:
 		case <-ctx.Done():
-			return false
+			return false, nil
 		}
 	}
 	m.dialMu.Lock()
-	if m.inflight[id] { // another dial of it started while this one waited for its slot
+	if busy := m.inflight[id]; busy != nil { // another dial of it started while this one waited for its slot
 		m.dialMu.Unlock()
 		<-slots
-		return false
+		return false, busy
 	}
-	m.inflight[id] = true
+	done := make(chan struct{})
+	m.inflight[id] = done
 	connect := m.connect
 	m.dialMu.Unlock()
 	go func() {
@@ -485,6 +513,7 @@ func (m *MemberProtector) startDial(ctx context.Context, id peer.ID, pace *Maint
 		m.dialMu.Lock()
 		defer m.dialMu.Unlock()
 		delete(m.inflight, id)
+		close(done)
 		if err == nil {
 			delete(m.retry, id)
 			return
@@ -508,7 +537,7 @@ func (m *MemberProtector) startDial(ctx context.Context, id peer.ID, pace *Maint
 		}
 		st.next = time.Now().Add(delay)
 	}()
-	return true
+	return true, done
 }
 
 // Disconnected is the protected members this node holds no connection to.

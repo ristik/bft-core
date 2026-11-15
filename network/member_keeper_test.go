@@ -320,3 +320,57 @@ func TestTwoProtectorsOfOnePeerShareTheBudget(t *testing.T) {
 	defer l.mu.Unlock()
 	require.Equal(t, MaxMemberDials, l.peak, "16 in flight for the whole host, not per protector")
 }
+
+// astra on #1088 r3: a superseding Set whose members' previous dials are cancelled but not yet finished still dials them, once those end:
+// for the same set, and for an overlapping one (whose dropped member is not dialled again).
+func TestASupersedingSetDialsMembersWhosePreviousDialIsStillEnding(t *testing.T) {
+	for name, overlap := range map[string]bool{"the same set": false, "an overlapping set": true} {
+		t.Run(name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			p := keeperPeer(t, ctx, "/ip4/127.0.0.1/tcp/0", generateKeyPair(t), nil)
+			defer func() { _ = p.Close() }()
+			var mu sync.Mutex
+			attempts := map[peer.ID]int{}
+			m := p.NewMemberProtector("shard-members")
+			m.connect = func(ctx context.Context, ai peer.AddrInfo) error {
+				mu.Lock()
+				attempts[ai.ID]++
+				first := attempts[ai.ID] == 1
+				mu.Unlock()
+				if first {
+					time.Sleep(300 * time.Millisecond) // the first generation's dial ignores its cancellation for a while: its cleanup comes late
+				}
+				return errors.New("refused")
+			}
+			ids := []peer.ID{generatePeerID(t), generatePeerID(t), generatePeerID(t)}
+			m.Set(ctx, ids)
+			require.Eventually(t, func() bool { mu.Lock(); defer mu.Unlock(); return len(attempts) == 3 }, time.Second, 5*time.Millisecond)
+			next := ids
+			if overlap {
+				next = []peer.ID{ids[1], ids[2], generatePeerID(t)}
+			}
+			m.Set(ctx, next) // while the first generation's dials are still running
+			require.Eventually(t, func() bool {
+				mu.Lock()
+				defer mu.Unlock()
+				for _, id := range next {
+					want := 2
+					if overlap && id == next[2] {
+						want = 1 // a new member: its first attempt
+					}
+					if attempts[id] < want {
+						return false
+					}
+				}
+				return true
+			}, 3*time.Second, 5*time.Millisecond, "every member of the new set is dialled once its previous dial has ended")
+			if overlap {
+				time.Sleep(400 * time.Millisecond)
+				mu.Lock()
+				require.Equal(t, 1, attempts[ids[0]], "the member the new set dropped is not dialled again")
+				mu.Unlock()
+			}
+		})
+	}
+}
