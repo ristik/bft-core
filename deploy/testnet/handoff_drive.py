@@ -285,6 +285,7 @@ class Drive(rehearse.Rehearsal):
     remote, require, allow_excluding = {}, frozenset(), False   # set by __init__ (remote_entity.load): defaults for a Drive made without it
 
     cold_restore = False   # set by __init__: the explicit cold bootstrap (wipe, pin, replay) instead of the follower
+    _bundle_lock = threading.Lock()   # the entities advance in parallel and share the bundle files
 
     def __init__(self, generation, cast, ubft, restore_pin=None, joiners=None, require=(), allow_excluding=False, funder=None, cold_restore=False):
         generation = Path(generation).resolve()
@@ -893,6 +894,25 @@ class Drive(rehearse.Rehearsal):
         os.chown(tmp, 10001, 10001)
         os.rename(tmp, kept)
 
+    def activation_bundles(self, after):
+        """The roots' activation bundles of epochs after..target (q3/bundle of root 1, which serves every epoch it installed from its journal), each kept
+        once as network/handoff/q3-bundle-<N>.cbor for every authority to read. They are evidence, not trust: an authority verifies each one itself
+        from its own pin (bft-core#1085), so a bundle written here and a bundle from anywhere else are refused or accepted alike."""
+        files = []
+        with self._bundle_lock:
+            for epoch in range(int(after) + 1, self.target + 1):
+                path = self.work / f'q3-bundle-{epoch}.cbor'
+                if not path.exists():
+                    status, body = self.transport.post(1, '/api/v1/q3/bundle', json.dumps({'epoch': epoch}).encode())
+                    self.expect(status == 200, f'root 1 serves the activation bundle of epoch {epoch}', body[:200].decode(errors='replace'))
+                    raw = bytes.fromhex(json.loads(body)['bundle'])
+                    tmp = path.with_name(f'.{path.name}.tmp')
+                    tmp.write_bytes(raw)
+                    os.chmod(tmp, 0o644)
+                    os.replace(tmp, path)
+                files.append(path)
+        return files
+
     def advance_entity(self, i, shard_epoch, journal):
         """Entity i's switch as sub-steps (advance/entity<i>/...), each resumable. The authority refuses a repeated advance (signingauthority/advance.go), so its
         status is read first and an advance it already holds is not sent again; replace-session may be repeated (the newest session wins). The shard node
@@ -928,6 +948,25 @@ class Drive(rehearse.Rehearsal):
             else:
                 journal.run('advance', lambda: self.follow_joiner(i, self.target, promoted=True) or {}, sub=f'{unit}/follow')   # the same follower, started again on its retained state
             return {'joiner': True}
+        if healthy(self.authority_status(i)).get('lineagePinned'):
+            # bft-core#1085: the authority verifies the activation itself from its pinned lineage, and the one operation also issues the next
+            # session (a rerun is a no-op that only repairs a missing credential); the drive supplies the roots' bundles and checks the result
+            def proof():
+                status = self.authority_status(i)
+                self.keep_credential(i)
+                # from the lineage tip on, and always the target's: a resume after the authority accepted it (its tip already the target) replays
+                # it, a no-op that lets the one operation repair the session and credential (astra on #1087)
+                files = self.activation_bundles(min(status.get('lineageEpoch') or 1, self.target - 1))
+                report = json.loads(self.exec_in(f'authority{i}', 'ubft', 'signing-authority', 'advance-with-proof', *OPERATOR,
+                                                 *[a for f in files for a in ('--proof', f'/network/handoff/{f.name}')],
+                                                 '--out', '/authority/client.cred', '--client-socket', '/authority/client.sock'))
+                status = healthy(self.authority_status(i))
+                self.expect(not report.get('retired') and advanced(status), f'authority {i} verified and holds root epoch {self.target} and shard epoch {shard_epoch}',
+                            str(report)[:300])
+                return {'generation': status.get('generation'), 'steps': len(report.get('steps') or []), 'sessionIssued': report.get('sessionIssued')}
+            journal.run('advance', proof, sub=f'{unit}/advance-with-proof')
+            journal.run('advance', lambda: self.compose('start', f'shard{i}') and {}, sub=f'{unit}/shard-start')
+            return {'proof': True}
         def advance():
             status = healthy(self.authority_status(i))
             if advanced(status):
@@ -976,6 +1015,17 @@ class Drive(rehearse.Rehearsal):
             else:
                 journal.run('advance', lambda: self.follow_joiner(i, self.target, promoted=True) or {}, sub=f'{unit}/follow')
             return {'joiner': True, 'remote': True}
+        if healthy(remote.authority_status()).get('lineagePinned'):
+            def proof():   # bft-core#1085, as for a host entity: the laptop's authority verifies the bundles itself
+                files = self.activation_bundles(min(remote.authority_status().get('lineageEpoch') or 1, self.target - 1))   # the target's always (a resume replays it)
+                remote.put({f'handoff/{f.name}': f for f in files})
+                report = remote.authority_step('advance-with-proof', self.target, shard_epoch)
+                status = healthy(remote.authority_status())
+                self.expect(advanced(status), f'authority {i} (laptop) verified and holds root epoch {self.target} and shard epoch {shard_epoch}', str(report)[:300])
+                return {'generation': status.get('generation')}
+            journal.run('advance', proof, sub=f'{unit}/advance-with-proof')
+            journal.run('advance', lambda: remote.authority_step('shard-start', self.target, shard_epoch) and {}, sub=f'{unit}/shard-start')
+            return {'remote': True, 'proof': True}
         def advance():
             status = healthy(remote.authority_status())
             if advanced(status):

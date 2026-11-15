@@ -202,7 +202,10 @@ def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, wit
             '--client-socket','/authority/client.sock','--operator-socket','/authority/operator.sock',
             '--operator-credential','/authority/operator.cred','--authority-id','paired-evm-%d'%i,
             '--node-id',ids['evm'][i-1],'--network-id','3','--partition-id','8','--shard-id','0x80',
-            '--shard-epoch','0','--root-epoch','1'] + common, [auth,network])
+            '--shard-epoch','0','--root-epoch','1'] + common
+            # bft-core#1085: the authority verifies every activation itself from the generation's genesis trust base (advance-with-proof); the
+            # operator-trusted advance-epoch is then refused (a recovery policy needs --recovery-unchecked-advance)
+            + ['--lineage-genesis-trust-base','/network/trust-base.json'] + (['--lineage-utb-genesis'] if utb else []), [auth,network])
         # A new authority process has a new key. Never auto-restart this lifetime.
         services['authority%d'%i]['restart']='no'
         service('ureth%d'%i, node, ['unicity-reth','node','--chain','/network/genesis.json','--datadir','/state',
