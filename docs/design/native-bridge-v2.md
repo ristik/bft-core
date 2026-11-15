@@ -587,6 +587,53 @@ Verify the token's full provenance before burning. Construct, persist and certif
 exact certified result before reporting success. After a timeout or an ambiguous submission, look for `Paid(eta)`
 before retrying; refresh stale history; never alter the certified burn or its index.
 
+### 12.7 Wallet RPC contract (NB2-06, #1102)
+
+A wallet builds every piece of evidence from the ordinary execution RPC behind the deployment's public gateway (one URL, JSON-RPC 2.0 POST, one request per call: no batches). There is no bridge-specific service. Nothing read here is trusted. Each item is verified offline (Sections 6.2, 12.2, 12.3), and a provider that withholds data can only delay the wallet.
+
+| Need | Method(s) | Notes |
+|---|---|---|
+| Certificate of block `N` | `eth_getBlockByNumber(N+1, false)`, then `unicity_getSealCompanionV1(hash(N+1))` | `companion.witnesses[0]` is `evmUC`, the canonical native UC that certifies block `N` (`IR.blockHash = hash(N)`, `IR.hash = stateRoot(N)`). `witnesses[1]` is its technical record, which the wallet does not use. Block `N+1` must name `hash(N)` as its parent. The UC is served once the child block exists, about one round after `N`. |
+| Header of block `N` | `eth_getBlockByHash(hash(N), false)` | The wallet re-encodes the header fields as `headerRLP` and requires `H_E(headerRLP) = hash(N)`. |
+| Receipt-trie path | `eth_getTransactionReceipt(tx)` for `txIndex` and the receipt-local `logIndex`; `eth_getBlockReceipts(hash(N))` | The wallet rebuilds the receipt trie, requires its root to equal `header.receiptsRoot`, and takes the root-to-leaf path for key `RLP(txIndex)`. `logIndex` is the log's position in its own receipt, not the block-level `logIndex` of the RPC log object. |
+| `SegmentSealed` logs (newest seal, 12.2; history, 12.3) | `eth_getLogs({address: vault20, topics: [[topic0(SegmentSealed)], ...], fromBlock, toBlock})` | Paged as described below. The newest seal pages backwards from `eth_blockNumber`, and the history pages forwards from the manifest's `deploymentBlock`. `topics[1]` may list wanted segment indices as `u256(j)` values. |
+| `Paid(eta)` for reconciliation (12.6) | `eth_getLogs({address: vault20, topics: [topic0(Paid), eta], ...})` | `eta` is the first indexed topic. A redemption after the burn can only appear after the burn's certification, so the wallet pages forwards from the block where it first submitted. |
+| Vault views | `eth_call` of `domain()`, `config()`, `state()` | Used for preflight and status only. `state()` replaces a seal receipt only under `stateReadOnly` (12.2). |
+| Simulation and submission | `eth_call`, `eth_estimateGas`, `eth_sendRawTransaction` | These are the only methods with large bodies (see Limits). |
+| Retention horizon | `unicity_sealCompanionHorizonV1` | Returns `null` (nothing pruned) or the lowest block number whose companion is still served. |
+| Trust-base history (11.3) | The SDK trust-base path (`GET /api/v1/trustbases` on the same host) | Nothing here is specific to the bridge. |
+
+**Limits at the public gateway** (`deploy/testnet/gateway.py`, `public_routes.py`):
+
+- Request bodies are at most 16 KiB for every method above except `eth_call`, `eth_estimateGas` and `eth_sendRawTransaction`. Those take up to 4.5 MiB, which holds a redeem transaction of `L_max = 512 KiB` hex-encoded with its JSON framing, and the gateway reads at most two such bodies at once (`503 busy`: retry). If NB2-09 pins a larger `L_max`, it MUST keep that bound at `2 L_max + 64 KiB` or more.
+- `eth_getLogs` MUST name exactly one `address`, and either a `blockHash` or explicit numeric `fromBlock` and `toBlock` (no tags) spanning at most **10,000 blocks** (`toBlock - fromBlock + 1`). Any other filter is refused with HTTP 400 and an error naming the window. The wallet pages in consecutive windows `[lo, lo + 9999]`. A window that the node answers with its result-count error (`query exceeds max results`, at most 20,000 logs per response) is split in half and retried.
+- Rate limits are 5 requests/s per client at nginx (burst 10), plus the gateway's own 10/s per client and 100/s in total (HTTP 429: back off). A deposit proof takes 5 requests, and a seal receipt takes the same 5 plus one `eth_getLogs` per window searched.
+- Responses are not capped by the gateway. `eth_getBlockReceipts` is bounded by the block gas limit.
+- `eth_sendRawTransaction` goes to every validator. An HTTP 503 ("broadcast may be partial") is ambiguous, because the transaction may still be included. The wallet looks for the receipt of the locally computed transaction hash, and for `Paid(eta)` (12.6), before it resubmits.
+
+**Retention.** Nodes behind the public gateway MUST run as proof sources. That is ureth's default, and only `--unicity.no-proof-source` turns it off. A proof source refuses to start with receipt, receipt-log-filter or body pruning, or with `--unicity.companion-retention-depth`. As a result, companions, receipts and logs are served for the life of the deployment, and `unicity_sealCompanionHorizonV1` answers `null`. Deposit evidence is therefore fetchable at any time after the deposit's child block exists. Segment logs are served for every segment since `deploymentBlock`, which covers any return delay, including more than `returnReserveSegments`. `eth_getProof` is not used, so ureth's `--rpc.eth-proof-window` (64 blocks) does not limit any wallet step. A wallet still builds `J` as soon as the child block exists and keeps it with the token (12.1), so that later minting never depends on a provider.
+
+**What a wallet sees when evidence is missing.**
+
+| Answer | Meaning | Wallet action |
+|---|---|---|
+| `eth_getBlockByNumber(N+1)` is `null` | The child block does not exist yet | Retry after a round |
+| `unicity_getSealCompanionV1` `{"status":"unknown"}` | The node does not hold the hash on its canonical chain (reorganised, not yet imported, or another chain) | Re-resolve `N+1` and retry; do not treat this as a verdict |
+| `unicity_getSealCompanionV1` `{"status":"unavailable","horizon":H}` | The node pruned the companion of a block below `H` | `EvidencePruned`: use another provider or an archive; not retryable at this node |
+| `eth_getBlockByHash` or `eth_getTransactionReceipt` is `null`, or `eth_getBlockReceipts` is `null` or does not hash to `receiptsRoot` | The node does not hold the block or receipts, or served inconsistent data | `EvidencePruned` or provider fault: use another provider |
+| `eth_getLogs` refused with HTTP 400 naming the window | The filter is outside the gateway limits | Fix the filter and page |
+| A companion whose `witnesses` is not exactly `[certificate, technical record]` | Provider fault | Use another provider |
+
+`EvidencePruned` joins the wallet refusals of Section 14.6. Like every other refusal, it never changes a burn or an index.
+
+**The lock-proof service is retired.** No step above uses `dnb-tool lockproof-serve`, `eth_getProof` or a validator's certificate archive. NB2-10 (#1106) removes the service from the package:
+- `scripts/dnb-tool` `lockproof-serve` with its locator and shard-configuration set (`serve.go`, `locator.go`, `shardconf.go`);
+- the `lockproof` service of `deploy/testnet/bridge/overlay.py`;
+- the `/lockproof/` route and its rate-limit zone in `public_routes.py`;
+- `lockProofUrl` in the tester configuration.
+
+`--rpc.eth-proof-window` stays, because the shard node's parent witness still reads `eth_getProof`.
+
 ## 13. Vault ABI
 
 ### 13.1 Functions
@@ -703,7 +750,8 @@ Every rule has one name. NB2-03 (#1099) uses `Err<Name>` as the Go sentinel; the
 
 `SealReceipt` (a seal receipt fails Section 6.2 steps 2 to 5 for `SegmentSealed`), `SegmentLog` (a `SegmentSealed`
 log has the wrong length, order or chain link), `CapacityPreflight`, `CapacityExceeded`, `ImplausibleIndex` (a
-`stateReadOnly` read jumps beyond the wallet's verified bound).
+`stateReadOnly` read jumps beyond the wallet's verified bound), `EvidencePruned` (the node no longer serves a
+companion, block or receipts the evidence needs; Section 12.7).
 
 ### 14.7 Required vectors (NB2-03, #1099)
 
