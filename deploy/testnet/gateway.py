@@ -7,7 +7,9 @@ Two public routes:
                             it sends it; at most LARGE_SLOTS bodies above MAX_BODY are read at once. The wallet evidence methods
                             (WALLET_EVIDENCE: the native bridge v2 wallet RPC contract, docs/design/native-bridge-v2.md) are public reads;
                             eth_getLogs must name one contract address and either a blockHash or an explicit numeric fromBlock..toBlock of
-                            at most LOG_BLOCK_RANGE blocks (a wallet pages through longer spans window by window).
+                            at most LOG_BLOCK_RANGE blocks (a wallet pages through longer spans window by window), the other evidence reads
+                            take exactly EVIDENCE_PARAMS, HEAVY_METHODS have their own rate limit, and no answer above MAX_RESULT_BYTES is
+                            relayed (413: page).
   POST /aggregator          the aggregator's JSON-RPC (AGG_METHODS, the state-transition SDK's), bodies up to AGG_MAX_BODY, and
   GET  /api/v1/trustbases   the aggregator's signed trust-base pages (the SDK's refresh resolves this path against the aggregator URL's host):
                             both forwarded to AGG_URL unchanged, with their own rate limit. No authentication (testnet).
@@ -25,7 +27,7 @@ import time
 import urllib.error
 import urllib.request
 
-from faucet.relay import Relay
+from faucet.relay import Relay, ResponseTooLarge
 
 # The reads a native bridge v2 wallet builds its evidence from (bft-core#1102): certified header evidence (the companion of the child block
 # carries the certificate of its parent), the block's receipts for the receipt-trie path, vault logs, and the companion retention horizon.
@@ -33,6 +35,11 @@ WALLET_EVIDENCE = frozenset('eth_getBlockByHash eth_getBlockReceipts eth_getLogs
 PUBLIC = frozenset('eth_chainId eth_blockNumber eth_getBlockByNumber eth_getBalance eth_getTransactionCount eth_gasPrice eth_maxPriorityFeePerGas eth_estimateGas eth_call eth_getCode eth_getTransactionReceipt eth_getTransactionByHash eth_sendRawTransaction net_version web3_clientVersion'.split()) | WALLET_EVIDENCE
 LOG_BLOCK_RANGE = 10000     # the most blocks one eth_getLogs may span (toBlock - fromBlock + 1)
 LOG_FILTER_KEYS = frozenset({'address', 'topics', 'fromBlock', 'toBlock', 'blockHash'})
+LOG_TOPICS = 4              # topic positions an EVM log has
+LOG_TOPIC_ALTERNATIVES = 64 # hashes one topic position may list (for example the wanted segment indices)
+# the reads whose upstream work and answer grow with the chain: their own, tighter per-client and total rate, on top of the general one
+HEAVY_METHODS = frozenset({'eth_getLogs', 'eth_getBlockReceipts'})
+MAX_RESULT_BYTES = 8 << 20  # the most bytes of one upstream answer the gateway reads and relays; above it the wallet pages (413)
 MAX_BODY = 16384
 MAX_RAW_TX_BODY = 4718592   # 4.5 MiB: the 2 MiB envelope as hex in a redeem transaction, with its ABI and JSON framing
 # the methods that may carry a redemption's calldata: its send, and the call and the estimate a wallet makes first (their execution is bounded by the
@@ -55,22 +62,47 @@ def _quantity(v):
         return None
 
 
+def _hexbytes(v, n):
+    """V is 0x and exactly 2N hex digits."""
+    return isinstance(v, str) and len(v) == 2 + 2 * n and v.startswith('0x') and all(c in '0123456789abcdefABCDEF' for c in v[2:])
+
+
 def _address(v):
-    return isinstance(v, str) and len(v) == 42 and v.startswith('0x') and all(c in '0123456789abcdefABCDEF' for c in v[2:])
+    return _hexbytes(v, 20)
+
+
+def _hash(v):
+    return _hexbytes(v, 32)
+
+
+def _topic(v):
+    """One topic position: null (any), a 32-byte hash, or a short non-empty list of hashes."""
+    if v is None or _hash(v):
+        return True
+    return isinstance(v, list) and 0 < len(v) <= LOG_TOPIC_ALTERNATIVES and all(_hash(t) for t in v)
+
+
+# The exact parameters of each wallet evidence read besides eth_getLogs (check_log_filter); a refusal names the accepted shape.
+EVIDENCE_PARAMS = {
+    'eth_getBlockByHash': ('[blockHash, false]', lambda p: len(p) == 2 and _hash(p[0]) and p[1] is False),
+    'eth_getBlockReceipts': ('[blockHash] or [hex block number]', lambda p: len(p) == 1 and (_hash(p[0]) or _quantity(p[0]) is not None)),
+    'unicity_getSealCompanionV1': ('[blockHash]', lambda p: len(p) == 1 and _hash(p[0])),
+    'unicity_sealCompanionHorizonV1': ('[]', lambda p: len(p) == 0),
+}
 
 
 def check_log_filter(params):
-    """Raise ValueError unless PARAMS is one bounded eth_getLogs filter: exactly one contract address, and a blockHash or an explicit numeric
-    fromBlock..toBlock of at most LOG_BLOCK_RANGE blocks. Topics are passed through (the body bound limits them)."""
+    """Raise ValueError unless PARAMS is one bounded eth_getLogs filter: exactly one contract address, a blockHash or an explicit numeric
+    fromBlock..toBlock of at most LOG_BLOCK_RANGE blocks, and at most LOG_TOPICS topic positions of hashes."""
     if len(params) != 1 or not isinstance(params[0], dict) or not set(params[0]) <= LOG_FILTER_KEYS:
         raise ValueError('log filter shape')
     f = params[0]
     if not _address(f.get('address')):
         raise ValueError('log filter must name exactly one contract address')
-    if 'topics' in f and not isinstance(f['topics'], list):
-        raise ValueError('log filter topics')
+    if 'topics' in f and (not isinstance(f['topics'], list) or len(f['topics']) > LOG_TOPICS or not all(_topic(t) for t in f['topics'])):
+        raise ValueError(f'log filter topics: at most {LOG_TOPICS}, each null, a 32-byte hash or at most {LOG_TOPIC_ALTERNATIVES} hashes')
     if 'blockHash' in f:
-        if 'fromBlock' in f or 'toBlock' in f or not isinstance(f['blockHash'], str) or len(f['blockHash']) != 66:
+        if 'fromBlock' in f or 'toBlock' in f or not _hash(f['blockHash']):
             raise ValueError('log filter block hash')
         return
     lo, hi = _quantity(f.get('fromBlock')), _quantity(f.get('toBlock'))
@@ -119,6 +151,7 @@ class Server(http.server.HTTPServer):
         self.slots = threading.BoundedSemaphore(8)
         self.large = threading.BoundedSemaphore(LARGE_SLOTS)
         self.rpc_limit = Limiter(10, 100)
+        self.heavy_limit = Limiter(2, 20)   # HEAVY_METHODS, in addition to rpc_limit
         self.agg_limit = Limiter(10, 50)
         self.requests = self.errors = self.agg_requests = self.agg_errors = 0
 
@@ -195,14 +228,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 raise ValueError('body size')
             if not isinstance(body.get('id'), (str, int, type(None))):
                 raise ValueError('id')
-            if body['method'] == 'eth_getLogs':
+            method, params = body['method'], body.get('params', [])
+            if method == 'eth_getLogs':
                 try:
-                    check_log_filter(body.get('params', []))
+                    check_log_filter(params)
                 except ValueError as e:   # named, so a wallet knows to page: one address, a blockHash or at most LOG_BLOCK_RANGE blocks
                     return self.reply(400, {'error': f'eth_getLogs: {e} (one address; blockHash, or numeric fromBlock..toBlock of at most {LOG_BLOCK_RANGE} blocks)'})
+            elif method in EVIDENCE_PARAMS:
+                shape, ok = EVIDENCE_PARAMS[method]
+                if not ok(params):
+                    return self.reply(400, {'error': f'{method}: params must be exactly {shape}'})
+            if method in HEAVY_METHODS and not self.server.heavy_limit.allowed(ip):
+                return self.reply(429, {'error': f'rate limit ({method})'})
             try:
-                result = self.server.relay.call(body['method'], body.get('params', []))
+                result = self.server.relay.call(method, params, max_bytes=MAX_RESULT_BYTES)
                 result['id'] = body.get('id')
+            except ResponseTooLarge:
+                return self.reply(413, {'error': f'{method}: the answer is above {MAX_RESULT_BYTES} bytes; ask for less (a narrower eth_getLogs window)'})
             except Exception:
                 self.server.errors += 1
                 return self.reply(503, {'error': 'RPC unavailable; broadcast may be partial, inspect before retry'})

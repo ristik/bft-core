@@ -476,8 +476,10 @@ copies a readable script and invokes it through `/bin/sh`), the aggregator-go an
 MongoDB service settings, and rejection of an otherwise valid allowed JSON-RPC request larger
 than 16 KiB before any relay call (`eth_sendRawTransaction`, `eth_call` and `eth_estimateGas` up to 4.5 MiB pass, within two
 large-request slots), the native bridge v2 wallet evidence reads (`eth_getBlockByHash`, `eth_getBlockReceipts`, `eth_getLogs`,
-`unicity_getSealCompanionV1`, `unicity_sealCompanionHorizonV1`) and the `eth_getLogs` bound (one address, a `blockHash` or a
-numeric window of at most 10,000 blocks), and the aggregator route's allow-list, bound and separate rate limit.
+`unicity_getSealCompanionV1`, `unicity_sealCompanionHorizonV1`) with their exact parameters, the `eth_getLogs` bound (one address,
+a `blockHash` or a numeric window of at most 10,000 blocks, at most 4 topic positions of hashes), the separate rate limit of
+`eth_getLogs` and `eth_getBlockReceipts`, the 8 MiB cap on a relayed answer (413), and the aggregator route's allow-list, bound and
+separate rate limit.
 
 CI also builds aggregator-go from `pins.json`'s revision and runs
 `validate-generation.py --aggregator <pinned-binary>`: a native three-root probe

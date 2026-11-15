@@ -206,7 +206,7 @@ class RelayTests(unittest.TestCase):
         cfg = config()
         calls = []
 
-        def rpc(url, body, headers):
+        def rpc(url, body, headers, max_bytes=None):
             calls.append((url, body['method']))
             if body['method'] == 'eth_chainId':
                 return {'result': hex(cfg['chain_id'])}
@@ -223,6 +223,30 @@ class RelayTests(unittest.TestCase):
         with patch.object(relay, 'request', side_effect=rpc):
             relay.Relay(cfg).call('eth_sendRawTransaction', ['0xraw'])
         self.assertEqual(sum(m == 'eth_sendRawTransaction' for _, m in calls), 2)
+
+    def test_request_reads_at_most_the_bound(self):
+        body = json.dumps({'jsonrpc': '2.0', 'id': 1, 'result': '0x' + 'ab' * 600}).encode()
+
+        class Upstream(http.server.BaseHTTPRequestHandler):
+            def do_POST(h):
+                h.rfile.read(int(h.headers['Content-Length']))
+                h.send_response(200)
+                h.send_header('Content-Length', str(len(body)))
+                h.end_headers()
+                h.wfile.write(body)
+
+            def log_message(h, *a):
+                pass
+
+        up = http.server.HTTPServer(('127.0.0.1', 0), Upstream)
+        threading.Thread(target=up.serve_forever, daemon=True).start()
+        self.addCleanup(up.server_close)
+        self.addCleanup(up.shutdown)
+        url = 'http://127.0.0.1:%d' % up.server_address[1]
+        self.assertEqual(gateway.request(url, {'method': 'x'}, max_bytes=len(body))['result'], '0x' + 'ab' * 600)
+        with self.assertRaises(gateway.ResponseTooLarge):
+            gateway.request(url, {'method': 'x'}, max_bytes=len(body) - 1)
+        self.assertEqual(gateway.request(url, {'method': 'x'})['id'], 1, 'no bound reads the whole answer')
 
 
 if __name__ == '__main__':
