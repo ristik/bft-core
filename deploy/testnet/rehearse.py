@@ -1523,15 +1523,31 @@ class Rehearsal:
             full = json.loads(self.exec_in(f'authority{i}', 'ubft', 'signing-authority', 'status', *operator))
             return {k: full[k] for k in ('authorityId', 'networkId', 'partitionId', 'shardEpoch', 'rootEpoch', 'shardConfHash', 'generation', 'signingKeyFingerprint', 'enrollmentComplete')}
         before = status(1)
+        pinned = json.loads(self.exec_in('authority1', 'ubft', 'signing-authority', 'status', *operator)).get('lineagePinned')
         rc, out, err = self.exec_rc('authority1', 'ubft', 'signing-authority', 'advance-epoch', *operator, '--trust-base', '/network/trust-base.json',
                                     '--shard-conf', '/network/full-shard-conf.json')
         self.say(f'  advance back to epoch 1: exit {rc}: {(out + err).strip()[-300:]}')
         (self.evh() / 'stale-trust-base.txt').write_text(f'exit {rc}\n{out}{err}')
-        # a pinned authority refuses the operator-trusted route outright (signing-advance-recovery-only, bft-core#1085); an unpinned one the context
-        self.expect(rc != 0 and ('signing-context-mismatch' in err or 'signing-advance-recovery-only' in err),
-                    'the authority refuses to be advanced back to the epoch-1 trust base and shard configuration', (out + err).strip()[-300:])
+        # a pinned authority refuses the operator-trusted route outright, whatever its input (bft-core#1085); an unpinned one refuses this stale context
+        refusal = 'signing-advance-recovery-only' if pinned else 'signing-context-mismatch'
+        self.expect(rc != 0 and refusal in err, f'the authority refuses to be advanced back to the epoch-1 trust base and shard configuration ({refusal})',
+                    (out + err).strip()[-300:])
         after = status(1)
         self.expect(after == before, 'the refused advance changes nothing in the authority status', f'{before} -> {after}')
+        if pinned:
+            # the proof route: every authentic activation it already holds, the current one and the older ones, is an idempotent replay (astra on #1090):
+            # it is accepted and changes neither the scope nor the generation (no session is issued: the current credential is the admitted one)
+            for epoch in range(2, self.target + 1):
+                path = net / 'handoff' / f'q3-bundle-{epoch}.cbor'
+                self.expect(path.is_file(), f'the activation bundle of epoch {epoch} was kept by pos-advance', str(path))
+                report = json.loads(self.exec_in('authority1', 'ubft', 'signing-authority', 'advance-with-proof', *operator, '--proof', f'/network/handoff/{path.name}',
+                                                 '--out', '/authority/client.cred', '--client-socket', '/authority/client.sock'))
+                (self.evh() / f'replay-proof-{epoch}.json').write_text(json.dumps(report, indent=1) + '\n')
+                steps = report.get('steps') or []
+                self.expect(len(steps) == 1 and steps[0].get('Replay') and not steps[0].get('Advanced') and not report.get('sessionIssued'),
+                            f'the retained activation of epoch {epoch} is a replay that advances nothing and issues no session', str(report)[:300])
+                replayed = status(1)
+                self.expect(replayed == before, f'the replay of epoch {epoch} leaves the scope and the generation as they were', f'{before} -> {replayed}')
         # (2) the old client credential
         auth = self.gen / 'validator1' / 'auth'
         old, current = auth / 'client.cred.pre-epoch-2', auth / 'client.cred'
