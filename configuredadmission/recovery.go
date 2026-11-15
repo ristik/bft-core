@@ -78,7 +78,11 @@ type ExecutionRecovery struct {
 	FetchArchive func(context.Context, shardnode.BlockRef, []byte) ([]shardnode.JournalFetchEntry, error)
 	// ArchiveCatchUp, when set, closes a gap that one recovery cannot (longer than its bounds, or with its newest blocks not archived
 	// yet) from the archive, one page per call (#769, catchup.go).
-	ArchiveCatchUp  ArchiveCatchUp
+	ArchiveCatchUp ArchiveCatchUp
+	// Prefetch, when set, is told the entries a fetched suffix is about to admit before the first is verified, so that what their
+	// verification will read from the network (the root-record cut of each block's origin, bft-core#1071) is fetched ahead, several at a
+	// time, instead of a round trip per block. It must return at once and decides nothing: every entry is verified as before.
+	Prefetch        func(context.Context, []shardnode.JournalFetchEntry)
 	catchUpSeen     []byte                // the last distinct target a catch-up call was asked for,
 	catchUpPrev     []byte                // and the one before it
 	catchUpRefused  map[peer.ID]time.Time // providers whose tail's top failed the walk at its first record, and when (rev2 B2)
@@ -706,6 +710,9 @@ func (r *ExecutionRecovery) admitFetched(ctx context.Context, after shardnode.Bl
 		return fmt.Errorf("%w: peer suffix ends at %x, requested %x", ErrRecoveryConflict, entries[len(entries)-1].Block.Hash, target)
 	}
 	parent := after
+	if r.Prefetch != nil {
+		r.Prefetch(ctx, entries)
+	}
 	f, err := r.Executor.Finalized(ctx)
 	if err != nil {
 		return fmt.Errorf("%w: finalized identity: %w", ErrRecoveryUnavailable, err)

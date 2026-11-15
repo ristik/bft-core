@@ -48,6 +48,9 @@ func (r *ExecutionRecovery) replayPrefix(ctx context.Context, c recoveryChain, h
 		if err != nil {
 			return err
 		}
+		if r.Prefetch != nil {
+			r.Prefetch(ctx, entries)
+		}
 		fin, last := cur, cur
 		stop := ""
 		for _, e := range entries {

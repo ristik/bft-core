@@ -25,6 +25,16 @@ type ReplicaPolicy struct {
 	mu        sync.Mutex
 	snap      ReplicaPolicySnapshot
 	changed   chan struct{}
+	// readBacks is shared by the frontier worker and the journal's frontier policy built under this policy (bft-core#1071).
+	readBacks ReadBackCache
+}
+
+// ReadBacks is the batched read-back cache the frontier worker and the frontier policy's availability check share; nil for a nil policy.
+func (p *ReplicaPolicy) ReadBacks() *ReadBackCache {
+	if p == nil {
+		return nil
+	}
+	return &p.readBacks
 }
 
 // ReplicaPolicySnapshot is one version of the policy.

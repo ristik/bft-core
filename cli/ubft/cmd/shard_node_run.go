@@ -1410,7 +1410,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				}
 				return nil
 			}
-			policy := frontier.Policy{Context: archiveSubject, Binding: archivewiring.CertifiedBinding{Context: journalCtx, Subject: archiveSubject}, Availability: archivewiring.ReplicaAvailability{Context: ctx, Host: archiveHost, Replicas: archiveReplicas, Limits: archiveTransportLimits}}
+			policy := frontier.Policy{Context: archiveSubject, Binding: archivewiring.CertifiedBinding{Context: journalCtx, Subject: archiveSubject}, Availability: archivewiring.ReplicaAvailability{Context: ctx, Host: archiveHost, Replicas: archiveReplicas, Limits: archiveTransportLimits, ReadBacks: replicaPolicy.ReadBacks()}}
 			if e := setFrontierReplicas(&policy, archiveReplicas, archiveDigest); e != nil {
 				return e
 			}
@@ -1546,6 +1546,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		server.SetPeerAuthorizer(activePeers.Allowed)
 		server.Register(peer)
 		coordinator.Host, coordinator.ProviderSource, coordinator.TransportLimits = peer, activePeers, shardnode.DefaultJournalTransportLimits()
+		coordinator.Prefetch = recordsPrefetch(verifierContext)
 		var archiveCatchUp *archivewiring.CatchUp // a gap longer than one recovery is paged in from the archive (#769) once the frontier worker exists
 		if archiveLocal != nil {
 			source := &archivewiring.RecoverySource{Context: journalCtx, Subject: archiveSubject, Local: archiveLocal, Host: archiveHost,
@@ -2350,6 +2351,33 @@ func openRecordCuts(journal string) (recordsfeed.CutStore, error) {
 		return nil, fmt.Errorf("opening the root-record store %s: %w", journal+".cuts", err)
 	}
 	return recordsfeed.KVCutStore{DB: db}, nil
+}
+
+// recordsPrefetch tells the pair's root-record source which origins a fetched suffix's verification will ask for (bft-core#1071): the
+// cut of each entry's authorizing certificate is fetched ahead, several at a time, instead of one round trip per block while the entries
+// are verified one by one. Nil without a records feed.
+func recordsPrefetch(vc *engineapi.VerifierContext) func(context.Context, []shardnode.JournalFetchEntry) {
+	if vc == nil {
+		return nil
+	}
+	return func(ctx context.Context, entries []shardnode.JournalFetchEntry) {
+		if vc.B1 == nil {
+			return
+		}
+		source, ok := vc.B1.Records.(interface {
+			Prefetch(context.Context, []recordsfeed.CutKey)
+		})
+		if !ok {
+			return
+		}
+		keys := make([]recordsfeed.CutKey, 0, len(entries))
+		for _, e := range entries {
+			if key, ok := recordsfeed.KeyOfCertificate(e.AuthorizingUC); ok {
+				keys = append(keys, key)
+			}
+		}
+		source.Prefetch(ctx, keys)
+	}
 }
 
 // attachShardRecordsFeed is attachRecordsFeed with the shard node's durable store and its failure reporting.

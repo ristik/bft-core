@@ -76,6 +76,17 @@ func KeyOf(origin evmroot.RootOriginV2) (CutKey, error) {
 	return key, nil
 }
 
+// KeyOfCertificate is the cut key of the origin a certificate names, read from its seal without authenticating it: a locator for
+// Prefetch only. Cursor verifies whatever it fetches against the authenticated origin.
+func KeyOfCertificate(uc *types.UnicityCertificate) (CutKey, bool) {
+	if uc == nil || uc.UnicitySeal == nil || len(uc.UnicitySeal.Hash) != 32 {
+		return CutKey{}, false
+	}
+	key := CutKey{Network: uint64(uc.UnicitySeal.NetworkID), Epoch: uc.UnicitySeal.Epoch, Round: uc.UnicitySeal.RootChainRoundNumber}
+	copy(key.TreeRoot[:], uc.UnicitySeal.Hash)
+	return key, true
+}
+
 // Remote is a root, or several, that serve cuts and records.
 type Remote interface {
 	// Cut returns the cut of the committed root block the key names.
@@ -134,6 +145,8 @@ type Source struct {
 	// persistErr is the first durable-retention failure; once set, this source no longer promises historical availability.
 	persistErr   error
 	onPersistErr func(error)
+	// prefetched are cuts fetched ahead of their use (Prefetch), bounded by maxPrefetched; unverified until Cursor verifies one.
+	prefetched map[CutKey]*prefetch
 }
 
 // CutStore durably retains verified cuts and the verified record log.
@@ -245,7 +258,22 @@ func NewSource(remotes ...Remote) *Source { return &Source{remotes: remotes} }
 // Cursor fetches and verifies the cut of the origin's committed block and extends the verified log to the length it authenticates. A
 // remote that withholds, or serves what the origin does not authenticate, is skipped for the next; the cursor is returned only from a
 // remote whose cut and records both verified, and every failure is reported when none did.
+//
+// A cut this source already verified for the origin's key, or one prefetched for it (Prefetch), is verified against the origin again and
+// used without asking a remote (bft-core#1071): each block's derivation asks for its origin's cursor twice, and a catch-up asks for one
+// per block, each a round trip to a mirror otherwise. The cut is the same bytes a remote would serve; nothing is believed unless it leads
+// to the origin's tree root, and the records are extended from the remotes as before when the log is shorter than the cut says.
 func (s *Source) Cursor(ctx context.Context, origin evmroot.RootOriginV2) (rootrecords.Cursor, error) {
+	key, err := KeyOf(origin)
+	if err != nil {
+		return rootrecords.Cursor{}, err
+	}
+	if cut, verified, ok := s.knownCut(ctx, key); ok {
+		if cursor, err := s.cursorWithCut(ctx, key, cut, origin, !verified); err == nil {
+			return cursor, nil
+		}
+		// a prefetched cut that does not verify, or a log the remotes must extend: the remotes are asked below, as without one
+	}
 	var errs []error
 	for _, remote := range s.remotes {
 		cursor, err := s.cursorFrom(ctx, remote, origin)
@@ -281,6 +309,202 @@ func (s *Source) cursorFrom(ctx context.Context, remote Remote, origin evmroot.R
 	}
 	s.retainCut(key, cut)
 	return cursor, nil
+}
+
+// knownCut is a cut for key this source holds without asking a remote: a verified one (the cache, then the durable store), else a
+// prefetched one, waiting for a prefetch still in flight. verified tells the two apart: a prefetched cut is unverified until cursorWithCut
+// verifies it.
+func (s *Source) knownCut(ctx context.Context, key CutKey) (cut Cut, verified, ok bool) {
+	s.mu.Lock()
+	cut, ok = s.cuts[key]
+	store := s.store
+	pending := s.prefetched[key]
+	s.mu.Unlock()
+	if ok {
+		return cut, true, true
+	}
+	if store != nil {
+		if cut, ok, err := store.GetCut(key); err == nil && ok {
+			return cut, true, true
+		}
+	}
+	if pending == nil {
+		return Cut{}, false, false
+	}
+	select {
+	case <-pending.done:
+	case <-ctx.Done():
+		return Cut{}, false, false
+	}
+	s.mu.Lock()
+	if s.prefetched[key] == pending {
+		delete(s.prefetched, key) // used once: verified below and retained, or refused and asked for again
+	}
+	s.mu.Unlock()
+	return pending.cut, false, pending.err == nil
+}
+
+// cursorWithCut verifies cut against the origin and returns the cursor when the verified log already covers the length it authenticates,
+// else extends the log from the remotes in order. retain retains the cut once verified (a prefetched one; a cut taken from the cache or
+// the store is retained already).
+func (s *Source) cursorWithCut(ctx context.Context, key CutKey, cut Cut, origin evmroot.RootOriginV2, retain bool) (rootrecords.Cursor, error) {
+	state, cursor, err := VerifyCut(cut, origin)
+	if err != nil {
+		return rootrecords.Cursor{}, err
+	}
+	errs := []error{ErrUnavailable}
+	extended := false
+	if err := s.extendLocal(state); err == nil {
+		extended = true
+	} else if !errors.Is(err, errNeedsRecords) {
+		return rootrecords.Cursor{}, err
+	}
+	for _, remote := range s.remotes {
+		if extended {
+			break
+		}
+		if err := s.extend(ctx, remote, state); err != nil {
+			errs = append(errs, err)
+			if ctx.Err() != nil {
+				break
+			}
+			continue
+		}
+		extended = true
+	}
+	if !extended {
+		return rootrecords.Cursor{}, errors.Join(errs...)
+	}
+	if retain {
+		s.retainCut(key, cut)
+	}
+	return cursor, nil
+}
+
+// errNeedsRecords: the verified log is shorter than the state the cut authenticates, so a remote has to serve the rest.
+var errNeedsRecords = errors.New("recordsfeed: the log needs records from a remote")
+
+// extendLocal is extend for a log that already covers the state: no remote is asked. errNeedsRecords when it does not.
+func (s *Source) extendLocal(state rootrecords.State) error {
+	s.mu.Lock()
+	covered := state.Count == 0 || uint64(len(s.log)) >= state.Count
+	s.mu.Unlock()
+	if !covered {
+		return errNeedsRecords
+	}
+	return s.extend(context.Background(), nil, state) // covered: extend asks no remote
+}
+
+// prefetch is one cut fetched ahead of its use (Prefetch); done closes when cut and err are set.
+type prefetch struct {
+	done chan struct{}
+	cut  Cut
+	err  error
+}
+
+const (
+	// maxPrefetched bounds the cuts fetched ahead and not yet used: a few catch-up pages.
+	maxPrefetched = 256
+	// prefetchStreams bounds the prefetches in flight. They are spread over the remotes (each one's next starts at another remote), and a
+	// mirror serves four streams per peer (MaxPendingPerPeer): with two or more mirrors this stays within that.
+	prefetchStreams = 8
+)
+
+// Prefetch fetches the cuts of the given keys ahead of their use, several at a time over the remotes, so that a catch-up executing a
+// page of blocks does not wait a round trip per block for its origin's cut (bft-core#1071). Nothing fetched is believed: Cursor verifies
+// a prefetched cut against the origin it is asked for, uses it once, and asks the remotes as before when it does not verify. A key this
+// source already holds a cut for, or is fetching, is skipped; the call returns at once and the fetches end with ctx.
+func (s *Source) Prefetch(ctx context.Context, keys []CutKey) {
+	if len(s.remotes) == 0 {
+		return
+	}
+	s.mu.Lock()
+	store := s.store
+	s.mu.Unlock()
+	if store != nil {
+		missing := keys[:0:0]
+		for _, key := range keys {
+			if _, ok, err := store.GetCut(key); err != nil || !ok {
+				missing = append(missing, key)
+			}
+		}
+		keys = missing
+	}
+	var jobs []CutKey
+	var pendings []*prefetch
+	s.mu.Lock()
+	if s.prefetched == nil {
+		s.prefetched = make(map[CutKey]*prefetch)
+	}
+	for _, key := range keys {
+		if _, ok := s.cuts[key]; ok {
+			continue
+		}
+		if _, ok := s.prefetched[key]; ok {
+			continue
+		}
+		if len(s.prefetched) >= maxPrefetched {
+			break
+		}
+		p := &prefetch{done: make(chan struct{})}
+		s.prefetched[key] = p
+		jobs, pendings = append(jobs, key), append(pendings, p)
+	}
+	s.mu.Unlock()
+	if len(jobs) == 0 {
+		return
+	}
+	sem := make(chan struct{}, prefetchStreams)
+	go func() {
+		for i, key := range jobs {
+			p := pendings[i]
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				for _, rest := range pendings[i:] {
+					rest.err = ctx.Err()
+					close(rest.done)
+				}
+				s.dropPrefetches(jobs[i:], pendings[i:])
+				return
+			}
+			go func(i int, key CutKey, p *prefetch) {
+				defer func() { <-sem }()
+				p.cut, p.err = s.fetchCut(ctx, key, i)
+				close(p.done)
+				if p.err != nil {
+					s.dropPrefetches([]CutKey{key}, []*prefetch{p})
+				}
+			}(i, key, p)
+		}
+	}()
+}
+
+// fetchCut asks the remotes in turn for key's cut, starting at the remote with index start (modulo their number).
+func (s *Source) fetchCut(ctx context.Context, key CutKey, start int) (Cut, error) {
+	var errs []error
+	for j := range s.remotes {
+		if ctx.Err() != nil {
+			break
+		}
+		cut, err := s.remotes[(start+j)%len(s.remotes)].Cut(ctx, key)
+		if err == nil {
+			return cut, nil
+		}
+		errs = append(errs, err)
+	}
+	return Cut{}, errors.Join(append([]error{ErrUnavailable}, errs...)...)
+}
+
+// dropPrefetches forgets prefetches that will not be used (failed or canceled), so a later Cursor asks the remotes at once.
+func (s *Source) dropPrefetches(keys []CutKey, ps []*prefetch) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, key := range keys {
+		if s.prefetched[key] == ps[i] {
+			delete(s.prefetched, key)
+		}
+	}
 }
 
 // Record returns a record of the verified log; a record that has not been verified is unavailable.
