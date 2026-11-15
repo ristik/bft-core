@@ -302,14 +302,16 @@ func (r *Runtime) resolve(a q3install.Activation) (q3format.Entry, handoff.OldCo
 	return e, p, b, err
 }
 
-// RootChecker is implemented by a root sink that can run its install checks without installing anything (consensus.CheckVerifiedEpoch).
+// RootChecker is implemented by a root sink that can run its install checks of a bundle without installing anything
+// (consensus.CheckVerifiedEpoch); the checks of its own durable state stay in the install.
 type RootChecker interface {
 	CheckVerifiedEpoch(entry q3format.Entry, proof handoff.OldCommitProof, head *abdrc.CommittedBlock, candidate []byte) error
 }
 
-// Authenticate checks a bundle as Activate would and changes nothing: the envelope against this runtime's history (the journal's own
-// check, which derives the activation record), and, when the attached root sink offers them, the root's install checks (the commit
-// proof under the old epoch's keys, the snapshot, a coupled candidate). An install that takes its bundle from a root peer authenticates
+// Authenticate checks the bundle itself as Activate would and changes nothing: the envelope against this runtime's history (the
+// journal's own check, which derives the activation record), and, when the attached root sink offers them, the root's checks of the
+// bundle (the commit proof under the old epoch's keys, the snapshot, a coupled candidate); checks of the root's own durable state stay in
+// the install. An install that takes its bundle from a root peer authenticates
 // each answer, so a peer serving a decodable but invalid bundle is passed over for the next one (#1080 review). It stages nothing:
 // Activate re-runs every check.
 func (r *Runtime) Authenticate(b Bundle) error {

@@ -44,9 +44,10 @@ type checkedQ3Epoch struct {
 	oldSigning votesig.Config
 }
 
-// CheckVerifiedEpoch runs every check InstallVerifiedEpoch makes before it writes anything, and writes nothing: the candidate against the
-// committed record, the old epoch's commit proof under its own keys and scheme, the snapshot against the proof, and a coupled assignment
-// against this store's committed history. An install that fetches its bundle from a root peer runs it on each answer (with the history's
+// CheckVerifiedEpoch runs InstallVerifiedEpoch's checks of the bundle itself, and writes nothing: the candidate against the committed
+// record, the old epoch's commit proof under its own keys and scheme, the snapshot against the proof, and a coupled assignment against this
+// store's committed history. The checks of this root's own durable state (the epoch-anchor safety record, the trust store's binding)
+// stay in the install. An install that fetches its bundle from a root peer runs it on each answer (with the history's
 // authentication, q3active.Runtime.Authenticate), so a peer serving an invalid bundle is passed over for the next one instead of failing the
 // install. It does not need a stopped manager; the install still re-runs every check.
 func (x *ConsensusManager) CheckVerifiedEpoch(entry q3format.Entry, proof handoff.OldCommitProof, head *abdrc.CommittedBlock, candidate []byte) error {

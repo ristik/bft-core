@@ -17,7 +17,7 @@ var errInvalidPeerBundle = errors.New("the served bundle does not authenticate")
 
 // fetchFromRootPeers asks the root peers in order and returns the first answer that authenticates (accept, when given: a side-effect-free
 // check against this root's installed history, so one peer serving a decodable but invalid bundle cannot mask a later honest one). Every
-// request gets ctx, and no peer is asked once ctx has ended. When none answers it returns every peer's refusal, each with the peer id, so an
+// request gets ctx; no peer is asked, no answer authenticated and none chosen once ctx has ended (its error is kept). When none answers it returns every peer's refusal, each with the peer id, so an
 // install that cannot find its bundle says why instead of only that it failed.
 func fetchFromRootPeers[B any](ctx context.Context, peers []peer.AddrInfo, request func(context.Context, peer.ID) (B, error), accept func(B) error) (B, error) {
 	var zero B
@@ -31,9 +31,19 @@ func fetchFromRootPeers[B any](ctx context.Context, peers []peer.AddrInfo, reque
 			break
 		}
 		b, err := request(ctx, root.ID)
+		// an answer that arrives as the budget ends is not authenticated, and one whose authentication outlasts it is not chosen: the
+		// caller installs under its own, longer context, so a late answer would make the install outlast the budget (astra on #1081)
+		if cerr := ctx.Err(); cerr != nil {
+			errs = append(errs, fmt.Errorf("peer %s: %w", root.ID, errors.Join(cerr, err)))
+			break
+		}
 		if err == nil && accept != nil {
 			if aerr := accept(b); aerr != nil {
 				err = fmt.Errorf("%w: %w", errInvalidPeerBundle, aerr)
+			}
+			if cerr := ctx.Err(); cerr != nil {
+				errs = append(errs, fmt.Errorf("peer %s: authenticated after the wait ended: %w", root.ID, errors.Join(cerr, err)))
+				break
 			}
 		}
 		if err == nil {
@@ -80,11 +90,15 @@ func awaitFromRootPeers[B any](ctx context.Context, r installRetry, peers []peer
 	delay := r.first
 	for attempt := 1; ; attempt++ {
 		b, err := fetchFromRootPeers(ctx, peers, request, accept)
-		if err == nil || errors.Is(err, errNoInstallPeers) {
+		if errors.Is(err, errNoInstallPeers) {
 			return b, err
 		}
-		if ctx.Err() != nil {
-			return b, fmt.Errorf("after %d attempts within %s: %w", attempt, r.wait, errors.Join(ctx.Err(), err))
+		if cerr := ctx.Err(); cerr != nil {
+			var zero B
+			return zero, fmt.Errorf("after %d attempts within %s: %w", attempt, r.wait, errors.Join(cerr, err))
+		}
+		if err == nil {
+			return b, nil
 		}
 		if waiting != nil {
 			waiting(attempt, err)

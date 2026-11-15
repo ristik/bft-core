@@ -145,9 +145,9 @@ type checkedEpochBundle struct {
 	bundle     handoffdelivery.Bundle
 }
 
-// CheckEpochBundle runs every check InstallEpochBundle makes before it writes anything, and writes nothing: the old commit proof under
-// the verified old trust lineage and its own epoch's scheme, the derived epoch genesis, the successor committee and the bundle's
-// snapshot. An install that fetches its bundle from a root peer runs it on each answer, so a peer serving an invalid bundle is passed over
+// CheckEpochBundle runs InstallEpochBundle's checks of the bundle itself, and writes nothing: the old commit proof under the verified old
+// trust lineage and its own epoch's scheme, the derived epoch genesis, the successor committee and the bundle's snapshot. The checks of
+// this root's own durable state (the retained bundle archive, the epoch-anchor safety record) stay in the install. An install that fetches its bundle from a root peer runs it on each answer, so a peer serving an invalid bundle is passed over
 // for the next one instead of failing the install. It does not need a stopped manager; the install still re-runs every check.
 func (x *ConsensusManager) CheckEpochBundle(incoming handoffdelivery.Bundle) error {
 	if x.params.NetworkProfileVersion != storage.ProfileHandoff {

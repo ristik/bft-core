@@ -206,6 +206,36 @@ func TestAwaitFromRootPeers(t *testing.T) {
 		require.Less(t, time.Since(start), 500*time.Millisecond)
 	})
 
+	t.Run("an authentication that outlasts the wait does not choose the bundle", func(t *testing.T) {
+		r := installRetry{first: time.Millisecond, max: time.Millisecond, wait: 20 * time.Millisecond}
+		got, err := awaitFromRootPeers(context.Background(), r, peers, func(context.Context, peer.ID) (string, error) { return "valid", nil },
+			func(string) error {
+				time.Sleep(40 * time.Millisecond) // a synchronous authentication crossing the deadline (astra's r2 repro)
+				return nil
+			}, nil)
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+		require.ErrorContains(t, err, "authenticated after the wait ended")
+		require.Empty(t, got, "nothing is chosen")
+	})
+
+	t.Run("an answer that arrives as the wait ends is neither authenticated nor chosen", func(t *testing.T) {
+		r := installRetry{first: time.Millisecond, max: time.Millisecond, wait: 20 * time.Millisecond}
+		authenticated := false
+		got, err := awaitFromRootPeers(context.Background(), r, peers, func(ctx context.Context, _ peer.ID) (string, error) {
+			<-ctx.Done() // the response races the deadline and loses
+			return "late", nil
+		}, func(string) error { authenticated = true; return nil }, nil)
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+		require.False(t, authenticated)
+		require.Empty(t, got)
+	})
+
+	t.Run("an answer after a cancellation is not chosen in the single sweep either", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		_, err := awaitFromRootPeers(ctx, installRetry{}, peers, func(context.Context, peer.ID) (string, error) { cancel(); return "late", nil }, nil, nil)
+		require.ErrorIs(t, err, context.Canceled)
+	})
+
 	t.Run("without peers there is nothing to wait for", func(t *testing.T) {
 		_, err := awaitFromRootPeers(context.Background(), fast, nil, func(context.Context, peer.ID) (string, error) { return "", nil }, nil,
 			func(int, error) { t.Fatal("waited for no peer") })
