@@ -75,25 +75,40 @@ def driver(gen, *args, env_file=None):
     return out.stdout
 
 
-def build(gen, record, image_id, ureth_command):
+def validator_pins(name, command, b1):
+    """One validator's execution client as the manifest requires it: a full proof source (none of NOT_PROOF_SOURCE, in either flag form), a pinned pool
+    byte limit at or above L_max, and the pool gas cap at the profile's ordinary capacity. Returns (pool bytes, pool gas)."""
+    bad = [f for f in NOT_PROOF_SOURCE if any(w == f or w.startswith(f + '=') for w in command)]
+    if bad:
+        raise SystemExit(f'{name} is not a full proof source ({", ".join(bad)}): wallets could not fetch their evidence from it')
+    pool, pool_gas = flag(command, '--txpool.max-tx-input-bytes'), flag(command, '--txpool.max-tx-gas')
+    if pool is None:
+        raise SystemExit(f'{name} runs without --txpool.max-tx-input-bytes: its pool\'s encoded-transaction limit is reth\'s default, not pinned')
+    if int(pool) < L_MAX:
+        raise SystemExit(f'{name}\'s pool admits {pool} encoded bytes, below L_max {L_MAX}')
+    if pool_gas is None or int(pool_gas) != b1['ordinaryCapacity']:
+        raise SystemExit(f'{name} runs --txpool.max-tx-gas {pool_gas}, not the profile\'s ordinary capacity {b1["ordinaryCapacity"]}')
+    return int(pool), int(pool_gas)
+
+
+def build(gen, record, image_id, services):
+    """The manifest of generation GEN. SERVICES are compose.yaml's services: every validator's execution client (ureth1..N, N the manifest's validators)
+    must be there and pass validator_pins with the same settings, because the gateway relays to all of them."""
     package = json.loads((gen / 'manifest.json').read_text())
     images = json.loads((ARTIFACTS / 'bridge-images.json').read_text())
     if images['images']['bridge'] != image_id:
         raise SystemExit(f'artifacts/bridge-images.json records {images["images"]["bridge"]}, but the deploy ran {image_id}')
     profile_bytes = (gen / 'network/b1-profile.json').read_bytes()
     b1 = json.loads(profile_bytes)
-    pool = flag(ureth_command, '--txpool.max-tx-input-bytes')
-    pool_gas = flag(ureth_command, '--txpool.max-tx-gas')
-    if pool is None:
-        raise SystemExit('compose.yaml runs ureth without --txpool.max-tx-input-bytes: the pool\'s encoded-transaction limit is reth\'s default, not pinned')
-    if pool_gas is None or int(pool_gas) != b1['ordinaryCapacity']:
-        raise SystemExit(f'ureth --txpool.max-tx-gas {pool_gas} is not the profile\'s ordinary capacity {b1["ordinaryCapacity"]}')
-    pool = int(pool)
-    if pool < L_MAX:
-        raise SystemExit(f'the pool admits {pool} encoded bytes, below L_max {L_MAX}')
-    bad = [f for f in NOT_PROOF_SOURCE if f in ureth_command]
-    if bad:
-        raise SystemExit(f'validator 1\'s ureth is not a full proof source ({bad}): wallets could not fetch their evidence')
+    per = {}
+    for i in range(1, package['validators'] + 1):
+        name = f'ureth{i}'
+        if name not in services or 'entrypoint' not in services[name]:
+            raise SystemExit(f'compose.yaml has no {name}: the manifest describes every validator\'s pool')
+        per[name] = validator_pins(name, services[name]['entrypoint'], b1)
+    if len(set(per.values())) != 1:
+        raise SystemExit(f'the validators\' pools differ ({per}): one admission policy per deployment')
+    pool, pool_gas = next(iter(per.values()))
     gw = gateway_limits()
     lmax = L_MAX
     if gw['MAX_RAW_TX_BODY'] < 2 * lmax + (64 << 10):
@@ -120,8 +135,8 @@ def build(gen, record, image_id, ureth_command):
         'pins': pins,
         'limits': {
             'maxEncodedTxBytes': {'value': lmax, 'source': 'release_nb2.py L_MAX (owner-question default, spec section 15): the wallets\' limit; within the pool and the gateway limits below'},
-            'poolMaxTxInputBytes': {'value': pool, 'source': 'compose.yaml ureth --txpool.max-tx-input-bytes, from the B1 profile\'s ureth flags (ubft cli/ubft/cmd/b1_activation.go urethTxInputBytes)'},
-            'poolMaxTxGas': {'value': int(pool_gas), 'source': 'compose.yaml ureth --txpool.max-tx-gas: the profile\'s ordinary capacity (a transaction above userGasLimit is refused at admission)'},
+            'poolMaxTxInputBytes': {'value': pool, 'source': f'compose.yaml --txpool.max-tx-input-bytes of every validator ({", ".join(per)}), from the B1 profile\'s ureth flags (ubft cli/ubft/cmd/b1_activation.go urethTxInputBytes)'},
+            'poolMaxTxGas': {'value': pool_gas, 'source': 'compose.yaml ureth --txpool.max-tx-gas: the profile\'s ordinary capacity (a transaction above userGasLimit is refused at admission)'},
             'gatewayMaxRawTxBytes': {'value': (gw['MAX_RAW_TX_BODY'] - (64 << 10)) // 2, 'source': 'gateway.py MAX_RAW_TX_BODY: the largest encoded transaction its body carries as hex with framing (below the pool\'s)'},
             'userGasLimit': {'value': b1['ordinaryCapacity'], 'source': 'network/b1-profile.json ordinaryCapacity: the block gas available to user transactions (max_gas - system_gas)'},
             'blockGasLimit': {'value': b1['maxGas'], 'source': 'network/b1-profile.json maxGas (ureth --builder.gaslimit): ordinary capacity plus the system reservation'},
@@ -134,7 +149,7 @@ def build(gen, record, image_id, ureth_command):
             'gatewayMaxResultBytes': {'value': gw['MAX_RESULT_BYTES'], 'source': 'gateway.py MAX_RESULT_BYTES: one relayed answer (413 above: ask for less)'},
             'gatewayAggregatorMaxBodyBytes': {'value': gw['AGG_MAX_BODY'], 'source': 'gateway.py AGG_MAX_BODY: the /aggregator route'},
             'retention': {'value': {'proofSource': True, 'companions': 'life of the deployment', 'receipts': 'life of the deployment', 'logs': 'life of the deployment'},
-                          'source': f'compose.yaml ureth: none of {", ".join(NOT_PROOF_SOURCE)} (ureth refuses pruning on a proof source); unicity_sealCompanionHorizonV1 answers null'},
+                          'source': f'compose.yaml, every validator ({", ".join(per)}): none of {", ".join(NOT_PROOF_SOURCE)} (ureth refuses pruning on a proof source); unicity_sealCompanionHorizonV1 answers null'},
             'p2p': {'value': 'no execution-client transaction gossip in this package (ureth --disable-discovery, no trusted peers): the gateway relays eth_sendRawTransaction to every validator; a block travels between validators on the shard node\'s /unicity/shard-payload/1.0.0 (no frame cap)',
                     'source': 'generate.py, deploy/testnet/gateway.py, shardnode/net_dissemination.go'},
         },

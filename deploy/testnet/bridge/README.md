@@ -22,7 +22,9 @@ go build -o /tmp/nb2-evidence ./scripts/nb2-evidence
 sudo python3 deploy/testnet/bridge/nb2/deploy_nb2.py /srv/<generation> --nb2-evidence /tmp/nb2-evidence [--k 4 --b 2 | --k 64 --b 16 --no-production]
 ```
 
-Publish `GENERATION/bridge/nb2/public/` (the manifest, the trust bundle and its pin) and nothing else: `GENERATION/bridge/nb2/driver.env` holds the lane's keys.
+Publish `GENERATION/bridge/nb2/public/` (the manifest, the trust bundle and its pin) and nothing else. `GENERATION/bridge/nb2/driver.env` holds the lane's
+keys while a run lasts (`rehearse_nb2.py` deletes it at the end unless `--keep-keys`). The manifest checks every validator's execution client
+(ureth1..N): each must be a full proof source with the same pool byte and gas pins, or the deploy refuses.
 
 ### The release manifest
 
@@ -51,7 +53,7 @@ expectations and outputs are in the script's docstring; the outputs (`out/*.json
 |---|---|
 | `deploy` | both builds deployed and readable through the gateway; the manifest against the chain (code hashes, creation blocks, `config()` is Γ); Go decodes Γ to the deployed fields; the plug-in's installation check (`NativeBridgeV2.open`: chain ID, `config()`, runtime code hash); the companion horizon is null; each verifier build refuses the other's Γ (ConfigShape) and each vault build's constructor the other's K (BadConfig(16)) |
 | `limits` | a transaction of exactly L_max encoded bytes accepted by the gateway, included, and its block held by every validator; one byte over the pools' own limit refused by every validator; the gateway's large-body bound (413 above it); a transaction at `userGasLimit` included and one gas above it refused at admission |
-| `fund` | the driver keys (`nb2/driver.env`, mode 0600, never in the evidence) funded from the faucet |
+| `fund` | the driver keys (`nb2/driver.env`, mode 0600) funded from the faucet. They reach the driver only through its environment file, never a command line, and are redacted from every console line, log and result. The run deletes them at its end, on success and on failure; `--keep-keys` hands them to the next invocation (the PoS lane's first one), and the last invocation deletes them |
 | `circulate` | deposit 100 (EIP-1559), mint, transfer, split 60 + 40, split 40 into 15 + 25, transfer; an origin-only token from a legacy deposit; a one-transfer token; three nested split levels; tokens with 16 and 17 certificate claims; a long history (one aggregator batch) |
 | `returns` | the 60, 15 and 25 returned with their own indices while a second key's small returns rotate the K = 4 segments: exactly 100 paid; each part's replay refused while in the recent buffers (AlreadyPaid, the wallet reconciles without a send) and after eviction (the wallet finds it in a sealed segment; the old calldata, a zero history and a forged gap proof refused); a witness made stale by two rotations refused (StaleEndpoint) and paid after refresh; a too-low gas limit reverted with the vault unchanged, then paid; a return whose broadcast the gateway calls partial (HTTP 503, #1121: the transaction already in one pool) found by receipt polling, with one send |
 | `evidence` | `scripts/nb2-evidence/stage.sh` against the real vault: the deposit receipt proof and the newest seal receipt through the gateway, verified by nb2ref |

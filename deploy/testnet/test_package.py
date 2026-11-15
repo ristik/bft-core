@@ -1954,14 +1954,22 @@ class NB2Release(unittest.TestCase):
                 'profileHash':'0x'+'a9'*32,'vectorsDigest':'9b'*32}
         return gen,art,record
     URETH=['unicity-reth','node','--txpool.max-tx-gas=60000000','--txpool.max-tx-input-bytes=4194304']   # the B1 profile's ureth flags (ubft engine-api b1-profile)
-    def build(self,gen,art,record,ureth=None):
+    def services(self,**changed):
+        """compose.yaml services of the 4 validators' execution clients, with ureth<i>=COMMAND replaced (None: the service is missing)."""
+        out={f'ureth{i}':{'entrypoint':list(self.URETH)} for i in range(1,5)}
+        for name,command in changed.items():
+            if command is None: out.pop(name)
+            else: out[name]={'entrypoint':command}
+        return out
+    def build(self,gen,art,record,services=None):
         m=self.module()
         with patch.object(m,'ARTIFACTS',art):
-            return m.build(gen,record,self.IMAGE,ureth or self.URETH)
+            return m.build(gen,record,self.IMAGE,services or self.services())
     def test_the_pins_are_the_wallets_deployment_pins(self):
         with tempfile.TemporaryDirectory() as tmp:
             r=self.build(*self.generation(tmp))
         self.assertEqual(r['limits']['poolMaxTxInputBytes']['value'],4194304);self.assertEqual(r['limits']['poolMaxTxGas']['value'],60000000)
+        self.assertIn('ureth1, ureth2, ureth3, ureth4',r['limits']['poolMaxTxInputBytes']['source'])
         self.assertEqual(r['pins'],{'gamma':'0x93tt','build':'test','vaultRuntimeCodeHash':'0x'+'a1'*32,'maxEncodedTxBytes':524288,'userGasLimit':'60000000',
                                     'gasReserve':'500000','returnReserveSegments':64,'deploymentBlock':12,'stateReadOnly':False})
         self.assertEqual(r['deployment']['production']['K'],64);self.assertEqual(r['deployment']['firstBlock'],11)
@@ -1969,25 +1977,88 @@ class NB2Release(unittest.TestCase):
         self.assertGreaterEqual(r['limits']['gatewayMaxRawTxBodyBytes']['value'],2*524288+(64<<10))   # section 12.7
         self.assertEqual(r['limits']['gatewayLogBlockRange']['value'],gateway.LOG_BLOCK_RANGE)
         self.assertEqual(r['limits']['gatewayMaxResultBytes']['value'],gateway.MAX_RESULT_BYTES)
-    def test_an_unpinned_pool_limit_or_a_pruning_node_is_refused(self):
+    def test_any_validator_that_is_not_pinned_or_not_a_proof_source_is_refused(self):
+        u=self.URETH
+        cases={
+            'proof source':dict(ureth2=u+['--unicity.no-proof-source']),                                       # only a non-primary validator is wrong
+            'proof source ':dict(ureth4=u+['--prune.receipts.distance=64']),                                  # the NAME=VALUE form
+            'max-tx-input-bytes':dict(ureth3=['unicity-reth','node','--txpool.max-tx-gas=60000000']),           # no pool byte pin
+            'below L_max':dict(ureth4=['unicity-reth','node','--txpool.max-tx-gas=60000000','--txpool.max-tx-input-bytes=131072']),
+            'max-tx-gas':dict(ureth2=['unicity-reth','node','--txpool.max-tx-gas=50000000','--txpool.max-tx-input-bytes=4194304']),
+            'no ureth4':dict(ureth4=None),                                                                    # a missing validator
+            'differ':dict(ureth3=['unicity-reth','node','--txpool.max-tx-gas=60000000','--txpool.max-tx-input-bytes=8388608']),
+        }
         with tempfile.TemporaryDirectory() as tmp:
             g=self.generation(tmp)
-            with self.assertRaisesRegex(SystemExit,'max-tx-input-bytes'): self.build(*g,ureth=['unicity-reth','node'])
-            with self.assertRaisesRegex(SystemExit,'proof source'): self.build(*g,ureth=self.URETH+['--unicity.no-proof-source'])
-            with self.assertRaisesRegex(SystemExit,'pool admits'): self.build(*g,ureth=['unicity-reth','node','--txpool.max-tx-gas=60000000','--txpool.max-tx-input-bytes=131072'])
-            with self.assertRaisesRegex(SystemExit,'max-tx-gas'): self.build(*g,ureth=['unicity-reth','node','--txpool.max-tx-gas=50000000','--txpool.max-tx-input-bytes=4194304'])
+            for want,changed in cases.items():
+                with self.subTest(want):
+                    with self.assertRaisesRegex(SystemExit,want.strip()): self.build(*g,services=self.services(**changed))
+            # ureth1 alone being healthy is not enough, and every validator healthy passes
+            self.assertEqual(self.build(*g)['limits']['poolMaxTxInputBytes']['value'],4194304)
     def test_another_image_than_the_recorded_one_is_refused(self):
         with tempfile.TemporaryDirectory() as tmp:
             gen,art,record=self.generation(tmp)
             m=self.module()
             with patch.object(m,'ARTIFACTS',art):
-                with self.assertRaisesRegex(SystemExit,'records'): m.build(gen,record,'sha256:'+'22'*32,self.URETH)
+                with self.assertRaisesRegex(SystemExit,'records'): m.build(gen,record,'sha256:'+'22'*32,self.services())
     def test_the_driver_runs_read_only_with_the_lane_directory_mounted(self):
         m=self.module()
         with patch('deploy_bridge.image',return_value=self.IMAGE),patch('deploy_bridge.validators_network',return_value='tn_validators'):
             cmd=m.driver_cmd(Path('/srv/g'),'state',env_file=Path('/srv/g/bridge/nb2/driver.env'))
         self.assertIn('--read-only',cmd);self.assertIn(f'{Path(__file__).parent/"bridge/nb2"}:/opt/bridge/native-bridge-plugins/tests/live/nb2lane:ro',cmd)
         self.assertEqual(cmd[cmd.index('--env-file')+1],'/srv/g/bridge/nb2/driver.env');self.assertEqual(cmd[-2:],['tests/live/nb2lane/driver.ts','state'])
+
+class NB2DriverKeys(unittest.TestCase):
+    """bridge/nb2/rehearse_nb2.py's driver keys (sol's review of #1126): never in the console or the evidence, deleted at the end of a run unless --keep-keys."""
+    KEY='0x'+'5a7e'*16
+    def module(self):
+        import importlib.util
+        for d in ('bridge','bridge/nb2'):
+            sys.path.insert(0,str(Path(__file__).parent/d)); self.addCleanup(sys.path.remove,str(Path(__file__).parent/d))
+        spec=importlib.util.spec_from_file_location('rehearse_nb2',Path(__file__).parent/'bridge/nb2/rehearse_nb2.py')
+        m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m);return m
+    def generation(self,tmp):
+        gen=Path(tmp)/'gen';(gen/'faucet-secrets').mkdir(parents=True)
+        (gen/'faucet-secrets/password').write_text('not-a-real-faucet-password\n')
+        (gen/'manifest.json').write_text(json.dumps({'generation':'tn-x','chain_id':31337,'genesis_hash':'0x'+'ab'*32,'validators':4}))
+        return gen
+    def run_main(self,m,gen,evidence,*extra):
+        out=__import__('io').StringIO()
+        argv=['rehearse_nb2.py','--generation',str(gen),'--evidence',str(evidence),'--nb2-evidence','/bin/true','--cast','/bin/false',*extra]
+        with patch.object(sys,'argv',argv),patch('sys.stdout',out):
+            code=m.main()
+        return code,out.getvalue()
+    def write_keys(self,r):
+        r.nb2.mkdir(parents=True,exist_ok=True);(r.nb2/'driver.env').write_text(f'NB2_KEY_MAIN={self.KEY}\nNB2_KEY_ROT=0x{"11"*32}\n')
+    def test_a_failed_command_carrying_a_key_publishes_it_nowhere_and_the_keys_are_deleted(self):
+        m=self.module()
+        key=self.KEY
+        def fund(r):
+            self.write_keys(r)
+            r.say(f'  $ cast mktx --private-key {key} (a command line, as a failure would print it)')
+            raise subprocess.CalledProcessError(1,['cast','mktx','--private-key',key,'--legacy'],output=f'error with {key[2:]}')
+        with tempfile.TemporaryDirectory() as tmp, patch.object(m.NB2Rehearsal,'fund',fund):
+            gen=self.generation(tmp);ev=Path(tmp)/'ev'
+            code,console=self.run_main(m,gen,ev,'--stages','fund')
+            self.assertEqual(code,1)
+            for text in (console,(ev/'rehearsal.log').read_text(),(ev/'nb2-result.json').read_text()):
+                self.assertNotIn(key[2:],text);self.assertNotIn(key[2:].upper(),text);self.assertNotIn('11'*32,text)
+            self.assertIn('FAIL fund',console)
+            self.assertFalse((gen/'bridge/nb2/driver.env').exists(),'a failed run deletes its driver keys')
+    def test_the_keys_outlive_an_invocation_only_with_keep_keys(self):
+        m=self.module()
+        with tempfile.TemporaryDirectory() as tmp, patch.object(m.NB2Rehearsal,'fund',lambda r: self.write_keys(r)), patch.object(m.NB2Rehearsal,'custody',lambda r: None):
+            gen=self.generation(tmp)
+            code,_=self.run_main(m,gen,Path(tmp)/'ev1','--stages','fund','--keep-keys')
+            self.assertEqual(code,0);self.assertTrue((gen/'bridge/nb2/driver.env').exists(),'--keep-keys hands the keys to the next invocation')
+            code,console=self.run_main(m,gen,Path(tmp)/'ev2','--stages','custody')   # the PoS sequence's last invocation
+            self.assertEqual(code,0);self.assertFalse((gen/'bridge/nb2/driver.env').exists(),'the last invocation deletes them')
+            self.assertIn('driver keys are deleted',console)
+            code,_=self.run_main(m,gen,Path(tmp)/'ev3','--stages','fund')   # a complete standalone run
+            self.assertEqual(code,0);self.assertFalse((gen/'bridge/nb2/driver.env').exists(),'a successful run deletes its keys')
+    def test_no_key_is_given_to_a_command_line(self):
+        src=(Path(__file__).parent/'bridge/nb2/rehearse_nb2.py').read_text()
+        self.assertNotIn('--private-key',src);self.assertNotIn('self.key(',src)
 
 class LoadGenerator(unittest.TestCase):
     """deploy/testnet/loadgen.py against an in-memory node and a fake clock."""

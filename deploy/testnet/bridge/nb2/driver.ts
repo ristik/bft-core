@@ -1069,6 +1069,34 @@ async function sized(w: Wallet, nonce: bigint, length: number, file: string, gas
   throw new Error(`could not size a transaction to ${length} bytes`);
 }
 
+// ---- signing for the lane (keys stay in the driver's environment, never in a command line) -------------------------------------------------
+
+/** The address of wallet W's EVM key. */
+function address(w: Wallet, file: string): void {
+  writeFileSync(file, `${hx(w.signer.address)}\n`);
+}
+
+/**
+ * A transaction signed by wallet W, written to FILE as hex: --legacy (EIP-155, the untyped transaction the legacy-receipt deposit needs) or
+ * EIP-1559. The lane passes everything but the key; calldata may be given as @FILE.
+ */
+async function mktx(w: Wallet, args: string[], file: string): Promise<void> {
+  const [kind, to, value, gas, price, nonce, dataArg] = args;
+  const data = dataArg.startsWith('@') ? unhex(readFileSync(dataArg.slice(1), 'utf8').trim()) : unhex(dataArg);
+  const { rlpBytes, rlpList, rlpUintEnc } = await import('../../../packages/native-bridge-plugin/src/nb2/rlp.js');
+  if (kind === '--legacy') {
+    const fields = [rlpUintEnc(big(nonce)), rlpUintEnc(big(price)), rlpUintEnc(big(gas)), rlpBytes(unhex(to)), rlpUintEnc(big(value)), rlpBytes(data)];
+    const hash = HE(rlpList([...fields, rlpUintEnc(cfg.chainId), rlpUintEnc(0n), rlpUintEnc(0n)]));
+    const sig = secp256k1.sign(hash, w.evmKey, { prehash: false, lowS: true, format: 'recovered' });
+    const strip = (b: Uint8Array): Uint8Array => { let i = 0; while (i < b.length && b[i] === 0) i++; return b.subarray(i); };
+    const v = cfg.chainId * 2n + 35n + BigInt(sig[0]);
+    writeFileSync(file, `${hx(rlpList([...fields, rlpUintEnc(v), rlpBytes(strip(sig.subarray(1, 33))), rlpBytes(strip(sig.subarray(33, 65)))]))}\n`);
+    return;
+  }
+  const tx = await signTx(w.signer, { chainId: cfg.chainId, nonce: big(nonce), maxPriorityFeePerGas: big(price), maxFeePerGas: big(price), gas: big(gas), to: unhex(to), value: big(value), data });
+  writeFileSync(file, `${hx(tx.raw)}\n`);
+}
+
 // ---- main -------------------------------------------------------------------------------------------------------------------------------
 
 async function main(): Promise<void> {
@@ -1099,6 +1127,8 @@ async function main(): Promise<void> {
     case 'boundary': return boundary(await wallet(), pos[1], Number(pos[2]));
     case 'state': out('state', await vaultState()); return;
     case 'sized': return sized(new Wallet(pos[0]), big(pos[1]), Number(pos[2]), pos[3]);
+    case 'address': return address(new Wallet(pos[0]), pos[1]);
+    case 'mktx': return mktx(new Wallet(args[0]), args.slice(1, 8), args[8]);
     default: throw new Error(`unknown command ${cmd}`);
   }
 }

@@ -113,7 +113,7 @@ jobs:
       - name: 1. Package up, the 5a smoke (epoch 1)
         run: sudo -E env "PATH=$PATH" python3 deploy/testnet/rehearse.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/1-package" --ubft pinned-bft/build/ubft --stages up,identity,first-tx,pos-smoke
       - name: 2. The native bridge v2 deployed, and a deposit, mint and transfer in epoch 1 (before the election and the root install)
-        run: sudo -E env "PATH=$PATH" python3 deploy/testnet/bridge/nb2/rehearse_nb2.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/2-nb2-epoch1" --nb2-evidence /tmp/nb2-evidence --stages deploy,fund,pos-deposit
+        run: sudo -E env "PATH=$PATH" python3 deploy/testnet/bridge/nb2/rehearse_nb2.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/2-nb2-epoch1" --nb2-evidence /tmp/nb2-evidence --stages deploy,fund,pos-deposit --keep-keys
       - name: 3. The handoff (election, proposal, propose, install, advance)
         run: sudo -E env "PATH=$PATH" python3 deploy/testnet/rehearse.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/3-handoff" --ubft pinned-bft/build/ubft --stages pos-election,pos-proposal,pos-propose,pos-install,pos-advance
       - name: '4. The return across the epoch change: transfer, split, burn, verdicts by the plug-in, the deployed verifier and Go, redeem; custody'

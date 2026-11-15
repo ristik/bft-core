@@ -4,7 +4,12 @@ bridge stages of testnet-bridge and testnet-bridge-pos (README.md "The rehearsal
 rotate after four payments. Every wallet step is the TypeScript plug-in (driver.ts) through the public gateway only; the Go reference (nb2-evidence,
 built from this checkout) is the independent verifier.
 
-    rehearse_nb2.py --generation GEN --evidence DIR --nb2-evidence BIN [--stages ...] [--long-transfers N]
+    rehearse_nb2.py --generation GEN --evidence DIR --nb2-evidence BIN [--stages ...] [--long-transfers N] [--keep-keys]
+
+The driver keys (`fund`: bridge/nb2/driver.env, funded from the faucet) are this run's secrets. They reach the driver only through its environment
+file, never a command line (the lane's own signing goes through the driver's `address` and `mktx`), and every console line, log and result is
+redacted of them. A run deletes them at its end, on success and on failure. --keep-keys hands them to a later invocation on the same generation: the
+PoS sequence's first invocation (deploy,fund,pos-deposit) keeps them, and its last one (pos-return,custody) runs without it and deletes them.
 
   deploy        deploy_nb2.py: the test pair (K = 4) and the production pair (64, 16); the manifest against the chain; Γ by Go, accepted by the vault
                 constructor and by the plug-in (installation check); the companion horizon null (retention); each build refuses the other's (K, B)
@@ -54,6 +59,10 @@ FUNDS = {'main': 20 * 10 ** 18, 'rot': 20 * 10 ** 18, 'big': 20 * 10 ** 18, 'siz
 
 
 class NB2Rehearsal(Rehearsal):
+    def __init__(self, *args, **kwargs):
+        self._addresses = {}
+        super().__init__(*args, **kwargs)
+
     @property
     def nb2(self):
         return self.gen / 'bridge' / 'nb2'
@@ -90,14 +99,53 @@ class NB2Rehearsal(Rehearsal):
     def go(self, *args):
         return subprocess.run([str(self.nb2_evidence), *args], check=True, text=True, capture_output=True).stdout
 
-    def key(self, wallet):
-        for line in (self.nb2 / 'driver.env').read_text().splitlines():
-            if line.startswith(f'NB2_KEY_{wallet.upper()}='):
-                return line.split('=', 1)[1].strip()
-        raise Failure(f'no key for {wallet}')
+    def driver_keys(self):
+        """Every driver key of bridge/nb2/driver.env, as written and without its 0x: secrets of this run, whatever the generation's own scan finds."""
+        env = self.nb2 / 'driver.env'
+        keys = set()
+        if env.exists():
+            for line in env.read_text().splitlines():
+                if line.startswith('NB2_KEY_') and '=' in line:
+                    k = line.split('=', 1)[1].strip()
+                    if len(k) >= 16:
+                        keys |= {k, k.removeprefix('0x'), k.lower(), k.removeprefix('0x').lower()}
+        return keys
+
+    def scrub(self, text, patterns=False):
+        """The package's redaction, with the driver keys added: they are not in a file the generation scan knows (driver.env), and a failed command's
+        text can carry anything it was given. Fails closed like the inherited scrub."""
+        try:
+            keys = self.driver_keys()
+        except Exception as error:
+            return f'[output withheld: the driver keys could not be read: {error}]'
+        for k in sorted(keys, key=len, reverse=True):
+            text = text.replace(k, '[redacted]')
+        out = super().scrub(text, patterns)
+        return '[output withheld: a driver key survived the redaction]' if any(k in out for k in keys) else out
 
     def address(self, wallet):
-        return self.cast_run('wallet', 'address', '--private-key', self.key(wallet))
+        """The address of a driver key, from the driver: the key stays in its environment file, never in a command line."""
+        if wallet not in self._addresses:
+            (self.nb2 / 'tmp').mkdir(parents=True, exist_ok=True)
+            self.driver('address', wallet, f'/work/nb2/tmp/address-{wallet}')
+            self._addresses[wallet] = (self.nb2 / 'tmp' / f'address-{wallet}').read_text().strip()
+        return self._addresses[wallet]
+
+    def mktx(self, wallet, to, value, gas, price, nonce, data='0x', legacy=True):
+        """A transaction signed by a driver key, in the driver (no key in any argv); its raw hex."""
+        (self.nb2 / 'tmp').mkdir(parents=True, exist_ok=True)
+        name = f'tx-{secrets.token_hex(4)}.hex'
+        self.driver('mktx', wallet, '--legacy' if legacy else '--1559', to, str(value), str(gas), str(price), str(nonce), data, f'/work/nb2/tmp/{name}')
+        return (self.nb2 / 'tmp' / name).read_text().strip()
+
+    def finalize_keys(self, keep):
+        """The run's end: the driver keys (funded, disposable) are deleted unless --keep-keys hands them to a later invocation (the PoS sequence's
+        stages around the handoff). The generation's faucet keystore is not the driver's and stays."""
+        env = self.nb2 / 'driver.env'
+        if keep or not env.exists():
+            return
+        env.unlink()
+        self.say('  the driver keys are deleted (bridge/nb2/driver.env)')
 
     # --- deploy ----------------------------------------------------------------------------------------------------------------
     def deploy(self):
@@ -217,12 +265,12 @@ class NB2Rehearsal(Rehearsal):
         gc = self.address('gascap')
         gnonce = int(self.call('eth_getTransactionCount', [gc, 'pending']), 16)
         price = int(self.call('eth_gasPrice'), 16) * 2
-        at = self.cast_run('mktx', '--private-key', self.key('gascap'), '--legacy', '--nonce', str(gnonce), '--gas-price', str(price), '--gas-limit', str(ugl), '--chain', str(self.chain_id), '--value', '1', size)
+        at = self.mktx('gascap', size, 1, ugl, price, gnonce)
         h = self.call('eth_sendRawTransaction', [at])
         r = self.wait('the userGasLimit transaction is mined', lambda: self.call('eth_getTransactionReceipt', [h]), 300)
         res['atUserGasLimit'] = {'tx': h, 'status': r['status'], 'block': int(r['blockNumber'], 16)}
         self.expect(r['status'] == '0x1', f'a transaction with gas limit {ugl} (userGasLimit) is included')
-        above = self.cast_run('mktx', '--private-key', self.key('gascap'), '--legacy', '--nonce', str(gnonce + 1), '--gas-price', str(price), '--gas-limit', str(ugl + 1), '--chain', str(self.chain_id), '--value', '1', size)
+        above = self.mktx('gascap', size, 1, ugl + 1, price, gnonce + 1)
         replies = {i: self.inner_reply(f'http://ureth{i}:8545', 'eth_sendRawTransaction', [above]) for i in range(1, self.n + 1)}
         outcome = {'gasLimit': ugl + 1, 'validators': {i: (r.get('error') or {}).get('message', 'ACCEPTED') for i, r in replies.items()}}
         self.expect(all(v != 'ACCEPTED' for v in outcome['validators'].values()), f'a transaction with gas limit {ugl + 1} is refused at admission by every pool (--txpool.max-tx-gas)', json.dumps(outcome))
@@ -252,8 +300,7 @@ class NB2Rehearsal(Rehearsal):
         sender = self.address(wallet)
         nonce = int(self.call('eth_getTransactionCount', [sender, 'pending']), 16)
         price = int(self.call('eth_gasPrice'), 16) * 2
-        raw = self.cast_run('mktx', '--private-key', self.key(wallet), '--legacy', '--nonce', str(nonce), '--gas-price', str(price), '--gas-limit', '200000',
-                            '--chain', str(self.chain_id), '--value', str(plan['value']), plan['vault'], plan['calldata'])
+        raw = self.mktx(wallet, plan['vault'], plan['value'], 200000, price, nonce, plan['calldata'])
         self.expect(raw.startswith('0xf8') or raw.startswith('0xf9'), 'the deposit is a legacy (untyped) transaction')
         tx = self.call('eth_sendRawTransaction', [raw])
         r = self.wait('the legacy deposit is mined', lambda: self.call('eth_getTransactionReceipt', [tx]), 180)
@@ -575,6 +622,8 @@ def main():
     p.add_argument('--cast', default='cast')
     p.add_argument('--nb2-evidence', required=True, type=Path, help='nb2-evidence built from this checkout (go build -o BIN ./scripts/nb2-evidence)')
     p.add_argument('--stages', default=','.join(s for s, _ in STAGES if s not in POS_STAGES))
+    p.add_argument('--keep-keys', action='store_true', help='keep bridge/nb2/driver.env for a later invocation on this generation (the PoS sequence\'s first one); '
+                   'the last invocation runs without it and deletes them, on success and on failure')
     p.add_argument('--prefix', default='', help='label prefix of the 100 scenario (circulate, returns): a second, clean pass on the same generation')
     p.add_argument('--long-transfers', type=int, default=40, help='transfers of the long-history part (one aggregator batch, so at most 254)')
     a = p.parse_args()
@@ -601,6 +650,11 @@ def main():
     finally:
         r.say('RESULT ' + ' '.join(f'{n}={s}' for n, s, _ in r.results))
         (a.evidence / 'nb2-result.json').write_text(json.dumps({'generation': r.gen.name, 'stages': r.results}, indent=2) + '\n')
+        try:
+            r.finalize_keys(a.keep_keys)
+        except OSError as error:
+            r.say(f'  the driver keys could not be deleted: {error}')
+            code = 1
     return code
 
 

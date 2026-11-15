@@ -150,8 +150,8 @@ def main():
 
     bridge = image(gen)
     record_image(gen, bridge)
-    ureth = json.loads((gen / 'compose.yaml').read_text())['services']['ureth1']['entrypoint']
-    doc = release_nb2.build(gen, record, bridge, ureth)
+    services = json.loads((gen / 'compose.yaml').read_text())['services']
+    doc = release_nb2.build(gen, record, bridge, services)   # every validator's execution client is checked, not only validator 1's
     lane = {'rpc': a.gateway, 'agg': a.gateway + '/aggregator', 'direct': ETH, 'release': '/work/nb2/public/nb2-release.json',
             'trustBundle': '/work/nb2/public/trust-base.bundle.cbor', 'trustPin': '/work/nb2/public/trust-base.genesis.entryid', 'unit': str(UNIT_WEI),
             'verifier': primary['verifier']['address'], 'helper': primary['helper']['address'],
