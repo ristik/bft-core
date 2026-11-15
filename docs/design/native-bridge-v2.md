@@ -581,7 +581,9 @@ time, in order, and reports the earliest failure.
 
 The vault and the verifier are separate deliverables behind this interface (NB2-04, #1100, and NB2-05, #1101). The
 internal division of the verifier into Solidity and existing generic primitives (`0x0100` certificate batch, `0x0102`
-membership) is NB2-05's decision gate and changes no byte above.
+membership) is NB2-05's decision gate and changes no byte above. **Decision (default): option 1**, the verifier in
+Solidity over the existing generic primitives; a native lineage primitive is deferred. Its measured costs are in
+Section 15 (ristik/unicity-pos-contracts#82, `docs/nb2-verifier.md`).
 
 ### 11.3 Historical authority
 
@@ -934,6 +936,21 @@ ristik/unicity-pos-contracts#80 `bench/nb2/RESULTS.md`):
 | Deposit, first | 48,758 | |
 | Deposit, steady | 31,670 | |
 
+**Measured verifier costs** (#1101, ristik/unicity-pos-contracts#82 `docs/nb2-verifier.md`, option 1: Solidity over
+`0x0100`/`0x0102`):
+
+| Evidence | Gas |
+|---|---:|
+| One-transfer token | ≈ 0.92M |
+| Reference two-split part | ≈ 1.85M |
+| Per extra transfer hop | ≈ 182k |
+| Per nested split level | ≈ 740k |
+| Origin (deposit receipt proof), marginal / standalone | ≈ 255k / 345k |
+
+A reference return needs a gas limit of about 2.42M, including the 500,000 `gasReserve`. Gas binds before size: a 30M
+`userGasLimit` admits about 155 transfers or about 40 nested split levels in one return, far below what `L_max` would
+allow. This corrects the design note's origin estimate (design v2 §10.4, "approximately 100k") to about 255k marginal.
+
 Open owner decisions (recorded in `briefs/owner-questions.md` with these defaults):
 
 1. **Continuation before real value.** Default: a real-value deployment requires NB2-12 (#1108) or an explicit owner
@@ -1004,6 +1021,7 @@ mirroring Section 11.1; boolean acceptance is unchanged.
 | NB2-07 TypeScript wallet (#1103) | §12.5 (`L_T` upper bound), §12.7 (companion status `"found"`) |
 | Astra vault review (unicity-pos-contracts#81) | §4.1 (`BadConfig` stage order), §11.1 step 5 (`MAX_VERIFIER_REVERT`), §13.3, §14.7 |
 | Astra delta review 2026-11-15 (`briefs/astra-review-1110-r2-answer.md`) | P2-1: §7, §14.4 (NB2 unlock restriction, owner ruling), §12.6, §14.7; P2-2: §14.6 `SealReceipt`, §14.7 |
+| NB2-05 verifier measurements (#1101, unicity-pos-contracts#82) | §11.2 (decision gate: option 1), §15 (verifier costs, origin estimate corrected) |
 | NB2-02 bake-off (#1098, unicity-pos-contracts#80) | Preamble, §4.1 (`K`, `B`, admitted set), §9.2, §10, §10.4 (sort), §12.4 (`gasReserve`), §14.7, §15 (values, measured table, capacity) |
 | NB2-03 reference defaults (#1099) | §6.2 (`DepositUC` scope, header), §3 (amount names, depth), §4.1 (test set, asset/ty/aid, `BadConfig` indices), §11.1 (reentrancy), §11.2 (check order), §14.4, §14.6 (`ImplausibleIndex`), §14.7 (vector file) |
 | Corrections confirmed (30M test profile, encoded-length limit, `2K - 1` scan, high index can strand) | Sections 4.3 (`userGasLimit` from the production profile), 12.5, 12.4, 12.2 |
