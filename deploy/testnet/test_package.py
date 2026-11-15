@@ -150,6 +150,66 @@ class B1Layout(unittest.TestCase):
                 root=svc['root%d'%i]['entrypoint']
                 self.assertIn('--q3-lane',root);self.assertIn('--b1-registry',root);self.assertEqual(root[root.index('--genesis-identities')+1],'/network/genesis-identities.json')
 
+class ImageTags(unittest.TestCase):
+    """bft-core#1092: images are tagged per pin and per ID, a tag is never moved, and nothing the package records or runs names an image by a tag."""
+    ID='sha256:'+'ab'*32; OTHER='sha256:'+'cd'*32
+    def test_mutable_images_are_found(self):
+        import imagetag
+        compose={'services':{'a':{'image':self.ID},'b':{'image':'mongo:7.0.45@sha256:'+'1'*64},'c':{'image':'tnops-node:verified'},
+                             'd':{'image':'prom/prometheus:v3.2.1'},'e':{'entrypoint':['x']}}}
+        self.assertEqual(imagetag.mutable_images(compose),['c','d'])
+        self.assertEqual(imagetag.immutable_tag('node','92ed0ce8c1ab',self.ID),'tnops-node:92ed0ce8c1ab-'+'ab'*6)
+    def test_generate_refuses_a_compose_with_a_tag(self):
+        with self.assertRaises(SystemExit) as e: generate.immutable({'services':{'rpc':{'image':'tnops-rpc:verified'},'root1':{'image':self.ID}}})
+        self.assertIn('rpc',str(e.exception))
+        ok={'services':{'root1':{'image':self.ID}}}
+        self.assertIs(generate.immutable(ok),ok)
+        source=(Path(__file__).parent/'generate.py').read_text()
+        self.assertEqual(source.count("write(out/'compose.yaml',immutable(topology("),2,'every compose.yaml the generator writes is checked')
+    def test_build_tags_by_id_and_never_moves_a_tag(self):
+        import imagetag
+        calls=[]; present={}
+        def run(cmd,check=False,capture_output=False,text=False,**kw):
+            calls.append(cmd)
+            if cmd[:2]==['docker','build']:
+                Path(cmd[cmd.index('--iidfile')+1]).write_text(self.ID+'\n')
+            if cmd[:3]==['docker','image','inspect']:
+                tag=cmd[-1]
+                return subprocess.CompletedProcess(cmd,0 if tag in present else 1,present.get(tag,''),'')
+            if cmd[:2]==['docker','tag']:
+                present[cmd[3]]=cmd[2]
+            return subprocess.CompletedProcess(cmd,0,'','')
+        with patch.object(imagetag.subprocess,'run',run):
+            image,tag=imagetag.build('node','92ed0ce8c1ab','ctx')
+            self.assertEqual((image,tag),(self.ID,'tnops-node:92ed0ce8c1ab-'+'ab'*6))
+            self.assertNotIn('-t',[w for c in calls if c[:2]==['docker','build'] for w in c],'no mutable tag at build time')
+            self.assertEqual(present,{tag:self.ID,'tnops-node:verified':self.ID})
+            present[tag]=self.OTHER   # the same tag on another image: refused, never moved
+            with self.assertRaises(SystemExit): imagetag.build('node','92ed0ce8c1ab','ctx')
+    def test_nothing_runs_an_image_through_a_tag(self):
+        here=Path(__file__).parent
+        for name in ('build-images.py','bridge/build-bridge-image.py','bridge/deploy_bridge.py','bridge/rehearse_bridge.py','bridge/bridge_pos.py','generate.py'):
+            source=(here/name).read_text()
+            self.assertNotIn(':verified',source,name)
+            self.assertNotRegex(source,r"\bTAG\b",name)
+        self.assertIn("'tags': tags",(here/'build-images.py').read_text())
+        self.assertIn("'tags': {'bridge': tag}",(here/'bridge/build-bridge-image.py').read_text())
+    def test_the_bridge_tools_run_by_the_recorded_id(self):
+        import importlib.util
+        sys.path.insert(0,str(Path(__file__).parent/'bridge'))
+        spec=importlib.util.spec_from_file_location('deploy_bridge',Path(__file__).parent/'bridge/deploy_bridge.py'); db=importlib.util.module_from_spec(spec); spec.loader.exec_module(db)
+        with tempfile.TemporaryDirectory() as tmp:
+            art=Path(tmp)/'artifacts'; art.mkdir()
+            (Path(tmp)/'pins.json').write_text(json.dumps({'bft':'f'*40}))
+            (art/'bridge-images.json').write_text(json.dumps({'sources':{'bft':'f'*40},'images':{'bridge':self.ID}}))
+            inspect=lambda rc: (lambda cmd,**kw: subprocess.CompletedProcess(cmd,rc,'',''))
+            with patch.object(db,'ARTIFACTS',art), patch.object(db.subprocess,'run',inspect(0)):
+                self.assertEqual(db.image(),self.ID)
+            with patch.object(db,'ARTIFACTS',art), patch.object(db.subprocess,'run',inspect(1)):
+                with self.assertRaises(SystemExit) as e: db.image()
+                self.assertIn('not in the local image store',str(e.exception))
+
+
 class UtbProfile(unittest.TestCase):
     """P1 live UTB source (briefs/pos-utb-live-source-plan.md, step 1): every root, shard node and the aggregator get the signed-history profile with the SAME pin,
     which is passed as its own argument next to the mounted genesis entry; without a pin the package is exactly the one without the profile."""

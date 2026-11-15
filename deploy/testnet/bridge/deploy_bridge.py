@@ -24,7 +24,18 @@ import release
 
 ETH = 'http://ureth1:8545'
 GATEWAY = 'http://rpc:8545'   # the package's public gateway (gateway.py) as the validators network names it
-TAG = 'tnops-bridge:verified'
+ARTIFACTS = Path(__file__).resolve().parent.parent / 'artifacts'
+
+
+def image():
+    """The bridge tools image by ID, as artifacts/bridge-images.json records it (bft-core#1092): never through a tag a later build can move. It
+    must have been built from the node images' bft pin (bft-core#1075) and be present locally."""
+    import overlay
+    record = json.loads((ARTIFACTS / 'bridge-images.json').read_text())
+    found = overlay.bridge_image(record, json.loads((ARTIFACTS.parent / 'pins.json').read_text()))
+    if subprocess.run(['docker', 'image', 'inspect', found], capture_output=True).returncode != 0:
+        raise SystemExit(f'the recorded bridge image {found} is not in the local image store: rebuild it (build-bridge-image.py)')
+    return found
 CONTRACTS = '/opt/bridge/contracts'
 
 
@@ -40,7 +51,7 @@ def tools(gen, *args, capture=False):
     # backup.py restores plain files and directories only
     cmd = ['docker', 'run', '--rm', '--read-only', '--network', validators_network(gen), '--user', f'{os.getuid()}:{os.getgid()}', '-e', 'HOME=/tmp/home',
            '-v', f'{gen / "network"}:/gen/network:ro', '-v', f'{gen / "faucet-secrets"}:/gen/faucet-secrets:ro', '-v', f'{gen / "bridge"}:/work',
-           '--tmpfs', '/tmp', '-w', '/work', TAG, *args]
+           '--tmpfs', '/tmp', '-w', '/work', image(), *args]
     return subprocess.run(cmd, check=True, text=True, capture_output=capture).stdout
 
 
@@ -111,9 +122,9 @@ def main():
     if a.tester_redeem_eth_url:
         tester['redeemEthUrl'] = a.tester_redeem_eth_url
     (public / 'tester-config.json').write_text(json.dumps(tester, indent=2) + '\n')
-    image = subprocess.check_output(['docker', 'image', 'inspect', '--format={{.Id}}', TAG], text=True).strip()
+    bridge = image()
     ureth = json.loads((gen / 'compose.yaml').read_text())['services']['ureth1']['entrypoint']
-    manifest_doc = release.build(gen, lambda *args: tools(gen, *args, capture=True), image, ureth, release.gateway_limits())
+    manifest_doc = release.build(gen, lambda *args: tools(gen, *args, capture=True), bridge, ureth, release.gateway_limits())
     (public / 'bridge-release.json').write_text(json.dumps(manifest_doc, indent=2) + '\n')
     if os.getuid() == 0:   # the package's services run as 10001 (the lock-proof endpoint reads the trust bundle here)
         subprocess.run(['chown', '-R', '10001:10001', str(work)], check=True)

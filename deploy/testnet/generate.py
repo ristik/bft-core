@@ -149,6 +149,16 @@ def utb_aggregator_environment(pin, variant):
         return {'UTB_GENESIS_FILE':UTB_GENESIS_FILE,'UTB_GENESIS_ID':pin,'UTB_ENTRIES_DB':UTB_AGGREGATOR_DIR+'/utb-entries.db'}
     raise ValueError('unknown UTB aggregator variant '+repr(variant))
 
+def immutable(compose):
+    """A generated compose document, refused if any service names its image by a tag (bft-core#1092): a tag can be moved by a later build, which
+    leaves this generation's image dangling and deletable. Images are named by ID (sha256:...) or by a digest-pinned reference."""
+    import imagetag
+    mutable = imagetag.mutable_images(compose)
+    if mutable:
+        raise SystemExit(f'refusing a compose file whose services {", ".join(mutable)} name a mutable image tag: use the image IDs of build-images.py')
+    return compose
+
+
 def write(path, obj):
     path.write_text(json.dumps(obj, indent=2) + '\n')
 
@@ -369,7 +379,7 @@ def main():
                 (out/f'validator{i}').mkdir()
                 auth=out/f'validator{i}/auth'; auth.mkdir()
                 cli('signing-authority','credential','--out',auth/'operator.cred')
-            write(out/'compose.yaml',topology(out,a.validators,{'root':roots,'evm':evms},records['images'],a.captcha_sitekey,payout=a.faucet_payout,subnets=subnets,root_cpus=a.root_cpus))
+            write(out/'compose.yaml',immutable(topology(out,a.validators,{'root':roots,'evm':evms},records['images'],a.captcha_sitekey,payout=a.faucet_payout,subnets=subnets,root_cpus=a.root_cpus)))
             def authority(i,*args):
                 auth=out/f'validator{i}/auth'
                 if a.offline_validation:
@@ -508,7 +518,7 @@ def main():
             trusted_proxy_ip=subnets['faucet']['gateway'],**faucet['network'])
         write(out/'network/network.json',network)
         flags=[*flags,'--unicity.genesis-commitment='+genesis_commitment(json.loads((home/'genesis.json').read_text()))]
-        write(out/'compose.yaml',topology(out,a.validators,{'root':roots,'evm':evms},records['images'],a.captcha_sitekey,flags,max_gas,bool(genesis),a.rpc_bind,utb_pin,a.utb_aggregator,payout=a.faucet_payout,subnets=subnets,root_cpus=a.root_cpus))
+        write(out/'compose.yaml',immutable(topology(out,a.validators,{'root':roots,'evm':evms},records['images'],a.captcha_sitekey,flags,max_gas,bool(genesis),a.rpc_bind,utb_pin,a.utb_aggregator,payout=a.faucet_payout,subnets=subnets,root_cpus=a.root_cpus)))
         manifest={'offline_validation_only':a.offline_validation,'generation':out.name,'chain_id':a.chain_id,'genesis_hash':'0x'+block,'validators':a.validators,'operator_rpc':{'bind':a.rpc_bind,'root_port':operator_rpc.ROOT_PORT,'shard_port':operator_rpc.SHARD_PORT},
             'faucet_address':next(iter(alloc)), 'artifacts':records,
             'faucet':{**faucet['network'],'genesis_balance_wei':str(faucet['balance_wei'])},'networks':subnets,'root_cpus':a.root_cpus,

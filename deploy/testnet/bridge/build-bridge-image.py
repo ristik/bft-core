@@ -15,12 +15,14 @@ import json
 import pathlib
 import shutil
 import subprocess
+import sys
 
 HERE = pathlib.Path(__file__).resolve().parent
 PINS = json.loads((HERE / 'pins.json').read_text())
 NODE_PINS = json.loads((HERE.parent / 'pins.json').read_text())   # the node images' sources: dnb-tool shares their bft pin
 ARTIFACTS = HERE.parent / 'artifacts'
-TAG = 'tnops-bridge:verified'
+sys.path.insert(0, str(HERE.parent))
+from imagetag import build   # noqa: E402  per-pin immutable tags (bft-core#1092)
 
 
 def run(*args, **kw):
@@ -64,14 +66,14 @@ def main():
     shutil.copy2(HERE / 'Dockerfile.tools', ctx / 'Dockerfile')
 
     f = PINS['foundry']
-    subprocess.run(['docker', 'build', '--platform', 'linux/amd64', '-t', TAG, '--build-arg', 'NODE_IMAGE=' + PINS['node'], '--build-arg', 'GO_IMAGE=' + PINS['go'],
-                    '--build-arg', 'FOUNDRY_URL=' + f['url'], '--build-arg', 'FOUNDRY_SHA256=' + f['sha256'], str(ctx)], check=True)
+    image, tag = build('bridge', NODE_PINS['bft'][:12], '--platform', 'linux/amd64', '--build-arg', 'NODE_IMAGE=' + PINS['node'], '--build-arg', 'GO_IMAGE=' + PINS['go'],
+                       '--build-arg', 'FOUNDRY_URL=' + f['url'], '--build-arg', 'FOUNDRY_SHA256=' + f['sha256'], str(ctx))
     # dnb-tool has no --help: an unknown command proves it starts (its cgo libraries resolve) and dispatches
     for probe in (['forge', '--version'], ['cast', '--version'], ['bash', '-c', 'dnb-tool probe 2>&1 | grep -q "unknown command"'],
                   ['npx', '--no-install', 'tsx', '--version']):
-        subprocess.run(['docker', 'run', '--rm', '--read-only', '--tmpfs', '/tmp', TAG, *probe], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
-    record = {'sources': dict(PINS, bft=run('git', '-C', str(bft), 'rev-parse', 'HEAD')), 'dnb_tool_sha256': run('docker', 'run', '--rm', '--entrypoint', 'sha256sum', TAG, '/usr/local/bin/dnb-tool').split()[0],
-              'images': {'bridge': run('docker', 'image', 'inspect', '--format={{.Id}}', TAG)}}
+        subprocess.run(['docker', 'run', '--rm', '--read-only', '--tmpfs', '/tmp', image, *probe], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+    record = {'sources': dict(PINS, bft=run('git', '-C', str(bft), 'rev-parse', 'HEAD')), 'dnb_tool_sha256': run('docker', 'run', '--rm', '--entrypoint', 'sha256sum', image, '/usr/local/bin/dnb-tool').split()[0],
+              'images': {'bridge': image}, 'tags': {'bridge': tag}}
     (ARTIFACTS / 'bridge-images.json').write_text(json.dumps(record, indent=2) + '\n')
     shutil.rmtree(ctx)
     print(ARTIFACTS / 'bridge-images.json')
