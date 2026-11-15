@@ -173,6 +173,19 @@ def utb_node_flags(pin):
     if not re.fullmatch(r'0x[0-9a-f]{64}', pin): raise ValueError('the UTB genesis EntryID must be 0x followed by 64 lowercase hex digits')
     return ['--utb-genesis', UTB_GENESIS_FILE, '--utb-genesis-id', pin, '--utb-entries-db', UTB_ENTRIES_DB]
 
+def authority_entrypoints(compose, n):
+    """The entrypoints of the n authority services of a compose dictionary."""
+    return {i: compose['services'][f'authority{i}']['entrypoint'] for i in range(1, n+1)}
+
+def check_authorities_unchanged(boot, final, n):
+    """The final compose must name exactly the authority entrypoints the generation started the authorities with: they are never recreated, so a
+    flag that only the final compose carries is a flag the running authorities do not have (bft-core#1091)."""
+    started, written = authority_entrypoints(boot, n), authority_entrypoints(final, n)
+    for i in range(1, n+1):
+        if started[i] != written[i]:
+            raise RuntimeError(f'authority{i} was started with {started[i]} but the final compose names {written[i]}: an authority is never recreated, '
+                               'so every argument it takes must be known when it is first started')
+
 def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, with_pos=False, rpc_bind=operator_rpc.DEFAULT_BIND, utb=None, utb_aggregator='integration', *,
              payout=FAUCET_PAYOUT, subnets=None, root_cpus=ROOT_CPUS):
     """JSON is a YAML subset, accepted directly by Docker Compose. `utb`: the pinned EntryID of the UTB genesis entry (0x..), or None for the package without the signed history.
@@ -212,7 +225,10 @@ def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, wit
             '--client-socket','/authority/client.sock','--operator-socket','/authority/operator.sock',
             '--operator-credential','/authority/operator.cred','--authority-id','paired-evm-%d'%i,
             '--node-id',ids['evm'][i-1],'--network-id','3','--partition-id','8','--shard-id','0x80',
-            '--shard-epoch','0','--root-epoch','1'] + common, [auth,network])
+            '--shard-epoch','0','--root-epoch','1'] + common
+            # bft-core#1085: the authority verifies every activation itself from the generation's genesis trust base (advance-with-proof); the
+            # operator-trusted advance-epoch is then refused (a recovery policy needs --recovery-unchecked-advance)
+            + ['--lineage-genesis-trust-base','/network/trust-base.json'] + (['--lineage-utb-genesis'] if utb else []), [auth,network])
         # A new authority process has a new key. Never auto-restart this lifetime.
         services['authority%d'%i]['restart']='no'
         service('ureth%d'%i, node, ['unicity-reth','node','--chain','/network/genesis.json','--datadir','/state',
@@ -379,7 +395,11 @@ def main():
                 (out/f'validator{i}').mkdir()
                 auth=out/f'validator{i}/auth'; auth.mkdir()
                 cli('signing-authority','credential','--out',auth/'operator.cred')
-            write(out/'compose.yaml',immutable(topology(out,a.validators,{'root':roots,'evm':evms},records['images'],a.captcha_sitekey,payout=a.faucet_payout,subnets=subnets,root_cpus=a.root_cpus)))
+            # the authorities are started from THIS compose and never recreated (their keys exist only in their memory): every argument their
+            # entrypoint takes, the UTB lineage pin included, must be known here already (bft-core#1091: started without --lineage-utb-genesis,
+            # every authority of a --utb generation refused the first activation); main() checks the final compose names the same entrypoints
+            boot=immutable(topology(out,a.validators,{'root':roots,'evm':evms},records['images'],a.captcha_sitekey,utb=utb_pin,payout=a.faucet_payout,subnets=subnets,root_cpus=a.root_cpus))
+            write(out/'compose.yaml',boot)
             def authority(i,*args):
                 auth=out/f'validator{i}/auth'
                 if a.offline_validation:
@@ -518,7 +538,10 @@ def main():
             trusted_proxy_ip=subnets['faucet']['gateway'],**faucet['network'])
         write(out/'network/network.json',network)
         flags=[*flags,'--unicity.genesis-commitment='+genesis_commitment(json.loads((home/'genesis.json').read_text()))]
-        write(out/'compose.yaml',immutable(topology(out,a.validators,{'root':roots,'evm':evms},records['images'],a.captcha_sitekey,flags,max_gas,bool(genesis),a.rpc_bind,utb_pin,a.utb_aggregator,payout=a.faucet_payout,subnets=subnets,root_cpus=a.root_cpus)))
+        final=immutable(topology(out,a.validators,{'root':roots,'evm':evms},records['images'],a.captcha_sitekey,flags,max_gas,bool(genesis),a.rpc_bind,utb_pin,a.utb_aggregator,payout=a.faucet_payout,subnets=subnets,root_cpus=a.root_cpus))
+        if not a.offline_validation:
+            check_authorities_unchanged(boot,final,a.validators)
+        write(out/'compose.yaml',final)
         manifest={'offline_validation_only':a.offline_validation,'generation':out.name,'chain_id':a.chain_id,'genesis_hash':'0x'+block,'validators':a.validators,'operator_rpc':{'bind':a.rpc_bind,'root_port':operator_rpc.ROOT_PORT,'shard_port':operator_rpc.SHARD_PORT},
             'faucet_address':next(iter(alloc)), 'artifacts':records,
             'faucet':{**faucet['network'],'genesis_balance_wei':str(faucet['balance_wei'])},'networks':subnets,'root_cpus':a.root_cpus,

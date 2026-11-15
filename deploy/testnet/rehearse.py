@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -988,6 +989,42 @@ class Rehearsal:
         finally:
             self.target = 2
 
+    _bundle_lock = threading.Lock()   # the drive advances entities in parallel and they share the bundle files
+
+    def activation_bundles(self, after):
+        """The roots' activation bundles of epochs after..target (q3/bundle of root 1, which serves every epoch it installed from its journal), each kept
+        once as network/handoff/q3-bundle-<N>.cbor for every authority to read. They are evidence, not trust: an authority verifies each one itself
+        from its own pin (bft-core#1085), so a bundle written here and a bundle from anywhere else are refused or accepted alike."""
+        transport = getattr(self, 'transport', None) or handoff_ops.DockerTransport(self.gen)
+        work = self.gen / 'network' / 'handoff'
+        files = []
+        with self._bundle_lock:
+            for epoch in range(int(after) + 1, self.target + 1):
+                path = work / f'q3-bundle-{epoch}.cbor'
+                if not path.exists():
+                    status, body = transport.post(1, '/api/v1/q3/bundle', json.dumps({'epoch': epoch}).encode())
+                    self.expect(status == 200, f'root 1 serves the activation bundle of epoch {epoch}', body[:200].decode(errors='replace'))
+                    raw = bytes.fromhex(json.loads(body)['bundle'])
+                    tmp = path.with_name(f'.{path.name}.tmp')
+                    tmp.write_bytes(raw)
+                    os.chmod(tmp, 0o644)
+                    os.replace(tmp, path)
+                files.append(path)
+        return files
+
+    def advance_with_proof(self, i, operator):
+        """Entity i's pinned authority advanced by the one proof-verified order (bft-core#1085): the bundles from its lineage tip to the target (always the
+        target's), verified by the authority itself, then its next session. Returns the order's report."""
+        status = json.loads(self.exec_in(f'authority{i}', 'ubft', 'signing-authority', 'status', *operator))
+        files = self.activation_bundles(min(status.get('lineageEpoch') or 1, self.target - 1))
+        report = json.loads(self.exec_in(f'authority{i}', 'ubft', 'signing-authority', 'advance-with-proof', *operator,
+                                         *[a for f in files for a in ('--proof', f'/network/handoff/{f.name}')],
+                                         '--out', '/authority/client.cred', '--client-socket', '/authority/client.sock'))
+        status = json.loads(self.exec_in(f'authority{i}', 'ubft', 'signing-authority', 'status', *operator))
+        self.expect(not report.get('retired') and status.get('rootEpoch') == self.target, f'authority {i} verified the activation and holds root epoch {self.target}',
+                    str(report)[:300])
+        return report
+
     def root_epoch(self, i, transport=None):
         """The epoch of root i's committed certificate, or None while it does not answer."""
         transport = transport or handoff_ops.DockerTransport(self.gen)
@@ -1090,9 +1127,17 @@ class Rehearsal:
             if i in self.joiners:
                 self.advance_joiner(i, operator, shard_epoch)
                 continue
+            auth = self.gen / f'validator{i}' / 'auth'
+            pinned = json.loads(self.exec_in(f'authority{i}', 'ubft', 'signing-authority', 'status', *operator)).get('lineagePinned')
+            if pinned:
+                # bft-core#1085: a generated authority verifies the activation itself (its operator-trusted advance is a recovery policy it was not started with)
+                shutil.copy(auth / 'client.cred', auth / f'client.cred.pre-epoch-{self.target}')   # kept for pos-stale
+                os.chmod(auth / f'client.cred.pre-epoch-{self.target}', 0o600)
+                self.advance_with_proof(i, operator)
+                self.compose('start', f'shard{i}')
+                continue
             self.exec_in(f'authority{i}', 'ubft', 'signing-authority', 'advance-epoch', *operator, '--trust-base', f'/network/handoff/trust-base-epoch{self.target}.json',
                          '--shard-conf', f'/network/handoff/shard-conf-{shard_epoch}.json')
-            auth = self.gen / f'validator{i}' / 'auth'
             shutil.copy(auth / 'client.cred', auth / f'client.cred.pre-epoch-{self.target}')   # kept for pos-stale; a credential, so only in the entity's own auth directory
             os.chmod(auth / f'client.cred.pre-epoch-{self.target}', 0o600)
             self.exec_in(f'authority{i}', 'ubft', 'signing-authority', 'replace-session', *operator, '--out', '/authority/client.cred')
@@ -1482,7 +1527,9 @@ class Rehearsal:
                                     '--shard-conf', '/network/full-shard-conf.json')
         self.say(f'  advance back to epoch 1: exit {rc}: {(out + err).strip()[-300:]}')
         (self.evh() / 'stale-trust-base.txt').write_text(f'exit {rc}\n{out}{err}')
-        self.expect(rc != 0 and 'signing-context-mismatch' in err, 'the authority refuses to be advanced back to the epoch-1 trust base and shard configuration (signing-context-mismatch)', (out + err).strip()[-300:])
+        # a pinned authority refuses the operator-trusted route outright (signing-advance-recovery-only, bft-core#1085); an unpinned one the context
+        self.expect(rc != 0 and ('signing-context-mismatch' in err or 'signing-advance-recovery-only' in err),
+                    'the authority refuses to be advanced back to the epoch-1 trust base and shard configuration', (out + err).strip()[-300:])
         after = status(1)
         self.expect(after == before, 'the refused advance changes nothing in the authority status', f'{before} -> {after}')
         # (2) the old client credential
