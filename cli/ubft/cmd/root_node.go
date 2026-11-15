@@ -84,6 +84,7 @@ type (
 		UTBCaptureUCResp         string // lane diagnostics: write each distinct version 2 certification response that carries entries here, before it is sent
 		HandoffProfile           bool
 		InstallHandoffEpoch      uint64
+		InstallHandoffWait       time.Duration // how long an install waits for a root peer to serve an epoch this root does not hold itself (#1080)
 		CommitteeWarmup          time.Duration // how long a member waits for its committee to be connected before its first round (#1082)
 		// RecordsPublicReads serves record reads (never cuts) of the records feed to any peer under recordsfeed.DefaultPublicLimits (#1048)
 		RecordsPublicReads bool
@@ -163,6 +164,8 @@ func rootNodeRunCmd(baseFlags *baseFlags) *cobra.Command {
 		fmt.Sprintf("path to the orchestration database (default: %s)", filepath.Join("$UBFT_HOME", orchestrationDBFileName)))
 	cmd.Flags().BoolVar(&flags.HandoffProfile, "profile-3", false, "run the version-3 root handoff network profile (the execution rule with root-applied shard-configuration transitions; a store or peer of profile 2 is refused)")
 	cmd.Flags().Uint64Var(&flags.InstallHandoffEpoch, "install-handoff-epoch", 0, "fetch and verify this successor epoch before starting profile-2 consensus")
+	cmd.Flags().DurationVar(&flags.InstallHandoffWait, "install-handoff-wait", installWaitDefault, "with --install-handoff-epoch: how long to keep asking the root peers "+
+		"for an epoch this root has not committed itself (a peer serves it once it has committed it); 0 asks once")
 	cmd.Flags().DurationVar(&flags.CommitteeWarmup, "committee-warmup", committeeWarmupDefault, "how long a member of the installed root committee waits, "+
 		"before its first round, for every other member to be connected (it dials them itself and keeps them connected; a member down costs at most this, once)")
 	cmd.Flags().BoolVar(&flags.RecordsPublicReads, "records-public-reads", true, "serve the retained source-log records (never the cuts) to any peer, under a bounded public budget: a root "+
@@ -504,15 +507,16 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		if err != nil {
 			return err
 		}
+		retry := defaultInstallRetry(flags.InstallHandoffWait)
 		if q3rt != nil {
-			if err := installQ3Epochs(ctx, host, peers, q3rt, cm, flags.InstallHandoffEpoch); err != nil {
+			if err := installQ3Epochs(ctx, log, host, peers, q3rt, cm, flags.InstallHandoffEpoch, retry); err != nil {
 				return err
 			}
 		}
 		for epoch := cm.InstalledRootEpoch() + 1; q3rt == nil && epoch <= flags.InstallHandoffEpoch; epoch++ {
-			bundle, fetchErr := fetchFromRootPeers(peers, func(id peer.ID) (handoffdelivery.Bundle, error) {
+			bundle, fetchErr := awaitFromRootPeers(ctx, retry, peers, func(ctx context.Context, id peer.ID) (handoffdelivery.Bundle, error) {
 				return handoffdelivery.Request(ctx, host, id, epoch)
-			})
+			}, cm.CheckEpochBundle, installWaitLogger(log, "handoff bundle", epoch))
 			if fetchErr != nil {
 				return fmt.Errorf("no root peer served verified handoff epoch %d: %w", epoch, fetchErr)
 			}
