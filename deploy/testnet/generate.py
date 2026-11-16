@@ -16,6 +16,7 @@ import time
 
 import operator_rpc
 import pos
+import ureth_key
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
@@ -233,13 +234,15 @@ def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, wit
             + ['--lineage-genesis-trust-base','/network/trust-base.json'] + (['--lineage-utb-genesis'] if utb else []), [auth,network])
         # A new authority process has a new key. Never auto-restart this lifetime.
         services['authority%d'%i]['restart']='no'
-        service('ureth%d'%i, node, ['unicity-reth','node','--chain','/network/genesis.json','--datadir','/state',
+        # bft-core#1148: the devp2p node key is made once (ureth_key.create) in the entity's ureth-key/, read-only here, never in the data directory a
+        # cold restore empties; the preflight refuses to start without it, so reth never makes a new one
+        service('ureth%d'%i, node, ureth_key.entrypoint(['unicity-reth','node','--chain','/network/genesis.json','--datadir','/state','--p2p-secret-key',ureth_key.PATH,
             '--authrpc.jwtsecret','/jwt/jwt.hex','--authrpc.addr','0.0.0.0','--authrpc.port','8551',
             '--http','--http.addr','0.0.0.0','--http.port','8545','--http.api','eth,net,web3,debug',   # debug: the paired shard node reads debug_getRawHeader for the parent registry witness (without it no validator can lead a round after the first); the validator network is internal and the public gateway allow-lists methods
             '--rpc.eth-proof-window','64','--disable-discovery','--ipcdisable',
             '--log.file.max-files','0',   # no log file: the root filesystem is read-only (reth wants $HOME/.cache/reth/logs) and Docker's json-file driver already rotates stdout
-            '--engine.persistence-threshold','64','--builder.gaslimit',str(max_gas),'--unicity.fee-collector',FEE,*ureth_flags],
-            ['./validator%d/ureth:/state'%i,'./validator%d/jwt:/jwt:ro'%i,network], memory='1536m',cpu=1.0)
+            '--engine.persistence-threshold','64','--builder.gaslimit',str(max_gas),'--unicity.fee-collector',FEE,*ureth_flags]),
+            ['./validator%d/ureth:/state'%i,ureth_key.mount(i),'./validator%d/jwt:/jwt:ro'%i,network], memory='1536m',cpu=1.0)
         peers = root_boot + ''.join(',/dns4/shard%d/tcp/9000/p2p/%s'%(j,ids['evm'][j-1]) for j in range(1,n+1) if j!=i)
         service('shard%d'%i, node, ['ubft','shard-node','run','--home','/state','--executor','engine-api',
             '--address','/ip4/0.0.0.0/tcp/9000','--bootnodes',peers,
@@ -518,6 +521,7 @@ def main():
                 shutil.move(str(src),val/kind)
             for kind in ('ureth','archive','jwt'): (val/kind).mkdir()
             (val/'jwt/jwt.hex').write_text(secrets.token_hex(32)+'\n')
+            ureth_key.create(val/ureth_key.DIR)   # the execution client's devp2p node key, once (bft-core#1148); chowned with the rest below
         shutil.move(str(home/'faucet-secrets'),out/'faucet-secrets')
         if genesis: shutil.move(str(home/'pos-owner-keys'),out/'pos-owner-keys')   # private host material, like faucet-secrets: not mounted, not in network/
         shutil.copy2(a.captcha_secret_file,out/'faucet-secrets/hcaptcha-secret')

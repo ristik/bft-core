@@ -2028,6 +2028,69 @@ class LoadGenerator(unittest.TestCase):
 
 
 
+class UrethKey(unittest.TestCase):
+    """bft-core#1148: the execution client's devp2p node key is made once per entity, kept outside its data directory, mounted read-only into that
+    entity's ureth only, and a missing key stops ureth instead of giving it a new identity."""
+    def cfg(self,n=4):
+        tmp=tempfile.mkdtemp();self.addCleanup(shutil.rmtree,tmp)
+        out=Path(tmp)/'tn-fixture';out.mkdir()
+        images={k:'sha256:'+'a'*64 for k in ['node','rpc','guard','signer']}
+        return generate.topology(out,n,{'root':['r%d'%i for i in range(n)],'evm':['e%d'%i for i in range(n)]},images,'captcha',['--unicity.network-id','3'])
+    def test_the_generated_config_mounts_each_entitys_key_persistently_and_read_only(self):
+        import ureth_key
+        services=self.cfg()['services']
+        for i in (1,2,3,4):
+            svc=services['ureth%d'%i];entry=svc['entrypoint']
+            self.assertIn('./validator%d/ureth-key:/ureth-key:ro'%i,svc['volumes'],'a bind mount of the generation directory: it outlives every restart and recreate')
+            self.assertIn('./validator%d/ureth:/state'%i,svc['volumes'])
+            self.assertEqual(entry[entry.index('--p2p-secret-key')+1],'/ureth-key/p2p-secret')
+            self.assertFalse(ureth_key.PATH.startswith('/state/'),'not in the data directory a cold restore empties')
+            self.assertNotIn('--p2p-secret-key-hex',entry)   # the key is never in the manifest
+            self.assertEqual(entry[:2]+entry[3:6],['/bin/sh','-c','ureth','unicity-reth','node'],'the preflight runs first, then execs the client with its arguments')
+            self.assertIn('-s /ureth-key/p2p-secret',entry[2]);self.assertIn('exec "$@"',entry[2])
+            self.assertEqual(entry[-2:],['--unicity.network-id','3'])
+        for name,svc in services.items():   # each service keeps its own key: no other service (nor another entity's ureth) mounts it
+            mounts=[m for m in svc.get('volumes',[]) if 'ureth-key' in m]
+            self.assertEqual(mounts,['./validator%s/ureth-key:/ureth-key:ro'%name[5:]] if name.startswith('ureth') else [],name)
+        self.assertEqual(services['ureth1']['restart'],'unless-stopped')
+    def test_the_joiner_clone_mounts_its_own_key(self):
+        services=joiner.joiner_services(self.cfg(),5,'r5','e5')
+        self.assertIn('./validator5/ureth-key:/ureth-key:ro',services['ureth5']['volumes'])
+        self.assertNotIn('./validator4/ureth-key:/ureth-key:ro',services['ureth5']['volumes'])
+    def test_the_laptop_entity_keeps_the_key_in_a_volume_of_its_own_that_a_cold_restore_never_mounts(self):
+        import remote_joiner
+        self.assertEqual(remote_joiner.volume_mount('./validator5/ureth-key:/ureth-key:ro',5),'ureth-key:/ureth-key:ro')
+        self.assertIn('ureth-key',remote_joiner.PRIVATE);self.assertNotIn('ureth-key',remote_joiner.COLD_RESTORE_VOLUMES)
+        self.assertNotIn('ureth-key',remote_joiner.COLD_RESTORE_WIPE)
+    def test_create_makes_one_private_key_and_never_replaces_it(self):
+        import stat,ureth_key
+        with tempfile.TemporaryDirectory() as d:
+            old=os.umask(0o022)   # a permissive caller
+            try: path=ureth_key.create(Path(d)/'ureth-key')
+            finally: os.umask(old)
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode),0o600);self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode),0o700)
+            text=path.read_text();self.assertRegex(text,r'^[0-9a-f]{64}$','64 hex digits, no newline: reth parses the whole file')
+            self.assertTrue(0<int(text,16)<ureth_key.N)
+            with self.assertRaises(FileExistsError): ureth_key.create(Path(d)/'ureth-key')
+            self.assertEqual(path.read_text(),text)
+    def test_the_preflight_refuses_a_missing_or_empty_key_and_otherwise_execs_the_client(self):
+        import ureth_key
+        with tempfile.TemporaryDirectory() as d:
+            key=Path(d)/'p2p-secret'
+            def run():
+                entry=ureth_key.entrypoint(['echo','started','--p2p-secret-key',str(key)])
+                return subprocess.run([entry[0],entry[1],entry[2].replace(ureth_key.PATH,str(key)),*entry[3:]],capture_output=True,text=True)
+            for state in ('missing','empty'):
+                if state=='empty': key.write_text('')
+                r=run();self.assertEqual(r.returncode,78,state);self.assertEqual(r.stdout,'')
+                self.assertIn('refusing to start under a new identity',r.stderr);self.assertIn('never regenerated',r.stderr)
+            key.write_text('ab'*32)
+            r=run();self.assertEqual((r.returncode,r.stdout),(0,'started --p2p-secret-key %s\n'%key))
+    def test_generate_and_prepare_make_the_key_before_anything_starts(self):
+        source=(Path(__file__).parent/'generate.py').read_text()
+        self.assertIn("ureth_key.create(val/ureth_key.DIR)",source)
+        self.assertLess(source.index("ureth_key.create(val/ureth_key.DIR)"),source.index("write(out/'compose.yaml',final)"))
+
 class Joiner(unittest.TestCase):
     images={k:'sha256:'+'a'*64 for k in ['node','rpc','guard','signer']}
     def topology(self,n):
@@ -2107,8 +2170,11 @@ class Joiner(unittest.TestCase):
                 mode=stat.S_IMODE(path.stat().st_mode)
                 self.assertEqual(mode&0o077,0,f'{path} is accessible to group or others: {oct(mode)}')
             self.assertTrue((val/'jwt'/'jwt.hex').is_file())
+            key=val/'ureth-key'/'p2p-secret'   # bft-core#1148: the joiner's execution client has its own node key from prepare on
+            self.assertEqual(stat.S_IMODE(key.stat().st_mode),0o600);self.assertRegex(key.read_text(),r'^[0-9a-f]{64}$')
             override=json.loads((gen/'compose.joiner.json').read_text())
             self.assertEqual(sorted(override['services']),['authority5','metrics5','pod5','root5','shard5','ureth5'])
+            self.assertIn('./validator5/ureth-key:/ureth-key:ro',override['services']['ureth5']['volumes'])
             self.assertIn('id-evm',override['services']['authority5']['entrypoint'])
     def test_set_scope_moves_only_the_authority_epochs_and_trust_base(self):
         with tempfile.TemporaryDirectory() as d:

@@ -54,8 +54,8 @@ import remote_entity      # noqa: E402  PORTS, the forwards
 PORTS = remote_entity.PORTS
 NETWORK_FILES = ('genesis.json', 'trust-base.json', 'full-shard-conf.json', 'aggregator-conf.json', 'b1-profile.json', 'pos-deployment.json',
                  'pos-genesis-identities.json', 'utb-genesis.cbor', 'utb-genesis.id', 'pos-plan.json')
-VOLUMES = ('root', 'evm', 'auth', 'ureth', 'archive', 'jwt', 'network', 'wallet', 'tools', 'work')
-PRIVATE = ('root', 'evm', 'auth', 'ureth', 'archive', 'jwt', 'wallet', 'work')
+VOLUMES = ('root', 'evm', 'auth', 'ureth', 'ureth-key', 'archive', 'jwt', 'network', 'wallet', 'tools', 'work')
+PRIVATE = ('root', 'evm', 'auth', 'ureth', 'ureth-key', 'archive', 'jwt', 'wallet', 'work')
 ROOT_POSTS = ('/api/v1/q3/signers', '/api/v1/q3/status', '/api/v1/handoff/plan', '/api/v1/handoff/intent', '/api/v1/handoff/endorse',
               '/api/v1/handoff/evm-assignment/context', '/api/v1/committee',   # the drive's verify asks every member's root (bft-core#1082)
               '/api/v1/q3/bundle')   # whether an installed root serves the new epoch's activation itself (bft-core#1080)
@@ -66,7 +66,7 @@ def subnet(project):
     return f'10.231.{16 + hashlib.sha256(project.encode()).digest()[0] % 224}.0/24'
 OPERATOR = ['--operator-socket', '/authority/operator.sock', '--operator-credential', '/authority/operator.cred']
 # The explicit cold restore (op_restore_start) empties ONLY the selected execution and bootstrap stores: the shard node's home (its keys and node-info
-# kept), its archive and the execution client's data. It never mounts the signing authority's volume (`auth`: the authority's anti-equivocation and
+# kept), its archive and the execution client's data (not its node key, in ureth-key). It never mounts the signing authority's volume (`auth`: the authority's anti-equivocation and
 # session history, the operator credential), the root's store, the wallet or the tunnel tools (astra, briefs/astra-q-1029-1043-answer.md Q2).
 COLD_RESTORE_VOLUMES = ('evm', 'archive', 'ureth')
 COLD_RESTORE_WIPE = ('find /evm -mindepth 1 -maxdepth 1 ! -name keys.json ! -name node-info.json -exec rm -rf {} + && '
@@ -855,6 +855,8 @@ def init(host, generation, home, mac_host, allow_dirty=False):
     if not have('jwt', 'jwt.hex'):
         lap.one(lap.rpc_image, ['-c', 'import os,secrets;fd=os.open("/jwt/jwt.hex",os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600);os.write(fd,(secrets.token_hex(32)+"\\n").encode())'],
                 [f'{lap.vol("jwt")}:/jwt'], entrypoint='python3')
+    if not have('ureth-key', 'p2p-secret'):   # the execution client's devp2p node key, made once in its own volume (bft-core#1148); a cold restore never mounts it
+        lap.one(lap.rpc_image, ['-', 'create', '/k'], [f'{lap.vol("ureth-key")}:/k'], entrypoint='python3', input=(HERE / 'ureth_key.py').read_text())
     root_id = lap.ubft(['node-id', '--home', '/state'], [f'{lap.vol("root")}:/state:ro']).strip().splitlines()[-1]
     evm_id = lap.ubft(['node-id', '--home', '/state'], [f'{lap.vol("evm")}:/state:ro']).strip().splitlines()[-1]
     node_info = json.loads(lap.vol_read('root', 'node-info.json'))

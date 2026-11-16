@@ -24,6 +24,18 @@ Authority keys exist only in process memory by protocol design. Authorities use
 changes its key and requires a separately authorized validator replacement. The
 generator enrolls keys inside the long-lived Docker authorities, never in a
 throwaway init process. Full host/daemon loss requires a fresh testnet reset.
+
+**ureth's node key (bft-core#1148).** The execution client signs nothing (block seals are verified, not made, by it; the EVM signing
+key is the signing authority's), but it has one key of its own: its devp2p node key, its RLPx peer id. The generator (and `joiner.py prepare`,
+`remote_joiner.py init`) makes it once as `validator<N>/ureth-key/p2p-secret` (directory 0700, file 0600, UID 10001), outside the data
+directory `validator<N>/ureth`, and mounts it read-only into `ureth<N>` only (`--p2p-secret-key /ureth-key/p2p-secret`). It is kept across
+restarts, `up --force-recreate`, image upgrades and a cold restore that empties `validator<N>/ureth`. A preflight in the service's entrypoint
+refuses to start when the file is missing or empty (exit 78, "refusing to start under a new identity"): ureth then restart-loops with that
+message instead of making a new key. Restore the file from the generation's backup (backup.py archives it); never create a new one in its
+place for a running generation. Generations made before #1148 keep reth's default: `validator<N>/ureth/discovery-secret`, made by reth on the
+first start (0644) and made again, silently, whenever the data directory is emptied. The Engine JWT (`validator<N>/jwt/jwt.hex`) is the one
+secret ureth shares, by design and only within its entity: the HMAC secret of its shard node's Engine API calls (the root reads it too, for
+q3-readiness).
 The one aggregator is aggregator-go (owner decision 40): partition 7, one full-range
 shard, a single instance without high availability, its state in a single-node
 MongoDB replica set (`mongo` service, pinned image, no authentication, on its own
@@ -265,7 +277,7 @@ procedure against the surviving authority, not a bare DB rollback or clone.
 
 Copy encrypted archives, digest, exact `docker save` images and checkout off host.
 Check decrypt/load before relying on them. Backups contain disposable root/shard
-keys, Engine JWTs, faucet key/password, operator/client credentials, the aggregator
+keys, ureth node keys (`validator<N>/ureth-key`), Engine JWTs, faucet key/password, operator/client credentials, the aggregator
 key (`aggregator/keys.json`) and the aggregator's MongoDB data; restrict access. SHA-256 checks integrity, not authentication against a
 malicious supplier. Off-host archives support investigation and retained history;
 they are **not full-host same-network disaster recovery**. Coupled rotation,
