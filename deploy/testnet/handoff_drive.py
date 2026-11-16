@@ -63,6 +63,7 @@ import operator_rpc
 import rehearse
 import remote_entity
 
+JOINER_READY_SECONDS = 120   # bft-core#1086 PR 2: how long the propose step waits for a joiner's image and staged-committee connections before it fails unendorsed
 JOINER_FIRST_SECONDS = 180   # how long the incumbents wait for the joiners' installs (bft-core#1082) before the step fails with them still running
 INSTALL_GATE_SECONDS = 120  # how long a root waits for verified evidence of the activation before the install step fails closed: the root is left
                             # running, never stopped without evidence it can install from (bft-core#1080, astra on #1084)
@@ -736,23 +737,39 @@ class Drive(rehearse.Rehearsal):
         return switch is not None
 
     def staged_committee_connected(self, i):
-        """bft-core#1086 PR 2 (#1082): joiner i's own view of the staged successor's committee: every other member connected (handoff.staged_connected)."""
+        """bft-core#1086 PR 2 (#1082): joiner i's own view of the staged successor's committee: every other member connected (handoff.staged_connected).
+        An unavailable or malformed answer is not connected."""
         try:
             status, body = self.transport.post(i, '/api/v1/committee', b'{}')
-        except handoff_ops.HandoffError:
-            return None
-        return handoff.staged_connected(json.loads(body), self.target) if status == 200 else None
+            return status == 200 and handoff.staged_connected(json.loads(body), self.target)
+        except (handoff_ops.HandoffError, ValueError):
+            return False
+
+    def joiner_ready(self, i):
+        """One probe of joiner i's readiness to be endorsed into the successor: 'legacy' for a well-formed status of an image that does not acquire (installed
+        first across a restart, as before), 'connected' for an acquiring image whose staged committee is all connected, None otherwise (asked again)."""
+        capability = handoff.joiner_capability(self.q3_status(i))
+        if capability == 'legacy':
+            return 'legacy'
+        if capability == 'acquires' and self.staged_committee_connected(i):
+            return 'connected'
+        return None
 
     def await_joiners_connected(self):
         """bft-core#1086 PR 2 (#1082, #1088): a joiner whose image switches in process is not installed before the incumbents any more: it switches into the
         successor at its first messages. So before the plan is endorsed (after which the commit follows in a few rounds), each such joiner must hold
-        connections to the whole staged committee; behind NAT, only its own dials reach the others. Fail closed: a joiner that is not connected leaves the
-        handoff unendorsed. A joiner on an older image is installed first across a restart, as before."""
+        connections to the whole staged committee; behind NAT, only its own dials reach the others. Fail closed (astra on #1133): an unavailable or malformed
+        status or committee view is asked again within JOINER_READY_SECONDS, never taken for an older image; a joiner whose image and readiness are not
+        established by then leaves the handoff unendorsed. Only a well-formed status of an image that does not acquire takes the joiner-first restart path."""
         for i in sorted(set(self.new) - set(self.old)):
-            if not handoff.acquires(self.q3_status(i)):
-                continue
-            self.wait(f'joiner root {i} is connected to the staged committee of epoch {self.target} (bft-core#1082)',
-                      lambda i=i: self.staged_committee_connected(i), 120, every=0.5)
+            try:
+                how = self.wait(f'joiner root {i}: its image and its connections to the staged committee of epoch {self.target} (bft-core#1082)',
+                                lambda i=i: self.joiner_ready(i), JOINER_READY_SECONDS, every=0.5)
+            except rehearse.Failure as error:
+                raise rehearse.Failure(f'joiner root {i} is not ready to be endorsed into epoch {self.target}: the handoff is left unendorsed: '
+                                       f'{str(error)[-300:]}') from None
+            if how == 'legacy':
+                self.say(f'  joiner root {i} does not switch in process: it is installed first, across a restart (bft-core#1082)')
 
     def step_propose(self, result, journal):
         recorded = journal.value('proposal', 'rootAttempt')

@@ -100,11 +100,34 @@ def awaits_switch(view, old_member):
     return ACQUIRE_WAIT_SECONDS if switch.get('acquires') else None
 
 
+def joiner_capability(view):
+    """bft-core#1086 PR 2 (astra on #1133): what a joiner's q3/status answer establishes about its image, failing closed. 'acquires' for a well-formed answer
+    whose switch state says it switches in process from a peer's activation; 'legacy' only for a well-formed answer of an image that does not (no switch
+    state at all, or a switch state without `acquires`); None for an unavailable (None) or malformed answer, which establishes nothing and is asked again."""
+    if not isinstance(view, dict) or not isinstance(view.get('activeEpoch'), int) or isinstance(view.get('activeEpoch'), bool):
+        return None
+    if 'switch' not in view or view['switch'] is None:
+        return 'legacy'
+    switch = view['switch']
+    if not isinstance(switch, dict) or not isinstance(switch.get('phase'), str):
+        return None
+    acquires = switch.get('acquires', False)
+    if not isinstance(acquires, bool):
+        return None
+    return 'acquires' if acquires else 'legacy'
+
+
 def staged_connected(view, target):
     """bft-core#1086 PR 2 (#1082): whether a joiner's committee view (POST /api/v1/committee) shows the staged successor of epoch `target` with every other
-    member connected: its readiness before the commit, since it switches into that committee in process and may lead its first rounds."""
-    staged = (view or {}).get('staged') or {}
-    return staged.get('epoch') == target and not staged.get('missing')
+    member connected: its readiness before the commit, since it switches into that committee in process and may lead its first rounds. Fail closed
+    (astra on #1133): only a well-formed `staged` object counts, for the target, with an explicit empty `missing` list and a non-empty `connected` list
+    of node identifiers; an absent field never stands for "nobody missing"."""
+    staged = view.get('staged') if isinstance(view, dict) else None
+    if not isinstance(staged, dict):
+        return False
+    epoch, missing, connected = staged.get('epoch'), staged.get('missing'), staged.get('connected')
+    return (isinstance(epoch, int) and not isinstance(epoch, bool) and epoch == target and isinstance(missing, list) and missing == []
+            and isinstance(connected, list) and len(connected) > 0 and all(isinstance(c, str) and c for c in connected))
 
 
 def install_override(compose, epoch):
