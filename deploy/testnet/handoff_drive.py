@@ -715,12 +715,44 @@ class Drive(rehearse.Rehearsal):
             return None
 
     def follower_epoch(self, i):
-        """The installed epoch of a root that holds no quorum certificate (a follower: q3/signers answers 422), from q3/status."""
+        """The installed epoch of a root that holds no quorum certificate (a follower: q3/signers answers 422), from q3/status: for an image that reports its
+        in-process switch (bft-core#1086) only a published one (handoff.status_epoch), never a raw activeEpoch."""
         try:
             status, body = self.transport.post(i, '/api/v1/q3/status', b'{}')
-            return json.loads(body).get('activeEpoch') if status == 200 else None
+            return handoff.status_epoch(json.loads(body)) if status == 200 else None
         except (handoff_ops.HandoffError, ValueError):
             return None
+
+    def incumbent_switched(self, i):
+        """bft-core#1086 PR 2: whether incumbent root i switched into the target in process at its own commit (waited for as handoff.awaits_switch says). One
+        that did is installed, without waiting for the joiners: nothing of it restarts. The outcome is kept for install_root. A root whose status does not
+        answer here is not waited for: it takes the joiner-first restart path, through the same gate."""
+        status = self.q3_status(i)
+        wait = handoff.awaits_switch(status, True) if status is not None else None
+        switch = handoff.switched_in_process(lambda: self.q3_status(i), self.target, wait=wait) if wait is not None else None
+        if not hasattr(self, 'switch_seen'):
+            self.switch_seen = {}
+        self.switch_seen[i] = switch
+        return switch is not None
+
+    def staged_committee_connected(self, i):
+        """bft-core#1086 PR 2 (#1082): joiner i's own view of the staged successor's committee: every other member connected (handoff.staged_connected)."""
+        try:
+            status, body = self.transport.post(i, '/api/v1/committee', b'{}')
+        except handoff_ops.HandoffError:
+            return None
+        return handoff.staged_connected(json.loads(body), self.target) if status == 200 else None
+
+    def await_joiners_connected(self):
+        """bft-core#1086 PR 2 (#1082, #1088): a joiner whose image switches in process is not installed before the incumbents any more: it switches into the
+        successor at its first messages. So before the plan is endorsed (after which the commit follows in a few rounds), each such joiner must hold
+        connections to the whole staged committee; behind NAT, only its own dials reach the others. Fail closed: a joiner that is not connected leaves the
+        handoff unendorsed. A joiner on an older image is installed first across a restart, as before."""
+        for i in sorted(set(self.new) - set(self.old)):
+            if not handoff.acquires(self.q3_status(i)):
+                continue
+            self.wait(f'joiner root {i} is connected to the staged committee of epoch {self.target} (bft-core#1082)',
+                      lambda i=i: self.staged_committee_connected(i), 120, every=0.5)
 
     def step_propose(self, result, journal):
         recorded = journal.value('proposal', 'rootAttempt')
@@ -731,6 +763,7 @@ class Drive(rehearse.Rehearsal):
             journal.write('proposal', 'redo', rootAttemptWas=recorded, rootAttemptNow=current)
             journal.write('proposal', 'done', **self.step_proposal(result))
         receipts = self.candidate()
+        self.await_joiners_connected()   # bft-core#1086 PR 2: before the endorsements, a switch-aware joiner holds its staged committee's connections
         log = self.gen / 'handoff' / 'log.jsonl'
         run = subprocess.run([sys.executable, str(Path(__file__).resolve().parent / 'handoff_ops.py'), 'propose', str(self.gen), '--ubft', str(self.ubft),
                               '--next-trust-base', str(self.work / f'trust-base-epoch{self.target}.json'), '--next-evm-assignment', str(self.work / 'published-assignment.json'),
@@ -756,12 +789,17 @@ class Drive(rehearse.Rehearsal):
             return handoff.installed_result(status, self.target)
         if complete is None and self.root_epoch(i, self.transport) == self.target:
             return {'already': True}
-        if i in self.old and i in self.new:
-            # bft-core#1086: a staying root switches into the epoch inside its process at its own commit; only one that does not (an older image, a faulted
-            # switch, no own evidence) is restarted
-            switch = handoff.switched_in_process(lambda: self.q3_status(i), self.target)
-            if switch is not None:
-                return {'already': True, 'inProcess': True, 'switchMs': switch.get('tookMs')}
+        # bft-core#1086: a root of the committee being left (staying or leaving) switches into the epoch inside its process at its own commit; with PR 2 a
+        # joiner or follower switches too, from an activation a root peer serves. Only one that does not (an older image, a faulted switch, no evidence)
+        # is restarted. An incumbent step_install has already waited for is not waited for again.
+        seen = getattr(self, 'switch_seen', {})
+        if i in seen:
+            switch = seen.pop(i)
+        else:
+            wait = handoff.awaits_switch(status, i in self.old)
+            switch = handoff.switched_in_process(lambda: self.q3_status(i), self.target, wait=wait) if wait is not None else None
+        if switch is not None:
+            return {'already': True, 'inProcess': True, 'switchMs': switch.get('tookMs')}
         subprocess.run(['docker', 'compose', *base, 'stop', f'root{i}'], check=True, capture_output=True)
         state, backup = self.gen / f'validator{i}' / 'root', self.gen / f'validator{i}' / f'root.pre-epoch-{self.target}'
         if not backup.exists():
@@ -880,7 +918,8 @@ class Drive(rehearse.Rehearsal):
                 finally:
                     joiner_outcome(i, ok)
             source = self.await_install_evidence(i, installed)
-            joiners_installed()   # bft-core#1082: never restart an incumbent before the joiners are up
+            if not self.incumbent_switched(i):
+                joiners_installed()   # bft-core#1082: never restart an incumbent before the joiners are up
             return self.install_one(journal, i, files, base, source)
         parallel({i: (lambda i=i: install(i)) for i in roots})
         for i in sorted(set(roots) - set(self.new)):   # a leaver installs the epoch (it holds the commit) but certifies nothing in it: it is a follower there

@@ -372,7 +372,8 @@ p85_handoff() {
 
 p85_install_activation() {
   H3_ROOTS="1 2 3 4 5"
-  q3_install_n 2 || return 1
+  # every root switches into epoch 2 in process (bft-core#1086): the genesis members 1-4 at their own commit, the joiner 5 from an activation a member serves
+  Q3_EXPECT_SWITCHED=${P85_EXPECT_SWITCHED_2-1 2 3 4 5} q3_install_n 2 || return 1
   Q3_COMMIT_SCHEME=1 Q3_TOTAL_WEIGHT=4 Q3_ROOT_QUORUM=3 q3_activation_n 1 2 || return 1   # epoch 2's Commit is the genesis K's (legacy scheme 1, W=4, quorum 3)
   # activated, not acknowledged: the registry has not moved, and custody's last acknowledged assignment is still K's
   h3_registry_is 0 1 || h3_registry_is 0 2 || { echo "the registry moved before J was acknowledged" >&2; return 1; }
@@ -427,8 +428,9 @@ p85_recovery_attempt_loop() {
   h3_retry_handoff 2 p85_recovery_attempt || return 1
   cp "$Q3_DIR/candidate-config-2.json" "$Q3_DIR/recovery-config.json" 2>/dev/null || true
   H3_ROOTS="1 2 3 4 5"
-  # the staying members of the recovery (K: 1-4) switch into epoch 3 in process at their own commit (bft-core#1086), the leaver (5) is restarted
-  Q3_EXPECT_SWITCHED=${P85_EXPECT_SWITCHED-1 2 3 4} q3_install_n 3 || return 1
+  # the staying members of the recovery (K: 1-4) switch into epoch 3 in process at their own commit (bft-core#1086), and so does the leaver (5), into
+  # Following(3): it signs nothing there
+  Q3_EXPECT_SWITCHED=${P85_EXPECT_SWITCHED-1 2 3 4 5} q3_install_n 3 || return 1
   H3_ROOTS="1 2 3 4"
   Q3_TOTAL_WEIGHT=5 Q3_ROOT_QUORUM=4 q3_activation_n 2 3 || return 1   # epoch 3's Commit is J's (W=5, quorum 4)
   local i back="1 2 3"

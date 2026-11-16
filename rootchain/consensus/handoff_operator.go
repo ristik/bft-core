@@ -117,6 +117,36 @@ func (x *ConsensusManager) HandoffAbortStatus(target abdrc.HandoffAbortTarget) (
 }
 
 func (x *ConsensusManager) handoffAbortStatus(target abdrc.HandoffAbortTarget) (abdrc.HandoffAbortStatus, evmroot.OrderedHandoffRecord, error) {
+	status, record, err := x.committedAbortStatus(target)
+	if errors.Is(err, ErrHandoffAbortTarget) {
+		if late, ok := x.installedAbortStatus(target); ok {
+			return late, evmroot.OrderedHandoffRecord{}, nil
+		}
+	}
+	return status, record, err
+}
+
+// installedAbortStatus is the abort status of a handoff this root has already installed (#1086): once it switched into the successor in
+// process, a stayer, a joiner or a leaver alike, its committed head is the successor's anchor and no longer carries the handoff's control
+// state. The verified history then holds the activation into OldEpoch+1; when its committed record is the target, an abort of it is too
+// late, exactly as before the switch. Anything else is not this root's to answer.
+func (x *ConsensusManager) installedAbortStatus(target abdrc.HandoffAbortTarget) (abdrc.HandoffAbortStatus, bool) {
+	if x.q3 == nil || target.OldEpoch == ^uint64(0) || x.InstalledRootEpoch() <= target.OldEpoch {
+		return abdrc.HandoffAbortStatus{}, false
+	}
+	entry, ok := x.q3.Activated(target.OldEpoch + 1)
+	if !ok {
+		return abdrc.HandoffAbortStatus{}, false
+	}
+	v, _, ok := entry.Handoff()
+	if !ok || !recordMatchesAbortTarget(v.Record, target) {
+		return abdrc.HandoffAbortStatus{}, false
+	}
+	return abdrc.HandoffAbortStatus{Target: target, State: "too_late", RecordID: fmt.Sprintf("0x%x", v.Record.ID()), OrderedRound: v.Record.OrderedRound}, true
+}
+
+// committedAbortStatus is the abort status the committed head's control state gives.
+func (x *ConsensusManager) committedAbortStatus(target abdrc.HandoffAbortTarget) (abdrc.HandoffAbortStatus, evmroot.OrderedHandoffRecord, error) {
 	status := abdrc.HandoffAbortStatus{Target: target, State: "unknown"}
 	if _, err := handoffAbortKeyFor(target); err != nil {
 		return status, evmroot.OrderedHandoffRecord{}, err
