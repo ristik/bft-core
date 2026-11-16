@@ -2,11 +2,8 @@
 //
 //	dnb-tool trust-bundle --trust-base trust-base.json --out trust-base.bundle.cbor --out-pin genesis-entry-id.hex
 //	dnb-tool b1check --request req.bin --trust-base trust-base.json --profile b1-profile.json --clock N
-//	dnb-tool deployment --identities genesis-identities.json --agg-conf shard-conf-7_0.json --out deployment.json
-//	dnb-tool pdr --full-shard-conf shard-conf.json --out pdr.cbor
 //
-// deployment and pdr serve only the combined CI lane's protocol 6/7 bridge deploy until that lane is migrated; the lock-proof
-// commands (lockproof, lockproof-serve) were removed with that bridge (bft-core#1106).
+// The protocol 6/7 commands (deployment, pdr, lockproof, lockproof-serve) were removed with that bridge (bft-core#1106).
 package main
 
 import (
@@ -15,9 +12,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"strings"
 
-	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/unicitynetwork/bft-core/b1ref"
 	"github.com/unicitynetwork/bft-core/q3format"
 	"github.com/unicitynetwork/bft-core/utb"
@@ -26,17 +21,13 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: dnb-tool deployment|trust-bundle|pdr|b1check ...")
+		fmt.Fprintln(os.Stderr, "usage: dnb-tool trust-bundle|b1check ...")
 		os.Exit(2)
 	}
 	var err error
 	switch os.Args[1] {
-	case "deployment":
-		err = deployment(os.Args[2:])
 	case "trust-bundle":
 		err = trustBundle(os.Args[2:])
-	case "pdr":
-		err = pdr(os.Args[2:])
 	case "b1check":
 		err = b1check(os.Args[2:])
 	default:
@@ -46,106 +37,6 @@ func main() {
 		fmt.Fprintln(os.Stderr, "dnb-tool:", err)
 		os.Exit(1)
 	}
-}
-
-// The protocol 6/7 deployment document of the combined CI lane (scripts/lib/agg-lib.sh, scripts/reth-paired-devnet.sh), which still
-// deploys that bridge from its pinned contracts. bridgeprofile was removed (bft-core#1106); the three values it supplied are inlined
-// here byte for byte (TestDeploymentBytesArePinned). Remove deployment and pdr when the lane leaves the protocol 6/7 bridge.
-
-// emptyPrefixShard is the one-byte native encoding of the empty shard prefix (depth 0): 0x80, not the empty byte string.
-var emptyPrefixShard = []byte{0x80}
-
-// semanticProfileHash is the SHA-256 of the protocol 7 semantic profile artifact (bridgeprofile/testdata/semantic-profile.json,
-// native-bridge-plugins protocol/vectors/config/semantic-profile.json before bft-core#1106).
-const semanticProfileHash = "0xbdca358b6e1a64fa9161b4947020090876573d5f0b0f9786532de3d5d384324a"
-
-// policyBody is the partition policy body C(b("UNICITY_BR_AGG_PARTITION"), 2, partition): canonical CBOR, a 3-array of a byte
-// string and two unsigned integers.
-func policyBody(partition uint32) []byte {
-	const domain = "UNICITY_BR_AGG_PARTITION"
-	out := append([]byte{0x83}, cborHead(2, uint64(len(domain)))...)
-	out = append(out, domain...)
-	out = append(out, cborHead(0, 2)...)
-	return append(out, cborHead(0, uint64(partition))...)
-}
-
-// cborHead is the shortest CBOR head of major type major and argument n.
-func cborHead(major byte, n uint64) []byte {
-	m := major << 5
-	switch {
-	case n < 24:
-		return []byte{m | byte(n)}
-	case n <= 0xff:
-		return []byte{m | 24, byte(n)}
-	case n <= 0xffff:
-		return []byte{m | 25, byte(n >> 8), byte(n)}
-	case n <= 0xffffffff:
-		return []byte{m | 26, byte(n >> 24), byte(n >> 16), byte(n >> 8), byte(n)}
-	}
-	return []byte{m | 27, byte(n >> 56), byte(n >> 48), byte(n >> 40), byte(n >> 32), byte(n >> 24), byte(n >> 16), byte(n >> 8), byte(n)}
-}
-
-type identities struct {
-	RootGenesisID    string `json:"rootGenesisId"`
-	EVMGenesisHash   string `json:"evmGenesisHash"`
-	ProfileHash      string `json:"profileHash"`
-	ExecutionChainID uint64 `json:"executionChainId"`
-}
-
-func deployment(args []string) error {
-	fs := flag.NewFlagSet("deployment", flag.ContinueOnError)
-	idPath := fs.String("identities", "", "genesis identity document")
-	aggConfPath := fs.String("agg-conf", "", "the aggregator shard configurations as registered with the root chain: one file, or a comma-separated list in increasing shard-id order")
-	evmPartition := fs.Uint64("evm-partition", 8, "EVM partition id")
-	network := fs.Uint64("network", 3, "network id")
-	out := fs.String("out", "", "output path")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if *idPath == "" || *aggConfPath == "" || *out == "" {
-		return fmt.Errorf("--identities, --agg-conf and --out are required")
-	}
-	raw, err := os.ReadFile(*idPath)
-	if err != nil {
-		return err
-	}
-	var id identities
-	if err := json.Unmarshal(raw, &id); err != nil {
-		return err
-	}
-	// The registered shard configurations of the aggregation partition: protocol 4's policy names only the partition (the UCs
-	// authenticate each shard's configuration), so they serve to read and cross-check that partition.
-	var partition uint32
-	for i, path := range strings.Split(*aggConfPath, ",") {
-		rawConf, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		var conf types.PartitionDescriptionRecord
-		if err := json.Unmarshal(rawConf, &conf); err != nil {
-			return fmt.Errorf("decoding the aggregator shard configuration %s: %w", path, err)
-		}
-		if i == 0 {
-			partition = uint32(conf.PartitionID)
-		} else if partition != uint32(conf.PartitionID) {
-			return fmt.Errorf("shard configuration %s belongs to partition %d, not %d", path, conf.PartitionID, partition)
-		}
-	}
-	doc := map[string]any{
-		"network":             *network,
-		"rootGenesis":         id.RootGenesisID,
-		"executionGenesis":    id.EVMGenesisHash,
-		"evmPartition":        *evmPartition,
-		"evmShard":            hexutil.Encode(emptyPrefixShard),
-		"semanticProfileHash": semanticProfileHash,
-		"b1ProfileHash":       id.ProfileHash,
-		"policyBody":          hexutil.Encode(policyBody(partition)),
-	}
-	enc, err := json.MarshalIndent(doc, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(*out, append(enc, '\n'), 0o644) // #nosec G306 -- public configuration
 }
 
 // trustBundle writes the release bundle of the deployment's trust-base history at its genesis (the entry a root is started with,
@@ -208,29 +99,6 @@ func checkTrustBundle(bundle []byte, pin [32]byte) error {
 		return fmt.Errorf("the bundle's genesis EntryID is not the pin")
 	}
 	return types.VerifyTrustBaseBundle(b, pin)
-}
-
-// pdr writes the canonical CBOR of the EVM shard's full configuration: the artifact a lock proof carries and the manifest pins.
-func pdr(args []string) error {
-	fs := flag.NewFlagSet("pdr", flag.ContinueOnError)
-	in := fs.String("full-shard-conf", "", "full shard configuration JSON")
-	out := fs.String("out", "", "output path")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	raw, err := os.ReadFile(*in)
-	if err != nil {
-		return err
-	}
-	var conf types.PartitionDescriptionRecord
-	if err := json.Unmarshal(raw, &conf); err != nil {
-		return err
-	}
-	enc, err := types.Cbor.Marshal(&conf)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(*out, enc, 0o644) // #nosec G306 -- public configuration
 }
 
 // b1check evaluates a CERT_BATCH_V2 request with the Go reference verifier (b1ref) against a format-2 registry holding the deployment's genesis

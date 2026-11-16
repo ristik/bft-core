@@ -64,7 +64,7 @@ echo "$RUN_MODE" | tee "$EVIDENCE_DIR/run-mode.txt"
 host_evidence before "$(host_evidence_file "$EVIDENCE_DIR" before)"
 echo "bft-core head=${LANE_PRODUCT_COMMIT:-$(git rev-parse HEAD)}${LANE_PRODUCT_COMMIT:+ harness=$(git rev-parse HEAD)} ureth=$M2_URETH_COMMIT ubft sha256=$(shasum -a 256 build/ubft | cut -d' ' -f1)" | tee "$EVIDENCE_DIR/heads.txt"
 if [ "${ANYAGE_LANE:-0}" = 1 ]; then
-  echo "contracts head=$(git -C "$P85_CONTRACTS" rev-parse HEAD) nbp head=$(git -C "${NBP_DIR:?set NBP_DIR}" rev-parse HEAD) aggregator sha256=$(shasum -a 256 "${AGG_BIN:?set AGG_BIN}" | cut -d' ' -f1) dnb-tool sha256=$(shasum -a 256 "${DNB_TOOL:?set DNB_TOOL}" | cut -d' ' -f1)" | tee -a "$EVIDENCE_DIR/heads.txt"
+  echo "contracts head=$(git -C "$P85_CONTRACTS" rev-parse HEAD) aggregator sha256=$(shasum -a 256 "${AGG_BIN:?set AGG_BIN}" | cut -d' ' -f1)" | tee -a "$EVIDENCE_DIR/heads.txt"
 fi
 
 # A signal to the lane stops the scenario child and waits for its own teardown (an orphaned child keeps restarting nodes in this checkout).

@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Clean checkouts of the pinned companion repositories (scripts/ci/lane-pins.json), built for the run job, as compact tar.zst artifacts:
 #   contracts  checkout + submodules, forge build output (out/, cache/) and the solc binaries it used (svm/) so the run job compiles nothing it does not have to
-#   nbp        checkout + `npm ci` (the vendored SDK tarball of its package.json), no dev tooling beyond what tests/live runs
 #   sdkjs      checkout + `npm ci && npm run build`, then production dependencies only
 # Each archive holds a git checkout at exactly the pinned commit (scripts/ci/check-pins.sh git verifies it in the run job).
 #   scripts/ci/prepare-sources.sh OUT_DIR [WORK_DIR]       needs git, jq, forge (Foundry on PATH), node/npm, zstd
@@ -32,12 +31,6 @@ git -C "$c" submodule update --init --depth 1 --recursive -q
 # solc binaries foundry fetched for the build (the run job's forge finds them here)
 mkdir -p "$c/.ci-svm"; for d in "$HOME/.svm" "$HOME/.local/share/svm" ; do [ -d "$d" ] && cp -R "$d/." "$c/.ci-svm/" 2>/dev/null || true; done
 pack contracts "$c"
-
-# native-bridge-plugins
-n=$work/native-bridge-plugins
-checkout native-bridge-plugins "$n"
-( cd "$n" && npm ci --no-audit --no-fund --silent )
-pack native-bridge-plugins "$n"
 
 # state-transition-sdk-js
 s=$work/state-transition-sdk-js
