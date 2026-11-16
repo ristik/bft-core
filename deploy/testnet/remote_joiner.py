@@ -447,17 +447,41 @@ class Laptop:
         except (Failure, ValueError, subprocess.TimeoutExpired):
             return None
 
-    def is_member(self):
-        """True when this entity's root is in the committed signer set, False only when it is positively not a member (its root is stopped, or it answers as
-        a follower), None when that cannot be told (fail closed)."""
+    def strict_services_state(self):
+        """services_state for a decision that must not guess: None when the query failed or its output is not valid rows (an empty list is a failure too:
+        the entity's other services and the peer stubs always exist)."""
         try:
-            if self.services_state().get(f'root{self.entity}') != 'running':
+            text = self.dc('ps', '-a', '--format', 'json')
+            out = {}
+            for line in text.splitlines():
+                if line.strip():
+                    rows = json.loads(line)
+                    for row in rows if isinstance(rows, list) else [rows]:
+                        out[row['Service']] = row['State']
+        except (Failure, ValueError, KeyError, TypeError, subprocess.TimeoutExpired):
+            return None
+        return out or None
+
+    def is_member(self):
+        """True when this entity's root is in the committed signer set; False only when it is positively not a member (its root container is confirmed
+        stopped or absent, it is absent from a well-formed signer set, or q3/status says `follower` is true); None when that cannot be told (fail closed)."""
+        try:
+            states = self.strict_services_state()
+            if states is None:
+                return None
+            state = states.get(f'root{self.entity}')
+            if state in (None, 'exited', 'dead', 'created'):
                 return False
+            if state != 'running':
+                return None
             code, body = self.root_post('/api/v1/q3/signers')
             if code == 200:
-                return self.state['rootNodeId'] in [x.get('nodeId') for x in json.loads(body).get('signers') or []]
+                signers = json.loads(body).get('signers')
+                if not isinstance(signers, list) or not signers or not all(isinstance(x, dict) and isinstance(x.get('nodeId'), str) and x['nodeId'] for x in signers):
+                    return None
+                return self.state['rootNodeId'] in [x['nodeId'] for x in signers]
             code, body = self.root_post('/api/v1/q3/status')
-            if code == 200 and json.loads(body).get('follower'):
+            if code == 200 and json.loads(body).get('follower') is True:
                 return False
         except (Failure, ValueError, AttributeError, TypeError, subprocess.TimeoutExpired):
             pass

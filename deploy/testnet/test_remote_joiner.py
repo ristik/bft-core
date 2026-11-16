@@ -1497,7 +1497,7 @@ class MemberTunnelGuard(unittest.TestCase):
     def lap(self, root='running', posts=(), signers_nodes=None):
         lap = rj.Laptop.__new__(rj.Laptop)
         lap.entity, lap.state = 5, {'rootNodeId': 'ROOT5'}
-        lap.services_state = lambda: {'root5': root}
+        lap.strict_services_state = lambda: root if isinstance(root, dict) or root is None else {'root5': root, 'peer1': 'running'}
         replies = iter(posts)
         def post(path):
             r = next(replies)
@@ -1533,6 +1533,31 @@ class MemberTunnelGuard(unittest.TestCase):
                 with self.assertRaises(rj.Failure):
                     self.stop(lap)
                 self.kill.assert_not_called()
+
+    def test_unknown_states_are_refused(self):
+        sig = lambda v: (200, json.dumps({'signers': v}))
+        cases = {'ps failed': dict(root=None), 'transient state': dict(root='restarting'),
+                 'no signers key': dict(posts=[(200, '{}')]), 'null signers': dict(posts=[sig(None)]), 'empty signers': dict(posts=[sig([])]),
+                 'malformed entry': dict(posts=[sig(['ROOT1'])]), 'entry without nodeId': dict(posts=[sig([{'id': 'ROOT1'}])]),
+                 'not json': dict(posts=[(200, 'x')]),
+                 'follower 1': dict(posts=[(422, ''), (200, json.dumps({'follower': 1}))]),
+                 'follower string': dict(posts=[(422, ''), (200, json.dumps({'follower': 'false'}))])}
+        for name, kw in cases.items():
+            with self.subTest(name):
+                lap = self.lap(**kw)
+                with self.assertRaises(rj.Failure):
+                    self.stop(lap)
+                self.kill.assert_not_called()
+
+    def test_strict_services_state(self):
+        lap = rj.Laptop.__new__(rj.Laptop)
+        for text in ('', 'not json', '{"State": "running"}'):
+            lap.dc = lambda *a, **k: text
+            self.assertIsNone(lap.strict_services_state(), text)
+        lap.dc = unittest.mock.Mock(side_effect=rj.Failure('docker down'))
+        self.assertIsNone(lap.strict_services_state())
+        lap.dc = lambda *a, **k: '{"Service": "root5", "State": "exited"}\n'
+        self.assertEqual(lap.strict_services_state(), {'root5': 'exited'})
 
     def test_retired_or_follower_may_stop(self):
         for lap in (self.lap(root='exited'), self.lap(posts=[(200, json.dumps({'signers': [{'nodeId': 'ROOT1'}]}))]),
