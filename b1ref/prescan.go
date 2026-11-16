@@ -405,7 +405,7 @@ type Grouping struct{ C, K, E, S, Q, A, P, Gas uint64 }
 // Group scans a request without reading any state and returns its grouping, or the halt a native call would raise.
 func Group(in []byte) (Grouping, error) { return GroupWith(in, Standard) }
 
-// GroupWith is Group under explicit aggregate limits (Composed for the native composition's anchor table).
+// GroupWith is Group under explicit aggregate limits.
 func GroupWith(in []byte, lim Limits) (Grouping, error) {
 	var pl plan
 	if err := scanBatch(in, &pl, lim); err != nil {

@@ -20,8 +20,7 @@ type Verdict struct {
 // halt (ErrMalformed) or an infrastructure failure (ErrInfrastructure); otherwise the verdict carries the full charge.
 func Cert(in []byte, st State, pins Pins) (Verdict, error) { return CertWith(in, st, pins, Standard) }
 
-// CertWith is Cert under explicit aggregate limits: the composition authenticates its anchor table under Composed, as the native
-// BRIDGE_COMPOSE_V1 does.
+// CertWith is Cert under explicit aggregate limits.
 func CertWith(in []byte, st State, pins Pins, lim Limits) (Verdict, error) {
 	var pl plan
 	if err := scanBatch(in, &pl, lim); err != nil {

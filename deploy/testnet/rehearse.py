@@ -939,11 +939,24 @@ class Rehearsal:
     def pos_too_late(self):
         """5b step 14 after H: the handoff proposed by pos-propose is committed (the roots still certify at the old epoch, the install has not run). An Abort naming that
         exact handoff is not ordered: every root answers "too late" and the CLI exits non-zero, no Abort record is committed, the epoch does not move and the install
-        (the next stage) still works. Run right after pos-propose."""
+        (the next stage) still works. Run right after pos-propose.
+
+        bft-core#1095: a staying root switches into the committed epoch inside its process at its own commit. The roots that did (switched_roots: q3/status shows the
+        switch published Running or Following in the target) are installed by the commit itself and certify the target epoch; for them the Abort must not change
+        that. Every other root has not installed anything: it still certifies the old epoch, before and after the Abort. The epochs are read only once every switch
+        has settled: a root read in the middle of its switch answers with neither epoch."""
         target = self.committed_target
         self.expect(target is not None, 'the committed handoff\'s target was read by pos-propose (context before the plan)', str(target))
         (self.evh() / 'too-late-target.json').write_text(json.dumps(target, indent=1, sort_keys=True) + '\n')
-        before = [self.root_epoch(i) for i in range(1, self.n + 1)]
+        transport = handoff_ops.DockerTransport(self.gen)
+        switched = self.switched_roots(transport)
+        if switched:
+            self.say(f'  switched into epoch {self.target} in process at the commit: roots {sorted(switched)}')
+        before = self.too_late_epochs(switched, transport)
+        self.expect(all(e == self.target for i, e in enumerate(before, 1) if i in switched),
+                    f'every root that switched at the commit reports its switch into epoch {self.target} published', str(before))
+        self.expect(all(e == self.target - 1 for i, e in enumerate(before, 1) if i not in switched),
+                    f'a root that did not switch has installed nothing: it certifies epoch {self.target - 1}', str(before))
         ops = str(Path(__file__).resolve().parent / 'handoff_ops.py')
         aborted = subprocess.run([sys.executable, ops, 'abort', str(self.gen), '--', '--network', str(target['network']), '--old-epoch', str(target['oldEpoch']),
                                   '--predecessor-body-id', target['predecessorBodyId'], '--attempt', str(target['attempt']), '--next-body-id', target['nextBodyId'],
@@ -956,7 +969,22 @@ class Rehearsal:
         self.expect(aborted.returncode != 0 and sorted(blocks) == list(range(1, self.n + 1)) and all(code != 0 and 'too late' in text for code, text in blocks.values()),
                     f'each of the {self.n} roots answers "too late" and exits non-zero, and so does the abort', out.strip()[-500:])
         self.expect('committed Abort record' not in out and 'Abort already committed' not in out, 'no Abort record was committed')
-        self.expect([self.root_epoch(i) for i in range(1, self.n + 1)] == before, 'no root changed epoch', str(before))
+        after = self.too_late_epochs(switched, transport)
+        self.expect(all(e == self.target for i, e in enumerate(after, 1) if i in switched),
+                    f'after the Abort every root that switched still reports its switch into epoch {self.target} published', str(after))
+        self.expect(after == before, 'no root changed epoch (a root that switched at the commit stays in it, every other one in the old epoch)', f'{before} -> {after}')
+        self.expect(all(handoff.switch_complete(self.q3_status(i, transport), self.target) for i in switched), 'every root that switched still reports the switch published')
+
+    def too_late_epochs(self, switched, transport):
+        """pos-too-late's epoch of each root: the target for a root that switched into it at the commit (its published switch, which the Abort must not undo), else
+        the epoch of its committed certificate, which must stay the old one."""
+        out = []
+        for i in range(1, self.n + 1):
+            if i in switched:
+                out.append(self.target if self.switch_published(i, transport) else None)
+            else:
+                out.append(self.root_epoch(i, transport))
+        return out
 
     def pos_handoff_2(self):
         """The second handoff, root epoch 2 to 3, from the epoch-2 network the earlier stages left (pos-stale restored its credentials): the election reserves the next
@@ -1050,9 +1078,22 @@ class Rehearsal:
             # PR 2: a joiner or follower whose image acquires the activation from a root peer is waited for as long as handoff.awaits_switch says; one
             # on an older image is restarted at once
             wait = handoff.awaits_switch(self.q3_status(i, transport), True)
-            if wait is not None and handoff.switched_in_process(lambda i=i: self.q3_status(i, transport), self.target, wait=wait) is not None:
+            switch = None if wait is None else handoff.switched_in_process(lambda i=i: self.q3_status(i, transport), self.target, wait=wait)
+            # evidence of the in-process switch itself: its target is this epoch (a root restarted into the epoch reports Running in it with no target)
+            if switch is not None and switch.get('target') == self.target:
                 out.add(i)
         return out
+
+    def switch_published(self, i, transport, tries=10):
+        """Whether root i reports its in-process switch into the target published (Running or Following, target and epoch the target). An unavailable or
+        other answer is asked again, within `tries`; it is never taken for the switch."""
+        for attempt in range(tries):
+            view = self.q3_status(i, transport)
+            if handoff.switch_complete(view, self.target) and view['switch'].get('target') == self.target:
+                return True
+            if attempt + 1 < tries:
+                time.sleep(0.5)
+        return False
 
     def root_listens(self, i, transport):
         try:
