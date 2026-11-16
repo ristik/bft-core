@@ -1778,6 +1778,21 @@ class InstallRootAfterAnInProcessSwitch(unittest.TestCase):
         self.assertEqual(result, {'already': True})
         self.assertEqual(restarted, [])
 
+    def test_a_joiner_that_acquires_is_installed_in_process(self):
+        """bft-core#1086 PR 2: a follower whose image acquires the activation from a root peer switches; the drive waits for it instead of restarting."""
+        follower = {'activeEpoch': 2, 'follower': True, 'switch': {'phase': 'running', 'epoch': 2, 'acquires': True}}
+        lap = self.laptop(follower, follower, {'activeEpoch': 3, 'switch': {'phase': 'running', 'epoch': 3, 'target': 3, 'tookMs': 41, 'acquires': True}})
+        with unittest.mock.patch.object(rj, 'run', return_value=unittest.mock.Mock(returncode=0)), unittest.mock.patch.object(rj.handoff.time, 'sleep'), \
+                unittest.mock.patch.object(rj.time, 'sleep'):
+            result = lap.op_install_root(3)
+        self.assertEqual(result, {'already': True, 'inProcess': True, 'switchMs': 41})
+        self.assertEqual(lap.restarted, [])
+
+    def test_a_joiner_on_an_older_image_is_restarted_at_once(self):
+        result, calls = self.install({'activeEpoch': 2, 'follower': True, 'switch': {'phase': 'running', 'epoch': 2}})
+        self.assertNotIn('already', result)
+        self.assertTrue(self.restarted(calls))
+
     def test_a_root_installed_by_an_earlier_restart_is_installed(self):
         result, restarted = self.install({'activeEpoch': 3, 'switch': {'phase': 'running', 'epoch': 3}})
         self.assertEqual(result, {'already': True})

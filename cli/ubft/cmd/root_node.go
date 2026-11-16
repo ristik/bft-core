@@ -86,7 +86,7 @@ type (
 		InstallHandoffEpoch      uint64
 		InstallHandoffWait       time.Duration // how long an install waits for a root peer to serve an epoch this root does not hold itself (#1080)
 		CommitteeWarmup          time.Duration // how long a member waits for its committee to be connected before its first round (#1082)
-		// InProcessSwitch makes a member that stays in the committee switch into a committed Q3 activation in process (#1086)
+		// InProcessSwitch makes a running root switch into a committed Q3 activation in process (#1086)
 		InProcessSwitch bool
 		// RecordsPublicReads serves record reads (never cuts) of the records feed to any peer under recordsfeed.DefaultPublicLimits (#1048)
 		RecordsPublicReads bool
@@ -170,9 +170,9 @@ func rootNodeRunCmd(baseFlags *baseFlags) *cobra.Command {
 		"for an epoch this root has not committed itself (a peer serves it once it has committed it); 0 asks once")
 	cmd.Flags().DurationVar(&flags.CommitteeWarmup, "committee-warmup", committeeWarmupDefault, "how long a member of the installed root committee waits, "+
 		"before its first round, for every other member to be connected (it dials them itself and keeps them connected; a member down costs at most this, once)")
-	cmd.Flags().BoolVar(&flags.InProcessSwitch, "in-process-epoch-switch", true, "with --q3-lane: a member of the committee that stays in the successor's "+
-		"switches into a committed activation inside the running process, from its own committed evidence, instead of waiting for an install restart "+
-		"(the joiners, the leavers and a root without its own evidence still install across a restart)")
+	cmd.Flags().BoolVar(&flags.InProcessSwitch, "in-process-epoch-switch", true, "with --q3-lane: a running root switches into a committed activation inside its process instead of waiting for an install restart: "+
+		"a member that stays or leaves (into Following) from its own committed evidence, a joiner, a follower or a member that lagged from an activation "+
+		"a root peer serves, authenticated against its own history (false: every root installs across a restart)")
 	cmd.Flags().BoolVar(&flags.RecordsPublicReads, "records-public-reads", true, "serve the retained source-log records (never the cuts) to any peer, under a bounded public budget: a root "+
 		"that is not a member of this root's committees (one that catches up several epochs behind) completes its checkpoints' record prefixes from it (--profile-3)")
 	cmd.Flags().BoolVar(&flags.Q3Lane, "q3-lane", false, "run the Q3 acceptance lane: verified Q3 history, install journal and V3 handoffs (requires --profile-3)")
@@ -556,6 +556,11 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		// #1086: the switch installs from this root's own evidence only (the journal's staged bundle, else its committed checkpoint), then
 		// re-derives what this start derived from the installed epoch: the request history, and the committee kept connected
 		epochSwitch.Bundle = q3BundleProvider{cm: cm, rt: q3rt}.Q3Bundle
+		// PR 2: a root that does not hold the commit itself (a joiner, a follower, a member that lagged) asks a root peer for the bundle, as
+		// its install restart does; the manager authenticates it against this root's own history before anything is staged
+		epochSwitch.Fetch = func(ctx context.Context, from peer.ID, epoch uint64) (q3active.Bundle, error) {
+			return q3delivery.Request(ctx, host, from, epoch)
+		}
 		networkID := uint64(trustBase.GetNetworkID())
 		epochSwitch.After = func(ctx context.Context, epoch uint64) error {
 			if err := selectRootQ3RequestHistory(q3rt, cm, orchestration, networkID); err != nil {
@@ -569,6 +574,11 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 				committee.follow(ctx, log, installed)
 			}
 			return nil
+		}
+		if committee != nil {
+			// #1086 PR 2 (#1082): a joiner keeps the successor's committee connected from its staged candidate on, before the commit, so that
+			// the successor's first messages reach it and its own reach the others when it switches; behind NAT, only its own dials do
+			go committee.keepStaged(ctx, log, cm)
 		}
 	}
 
