@@ -7,8 +7,10 @@ free before pruning). Nothing larger is assumed. This page is the operator's gui
 ## What it runs
 
 `scripts/utb-lane.sh`, the same script and the same assertions as on the Mac: one fresh genesis, the P85 recovery machinery, the signed trust-base
-(UTB) profile from the first voting epoch, the aggregator of its pin, the reference client and the JS SDK client, the any-age L1 token and its one
-vault release, and the evidence-pack checker. Nothing is relaxed for CI. The differences are the inputs (pins, below), Linux portability, and where the
+(UTB) profile from the first voting epoch, the aggregator of its pin, the reference client and the JS SDK client, the any-age registry checks (the
+acknowledgement block installing both entries), and the evidence-pack checker. The protocol 6/7 bridge steps (the any-age L1 token and its vault release,
+the consolidated and the long-history redemptions) and the native-bridge-plugins input were removed with that bridge (bft-core#1106); the UTB steps'
+original token is now a certificate of the aggregator's. Nothing is relaxed for CI. The differences are the inputs (pins, below), Linux portability, and where the
 evidence goes.
 
 ## Dispatching it
@@ -30,8 +32,8 @@ the push event reads its inputs from `scripts/ci/run-inputs.json` of that branch
 |---|---|---|
 | `plan` | resolves the inputs | - |
 | `build-ureth` | clean checkout of the pinned ureth commit, locked release build of `unicity-reth` (`scripts/ci/build-ureth.sh`) | `ureth-linux`: the binary, `commit.txt`, `sha256.txt`, toolchain, flags, `Cargo.lock` hash, workflow run identity |
-| `build-tools` | `make build` (ubft), the Go lane tools (`dnb-tool`, `utb-evidence`, `evmtx`, ...), the aggregator from its pin (VCS stamped, provenance directory), the lane's chain-free self-tests | `bft-tools` |
-| `build-sources` | pinned contracts (with `forge build` output and solc), NBP driver (`npm ci`), JS SDK (`npm ci`, build, production dependencies only) | `sources` (three `tar.zst` with digests) |
+| `build-tools` | `make build` (ubft), the Go lane tools (`utb-evidence`, `evmtx`, ...), the aggregator from its pin (VCS stamped, provenance directory), the lane's chain-free self-tests | `bft-tools` |
+| `build-sources` | pinned contracts (with `forge build` output and solc), JS SDK (`npm ci`, build, production dependencies only) | `sources` (two `tar.zst` with digests) |
 | `run-lane` | downloads **only those artifacts**, verifies each against `scripts/ci/lane-pins.json`, starts Mongo, runs `scripts/utb-lane.sh --prep` and the lane, finalizes | `lane-evidence`, `resources-*` |
 
 The run job has no Rust target, no Go build cache and no Go or Rust toolchain; the Go tools it needs are prebuilt binaries (`LANE_TOOLS_DIR`, and
@@ -40,7 +42,7 @@ in `build-tools`; the run job's preflight checks its recorded result for this ve
 
 ## Pins
 
-`scripts/ci/lane-pins.json` is the reviewed input manifest: full commits of ureth, aggregator-go, contracts, native-bridge-plugins and the JS SDK (and of bft-core itself, below), the
+`scripts/ci/lane-pins.json` is the reviewed input manifest: full commits of ureth, aggregator-go, contracts and the JS SDK (and of bft-core itself, below), the
 Rust / Go / Node versions, the Foundry release and its archive digest, the Mongo image digest. It is **not** `deploy/testnet/pins.json`.
 
 **Pinned product (campaign runs).** `components["bft-core"]` is the frozen PoS release product commit. A pull request, the nightly and a default dispatch build `ubft` and the Go tools from the commit under test and never read it. A dispatch with `product: pinned`, or `"product": "pinned"` in `scripts/ci/run-inputs.json` of a `ci-lane-run/**` branch, builds them instead from a separate clean checkout of exactly that commit (`build-tools.sh` with `PRODUCT_DIR`, verified by `check-pins.sh git bft-core`); the harness (workflow, scripts, self-tests) stays the commit under test. The tools artifact records `product-commit.txt`; the run job accepts a product that is not the commit under test only when it equals the pin, and exports it as `LANE_PRODUCT_COMMIT`, which the binaries' stamp checks in the lane preflights use in place of HEAD. The plan's job summary records `product: pinned`.
@@ -58,7 +60,7 @@ Every job samples `df`, `free` and the largest resident process every 5 s (`scri
 |---|---|---|---|---|
 | `build-ureth` (cold, rustc 1.97.1, locked release) | 18 min 38 s (acceptance run: 12 min 38 s) | 3.79 GiB | 110.6 GiB | 4.62 GiB (4.99 GiB), no swap |
 | `build-tools` (ubft, Go tools, aggregator, self-tests) | 3 min 32 s | 3.72 GiB | 81.9 GiB | 1.86 GiB |
-| `build-sources` (contracts + forge, NBP, JS SDK) | 4 min 27 s | 0.97 GiB | 84.0 GiB | 3.74 GiB |
+| `build-sources` (contracts + forge, NBP, JS SDK; measured before NBP was removed) | 4 min 27 s | 0.97 GiB | 84.0 GiB | 3.74 GiB |
 | `run-lane` (prep + the lane) | 10 min 8 s (acceptance run: 10 min 29 s) | 3.88 GiB (3.90 GiB) | 109.9 GiB (110.4 GiB) | 2.36 GiB (5.31 GiB) |
 
 **The free-disk gate** (`runner.minFreeDiskGiB` in `lane-pins.json`, passed as `UTB_MIN_FREE_GIB`, checked by the lane's preflight after the inputs are unpacked) is
@@ -99,7 +101,7 @@ lock script is `$AGRE_ROOT/briefs/devnet-lock.sh` when present, else the reposit
 | `t6` | `scripts/t6-rehearsal.sh` (`scripts/ci/run-t6.sh`): independent genesis/artifact checks, authority-backed rotation, over-bound control, acknowledgement, paid execution under the new set, offline F7 verification | `t6-evidence` |
 | `ureth-targeted` | `scripts/ci/test-ureth.sh`: `cargo test -p` the four Unicity crates of the ureth pin (`components.ureth.targetedPackages`: `reth-unicity-b1`, `-execution`, `-payload`, `-store`), not `--workspace` and no generic Ethereum suites; an empty selection fails | `ureth-targeted` (cargo log, per-binary results, summary) |
 
-`overbound`, `abort` and `combined` share the builds and the run job (`run-lane.sh`, `CI_LANE_KIND`); the non-combined kinds skip Mongo, the aggregator, NBP and the SDK and check ureth, contracts and Foundry (`check-pins.sh env-core`). T6 builds its own helper tools and the four allocation contracts in an isolated checkout, so its job has Go (setup-go) and the ureth artifact, nothing else from the build jobs. `inject_failure` is honoured by every kind (`after-builds`; `in-lane` fails after a named step: `utb_step_u1` / `p85_joiner_nodes` / T6's build step; the Abort lane has no step hook, so there it adds a failing harness step after the lane ran).
+`overbound`, `abort` and `combined` share the builds and the run job (`run-lane.sh`, `CI_LANE_KIND`); the non-combined kinds skip Mongo, the aggregator and the SDK and check ureth, contracts and Foundry (`check-pins.sh env-core`). T6 builds its own helper tools and the four allocation contracts in an isolated checkout, so its job has Go (setup-go) and the ureth artifact, nothing else from the build jobs. `inject_failure` is honoured by every kind (`after-builds`; `in-lane` fails after a named step: `utb_step_u1` / `p85_joiner_nodes` / T6's build step; the Abort lane has no step hook, so there it adds a failing harness step after the lane ran).
 
 **T6 pins.** T6 keeps its own pins (contracts `e7eb3216`, Foundry **1.8.3**; the lane's are contracts `316203f4`, Foundry 1.8.1). They are recorded under `t6` in `lane-pins.json` and `check-pins.sh t6` refuses a `t6-rehearsal.sh` whose defaults differ (negative cases in `check-pins.sh selftest`). The Linux Foundry asset is `foundry_v1.8.3_linux_amd64.tar.gz`, sha256 `7ca48e6c...c228568` (the release API's digest and `sha256sum` of the download agree). The default ureth of T6, H6 Abort and the lane runner is the attested `6e59b68c` (#679).
 

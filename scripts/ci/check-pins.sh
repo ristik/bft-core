@@ -2,9 +2,9 @@
 # Verifies the components of a lane run against the reviewed manifest scripts/ci/lane-pins.json and refuses a wrong pin.
 #   scripts/ci/check-pins.sh component NAME VALUE      VALUE (a 40-hex commit) must equal the pinned commit of NAME
 #   scripts/ci/check-pins.sh git NAME DIR              the HEAD of the checkout DIR (clean, no local change) must equal the pinned commit of NAME
-#   scripts/ci/check-pins.sh env                       every component the lane reads from the environment (AGG_COMMIT + the aggregator provenance, P85_CONTRACTS, NBP_DIR,
+#   scripts/ci/check-pins.sh env                       every component the lane reads from the environment (AGG_COMMIT + the aggregator provenance, P85_CONTRACTS,
 #                                                      UTB_SDK_JS, M2_URETH_COMMIT + M2_URETH_BIN's reported commit, FOUNDRY) against the manifest; prints one line each
-#   scripts/ci/check-pins.sh env-core                  the same for a lane without the aggregator, NBP and the SDK (ureth, contracts, Foundry)
+#   scripts/ci/check-pins.sh env-core                  the same for a lane without the aggregator and the SDK (ureth, contracts, Foundry)
 #   scripts/ci/check-pins.sh selftest                  chain-free tests: a right pin is accepted, a wrong one, a short one and an unknown component are refused
 # PINS=<file> selects another manifest (the self-test uses it). Exit status 0 only when everything checked matches.
 set -uo pipefail
@@ -56,7 +56,6 @@ case "${1:-}" in
       prov=$(dirname "$AGG_BIN"); [ -s "$prov/commit.txt" ] && check_component aggregator-go "$(tr -d '[:space:]' <"$prov/commit.txt")" || { say "FAIL  aggregator-go: no provenance commit.txt beside AGG_BIN"; bad=1; }
     else say "FAIL  aggregator-go: AGG_BIN is not set"; bad=1; fi
     check_git contracts "${P85_CONTRACTS:-/nonexistent}" || bad=1
-    check_git native-bridge-plugins "${NBP_DIR:-/nonexistent}" || bad=1
     check_git state-transition-sdk-js "${UTB_SDK_JS:-/nonexistent}" || bad=1
     reported=$("${M2_URETH_BIN:-/nonexistent}" --version 2>&1 | sed -n 's/^Commit SHA: //p' | head -1)
     check_component ureth "${reported:-none}" || bad=1

@@ -4,16 +4,17 @@ import json
 import os
 from pathlib import Path
 try:
-    from .gateway import request
+    from .gateway import ResponseTooLarge, request  # noqa: F401 (ResponseTooLarge is the bound's refusal, for callers)
 except ImportError:  # Standalone faucet image/CLI.
-    from gateway import request
+    from gateway import ResponseTooLarge, request  # noqa: F401
 
 
 class Relay:
     def __init__(self, cfg):
         self.cfg = cfg
 
-    def call(self, method, params):
+    def call(self, method, params, max_bytes=None):
+        """MAX_BYTES bounds the answer read from the target (ResponseTooLarge above it); None reads it whole."""
         results = []
         # Check every target before submitting to any target. Fail closed on partial
         # availability. A timeout during broadcast remains ambiguous to the caller.
@@ -28,7 +29,7 @@ class Relay:
         targets = self.cfg['validator_rpc_urls'] if method == 'eth_sendRawTransaction' else self.cfg['validator_rpc_urls'][:1]
         for url in targets:
             results.append(request(url, dict(jsonrpc='2.0', id=1, method=method, params=params),
-                                   {'Content-Type': 'application/json'}))
+                                   {'Content-Type': 'application/json'}, max_bytes=max_bytes))
         if method == 'eth_sendRawTransaction' and any(r.get('result') != results[0].get('result') for r in results):
             raise ValueError('partial broadcast; inspect transaction before retry')
         return results[0]

@@ -55,6 +55,9 @@ type skewedBox struct {
 	q    []any
 	wake chan struct{}
 	rcv  chan any
+	// origins, once a manager tracks them (TrackOrigins, #1086), is each queued message's sender and encoded size, as the libp2p network
+	// authenticates and measures them
+	origins map[any]network.MessageOrigin
 }
 
 type skewedConn struct {
@@ -128,6 +131,13 @@ func (n *skewedNet) deliver(from, to peer.ID, msg any) (bool, error) {
 	}
 	box.mu.Lock()
 	box.q = append(box.q, msg)
+	if box.origins != nil {
+		size := uint64(1024)
+		if raw, err := types.Cbor.Marshal(msg); err == nil {
+			size = uint64(len(raw))
+		}
+		box.origins[msg] = network.MessageOrigin{Peer: from, Size: size}
+	}
 	box.mu.Unlock()
 	select {
 	case box.wake <- struct{}{}:
@@ -137,6 +147,24 @@ func (n *skewedNet) deliver(from, to peer.ID, msg any) (bool, error) {
 }
 
 func (c *skewedConn) ReceivedChannel() <-chan any { return c.box.rcv }
+
+// TrackOrigins and TakeOrigin make the skewed network a MessageOrigins network, as the libp2p one is (#1086): the sender of each queued
+// message is the transport's.
+func (c *skewedConn) TrackOrigins() {
+	c.box.mu.Lock()
+	defer c.box.mu.Unlock()
+	if c.box.origins == nil {
+		c.box.origins = map[any]network.MessageOrigin{}
+	}
+}
+
+func (c *skewedConn) TakeOrigin(msg any) (peer.ID, uint64, bool) {
+	c.box.mu.Lock()
+	defer c.box.mu.Unlock()
+	o, ok := c.box.origins[msg]
+	delete(c.box.origins, msg)
+	return o.Peer, o.Size, ok
+}
 
 // skewedStakes: node 0 is the heavy node. The quorum threshold of 9 in total is 7, so the heavy node needs one light node and
 // the three light nodes (3) never reach it.

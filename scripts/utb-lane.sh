@@ -8,7 +8,7 @@
 #   scripts/utb-lane.sh --selftest     chain-free tests of the lane's own logic (genesis/manifest generation, flags, the evidence-pack checker)
 #   scripts/utb-lane.sh --build-aggregator   AGG_COMMIT=<40 hex>: clone, build and record the aggregator (builds/aggregator-<sha8>/); pushes nothing
 #   scripts/utb-lane.sh --prep         dry run of the genesis side (ANYAGE_PREP_ONLY with UTB_LANE=1): P85 genesis, the UTB genesis entry, pin and manifest,
-#                                      aggregator shard configurations and the bridge deployment; starts no reth, root, validator or aggregator
+#                                      and the aggregator shard configurations; starts no reth, root, validator or aggregator
 #   scripts/utb-lane.sh --check-evidence DIR   checks an evidence directory against the required list (design §11.4)
 #   scripts/utb-lane.sh                the run: refuses unless the preflight is entirely ok
 #
@@ -31,16 +31,13 @@ plan() {
 UTB lane steps (one fresh genesis, the any-age/P85 machinery + UTB_LANE=1; evidence under briefs/devnet-runs/utb-<utc>/p85/utb, required list: --check-evidence).
 Entries: epoch 2 is the K->J handoff (activated; the P85 J is never acknowledged), epoch 3 the derived recovery to K (the acknowledgement block installs both, span 2).
   0  preflight (this script), the devnet lock, the manifest: pins, builds, the aggregator commit, the genesis entry and its pin
-  1  genesis: PoS genesis + bridge + aggregator shard + the UTB genesis entry (canonical V2, null signatures), generated once from the epoch-1 trust base
-  2  U1  after the baseline and L1a: the aggregator serves the genesis only; the original token (its exact bytes and digest) is saved and verifies under the genesis committee;
+  1  genesis: PoS genesis + aggregator shard + the UTB genesis entry (canonical V2, null signatures), generated once from the epoch-1 trust base
+  2  U1  after the baseline: the aggregator serves the genesis only; the original token (a certificate of the genesis epoch, the aggregator's latest block's: its exact
+         bytes and digest) is saved and verifies under the genesis committee;
          the reference client (its own durable store) starts from the genesis
   2b S1/S2 (bft-core#671, live proof for #648) before the V3 handoff one root (UTB_IMPORT_ROOT, default 4) is stopped, left 12 rounds behind (UTB_IMPORT_GAP) and restarted in the genesis
          epoch with its store: it recovers by state import (log: completed recovery); after the handoff committed its log shows no 'V3 freeze rules are not enabled', no 'successor
          trust-base entry cannot be derived', a signed vote at exactly the record's round and the committed outcome of the record (state-import/root<N>.txt)
-  2c C   (DNB_AGG_SHARDS=2) right after L1b: a second token over both aggregator shards is consolidated by the SDK (K = m anchors under one seal) and redeemed once (#526 step 4);
-         the per-SID envelope of the same token is built and priced as the control (anyage_step_consolidated)
-  2d LH  (B7_LONG_HISTORY=1) a token transferred live past every former bridge bound (more than 65 leaves, above 64 KiB and 7M gas) is redeemed one gas short (it reverts,
-         the vault unchanged) and then with the estimate (credited, claimed) (anyage_step_long_history, B7 PR 3)
   3  U2  after the K->J activation: the aggregator receives the epoch-2 entry attached to a version 3 certification response (log: received + appended, no catch-up), the root's
          message is captured and decodes to exactly that entry; the aggregator serves epoch 2
   4  U3a the aggregator restarts from its retained store (unchanged records); then it is stopped and its history store removed (the controlled fault)
@@ -50,8 +47,8 @@ Entries: epoch 2 is the K->J handoff (activated; the P85 J is never acknowledged
   7  L2  the acknowledgement block installs both entries; U4 a token certified after the recovery; the stale client meets the unknown epoch 3, fetches [2 3] in one request
          and verifies; the aggregator restarts again, unchanged bytes, healthy;  U4b the JS SDK (the fork, UTB_SDK_JS) holds the genesis only, meets epoch 3 on the same
          certificate, fetches epochs 2..3 from the aggregator's GetTrustBase endpoint with its fetch-and-retry loop and verifies; its entries equal the history's bytes
-  8  L1c the same saved bytes verify against the historical epoch; the one vault release;  U5 the original token verifies unchanged under its historical committee (utb-evidence),
-         the bridge receipt, the complete history exported and reloaded by a fresh client store: identical records and tip
+  8  U5 the original token verifies unchanged under its historical committee (utb-evidence), the complete history exported and reloaded by a fresh client store:
+         identical records and tip (the protocol 6/7 bridge checkpoints L1a/L1b/L1c, C and LH were removed with that bridge, bft-core#1106)
   9  restarts (P85); the root logs counted (V3 freeze rules are not enabled = 0, successor trust-base entry cannot be derived = 0, recoveries completed reported); the evidence pack assembled and checked by the tools (self-contained), teardown through scripts/p85-stop.sh only
 PLAN
 }
@@ -69,7 +66,7 @@ preflight() {
   while read -r line; do case "$line" in ok*) yes "${line#ok }";; *) no "${line#FAIL }";; esac; done < <("$SCRIPT_DIR/ci/check-pins.sh" env 2>&1)
   else
   echo "-- merged prerequisites (read-only gh queries on ristik/*)"
-  for pr in "ristik/bft-core 632" "ristik/bft-core 633" "ristik/bft-core 634" "ristik/bft-core 635" "ristik/bft-core 650" "ristik/aggregator-go 2" "ristik/bft-go-base 1" "ristik/ureth 70" "ristik/unicity-pos-contracts 39" "ristik/native-bridge-plugins 19"; do
+  for pr in "ristik/bft-core 632" "ristik/bft-core 633" "ristik/bft-core 634" "ristik/bft-core 635" "ristik/bft-core 650" "ristik/aggregator-go 2" "ristik/bft-go-base 1" "ristik/ureth 70" "ristik/unicity-pos-contracts 39"; do
     set -- $pr; st=$(gh pr view "$2" -R "$1" --json state --jq .state 2>/dev/null || echo unknown)
     if [ "$st" = MERGED ]; then yes "$1#$2 merged"; else no "$1#$2 is $st (must be MERGED before the run)"; fi
   done
@@ -110,16 +107,9 @@ preflight() {
   if [ -n "${P85_CONTRACTS:-}" ] && [ -d "$P85_CONTRACTS" ]; then yes "P85_CONTRACTS $P85_CONTRACTS"; else no "set P85_CONTRACTS to the contracts checkout"; fi
   check "the contracts genesis takes the root network and genesis identity (contracts#46: P85_ROOT_NETWORK, P85_ROOT_GENESIS; the lane sets both from the trust base)" bash -c "grep -q P85_ROOT_GENESIS '${P85_CONTRACTS:-/nonexistent}/script/P85Genesis.s.sol' && grep -q P85_ROOT_NETWORK '${P85_CONTRACTS:-/nonexistent}/script/P85Genesis.s.sol'"
   note "contracts#46 changes the manifest hash and the publication fixture: the copies under evmassign/testdata and rootchain/evmstate/testdata and the xrepo/fixtures.json pin are re-copied at the #46 merge commit (checked: the new fixture passes evmassign, evmstate, xrepo, posrelayer, signingauthority)"
-  if [ -n "${NBP_DIR:-}" ] && [ -d "$NBP_DIR/tests/live" ]; then yes "NBP_DIR $NBP_DIR"; else no "set NBP_DIR to the native-bridge-plugins checkout"; fi
-  check "NBP_DIR's live driver reads the trust-base release bundle (native-bridge-plugins#27, a lane prerequisite: the lane writes trust-base.bundle.cbor since bft-core#658 and no sdk-trust-base.json)" bash -c "grep -q 'trust-base.bundle.cbor' '${NBP_DIR:-/nonexistent}/tests/live/anyage.ts'"
-  if [ "${B7_LONG_HISTORY:-0}" = 1 ]; then
-    check "B7_LONG_HISTORY=1: NBP_DIR's live driver has the long-history command (B7 PR 3)" bash -c "grep -q \"'long-history'\" '${NBP_DIR:-/nonexistent}/tests/live/anyage.ts'"
-  fi
   if [ "${DNB_AGG_SHARDS:-1}" != 1 ]; then
-    check "DNB_AGG_SHARDS=${DNB_AGG_SHARDS}: NBP_DIR's live driver steers the saved history across the aggregator shards (native-bridge-plugins anyage driver: 'no lock gave a mint and a burn on different aggregator shards')" bash -c "grep -q 'on different aggregator shards' '${NBP_DIR:-/nonexistent}/tests/live/anyage.ts'"
     check "the aggregator shard count is 2 (the depth-1 topology 0x40, 0xc0)" test "${DNB_AGG_SHARDS}" = 2
   fi
-  [ -n "${DNB_TOOL:-}" ] && [ -x "$DNB_TOOL" ] && yes "DNB_TOOL $DNB_TOOL" || no "set DNB_TOOL to a dnb-tool built from this checkout"
   if (exec 3<>/dev/tcp/127.0.0.1/27117) 2>/dev/null; then yes "MongoDB replica set port 27117 answers"; else no "no MongoDB on 127.0.0.1:27117"; fi
   echo "-- the aggregator (ristik/aggregator-go integration/enshrined-evm at AGG_COMMIT, built by --build-aggregator; provenance builds/aggregator-<sha8>/)"
   if [ -n "${AGG_BIN:-}" ] && [ -x "$AGG_BIN" ]; then
@@ -190,7 +180,7 @@ case "${1:-}" in
   --preflight) plan; echo; preflight ;;
   --prep)
     lane_env
-    [ -n "${P85_CONTRACTS:-}" ] && [ -n "${DNB_TOOL:-}" ] || { echo "--prep needs P85_CONTRACTS, M2_URETH_BIN, M2_URETH_COMMIT, DNB_TOOL (and P85_DEV_RUN=1 unless the provenance is attested)" >&2; exit 2; }
+    [ -n "${P85_CONTRACTS:-}" ] || { echo "--prep needs P85_CONTRACTS, M2_URETH_BIN, M2_URETH_COMMIT (and P85_DEV_RUN=1 unless the provenance is attested)" >&2; exit 2; }
     export ANYAGE_PREP_ONLY=1
     "$(lane_lock_script)" utb-prep env P85_LANE_LOCKED=1 "$SCRIPT_DIR/p85-lane.sh"; rc=$?
     if [ "$rc" -eq 0 ]; then
