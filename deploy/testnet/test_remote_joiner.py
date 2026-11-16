@@ -1561,7 +1561,7 @@ class MemberTunnelGuard(unittest.TestCase):
 
     def test_retired_or_follower_may_stop(self):
         for lap in (self.lap(root='exited'), self.lap(posts=[(200, json.dumps({'signers': [{'nodeId': 'ROOT1'}]}))]),
-                    self.lap(posts=[(422, ''), (200, json.dumps({'follower': {'x': 1}}))])):
+                    self.lap(posts=[(422, ''), (200, json.dumps({'follower': True}))])):
             self.stop(lap)
             self.kill.assert_called_once_with(4242, 15)
 
