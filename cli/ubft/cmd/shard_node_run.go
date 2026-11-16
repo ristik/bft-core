@@ -577,6 +577,9 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	if err := shardnode.CheckBlockInterval(flags.BlockInterval, shardConf.T2Timeout, consensus.BlockRate*time.Millisecond); err != nil {
 		return fmt.Errorf("--target-block-interval: %w (regenerate the shard conf with a larger --t2-timeout, or lower the interval)", err)
 	}
+	if err := shardnode.CheckInactivityMargin(flags.BlockInterval, shardConf.T2Timeout, consensus.BlockRate*time.Millisecond, flags.InactivityTimeout); err != nil {
+		flags.observe.Logger().Warn("--target-block-interval is close to --inactivity-timeout", "reason", err.Error())
+	}
 
 	// How certification requests are signed is decided once, here, before anything is built: with the
 	// key configuration's signing key as before, or through a signing authority when one is configured

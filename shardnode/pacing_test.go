@@ -3,6 +3,7 @@ package shardnode_test
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -10,7 +11,39 @@ import (
 
 	"github.com/unicitynetwork/bft-core/shardnode"
 	"github.com/unicitynetwork/bft-core/shardnode/executortest"
+	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
+	"github.com/unicitynetwork/bft-go-base/types"
 )
+
+func pacingSigner(t *testing.T) abcrypto.Signer {
+	t.Helper()
+	s, err := abcrypto.NewInMemorySecp256K1Signer()
+	require.NoError(t, err)
+	return s
+}
+
+// countingBuilds counts the builds that reach the executor: a build is the first irreversible leader action (it moves forkchoice).
+type countingBuilds struct {
+	shardnode.Executor
+	builds atomic.Int32
+}
+
+func (e *countingBuilds) Build(ctx context.Context, p shardnode.RoundParams) (shardnode.BuildID, error) {
+	e.builds.Add(1)
+	return e.Executor.Build(ctx, p)
+}
+
+// pacedLeader is a single-validator round that has led round 1 (so its pacing state is populated) and holds round 1's certificate.
+func pacedLeader(t *testing.T, interval time.Duration) (*shardnode.Round, string, *countingBuilds, *recordingSubmitter, *types.UnicityCertificate) {
+	t.Helper()
+	exec := &countingBuilds{Executor: executortest.New()}
+	sub := &recordingSubmitter{}
+	r, id := newTestRound(t, exec, sub)
+	r.SetBlockInterval(interval)
+	require.NoError(t, r.HandleCertificate(context.Background(), genesisUC(1000), tr(1, 0, id)))
+	require.EqualValues(t, 1, exec.builds.Load())
+	return r, id, exec, sub, certifyFrom(sub.last(t), 2, 1000)
+}
 
 // bft-core#1167: with a block interval the leader builds its next block no sooner than the interval after its previous one, and the
 // paced request is byte-for-byte what an unpaced node submits for the same certificates: pacing is a delay, never a different block.
@@ -147,4 +180,112 @@ func TestPacing_MinT2ForBlockInterval(t *testing.T) {
 			require.NoError(t, shardnode.CheckBlockInterval(tc.interval, need, rbr))
 		}
 	}
+}
+
+// A repeat UC of the certificate a paced leader holds ends its wait at once (the authorization was replaced): nothing is built or sent for
+// the replaced certificate, the round returns cleanly, and the repeat is then handled normally, still paced from the last real build.
+func TestPacing_ARepeatUCEndsAPacedLeadersWait(t *testing.T) {
+	const interval = 400 * time.Millisecond
+	r, id, exec, sub, uc1 := pacedLeader(t, interval)
+	var fired atomic.Bool
+	r.SetSupersessionWatch(func(held *types.UnicityCertificate, cancel func()) func() {
+		if held.GetRootRoundNumber() == uc1.GetRootRoundNumber() && fired.CompareAndSwap(false, true) {
+			time.AfterFunc(50*time.Millisecond, cancel) // the repeat arrives while the leader waits
+		}
+		return func() {}
+	})
+
+	start := time.Now()
+	require.NoError(t, r.HandleCertificate(context.Background(), uc1, tr(2, 0, id)), "a superseded wait is an abstention, not a failure")
+	require.Less(t, time.Since(start), interval/2, "the wait ended with the repeat, not with the interval")
+	require.True(t, fired.Load())
+	require.EqualValues(t, 1, exec.builds.Load(), "nothing was built for the replaced certificate")
+	require.Len(t, sub.got, 1, "and nothing was sent")
+
+	repeat := certifyFrom(sub.got[0], 3, 1000) // same input record, a later root round
+	start = time.Now()
+	require.NoError(t, r.HandleCertificate(context.Background(), repeat, tr(2, 0, id)))
+	require.GreaterOrEqual(t, time.Since(start), interval/2, "the repeat is paced from the last real build, which the abandoned wait did not move")
+	require.EqualValues(t, 2, exec.builds.Load())
+	require.Len(t, sub.got, 2)
+	require.Equal(t, uint64(2), sub.last(t).InputRecord.RoundNumber)
+}
+
+// A role that ends while the leader waits (retired, or re-published under a new token) stops the round before the build: the lease is
+// checked again after the wait, so a node that lost its role during the delay never moves forkchoice, signs or sends.
+func TestPacing_ARoleEndingDuringTheWaitBuildsNothing(t *testing.T) {
+	const interval = 300 * time.Millisecond
+	for name, end := range map[string]func(*leaseRole){
+		"retired":      func(l *leaseRole) { l.active.Store(false) },
+		"re-published": func(l *leaseRole) { l.token.Add(1) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			role := &leaseRole{}
+			role.active.Store(true)
+			exec := &countingBuilds{Executor: executortest.New()}
+			sub := &recordingSubmitter{}
+			r, id := newTestRound(t, exec, sub)
+			r.SetRole(role)
+			r.SetBlockInterval(interval)
+			require.NoError(t, r.HandleCertificate(context.Background(), genesisUC(1000), tr(1, 0, id)))
+			uc1 := certifyFrom(sub.last(t), 2, 1000)
+
+			time.AfterFunc(50*time.Millisecond, func() { end(role) })
+			require.NoError(t, r.HandleCertificate(context.Background(), uc1, tr(2, 0, id)))
+			require.EqualValues(t, 1, exec.builds.Load(), "no build after the role ended during the wait")
+			require.Len(t, sub.got, 1, "no request either")
+		})
+	}
+}
+
+// Leadership rotates between rounds: the round-1 leader follows in round 2 and the round-1 follower leads it. The new leader paces from
+// when it received round 1's block; the new follower extends its wait from when it built it. Both take part in round 2, though the paced
+// block arrives well after the follower's own await budget.
+func TestPacing_LeadershipChangeBetweenPacedRounds(t *testing.T) {
+	const interval, budget = 400 * time.Millisecond, 100 * time.Millisecond
+	ctx := context.Background()
+	d := newBroadcastDisseminator()
+	a, b := newDeterminismValidator(t, d), newDeterminismValidator(t, d)
+	for _, v := range []*determinismValidator{a, b} {
+		v.round.SetBlockInterval(interval)
+		v.round.SetAwaitTimeout(budget)
+	}
+	uc, rec := genesisUC(1000), tr(1, 0, a.nodeID)
+	require.NoError(t, a.round.HandleCertificate(ctx, uc, rec))
+	require.NoError(t, b.round.HandleCertificate(ctx, uc, rec))
+
+	uc2, rec2 := certifyFrom(a.sub.last(t), 2, 1000), tr(2, 0, b.nodeID)
+	led := make(chan time.Duration, 1)
+	go func() {
+		start := time.Now()
+		require.NoError(t, b.round.HandleCertificate(ctx, uc2, rec2))
+		led <- time.Since(start)
+	}()
+	require.NoError(t, a.round.HandleCertificate(ctx, uc2, rec2), "the former leader waited for the paced block beyond its budget")
+	require.GreaterOrEqual(t, <-led, interval-100*time.Millisecond, "the former follower paced its first build from the block it received")
+	require.Len(t, a.sub.got, 2)
+	require.Len(t, b.sub.got, 2)
+	require.Equal(t, b.sub.last(t).InputRecord, a.sub.last(t).InputRecord)
+}
+
+// Pacing state is per process and never persisted: after a restart the first block is not delayed. The same certificate (a repeat at a
+// later root round, as after a lost round) is paced by the process that built recently, and built at once by a restarted one.
+func TestPacing_ARestartedProcessStartsUnpaced(t *testing.T) {
+	const interval = 300 * time.Millisecond
+	ctx := context.Background()
+	r, id, _, sub, _ := pacedLeader(t, interval)
+	repeat := genesisUC(1000)
+	repeat.UnicitySeal.RootChainRoundNumber = 2
+
+	start := time.Now()
+	require.NoError(t, r.HandleCertificate(ctx, repeat, tr(1, 0, id)))
+	require.GreaterOrEqual(t, time.Since(start), interval-100*time.Millisecond, "the running process is paced: its state was populated")
+
+	restartedSub := &recordingSubmitter{}
+	restarted := shardnode.NewRound(id, types.PartitionID(8), types.ShardID{}, executortest.New(), shardnode.NewLoopbackDisseminator(), pacingSigner(t), restartedSub, nil)
+	restarted.SetBlockInterval(interval)
+	start = time.Now()
+	require.NoError(t, restarted.HandleCertificate(ctx, repeat, tr(1, 0, id)))
+	require.Less(t, time.Since(start), interval/2, "a restarted process has no previous block to pace from")
+	require.Equal(t, sub.last(t).InputRecord, restartedSub.last(t).InputRecord, "and builds the same block")
 }

@@ -44,10 +44,13 @@ DEFAULT_SUBNETS = {'faucet': '172.30.88.0/24', 'edge': '172.30.89.0/24'}
 # handoff every ~8 min) the roots ran at their 0.5 quota with 34 % of cgroup periods throttled at 34 epochs, while the EVM slowed from 0.62 to 0.15 blocks/s.
 # The install restart recreates a root from compose.yaml (compose.install-epoch-N.json sets no limits), so the quota holds across handoffs.
 ROOT_CPUS = 2.0
-# The EVM shard's target block interval (bft-core#1167, owner 2026-11-16: about one block every 10 s is fine for the testnet; the code default, 0, is one block per
-# certification round trip, about 1.6 to 2 s). Best effort and per node (`shard-node run --target-block-interval`): the leader delays its build, nothing checks it. The shard
+# The EVM shard's target block interval (bft-core#1167, owner 2026-11-16: about one block every 10 s is fine for the testnet; 0 is one block per certification
+# round trip, about 1.6 to 2 s). Best effort and per node (`shard-node run --target-block-interval`): the leader delays its build, nothing checks it. The shard
 # conf's T2 must cover it, so it is derived from it (t2_for_block_interval); rehearsals and CI pass --block-interval-ms 0 and keep today's cadence and T2.
-BLOCK_INTERVAL_MS = 10000
+# The default is 0 while the pinned ubft (pins.json) has no --target-block-interval: it switches to 10000 together with the pin and image bump that carries the
+# flag (bft-core#1169). A nonzero interval with an older pin is refused, never silently dropped.
+BLOCK_INTERVAL_MS = 0
+TESTNET_BLOCK_INTERVAL_MS = 10000   # the owner's testnet cadence: pass --block-interval-ms 10000 with a pin that has the flag (the default from bft-core#1169)
 # The T2 of a shard without a block interval: what every lane and earlier generation used.
 BASE_T2_MS = 5000
 ROOT_BLOCK_RATE_MS = 900   # the roots' --block-rate default (consensus.BlockRate); the package does not change it
@@ -334,7 +337,7 @@ def main():
     p.add_argument('--faucet-daily-claims',type=int,default=FAUCET_DAILY_CLAIMS,help=f'claims in any 24 hours (default {FAUCET_DAILY_CLAIMS})')
     p.add_argument('--faucet-per-ip-limit',action='store_true',help='also one claim per client IP per 24 hours (off by default: clients behind one NAT would share a claim)')
     p.add_argument('--faucet-subnet',default=DEFAULT_SUBNETS['faucet'],help=f'the faucet network (default {DEFAULT_SUBNETS["faucet"]}); its first address is the guard\'s trusted proxy')
-    p.add_argument('--block-interval-ms',type=int,default=BLOCK_INTERVAL_MS,help=f'the EVM shard nodes\' target block interval in ms (default {BLOCK_INTERVAL_MS}; 0: one block per certification round trip, as the lanes run); the shard conf\'s T2 is derived from it')
+    p.add_argument('--block-interval-ms',type=int,default=BLOCK_INTERVAL_MS,help=f'the EVM shard nodes\' target block interval in ms (default {BLOCK_INTERVAL_MS}: one block per certification round trip, as the lanes run; the testnet cadence is {TESTNET_BLOCK_INTERVAL_MS} and needs a pinned ubft with --target-block-interval, bft-core#1169); the shard conf\'s T2 is derived from it')
     p.add_argument('--root-cpus',type=float,default=ROOT_CPUS,help=f'each root node\'s CPU quota (default {ROOT_CPUS}; 0.25..8)')
     p.add_argument('--edge-subnet',default=DEFAULT_SUBNETS['edge'],help=f'the edge network (default {DEFAULT_SUBNETS["edge"]}); its first address is the RPC gateway\'s and the lock-proof endpoint\'s trusted proxy')
     a=p.parse_args()

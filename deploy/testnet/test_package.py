@@ -88,8 +88,10 @@ class BlockInterval(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             out=Path(tmp)/'tn-fixture';out.mkdir()
             return generate.topology(out,n,{'root':['r%d'%i for i in range(n)],'evm':['e%d'%i for i in range(n)]},self.images,'captcha',**kw)
-    def test_the_default_is_ten_seconds_with_a_t2_that_covers_it(self):
-        self.assertEqual(generate.BLOCK_INTERVAL_MS,10000)
+    def test_the_default_is_unpaced_until_the_pin_has_the_flag_and_ten_seconds_has_a_t2_that_covers_it(self):
+        # 0 until the pin and image bump that carries --target-block-interval (bft-core#1169), then 10000
+        self.assertEqual(generate.BLOCK_INTERVAL_MS,0)
+        self.assertEqual(generate.TESTNET_BLOCK_INTERVAL_MS,10000)
         self.assertEqual(generate.t2_for_block_interval(10000),20000)
         self.assertGreaterEqual(generate.t2_for_block_interval(10000),generate.min_t2_ms(10000))
         self.assertEqual(generate.t2_for_block_interval(0),5000,'without an interval the T2 is the one every lane runs')
@@ -118,6 +120,9 @@ class BlockInterval(unittest.TestCase):
         main=source.split('def main')[1]
         self.assertIn("'--t2-timeout',str(t2_for_block_interval(a.block_interval_ms))",main)
         self.assertEqual(main.count('block_interval_ms=a.block_interval_ms))'),2,'the boot and the final compose both carry it')
+        # a nonzero interval with a pinned ubft that lacks the flag is refused before anything is generated, never silently dropped
+        self.assertIn("if a.block_interval_ms and '--target-block-interval' not in subprocess.run([ubft,'shard-node','run','--help']",main)
+        self.assertIn("p.error('the pinned ubft has no shard-node run --target-block-interval",main)
         self.assertIn("'evm_block':{'interval_ms':a.block_interval_ms,'t2_ms':t2_for_block_interval(a.block_interval_ms)}",main)
 
 class B1Layout(unittest.TestCase):

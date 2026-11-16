@@ -129,3 +129,22 @@ func CheckBlockInterval(interval, t2, rootBlockRate time.Duration) error {
 	}
 	return nil
 }
+
+// InactivityWarnMargin is the least headroom CheckInactivityMargin accepts between a paced node's longest healthy wait for a certificate and
+// its inactivity re-handshake.
+const InactivityWarnMargin = 10 * time.Second
+
+// CheckInactivityMargin warns (it is advice, not a refusal) when a block interval brings the longest healthy gap between certificates
+// close to the client's inactivity timeout: the interval, the follower's await budget and one root round. Past the timeout a healthy node
+// re-handshakes with the roots for nothing (BFTClient's heartbeat); no block is rejected. Zero intervals and timeouts are not checked.
+func CheckInactivityMargin(interval, t2, rootBlockRate, inactivity time.Duration) error {
+	if interval <= 0 || inactivity <= 0 {
+		return nil
+	}
+	gap := interval + AwaitTimeoutForT2(t2) + rootBlockRate
+	if margin := inactivity - gap; margin < InactivityWarnMargin {
+		return fmt.Errorf("block interval %s: a healthy gap between certificates reaches %s (the interval, the follower await budget and one root round), %s below the %s inactivity timeout; a slower round makes the node re-handshake",
+			interval, gap, margin, inactivity)
+	}
+	return nil
+}
