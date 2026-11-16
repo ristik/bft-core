@@ -27,8 +27,10 @@ const (
 	declined   = `{"activeEpoch":2,"switch":{"phase":"running","epoch":2,"declined":3,"declinedReason":"leaving"}}`
 	undecided  = `{"activeEpoch":2,"switch":{"phase":"running","epoch":2}}`
 	olderImage = `{"activeEpoch":2}`
-	oldCert    = `{"epoch":2,"round":40}`
-	newCert    = `{"epoch":3,"round":41}`
+	// a joiner (a follower of epoch 2) whose image acquires the activation from a root peer, before it switched
+	joinerWaiting = `{"activeEpoch":2,"follower":true,"switch":{"phase":"running","epoch":2,"acquires":true}}`
+	oldCert       = `{"epoch":2,"round":40}`
+	newCert       = `{"epoch":3,"round":41}`
 )
 
 // install runs q3_install_roots 3 over the stubbed roots and returns its output, the restart call (roots and boot root) and its error.
@@ -87,6 +89,13 @@ func TestTheInstallBarrierWithInProcessSwitches(t *testing.T) {
 		require.NoError(t, err, out)
 		require.Contains(t, out, "switched in process: 1 2 3 4; restarted: 5")
 		require.Equal(t, "restart roots=[5] epoch=3 boot=[1] wait=[1]", restart, "the leaver bootstraps to a switched root, and the restart waits on that member")
+	})
+	t.Run("a joiner that acquires the activation is waited for until it switched (bft-core#1086 PR 2)", func(t *testing.T) {
+		out, restart, err := install(t, map[string]root{"1": {statuses: []string{published}},
+			"5": {statuses: []string{joinerWaiting, joinerWaiting, published}, signers: oldCert}}, "Q3_EXPECT_SWITCHED=1 5")
+		require.NoError(t, err, out)
+		require.Contains(t, out, "switched in process: 1 5; restarted: none")
+		require.Empty(t, restart)
 	})
 	t.Run("every root switched: nothing is restarted", func(t *testing.T) {
 		out, restart, err := install(t, map[string]root{"1": {statuses: []string{published}}, "2": {statuses: []string{following}}})

@@ -54,7 +54,7 @@ def switched_in_process(status, target, wait=None, sleep=time.sleep, clock=time.
     """bft-core#1086: the root's in-process switch into `target` (its q3/status `switch`, phase running or following, with the target installed), else None.
     `status` is the root's q3/status answer as a dict, or None while it does not answer (asked again until `wait`). A root that answers without a `switch`
     does not switch in process (an older image, or --in-process-epoch-switch=false): None at once. A switch that is still switching, or a root still in the old epoch, is asked again until `wait`
-    has passed; a faulted switch (the root exits to its recovery) and a declined one (a successor with joiners, a leaver, no own evidence) are None at once. None means: install the root by the restart, through the same evidence gate."""
+    has passed; a faulted switch (the root exits to its recovery) and a declined one (no own evidence, or an older image's leaver or successor with joiners) are None at once. None means: install the root by the restart, through the same evidence gate."""
     deadline = clock() + (SWITCH_WAIT_SECONDS if wait is None else wait)
     while True:
         view = status()
@@ -71,6 +71,63 @@ def switched_in_process(status, target, wait=None, sleep=time.sleep, clock=time.
         if switch.get('phase') == 'faulted' or switch.get('declined') == target or clock() >= deadline:
             return None
         sleep(0.1)
+
+
+# bft-core#1086 PR 2: how long the drive waits for a root that does not hold the commit itself (a joiner, a follower) to switch in process. It switches
+# once the successor's first messages reach it (or its staged poll finds the activation) and a root peer serves it the bundle: over the WAN for a remote
+# joiner, after the staying roots switched.
+ACQUIRE_WAIT_SECONDS = 15
+
+
+def acquires(view):
+    """bft-core#1086 PR 2: whether the root's image also switches in process without holding the commit itself (q3/status `switch.acquires`): a joiner, a
+    follower or a member that lagged fetches the activation from a root peer and switches. An older image installs such a root across a restart."""
+    return bool(((view or {}).get('switch') or {}).get('acquires'))
+
+
+def awaits_switch(view, old_member):
+    """How long the drive waits for a root's in-process switch before its install restart, or None to restart at once. A root whose status did not answer
+    is asked again (SWITCH_WAIT_SECONDS: an unavailable answer is no evidence); one that reports no switch state (an older image, the switch disabled) is
+    restarted; a member of the committee being left (it switches at its own commit) gets SWITCH_WAIT_SECONDS; a follower there (a joiner) is waited for
+    only when its image acquires (ACQUIRE_WAIT_SECONDS)."""
+    if view is None:
+        return SWITCH_WAIT_SECONDS
+    switch = view.get('switch')
+    if not switch:
+        return None
+    if old_member and not view.get('follower'):
+        return SWITCH_WAIT_SECONDS
+    return ACQUIRE_WAIT_SECONDS if switch.get('acquires') else None
+
+
+def joiner_capability(view):
+    """bft-core#1086 PR 2 (astra on #1133): what a joiner's q3/status answer establishes about its image, failing closed. 'acquires' for a well-formed answer
+    whose switch state says it switches in process from a peer's activation; 'legacy' only for a well-formed answer of an image that does not (no switch
+    state at all, or a switch state without `acquires`); None for an unavailable (None) or malformed answer, which establishes nothing and is asked again."""
+    if not isinstance(view, dict) or not isinstance(view.get('activeEpoch'), int) or isinstance(view.get('activeEpoch'), bool):
+        return None
+    if 'switch' not in view or view['switch'] is None:
+        return 'legacy'
+    switch = view['switch']
+    if not isinstance(switch, dict) or not isinstance(switch.get('phase'), str):
+        return None
+    acquires = switch.get('acquires', False)
+    if not isinstance(acquires, bool):
+        return None
+    return 'acquires' if acquires else 'legacy'
+
+
+def staged_connected(view, target):
+    """bft-core#1086 PR 2 (#1082): whether a joiner's committee view (POST /api/v1/committee) shows the staged successor of epoch `target` with every other
+    member connected: its readiness before the commit, since it switches into that committee in process and may lead its first rounds. Fail closed
+    (astra on #1133): only a well-formed `staged` object counts, for the target, with an explicit empty `missing` list and a non-empty `connected` list
+    of node identifiers; an absent field never stands for "nobody missing"."""
+    staged = view.get('staged') if isinstance(view, dict) else None
+    if not isinstance(staged, dict):
+        return False
+    epoch, missing, connected = staged.get('epoch'), staged.get('missing'), staged.get('connected')
+    return (isinstance(epoch, int) and not isinstance(epoch, bool) and epoch == target and isinstance(missing, list) and missing == []
+            and isinstance(connected, list) and len(connected) > 0 and all(isinstance(c, str) and c for c in connected))
 
 
 def install_override(compose, epoch):
