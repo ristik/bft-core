@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Builds the Go side of the lane from the checkout under test and the aggregator from its pin, runs the lane's chain-free self-tests, and writes compact artifacts:
 #   OUT/ubft                       build/ubft (VCS stamped for HEAD)
-#   OUT/tools/<name>               dnb-tool, utb-evidence, evmtx, h3slots, h3-pdr, h4-restore-pin, m2slots, f7-mintproof-*, buildinfo
+#   OUT/tools/<name>               utb-evidence, evmtx, h3slots, h3-pdr, h4-restore-pin, m2slots, f7-mintproof-*, buildinfo
 #   OUT/aggregator-<sha8>/         the aggregator and its provenance (commit.txt, gomod-pins.txt, sha256.txt, toolchain.txt)
 #   OUT/selftest/                  the lane's and the pin checker's self-test logs, the first stamped with the commit they ran for
 #   OUT/commit-under-test.txt, OUT/sha256.txt
@@ -27,9 +27,9 @@ fi
 echo "$product" >"$out/product-commit.txt"
 ( cd "$pdir" && make build >/dev/null )
 cp "$pdir/build/ubft" "$out/ubft"
-for t in dnb-tool utb-evidence evmtx h3slots h3-pdr h4-restore-pin m2slots f7-mintproof-extract f7-mintproof-verify s4-equivocate; do ( cd "$pdir" && go build -trimpath=false -o "$out/tools/$t" "./scripts/$t" ); done
+for t in utb-evidence evmtx h3slots h3-pdr h4-restore-pin m2slots f7-mintproof-extract f7-mintproof-verify s4-equivocate; do ( cd "$pdir" && go build -trimpath=false -o "$out/tools/$t" "./scripts/$t" ); done
 go build -o "$out/tools/buildinfo" ./scripts/ci/buildinfo
-for b in "$out/ubft" "$out/tools/utb-evidence" "$out/tools/dnb-tool"; do
+for b in "$out/ubft" "$out/tools/utb-evidence"; do
   "$out/tools/buildinfo" "$b" | grep -q "vcs.revision=$product" && ! "$out/tools/buildinfo" "$b" | grep -q 'vcs.modified=true' || { echo "build-tools: $b is not stamped for a clean $product" >&2; exit 1; }
 done
 

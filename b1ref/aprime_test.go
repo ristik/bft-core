@@ -145,27 +145,3 @@ func TestClaimConflictPredicate(t *testing.T) {
 		t.Fatal("an exact repeat (not a new claim) is no conflict")
 	}
 }
-
-// TestComposedLimits: the composition's anchor table is grouped under Composed. Seventeen occurrences of one claim exceed the
-// standalone claim bound (ErrCount) but group under Composed into one claim, one seal and one epoch, with the occurrences counted.
-func TestComposedLimits(t *testing.T) {
-	single := vectorByID(t, b1gen.Build(corpusSeed), "cert.single.ok")
-	one, err := GroupWith(single, Composed)
-	if err != nil {
-		t.Fatal(err)
-	}
-	in := []byte{2, 0, 0, 17}
-	for i := 0; i < 17; i++ {
-		in = append(in, single[4:]...)
-	}
-	if _, err := Group(in); !errors.Is(err, ErrCount) {
-		t.Fatalf("standalone: %v", err)
-	}
-	g, err := GroupWith(in, Composed)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if g.K != 17 || g.A != 1 || g.S != 1 || g.E != 1 || g.Q != one.Q || g.P != one.P {
-		t.Fatalf("composed grouping %+v, single %+v", g, one)
-	}
-}
