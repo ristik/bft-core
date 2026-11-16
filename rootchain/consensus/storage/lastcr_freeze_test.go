@@ -15,7 +15,7 @@ import (
 // commitUCs is lastCRPipeline.commit that returns the responses the commit generated.
 func (p *lastCRPipeline) commitUCs(s *BlockStore, round uint64) ([]*certification.CertificationResponse, error) {
 	b := mustBlock(p.t, s, round)
-	return s.blockTree.Commit(&rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: round + 1, ParentRoundNumber: round, Epoch: 2},
+	return s.tree().Commit(&rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: round + 1, ParentRoundNumber: round, Epoch: 2},
 		LedgerCommitInfo: &types.UnicitySeal{Version: 1, NetworkID: 5, RootChainRoundNumber: round, Epoch: 2, Timestamp: 1_000 + round, Hash: b.RootHash}})
 }
 
@@ -27,7 +27,7 @@ func TestCommittedControlSuppressesTheResponseAndKeepsThePair(t *testing.T) {
 	s := p.s
 	// the suppression below is imposed on epoch 2 blocks and so suppresses the epoch's recertification too; the pair it keeps is taken to be
 	// a certificate of epoch 2, as a request is certified in epoch 2 only on one (#1036)
-	s.blockTree.root.data.ShardState.States[p.f.shard].LastCR.UC.UnicitySeal.Epoch = 2
+	s.tree().root.data.ShardState.States[p.f.shard].LastCR.UC.UnicitySeal.Epoch = 2
 	committed := func() *evmroot.ControlState {
 		return &evmroot.ControlState{Network: 5, Epoch: 1, Phase: "committed", OrderedRound: 7, PredecessorBodyID: bytes.Repeat([]byte{1}, 32)}
 	}
@@ -39,13 +39,13 @@ func TestCommittedControlSuppressesTheResponseAndKeepsThePair(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, mustBlock(t, s, 8).ShardState.Changed, p.f.shard, "premise: without the control record the timeout would certify")
 
-	s.blockTree.root.data.ShardState.Control = committed()
+	s.tree().root.data.ShardState.Control = committed()
 	b8 := mustBlock(t, s, 8)
 	b8.ShardState.Control = committed()
 	tree, _, err := b8.ShardState.UnicityTree(crypto.SHA256) // the control leaf is part of the block's state root
 	require.NoError(t, err)
 	b8.RootHash = tree.RootHash()
-	before := s.blockTree.root.data.ShardState.States[p.f.shard].LastCR
+	before := s.tree().root.data.ShardState.States[p.f.shard].LastCR
 	ucs, err := p.commitUCs(s, 8)
 	require.NoError(t, err)
 

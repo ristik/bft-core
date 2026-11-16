@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -46,10 +47,36 @@ const (
 
 // rootCommittee is the keeper of one root's committee connections.
 type rootCommittee struct {
+	mu      sync.Mutex // an in-process epoch switch moves the keeper to the successor's committee while the status endpoint reads it
 	epoch   uint64
 	member  bool
 	members []peer.ID // the others of the committee
 	keeper  *network.MemberProtector
+	host    *network.Peer
+}
+
+// follow moves the keeper to the committee of tb, the epoch this root switched into in process (#1086), without a warm-up wait: the
+// connections the committees share are kept, a member that joins is dialled, and a member that left is no longer protected. A root that
+// is not a member of tb keeps no committee.
+func (c *rootCommittee) follow(ctx context.Context, log *slog.Logger, tb *types.RootTrustBaseV1) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	members, member := committeePeers(tb, c.host.ID())
+	c.epoch, c.member, c.members = tb.Epoch, member, members
+	if !member {
+		if c.keeper != nil {
+			c.keeper.Set(ctx, nil)
+		}
+		return
+	}
+	if c.keeper == nil {
+		c.keeper = c.host.NewMemberProtector("root-committee")
+		go c.keeper.Maintain(ctx, committeeKeep)
+	}
+	c.keeper.Set(ctx, members)
+	if missing := c.keeper.Disconnected(); len(missing) != 0 {
+		log.Info("keeping the switched-into root committee connected", "epoch", tb.Epoch, "missing", peerStrings(missing))
+	}
 }
 
 // committeePeers is the committee of tb other than self, and whether self is in it.
@@ -77,7 +104,7 @@ func committeePeers(tb *types.RootTrustBaseV1, self peer.ID) ([]peer.ID, bool) {
 // other member to be connected. It returns the keeper for the status endpoint; a non-member keeps nothing.
 func keepRootCommittee(ctx context.Context, log *slog.Logger, host *network.Peer, tb *types.RootTrustBaseV1, warmup time.Duration) *rootCommittee {
 	members, member := committeePeers(tb, host.ID())
-	c := &rootCommittee{epoch: tb.Epoch, member: member, members: members}
+	c := &rootCommittee{epoch: tb.Epoch, member: member, members: members, host: host}
 	if !member {
 		return c
 	}
@@ -114,6 +141,8 @@ type rootCommitteeStatus struct {
 }
 
 func (c *rootCommittee) status() rootCommitteeStatus {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	out := rootCommitteeStatus{Epoch: c.epoch, Member: c.member, Connected: []string{}, Missing: []string{}}
 	if c.keeper == nil {
 		return out

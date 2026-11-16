@@ -38,8 +38,9 @@ const (
 	DevTime         = SealTime
 )
 
-// SemanticProfileHash is SHA-256 of the exact bytes of native-bridge-plugins protocol/profile.json (protocol 9, artifactVersion 4).
-var SemanticProfileHash = [32]byte(mustHex("30f5f9fc4751f403a73bc3f886a5f5d85858f1166536a975bc66b6862528e428"))
+// SemanticProfileHash is SHA-256 of the exact bytes of native-bridge-plugins protocol/profile.json (protocol 9, artifactVersion 7,
+// native-bridge-plugins 0ee070eac2c93b59864a659ee50f4aa7a9dfd54c).
+var SemanticProfileHash = [32]byte(mustHex("a9da5f02d629fd81f4e4ce61566e69c234157b106749e18221598909097d144f"))
 
 // NewWorld builds the deployment with the given (K, B) and aggregator shard count (1 or 2).
 func NewWorld(k, b uint64, aggShards int) (*World, error) {

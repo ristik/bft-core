@@ -60,6 +60,16 @@ type pendingHandoffAbort struct {
 // SubmitHandoffAbort is the operator-only local signing path. Network peers
 // can relay an approval but cannot cause this validator to create one.
 func (x *ConsensusManager) SubmitHandoffAbort(ctx context.Context, target abdrc.HandoffAbortTarget) (abdrc.HandoffAbortStatus, error) {
+	// an operator entry point runs in one published consensus context, never during an in-process epoch switch (#1086)
+	var out abdrc.HandoffAbortStatus
+	err := x.operator(func() (err error) {
+		out, err = x.opSubmitHandoffAbort(ctx, target)
+		return err
+	})
+	return out, err
+}
+
+func (x *ConsensusManager) opSubmitHandoffAbort(ctx context.Context, target abdrc.HandoffAbortTarget) (abdrc.HandoffAbortStatus, error) {
 	status, record, err := x.handoffAbortStatus(target)
 	if err != nil {
 		return abdrc.HandoffAbortStatus{}, err
@@ -295,6 +305,16 @@ func intentSummary(network uint64, predecessor []byte, attempt uint64) []byte {
 // the unsigned message the leader orders a Prepare for. It binds no EVM parent. Every old validator is given the same message
 // (AcceptHandoffIntent) and endorses it only after the Prepare is committed (EndorseHandoff).
 func (x *ConsensusManager) PlanHandoff(next *types.RootTrustBaseV1, proposal *evmassign.Proposal) (abdrc.HandoffApprovalMsg, error) {
+	// an operator entry point runs in one published consensus context, never during an in-process epoch switch (#1086)
+	var out abdrc.HandoffApprovalMsg
+	err := x.operator(func() (err error) {
+		out, err = x.opPlanHandoff(next, proposal)
+		return err
+	})
+	return out, err
+}
+
+func (x *ConsensusManager) opPlanHandoff(next *types.RootTrustBaseV1, proposal *evmassign.Proposal) (abdrc.HandoffApprovalMsg, error) {
 	state, err := x.blockStore.GetState()
 	if err != nil {
 		return abdrc.HandoffApprovalMsg{}, ErrHandoffApproval
@@ -310,6 +330,11 @@ func (x *ConsensusManager) PlanHandoff(next *types.RootTrustBaseV1, proposal *ev
 // AcceptHandoffIntent registers a plan another validator's operator endpoint built, after checking everything about it that needs
 // no signature and no EVM state: the body, the candidate, the attempt this chain expects next.
 func (x *ConsensusManager) AcceptHandoffIntent(plan abdrc.HandoffApprovalMsg) error {
+	// an operator entry point runs in one published consensus context, never during an in-process epoch switch (#1086)
+	return x.operator(func() error { return x.opAcceptHandoffIntent(plan) })
+}
+
+func (x *ConsensusManager) opAcceptHandoffIntent(plan abdrc.HandoffApprovalMsg) error {
 	state, err := x.blockStore.GetState()
 	if err != nil {
 		return fmt.Errorf("%w: no committed state", ErrHandoffApproval)
@@ -879,6 +904,11 @@ func (x *ConsensusManager) validateHandoffApproval(msg *abdrc.HandoffApprovalMsg
 // the Prepare, so it is refused until that Prepare is in this validator's
 // committed state, and the plan may name no other parent.
 func (x *ConsensusManager) EndorseHandoff(ctx context.Context, plan abdrc.HandoffApprovalMsg) error {
+	// an operator entry point runs in one published consensus context, never during an in-process epoch switch (#1086)
+	return x.operator(func() error { return x.opEndorseHandoff(ctx, plan) })
+}
+
+func (x *ConsensusManager) opEndorseHandoff(ctx context.Context, plan abdrc.HandoffApprovalMsg) error {
 	state, err := x.blockStore.GetState()
 	if err != nil {
 		return ErrHandoffApproval

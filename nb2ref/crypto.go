@@ -44,12 +44,20 @@ func UnlockMessage(sourceHash, txHash [32]byte) [32]byte {
 	return HU(CArr(CBytes(sourceHash[:]), CBytes(txHash[:])))
 }
 
-// VerifyUnlock is the SDK token-unlock rule, unchanged from protocol 7: exactly 65 bytes r||s||id (UnlockLength), 1 <= r < n
-// and 1 <= s <= n/2 (UnlockScalars), id in 0..3 (UnlockRecovery), the key recovered with the supplied id equal to the source
-// key (UnlockKey), then the compact verification. Nothing is normalised. Under this order the compact verification cannot fail
-// once the recovered key equals the source key, so it has no rule of its own (the Unlock name was dropped, coordinator ruling
-// 2026-11-15); it stays as defense in depth and reports UnlockKey.
+// VerifyUnlock is the token-unlock rule over the unlock message H(C(b(sourceHash32), b(txHash32))); see VerifyUnlockDigest.
 func VerifyUnlock(key *secp256k1.PublicKey, sourceHash, txHash [32]byte, unlock []byte) error {
+	return VerifyUnlockDigest(key, UnlockMessage(sourceHash, txHash), unlock)
+}
+
+// VerifyUnlockDigest is the SDK token-unlock rule of protocol 7 under the NB2 unlock restriction (section 14.4, profile
+// artifact 5 unlockRestriction): exactly 65 bytes r||s||id (UnlockLength), 1 <= r < n and 1 <= s <= n/2 (UnlockScalars), id in
+// 0..1 (UnlockRecovery), the key recovered with the supplied id equal to the source key (UnlockKey), then the compact
+// verification. Nothing is normalised. The pinned SDK admits ids 0..3; NB2 refuses 2 and 3 as UnlockRecovery even when the
+// signature is valid and recovers the source key, so wallets, plug-in admission, this reference and the Solidity verifier
+// accept the same unlocks. Under this order the compact verification cannot fail once the recovered key equals the source key,
+// so it has no rule of its own (the Unlock name was dropped, coordinator ruling 2026-11-15); it stays as defense in depth and
+// reports UnlockKey.
+func VerifyUnlockDigest(key *secp256k1.PublicKey, digest [32]byte, unlock []byte) error {
 	if len(unlock) != 65 {
 		return fail(ErrUnlockLength)
 	}
@@ -61,16 +69,21 @@ func VerifyUnlock(key *secp256k1.PublicKey, sourceHash, txHash [32]byte, unlock 
 		}
 	}
 	id := unlock[64]
-	if id > 3 {
+	if id > 1 {
 		if err := fail(ErrUnlockRecovery); err != nil {
 			return err
 		}
-		id &= 3
+		id &= 3 // disabled: the SDK relation, ids 0..3
 	}
-	digest := UnlockMessage(sourceHash, txHash)
+	return sdkRecover(key, digest, unlock[:64], id)
+}
+
+// sdkRecover is the pinned SDK's recovery step for a recovery id in 0..3: recover with exactly that id (2 and 3 take x = r + n),
+// require the recovered key equal to the source key, then compact verify (UnlockKey).
+func sdkRecover(key *secp256k1.PublicKey, digest [32]byte, rs []byte, id byte) error {
 	compact := make([]byte, 65)
 	compact[0] = 27 + 4 + id
-	copy(compact[1:], unlock[:64])
+	copy(compact[1:], rs)
 	rec, _, err := ecdsa.RecoverCompact(compact, digest[:])
 	if err != nil || !rec.IsEqual(key) {
 		if err := fail(ErrUnlockKey); err != nil {
@@ -78,10 +91,10 @@ func VerifyUnlock(key *secp256k1.PublicKey, sourceHash, txHash [32]byte, unlock 
 		}
 		return nil
 	}
-	var rs, ss secp256k1.ModNScalar
-	rs.SetByteSlice(unlock[:32])
-	ss.SetByteSlice(unlock[32:64])
-	if !ecdsa.NewSignature(&rs, &ss).Verify(digest[:], key) {
+	var r, s secp256k1.ModNScalar
+	r.SetByteSlice(rs[:32])
+	s.SetByteSlice(rs[32:])
+	if !ecdsa.NewSignature(&r, &s).Verify(digest[:], key) {
 		return ErrUnlockKey
 	}
 	return nil

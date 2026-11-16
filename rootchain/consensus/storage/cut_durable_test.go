@@ -34,10 +34,10 @@ func TestCutsOfEveryOriginSurviveTheEpochInstallRestartsAndTheCacheBound(t *test
 		commitRound(t, f.store, 2)
 	}
 	h := f.commitAssignment(t)
-	hKey := keyOfBlock(t, f.store.blockTree.Root()) // the block that carries the committed handoff record
-	require.EqualValues(t, 4, f.store.blockTree.Root().GetRound())
+	hKey := keyOfBlock(t, f.store.tree().Root()) // the block that carries the committed handoff record
+	require.EqualValues(t, 4, f.store.tree().Root().GetRound())
 	commitRound(t, f.store, 5)
-	suffix := keyOfBlock(t, f.store.blockTree.Root())
+	suffix := keyOfBlock(t, f.store.tree().Root())
 	require.EqualValues(t, 5, suffix.Round)
 	require.NotEqual(t, hKey.TreeRoot, ordinary.TreeRoot, "the ordinary origin's tree differs from H's")
 	require.Equal(t, hKey.TreeRoot, suffix.TreeRoot, "an unchanged-state suffix has H's tree, at its own round")
@@ -68,10 +68,10 @@ func TestCutsOfEveryOriginSurviveTheEpochInstallRestartsAndTheCacheBound(t *test
 
 	// the cache bound limits memory, not availability
 	for i := uint64(0); i < MaxRetainedCuts+10; i++ {
-		s.blockTree.cuts.put(CutKey{Network: 5, Epoch: 2, Round: 1_000 + i}, ControlCut{})
+		s.tree().cuts.put(CutKey{Network: 5, Epoch: 2, Round: 1_000 + i}, ControlCut{})
 	}
-	require.Len(t, s.blockTree.cuts.order, MaxRetainedCuts)
-	_, hot := s.blockTree.cuts.get(ordinary)
+	require.Len(t, s.tree().cuts.order, MaxRetainedCuts)
+	_, hot := s.tree().cuts.get(ordinary)
 	require.False(t, hot, "evicted from memory")
 	served(s, "after the cache evicted them")
 	served(restart(), "after a second restart")

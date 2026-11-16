@@ -140,6 +140,8 @@ func record(v *Vault, st *VaultStep, want, wantInner string) error {
 	for _, e := range v.Events[before:] {
 		st.Events = append(st.Events, eventJSON(v.Cfg, e))
 	}
+	state := StateOf(v)
+	st.State = &state
 	if st.Expect.Error != want || st.Inner != wantInner {
 		return fmt.Errorf("step %s: got %v inner %q (%v), want %q inner %q", st.Op, st.Expect, st.Inner, err, want, wantInner)
 	}
@@ -156,6 +158,13 @@ func StateOf(v *Vault) VaultState {
 	}
 	for _, x := range prev {
 		s.Previous = append(s.Previous, h32(x))
+	}
+	s.Accounting = h32(u256(v.A))
+	for p := 0; p < 2; p++ {
+		s.TagWords[p] = []Hex{}
+		for _, w := range v.T[p] {
+			s.TagWords[p] = append(s.TagWords[p], h32(u256(w)))
+		}
 	}
 	return s
 }
@@ -225,6 +234,8 @@ func (wl *Workload) redeem(kind string, claimed [32]byte, a uint64, history []by
 	for _, e := range wl.V.Events[before:] {
 		st.Events = append(st.Events, eventJSON(wl.V.Cfg, e))
 	}
+	state := StateOf(wl.V)
+	st.State = &state
 	if (err == nil) != refOK {
 		return fmt.Errorf("%s: vault %v, reference accepts %v", kind, err, refOK)
 	}

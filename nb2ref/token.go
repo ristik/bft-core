@@ -346,15 +346,15 @@ func decodeProof(it *item, b []byte) (*InclusionProof, error) {
 	if k[4].major != majTag {
 		return nil, ErrShape
 	}
-	if k[4].end-k[4].start > maxProofUCBytes {
+	if k[4].end-k[4].start > MaxAggregatorUCBytes {
 		return nil, ErrInputTooLarge
 	}
 	p.UC = k[4].raw(b)
 	return p, nil
 }
 
-// maxProofUCBytes bounds an aggregator certificate (the native scan's own bound).
-const maxProofUCBytes = 24 << 10
+// MaxAggregatorUCBytes (profile aggregatorUcBytes) bounds an inline aggregator certificate (the native scan's own bound).
+const MaxAggregatorUCBytes = 24576
 
 // StateID is sid = H(C(Psource, b(sourceHash32))).
 func StateID(source Predicate, sourceHash [32]byte) [32]byte {
