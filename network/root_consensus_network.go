@@ -18,6 +18,15 @@ const (
 	ProtocolRootPosControl      = "/ab/root-pos-control/1.0.0"
 )
 
+// MaxRootVoteFrame and MaxRootTimeoutFrame bound the wire frame of a received vote and timeout vote before anything is decoded (#1086 review):
+// a vote or timeout carries a high QC (and a timeout the last TC) of at most q3format.MaxMembers signers, well below this. Proposals stay
+// unbounded on the wire (a block carries the shards' certification requests, each up to certification.MaxBlockCertificationRequestFrame);
+// what the consensus manager retains of an unverified one is bounded there.
+const (
+	MaxRootVoteFrame    = 4 << 20
+	MaxRootTimeoutFrame = 4 << 20
+)
+
 // consensusSendRetries is the number of repeats of an undelivered proposal, vote or timeout vote to a connected root (#982).
 const consensusSendRetries = 2
 
@@ -55,12 +64,14 @@ func NewLibP2RootConsensusNetwork(self *Peer, capacity uint, sendTimeout time.Du
 			TypeFn:     func() any { return &abdrc.ProposalMsg{} },
 		},
 		{
-			ProtocolID: ProtocolRootVote,
-			TypeFn:     func() any { return &abdrc.VoteMsg{} },
+			ProtocolID:   ProtocolRootVote,
+			TypeFn:       func() any { return &abdrc.VoteMsg{} },
+			MaxFrameSize: MaxRootVoteFrame,
 		},
 		{
-			ProtocolID: ProtocolRootTimeout,
-			TypeFn:     func() any { return &abdrc.TimeoutMsg{} },
+			ProtocolID:   ProtocolRootTimeout,
+			TypeFn:       func() any { return &abdrc.TimeoutMsg{} },
+			MaxFrameSize: MaxRootTimeoutFrame,
 		},
 		{
 			ProtocolID: ProtocolRootStateReq,

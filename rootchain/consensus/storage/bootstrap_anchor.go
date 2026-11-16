@@ -39,7 +39,7 @@ func (x *BlockStore) InstallEpochAnchor(head *abdrc.CommittedBlock, v evmroot.Ve
 	}
 	x.lock.Lock()
 	defer x.lock.Unlock()
-	current := x.blockTree.Root()
+	current := x.tree().Root()
 	if current.BlockData.Epoch >= a.Epoch {
 		if isEpochAnchorRoot(current) && bytes.Equal(current.BlockData.Anchor.GenesisID, a.GenesisID) {
 			return a, nil
@@ -79,25 +79,25 @@ func (x *BlockStore) InstallEpochAnchor(head *abdrc.CommittedBlock, v evmroot.Ve
 	}
 	root := newNode(oldRoot)
 	tree := &BlockTree{root: root, roundToNode: map[uint64]*node{a.Slot: root}, blocksDB: x.storage}
-	x.blockTree = tree
+	x.treeRef.Store(tree)
 	return a, nil
 }
 
 func (x *BlockStore) RootAnchor() *rctypes.EpochAnchor {
-	root := x.blockTree.Root()
+	root := x.tree().Root()
 	if isEpochAnchorRoot(root) {
 		return root.BlockData.Anchor
 	}
 	return nil
 }
 
-func (x *BlockStore) RootEpoch() uint64 { return x.blockTree.Root().BlockData.Epoch }
+func (x *BlockStore) RootEpoch() uint64 { return x.tree().Root().BlockData.Epoch }
 
 // anchoredCommit returns the installed anchor root's committed record and the
 // frozen EVM shard H names, with the retained candidate preimage when H changes the
 // assignment.
 func (x *BlockStore) anchoredCommit() (*ExecutedBlock, evmroot.OrderedHandoffRecord, *ShardInfo, []byte, error) {
-	root := x.blockTree.Root()
+	root := x.tree().Root()
 	if !isEpochAnchorRoot(root) || root.ShardState.Control == nil {
 		return nil, evmroot.OrderedHandoffRecord{}, nil, nil, rctypes.ErrEpochAnchor
 	}
@@ -129,7 +129,7 @@ func (x *BlockStore) anchoredCommit() (*ExecutedBlock, evmroot.OrderedHandoffRec
 func (x *BlockStore) AnchoredTechnicalRecord(hash []byte) (certification.TechnicalRecord, error) {
 	x.lock.RLock()
 	defer x.lock.RUnlock()
-	root := x.blockTree.Root()
+	root := x.tree().Root()
 	if !isEpochAnchorRoot(root) || len(hash) != 32 {
 		return certification.TechnicalRecord{}, rctypes.ErrEpochAnchor
 	}
@@ -202,7 +202,7 @@ func (x *BlockStore) AnchoredFrozenParent(trHash, parent []byte) error {
 	}
 	x.lock.RLock()
 	defer x.lock.RUnlock()
-	root := x.blockTree.Root()
+	root := x.tree().Root()
 	if !isEpochAnchorRoot(root) {
 		return rctypes.ErrEpochAnchor
 	}
@@ -243,7 +243,7 @@ func (x *BlockStore) VerifyRecoveryAnchor(head *abdrc.CommittedBlock) error {
 		!bytes.Equal(installed.GenesisID, head.Anchor.GenesisID) || !bytes.Equal(installed.StateRoot, head.Anchor.StateRoot) {
 		return rctypes.ErrEpochAnchor
 	}
-	root := x.blockTree.Root()
+	root := x.tree().Root()
 	// The peer cannot replace the locally installed checkpoint time floor.
 	if head.Block == nil || head.Block.Timestamp != root.BlockData.Timestamp {
 		return rctypes.ErrEpochAnchor
@@ -292,8 +292,8 @@ func (x *BlockStore) NewFromAnchorState(head *abdrc.CommittedBlock) (*BlockStore
 	if err != nil {
 		return nil, err
 	}
-	return &BlockStore{hash: x.hash, blockTree: tree, storage: x.storage,
-		orchestration: x.orchestration, profile: x.profile, log: x.log}, nil
+	return withTree(&BlockStore{hash: x.hash, storage: x.storage,
+		orchestration: x.orchestration, profile: x.profile, log: x.log}, tree), nil
 }
 
 // RetainHandoffArtifacts stores the successor body and, for an EVM assignment,

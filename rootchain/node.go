@@ -77,6 +77,9 @@ type (
 		epochMu          sync.Mutex
 		seenEpoch        uint64
 		seenEpochSet     bool
+		// the root epoch the subscriptions were last validated in (owned by handleConsensus)
+		subsEpoch    uint64
+		subsEpochSet bool
 
 		log    *slog.Logger
 		tracer trace.Tracer
@@ -531,6 +534,24 @@ func (v *Node) observeEpoch(_ context.Context) uint64 {
 	return now
 }
 
+// revalidateSubscriptions runs when the installed root epoch changed under a running node (the in-process epoch switch, #1086): the
+// subscriptions and connections survive the switch, but a subscription is kept only for a node that is still a validator of its shard
+// in the successor's committed state, exactly as a handshake admits one. A shard state that cannot be read keeps its subscriptions
+// (the delivered certificates are public; nothing is admitted by a subscription).
+func (v *Node) revalidateSubscriptions(ctx context.Context) {
+	now := v.rootEpoch()
+	if !v.subsEpochSet || now == v.subsEpoch {
+		v.subsEpoch, v.subsEpochSet = now, true
+		return
+	}
+	v.subsEpoch = now
+	dropped := v.subscription.Retain(func(partition types.PartitionID, shard types.ShardID, id peer.ID) bool {
+		si, err := v.consensusManager.ShardInfo(partition, shard)
+		return err != nil || si.IsMember(id.String())
+	})
+	v.log.InfoContext(ctx, "root epoch changed in process: shard subscriptions revalidated", "epoch", now, "dropped", dropped)
+}
+
 // rootEpoch is the root epoch the consensus manager has installed, or 0 when it does not say.
 func (v *Node) rootEpoch() uint64 {
 	if m, ok := v.consensusManager.(interface{ InstalledRootEpoch() uint64 }); ok {
@@ -756,6 +777,7 @@ func (v *Node) handleConsensus(ctx context.Context) error {
 			if !ok {
 				return fmt.Errorf("consensus channel closed")
 			}
+			v.revalidateSubscriptions(ctx)
 			v.subscription.Send(ctx, cr)
 			v.clearShard(ctx, cr.Partition, cr.Shard)
 			// the committed context of the shard advanced: requests held for the round after it are admitted again

@@ -106,6 +106,22 @@ type q3StatusResponse struct {
 	Staged      *q3StagedResponse `json:"staged,omitempty"`
 	ActiveEpoch uint64            `json:"activeEpoch"`
 	Follower    bool              `json:"follower,omitempty"` // this root is not in the installed committee: it follows, stages and signs nothing
+	// Switch is the in-process epoch switch (#1086), present when this root switches in process: the drive waits for it instead of
+	// restarting the root
+	Switch *q3SwitchResponse `json:"switch,omitempty"`
+}
+
+// q3SwitchResponse is the in-process epoch switch's state: running, switching, following or faulted, the epoch of the published context
+// and the target of the last switch.
+type q3SwitchResponse struct {
+	Phase  string `json:"phase"`
+	Epoch  uint64 `json:"epoch"`
+	Target uint64 `json:"target,omitempty"`
+	TookMs int64  `json:"tookMs,omitempty"`
+	Error  string `json:"error,omitempty"`
+	// Declined is a committed activation this root does not switch into in process (it installs across a restart), and why
+	Declined       uint64 `json:"declined,omitempty"`
+	DeclinedReason string `json:"declinedReason,omitempty"`
 }
 
 func (a rootQ3API) statusResponse() (q3StatusResponse, error) {
@@ -114,6 +130,10 @@ func (a rootQ3API) statusResponse() (q3StatusResponse, error) {
 		return q3StatusResponse{}, err
 	}
 	out := q3StatusResponse{Network: st.Network, Genesis: hex.EncodeToString(st.Genesis[:]), ActiveEpoch: st.ActiveEpoch, Follower: st.Follower}
+	if st.InProcessSwitch {
+		out.Switch = &q3SwitchResponse{Phase: st.Switch.Phase.String(), Epoch: st.Switch.Epoch, Target: st.Switch.Target,
+			TookMs: st.Switch.Took.Milliseconds(), Error: st.Switch.Err, Declined: st.Switch.Declined, DeclinedReason: st.Switch.DeclinedReason}
+	}
 	if st.Staged != nil {
 		out.Staged = &q3StagedResponse{CandidateDigest: hex.EncodeToString(st.Staged.CandidateDigest[:]),
 			BodyID: hex.EncodeToString(st.Staged.BodyID[:]), Attempt: &st.Staged.Attempt, Config: hex.EncodeToString(st.Staged.Config[:])}

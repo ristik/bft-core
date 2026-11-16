@@ -37,7 +37,7 @@ PY
 }
 
 # ---- the root's verified Q3 endpoints (local operator API) --------------------------------------------------------------------------------------
-q3_signers_of() { curl -fsS -X POST -H 'content-type: application/json' -d '{}' "$(h3_rpc_url "$1")/api/v1/q3/signers"; }   # {epoch,round,scheme,signers,signedTotal,threshold,quorum}
+q3_signers_of() { curl -fsS -m 5 -X POST -H 'content-type: application/json' -d '{}' "$(h3_rpc_url "$1")/api/v1/q3/signers"; }   # {epoch,round,scheme,signers,signedTotal,threshold,quorum}
 
 q3_weight_of() { # entity: the weight at its position in Q3_ENTITIES (the entities of the handoff in hand, default 1 2 3 4)
   local k=1 e
@@ -126,13 +126,68 @@ q3_handoff_n() { # n epoch weights supersede(0|1) incumbent: plans, endorses and
   echo "handoff $n committed at root epoch $((epoch - 1))"
 }
 
-q3_install_n() { # epoch: the installation barrier of epoch N; no certificate of N may exist before the roots restart into it
-  local epoch=$1 prev=$(($1 - 1)) r before
-  for r in $H3_ROOTS; do
-    before=$(q3_signers_of "$r" | jq -r .epoch) || return 1
-    [ "$before" = "$prev" ] || { echo "root $r reports a certificate of epoch $before before its install restart into $epoch" >&2; return 1; }
+q3_status_of() { curl -fsS -m 5 -X POST -H 'content-type: application/json' -d '{}' "$(h3_rpc_url "$1")/api/v1/q3/status"; }
+
+# q3_switch_decision root epoch: how the root installs epoch N (bft-core#1086). "switched" once its q3/status reports the in-process switch published
+# Running or Following in N; "restart" when it does not switch: no switch state (an older image, the switch disabled), a declined or a faulted switch;
+# nothing while it is not known yet: q3/status unavailable, the switch Switching, or the root still in the old epoch without a decision. An
+# unavailable or incomplete answer is never evidence of an install.
+q3_switch_decision() {
+  local st
+  st=$(q3_status_of "$1" 2>/dev/null) || return 0
+  jq -r --argjson e "$2" '
+    if .switch == null then "restart"
+    elif .activeEpoch == $e and .switch.epoch == $e and (.switch.phase == "running" or .switch.phase == "following") then "switched"
+    elif .switch.phase == "faulted" or (.switch.declined // 0) == $e then "restart"
+    else empty end' <<<"$st" 2>/dev/null
+}
+
+# q3_install_roots epoch: the installation barrier of epoch N over H3_ROOTS. Each root either switched into N in process at its own commit (installed:
+# it is not restarted), or is restarted into N, and a root that has not installed N holds no certificate of N before its install restart (it answers
+# with its old epoch's). A root whose decision is not known within Q3_SWITCH_WAIT seconds (default 30) is restarted, through the same check.
+# Sets Q3_SWITCHED and Q3_RESTARTED.
+q3_install_roots() {
+  local epoch=$1 prev=$(($1 - 1)) r d before left pending=$H3_ROOTS deadline=$((SECONDS + ${Q3_SWITCH_WAIT:-30})) i
+  Q3_SWITCHED=; Q3_RESTARTED=
+  while [ -n "$pending" ]; do
+    left=
+    for r in $pending; do
+      d=$(q3_switch_decision "$r" "$epoch")
+      case "$d" in
+        switched) Q3_SWITCHED+="${Q3_SWITCHED:+ }$r" ;;
+        restart) Q3_RESTARTED+="${Q3_RESTARTED:+ }$r" ;;
+        *) left+="${left:+ }$r" ;;
+      esac
+    done
+    pending=$left
+    [ -n "$pending" ] || break
+    if [ "$SECONDS" -ge "$deadline" ]; then Q3_RESTARTED+="${Q3_RESTARTED:+ }$pending"; break; fi
+    sleep 0.5
   done
-  h3_restart_roots "$epoch" || { echo "root restart into epoch $epoch failed" >&2; return 1; }
+  for r in $Q3_RESTARTED; do
+    # an answer without a certificate (422) or no answer is not evidence either way: asked again, bounded; a root that never answers is down and
+    # holds nothing it could serve, a root that answers must answer with the old epoch
+    before=; d=
+    for i in $(seq 1 20); do
+      if d=$(q3_signers_of "$r" 2>/dev/null); then before=$(jq -r .epoch <<<"$d"); break; fi
+      sleep 0.5
+    done
+    [ -z "$d" ] || [ "$before" = "$prev" ] || { echo "root $r reports a certificate of epoch ${before:-?} before its install restart into $epoch" >&2; return 1; }
+  done
+  echo "epoch $epoch install: switched in process: ${Q3_SWITCHED:-none}; restarted: ${Q3_RESTARTED:-none}"
+  # a lane that expects these roots to switch in process proves it: one of them restarted instead fails the step
+  for r in ${Q3_EXPECT_SWITCHED:-}; do
+    case " $Q3_SWITCHED " in *" $r "*) ;; *) echo "root $r was expected to switch into epoch $epoch in process, but is restarted (q3/status: $(q3_status_of "$r" 2>/dev/null || echo unavailable))" >&2; return 1 ;; esac
+  done
+  [ -n "$Q3_RESTARTED" ] || return 0
+  local switched_root; switched_root=$(echo "$Q3_SWITCHED" | awk '{print $1}')
+  # the restarted roots bootstrap to a switched root and the restart waits on it, a member of the epoch, not on a restarted leaver
+  H3_ROOTS=$Q3_RESTARTED H3_BOOT_ROOT=$switched_root H3_WAIT_ROOT=$switched_root h3_restart_roots "$epoch" || { echo "root restart into epoch $epoch failed" >&2; return 1; }
+}
+
+q3_install_n() { # epoch: the installation barrier of epoch N (q3_install_roots), then its first certificate
+  local epoch=$1 r
+  q3_install_roots "$epoch" || return 1
   for r in $(seq 1 120); do
     [ "$(q3_signers_of "$(h3_first_root)" 2>/dev/null | jq -r .epoch 2>/dev/null)" = "$epoch" ] && break
     sleep 1

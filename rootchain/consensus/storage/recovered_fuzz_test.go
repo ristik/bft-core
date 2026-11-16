@@ -253,7 +253,7 @@ func (e *recFuzzEnv) exercise(sm *abdrc.StateMsg) (r reached) {
 		// exercised on every input as defensive code, the post-recovery steps only on verified ones
 		return
 	}
-	root := store.blockTree.root.data
+	root := store.tree().root.data
 	_, _ = store.GetState()
 	_ = store.GetCertificates()
 	_ = store.GetHighQc()

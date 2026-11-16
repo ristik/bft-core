@@ -34,7 +34,7 @@ func (f fakeLeaderInputs) LeaderCommittee(uint64) ([]string, bool, error) {
 func leaderStore(t *testing.T) *BlockStore {
 	t.Helper()
 	s := profileStore(t)
-	root := s.blockTree.Root()
+	root := s.tree().Root()
 	ring, err := rctypes.NewLeaderState(bytes.Repeat([]byte{7}, 32), root.BlockData.Epoch, root.GetRound()+1, 4, root.GetRound()+1)
 	require.NoError(t, err)
 	ring.Records = ring.Records[:1]
@@ -53,19 +53,19 @@ func leaderQC(round, epoch uint64, signers ...string) *rctypes.QuorumCert {
 }
 
 func leaderBlock(s *BlockStore, round uint64, qc *rctypes.QuorumCert, records [][]byte) *rctypes.BlockData {
-	return &rctypes.BlockData{Version: 3, Round: round, Epoch: s.blockTree.Root().BlockData.Epoch, Payload: &rctypes.Payload{Version: 3, HandoffRecords: records}, Qc: qc}
+	return &rctypes.BlockData{Version: 3, Round: round, Epoch: s.tree().Root().BlockData.Epoch, Payload: &rctypes.Payload{Version: 3, HandoffRecords: records}, Qc: qc}
 }
 
 func TestLeaderRingAppendsTheCarriedQCsSigners(t *testing.T) {
 	s := leaderStore(t)
-	epoch := s.blockTree.Root().BlockData.Epoch
+	epoch := s.tree().Root().BlockData.Epoch
 	_, err := s.Add(leaderBlock(s, 2, leaderQC(1, epoch, "a", "b", "c"), nil), nil)
 	require.NoError(t, err)
 	b := mustBlock(t, s, 2)
 	last := b.ShardState.Leader.Records[len(b.ShardState.Leader.Records)-1]
 	require.EqualValues(t, 2, last.Round)
 	require.Equal(t, []byte{0b0111}, last.Voters)
-	require.Equal(t, 1, len(s.blockTree.Root().ShardState.Leader.Records), "the parent's ring is not touched")
+	require.Equal(t, 1, len(s.tree().Root().ShardState.Leader.Records), "the parent's ring is not touched")
 }
 
 // The state root binds exactly the signer set of Signatures: two blocks that differ in another signer subset differ in the root, and
@@ -79,7 +79,7 @@ func TestLeaderRingRootBindsOnlyTheSigners(t *testing.T) {
 		require.NoError(t, err)
 		return mustBlock(t, s, 2).RootHash
 	}
-	epoch := leaderStore(t).blockTree.Root().BlockData.Epoch
+	epoch := leaderStore(t).tree().Root().BlockData.Epoch
 	base := root(leaderQC(1, epoch, "a", "b", "c"), "a")
 	require.NotEqual(t, base, root(leaderQC(1, epoch, "a", "b", "d"), "a"), "another valid signer subset")
 	seal := leaderQC(1, epoch, "a", "b", "c")
@@ -90,7 +90,7 @@ func TestLeaderRingRootBindsOnlyTheSigners(t *testing.T) {
 
 func TestLeaderRingRefusals(t *testing.T) {
 	s := leaderStore(t)
-	epoch := s.blockTree.Root().BlockData.Epoch
+	epoch := s.tree().Root().BlockData.Epoch
 	_, err := s.Add(leaderBlock(s, 2, leaderQC(1, epoch, "a", "z"), nil), nil)
 	require.ErrorIs(t, err, rctypes.ErrLeaderState, "a signer outside the committee")
 	_, err = s.Add(leaderBlock(s, 2, leaderQC(1, epoch), nil), nil)
@@ -127,7 +127,7 @@ func TestLeaderRingIsFrozenInTheSuffix(t *testing.T) {
 	body, frozen, tr := bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{2}, 32), bytes.Repeat([]byte{3}, 32)
 	s := leaderStore(t)
 	installTestFrozenShard(t, s, bytes.Repeat([]byte{0x42}, 32))
-	epoch := s.blockTree.Root().BlockData.Epoch
+	epoch := s.tree().Root().BlockData.Epoch
 	add := func(round uint64, records [][]byte) *ExecutedBlock {
 		t.Helper()
 		_, err := s.Add(leaderBlock(s, round, leaderQC(round-1, epoch, "a", "b", "c"), records), nil)
@@ -182,7 +182,7 @@ func leaderCheckpoint(t *testing.T, b *ExecutedBlock) *abdrc.CommittedBlock {
 // comes back whole, on either the head's route or the codec.
 func TestLeaderRingIsBoundByTheRestoredRoot(t *testing.T) {
 	s := leaderStore(t)
-	epoch := s.blockTree.Root().BlockData.Epoch
+	epoch := s.tree().Root().BlockData.Epoch
 	_, err := s.Add(leaderBlock(s, 2, leaderQC(1, epoch, "a", "b", "c"), nil), nil)
 	require.NoError(t, err)
 	b := mustBlock(t, s, 2)
@@ -247,14 +247,14 @@ func TestLeaderRingTravelsWithWhatTheStoreProduces(t *testing.T) {
 	body, frozen, tr := bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{2}, 32), bytes.Repeat([]byte{3}, 32)
 	s := leaderStore(t)
 	installTestFrozenShard(t, s, bytes.Repeat([]byte{0x42}, 32))
-	epoch := s.blockTree.Root().BlockData.Epoch
+	epoch := s.tree().Root().BlockData.Epoch
 
-	state, err := s.blockTree.CurrentState()
+	state, err := s.tree().CurrentState()
 	require.NoError(t, err)
 	require.NotNil(t, state.CommittedHead.Leader, "the state message carries the ring")
 	restored, err := NewRootBlock(state.CommittedHead, crypto.SHA256, s.orchestration, ProfileHandoff)
 	require.NoError(t, err)
-	require.Equal(t, s.blockTree.Root().RootHash, restored.RootHash)
+	require.Equal(t, s.tree().Root().RootHash, restored.RootHash)
 
 	add := func(round uint64, rec []byte) *ExecutedBlock {
 		t.Helper()

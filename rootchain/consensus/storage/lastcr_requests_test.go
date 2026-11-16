@@ -55,7 +55,7 @@ func (p *lastCRPipeline) add(s *BlockStore, round, parent uint64, reqs ...*rctyp
 func (p *lastCRPipeline) commit(s *BlockStore, round uint64) {
 	p.t.Helper()
 	b := mustBlock(p.t, s, round)
-	_, err := s.blockTree.Commit(&rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: round + 1, ParentRoundNumber: round, Epoch: 2},
+	_, err := s.tree().Commit(&rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: round + 1, ParentRoundNumber: round, Epoch: 2},
 		LedgerCommitInfo: &types.UnicitySeal{Version: 1, NetworkID: 5, RootChainRoundNumber: round, Epoch: 2, Timestamp: 1_000 + round, Hash: b.RootHash}})
 	require.NoError(p.t, err)
 }
