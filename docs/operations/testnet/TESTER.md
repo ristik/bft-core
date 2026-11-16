@@ -18,7 +18,7 @@ python3 deploy/testnet/tester-check.py --rpc <rpc-url> --manifest <faucet-url>/a
 
 It needs only Python 3 and sends no transaction. `ok` on chain ID, `net_version` and block-zero hash means the endpoint serves the published network. Exit status 1
 and a line starting `FAIL` means it does not (a wrong URL, or the network was reset since you copied the values): stop and do not sign anything for it. Exit status 2 means the
-endpoint or the values could not be read. `--wait 30` additionally requires a new block within 30 seconds; an idle chain makes no blocks, so that is optional.
+endpoint or the values could not be read. `--wait 30` additionally requires a new block within 30 seconds (the testnet makes one about every 10 s, idle or not; allow 60 if a round may time out).
 The check proves identity, not safety: it cannot tell a malicious endpoint that repeats the published values from the real one, so take the values from the operator's channel, not from the endpoint.
 
 ## 2. Make a wallet for this network

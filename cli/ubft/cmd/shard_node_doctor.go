@@ -15,6 +15,7 @@ import (
 	"github.com/unicitynetwork/bft-core/network"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/zkverifier"
+	"github.com/unicitynetwork/bft-core/shardnode"
 )
 
 // doctorCheck is one preflight check. Framework checks apply to any shard
@@ -40,6 +41,10 @@ type shardNodeDoctorFlags struct {
 	JWTSecret string
 
 	DialTimeout time.Duration
+	// BlockInterval is the --target-block-interval the node runs with (shard-node run): checked against the shard conf's T2.
+	BlockInterval time.Duration
+	// InactivityTimeout is the --inactivity-timeout the node runs with: a paced gap close to it is warned about.
+	InactivityTimeout time.Duration
 }
 
 func shardNodeDoctorCmd(baseFlags *baseFlags) *cobra.Command {
@@ -65,6 +70,8 @@ they're specific to what that executor needs (an Engine API endpoint to reach).`
 	cmd.Flags().StringVar(&flags.EthURL, "eth-url", "http://127.0.0.1:8545", "engine-api executor only: eth_* endpoint")
 	cmd.Flags().StringVar(&flags.JWTSecret, "jwt-secret", "", "engine-api executor only: path to the JWT secret (default: $UBFT_HOME/jwt.hex)")
 	cmd.Flags().DurationVar(&flags.DialTimeout, "dial-timeout", 5*time.Second, "timeout for network-reachability checks")
+	cmd.Flags().DurationVar(&flags.BlockInterval, "target-block-interval", 0, "the --target-block-interval this node runs with; checked against the shard conf's T2")
+	cmd.Flags().DurationVar(&flags.InactivityTimeout, "inactivity-timeout", shardnode.DefaultBFTClientOptions.InactivityTimeout, "the --inactivity-timeout this node runs with; a block interval that comes close to it is warned about")
 	return cmd
 }
 
@@ -80,13 +87,16 @@ func shardNodeDoctor(ctx context.Context, flags *shardNodeDoctorFlags) error {
 		ok, detail, fix := c.run(checkCtx)
 		cancel()
 
+		// A passing check that still names a fix is a warning: advice, not a failure.
 		status := "PASS"
 		if !ok {
 			status = "FAIL"
 			failed++
+		} else if fix != "" {
+			status = "WARN"
 		}
 		fmt.Printf("[%s] %-22s %s\n", status, c.name, detail)
-		if !ok && fix != "" {
+		if fix != "" {
 			fmt.Printf("       fix: %s\n", fix)
 		}
 	}
@@ -193,6 +203,16 @@ func frameworkChecks(flags *shardNodeDoctorFlags) []doctorCheck {
 						"regenerate the shard conf with a larger --t2-timeout"
 				}
 				return true, fmt.Sprintf("T2=%s, root block rate=%dms, margin=%s", shardConf.T2Timeout, consensus.BlockRate, margin), ""
+			},
+		},
+		{
+			name: "block interval",
+			run: func(ctx context.Context) (bool, string, string) {
+				shardConf, err := loadOneShardConf(flags)
+				if err != nil {
+					return false, err.Error(), ""
+				}
+				return blockIntervalCheck(flags.BlockInterval, shardConf.T2Timeout, consensus.BlockRate*time.Millisecond, flags.InactivityTimeout)
 			},
 		},
 	}
@@ -328,4 +348,21 @@ func loadJWTSecret(flags *shardNodeDoctorFlags) (engineapi.Secret, error) {
 		return engineapi.Secret{}, fmt.Errorf("reading JWT secret %q: %w", jwtPath, err)
 	}
 	return engineapi.ParseSecret(strings.TrimSpace(string(data)))
+}
+
+// blockIntervalCheck is the doctor's view of shardnode.CheckBlockInterval, the same rule `shard-node run` refuses to start on.
+// A combination that passes but leaves the inactivity re-handshake little headroom is a WARN (shardnode.CheckInactivityMargin).
+func blockIntervalCheck(interval, t2, rootBlockRate, inactivity time.Duration) (bool, string, string) {
+	if err := shardnode.CheckBlockInterval(interval, t2, rootBlockRate); err != nil {
+		return false, err.Error(), fmt.Sprintf("regenerate the shard conf with --t2-timeout of at least %d (ms), or lower --target-block-interval",
+			shardnode.MinT2ForBlockInterval(interval, rootBlockRate).Milliseconds())
+	}
+	if interval == 0 {
+		return true, "not set: one block per certification round trip", ""
+	}
+	if err := shardnode.CheckInactivityMargin(interval, t2, rootBlockRate, inactivity); err != nil {
+		return true, err.Error(), fmt.Sprintf("run the node with --inactivity-timeout of at least %s, or lower --target-block-interval",
+			interval+shardnode.AwaitTimeoutForT2(t2)+rootBlockRate+shardnode.InactivityWarnMargin)
+	}
+	return true, fmt.Sprintf("interval=%s, T2=%s covers it (needs at least %s); inactivity timeout %s", interval, t2, shardnode.MinT2ForBlockInterval(interval, rootBlockRate), inactivity), ""
 }

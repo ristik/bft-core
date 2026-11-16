@@ -95,7 +95,7 @@ jobs:
           umask 077
           echo rehearsal-not-a-real-secret > /tmp/captcha-secret
           sudo -E env "PATH=$PATH" python3 deploy/testnet/generate.py --out /srv/tn-bridge-1 --validators 4 --chain-id 31337 \
-            --ubft pinned-bft/build/ubft --b1genesis /tmp/tn-b1genesis --keygen /tmp/tn-keygen \
+            --ubft pinned-bft/build/ubft --b1genesis /tmp/tn-b1genesis --keygen /tmp/tn-keygen --block-interval-ms 0 \
             --captcha-sitekey rehearsal-sitekey --captcha-secret-file /tmp/captcha-secret
       - name: Bring the package up (rehearse.py up, identity)
         run: sudo -E env "PATH=$PATH" python3 deploy/testnet/rehearse.py --generation /srv/tn-bridge-1 --evidence "$RUNNER_TEMP/evidence" --stages up,identity

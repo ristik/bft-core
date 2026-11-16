@@ -81,6 +81,50 @@ class ChurnBudget(unittest.TestCase):
         self.assertEqual(source.count("evm_partition_params(a.chain_id)"),1)
         self.assertNotIn("f'proof_type=exec,chain_id=",source.split('def main')[1])
 
+class BlockInterval(unittest.TestCase):
+    """bft-core#1167: the package paces the EVM shard to one block every 10 s by default, with a T2 that covers it; a fast package (the lanes) is the earlier one."""
+    images={k:'sha256:'+'a'*64 for k in ['node','rpc','guard','signer']}
+    def topo(self,n,**kw):
+        with tempfile.TemporaryDirectory() as tmp:
+            out=Path(tmp)/'tn-fixture';out.mkdir()
+            return generate.topology(out,n,{'root':['r%d'%i for i in range(n)],'evm':['e%d'%i for i in range(n)]},self.images,'captcha',**kw)
+    def test_the_default_is_unpaced_until_the_pin_has_the_flag_and_ten_seconds_has_a_t2_that_covers_it(self):
+        # 0 until the pin and image bump that carries --target-block-interval (bft-core#1169), then 10000
+        self.assertEqual(generate.BLOCK_INTERVAL_MS,0)
+        self.assertEqual(generate.TESTNET_BLOCK_INTERVAL_MS,10000)
+        self.assertEqual(generate.t2_for_block_interval(10000),20000)
+        self.assertGreaterEqual(generate.t2_for_block_interval(10000),generate.min_t2_ms(10000))
+        self.assertEqual(generate.t2_for_block_interval(0),5000,'without an interval the T2 is the one every lane runs')
+        for ms in (1,500,1000,2000,3000,5000,7000,10000,30000,60000):
+            t2=generate.t2_for_block_interval(ms)
+            # the rule shard-node run enforces (shardnode.CheckBlockInterval): T2 >= interval + min(T2/2, 5 s) + one root round
+            self.assertGreaterEqual(t2,ms+min(t2//2,generate.FOLLOWER_AWAIT_CAP_MS)+generate.ROOT_BLOCK_RATE_MS,ms)
+        with self.assertRaises(ValueError): generate.t2_for_block_interval(-1)
+    def test_every_shard_node_carries_the_interval(self):
+        cfg=self.topo(4,block_interval_ms=10000)
+        for i in range(1,5):
+            shard=cfg['services']['shard%d'%i]['entrypoint']
+            self.assertEqual(shard[shard.index('--target-block-interval')+1],'10000ms')
+        for name,svc in cfg['services'].items():
+            if not name.startswith('shard'): self.assertNotIn('--target-block-interval',svc['entrypoint'],name)
+    def test_a_fast_package_has_no_interval_flag(self):
+        self.assertEqual(self.topo(4,block_interval_ms=0),self.topo(4),'0 is exactly the package without pacing')
+        self.assertFalse(any('--target-block-interval' in svc['entrypoint'] for svc in self.topo(4)['services'].values()))
+    def test_a_joiner_entity_gets_the_interval(self):
+        four=self.topo(4,block_interval_ms=10000)
+        got=joiner.joiner_services(four,5,'r4','e4')
+        shard=got['shard5']['entrypoint']
+        self.assertEqual(shard[shard.index('--target-block-interval')+1],'10000ms')
+    def test_the_generator_derives_the_shard_conf_t2_and_records_both(self):
+        source=(generate.HERE/'generate.py').read_text()
+        main=source.split('def main')[1]
+        self.assertIn("'--t2-timeout',str(t2_for_block_interval(a.block_interval_ms))",main)
+        self.assertEqual(main.count('block_interval_ms=a.block_interval_ms))'),2,'the boot and the final compose both carry it')
+        # a nonzero interval with a pinned ubft that lacks the flag is refused before anything is generated, never silently dropped
+        self.assertIn("if a.block_interval_ms and '--target-block-interval' not in subprocess.run([ubft,'shard-node','run','--help']",main)
+        self.assertIn("p.error('the pinned ubft has no shard-node run --target-block-interval",main)
+        self.assertIn("'evm_block':{'interval_ms':a.block_interval_ms,'t2_ms':t2_for_block_interval(a.block_interval_ms)}",main)
+
 class B1Layout(unittest.TestCase):
     def test_the_package_is_on_the_single_b1_layout(self):
         source=(generate.HERE/'generate.py').read_text()
