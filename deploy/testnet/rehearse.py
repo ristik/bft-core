@@ -953,6 +953,8 @@ class Rehearsal:
         if switched:
             self.say(f'  switched into epoch {self.target} in process at the commit: roots {sorted(switched)}')
         before = self.too_late_epochs(switched, transport)
+        self.expect(all(e == self.target for i, e in enumerate(before, 1) if i in switched),
+                    f'every root that switched at the commit reports its switch into epoch {self.target} published', str(before))
         self.expect(all(e == self.target - 1 for i, e in enumerate(before, 1) if i not in switched),
                     f'a root that did not switch has installed nothing: it certifies epoch {self.target - 1}', str(before))
         ops = str(Path(__file__).resolve().parent / 'handoff_ops.py')
@@ -968,6 +970,8 @@ class Rehearsal:
                     f'each of the {self.n} roots answers "too late" and exits non-zero, and so does the abort', out.strip()[-500:])
         self.expect('committed Abort record' not in out and 'Abort already committed' not in out, 'no Abort record was committed')
         after = self.too_late_epochs(switched, transport)
+        self.expect(all(e == self.target for i, e in enumerate(after, 1) if i in switched),
+                    f'after the Abort every root that switched still reports its switch into epoch {self.target} published', str(after))
         self.expect(after == before, 'no root changed epoch (a root that switched at the commit stays in it, every other one in the old epoch)', f'{before} -> {after}')
         self.expect(all(handoff.switch_complete(self.q3_status(i, transport), self.target) for i in switched), 'every root that switched still reports the switch published')
 
@@ -977,7 +981,7 @@ class Rehearsal:
         out = []
         for i in range(1, self.n + 1):
             if i in switched:
-                out.append(self.target if handoff.switch_complete(self.q3_status(i, transport), self.target) else None)
+                out.append(self.target if self.switch_published(i, transport) else None)
             else:
                 out.append(self.root_epoch(i, transport))
         return out
@@ -1071,9 +1075,22 @@ class Rehearsal:
         an unavailable or Switching answer is no evidence; a declined, faulted or late switch is not a switch); a root that reports none is not one."""
         out = set()
         for i in range(1, self.n + 1):
-            if handoff.switched_in_process(lambda i=i: self.q3_status(i, transport), self.target) is not None:
+            switch = handoff.switched_in_process(lambda i=i: self.q3_status(i, transport), self.target)
+            # evidence of the in-process switch itself: its target is this epoch (a root restarted into the epoch reports Running in it with no target)
+            if switch is not None and switch.get('target') == self.target:
                 out.add(i)
         return out
+
+    def switch_published(self, i, transport, tries=10):
+        """Whether root i reports its in-process switch into the target published (Running or Following, target and epoch the target). An unavailable or
+        other answer is asked again, within `tries`; it is never taken for the switch."""
+        for attempt in range(tries):
+            view = self.q3_status(i, transport)
+            if handoff.switch_complete(view, self.target) and view['switch'].get('target') == self.target:
+                return True
+            if attempt + 1 < tries:
+                time.sleep(0.5)
+        return False
 
     def root_listens(self, i, transport):
         try:

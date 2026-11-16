@@ -2804,6 +2804,8 @@ class PosTooLateAfterAnInProcessSwitch(unittest.TestCase):
             def post(self, i, path, body):
                 if path == '/api/v1/q3/status':
                     s = statuses[i]
+                    if isinstance(s, list):   # answers in turn, the last one repeating
+                        s = s.pop(0) if len(s) > 1 else s[0]
                     return (503, b'') if s is None else (200, json.dumps(s).encode())
                 epochs = after_signers if (phase['after'] and after_signers) else signers
                 return (422, b'{}') if epochs[i] is None else (200, json.dumps({'epoch': epochs[i]}).encode())
@@ -2824,7 +2826,8 @@ class PosTooLateAfterAnInProcessSwitch(unittest.TestCase):
             phase['after'] = True
             return unittest.mock.Mock(returncode=1, stdout=out, stderr='')
         with unittest.mock.patch.object(handoff_ops, 'DockerTransport', lambda gen: Transport()), \
-                unittest.mock.patch.object(handoff, 'SWITCH_WAIT_SECONDS', 0), unittest.mock.patch('subprocess.run', side_effect=run):
+                unittest.mock.patch.object(handoff, 'SWITCH_WAIT_SECONDS', 0), unittest.mock.patch('subprocess.run', side_effect=run), \
+                unittest.mock.patch.object(rehearse.time, 'sleep'):
             Fake().pos_too_late()
 
     published = {'activeEpoch': 2, 'switch': {'phase': 'running', 'epoch': 2, 'target': 2}}
@@ -2840,5 +2843,20 @@ class PosTooLateAfterAnInProcessSwitch(unittest.TestCase):
             self.run_too_late(statuses, {1: 1, 2: None}, after_signers={1: 2, 2: None})   # it moved during the Abort
         with self.assertRaises(rehearse.Failure):
             self.run_too_late(statuses, {1: 2, 2: None})   # it had installed the epoch without a switch
+
+    def test_a_restarted_root_is_not_taken_for_a_switched_one(self):
+        import rehearse
+        restarted = {'activeEpoch': 2, 'switch': {'phase': 'running', 'epoch': 2}}   # Running in the epoch with no switch target: installed by a restart
+        with self.assertRaises(rehearse.Failure) as raised:
+            self.run_too_late({1: restarted, 2: self.published}, {1: 2, 2: None})
+        self.assertIn('installed nothing', str(raised.exception), 'it gets the certificate check, which a root already in the epoch fails')
+
+    def test_a_switched_root_that_stops_answering_fails(self):
+        import rehearse
+        for name, answers in (('unavailable before and after', [self.published, None]),
+                              ('unavailable before, good after', [self.published] + [None] * 10 + [self.published])):
+            with self.assertRaises(rehearse.Failure, msg=name) as raised:
+                self.run_too_late({1: list(answers), 2: self.published}, {1: None, 2: None})
+            self.assertIn('reports its switch into epoch 2 published', str(raised.exception), name)
 
 if __name__=='__main__': unittest.main()
