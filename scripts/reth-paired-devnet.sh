@@ -50,9 +50,9 @@ validators=${1:-4}
 rounds=${2:-10}
 postM2aMode=${POST_M2A_MODE:-}
 postM2aChainID=${POST_M2A_CHAIN_ID:-31337}
-# The any-age final lane (scripts/anyage-lane.sh, briefs/anyage-final-lane-plan.md): the P85 genesis AND the bridge in one devnet. ANYAGE_LANE=1 adds
-# the aggregator-go shard(s) as BFT shard(s) of the same root chain (partition 7, the aggregation partition, scripts/lib/agg-lib.sh) beside the EVM shard; the vault and verifier are
-# deployed by the lane's setup step once the devnet is up. Nothing in the P85 path changes when the flag is unset.
+# The any-age final lane (scripts/anyage-lane.sh, briefs/anyage-final-lane-plan.md): the P85 genesis AND the aggregator in one devnet. ANYAGE_LANE=1 adds
+# the aggregator-go shard(s) as BFT shard(s) of the same root chain (partition 7, the aggregation partition, scripts/lib/agg-lib.sh) beside the EVM shard. Nothing in the
+# P85 path changes when the flag is unset. (The protocol 6/7 bridge the lane once deployed here was removed, bft-core#1106.)
 if [ "${ANYAGE_LANE:-0}" = 1 ]; then
   [ "${P85_LANE:-0}" = 1 ] && [ "${M2_PROFILE2:-0}" = 1 ] && [ "$validators" -eq 4 ] || { echo "ANYAGE_LANE=1 requires the P85 lane (P85_LANE=1, M2_PROFILE2=1, four validators)" >&2; exit 2; }
   chainID=$postM2aChainID partitionID=8 rootRpcPort=25866
@@ -282,7 +282,7 @@ genesisSHA=$(shasum -a 256 test-nodes/evm-genesis.json | cut -d' ' -f1)
 echo "generated genesis sha256=$genesisSHA"
 
 # Fresh-B1 deployment (Q3_B1=1): one profile file, derived from the shard configuration and the root trust base, is the source of the registry
-# genesis (layout 3), of ureth's --unicity.* bindings and of the shard nodes' Update admission (--b1-profile), as in scripts/dnb-devnet.sh.
+# genesis (layout 3), of ureth's --unicity.* bindings and of the shard nodes' Update admission (--b1-profile).
 b1GasLimit=30000000
 if [ "${Q3_B1:-0}" = 1 ]; then
   p85ProfileArgs=()
@@ -356,7 +356,7 @@ fi
 if [ "${UTB_LANE:-0}" = 1 ]; then
   # the combined UTB lane (scripts/utb-lane.sh): the any-age machinery with the signed trust-base entry profile on from the first voting epoch. The genesis
   # entry, its pin and the deployment manifest are generated once, here, from the epoch-1 trust base the roots will start with.
-  [ "${ANYAGE_LANE:-0}" = 1 ] || { echo "UTB_LANE=1 requires ANYAGE_LANE=1 (the aggregator partition and the bridge)" >&2; exit 2; }
+  [ "${ANYAGE_LANE:-0}" = 1 ] || { echo "UTB_LANE=1 requires ANYAGE_LANE=1 (the aggregator partition)" >&2; exit 2; }
   source scripts/lib/utb-lib.sh
   UTB_ROOT_FLAGS_FN=utb_root_flags UTB_AGG_ENV_FN=utb_agg_env
   export UTB_ROOT_FLAGS_FN UTB_AGG_ENV_FN
@@ -365,16 +365,10 @@ if [ "${UTB_LANE:-0}" = 1 ]; then
 fi
 
 if [ "${ANYAGE_LANE:-0}" = 1 ] && [ -n "${ANYAGE_PREP_ONLY:-}" ]; then
-  # A dry run of the combined genesis: every offline input exists (P85 genesis, profile, identities, enrolled authorities, aggregator shard configurations,
-  # the bridge deployment derived from the identities); no reth, root, validator or aggregator process is started and no port is taken.
+  # A dry run of the combined genesis: every offline input exists (P85 genesis, profile, identities, enrolled authorities, aggregator shard configurations);
+  # no reth, root, validator or aggregator process is started and no port is taken.
   agg_prepare_confs || { echo "aggregator shard configuration failed" >&2; exit 1; }
-  if [ -n "${DNB_TOOL:-}" ]; then
-    BRIDGE_IDENTITIES=test-nodes/b1-identities.json
-    "$DNB_TOOL" deployment --identities "$BRIDGE_IDENTITIES" --agg-conf "$(for k in $(seq 1 "$aggShards"); do printf '%s,' "$(agg_conf "$k")"; done | sed 's/,$//')" --out test-nodes/bridge-deployment.json \
-      || { echo "the bridge deployment cannot be derived from this genesis' identities" >&2; exit 1; }
-    test -s test-nodes/bridge-deployment.json || { echo "dnb-tool wrote no bridge-deployment.json" >&2; exit 1; }
-  fi
-  echo "anyage prep only: P85 genesis, profile, identities, aggregator shard configurations${DNB_TOOL:+, bridge deployment} generated; nothing started"
+  echo "anyage prep only: P85 genesis, profile, identities, aggregator shard configurations generated; nothing started"
   exit 0
 fi
 

@@ -22,8 +22,10 @@ on:
 permissions:
   contents: read
 concurrency:
+  # A newer push to the PR supersedes its run in progress. Dispatch runs (refs/heads/...) never share a group with a PR (refs/pull/N/merge)
+  # and are never cancelled; a second dispatch on the same branch waits for the first.
   group: testnet-bridge-pos-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   preflight:
     runs-on: ubuntu-22.04

@@ -280,7 +280,7 @@ jobs:
           echo $! >"$RUNNER_TEMP/res/sampler.pid"
       - name: Install the pinned Foundry
         uses: ./.github/actions/foundry
-      - name: Pinned sources (contracts with its forge build, the NBP driver, the JS SDK)
+      - name: Pinned sources (contracts with its forge build, the JS SDK)
         run: scripts/ci/prepare-sources.sh "$RUNNER_TEMP/sources-out" "$RUNNER_TEMP/sources-work"
       - name: Resources of this job
         if: always()

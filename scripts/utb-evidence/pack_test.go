@@ -128,7 +128,6 @@ func buildPack(t *testing.T, ubft, tool string) string {
 	put("proofs/original-proof.sha256", []byte(hex.EncodeToString(sum[:])+"\n"))
 	hist := run(t, tool, "uc-verify", "--token", filepath.Join(pack, "proofs", "token.cbor"), "--bundle", filepath.Join(pack, "bundle", "final.cbor"), "--shard-conf", filepath.Join(pack, "manifest", "shard-conf.json"))
 	put("proofs/historical-verify.log", []byte(strings.TrimSuffix(hist, "\n")))
-	put("proofs/bridge-receipt.json", []byte(`{"redeem":{"gasUsed":"12345"},"claim":{"gasUsed":"6789"}}`))
 
 	// the post-recovery certificate: epoch 3, in the activation interval of its entry, signed by that committee
 	cert3 := testcertificates.CreateUnicityCertificate(t, chain.Members[0].Signer, &types.InputRecord{Version: 1, RoundNumber: 9, Hash: bytes.Repeat([]byte{1}, 32),
@@ -226,9 +225,6 @@ func TestEvidencePackIsCheckedByTheToolsAndEveryBadByteIsRefused(t *testing.T) {
 		"a historical log that is not the tool's output": {func(p string) { write(t, p, "proofs/historical-verify.log", []byte("verified\n")) }, "not the verifier's output"},
 		"a client reload without the final digest":       {func(p string) { write(t, p, "history/client-reload.log", []byte("tip now 3\n")) }, "client-reload.log"},
 		"a client that fetched one entry at a time":      {func(p string) { write(t, p, "catchup/client-gap-two-entries.log", []byte("client: appended [3]\n")) }, "epochs 2 and 3 fetched in one sync"},
-		"a failed redemption": {func(p string) {
-			write(t, p, "proofs/bridge-receipt.json", []byte(`{"redeem":{"gasUsed":"0"},"claim":{"gasUsed":"1"}}`))
-		}, "successful redemption"},
 		"a trust base other than the manifest's": {func(p string) {
 			write(t, p, "manifest/trust-base.json", append(read(t, p, "manifest/trust-base.json"), ' '))
 		}, "manifest does not check out"},
