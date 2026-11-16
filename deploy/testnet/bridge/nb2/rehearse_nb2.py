@@ -526,6 +526,12 @@ class NB2Rehearsal(Rehearsal):
         b = self.outfile('boundary-g')
         self.say(f'  boundary: {json.dumps(b["tries"], default=str)}')
         c = b['confirmed']
+        lim = int(self.release()['pins']['userGasLimit'])
+        g = {k: (int(c[k]['gas']), int(c[k]['marginal'])) for k in ('pass', 'fail')} if all(c[k].get('gas') is not None and c[k].get('marginal') is not None for k in ('pass', 'fail')) else None
+        # sol r7 on #1126: the boundary holds under each token's own shape (its bytes and signatures), not only under the recorded conditions
+        self.expect(g is not None and g['pass'][0] <= lim < g['pass'][0] + g['pass'][1] and g['fail'][0] - g['fail'][1] <= lim < g['fail'][0],
+                    f'under each token\'s own shape the boundary is the pair\'s: {b["pass"]["label"]} with one more transfer is over {lim}, {b["fail"]["label"]} with one fewer is within it',
+                    json.dumps({'confirmed': c, 'refused': b.get('refused')}, default=str))
         self.expect(b['fail']['transfers'] == b['pass']['transfers'] + 1 and b['fail']['conditions'] == b['pass']['conditions']
                     and (c['pass']['real'], c['fail']['real']) == ('passes', 'CapacityPreflight') and c['pass']['conditions'] == c['fail']['conditions'] == b['pass']['conditions'],
                     f'the boundary pair is adjacent ({b["pass"]["transfers"]} and {b["fail"]["transfers"]} transfers) under the same conditions ({b["pass"]["conditions"]}), '

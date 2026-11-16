@@ -816,8 +816,51 @@ async function predict(w: Wallet, token: Uint8Array): Promise<{ ok: boolean; gas
  * segment need, both judged again back to back at the end. Each probe is a fresh deposit chained to its length, because a token checked one
  * transfer further has spent the one below; the search (boundary_search.ts) is bounded by BOUNDARY_PROBES.
  */
+/**
+ * The model's gas of one more transfer of TOKEN's own average shape (MeasuredGasModel.redeemGasLimit, measured-nb2-05): a hop, the excess
+ * evidence bytes its pair adds beyond the measured 1,026 (the pair's bytes averaged over the token's transfers), and its certificate's seal
+ * signatures beyond the measured 3 (averaged likewise). Rounded down. Null, never a pair, when a seal does not decode or exceeds the bound.
+ * LT is the evidence length the preflight charges (predict's bytes). The rest of the model (the mint's and the deposit's certificates, the
+ * split levels, the pending burn, the gap proofs) is the token's fixed share: inside its gas, and judged by shapeHolds on both sides.
+ */
+async function marginalOf(token: Uint8Array, lT: number): Promise<{ marginal: bigint | null; pairBytes: number; extraSignatures: number }> {
+  const { lineageOf } = await import('../../../packages/native-bridge-plugin/src/nb2/index.js');
+  const m = MEASURED_VERIFIER;
+  const t = decodeToken(token);
+  const lineage = lineageOf(t);
+  const levels = lineage.length - 1;
+  const hops = lineage.reduce((n, x) => n + x.transfers.length, 0) + 1 - lineage.length; // the pending burn is a transfer of the walk
+  const n = t.transfers.length;
+  let bytes = 0;
+  let extra = 0;
+  const sigs = new Map<string, number | null>();
+  for (let i = 0; i < n; i++) {
+    bytes += 1 + (t.transfersRaw[i]?.length ?? 0) + encodeProof(t.proofs[i]).length; // the pair: a 2-array head, the transaction, its proof
+    const uc = t.proofs[i].uc;
+    const key = hx(HU(uc));
+    if (!sigs.has(key)) {
+      try {
+        const wit = UnicityCertificate.fromCBOR(uc).unicitySeal.witnesses as unknown as Map<unknown, unknown> | null;
+        sigs.set(key, wit === null ? 0 : wit.size);
+      } catch {
+        sigs.set(key, null);
+      }
+    }
+    const c = sigs.get(key)!;
+    if (c === null || c > m.maxSignatures) return { marginal: null, pairBytes: 0, extraSignatures: 0 };
+    extra += Math.max(0, c - m.measuredSignatures);
+  }
+  if (n === 0 || t.transfersRaw.length !== n) return { marginal: null, pairBytes: 0, extraSignatures: 0 };
+  const pairBytes = Math.floor(bytes / n);
+  const extraSigs = Math.floor(extra / n);
+  const shaped = m.baseBytes + m.bytesPerTransfer * hops + m.bytesPerSplitLevel * levels;
+  const excessNow = Math.max(0, lT - shaped);
+  const excessNext = Math.max(0, lT + pairBytes - (shaped + m.bytesPerTransfer));
+  return { marginal: m.perTransfer + m.perExcessByte * BigInt(excessNext - excessNow) + m.perExtraSignature * BigInt(extraSigs), pairBytes, extraSignatures: extraSigs };
+}
+
 const BOUNDARY_CERTIFICATES = 16;
-const BOUNDARY_PROBES = 16;
+const BOUNDARY_PROBES = 20;
 async function boundary(w: Wallet, label: string, estimate: number): Promise<void> {
   const est = JSON.parse(readFileSync(join(WORK, 'out', `boundary-estimate-${label}e.json`), 'utf8'));
   const certificates = new Map<string, number>();
@@ -833,8 +876,10 @@ async function boundary(w: Wallet, label: string, estimate: number): Promise<voi
       real = e instanceof Nb2Error ? e.rule : e instanceof WalletError ? e.reason : String(e);
     }
     if (real !== 'passes' && real !== 'CapacityPreflight') throw new Error(`the boundary probe ${l} was refused for another reason: ${real}`);
-    const probe: Probe = { label: l, transfers, conditions: `${certificates.get(l)} certificates, need ${p.need}`, gas: p.gas, real: real as Verdict };
-    log(`  ${l}: ${transfers} transfers, ${evidenceOf(t).length} evidence bytes, ${probe.conditions}, preflight gas ${p.gas}: planReturn ${real}`);
+    const shape = await marginalOf(t, p.bytes);
+    const probe: Probe = { label: l, transfers, conditions: `${certificates.get(l)} certificates, need ${p.need}`, gas: p.gas, marginal: shape.marginal, real: real as Verdict };
+    log(`  ${l}: ${transfers} transfers, ${evidenceOf(t).length} evidence bytes (${shape.pairBytes} a transfer, ${shape.extraSignatures} extra signatures), ${probe.conditions}, `
+      + `preflight gas ${p.gas} (one more transfer of this shape ${shape.marginal}): planReturn ${real}`);
     return probe;
   };
   const probe = async (k: number, i: number): Promise<Probe> => {
@@ -851,10 +896,10 @@ async function boundary(w: Wallet, label: string, estimate: number): Promise<voi
       estimate, limit: pins.userGasLimit, start: { transfers: est.probeTransfers, gas: big(est.probeGas) }, maxProbes: BOUNDARY_PROBES, min: BOUNDARY_CERTIFICATES,
     });
   } catch (e) {
-    if (e instanceof BoundaryNotFound) out(`boundary-${label}`, { pass: null, fail: null, tries: e.tries, error: e.message });
+    if (e instanceof BoundaryNotFound) out(`boundary-${label}`, { pass: null, fail: null, tries: e.tries, refused: e.refused, error: e.message });
     throw e;
   }
-  out(`boundary-${label}`, { pass: res.pass, fail: res.fail, confirmed: res.confirmed, tries: res.tries, certificatesPerProbe: BOUNDARY_CERTIFICATES });
+  out(`boundary-${label}`, { pass: res.pass, fail: res.fail, confirmed: res.confirmed, tries: res.tries, refused: res.refused, certificatesPerProbe: BOUNDARY_CERTIFICATES });
   log(`  boundary: ${res.pass.transfers} transfers pass and ${res.fail.transfers} are refused, under ${res.pass.conditions}, confirmed back to back (${res.tries.length} probes)`);
 }
 
