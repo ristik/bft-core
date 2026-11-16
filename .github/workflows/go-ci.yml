@@ -159,7 +159,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        # Shard 1 is rootchain/consensus alone, split across the consensus jobs below.
+        shard: [2, 3, 4]
     steps:
       - name: Skip Go work for documentation-only changes
         if: needs.changes.outputs.go != 'true'
@@ -199,6 +200,115 @@ jobs:
             packages.txt
             all-packages.txt
           retention-days: 7
+
+  # Shard 1 (rootchain/consensus) used to be the slowest job. Its top-level tests are
+  # split across these jobs by recorded duration; "Test shard 1/4" below checks that
+  # every listed test passed (or skipped) in exactly one part.
+  consensus:
+    needs: changes
+    name: Consensus tests ${{ matrix.part }}/3
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [1, 2, 3]
+    steps:
+      - name: Skip Go work for documentation-only changes
+        if: needs.changes.outputs.go != 'true'
+        run: echo 'Documentation/briefs only; 0 Go packages run.' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/checkout@v4
+        if: needs.changes.outputs.go == 'true'
+      - uses: actions/setup-go@v5
+        if: needs.changes.outputs.go == 'true'
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+      - name: Select tests
+        if: needs.changes.outputs.go == 'true'
+        run: |
+          go list ./... > all-packages.txt
+          python3 scripts/ci-packages.py 1 < all-packages.txt > packages.txt
+          if [[ $(wc -l < packages.txt) -ne 1 ]]; then
+            echo 'Shard 1 must be exactly one package to split by test.' >&2
+            exit 1
+          fi
+          package=$(cat packages.txt)
+          go test -list '.*' "$package" > list-raw.txt
+          python3 scripts/ci-test-split.py list list-raw.txt > list.txt
+          python3 scripts/ci-test-split.py select 3 '${{ matrix.part }}' \
+            scripts/ci/consensus-test-timings.json < list.txt > assigned.txt
+          {
+            echo "### Consensus part ${{ matrix.part }}/3: $(wc -l < assigned.txt) of $(wc -l < list.txt) tests in $package"
+            echo '<details><summary>Test list</summary>'
+            echo
+            cat assigned.txt
+            echo '</details>'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Test (without FFI)
+        if: needs.changes.outputs.go == 'true'
+        run: |
+          package=$(cat packages.txt)
+          pattern=$(python3 scripts/ci-test-split.py regex < assigned.txt)
+          go test "$package" -run "$pattern" -json -count=1 -timeout 30m 2>&1 | tee test-log.json
+          python3 scripts/ci-test-split.py ran "$package" < test-log.json > ran.txt
+      - name: Upload the split record
+        if: needs.changes.outputs.go == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: consensus-part-${{ matrix.part }}
+          path: |
+            list.txt
+            assigned.txt
+            ran.txt
+          retention-days: 7
+          overwrite: true
+      - name: Upload test failure log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: consensus-part-${{ matrix.part }}-failure
+          path: |
+            test-log.json
+            list-raw.txt
+            assigned.txt
+          retention-days: 7
+          overwrite: true
+
+  # Keeps the required "Test shard 1/4" check: it passes only when every consensus part
+  # passed and together they ran each listed test exactly once.
+  test-shard-1:
+    needs: [changes, consensus]
+    if: ${{ !cancelled() && needs.changes.result != 'skipped' }}
+    name: Test shard 1/4
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Require the path filter and every consensus part
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          CONSENSUS: ${{ needs.consensus.result }}
+        run: |
+          echo "changes: $CHANGES, consensus parts: $CONSENSUS"
+          [[ "$CHANGES" == success && "$CONSENSUS" == success ]]
+      - name: Skip Go work for documentation-only changes
+        if: needs.changes.outputs.go != 'true'
+        run: echo 'Documentation/briefs only; 0 Go packages run.' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/checkout@v4
+        if: needs.changes.outputs.go == 'true'
+      - uses: actions/download-artifact@v4
+        if: needs.changes.outputs.go == 'true'
+        with:
+          pattern: consensus-part-[0-9]
+          path: parts
+      - name: Every consensus test ran in exactly one part
+        if: needs.changes.outputs.go == 'true'
+        run: |
+          python3 scripts/ci-test-split.py selftest
+          for k in 1 2 3; do mv "parts/consensus-part-$k" "parts/part-$k"; done
+          python3 scripts/ci-test-split.py verify 3 scripts/ci/consensus-test-timings.json parts \
+            | tee -a "$GITHUB_STEP_SUMMARY"
 
   race:
     needs: changes
