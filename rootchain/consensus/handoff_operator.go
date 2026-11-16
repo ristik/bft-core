@@ -117,36 +117,47 @@ func (x *ConsensusManager) HandoffAbortStatus(target abdrc.HandoffAbortTarget) (
 }
 
 func (x *ConsensusManager) handoffAbortStatus(target abdrc.HandoffAbortTarget) (abdrc.HandoffAbortStatus, evmroot.OrderedHandoffRecord, error) {
-	status, record, err := x.committedAbortStatus(target)
+	status, record, err := x.handoffAbortStatusAtHead(target)
 	if errors.Is(err, ErrHandoffAbortTarget) {
-		if late, ok := x.installedAbortStatus(target); ok {
-			return late, evmroot.OrderedHandoffRecord{}, nil
+		// the committed head is past the target's epoch (the root switched into the successor in process, #1095, or was restarted into it): the
+		// target's handoff is no longer the head's control state, but its committed activation is in the verified history
+		if s, r, ok := x.abortTooLateAfterActivation(target); ok {
+			return s, r, nil
 		}
 	}
 	return status, record, err
 }
 
-// installedAbortStatus is the abort status of a handoff this root has already installed (#1086): once it switched into the successor in
-// process, a stayer, a joiner or a leaver alike, its committed head is the successor's anchor and no longer carries the handoff's control
-// state. The verified history then holds the activation into OldEpoch+1; when its committed record is the target, an abort of it is too
-// late, exactly as before the switch. Anything else is not this root's to answer.
-func (x *ConsensusManager) installedAbortStatus(target abdrc.HandoffAbortTarget) (abdrc.HandoffAbortStatus, bool) {
-	if x.q3 == nil || target.OldEpoch == ^uint64(0) || x.InstalledRootEpoch() <= target.OldEpoch {
-		return abdrc.HandoffAbortStatus{}, false
+// abortTooLateAfterActivation reports an Abort target whose handoff this root has already activated: the verified history's entry of the
+// epoch after the target's is the activation of exactly the target's committed record (network, epoch, attempt, predecessor and successor
+// body). Such an Abort is too late, as it is at the commit itself; any other target is not answered here.
+func (x *ConsensusManager) abortTooLateAfterActivation(target abdrc.HandoffAbortTarget) (abdrc.HandoffAbortStatus, evmroot.OrderedHandoffRecord, bool) {
+	none := evmroot.OrderedHandoffRecord{}
+	if x.q3 == nil || target.OldEpoch == 0 || target.OldEpoch == ^uint64(0) || x.InstalledRootEpoch() <= target.OldEpoch {
+		return abdrc.HandoffAbortStatus{}, none, false
+	}
+	if _, err := handoffAbortKeyFor(target); err != nil {
+		return abdrc.HandoffAbortStatus{}, none, false
 	}
 	entry, ok := x.q3.Activated(target.OldEpoch + 1)
 	if !ok {
-		return abdrc.HandoffAbortStatus{}, false
+		return abdrc.HandoffAbortStatus{}, none, false
 	}
 	v, _, ok := entry.Handoff()
-	if !ok || !recordMatchesAbortTarget(v.Record, target) {
-		return abdrc.HandoffAbortStatus{}, false
+	if !ok || v.Epoch != target.OldEpoch || v.Record.Kind != "commit" || !recordMatchesAbortTarget(v.Record, target) {
+		return abdrc.HandoffAbortStatus{}, none, false
 	}
-	return abdrc.HandoffAbortStatus{Target: target, State: "too_late", RecordID: fmt.Sprintf("0x%x", v.Record.ID()), OrderedRound: v.Record.OrderedRound}, true
+	status := abdrc.HandoffAbortStatus{Target: target, State: "too_late", RecordID: fmt.Sprintf("0x%x", v.Record.ID()), OrderedRound: v.OrderRound}
+	if state, err := x.blockStore.GetState(); err == nil && state != nil && state.CommittedHead != nil && state.CommittedHead.Block != nil {
+		if blockID, err := state.CommittedHead.Block.Hash(crypto.SHA256); err == nil {
+			status.CommittedRootID = fmt.Sprintf("0x%x", blockID)
+			status.CommittedRootRound = state.CommittedHead.Block.GetRound()
+		}
+	}
+	return status, v.Record, true
 }
 
-// committedAbortStatus is the abort status the committed head's control state gives.
-func (x *ConsensusManager) committedAbortStatus(target abdrc.HandoffAbortTarget) (abdrc.HandoffAbortStatus, evmroot.OrderedHandoffRecord, error) {
+func (x *ConsensusManager) handoffAbortStatusAtHead(target abdrc.HandoffAbortTarget) (abdrc.HandoffAbortStatus, evmroot.OrderedHandoffRecord, error) {
 	status := abdrc.HandoffAbortStatus{Target: target, State: "unknown"}
 	if _, err := handoffAbortKeyFor(target); err != nil {
 		return status, evmroot.OrderedHandoffRecord{}, err
