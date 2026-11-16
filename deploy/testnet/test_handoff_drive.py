@@ -131,6 +131,144 @@ class InProcessSwitchInstall(unittest.TestCase):
                     d.install_root(1, [], [])
 
 
+class InProcessSwitchPR2(unittest.TestCase):
+    """bft-core#1086 PR 2: joiners, followers and leavers switch in process too; the drive waits for them as their image says, restarts the rest."""
+
+    def drive(self, *views):
+        d = object.__new__(hd.Drive)
+        d.gen, d.target, d.old, d.new = Path('/nonexistent'), 3, [1, 2, 4], [1, 2, 3]
+        d.root_epoch = lambda i, transport=None: 2
+        d.transport = None
+        answers = list(views)
+        d.q3_status = lambda i: answers.pop(0) if len(answers) > 1 else answers[0]
+        return d
+
+    def test_how_long_a_root_is_waited_for(self):
+        self.assertEqual(handoff.awaits_switch(None, True), handoff.SWITCH_WAIT_SECONDS, 'an unavailable status is asked again')
+        self.assertIsNone(handoff.awaits_switch({'activeEpoch': 2}, True), 'an older image is restarted at once')
+        member = {'activeEpoch': 2, 'switch': {'phase': 'running', 'epoch': 2}}
+        self.assertEqual(handoff.awaits_switch(member, True), handoff.SWITCH_WAIT_SECONDS, 'a member of the committee left switches at its own commit')
+        follower = {'activeEpoch': 2, 'follower': True, 'switch': {'phase': 'running', 'epoch': 2}}
+        self.assertIsNone(handoff.awaits_switch(follower, False), 'a joiner on a PR 1 image is restarted at once')
+        self.assertIsNone(handoff.awaits_switch(member, False), 'a root that is not a member of the committee left, on a PR 1 image')
+        acquiring = {'activeEpoch': 2, 'follower': True, 'switch': {'phase': 'running', 'epoch': 2, 'acquires': True}}
+        self.assertEqual(handoff.awaits_switch(acquiring, False), handoff.ACQUIRE_WAIT_SECONDS)
+        self.assertEqual(handoff.awaits_switch(acquiring, True), handoff.ACQUIRE_WAIT_SECONDS, 'a follower of the old epoch acquires')
+        self.assertTrue(handoff.acquires(acquiring))
+        self.assertFalse(handoff.acquires(member))
+        self.assertFalse(handoff.acquires(None))
+
+    def test_a_joiner_that_acquires_is_waited_for_and_installed_in_process(self):
+        d = self.drive({'activeEpoch': 2, 'follower': True, 'switch': {'phase': 'running', 'epoch': 2, 'acquires': True}},
+                       {'activeEpoch': 2, 'follower': True, 'switch': {'phase': 'running', 'epoch': 2, 'acquires': True}},
+                       {'activeEpoch': 3, 'switch': {'phase': 'running', 'epoch': 3, 'target': 3, 'tookMs': 44, 'acquires': True}})
+        with unittest.mock.patch('subprocess.run', side_effect=AssertionError('restarted')), unittest.mock.patch.object(handoff.time, 'sleep'):
+            self.assertEqual(d.install_root(3, [], []), {'already': True, 'inProcess': True, 'switchMs': 44})
+
+    def test_a_joiner_that_acquires_but_does_not_switch_in_time_is_restarted(self):
+        d = self.drive({'activeEpoch': 2, 'follower': True, 'switch': {'phase': 'running', 'epoch': 2, 'acquires': True}})
+        with unittest.mock.patch('subprocess.run', side_effect=RuntimeError('restart')), unittest.mock.patch.object(handoff, 'ACQUIRE_WAIT_SECONDS', 0):
+            with self.assertRaisesRegex(RuntimeError, 'restart'):
+                d.install_root(3, [], [])
+
+    def test_a_leaver_that_switched_is_following(self):
+        d = self.drive({'activeEpoch': 3, 'follower': True, 'switch': {'phase': 'following', 'epoch': 3, 'target': 3, 'tookMs': 20, 'acquires': True}})
+        with unittest.mock.patch('subprocess.run', side_effect=AssertionError('restarted')):
+            self.assertEqual(d.install_root(4, [], []), {'already': True, 'inProcess': True, 'switchMs': 20})
+
+    def test_the_leavers_epoch_is_a_published_one(self):
+        d = self.drive()
+        for view, epoch in (({'activeEpoch': 3, 'switch': {'phase': 'switching', 'epoch': 2, 'target': 3}}, None),
+                            ({'activeEpoch': 3, 'switch': {'phase': 'following', 'epoch': 3, 'target': 3}}, 3), ({'activeEpoch': 3}, 3)):
+            d.transport = unittest.mock.Mock(post=lambda i, path, body, view=view: (200, json.dumps(view).encode()))
+            self.assertEqual(d.follower_epoch(4), epoch, view)
+
+    def test_an_incumbent_seen_switched_is_not_waited_for_again(self):
+        d = self.drive({'activeEpoch': 3, 'switch': {'phase': 'running', 'epoch': 3, 'target': 3, 'tookMs': 30}})
+        self.assertTrue(d.incumbent_switched(1))
+        d.q3_status = lambda i: {'activeEpoch': 3, 'switch': {'phase': 'running', 'epoch': 3, 'target': 3, 'tookMs': 30}}
+        with unittest.mock.patch.object(handoff, 'switched_in_process', side_effect=AssertionError('asked again')):
+            self.assertEqual(d.install_root(1, [], []), {'already': True, 'inProcess': True, 'switchMs': 30})
+        d = self.drive(None)
+        self.assertFalse(d.incumbent_switched(1), 'no answer: not waited for here, the joiner-first restart path')
+
+    def test_a_switch_aware_joiner_is_connected_to_the_staged_committee_before_the_endorsements(self):
+        acquiring = {'activeEpoch': 2, 'follower': True, 'switch': {'phase': 'running', 'epoch': 2, 'acquires': True}}
+        views = [{'epoch': 2, 'member': False, 'staged': {'epoch': 3, 'connected': ['a'], 'missing': ['b']}},
+                 {'epoch': 2, 'member': False, 'staged': {'epoch': 3, 'connected': ['a', 'b'], 'missing': []}}]
+        d = self.drive(acquiring)
+        d.say = lambda text: None
+        d.transport = unittest.mock.Mock(post=lambda i, path, body: (200, json.dumps(views.pop(0) if len(views) > 1 else views[0]).encode()))
+        with unittest.mock.patch('time.sleep'):
+            d.await_joiners_connected()
+        self.assertEqual(len(views), 1, 'asked until connected')
+        d.transport = unittest.mock.Mock(post=lambda i, path, body: (200, json.dumps({'epoch': 2, 'staged': {'epoch': 3, 'missing': ['b']}}).encode()))
+        with unittest.mock.patch.object(hd.Drive, 'wait', side_effect=hd.rehearse.Failure('not within 120 s')):
+            with self.assertRaisesRegex(hd.rehearse.Failure, 'not within'):
+                d.await_joiners_connected()
+        older = self.drive({'activeEpoch': 2, 'follower': True})
+        older.say = lambda text: None
+        older.transport = unittest.mock.Mock(post=unittest.mock.Mock(side_effect=AssertionError('asked')))
+        older.await_joiners_connected()   # an older image's joiner installs first across a restart, as before
+        self.assertFalse(handoff.staged_connected({'staged': {'epoch': 2, 'missing': [], 'connected': ['a']}}, 3), 'another epoch')
+        self.assertFalse(handoff.staged_connected({'epoch': 2}, 3), 'nothing staged')
+
+    # astra on #1133 (P2): the readiness gate fails closed on an unavailable or malformed answer
+    def gate(self, statuses, views, seconds=0.2):
+        """await_joiners_connected over q3/status answers `statuses` and committee views `views` in turn (the last repeats; None is unavailable)."""
+        d = self.drive(*statuses)
+        d.say = lambda text: None
+        asked = []
+        def post(i, path, body):
+            asked.append(path)
+            view = views.pop(0) if len(views) > 1 else views[0]
+            return (503, b'unavailable') if view is None else (200, json.dumps(view).encode())
+        d.transport = unittest.mock.Mock(post=post)
+        with unittest.mock.patch.object(hd, 'JOINER_READY_SECONDS', seconds), unittest.mock.patch('time.sleep'):
+            d.await_joiners_connected()
+        return asked
+
+    acquiring = {'activeEpoch': 2, 'follower': True, 'switch': {'phase': 'running', 'epoch': 2, 'acquires': True}}
+    connected = {'epoch': 2, 'member': False, 'staged': {'epoch': 3, 'connected': ['a', 'b'], 'missing': []}}
+
+    def test_an_unavailable_status_is_asked_again_never_taken_for_an_older_image(self):
+        asked = self.gate([None, None, self.acquiring], [self.connected])
+        self.assertIn('/api/v1/committee', asked, 'the acquiring joiner identified after the 503s is held to its connectivity')
+        with self.assertRaisesRegex(hd.rehearse.Failure, 'left unendorsed'):
+            self.gate([None, self.acquiring], [{'epoch': 2, 'staged': {'epoch': 3, 'connected': ['a'], 'missing': ['b']}}])
+
+    def test_unavailable_throughout_leaves_the_handoff_unendorsed(self):
+        with self.assertRaisesRegex(hd.rehearse.Failure, 'left unendorsed'):
+            self.gate([None], [self.connected])
+
+    def test_a_malformed_status_is_no_evidence_of_an_image(self):
+        for malformed in ([], {'follower': True}, {'activeEpoch': '2'}, {'activeEpoch': 2, 'switch': 'running'}, {'activeEpoch': 2, 'switch': {}},
+                          {'activeEpoch': 2, 'switch': {'phase': 'running', 'acquires': 'yes'}}):
+            self.assertIsNone(handoff.joiner_capability(malformed), malformed)
+            with self.assertRaisesRegex(hd.rehearse.Failure, 'left unendorsed', msg=str(malformed)):
+                self.gate([malformed], [self.connected])
+        self.assertEqual(handoff.joiner_capability({'activeEpoch': 2, 'follower': True}), 'legacy')
+        self.assertEqual(handoff.joiner_capability({'activeEpoch': 2, 'switch': {'phase': 'running', 'epoch': 2}}), 'legacy')
+        self.assertEqual(handoff.joiner_capability(self.acquiring), 'acquires')
+
+    def test_a_malformed_or_incomplete_staged_view_is_not_connected(self):
+        for staged in ({'epoch': 3}, {'epoch': 3, 'connected': ['a']}, {'epoch': 3, 'missing': []}, {'epoch': 3, 'connected': [], 'missing': []},
+                       {'epoch': 3, 'connected': ['a'], 'missing': None}, {'epoch': 3, 'connected': 'a', 'missing': []},
+                       {'epoch': '3', 'connected': ['a'], 'missing': []}, {'epoch': 3, 'connected': [1], 'missing': []}):
+            self.assertFalse(handoff.staged_connected({'staged': staged}, 3), staged)
+            with self.assertRaisesRegex(hd.rehearse.Failure, 'left unendorsed', msg=str(staged)):
+                self.gate([self.acquiring], [{'epoch': 2, 'staged': staged}])
+        self.assertFalse(handoff.staged_connected({'staged': 'yes'}, 3))
+        self.assertFalse(handoff.staged_connected(None, 3))
+        self.assertTrue(handoff.staged_connected(self.connected, 3))
+
+    def test_an_unavailable_committee_view_is_asked_again(self):
+        self.gate([self.acquiring], [None, 'not json', self.connected])
+
+    def test_a_genuine_older_image_takes_the_joiner_first_path(self):
+        self.assertEqual(self.gate([{'activeEpoch': 2, 'follower': True}], [self.connected]), [], 'its committee view is not needed')
+
+
 class JournalResume(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
@@ -424,6 +562,7 @@ class InstallAtOnce(unittest.TestCase):
         d.say = lambda text: None
         d.evh = lambda: gen
         d.install_root = lambda i, files, base: self.install(i)
+        d.q3_status = lambda i: None   # no switch-aware status: the joiner-first restart path (bft-core#1086 PR 2 below)
         d.serves_own_activation = self.serves
         record = {'epoch': 3, 'signingScheme': 2, 'v3BodyId': 'ab' * 32, 'activationRound': 99}
         d.exec_in = lambda service, *command, binary=False: json.dumps(record) if command[0] == 'cat' else ''
@@ -520,6 +659,20 @@ class InstallAtOnce(unittest.TestCase):
                 self.drive.step_install(self.journal)
         self.assertEqual([e for e in self.events if e[0] == 'install'], [], 'no incumbent restarts while the joiner is still installing')
         self.assertTrue(self.journal.done('install', 'root5'), 'the joiner itself completed')
+
+    def test_incumbents_that_switched_in_process_do_not_wait_for_a_slow_joiner(self):
+        """bft-core#1086 PR 2: an incumbent that switched at its own commit is installed at once; the joiner-first rule holds only for a restart."""
+        def slow(i):
+            if i == 5:
+                time.sleep(1.0)
+            return self.install(i)
+        self.drive.remote[5].install = slow
+        self.drive.install_root = lambda i, files, base: slow(i)
+        self.drive.q3_status = lambda i: {'activeEpoch': 3, 'switch': {'phase': 'running', 'epoch': 3, 'target': 3, 'tookMs': 30}}
+        with unittest.mock.patch.object(hd, 'JOINER_FIRST_SECONDS', 0.3):
+            self.drive.step_install(self.journal)
+        five = self.events.index(('done', 5))
+        self.assertTrue(all(('done', i) in self.events[:five] for i in (1, 2, 3, 4)), 'the switched incumbents did not wait for the joiner')
 
     def test_a_resumed_install_skips_the_installed_roots(self):
         for i in (1, 2, 3, 4, 5):

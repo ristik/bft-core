@@ -170,6 +170,9 @@ type Q3Status struct {
 	// Switch is the in-process epoch switch's state (#1086); InProcessSwitch says the manager switches in process at all.
 	Switch          SwitchState
 	InProcessSwitch bool
+	// AcquiresActivations says the switch also installs, in process, an activation this root does not hold the commit of itself, from a
+	// root peer (#1086, PR 2): a joiner, a follower and a lagging member switch too.
+	AcquiresActivations bool
 }
 
 // Q3Status reports the chain this node's verified history is rooted in, the staged candidate and the installed epoch.
@@ -187,7 +190,7 @@ func (x *ConsensusManager) Q3Status() (Q3Status, error) {
 		follower = x.safety.member(installed) != nil
 	}
 	return Q3Status{Network: cfg.Network, Genesis: cfg.Genesis, Staged: x.q3Staged.Load(), ActiveEpoch: installed, Follower: follower,
-		Switch: x.SwitchState(), InProcessSwitch: x.switcher != nil}, nil
+		Switch: x.SwitchState(), InProcessSwitch: x.switcher != nil, AcquiresActivations: x.acquirer() != nil}, nil
 }
 
 // ErrV3CandidateSuperseded is returned when the candidate the members signed readiness for is not the one this validator would derive any
