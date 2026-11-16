@@ -82,9 +82,28 @@ URETH_KEYS = frozenset({'cap_drop', 'cpus', 'entrypoint', 'image', 'logging', 'm
 URETH_SERVICE = re.compile(r'^ureth\d+$')
 
 
+# Compose's interpolation (compose-go template): `$$` is an escaped `$`, `$NAME` and `${...}` are substituted (names case-insensitive); any other `$`
+# is left as written. A string Compose would render differently from its text is not judged.
+COMPOSE_REWRITES = re.compile(r'\$(?:\$|\{|[_A-Za-z])')
+
+
+def key_preflight():
+    """The ureth key preflight wrapper's head exactly as generate.py and joiner.py write it (ureth_key.entrypoint, bft-core#1148): /bin/sh -c PREFLIGHT
+    ureth, then ureth's own argv. PREFLIGHT is written unescaped; it is accepted only while Compose leaves it as written (its one `$` is "$@")."""
+    import sys
+    if str(TESTNET) not in sys.path:
+        sys.path.insert(0, str(TESTNET))
+    import ureth_key
+    head = ureth_key.entrypoint([])
+    if COMPOSE_REWRITES.search(ureth_key.PREFLIGHT):
+        raise SystemExit('ureth_key.PREFLIGHT holds text Compose would interpolate: the manifest cannot judge the generated entrypoint (refused)')
+    return head
+
+
 def effective_argv(name, service):
-    """The arguments SERVICE runs with, in the only form generate.py writes: exactly its keys (URETH_KEYS), `entrypoint` a list of plain strings. Anything
-    else is refused, so Compose is never emulated: no extends or command, no string entrypoint, no argument holding `$`, a backslash or a quote."""
+    """The arguments SERVICE runs with, in the only form generate.py writes: exactly its keys (URETH_KEYS), `entrypoint` a list of plain strings, behind
+    the node key preflight (key_preflight: exactly ureth_key's text, stripped) or bare. Anything else is refused, so Compose is never emulated: no extends
+    or command, no string entrypoint, no other argument holding `$`, a backslash or a quote (a `$$` too: Compose would render it `$`)."""
     if not isinstance(service, dict) or set(service) != URETH_KEYS:
         extra = sorted(set(service) - URETH_KEYS) if isinstance(service, dict) else []
         missing = sorted(URETH_KEYS - set(service)) if isinstance(service, dict) else []
@@ -92,6 +111,13 @@ def effective_argv(name, service):
     ep = service['entrypoint']
     if not isinstance(ep, list) or not all(isinstance(x, str) for x in ep):
         raise SystemExit(f'{name}\'s entrypoint is not a list of strings ({type(ep).__name__}): refused')
+    head = key_preflight()
+    if ep[:len(head)] == head:
+        ep = ep[len(head):]
+        if not ep:
+            raise SystemExit(f'{name}\'s entrypoint is the key preflight with no command after it (refused)')
+    elif ep[:2] == head[:2]:
+        raise SystemExit(f'{name}\'s entrypoint is a shell wrapper other than the generated key preflight (ureth_key.entrypoint): refused')
     odd = [x for x in ep if any(c in x for c in '$\\\'"')]
     if odd:
         raise SystemExit(f'{name}\'s entrypoint has arguments Compose would rewrite (interpolation, escapes or quotes): {odd[:3]} (refused)')
