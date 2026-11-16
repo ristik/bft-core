@@ -693,6 +693,16 @@ func checkpointOf(root *ExecutedBlock) (*rcnet.CommittedBlock, *basetypes.Unicit
 // the carrier, which is pruned everywhere) REFUSES with ErrHandoffRecord rather than serve the current root: a non-canonical copy served
 // once is retained by the bundle archive and served for good, and replicas then refuse the canonical one. The follower asks every root,
 // so another one, which did capture it, serves it. Only a store without checkpoint retention (tests) serves the current root.
+// CommittedHandoff is the handoff record the committed root holds in its committed phase, with the root's round; ok is false while the
+// root holds no committed record. It reads only the root's own control state, never the retained checkpoint: it is what tells the
+// manager that its own committed chain has ended its epoch (#1086), not the evidence of the activation.
+func (bt *BlockTree) CommittedHandoff() (record evmroot.OrderedHandoffRecord, round uint64, ok bool) {
+	bt.m.Lock()
+	defer bt.m.Unlock()
+	record, ok = committedRecord(bt.root.data)
+	return record, bt.root.data.GetRound(), ok
+}
+
 func (bt *BlockTree) HandoffCheckpoint() (*rcnet.CommittedBlock, *basetypes.UnicityTreeCertificate, evmroot.OrderedHandoffRecord, error) {
 	bt.m.Lock()
 	defer bt.m.Unlock()

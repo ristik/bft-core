@@ -41,7 +41,8 @@ func (x *ConsensusManager) judgeRetained(req *drctypes.IRChangeReq) (retainedVer
 	if err := x.refuseFrozenIR(req); err != nil {
 		return frozenVerdict(err), err
 	}
-	if x.viewResolver == nil {
+	resolver := x.resolver()
+	if resolver == nil {
 		_, err := x.irReqVerifier.VerifyRequest(round, req)
 		switch {
 		case err == nil:
@@ -51,7 +52,7 @@ func (x *ConsensusManager) judgeRetained(req *drctypes.IRChangeReq) (retainedVer
 		}
 		return retainedRefused, err
 	}
-	view, err := x.viewResolver.ResolveView(req.Partition, req.Shard, round, storage.PurposeCertify)
+	view, err := resolver.ResolveView(req.Partition, req.Shard, round, storage.PurposeCertify)
 	if err != nil {
 		return retainedUnknown, err
 	}

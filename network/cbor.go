@@ -37,6 +37,22 @@ func deserializeMsg(r io.Reader, msg any) error {
 	return nil
 }
 
+// deserializeMsgCounted is deserializeMsg on a frame read from src, and returns the frame's declared payload length.
+func deserializeMsgCounted(src *bufio.Reader, msg any) (uint64, error) {
+	length64, err := binary.ReadUvarint(src)
+	if err != nil {
+		return 0, fmt.Errorf("reading data length: %w", err)
+	}
+	if length64 == 0 {
+		return 0, fmt.Errorf("unexpected data length zero")
+	}
+	lengthInt64 := int64(length64) /* #nosec G115 its unlikely that value of length64 exceeds int64 max value */
+	if err := types.Cbor.Decode(io.LimitReader(src, lengthInt64), msg); err != nil {
+		return 0, fmt.Errorf("decoding message data: %w", err)
+	}
+	return length64, nil
+}
+
 // frameMsg prefixes the CBOR payload with its unsigned-varint length.
 func frameMsg(data []byte) []byte {
 	buf := make([]byte, binary.MaxVarintLen64, binary.MaxVarintLen64+len(data))

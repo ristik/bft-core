@@ -52,7 +52,7 @@ func TestFollowerRecoveryReplaysTheHistoricalLastCRFrontier(t *testing.T) {
 	qb := c.propose([]types.PartitionID{1}, nil)
 	rB := c.round
 	source := c.store
-	require.EqualValues(t, headRound, source.blockTree.root.data.GetRound(), "premise: the window is pending; pending=%d", len(source.blockTree.allUncommittedNodes()))
+	require.EqualValues(t, headRound, source.tree().root.data.GetRound(), "premise: the window is pending; pending=%d", len(source.tree().allUncommittedNodes()))
 	headBefore := lastCRs(t, mustBlock(t, source, headRound))
 	require.Len(t, headBefore, 2)
 

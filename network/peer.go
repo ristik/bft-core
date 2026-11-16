@@ -306,6 +306,15 @@ type MemberProtector struct {
 	retry       map[peer.ID]*memberRetry
 	windowStart time.Time
 	connect     func(ctx context.Context, ai peer.AddrInfo) error // the host's Connect; a test replaces it
+	now         func() time.Time                                  // the clock of the retry schedule; a test replaces it (nil: time.Now)
+}
+
+// clock is the keeper's time source: time.Now unless a test injected one.
+func (m *MemberProtector) clock() time.Time {
+	if m.now != nil {
+		return m.now()
+	}
+	return time.Now()
 }
 
 type memberRetry struct {
@@ -360,7 +369,7 @@ func (m *MemberProtector) Set(ctx context.Context, ids []peer.ID) {
 		}
 	}
 	m.dialMu.Lock()
-	m.retry, m.windowStart = map[peer.ID]*memberRetry{}, time.Now()
+	m.retry, m.windowStart = map[peer.ID]*memberRetry{}, m.clock()
 	m.dialMu.Unlock()
 	warm, cancel := context.WithCancel(ctx)
 	m.cancel = cancel
@@ -436,7 +445,7 @@ func (m *MemberProtector) Maintain(ctx context.Context, cfg MaintainConfig) {
 	ticker := time.NewTicker(cfg.Interval)
 	defer ticker.Stop()
 	for {
-		now := time.Now()
+		now := m.clock()
 		started := 0
 		missing := m.Disconnected()
 		rand.Shuffle(len(missing), func(i, j int) { missing[i], missing[j] = missing[j], missing[i] })
@@ -528,14 +537,14 @@ func (m *MemberProtector) startDial(ctx context.Context, id peer.ID, pace *Maint
 		}
 		st.failures++
 		delay := pace.Interval
-		if time.Since(m.windowStart) >= pace.RapidWindow {
+		if m.clock().Sub(m.windowStart) >= pace.RapidWindow {
 			delay = pace.Interval << min(st.failures, 16)
 			if pace.BackoffMax > 0 && delay > pace.BackoffMax {
 				delay = pace.BackoffMax
 			}
 			delay = delay/2 + time.Duration(rand.Int64N(int64(delay)+1)) // +-50% jitter
 		}
-		st.next = time.Now().Add(delay)
+		st.next = m.clock().Add(delay)
 	}()
 	return true, done
 }

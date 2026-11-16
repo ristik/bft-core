@@ -133,7 +133,7 @@ func (f *assignmentFixture) installShard(t *testing.T, conf *types.PartitionDesc
 			return map[types.PartitionShardID]*types.PartitionDescriptionRecord{f.shard: conf}, nil
 		}, identities: f.incumbent}
 	}
-	root := f.store.blockTree.Root()
+	root := f.store.tree().Root()
 	root.ShardState.States[f.shard] = si
 	tree, _, err := root.ShardState.UnicityTree(crypto.SHA256)
 	require.NoError(t, err)

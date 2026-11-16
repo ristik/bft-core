@@ -62,7 +62,7 @@ func withViewResolver(t *testing.T, cm *ConsensusManager, steady types.Partition
 	f := newFixture(t)
 	res := &partitionResolver{views: map[types.PartitionID]*storage.RequestRoundView{
 		steady: viewOf(t, f.infos, viewOpts{round: round, purpose: storage.PurposeTimeout, ucRound: 1, partition: steady})}}
-	cm.viewResolver = res
+	cm.SetViewResolver(res)
 	return res
 }
 

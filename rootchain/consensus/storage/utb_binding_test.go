@@ -65,7 +65,7 @@ func TestBindingIsOnlyForUTBEpochs(t *testing.T) {
 // ProcessQc applies the binding before anything is inserted or committed.
 func TestProcessQcRefusesAMismatchedEndorsementBeforeApplyingTheCertificate(t *testing.T) {
 	bStore := initBlockStoreFromGenesis(t, nil)
-	rBlock := bStore.blockTree.Root()
+	rBlock := bStore.tree().Root()
 	bStore.SetUTBBinding(func(qc *rctypes.QuorumCert) error {
 		if qc.UTB == nil {
 			return ErrUTBBinding
@@ -85,7 +85,7 @@ func TestProcessQcRefusesAMismatchedEndorsementBeforeApplyingTheCertificate(t *t
 
 func utbBindingStoreWithRootTwo(t *testing.T) *BlockStore {
 	bStore := initBlockStoreFromGenesis(t, nil)
-	rBlock := bStore.blockTree.Root()
+	rBlock := bStore.tree().Root()
 	mockBlockVer := mockIRVerifier{
 		verify: func(round uint64, irChReq *rctypes.IRChangeReq) (*types.InputRecord, error) {
 			luc, err := bStore.GetCertificate(irChReq.Partition, irChReq.Shard)
@@ -186,7 +186,7 @@ func utbBindingStoreWithRootTwo(t *testing.T) *BlockStore {
 	rh, err = bStore.Add(block, mockBlockVer)
 	require.NoError(t, err)
 	require.Nil(t, rh)
-	rBlock = bStore.blockTree.Root()
+	rBlock = bStore.tree().Root()
 	require.Equal(t, uint64(2), rBlock.BlockData.Round)
 	return bStore
 }

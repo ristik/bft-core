@@ -1698,3 +1698,87 @@ class ExpectationRetry(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class InstallRootAfterAnInProcessSwitch(unittest.TestCase):
+    """bft-core#1086 (astra on #1095): op_install_root takes a root that reports a switch state as installed only once that state is published Running or
+    Following in the target; Switching or Faulted with the target as activeEpoch goes to the (evidence-gated) restart."""
+
+    def laptop(self, *statuses):
+        """A laptop whose q3/status answers are `statuses` in turn (the last one repeats; None is a 503) and whose root holds no committed certificate
+        (q3/signers 422: a follower, or the synthetic anchor of a root that just switched)."""
+        lap = rj.Laptop.__new__(rj.Laptop)
+        lap.entity, lap.home = 5, Path(tempfile.mkdtemp())
+        lap.restarted, answers = [], list(statuses)
+
+        def post(path, body=b'{}', timeout=10):
+            if path == '/api/v1/q3/signers':
+                return 422, b'{}'
+            status = answers.pop(0) if len(answers) > 1 else answers[0]
+            return (503, b'unavailable') if status is None else (200, json.dumps(status).encode())
+        lap.root_post = post
+        lap.compose = lambda: {'services': {'root5': {'entrypoint': ['ubft', 'root-node', 'run']}}}
+        lap.dc = lambda *a, **k: lap.restarted.append(a)
+        lap.vol = lambda name: f'p_{name}'
+        lap.one = lambda *a, **k: None
+        lap.wait = lambda *a, **k: True
+        return lap
+
+    def install(self, *statuses):
+        lap = self.laptop(*statuses)
+        with unittest.mock.patch.object(rj, 'run', return_value=unittest.mock.Mock(returncode=0)), \
+                unittest.mock.patch.object(rj.handoff, 'SWITCH_WAIT_SECONDS', 0), unittest.mock.patch.object(rj.handoff.time, 'sleep'), \
+                unittest.mock.patch.object(rj.time, 'sleep'):
+            return lap.op_install_root(3), lap.restarted
+
+    def restarted(self, calls):
+        return any('stop' in call for call in calls)
+
+    def test_unavailable_then_switching_or_faulted_is_restarted(self):
+        for phase in ('switching', 'faulted'):
+            result, calls = self.install(None, {'activeEpoch': 3, 'switch': {'phase': phase, 'epoch': 2, 'target': 3}})
+            self.assertNotIn('already', result, phase)
+            self.assertTrue(self.restarted(calls), f'{phase}: an unavailable first status never stands in for a published switch')
+
+    def test_unavailable_throughout_is_restarted(self):
+        result, calls = self.install(None)
+        self.assertNotIn('already', result)
+        self.assertTrue(self.restarted(calls))
+
+    def test_unavailable_then_published_is_installed(self):
+        result, calls = self.install(None, {'activeEpoch': 3, 'switch': {'phase': 'running', 'epoch': 3, 'target': 3, 'tookMs': 31}})
+        self.assertEqual(result, {'already': True, 'inProcess': True, 'switchMs': 31})
+        self.assertEqual(calls, [])
+
+    def test_unavailable_then_an_older_image_follower_is_installed(self):
+        result, calls = self.install(None, {'activeEpoch': 3, 'follower': True})
+        self.assertEqual(result, {'already': True})
+        self.assertEqual(calls, [])
+
+    def test_the_status_fallback_of_root_epoch_is_switch_aware(self):
+        for phase in ('switching', 'faulted'):
+            self.assertIsNone(self.laptop({'activeEpoch': 3, 'switch': {'phase': phase, 'epoch': 2, 'target': 3}}).root_epoch(), phase)
+        self.assertEqual(self.laptop({'activeEpoch': 3, 'switch': {'phase': 'running', 'epoch': 3}}).root_epoch(), 3)
+        self.assertEqual(self.laptop({'activeEpoch': 3, 'follower': True}).root_epoch(), 3)
+
+    def test_a_published_switch_is_installed(self):
+        for phase in ('running', 'following'):
+            result, restarted = self.install({'activeEpoch': 3, 'switch': {'phase': phase, 'epoch': 3, 'target': 3, 'tookMs': 30}})
+            self.assertEqual(result, {'already': True, 'inProcess': True, 'switchMs': 30}, phase)
+            self.assertEqual(restarted, [], phase)
+
+    def test_switching_or_faulted_is_never_taken_from_the_raw_active_epoch(self):
+        for phase, epoch in (('switching', 2), ('faulted', 2)):
+            result, restarted = self.install({'activeEpoch': 3, 'switch': {'phase': phase, 'epoch': epoch, 'target': 3}})
+            self.assertNotIn('already', result, phase)
+            self.assertTrue(any('stop' in call for call in restarted), f'{phase}: the root is restarted (the drive gated it on evidence)')
+
+    def test_an_older_image_is_judged_by_its_epoch_as_before(self):
+        result, restarted = self.install({'activeEpoch': 3, 'follower': True})
+        self.assertEqual(result, {'already': True})
+        self.assertEqual(restarted, [])
+
+    def test_a_root_installed_by_an_earlier_restart_is_installed(self):
+        result, restarted = self.install({'activeEpoch': 3, 'switch': {'phase': 'running', 'epoch': 3}})
+        self.assertEqual(result, {'already': True})
+        self.assertEqual(restarted, [])

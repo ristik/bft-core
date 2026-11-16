@@ -1034,6 +1034,23 @@ class Rehearsal:
         except (handoff_ops.HandoffError, ValueError):
             return None
 
+    def q3_status(self, i, transport):
+        """Root i's q3/status answer, or None while it does not answer."""
+        try:
+            status, body = transport.post(i, '/api/v1/q3/status', b'{}')
+            return json.loads(body) if status == 200 else None
+        except (handoff_ops.HandoffError, ValueError):
+            return None
+
+    def switched_roots(self, transport):
+        """The roots that switched into the target epoch in process (bft-core#1086): a root that reports a switch state is waited for (handoff.switched_in_process:
+        an unavailable or Switching answer is no evidence; a declined, faulted or late switch is not a switch); a root that reports none is not one."""
+        out = set()
+        for i in range(1, self.n + 1):
+            if handoff.switched_in_process(lambda i=i: self.q3_status(i, transport), self.target) is not None:
+                out.add(i)
+        return out
+
     def root_listens(self, i, transport):
         try:
             transport.post(i, '/api/v1/q3/signers', b'{}')
@@ -1050,14 +1067,23 @@ class Rehearsal:
         work = self.gen / 'network' / 'handoff'
         self.expect((work / 'v3-body-id.txt').is_file(), 'the candidate files exist (run pos-propose first)')
         transport = handoff_ops.DockerTransport(self.gen)
+        # bft-core#1086: a root that switched into the epoch inside its process at its own commit (q3/status: the switch published Running or Following in
+        # it) is installed and is not restarted; every other root is, and none of those may hold a certificate of the epoch before its install restart
+        switched = self.switched_roots(transport)
         for i in self.members():
+            if i in switched:
+                continue
             self.expect(self.root_epoch(i, transport) == self.target - 1, f'root {i} has no certificate of epoch {self.target} before its install restart')
+        if switched:
+            self.say(f'  switched into epoch {self.target} in process (not restarted): roots {sorted(switched)}')
         override = self.gen / f'compose.install-epoch-{self.target}.json'
         if not override.exists():
             override.write_text(json.dumps(handoff.install_override(compose, self.target), indent=1) + '\n')
         base = handoff_ops.compose_files(self.gen)
         files = base + ['-f', str(override)]
         for i in range(1, self.n + 1):
+            if i in switched:
+                continue
             self.say(f'  installing epoch {self.target} in root {i}')
             subprocess.run(['docker', 'compose', *base, 'stop', f'root{i}'], check=True, capture_output=True)
             state = self.gen / f'validator{i}' / 'root'

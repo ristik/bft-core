@@ -130,6 +130,8 @@ function start_root_nodes() {
         fi
         # the shards of a B1 deployment (--b1-profile) refuse a committee above the registry's 16 members; the roots admit the handoff with the same bound
         [ -z "${EVM_B1_PROFILE:-}" ] || profileArgs+=(--b1-registry)
+        # a lane that exercises the install restart itself keeps it from the genesis roots on (bft-core#1086; m2_start_root does the same)
+        [ -z "${M2_IN_PROCESS_SWITCH:-}" ] || profileArgs+=(--in-process-epoch-switch="$M2_IN_PROCESS_SWITCH")
       fi
       if [ "${P85_LANE:-0}" = 1 ]; then
         # proof of stake (briefs/p85-recovery-lane.md): the coupled runtime, the P85 control executor and the genesis committee as K
