@@ -77,6 +77,18 @@ Configure nginx from [nginx.conf.example](../../../deploy/testnet/nginx.conf.exa
 [faucet/nginx.conf.example](../../../deploy/testnet/faucet/nginx.conf.example) (real names, TLS, `nginx -t`, reload).
 **No container step of this guide has yet run on a live server** ([evidence](../../../deploy/testnet/evidence/README.md)).
 
+**EVM block interval** ([#1167](https://github.com/ristik/bft-core/issues/1167)). The package paces the EVM shard to about one block every 10 s
+(`--block-interval-ms`, default 10000; it becomes each shard node's `shard-node run --target-block-interval` and is recorded as `evm_block` in
+`manifest.json`). It is best effort and per node: the leader waits until the interval has passed since its previous block, a follower waits that much
+longer for it, and nothing checks it, so blocks stay valid whatever the interval. The shard conf's T2 is derived from it (10 s gives 20 s:
+`shard-node run` refuses an interval its T2 cannot cover, and `shard-node doctor --target-block-interval` reports the same rule). A larger T2 also means a
+silent leader's round times out after 20 s instead of 5 s, and a transaction waits up to one interval plus a round trip for its block when it reaches
+every validator (the gateway and the faucet relay send to all; the execution clients do not gossip): a transaction sent to one validator's client waits
+for that validator to lead, up to the committee size times the interval (measured 6 to 69 s at four validators), so give tools that take one
+`--eth-rpc` the comma-separated list of every validator. Pass
+`--block-interval-ms 0` for the unpaced cadence of the CI lanes (one block per certification round trip, about 2 s, T2 5 s); a pinned ubft without
+the flag needs it.
+
 ## 5. Verify before opening to the public
 **The gateway refuses a request that did not come through the trusted proxy:** a direct `eth_*` call to `127.0.0.1:8545` answers `400 {"error": "invalid proxy address"}` (`/healthz` is exempt), and so does `tester-check.py` (exit 2). Until nginx is in front, send the header the proxy would set: `-H 'X-Forwarded-For: 203.0.113.9'`; `observe.py` and `loadgen.py` do.
 ```sh
@@ -287,7 +299,7 @@ block-zero hash and faucet address. The old pin must get 409 (checked before the
 
 ### 8a. A shard's request is lost at every root, or certification does not progress (bft-core#976)
 
-Nothing at the roots replays a shard request after every root that held it (the per-validator buffer, the retained aggregated request, the leader's buffer: all in memory) has restarted or been replaced, and nothing detects the loss. What recovers the shard, when the **premises** hold, is the roots' own T2 timer, which does not depend on a request: a repeat of the shard's last input record is certified from `u + floor(T2 / (block rate / 2)) + 1` root rounds after the shard's last certificate `u`, and the shard then builds and sends a **new** request. The original signed request is not delivered: a repeat supersedes its authorization. The shard's unchanged re-send (on a duplicate of the certificate it holds, for example after the 30 s inactivity handshake) is a second path with its own limits: at most 10 re-sends, at least 5 s apart, to the same two ingress roots; 30 s is an inactivity threshold polled every 5 s, not a delivery deadline.
+Nothing at the roots replays a shard request after every root that held it (the per-validator buffer, the retained aggregated request, the leader's buffer: all in memory) has restarted or been replaced, and nothing detects the loss. What recovers the shard, when the **premises** hold, is the roots' own T2 timer, which does not depend on a request: a repeat of the shard's last input record is certified from `u + floor(T2 / (block rate / 2)) + 1` root rounds after the shard's last certificate `u`, and the shard then builds and sends a **new** request. The original signed request is not delivered: a repeat supersedes its authorization. The shard's unchanged re-send (on a duplicate of the certificate it holds, for example after the 30 s inactivity handshake) is a second path (T2 is 20 s on a package paced to 10 s blocks, 5 s unpaced: see §4) with its own limits: at most 10 re-sends, at least 5 s apart, to the same two ingress roots; 30 s is an inactivity threshold polled every 5 s, not a delivery deadline.
 
 **Premises:** a responsive root quorum, a live shard leader and shard quorum, a working executor and subscription, and reachable ingress roots. No finite bound holds when they do not (a root timeout can take 10 s, quorum loss halts advancement, a pending change or configuration switch suppresses T2 proposals, and the first proposal of a recovery run carries no repeat). Account for the recovery as `time to an eligible repeat proposal + its commit + shard delivery, application and fresh-request acceptance (R) + the fresh request's certification`; R was measured on the package at about 1 s only on successful cycles, and #886 records cycles with a paused next shard leader where no fresh request came.
 

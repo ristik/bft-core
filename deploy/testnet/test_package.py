@@ -102,17 +102,17 @@ class BlockInterval(unittest.TestCase):
         cfg=self.topo(4,block_interval_ms=10000)
         for i in range(1,5):
             shard=cfg['services']['shard%d'%i]['entrypoint']
-            self.assertEqual(shard[shard.index('--block-interval')+1],'10000ms')
+            self.assertEqual(shard[shard.index('--target-block-interval')+1],'10000ms')
         for name,svc in cfg['services'].items():
-            if not name.startswith('shard'): self.assertNotIn('--block-interval',svc['entrypoint'],name)
+            if not name.startswith('shard'): self.assertNotIn('--target-block-interval',svc['entrypoint'],name)
     def test_a_fast_package_has_no_interval_flag(self):
         self.assertEqual(self.topo(4,block_interval_ms=0),self.topo(4),'0 is exactly the package without pacing')
-        self.assertFalse(any('--block-interval' in svc['entrypoint'] for svc in self.topo(4)['services'].values()))
+        self.assertFalse(any('--target-block-interval' in svc['entrypoint'] for svc in self.topo(4)['services'].values()))
     def test_a_joiner_entity_gets_the_interval(self):
         four=self.topo(4,block_interval_ms=10000)
         got=joiner.joiner_services(four,5,'r4','e4')
         shard=got['shard5']['entrypoint']
-        self.assertEqual(shard[shard.index('--block-interval')+1],'10000ms')
+        self.assertEqual(shard[shard.index('--target-block-interval')+1],'10000ms')
     def test_the_generator_derives_the_shard_conf_t2_and_records_both(self):
         source=(generate.HERE/'generate.py').read_text()
         main=source.split('def main')[1]

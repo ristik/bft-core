@@ -451,7 +451,7 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 		"local certified archive directory; requires --execution-journal. Replicas are derived from the shard's validators (the next three after this node in peer-ID order, any two sufficing) unless exactly two --archive-replica peer IDs are given")
 	cmd.Flags().DurationVar(&flags.UCRelayAfter, "uc-relay-after", time.Second,
 		"with no adopted certificate for this long, ask two active shard peers for the certificate they hold (verified like a root's response); 0 disables")
-	cmd.Flags().DurationVar(&flags.BlockInterval, "block-interval", 0,
+	cmd.Flags().DurationVar(&flags.BlockInterval, "target-block-interval", 0,
 		"best-effort minimum interval between this validator's blocks: the leader delays building until it has passed since its previous block, and a follower waits that much longer for it. "+
 			"Not part of block validity; peers and replay never check it. 0 (the default) builds one block per certification round trip. The shard conf's T2 must cover it (see 'shard-node doctor')")
 	cmd.Flags().BoolVar(&flags.ArchivePublicReads, "archive-public-reads", false,
@@ -575,7 +575,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	}
 	// A block interval the shard's T2 cannot cover turns every paced round into a root-chain timeout: refuse it before anything starts.
 	if err := shardnode.CheckBlockInterval(flags.BlockInterval, shardConf.T2Timeout, consensus.BlockRate*time.Millisecond); err != nil {
-		return fmt.Errorf("--block-interval: %w (regenerate the shard conf with a larger --t2-timeout, or lower the interval)", err)
+		return fmt.Errorf("--target-block-interval: %w (regenerate the shard conf with a larger --t2-timeout, or lower the interval)", err)
 	}
 
 	// How certification requests are signed is decided once, here, before anything is built: with the

@@ -45,7 +45,7 @@ DEFAULT_SUBNETS = {'faucet': '172.30.88.0/24', 'edge': '172.30.89.0/24'}
 # The install restart recreates a root from compose.yaml (compose.install-epoch-N.json sets no limits), so the quota holds across handoffs.
 ROOT_CPUS = 2.0
 # The EVM shard's target block interval (bft-core#1167, owner 2026-11-16: about one block every 10 s is fine for the testnet; the code default, 0, is one block per
-# certification round trip, about 1.6 to 2 s). Best effort and per node (`shard-node run --block-interval`): the leader delays its build, nothing checks it. The shard
+# certification round trip, about 1.6 to 2 s). Best effort and per node (`shard-node run --target-block-interval`): the leader delays its build, nothing checks it. The shard
 # conf's T2 must cover it, so it is derived from it (t2_for_block_interval); rehearsals and CI pass --block-interval-ms 0 and keep today's cadence and T2.
 BLOCK_INTERVAL_MS = 10000
 # The T2 of a shard without a block interval: what every lane and earlier generation used.
@@ -67,8 +67,8 @@ def t2_for_block_interval(interval_ms):
     return max(BASE_T2_MS, -(-need // 1000) * 1000)
 
 def block_interval_flags(interval_ms):
-    """The shard node's `--block-interval` argument; none without an interval, so a fast package's command line is exactly the earlier one."""
-    return ['--block-interval', f'{interval_ms}ms'] if interval_ms else []
+    """The shard node's `--target-block-interval` argument; none without an interval, so a fast package's command line is exactly the earlier one."""
+    return ['--target-block-interval', f'{interval_ms}ms'] if interval_ms else []
 
 def uct_wei(text, what):
     """Wei of a decimal number of UCT (18 decimals), exactly: '200' -> 200 * 10**18. Refuses anything else."""
@@ -217,7 +217,7 @@ def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, wit
              payout=FAUCET_PAYOUT, subnets=None, root_cpus=ROOT_CPUS, block_interval_ms=0):
     """JSON is a YAML subset, accepted directly by Docker Compose. `utb`: the pinned EntryID of the UTB genesis entry (0x..), or None for the package without the signed history.
     `payout`: the faucet signer's payout per claim (UCT, network.json's). `subnets`: bridged_subnets(), the faucet and edge networks. `root_cpus`: each root's CPU quota.
-    `block_interval_ms`: the shard nodes' --block-interval (0: none)."""
+    `block_interval_ms`: the shard nodes' --target-block-interval (0: none)."""
     subnets = subnets or bridged_subnets()
     services = {}
     def service(name, image, command, mounts=(), memory='256m', cpu=0.5, networks=None, pod=None, **extra):
@@ -373,8 +373,8 @@ def main():
         version=subprocess.check_output(['go','version','-m',tool],text=True)
         if 'vcs.revision='+PINS['bft'] not in version or 'vcs.modified=true' in version:
             p.error(f'{Path(tool).name} must be built from clean pinned BFT source')
-    if a.block_interval_ms and '--block-interval' not in subprocess.run([ubft,'shard-node','run','--help'],capture_output=True,text=True).stdout:
-        p.error('the pinned ubft has no shard-node run --block-interval (bft-core#1167): bump pins.json past it, or pass --block-interval-ms 0')
+    if a.block_interval_ms and '--target-block-interval' not in subprocess.run([ubft,'shard-node','run','--help'],capture_output=True,text=True).stdout:
+        p.error('the pinned ubft has no shard-node run --target-block-interval (bft-core#1167): bump pins.json past it, or pass --block-interval-ms 0')
     if not a.offline_validation:
         if os.geteuid()!=0: p.error('live generation must run as root on Linux to assign UID 10001 ownership')
         subprocess.run(['docker','info'],check=True,stdout=subprocess.DEVNULL)

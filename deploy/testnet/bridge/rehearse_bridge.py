@@ -322,7 +322,8 @@ class BridgeRehearsal(SdkClients, BridgePos, Rehearsal):
                 return True
             self.send_via_gateway(self.gen / 'faucet-secrets', '0x' + '11' * 20)   # a block per transaction: the head must move, whatever the cadence of empty rounds
             return False
-        self.wait(f'the head passes the lock by more than the proof window ({PROOF_WINDOW})', past_window, 1200)
+        # one transaction, so at least one block, per poll: on a paced package (bft-core#1167) each costs about a block interval
+        self.wait(f'the head passes the lock by more than the proof window ({PROOF_WINDOW})', past_window, max(1200, 3 * PROOF_WINDOW * self.block_interval_s()))
         time.sleep(1.1)
         s, text = self.proof(block, nonce)
         self.expect(s == 404, 'a lock older than the proof window is not found (fetch the proof soon after locking)', f'status {s} {text[:160]!r}')

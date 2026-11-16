@@ -41,7 +41,7 @@ type shardNodeDoctorFlags struct {
 	JWTSecret string
 
 	DialTimeout time.Duration
-	// BlockInterval is the --block-interval the node runs with (shard-node run): checked against the shard conf's T2.
+	// BlockInterval is the --target-block-interval the node runs with (shard-node run): checked against the shard conf's T2.
 	BlockInterval time.Duration
 }
 
@@ -68,7 +68,7 @@ they're specific to what that executor needs (an Engine API endpoint to reach).`
 	cmd.Flags().StringVar(&flags.EthURL, "eth-url", "http://127.0.0.1:8545", "engine-api executor only: eth_* endpoint")
 	cmd.Flags().StringVar(&flags.JWTSecret, "jwt-secret", "", "engine-api executor only: path to the JWT secret (default: $UBFT_HOME/jwt.hex)")
 	cmd.Flags().DurationVar(&flags.DialTimeout, "dial-timeout", 5*time.Second, "timeout for network-reachability checks")
-	cmd.Flags().DurationVar(&flags.BlockInterval, "block-interval", 0, "the --block-interval this node runs with; checked against the shard conf's T2")
+	cmd.Flags().DurationVar(&flags.BlockInterval, "target-block-interval", 0, "the --target-block-interval this node runs with; checked against the shard conf's T2")
 	return cmd
 }
 
@@ -347,7 +347,7 @@ func loadJWTSecret(flags *shardNodeDoctorFlags) (engineapi.Secret, error) {
 // blockIntervalCheck is the doctor's view of shardnode.CheckBlockInterval, the same rule `shard-node run` refuses to start on.
 func blockIntervalCheck(interval, t2, rootBlockRate time.Duration) (bool, string, string) {
 	if err := shardnode.CheckBlockInterval(interval, t2, rootBlockRate); err != nil {
-		return false, err.Error(), fmt.Sprintf("regenerate the shard conf with --t2-timeout of at least %d (ms), or lower --block-interval",
+		return false, err.Error(), fmt.Sprintf("regenerate the shard conf with --t2-timeout of at least %d (ms), or lower --target-block-interval",
 			shardnode.MinT2ForBlockInterval(interval, rootBlockRate).Milliseconds())
 	}
 	if interval == 0 {
