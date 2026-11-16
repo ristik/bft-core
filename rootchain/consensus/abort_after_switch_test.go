@@ -56,8 +56,43 @@ func TestAbortAfterTheInProcessSwitchIsTooLate(t *testing.T) {
 	other = target
 	other.Network++
 	mismatched["another network"] = other
+	other = target
+	other.PredecessorBodyID = bytes.Repeat([]byte{0x6b}, 32)
+	mismatched["another predecessor"] = other
+	other = target
+	other.OldEpoch = 3
+	mismatched["a future epoch"] = other
+	other = target
+	other.OldEpoch = ^uint64(0)
+	mismatched["the largest epoch (no successor)"] = other
+	other = target
+	other.OldEpoch = 0
+	mismatched["epoch zero"] = other
 	for name, tgt := range mismatched {
 		_, err := m.HandoffAbortStatus(tgt)
 		require.ErrorIs(t, err, ErrHandoffAbortTarget, name)
 	}
+
+	// a root restarted after the successor committed: a new manager over its stores, whose committed head is a successor block
+	c.restart(1)
+	restarted := c.replicas[1].manager
+	_, _, err = restarted.handoffAbortStatusAtHead(target)
+	require.ErrorIs(t, err, ErrHandoffAbortTarget, "the restarted root's committed head is a successor block")
+	again, err := restarted.HandoffAbortStatus(target)
+	require.NoError(t, err, "restarted")
+	require.Equal(t, "too_late", again.State)
+	require.Equal(t, before.RecordID, again.RecordID)
+	require.Equal(t, before.OrderedRound, again.OrderedRound)
+	for name, tgt := range mismatched {
+		_, err := restarted.HandoffAbortStatus(tgt)
+		require.ErrorIs(t, err, ErrHandoffAbortTarget, "restarted: "+name)
+	}
+
+	// without the verified Q3 history there is no authenticated activation to answer from: the head's refusal stands
+	c.stopAll()
+	authority := m.q3
+	m.q3 = nil
+	_, err = m.HandoffAbortStatus(target)
+	m.q3 = authority
+	require.ErrorIs(t, err, ErrHandoffAbortTarget, "no Q3 authority")
 }
