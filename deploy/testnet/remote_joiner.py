@@ -50,12 +50,13 @@ import handoff_ops        # noqa: E402  HELPER (the operator POST made inside th
 import joiner             # noqa: E402  joiner_services (the entity's services, cloned from the last genesis entity's)
 import operator_rpc       # noqa: E402
 import remote_entity      # noqa: E402  PORTS, the forwards
+import ureth_key          # noqa: E402  the execution client's node key (bft-core#1148)
 
 PORTS = remote_entity.PORTS
 NETWORK_FILES = ('genesis.json', 'trust-base.json', 'full-shard-conf.json', 'aggregator-conf.json', 'b1-profile.json', 'pos-deployment.json',
                  'pos-genesis-identities.json', 'utb-genesis.cbor', 'utb-genesis.id', 'pos-plan.json')
-VOLUMES = ('root', 'evm', 'auth', 'ureth', 'archive', 'jwt', 'network', 'wallet', 'tools', 'work')
-PRIVATE = ('root', 'evm', 'auth', 'ureth', 'archive', 'jwt', 'wallet', 'work')
+VOLUMES = ('root', 'evm', 'auth', 'ureth', 'ureth-key', 'archive', 'jwt', 'network', 'wallet', 'tools', 'work')
+PRIVATE = ('root', 'evm', 'auth', 'ureth', 'ureth-key', 'archive', 'jwt', 'wallet', 'work')
 ROOT_POSTS = ('/api/v1/q3/signers', '/api/v1/q3/status', '/api/v1/handoff/plan', '/api/v1/handoff/intent', '/api/v1/handoff/endorse',
               '/api/v1/handoff/evm-assignment/context', '/api/v1/committee',   # the drive's verify asks every member's root (bft-core#1082)
               '/api/v1/q3/bundle')   # whether an installed root serves the new epoch's activation itself (bft-core#1080)
@@ -66,7 +67,7 @@ def subnet(project):
     return f'10.231.{16 + hashlib.sha256(project.encode()).digest()[0] % 224}.0/24'
 OPERATOR = ['--operator-socket', '/authority/operator.sock', '--operator-credential', '/authority/operator.cred']
 # The explicit cold restore (op_restore_start) empties ONLY the selected execution and bootstrap stores: the shard node's home (its keys and node-info
-# kept), its archive and the execution client's data. It never mounts the signing authority's volume (`auth`: the authority's anti-equivocation and
+# kept), its archive and the execution client's data (not its node key, in ureth-key). It never mounts the signing authority's volume (`auth`: the authority's anti-equivocation and
 # session history, the operator credential), the root's store, the wallet or the tunnel tools (astra, briefs/astra-q-1029-1043-answer.md Q2).
 COLD_RESTORE_VOLUMES = ('evm', 'archive', 'ureth')
 COLD_RESTORE_WIPE = ('find /evm -mindepth 1 -maxdepth 1 ! -name keys.json ! -name node-info.json -exec rm -rf {} + && '
@@ -217,6 +218,31 @@ def laptop_compose(host_compose, entity, root_id, evm_id, project, mac_host='hos
     used = sorted({m.split(':')[0] for svc in services.values() for m in svc.get('volumes', [])})
     return {'name': project, 'services': services, 'networks': {'validators': {'ipam': {'config': [{'subnet': subnet(project)}]}}},
             'volumes': {v: {'external': True, 'name': f'{project}_{v}'} for v in used}}
+
+
+URETH_KEY_MARK = 'urethKeyCreated'
+
+
+def ensure_ureth_key(lap, have, compose_file):
+    """The execution client's devp2p node key, made once in its own volume (bft-core#1148; a cold restore never mounts it). Only the FIRST init makes it:
+    state.json (in the home, outside every volume) records that it was made, and an entity whose compose already mounts it was initialized with one.
+    A key missing after that (the file or the whole volume lost) is refused, never replaced: a new key would be a new identity of an established node.
+    Returns 'kept' or 'created'."""
+    if have('ureth-key', ureth_key.FILE):
+        if not lap.state.get(URETH_KEY_MARK):   # made by an init from before the marker
+            lap.state[URETH_KEY_MARK] = now()
+            lap.save()
+        return 'kept'
+    mounted = compose_file.is_file() and any(m.split(':')[0] == ureth_key.DIR for svc in json.loads(compose_file.read_text())['services'].values()
+                                             for m in svc.get('volumes', []))
+    if lap.state.get(URETH_KEY_MARK) or mounted:
+        raise Failure(f'the execution client\'s node key ({lap.vol(ureth_key.DIR)}:/{ureth_key.FILE}) is missing, but this entity was initialized with one '
+                      f'({URETH_KEY_MARK}: {lap.state.get(URETH_KEY_MARK) or "its compose.json mounts it"}): restore the file from a backup of the volume; '
+                      'init never makes a new one (it would be a new identity of the node)')
+    lap.one(lap.rpc_image, ['-', 'create', '/k'], [f'{lap.vol(ureth_key.DIR)}:/k'], entrypoint='python3', input=(HERE / 'ureth_key.py').read_text())
+    lap.state[URETH_KEY_MARK] = now()   # recorded at once: a later failure of init must not make the next init take the key for a first one
+    lap.save()
+    return 'created'
 
 
 def set_scope(compose, entity, root_epoch, shard_epoch):
@@ -855,6 +881,7 @@ def init(host, generation, home, mac_host, allow_dirty=False):
     if not have('jwt', 'jwt.hex'):
         lap.one(lap.rpc_image, ['-c', 'import os,secrets;fd=os.open("/jwt/jwt.hex",os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600);os.write(fd,(secrets.token_hex(32)+"\\n").encode())'],
                 [f'{lap.vol("jwt")}:/jwt'], entrypoint='python3')
+    ensure_ureth_key(lap, have, home / 'compose.json')
     root_id = lap.ubft(['node-id', '--home', '/state'], [f'{lap.vol("root")}:/state:ro']).strip().splitlines()[-1]
     evm_id = lap.ubft(['node-id', '--home', '/state'], [f'{lap.vol("evm")}:/state:ro']).strip().splitlines()[-1]
     node_info = json.loads(lap.vol_read('root', 'node-info.json'))
