@@ -30,9 +30,9 @@ key is the signing authority's), but it has one key of its own: its devp2p node 
 `remote_joiner.py init`) makes it once as `validator<N>/ureth-key/p2p-secret` (directory 0700, file 0600, UID 10001), outside the data
 directory `validator<N>/ureth`, and mounts it read-only into `ureth<N>` only (`--p2p-secret-key /ureth-key/p2p-secret`). It is kept across
 restarts, `up --force-recreate`, image upgrades and a cold restore that empties `validator<N>/ureth`. A preflight in the service's entrypoint
-refuses to start when the file is missing or empty (exit 78, "refusing to start under a new identity"): ureth then restart-loops with that
+refuses to start when the file is missing, empty, unreadable or not a regular file (a symbolic link is refused) (exit 78, "refusing to start under a new identity"): ureth then restart-loops with that
 message instead of making a new key. Restore the file from the generation's backup (backup.py archives it); never create a new one in its
-place for a running generation. Generations made before #1148 keep reth's default: `validator<N>/ureth/discovery-secret`, made by reth on the
+place for a running generation. A repeated `remote_joiner.py init` likewise refuses a lost key once the entity was initialized with one (`urethKeyCreated` in its `state.json`, or a `compose.json` that mounts it). Generations made before #1148 keep reth's default: `validator<N>/ureth/discovery-secret`, made by reth on the
 first start (0644) and made again, silently, whenever the data directory is emptied. The Engine JWT (`validator<N>/jwt/jwt.hex`) is the one
 secret ureth shares, by design and only within its entity: the HMAC secret of its shard node's Engine API calls (the root reads it too, for
 q3-readiness).

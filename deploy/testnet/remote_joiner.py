@@ -50,6 +50,7 @@ import handoff_ops        # noqa: E402  HELPER (the operator POST made inside th
 import joiner             # noqa: E402  joiner_services (the entity's services, cloned from the last genesis entity's)
 import operator_rpc       # noqa: E402
 import remote_entity      # noqa: E402  PORTS, the forwards
+import ureth_key          # noqa: E402  the execution client's node key (bft-core#1148)
 
 PORTS = remote_entity.PORTS
 NETWORK_FILES = ('genesis.json', 'trust-base.json', 'full-shard-conf.json', 'aggregator-conf.json', 'b1-profile.json', 'pos-deployment.json',
@@ -217,6 +218,31 @@ def laptop_compose(host_compose, entity, root_id, evm_id, project, mac_host='hos
     used = sorted({m.split(':')[0] for svc in services.values() for m in svc.get('volumes', [])})
     return {'name': project, 'services': services, 'networks': {'validators': {'ipam': {'config': [{'subnet': subnet(project)}]}}},
             'volumes': {v: {'external': True, 'name': f'{project}_{v}'} for v in used}}
+
+
+URETH_KEY_MARK = 'urethKeyCreated'
+
+
+def ensure_ureth_key(lap, have, compose_file):
+    """The execution client's devp2p node key, made once in its own volume (bft-core#1148; a cold restore never mounts it). Only the FIRST init makes it:
+    state.json (in the home, outside every volume) records that it was made, and an entity whose compose already mounts it was initialized with one.
+    A key missing after that (the file or the whole volume lost) is refused, never replaced: a new key would be a new identity of an established node.
+    Returns 'kept' or 'created'."""
+    if have('ureth-key', ureth_key.FILE):
+        if not lap.state.get(URETH_KEY_MARK):   # made by an init from before the marker
+            lap.state[URETH_KEY_MARK] = now()
+            lap.save()
+        return 'kept'
+    mounted = compose_file.is_file() and any(m.split(':')[0] == ureth_key.DIR for svc in json.loads(compose_file.read_text())['services'].values()
+                                             for m in svc.get('volumes', []))
+    if lap.state.get(URETH_KEY_MARK) or mounted:
+        raise Failure(f'the execution client\'s node key ({lap.vol(ureth_key.DIR)}:/{ureth_key.FILE}) is missing, but this entity was initialized with one '
+                      f'({URETH_KEY_MARK}: {lap.state.get(URETH_KEY_MARK) or "its compose.json mounts it"}): restore the file from a backup of the volume; '
+                      'init never makes a new one (it would be a new identity of the node)')
+    lap.one(lap.rpc_image, ['-', 'create', '/k'], [f'{lap.vol(ureth_key.DIR)}:/k'], entrypoint='python3', input=(HERE / 'ureth_key.py').read_text())
+    lap.state[URETH_KEY_MARK] = now()   # recorded at once: a later failure of init must not make the next init take the key for a first one
+    lap.save()
+    return 'created'
 
 
 def set_scope(compose, entity, root_epoch, shard_epoch):
@@ -855,8 +881,7 @@ def init(host, generation, home, mac_host, allow_dirty=False):
     if not have('jwt', 'jwt.hex'):
         lap.one(lap.rpc_image, ['-c', 'import os,secrets;fd=os.open("/jwt/jwt.hex",os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600);os.write(fd,(secrets.token_hex(32)+"\\n").encode())'],
                 [f'{lap.vol("jwt")}:/jwt'], entrypoint='python3')
-    if not have('ureth-key', 'p2p-secret'):   # the execution client's devp2p node key, made once in its own volume (bft-core#1148); a cold restore never mounts it
-        lap.one(lap.rpc_image, ['-', 'create', '/k'], [f'{lap.vol("ureth-key")}:/k'], entrypoint='python3', input=(HERE / 'ureth_key.py').read_text())
+    ensure_ureth_key(lap, have, home / 'compose.json')
     root_id = lap.ubft(['node-id', '--home', '/state'], [f'{lap.vol("root")}:/state:ro']).strip().splitlines()[-1]
     evm_id = lap.ubft(['node-id', '--home', '/state'], [f'{lap.vol("evm")}:/state:ro']).strip().splitlines()[-1]
     node_info = json.loads(lap.vol_read('root', 'node-info.json'))

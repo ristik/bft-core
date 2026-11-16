@@ -7,7 +7,7 @@ cold restore or a joiner restore empties the data directory, the node comes back
 entity's directories are made (generate.py, joiner.py prepare, remote_joiner.py init), in the entity's own directory validator<N>/ureth-key/ (0700),
 file p2p-secret (0600, the service user's), outside the data directory, and mounts it read-only into ureth<N> only. ureth reads it with
 --p2p-secret-key; it cannot rewrite it, and a preflight in the service's entrypoint refuses to start when it is missing or empty, so a lost key is a
-visible restart loop with a clear message, never a new identity. The key is the execution client's alone: no other service mounts it, and it is
+visible restart loop with a clear message, never a new identity; so is a symbolic link or an unreadable file. The key is the execution client's alone: no other service mounts it, and it is
 not the root's, the shard node's or the signing authority's key.
 
     python3 ureth_key.py create DIR    make DIR/p2p-secret (DIR is created 0700 if absent); refuses an existing key. Standard library only: the
@@ -25,7 +25,9 @@ PATH = f'{MOUNT}/{FILE}'
 # secp256k1's group order: a node key is a scalar in [1, N-1]
 N = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
 
-PREFLIGHT = (f'if [ ! -s {PATH} ]; then echo "ureth: its persistent devp2p node key {PATH} (validator<N>/{DIR}/{FILE} of the generation) is missing or empty;'
+# -L first: -f, -s and -r follow a link, and a link (into the writable /state, say) would let reth write a new key where it points if the target went away
+PREFLIGHT = (f'if [ -L {PATH} ] || [ ! -f {PATH} ] || [ ! -s {PATH} ] || [ ! -r {PATH} ]; then echo "ureth: its persistent devp2p node key {PATH}'
+             f' (validator<N>/{DIR}/{FILE} of the generation) is missing, empty, unreadable, or not a regular file (a symbolic link is refused);'
              ' refusing to start under a new identity (bft-core#1148). Restore that file from the generation\'s backup; it is never regenerated." >&2;'
              ' exit 78; fi; exec "$@"')
 

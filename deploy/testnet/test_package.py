@@ -2086,6 +2086,59 @@ class UrethKey(unittest.TestCase):
                 self.assertIn('refusing to start under a new identity',r.stderr);self.assertIn('never regenerated',r.stderr)
             key.write_text('ab'*32)
             r=run();self.assertEqual((r.returncode,r.stdout),(0,'started --p2p-secret-key %s\n'%key))
+            # sol on #1155: test -s follows a link, so a non-empty key linked into the writable /state passed; a link is refused whatever it points to
+            target=Path(d)/'state-discovery-secret';target.write_text('cd'*32)
+            key.unlink();key.symlink_to(target)
+            r=run();self.assertEqual((r.returncode,r.stdout),(78,''),'a link to a readable non-empty file');self.assertIn('symbolic link is refused',r.stderr)
+            target.unlink()
+            r=run();self.assertEqual((r.returncode,r.stdout),(78,''),'a dangling link (reth would write a new key through it)')
+            key.unlink();key.mkdir()
+            r=run();self.assertEqual((r.returncode,r.stdout),(78,''),'a directory');key.rmdir()
+            key.write_text('ab'*32);key.chmod(0o000)
+            try:
+                if os.geteuid()!=0:   # root reads anything; the service runs as 10001
+                    r=run();self.assertEqual((r.returncode,r.stdout),(78,''),'an unreadable key');self.assertIn('unreadable',r.stderr)
+            finally: key.chmod(0o600)
+            r=run();self.assertEqual(r.returncode,0,'the readable regular file again')
+    def test_a_repeated_laptop_init_never_replaces_a_lost_key(self):
+        import remote_joiner
+        class Lap:
+            rpc_image='sha256:rpc'
+            def __init__(self): self.state={};self.saved=[];self.made=[]
+            def vol(self,v): return 'p_'+v
+            def save(self): self.saved.append(dict(self.state))
+            def one(self,image,args,mounts,**kw): self.made.append(mounts);volume['key']=True
+        with tempfile.TemporaryDirectory() as d:
+            compose=Path(d)/'compose.json';volume={'key':False}
+            have=lambda v,rel:(v,rel)==('ureth-key','p2p-secret') and volume['key']
+            lap=Lap()
+            self.assertEqual(remote_joiner.ensure_ureth_key(lap,have,compose),'created')   # the first init
+            self.assertEqual(lap.made,[['p_ureth-key:/k']]);self.assertIn(remote_joiner.URETH_KEY_MARK,lap.saved[-1],'the marker is saved at once')
+            compose.write_text(json.dumps({'services':{'ureth5':{'volumes':['ureth:/state','ureth-key:/ureth-key:ro']}}}))
+            self.assertEqual(remote_joiner.ensure_ureth_key(lap,have,compose),'kept');self.assertEqual(len(lap.made),1)   # init again: the key is there
+            volume['key']=False   # the file (or the whole volume) lost
+            with self.assertRaises(remote_joiner.Failure) as e: remote_joiner.ensure_ureth_key(lap,have,compose)
+            self.assertIn('restore the file',str(e.exception));self.assertEqual(len(lap.made),1,'no new key')
+            fresh=Lap()   # state.json lost too: the compose that mounts the key still says the entity was initialized with one
+            with self.assertRaises(remote_joiner.Failure): remote_joiner.ensure_ureth_key(fresh,have,compose)
+            self.assertEqual(fresh.made,[])
+            compose.unlink()   # the marker alone suffices
+            with self.assertRaises(remote_joiner.Failure): remote_joiner.ensure_ureth_key(lap,have,compose)
+            self.assertEqual(len(lap.made),1)
+            volume['key']=True;old=Lap()   # an entity whose key predates the marker: kept, and marked
+            self.assertEqual(remote_joiner.ensure_ureth_key(old,have,compose),'kept');self.assertIn(remote_joiner.URETH_KEY_MARK,old.state);self.assertEqual(old.made,[])
+    def test_reruns_of_generate_and_prepare_cannot_make_a_second_key(self):
+        import ureth_key
+        source=(Path(__file__).parent/'generate.py').read_text()
+        self.assertIn("if out.exists(): p.error('output exists: choose a new generation directory')",source)   # a generation is made once, into a new directory
+        with tempfile.TemporaryDirectory() as d:
+            gen=Path(d)/'gen';gen.mkdir();(gen/'compose.yaml').write_text(json.dumps(generate.topology(gen,4,{'root':['r%d'%i for i in range(4)],'evm':['e%d'%i for i in range(4)]},
+                {k:'sha256:'+'a'*64 for k in ['node','rpc','guard','signer']},'captcha')))
+            (gen/'validator5'/'ureth-key').mkdir(parents=True)   # a prepared joiner whose key was lost
+            with self.assertRaisesRegex(ValueError,'validator5 exists'): joiner.prepare(gen,'/nonexistent/ubft',5)
+            self.assertFalse((gen/'validator5'/'ureth-key'/'p2p-secret').exists())
+            ureth_key.create(gen/'k')
+            with self.assertRaises(FileExistsError): ureth_key.create(gen/'k')
     def test_generate_and_prepare_make_the_key_before_anything_starts(self):
         source=(Path(__file__).parent/'generate.py').read_text()
         self.assertIn("ureth_key.create(val/ureth_key.DIR)",source)
