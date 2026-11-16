@@ -14,7 +14,8 @@ on:
     # restore that build (scripts/ci/rehearsal-bundle.py key names the same inputs)
     branches: [integration/enshrined-evm]
     paths: ['deploy/testnet/pins.json', 'deploy/testnet/build-images.py', 'deploy/testnet/imagetag.py', 'deploy/testnet/Dockerfile.*', 'deploy/testnet/faucet/**',
-            'deploy/testnet/gateway.py', 'deploy/testnet/metrics_relay.py', 'scripts/ci/rehearsal-bundle.py', '.github/workflows/testnet-rehearsal.yml', 'go.mod']
+            'deploy/testnet/gateway.py', 'deploy/testnet/metrics_relay.py', 'deploy/testnet/.dockerignore', 'deploy/testnet/*.dockerignore',
+            'scripts/ci/rehearsal-bundle.py', '.github/workflows/testnet-rehearsal.yml', 'go.mod']
   workflow_dispatch:
     inputs:
       stages:

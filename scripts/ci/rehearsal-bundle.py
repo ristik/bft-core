@@ -134,10 +134,21 @@ def build_inputs():
     return sorted(set(files))
 
 
+# The ignore files that can shape a build context (docker reads <context>/.dockerignore, or <Dockerfile>.dockerignore next to the Dockerfile
+# in preference): hashed as present-with-content or absent, so adding, changing or removing one moves the key.
+IGNORE_FILES = ('deploy/testnet/.dockerignore', 'deploy/testnet/Dockerfile.rpc.dockerignore',
+                'deploy/testnet/faucet/.dockerignore', 'deploy/testnet/faucet/Dockerfile.gateway.dockerignore',
+                'deploy/testnet/faucet/Dockerfile.backend.dockerignore',
+                'deploy/testnet/artifacts/.dockerignore', 'deploy/testnet/artifacts/Dockerfile.dockerignore')
+
+
 def key():
     h = hashlib.sha256()
     for f in build_inputs():
         h.update(f.encode() + b'\0' + hashlib.sha256((REPO / f).read_bytes()).digest())
+    for f in IGNORE_FILES:
+        path = REPO / f
+        h.update(f.encode() + b'\0' + (hashlib.sha256(path.read_bytes()).digest() if path.is_file() else b'absent'))
     # the toolchains the build uses from the runner: go (setup-go, from this checkout's go.mod) and the default rustc; the runner image
     for tool in (['go', 'version'], ['rustc', '-V'], ['cargo', '-V']):
         h.update(out(*tool).encode() + b'\0')
