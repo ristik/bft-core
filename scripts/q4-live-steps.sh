@@ -895,6 +895,8 @@ q4_first_successor_held() {
   local r i hits=0 before t0 successors=$H3_ROOTS
   [ "$Q4_TURNOVER" != 1 ] || successors=$Q4_B_ENTITIES
   for r in $H3_ROOTS; do
+    # this row exercises the install restart: no root may run the in-process switch (bft-core#1086; M2_IN_PROCESS_SWITCH=false for the whole lane)
+    q4_status_of "$r" | jq -e '.switch == null' >/dev/null || { echo "root $r reports an in-process switch state: the Q4 lane must run with the switch off" >&2; return 1; }
     before=$(q3_signers_of "$r" | jq -r .epoch) || return 1
     [ "$before" = 2 ] || { echo "root $r reports a certificate of epoch $before before its install restart into 3" >&2; return 1; }
   done

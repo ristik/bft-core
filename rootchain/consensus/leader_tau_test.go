@@ -67,7 +67,7 @@ func TestTauOfAnUnknownLeaderRound(t *testing.T) {
 	}
 	resolvers := make([]*onLoopResolver, len(c.nodes))
 	for i, n := range c.nodes {
-		resolvers[i] = &onLoopResolver{ViewResolver: n.r.manager.viewResolver}
+		resolvers[i] = &onLoopResolver{ViewResolver: n.r.manager.resolver()}
 		n.r.manager.SetViewResolver(resolvers[i])
 	}
 	c.start(c.all()...)

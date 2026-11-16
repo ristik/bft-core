@@ -8,6 +8,7 @@ import os
 import subprocess
 from pathlib import Path
 import tempfile
+import unittest.mock
 import threading
 import time
 import unittest
@@ -290,6 +291,17 @@ class UtbProfile(unittest.TestCase):
         generate.check_authorities_unchanged(self.boot(4,self.PIN),self.topo(4,self.PIN),4)
         with self.assertRaisesRegex(RuntimeError,'never recreated'):
             generate.check_authorities_unchanged(self.boot(4,None),self.topo(4,self.PIN),4)
+        # astra on #1090: the whole service, not only its arguments
+        import copy
+        for field,change in (('image',lambda svc: svc.__setitem__('image','sha256:'+'b'*64)),
+                             ('volumes',lambda svc: svc.__setitem__('volumes',[v.replace('./network:','./network-other:') for v in svc['volumes']])),
+                             ('command',lambda svc: svc.__setitem__('command',['--extra'])),
+                             ('environment',lambda svc: svc.__setitem__('environment',{'UBFT_LINEAGE_UTB_GENESIS':'false'})),
+                             ('entrypoint',lambda svc: svc['entrypoint'].append('--recovery-unchecked-advance'))):
+            final=copy.deepcopy(self.topo(4,self.PIN))
+            change(final['services']['authority3'])
+            with self.assertRaisesRegex(RuntimeError,r"authority3 .*\b"+field+r"\b",msg=field):
+                generate.check_authorities_unchanged(self.boot(4,self.PIN),final,4)
         source=(Path(generate.__file__)).read_text()
         self.assertRegex(source,r"boot=immutable\(topology\([^\n]*utb=utb_pin",'main() starts the authorities from a compose that carries the UTB pin')
         self.assertIn('check_authorities_unchanged(boot,final,a.validators)',source)
@@ -2813,6 +2825,69 @@ class RootCpus(unittest.TestCase):
             done=subprocess.run([sys.executable,str(Path(__file__).parent/'generate.py'),'--out','/nonexistent/tn-x','--validators','4','--ubft','x','--keygen','x','--b1genesis','x',
                 '--images','x','--captcha-sitekey','a','--captcha-secret-file','x','--root-cpus',bad],text=True,capture_output=True)
             self.assertEqual(done.returncode,2,bad); self.assertIn('--root-cpus',done.stderr)
+
+
+
+class PosInstallAfterAnInProcessSwitch(unittest.TestCase):
+    """bft-core#1086: the rehearsal's pos-install restarts only the roots that did not switch into the epoch in process, after the check that each of those holds
+    no certificate of the epoch; a switched root (q3/status: the switch published Running or Following in it) is installed and is neither checked nor restarted."""
+
+    class Stop(Exception):
+        pass
+
+    def run_install(self, statuses, signers):
+        import rehearse
+        gen = Path(tempfile.mkdtemp())
+        (gen / 'network' / 'handoff').mkdir(parents=True)
+        (gen / 'network' / 'handoff' / 'v3-body-id.txt').write_text('ab' * 32)
+        asked, restarted = [], []
+
+        class Transport:
+            def post(self, i, path, body):
+                if path == '/api/v1/q3/status':
+                    s = statuses[i]
+                    return (503, b'') if s is None else (200, json.dumps(s).encode())
+                asked.append(i)
+                return (200, json.dumps({'epoch': signers[i]}).encode())
+
+        class Fake(rehearse.Rehearsal):
+            def __init__(self):
+                self.n, self.gen, self.target, self.joiners = len(statuses), gen, 2, set()
+            def say(self, *a): pass
+            def expect(self, ok, what, detail=''):
+                if not ok: raise rehearse.Failure(what)
+
+        def run(cmd, **k):
+            if 'stop' in cmd:
+                restarted.append(cmd[-1])
+                raise self.Stop()   # the restarts are not under test
+            return unittest.mock.Mock(returncode=0, stderr='', stdout='')
+        with unittest.mock.patch.object(handoff_ops, 'DockerTransport', lambda gen: Transport()), \
+                unittest.mock.patch.object(handoff_ops, 'load_compose', return_value={'services': {}}), \
+                unittest.mock.patch.object(handoff_ops, 'compose_files', return_value=[]), \
+                unittest.mock.patch.object(handoff, 'install_override', return_value={}), \
+                unittest.mock.patch.object(handoff, 'SWITCH_WAIT_SECONDS', 0), unittest.mock.patch('subprocess.run', side_effect=run):
+            try:
+                Fake().pos_install()
+            except self.Stop:
+                pass
+        return asked, restarted
+
+    def test_switched_roots_are_not_restarted(self):
+        published = {'activeEpoch': 2, 'switch': {'phase': 'running', 'epoch': 2, 'target': 2}}
+        statuses = {1: published, 2: published, 3: published, 4: {'activeEpoch': 1, 'switch': {'phase': 'running', 'epoch': 1, 'declined': 2}}}
+        asked, restarted = self.run_install(statuses, {1: None, 2: None, 3: None, 4: 1})
+        self.assertEqual(asked, [4], 'only the root to restart is checked for a certificate of the epoch (a switched one answers 422)')
+        self.assertEqual(restarted, ['root4'])
+
+    def test_an_older_image_or_a_faulted_switch_is_restarted_after_the_check(self):
+        import rehearse
+        statuses = {1: {'activeEpoch': 1}, 2: {'activeEpoch': 2, 'switch': {'phase': 'faulted', 'epoch': 1, 'target': 2}}}
+        asked, restarted = self.run_install(statuses, {1: 1, 2: 1})
+        self.assertEqual(asked, [1, 2])
+        self.assertEqual(restarted, ['root1'])
+        with self.assertRaises(rehearse.Failure):
+            self.run_install({1: {'activeEpoch': 1}}, {1: 2})   # a certificate of the epoch before the restart: the barrier fails
 
 
 if __name__=='__main__': unittest.main()

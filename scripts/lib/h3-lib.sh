@@ -253,25 +253,26 @@ h3_restart_roots() {
     # the others start CONCURRENTLY (m2_start_root waits 2-3 s per root for its listener, so one after the other the roots before the last could form the quorum and run the
     # switch while the last one is still starting). Any four of five can make a quorum, so the start of the last root is within the same few hundred milliseconds as the others'.
     local first pids=() rc=0 p; first=$(h3_first_root)
-    m2_start_root "$first" "$epoch" "" || return 1
+    # H3_BOOT_ROOT: a running root the restarted ones bootstrap to (roots that switched into the epoch in process, bft-core#1086)
+    m2_start_root "$first" "$epoch" "${H3_BOOT_ROOT:+$(m2_root_addr "$H3_BOOT_ROOT")}" || return 1
     for i in $H3_ROOTS; do
       [ "$i" != "$first" ] || continue
       ( m2_start_root "$i" "$epoch" "$(m2_root_addr "$first")" ) & pids+=($!)
     done
     for p in "${pids[@]}"; do wait "$p" || rc=1; done
     [ "$rc" = 0 ] || return 1
-    m2_wait_root_epoch "$(h3_first_root)" "$epoch"
+    m2_wait_root_epoch "${H3_WAIT_ROOT:-$(h3_first_root)}" "$epoch"
     return
   fi
   for i in $H3_ROOTS; do
-    prev=$(echo "$H3_ROOTS" | tr ' ' '\n' | grep -vx "$i" | head -1)
+    prev=${H3_BOOT_ROOT:-$(echo "$H3_ROOTS" | tr ' ' '\n' | grep -vx "$i" | head -1)}
     boot=$(m2_root_addr "$prev")
     stop_pidfile "test-nodes/root$i/pid" 'ubft root-node' || return 1
     for _ in $(seq 1 50); do lsof -nP -iTCP:"$(m2_rpc_port "$i")" -sTCP:LISTEN >/dev/null 2>&1 || break; sleep 0.2; done
     m2_archive_root_state "$i" "$epoch" || return 1
     m2_start_root "$i" "$epoch" "$boot" || return 1
   done
-  m2_wait_root_epoch "$(h3_first_root)" "$epoch"
+  m2_wait_root_epoch "${H3_WAIT_ROOT:-$(h3_first_root)}" "$epoch"   # H3_WAIT_ROOT: a member of the epoch when only some roots restart (bft-core#1086)
 }
 
 # reth_trust / reth_untrust (definitions only): every lane that reaches h3_start_reth needs them, not only the paired devnet that sources them first

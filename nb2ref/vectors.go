@@ -46,8 +46,10 @@ func h32(b [32]byte) Hex { return Hex(b[:]) }
 
 // Expect is a vector's expected outcome: Error empty means acceptance.
 type Expect struct {
-	Error string   `json:"error,omitempty"`
-	Args  []string `json:"args,omitempty"` // the custom error's arguments (vault errors), decimal or 0x hex
+	Error   string   `json:"error,omitempty"`
+	Args    []string `json:"args,omitempty"`         // the custom error's arguments (vault errors), decimal or 0x hex
+	OnChain string   `json:"onChainError,omitempty"` // the on-chain name where it differs from Error
+	Revert  Hex      `json:"revert,omitempty"`       // the exact on-chain revert data (selector and ABI arguments)
 }
 
 // VectorFile is the document.
@@ -164,15 +166,38 @@ func verdictJSON(v *Verdict) *VerdictJSON {
 
 // SealReceiptVector is a wallet's verification of a SegmentSealed receipt proof (section 12.2).
 type SealReceiptVector struct {
-	ID         string `json:"id"`
-	Deployment string `json:"deployment"`
-	Note       string `json:"note,omitempty"`
-	Receipt    Hex    `json:"receipt"`
-	Expect     Expect `json:"expect"`
-	Inner      string `json:"innerRule,omitempty"` // the rule SealReceipt wraps
-	Segment    uint64 `json:"segment,omitempty"`
+	ID         string      `json:"id"`
+	Deployment string      `json:"deployment"`
+	Note       string      `json:"note,omitempty"`
+	Receipt    Hex         `json:"receipt"`
+	Expect     Expect      `json:"expect"`
+	Inner      string      `json:"innerRule,omitempty"` // the rule SealReceipt wraps
+	NoReceipt  bool        `json:"noReceipt,omitempty"` // the wallet holds no seal receipt: a = 0 from H_0
+	Result     *SealResult `json:"result,omitempty"`
+}
+
+// SealResult is an accepted seal receipt's authenticated segment and the burn index it gives (section 12.2).
+type SealResult struct {
+	Segment    uint64 `json:"segment"`
+	HeadBefore Hex    `json:"headBefore,omitempty"`
 	HeadAfter  Hex    `json:"headAfter,omitempty"`
-	BurnIndex  uint64 `json:"burnIndex,omitempty"`
+	IDs        []Hex  `json:"ids"`
+	Root       Hex    `json:"root,omitempty"`
+	BurnIndex  uint64 `json:"burnIndex"`
+	StartHead  Hex    `json:"startHead"`
+}
+
+func sealResult(c *Config, sr *SealReceipt) *SealResult {
+	a, h := BurnIndex(c, sr)
+	out := &SealResult{BurnIndex: a, StartHead: h32(h), IDs: []Hex{}}
+	if sr != nil {
+		s := sr.Segment
+		out.Segment, out.HeadBefore, out.HeadAfter, out.Root = s.Index, h32(s.Before), h32(s.After), h32(s.Root)
+		for _, x := range s.Z {
+			out.IDs = append(out.IDs, h32(x))
+		}
+	}
+	return out
 }
 
 // GapVector is one gap proof against a set: root is M of the sorted ids; the proof is valid for eta iff Expect is empty.
@@ -207,6 +232,8 @@ type SegmentLogVector struct {
 	ExpectBefore Hex    `json:"expectedHeadBefore"`
 	Data         Hex    `json:"data"`
 	Expect       Expect `json:"expect"`
+	Root         Hex    `json:"root,omitempty"`      // M_j, when accepted
+	HeadAfter    Hex    `json:"headAfter,omitempty"` // H_{j+1}, when accepted
 }
 
 // VaultVector is a vault sequence from its constructed state (or a harness-injected one).
@@ -221,14 +248,16 @@ type VaultVector struct {
 
 // VaultState is the observable state: state() and the live buffers in arrival order.
 type VaultState struct {
-	Deposits    uint64 `json:"deposits"`
-	Segment     uint64 `json:"segment"`
-	Population  uint64 `json:"population"`
-	Outstanding string `json:"outstanding"`
-	Head        Hex    `json:"head"`
-	PrevHead    Hex    `json:"previousHead"`
-	Current     []Hex  `json:"current"`
-	Previous    []Hex  `json:"previous"`
+	Deposits    uint64   `json:"deposits"`
+	Segment     uint64   `json:"segment"`
+	Population  uint64   `json:"population"`
+	Outstanding string   `json:"outstanding"`
+	Head        Hex      `json:"head"`
+	PrevHead    Hex      `json:"previousHead"`
+	Current     []Hex    `json:"current"`
+	Previous    []Hex    `json:"previous"`
+	Accounting  Hex      `json:"accounting"` // the packed word A = n << 200 | c << 152 | m << 144 | Q
+	TagWords    [2][]Hex `json:"tagWords"`   // T_0, T_1
 }
 
 // VaultStep is one call.
@@ -248,6 +277,7 @@ type VaultStep struct {
 	Expect         Expect      `json:"expect"`
 	Inner          string      `json:"innerError,omitempty"`
 	Events         []EventJSON `json:"events"`
+	State          *VaultState `json:"state"` // the observable state after the step
 }
 
 // EventJSON is one emitted log.
@@ -286,6 +316,7 @@ type CapacityVector struct {
 	LO           uint64 `json:"otherBytes"`
 	K            uint64 `json:"K"`
 	PMax         uint64 `json:"pMax"`
+	BaseFits     bool   `json:"baseFits"` // the return without history fits L_max (L_T <= L_max and L_O <= L_max - L_T)
 	A            uint64 `json:"a,omitempty"`
 	CObs         uint64 `json:"currentSegment,omitempty"`
 	Reserve      uint64 `json:"returnReserveSegments,omitempty"`
@@ -319,6 +350,7 @@ type StateReadVector struct {
 // PrimitiveVectors are rule-level checks no whole input can reach.
 type PrimitiveVectors struct {
 	MinterScalars []MinterScalarVector `json:"minterScalars"`
+	Unlocks       []UnlockVector       `json:"unlockRecovery"`
 	Constants     map[string]Hex       `json:"constants"`
 }
 
@@ -329,6 +361,19 @@ type MinterScalarVector struct {
 	Valid  bool `json:"valid"`
 }
 
+// UnlockVector is one token-unlock signature checked at the primitive level (section 14.4, the NB2 unlock restriction):
+// VerifyUnlockDigest(key, digest, unlock). sdkValid says whether the pinned SDK relation (ids 0..3: recover with the supplied
+// id, require the source key, compact verify) accepts it; NB2 refuses every id 2 or 3, valid or not, as UnlockRecovery.
+type UnlockVector struct {
+	ID       string `json:"id"`
+	Note     string `json:"note,omitempty"`
+	Key      Hex    `json:"key"`    // the compressed source key
+	Digest   Hex    `json:"digest"` // the 32-byte unlock message H(C(b(sourceHash32), b(txHash32)))
+	Unlock   Hex    `json:"unlock"` // r32||s32||recoveryId
+	SDKValid bool   `json:"sdkValid"`
+	Expect   Expect `json:"expect"`
+}
+
 // expectOf renders an error as an expectation.
 func expectOf(err error) Expect {
 	if err == nil {
@@ -336,18 +381,35 @@ func expectOf(err error) Expect {
 	}
 	var ae *ArgsError
 	if errors.As(err, &ae) {
-		return Expect{Error: ae.Rule.Name, Args: ae.Args}
+		return Expect{Error: ae.Rule.Name, Args: ae.Args, Revert: revertData(ae.Rule, ae.Vals...)}
 	}
 	var pe *PositionError
 	if errors.As(err, &pe) {
-		return Expect{Error: pe.Rule.Name, Args: []string{fmt.Sprint(pe.Position)}}
+		return Expect{Error: pe.Rule.Name, Args: []string{fmt.Sprint(pe.Position)}, Revert: revertData(pe.Rule, pe.Position)}
 	}
 	var bc *BadConfigError
 	if errors.As(err, &bc) {
-		return Expect{Error: "BadConfig", Args: []string{fmt.Sprint(bc.Field)}}
+		return Expect{Error: "BadConfig", Args: []string{fmt.Sprint(bc.Field)}, Revert: revertData(ErrBadConfig, uint64(bc.Field))}
 	}
 	if r := RuleOf(err); r != nil {
-		return Expect{Error: r.Name}
+		e := Expect{Error: r.Name}
+		on := r
+		// The on-chain 0x0100 returns one boolean for epoch, interval and quorum (NB2-05 ruling 2026-11-15).
+		if r == ErrSealEpoch || r == ErrNoEntryForEpoch {
+			on = ErrQuorumNotMet
+			if errors.Is(err, ErrDepositUC) {
+				on = ErrDepositUC
+			}
+			e.OnChain = on.Name
+		}
+		// A seal receipt wrapping the retryable NoEntryForEpoch (section 14.6): the same EVM UC is DepositUC on chain.
+		if r == ErrSealReceipt && errors.Is(err, ErrNoEntryForEpoch) {
+			e.OnChain = ErrDepositUC.Name
+		}
+		if on.Section != "14.6" {
+			e.Revert = revertData(on)
+		}
+		return e
 	}
 	for e, name := range map[error]string{ErrStateReadNotAdmitted: "StateReadNotAdmitted", ErrCompanionUnknown: "CompanionUnknown", ErrCompanionProvider: "CompanionProvider"} {
 		if errors.Is(err, e) {
@@ -448,3 +510,44 @@ func checkExpect(id string, got error, want string) error {
 }
 
 func amountString(v *big.Int) string { return v.String() }
+
+// revertData is the exact on-chain revert payload of a rule: its selector and the ABI encoding of its arguments by the
+// signature's types (uint256, uint64, bytes32 are one word each; bytes is dynamic).
+func revertData(r *Rule, vals ...any) []byte {
+	sig := r.Signature()
+	sel := HE([]byte(sig))
+	out := append([]byte{}, sel[:4]...)
+	types := strings.Split(strings.TrimSuffix(sig[strings.IndexByte(sig, '(')+1:], ")"), ",")
+	if len(vals) == 0 || types[0] == "" {
+		return out
+	}
+	var heads, tails []byte
+	for i, v := range vals {
+		switch types[i] {
+		case "bytes":
+			b := v.([]byte)
+			off := u256u(uint64(32*len(vals) + len(tails)))
+			heads = append(heads, off[:]...)
+			ln := u256u(uint64(len(b)))
+			tails = append(tails, ln[:]...)
+			tails = append(tails, b...)
+			for len(tails)%32 != 0 {
+				tails = append(tails, 0)
+			}
+		default:
+			var w [32]byte
+			switch x := v.(type) {
+			case *big.Int:
+				w = u256(x)
+			case uint64:
+				w = u256u(x)
+			case [32]byte:
+				w = x
+			default:
+				panic(fmt.Sprintf("nb2: revert argument %T", v))
+			}
+			heads = append(heads, w[:]...)
+		}
+	}
+	return append(append(out, heads...), tails...)
+}

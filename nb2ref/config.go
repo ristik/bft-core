@@ -234,16 +234,18 @@ func DecodeConfig(b []byte, p Params) (*Config, error) {
 	if err := k[15].fixed(c.VerifierCodeHash[:]); err != nil {
 		return nil, cfgErr(15, err)
 	}
+	// Field 16 is complete, K in the build's admitted K set, before field 17 is read (section 4.1 stage order): a production
+	// Γ with K = 4 and B = 0 is BadConfig(16).
 	if c.K, err = k[16].uintIn(2, MaxK); err != nil {
 		return nil, cfgErr(16, err)
+	}
+	if !(p.K[c.K] && bits.OnesCount64(c.K) == 1) {
+		return nil, cfgErr(16, ErrIntRange)
 	}
 	if c.B, err = k[17].uintIn(2, MaxK); err != nil {
 		return nil, cfgErr(17, err)
 	}
 	if !p.Admits(c.K, c.B) {
-		if !(p.K[c.K] && bits.OnesCount64(c.K) == 1) {
-			return nil, cfgErr(16, ErrIntRange)
-		}
 		return nil, cfgErr(17, ErrIntRange)
 	}
 	if c.Qmax, err = k[18].amount(); err != nil {

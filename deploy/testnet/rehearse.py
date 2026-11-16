@@ -1034,6 +1034,23 @@ class Rehearsal:
         except (handoff_ops.HandoffError, ValueError):
             return None
 
+    def q3_status(self, i, transport):
+        """Root i's q3/status answer, or None while it does not answer."""
+        try:
+            status, body = transport.post(i, '/api/v1/q3/status', b'{}')
+            return json.loads(body) if status == 200 else None
+        except (handoff_ops.HandoffError, ValueError):
+            return None
+
+    def switched_roots(self, transport):
+        """The roots that switched into the target epoch in process (bft-core#1086): a root that reports a switch state is waited for (handoff.switched_in_process:
+        an unavailable or Switching answer is no evidence; a declined, faulted or late switch is not a switch); a root that reports none is not one."""
+        out = set()
+        for i in range(1, self.n + 1):
+            if handoff.switched_in_process(lambda i=i: self.q3_status(i, transport), self.target) is not None:
+                out.add(i)
+        return out
+
     def root_listens(self, i, transport):
         try:
             transport.post(i, '/api/v1/q3/signers', b'{}')
@@ -1050,14 +1067,23 @@ class Rehearsal:
         work = self.gen / 'network' / 'handoff'
         self.expect((work / 'v3-body-id.txt').is_file(), 'the candidate files exist (run pos-propose first)')
         transport = handoff_ops.DockerTransport(self.gen)
+        # bft-core#1086: a root that switched into the epoch inside its process at its own commit (q3/status: the switch published Running or Following in
+        # it) is installed and is not restarted; every other root is, and none of those may hold a certificate of the epoch before its install restart
+        switched = self.switched_roots(transport)
         for i in self.members():
+            if i in switched:
+                continue
             self.expect(self.root_epoch(i, transport) == self.target - 1, f'root {i} has no certificate of epoch {self.target} before its install restart')
+        if switched:
+            self.say(f'  switched into epoch {self.target} in process (not restarted): roots {sorted(switched)}')
         override = self.gen / f'compose.install-epoch-{self.target}.json'
         if not override.exists():
             override.write_text(json.dumps(handoff.install_override(compose, self.target), indent=1) + '\n')
         base = handoff_ops.compose_files(self.gen)
         files = base + ['-f', str(override)]
         for i in range(1, self.n + 1):
+            if i in switched:
+                continue
             self.say(f'  installing epoch {self.target} in root {i}')
             subprocess.run(['docker', 'compose', *base, 'stop', f'root{i}'], check=True, capture_output=True)
             state = self.gen / f'validator{i}' / 'root'
@@ -1523,15 +1549,31 @@ class Rehearsal:
             full = json.loads(self.exec_in(f'authority{i}', 'ubft', 'signing-authority', 'status', *operator))
             return {k: full[k] for k in ('authorityId', 'networkId', 'partitionId', 'shardEpoch', 'rootEpoch', 'shardConfHash', 'generation', 'signingKeyFingerprint', 'enrollmentComplete')}
         before = status(1)
+        pinned = json.loads(self.exec_in('authority1', 'ubft', 'signing-authority', 'status', *operator)).get('lineagePinned')
         rc, out, err = self.exec_rc('authority1', 'ubft', 'signing-authority', 'advance-epoch', *operator, '--trust-base', '/network/trust-base.json',
                                     '--shard-conf', '/network/full-shard-conf.json')
         self.say(f'  advance back to epoch 1: exit {rc}: {(out + err).strip()[-300:]}')
         (self.evh() / 'stale-trust-base.txt').write_text(f'exit {rc}\n{out}{err}')
-        # a pinned authority refuses the operator-trusted route outright (signing-advance-recovery-only, bft-core#1085); an unpinned one the context
-        self.expect(rc != 0 and ('signing-context-mismatch' in err or 'signing-advance-recovery-only' in err),
-                    'the authority refuses to be advanced back to the epoch-1 trust base and shard configuration', (out + err).strip()[-300:])
+        # a pinned authority refuses the operator-trusted route outright, whatever its input (bft-core#1085); an unpinned one refuses this stale context
+        refusal = 'signing-advance-recovery-only' if pinned else 'signing-context-mismatch'
+        self.expect(rc != 0 and refusal in err, f'the authority refuses to be advanced back to the epoch-1 trust base and shard configuration ({refusal})',
+                    (out + err).strip()[-300:])
         after = status(1)
         self.expect(after == before, 'the refused advance changes nothing in the authority status', f'{before} -> {after}')
+        if pinned:
+            # the proof route: every authentic activation it already holds, the current one and the older ones, is an idempotent replay (astra on #1090):
+            # it is accepted and changes neither the scope nor the generation (no session is issued: the current credential is the admitted one)
+            for epoch in range(2, self.target + 1):
+                path = net / 'handoff' / f'q3-bundle-{epoch}.cbor'
+                self.expect(path.is_file(), f'the activation bundle of epoch {epoch} was kept by pos-advance', str(path))
+                report = json.loads(self.exec_in('authority1', 'ubft', 'signing-authority', 'advance-with-proof', *operator, '--proof', f'/network/handoff/{path.name}',
+                                                 '--out', '/authority/client.cred', '--client-socket', '/authority/client.sock'))
+                (self.evh() / f'replay-proof-{epoch}.json').write_text(json.dumps(report, indent=1) + '\n')
+                steps = report.get('steps') or []
+                self.expect(len(steps) == 1 and steps[0].get('Replay') and not steps[0].get('Advanced') and not report.get('sessionIssued'),
+                            f'the retained activation of epoch {epoch} is a replay that advances nothing and issues no session', str(report)[:300])
+                replayed = status(1)
+                self.expect(replayed == before, f'the replay of epoch {epoch} leaves the scope and the generation as they were', f'{before} -> {replayed}')
         # (2) the old client credential
         auth = self.gen / 'validator1' / 'auth'
         old, current = auth / 'client.cred.pre-epoch-2', auth / 'client.cred'

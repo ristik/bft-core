@@ -230,7 +230,7 @@ func Test_Chain_NormalRecoveryRoundTrip(t *testing.T) {
 	sm := received(t, c.state())
 	bs, _, err := c.recoverInto(sm)
 	require.NoError(t, err)
-	require.Equal(t, c.store.blockTree.root.data.RootHash, bs.blockTree.root.data.RootHash)
+	require.Equal(t, c.store.tree().root.data.RootHash, bs.tree().root.data.RootHash)
 }
 
 // consistentHeadQCs returns the QC of the block and the commit QC which commits it, with the relationships the

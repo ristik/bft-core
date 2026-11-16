@@ -93,7 +93,7 @@ func Test_RecoveryPending_CertifiedBlockMustMatchItsQC(t *testing.T) {
 	toRound := sm.CommittedHead.GetRound() + 1
 	_, bs, err := validateLikeManager(t, c, sm, toRound)
 	require.NoError(t, err)
-	require.Equal(t, bs.GetHighQc().VoteInfo.CurrentRootHash, bs.blockTree.roundToNode[toRound].data.RootHash)
+	require.Equal(t, bs.GetHighQc().VoteInfo.CurrentRootHash, bs.tree().roundToNode[toRound].data.RootHash)
 
 	// the manipulation: the pending payload is changed, every signed certificate is untouched
 	require.Len(t, sm.Pending, 1)
@@ -190,7 +190,7 @@ func Test_RecoveryBinding_ShardsWithDifferentEpochStarts(t *testing.T) {
 		c2.next(1, 2)
 		for i := 0; i < 10; i++ {
 			_, _, err := c2.recoverInto(received(t, c2.state()))
-			require.NoError(t, err, "head round %d", c2.store.blockTree.root.data.GetRound())
+			require.NoError(t, err, "head round %d", c2.store.tree().root.data.GetRound())
 		}
 	}
 }

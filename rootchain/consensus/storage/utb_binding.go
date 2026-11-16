@@ -78,9 +78,9 @@ func (x *BlockStore) SetUTBBinding(b UTBBinding) { x.utbBinding = b }
 // terminal state of a handoff. The block must be the locally executed one the caller names: its epoch and executed state hash are compared, never taken
 // from the caller's claim alone.
 func (x *BlockStore) HandoffCommittedAt(round, epoch uint64, rootHash []byte) (record evmroot.OrderedHandoffRecord, ok bool, err error) {
-	block, err := x.blockTree.FindBlock(round)
+	block, err := x.tree().FindBlock(round)
 	if err != nil {
-		if root := x.blockTree.Root(); root != nil && round < root.GetRound() {
+		if root := x.tree().Root(); root != nil && round < root.GetRound() {
 			return record, false, fmt.Errorf("%w: round %d, root %d", ErrUTBAlreadyCommitted, round, root.GetRound())
 		}
 		return record, false, err

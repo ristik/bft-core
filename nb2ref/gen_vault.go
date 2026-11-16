@@ -181,6 +181,22 @@ func (g *gen) vault() error {
 			return s.redeemWith(eta("x"), 0, []byte{}, VerifierCall{Return: bad}, "accepts", "VerifierBadReturn", "").done()
 		},
 		func() error {
+			s := g.script("k4", "vault-verifier-revert-bound", "MAX_VERIFIER_REVERT = 1024: a revert of exactly 1024 bytes is VerifierRefused with those bytes; 1025 and 4096 bytes are VerifierBadReturn (never copied)")
+			rev := make([]byte, MaxVerifierRevert+1)
+			for i := range rev {
+				rev[i] = byte(i)
+			}
+			s.deposit(big1m, "").redeemWith(eta("x"), 0, []byte{}, VerifierCall{Revert: rev[:MaxVerifierRevert]}, "accepts", "VerifierRefused", "")
+			s.redeemWith(eta("x"), 0, []byte{}, VerifierCall{Revert: rev}, "accepts", "VerifierBadReturn", "")
+			return s.redeemWith(eta("x"), 0, []byte{}, VerifierCall{Revert: make([]byte, 4096)}, "accepts", "VerifierBadReturn", "").done()
+		},
+		func() error {
+			long := make([]byte, 4096)
+			copy(long, syntheticVerdict(d4, eta("x"), 0, 1, Recipient20("r")))
+			return g.script("k4", "vault-verifier-return-4096", "4096 bytes of return data, a valid verdict first: not exactly 192 bytes").deposit(big1m, "").
+				redeemWith(eta("x"), 0, []byte{}, VerifierCall{Return: long}, "accepts", "VerifierBadReturn", "").done()
+		},
+		func() error {
 			return g.script("k4", "vault-DomainMismatch", "").deposit(big1m, "").
 				redeemWith(eta("x"), 0, []byte{}, verdictWith(func(v *Verdict) { v.Domain = HU([]byte("other")) }), "accepts", "DomainMismatch", "").done()
 		},
