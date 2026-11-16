@@ -27,9 +27,11 @@ export interface Probe {
   transfers: number;
   conditions: string; // what besides the transfers moves the verdict: the distinct certificates and the segment need
   gas: bigint | null; // the preflight's gas for the token (the lane's replay of planReturn's inputs, the same model and inputs)
-  // the model's gas of one more transfer of this token's own average shape (its bytes and its signatures beyond the measured ones), rounded
-  // down: both of shapeHolds' sides are stricter with a smaller one; null when it cannot be computed (never a pair)
-  marginal: bigint | null;
+  // the model's gas of one more transfer of this token's own average shape (its bytes and signatures beyond the measured ones), and the gas
+  // one fewer saves: not the same where the excess bytes clip at zero (boundary_shape.ts marginals); rounded down, which makes both of
+  // shapeHolds' sides stricter; null when they cannot be computed (never a pair)
+  up: bigint | null;
+  down: bigint | null;
   real: Verdict; // planReturn's own verdict
 }
 
@@ -38,10 +40,10 @@ export interface Probe {
  * model planReturn applies. Null when it holds, else why not.
  */
 export function shapeHolds(pass: Probe, fail: Probe, limit: bigint): string | null {
-  if (pass.gas === null || fail.gas === null || pass.marginal === null || fail.marginal === null) return 'a gas or marginal is unknown';
+  if (pass.gas === null || fail.gas === null || pass.up === null || fail.down === null) return 'a gas or a counterfactual step is unknown';
   if (pass.gas > limit || fail.gas <= limit) return `the model's gas (${pass.gas}, ${fail.gas}) does not straddle the limit ${limit}`;
-  if (pass.gas + pass.marginal <= limit) return `${pass.label} with one more transfer of its own shape (${pass.gas} + ${pass.marginal}) is within the limit: ${fail.label}'s refusal is its overhead`;
-  if (fail.gas - fail.marginal > limit) return `${fail.label} with one transfer fewer of its own shape (${fail.gas} - ${fail.marginal}) is still over the limit: its refusal is its overhead`;
+  if (pass.gas + pass.up <= limit) return `${pass.label} with one more transfer of its own shape (${pass.gas} + ${pass.up}) is within the limit: ${fail.label}'s refusal is its overhead`;
+  if (fail.gas - fail.down > limit) return `${fail.label} with one transfer fewer of its own shape (${fail.gas} - ${fail.down}) is still over the limit: its refusal is its overhead`;
   return null;
 }
 
@@ -139,8 +141,8 @@ export async function findBoundary(probe: (transfers: number, i: number) => Prom
 
   // a token whose own shape puts the boundary next to it: a pass that one more transfer of its shape would take over the limit, a refusal that
   // one transfer fewer would bring within it (shapeHolds' two sides). A pair of them, adjacent and under one conditions, is the candidate.
-  const goodPass = (t: Probe): boolean => t.real === 'passes' && t.gas !== null && t.marginal !== null && t.gas <= o.limit && t.gas + t.marginal > o.limit;
-  const goodFail = (t: Probe): boolean => t.real === 'CapacityPreflight' && t.gas !== null && t.marginal !== null && t.gas > o.limit && t.gas - t.marginal <= o.limit;
+  const goodPass = (t: Probe): boolean => t.real === 'passes' && t.gas !== null && t.up !== null && t.gas <= o.limit && t.gas + t.up > o.limit;
+  const goodFail = (t: Probe): boolean => t.real === 'CapacityPreflight' && t.gas !== null && t.down !== null && t.gas > o.limit && t.gas - t.down <= o.limit;
 
   let k = clamp(o.estimate);
   let prev: { transfers: number; gas: bigint | null } = o.start;

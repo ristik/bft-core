@@ -50,6 +50,7 @@ import { decodeReceiptBacking } from '../../../packages/native-bridge-plugin/src
 import { u256 } from '../../../packages/native-bridge-plugin/src/nb2/cbor.js';
 import { TrustInput } from '../../../packages/native-bridge-plugin/src/trust.js';
 import { BoundaryNotFound, findBoundary, type Probe, type Verdict } from './boundary_search.js';
+import { marginals, type TokenShape } from './boundary_shape.js';
 import { refreshAll } from '../../../tester/trust.js';
 
 // ---- configuration ------------------------------------------------------------------------------------------------------------------
@@ -817,13 +818,13 @@ async function predict(w: Wallet, token: Uint8Array): Promise<{ ok: boolean; gas
  * transfer further has spent the one below; the search (boundary_search.ts) is bounded by BOUNDARY_PROBES.
  */
 /**
- * The model's gas of one more transfer of TOKEN's own average shape (MeasuredGasModel.redeemGasLimit, measured-nb2-05): a hop, the excess
- * evidence bytes its pair adds beyond the measured 1,026 (the pair's bytes averaged over the token's transfers), and its certificate's seal
- * signatures beyond the measured 3 (averaged likewise). Rounded down. Null, never a pair, when a seal does not decode or exceeds the bound.
- * LT is the evidence length the preflight charges (predict's bytes). The rest of the model (the mint's and the deposit's certificates, the
- * split levels, the pending burn, the gap proofs) is the token's fixed share: inside its gas, and judged by shapeHolds on both sides.
+ * TOKEN's shape as MeasuredGasModel.redeemGasLimit (measured-nb2-05) charges it, and the gas of one more and one fewer transfer of that shape
+ * (boundary_shape.ts marginals): its hops and split levels, LT (the evidence length the preflight charges, predict's bytes), its transfers'
+ * average pair bytes and seal signatures beyond the measured 3. Null steps, never a pair, when a seal does not decode or exceeds the bound.
+ * The rest of the model (the mint's and the deposit's certificates, the pending burn, the gap proofs) is the token's fixed share: inside its
+ * gas, and judged by shapeHolds on both sides.
  */
-async function marginalOf(token: Uint8Array, lT: number): Promise<{ marginal: bigint | null; pairBytes: number; extraSignatures: number }> {
+async function shapeOf(token: Uint8Array, lT: number): Promise<{ up: bigint | null; down: bigint | null; shape: TokenShape | null }> {
   const { lineageOf } = await import('../../../packages/native-bridge-plugin/src/nb2/index.js');
   const m = MEASURED_VERIFIER;
   const t = decodeToken(token);
@@ -831,11 +832,13 @@ async function marginalOf(token: Uint8Array, lT: number): Promise<{ marginal: bi
   const levels = lineage.length - 1;
   const hops = lineage.reduce((n, x) => n + x.transfers.length, 0) + 1 - lineage.length; // the pending burn is a transfer of the walk
   const n = t.transfers.length;
+  const none = { up: null, down: null, shape: null };
+  if (n === 0 || t.transfersRaw.length !== n) return none;
   let bytes = 0;
   let extra = 0;
   const sigs = new Map<string, number | null>();
   for (let i = 0; i < n; i++) {
-    bytes += 1 + (t.transfersRaw[i]?.length ?? 0) + encodeProof(t.proofs[i]).length; // the pair: a 2-array head, the transaction, its proof
+    bytes += 1 + t.transfersRaw[i].length + encodeProof(t.proofs[i]).length; // the pair: a 2-array head, the transaction, its proof
     const uc = t.proofs[i].uc;
     const key = hx(HU(uc));
     if (!sigs.has(key)) {
@@ -847,16 +850,11 @@ async function marginalOf(token: Uint8Array, lT: number): Promise<{ marginal: bi
       }
     }
     const c = sigs.get(key)!;
-    if (c === null || c > m.maxSignatures) return { marginal: null, pairBytes: 0, extraSignatures: 0 };
+    if (c === null || c > m.maxSignatures) return none;
     extra += Math.max(0, c - m.measuredSignatures);
   }
-  if (n === 0 || t.transfersRaw.length !== n) return { marginal: null, pairBytes: 0, extraSignatures: 0 };
-  const pairBytes = Math.floor(bytes / n);
-  const extraSigs = Math.floor(extra / n);
-  const shaped = m.baseBytes + m.bytesPerTransfer * hops + m.bytesPerSplitLevel * levels;
-  const excessNow = Math.max(0, lT - shaped);
-  const excessNext = Math.max(0, lT + pairBytes - (shaped + m.bytesPerTransfer));
-  return { marginal: m.perTransfer + m.perExcessByte * BigInt(excessNext - excessNow) + m.perExtraSignature * BigInt(extraSigs), pairBytes, extraSignatures: extraSigs };
+  const shape: TokenShape = { evidenceBytes: lT, hops, levels, pairBytes: Math.floor(bytes / n), extraSignatures: Math.floor(extra / n) };
+  return { ...marginals(shape, m), shape };
 }
 
 const BOUNDARY_CERTIFICATES = 16;
@@ -876,10 +874,10 @@ async function boundary(w: Wallet, label: string, estimate: number): Promise<voi
       real = e instanceof Nb2Error ? e.rule : e instanceof WalletError ? e.reason : String(e);
     }
     if (real !== 'passes' && real !== 'CapacityPreflight') throw new Error(`the boundary probe ${l} was refused for another reason: ${real}`);
-    const shape = await marginalOf(t, p.bytes);
-    const probe: Probe = { label: l, transfers, conditions: `${certificates.get(l)} certificates, need ${p.need}`, gas: p.gas, marginal: shape.marginal, real: real as Verdict };
-    log(`  ${l}: ${transfers} transfers, ${evidenceOf(t).length} evidence bytes (${shape.pairBytes} a transfer, ${shape.extraSignatures} extra signatures), ${probe.conditions}, `
-      + `preflight gas ${p.gas} (one more transfer of this shape ${shape.marginal}): planReturn ${real}`);
+    const sh = await shapeOf(t, p.bytes);
+    const probe: Probe = { label: l, transfers, conditions: `${certificates.get(l)} certificates, need ${p.need}`, gas: p.gas, up: sh.up, down: sh.down, real: real as Verdict };
+    log(`  ${l}: ${transfers} transfers, ${evidenceOf(t).length} evidence bytes (${sh.shape?.pairBytes} a transfer, ${sh.shape?.extraSignatures} extra signatures), ${probe.conditions}, `
+      + `preflight gas ${p.gas} (one transfer more +${sh.up}, one fewer -${sh.down}): planReturn ${real}`);
     return probe;
   };
   const probe = async (k: number, i: number): Promise<Probe> => {

@@ -56,9 +56,10 @@ function model(seed: number, o: Opts = {}): Model {
     const need = o.need?.(m.judged) ?? 3;
     m.judged++;
     const gas = BigInt(Math.round(baseGas(t.k) + (o.shift ?? 0) + 100_000 * t.certs + 150_000 * need + t.noise));
-    // one more transfer of this token's own shape: the model's step, rounded down (the driver's marginal)
-    const marginal = BigInt(Math.floor(baseGas(t.k + 1) - baseGas(t.k)));
-    return { label, transfers: t.k, conditions: `${t.certs} certificates, need ${need}`, gas, marginal, real: gas <= LIMIT ? 'passes' : 'CapacityPreflight' };
+    // one more and one fewer transfer of this token's own shape: the model's steps, rounded down (the driver's shapeOf)
+    const up = BigInt(Math.floor(baseGas(t.k + 1) - baseGas(t.k)));
+    const down = BigInt(Math.floor(baseGas(t.k) - baseGas(t.k - 1)));
+    return { label, transfers: t.k, conditions: `${t.certs} certificates, need ${need}`, gas, up, down, real: gas <= LIMIT ? 'passes' : 'CapacityPreflight' };
   };
   return m;
 }
@@ -172,7 +173,7 @@ test('the probe budget is a bound: BoundaryNotFound carries every probe', async 
 });
 
 test('a probe of another length than asked is refused', async () => {
-  const bad = async (k: number, i: number): Promise<Probe> => ({ label: `g${i}c`, transfers: k + 1, conditions: 'x', gas: 1n, marginal: 1n, real: 'passes' });
+  const bad = async (k: number, i: number): Promise<Probe> => ({ label: `g${i}c`, transfers: k + 1, conditions: 'x', gas: 1n, up: 1n, down: 1n, real: 'passes' });
   await assert.rejects(findBoundary(bad, async (p) => p, opts(200)), BoundaryNotFound);
 });
 
@@ -183,8 +184,8 @@ const exactBound = (): number => {
   while (baseGas(n + 1) + 1_600_000 + 450_000 <= Number(LIMIT)) n++;
   return n;
 };
-const probeOf = (label: string, transfers: number, gas: bigint, marginal: bigint | null): Probe =>
-  ({ label, transfers, conditions: '16 certificates, need 3', gas, marginal, real: gas <= LIMIT ? 'passes' : 'CapacityPreflight' });
+const probeOf = (label: string, transfers: number, gas: bigint, up: bigint | null, down: bigint | null = up): Probe =>
+  ({ label, transfers, conditions: '16 certificates, need 3', gas, up, down, real: gas <= LIMIT ? 'passes' : 'CapacityPreflight' });
 
 test('shapeHolds: the pair holds under each token\'s own shape, or it is refused', () => {
   assert.equal(shapeHolds(probeOf('p', 20, LIMIT - 50_000n, 100_000n), probeOf('f', 21, LIMIT + 50_000n, 100_000n), LIMIT), null);
@@ -192,6 +193,13 @@ test('shapeHolds: the pair holds under each token\'s own shape, or it is refused
   assert.match(shapeHolds(probeOf('p', 20, LIMIT - 150_000n, 100_000n), probeOf('f', 21, LIMIT + 50_000n, 100_000n), LIMIT)!, /p with one more transfer/);
   // 21 with one transfer fewer of its own shape is still over: its refusal is its overhead
   assert.match(shapeHolds(probeOf('p', 20, LIMIT - 50_000n, 100_000n), probeOf('f', 21, LIMIT + 150_000n, 100_000n), LIMIT)!, /f with one transfer fewer/);
+  // sol r8: the refusal's side takes the backward step. 1,100-byte pairs at zero excess: +200,064 forward, -190,000 back; a refusal at
+  // 60,195,000 is 60,005,000 with one transfer fewer, still over: refused, though its forward step would have taken it within
+  assert.match(shapeHolds(probeOf('p', 20, LIMIT - 50_000n, 200_064n, 190_000n), probeOf('f', 21, 60_195_000n, 200_064n, 190_000n), LIMIT)!, /f with one transfer fewer of its own shape \(60195000 - 190000\)/);
+  assert.equal(shapeHolds(probeOf('p', 20, LIMIT - 50_000n, 200_064n, 190_000n), probeOf('f', 21, 60_185_000n, 200_064n, 190_000n), LIMIT), null);
+  // and the pass's side the forward one
+  assert.equal(shapeHolds(probeOf('p', 20, LIMIT - 195_000n, 200_064n, 190_000n), probeOf('f', 21, LIMIT + 5_000n, 200_064n, 190_000n), LIMIT), null);
+  assert.notEqual(shapeHolds(probeOf('p', 20, LIMIT - 195_000n, 190_000n, 200_064n), probeOf('f', 21, LIMIT + 5_000n, 190_000n, 190_000n), LIMIT), null);
   // unknown inputs fail closed, and so does a pair whose model gas does not straddle the limit
   assert.notEqual(shapeHolds(probeOf('p', 20, LIMIT - 50_000n, null), probeOf('f', 21, LIMIT + 50_000n, 100_000n), LIMIT), null);
   assert.notEqual(shapeHolds(probeOf('p', 20, LIMIT + 1n, 100_000n), probeOf('f', 21, LIMIT + 50_000n, 100_000n), LIMIT), null);

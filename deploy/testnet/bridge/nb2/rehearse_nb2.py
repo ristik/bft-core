@@ -527,7 +527,8 @@ class NB2Rehearsal(Rehearsal):
         self.say(f'  boundary: {json.dumps(b["tries"], default=str)}')
         c = b['confirmed']
         lim = int(self.release()['pins']['userGasLimit'])
-        g = {k: (int(c[k]['gas']), int(c[k]['marginal'])) for k in ('pass', 'fail')} if all(c[k].get('gas') is not None and c[k].get('marginal') is not None for k in ('pass', 'fail')) else None
+        step = {'pass': 'up', 'fail': 'down'}   # the pass's forward step, the refusal's backward one (sol r8: they differ where the excess clips)
+        g = {k: (int(c[k]['gas']), int(c[k][step[k]])) for k in step} if all(c[k].get('gas') is not None and c[k].get(step[k]) is not None for k in step) else None
         # sol r7 on #1126: the boundary holds under each token's own shape (its bytes and signatures), not only under the recorded conditions
         self.expect(g is not None and g['pass'][0] <= lim < g['pass'][0] + g['pass'][1] and g['fail'][0] - g['fail'][1] <= lim < g['fail'][0],
                     f'under each token\'s own shape the boundary is the pair\'s: {b["pass"]["label"]} with one more transfer is over {lim}, {b["fail"]["label"]} with one fewer is within it',
