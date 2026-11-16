@@ -54,16 +54,30 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: The cache key of the node images' build (the same inputs, and so the same key, as testnet-rehearsal's image build)
+        id: key
+        run: python3 scripts/ci/rehearsal-bundle.py key | tee -a "$GITHUB_OUTPUT"
+      # Pull requests restore the build of exactly these inputs (exact key, no restore-keys); dispatch runs never restore. The bridge tools image is
+      # built every run: it carries dnb-tool from this checkout.
+      - name: Restore the node images' build of these pins (pull requests only)
+        id: cache
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/rehearsal-build-cache
+          key: ${{ steps.key.outputs.key }}
       - uses: actions/checkout@v4
         with:
           ref: ${{ steps.pins.outputs.bft }}
           path: pinned-bft
       - uses: actions/checkout@v4
+        if: ${{ steps.cache.outputs.cache-hit != 'true' }}
         with:
           repository: ristik/ureth
           ref: ${{ steps.pins.outputs.ureth }}
           path: pinned-ureth
       - uses: actions/checkout@v4
+        if: ${{ steps.cache.outputs.cache-hit != 'true' }}
         with:
           repository: ristik/aggregator-go
           ref: ${{ steps.pins.outputs.aggregator_go }}
@@ -85,19 +99,41 @@ jobs:
           repository: ristik/native-bridge-plugins
           ref: ${{ steps.pins.outputs.nbp }}
           path: pinned-nbp
-      - run: sudo apt-get update && sudo apt-get install -y clang libclang-dev libssl-dev pkg-config protobuf-compiler
+      - name: Load the restored node images' build (verified against pins.json and images.json; refused on any mismatch, never rebuilt over)
+        if: ${{ steps.cache.outputs.cache-hit == 'true' }}
+        run: |
+          python3 scripts/ci/rehearsal-bundle.py unpack "$RUNNER_TEMP/rehearsal-build-cache/bundle.tar.zst" \
+            ubft=pinned-bft/build/ubft keygen=/tmp/tn-keygen b1genesis=/tmp/tn-b1genesis h4pin=/tmp/tn-h4pin
+          echo "- node images and pinned tools restored from cache \`${{ steps.key.outputs.key }}\`" >>"$GITHUB_STEP_SUMMARY"
+      - if: ${{ steps.cache.outputs.cache-hit != 'true' }}
+        run: sudo apt-get update && sudo apt-get install -y clang libclang-dev libssl-dev pkg-config protobuf-compiler
       - uses: ./.github/actions/foundry   # Foundry v1.8.1 (digest-pinned archive)
       - uses: Swatinem/rust-cache@v2
+        if: ${{ steps.cache.outputs.cache-hit != 'true' }}
         with:
           cache-on-failure: true
           workspaces: |
             pinned-ureth
       - name: Build the node images from the pinned sources (aggregator A, the integration variant)
+        if: ${{ steps.cache.outputs.cache-hit != 'true' }}
         run: python3 deploy/testnet/build-images.py --bft-source pinned-bft --ureth-source pinned-ureth --aggregator-go-source pinned-aggregator-go
       - name: Build the bridge tools image (dnb-tool from this checkout, contracts and plug-ins at bridge/pins.json)
         run: python3 deploy/testnet/bridge/build-bridge-image.py --bft-source pinned-bft --contracts-source pinned-bridge-contracts --nbp-source pinned-nbp
       - run: go build -o /tmp/tn-keygen ./deploy/testnet/keygen
-      - run: go build -C pinned-bft -o /tmp/tn-b1genesis ./scripts/b1genesis
+      - if: ${{ steps.cache.outputs.cache-hit != 'true' }}
+        run: go build -C pinned-bft -o /tmp/tn-b1genesis ./scripts/b1genesis
+      - name: Save the node images' build of these pins (the bundle testnet-rehearsal's image build makes, h4pin included)
+        if: ${{ steps.cache.outputs.cache-hit != 'true' }}
+        run: |
+          go build -C pinned-bft -o /tmp/tn-h4pin ./scripts/h4-restore-pin
+          mkdir -p "$RUNNER_TEMP/rehearsal-build-cache"
+          python3 scripts/ci/rehearsal-bundle.py pack "$RUNNER_TEMP/rehearsal-build-cache/bundle.tar.zst" \
+            ubft=pinned-bft/build/ubft keygen=/tmp/tn-keygen b1genesis=/tmp/tn-b1genesis h4pin=/tmp/tn-h4pin
+      - if: ${{ steps.cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/rehearsal-build-cache
+          key: ${{ steps.key.outputs.key }}
       - name: Generate a --pos --utb generation (the cadence declared for the epoch-1 bridge steps)
         run: |
           umask 077

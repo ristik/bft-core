@@ -61,7 +61,7 @@ CAPTURE_MAX_LINES = 6000          # per service and window; the rest is counted,
 SECRET_LINE = re.compile(r'(?i)(secret|priv(ate)?[ _-]?key|mnemonic|passphrase|password|credential|\.cred\b|keystore|authorization|bearer|api[ _-]?key|\btoken\b|\bseed\b|ciphertext)')
 WITHHELD_LINE = '[line withheld: it matches a secret pattern]'
 SECRET_FILE = re.compile(r'(?i)(^password$|identity\.json$|secret|\.cred(\.|$)|\.key$|^keys?\.json$|^keystore\.json$|^priv|^jwt)')
-SECRET_DIRS = ('faucet-secrets', 'pos-owner-keys', 'auth', 'jwt')   # every file in these is a secret (auth and jwt are what the root and shard services mount besides their own state)
+SECRET_DIRS = ('faucet-secrets', 'pos-owner-keys', 'auth', 'jwt', 'ureth-key')   # every file in these is a secret (auth and jwt are what the root and shard services mount besides their own state; ureth-key, ureth's node key)
 
 
 class SecretScanError(Exception):
