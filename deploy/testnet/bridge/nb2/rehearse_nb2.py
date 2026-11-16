@@ -525,6 +525,11 @@ class NB2Rehearsal(Rehearsal):
         self.driver('boundary', 'big', 'g', str(est))
         b = self.outfile('boundary-g')
         self.say(f'  boundary: {json.dumps(b["tries"], default=str)}')
+        c = b['confirmed']
+        self.expect(b['fail']['transfers'] == b['pass']['transfers'] + 1 and b['fail']['conditions'] == b['pass']['conditions']
+                    and (c['pass']['real'], c['fail']['real']) == ('passes', 'CapacityPreflight') and c['pass']['conditions'] == c['fail']['conditions'] == b['pass']['conditions'],
+                    f'the boundary pair is adjacent ({b["pass"]["transfers"]} and {b["fail"]["transfers"]} transfers) under the same conditions ({b["pass"]["conditions"]}), '
+                    f'both judged again back to back ({len(b["tries"])} probes)', json.dumps(c, default=str))
         self.driver('burn', 'big', b['pass']['label'])
         self.driver('redeem', 'big', b['pass']['label'])
         o = self.outfile(f'redeem-{b["pass"]["label"]}')

@@ -49,6 +49,7 @@ import { HE, HU } from '../../../packages/native-bridge-plugin/src/nb2/crypto.js
 import { decodeReceiptBacking } from '../../../packages/native-bridge-plugin/src/nb2/deposit.js';
 import { u256 } from '../../../packages/native-bridge-plugin/src/nb2/cbor.js';
 import { TrustInput } from '../../../packages/native-bridge-plugin/src/trust.js';
+import { BoundaryNotFound, findBoundary, type Probe, type Verdict } from './boundary_search.js';
 import { refreshAll } from '../../../tester/trust.js';
 
 // ---- configuration ------------------------------------------------------------------------------------------------------------------
@@ -458,8 +459,12 @@ async function split(w: Wallet, from: string, owner: number, outs: string[]): Pr
   log(`  split ${from} into ${outs.join(' + ')}`);
 }
 
-/** N transfers of FROM to the wallet's own keys, all requests built offline from the known states and certified together. */
-async function chain(w: Wallet, from: string, to: string, n: number, rounds: boolean): Promise<void> {
+/**
+ * N transfers of FROM to the wallet's own keys, kept as TO, every request built offline from the known states. Certified as one aggregator
+ * batch by default (the rounds the batch happens to span), one round each with ROUNDS, or as GROUPS consecutive groups, each certified before
+ * the next is submitted: GROUPS distinct certificates whatever the length (one more when a group straddles a round), for the boundary probes.
+ */
+async function chain(w: Wallet, from: string, to: string, n: number, rounds: boolean, groups?: number): Promise<{ transfers: number; certificates: number }> {
   const agg = new LaneAggregator(lane.agg);
   let token = w.token(from);
   let owner = w.entry(from).owner;
@@ -480,14 +485,19 @@ async function chain(w: Wallet, from: string, to: string, n: number, rounds: boo
     }
   }
   if (!rounds) {
-    for (let i = 0; i < pending.length; i += 32) await Promise.all(pending.slice(i, i + 32).map((p) => agg.submit(p.cd)));
-    for (const p of pending) token = appendTransfer(token, p.tx, await agg.proof(p.cd));
+    const g = groups === undefined ? 1 : Math.min(groups, pending.length);
+    for (let j = 0, at = 0; j < g; j++) {
+      const group = pending.slice(at, (at = Math.round((pending.length * (j + 1)) / g)));
+      for (let i = 0; i < group.length; i += 32) await Promise.all(group.slice(i, i + 32).map((p) => agg.submit(p.cd)));
+      for (const p of group) token = appendTransfer(token, p.tx, await agg.proof(p.cd));
+    }
   }
   const v = await w.bridge.verifyToken(token);
   w.keep(to, token, owner, { amount: v.amount.toString() });
   const ucs = new Set(decodeToken(token).proofs.map((p) => hx(HU(p.uc))));
   out(`chain-${to}`, { transfers: decodeToken(token).transfers.length, distinctCertificates: ucs.size, bytes: token.length });
   log(`  ${to}: ${decodeToken(token).transfers.length} transfers under ${ucs.size} certificates, ${token.length} bytes`);
+  return { transfers: decodeToken(token).transfers.length, certificates: ucs.size };
 }
 
 let placeholder: Uint8Array | null = null;
@@ -801,21 +811,18 @@ async function predict(w: Wallet, token: Uint8Array): Promise<{ ok: boolean; gas
 
 /**
  * The largest transfer history whose return passes the wallet's preflight (the gas bound binds before L_max on this deployment), found on
- * live tokens: one held at the boundary (returned by the lane) and one a transfer above it (refused with CapacityPreflight). Each probe is a
- * fresh deposit chained to the predicted length, because a token checked one transfer further has spent the one below.
+ * live tokens: one held at the boundary (returned by the lane) and one a transfer above it (refused with CapacityPreflight), under the same
+ * conditions: the same distinct certificates (each probe is certified in BOUNDARY_CERTIFICATES rounds, whatever its length) and the same
+ * segment need, both judged again back to back at the end. Each probe is a fresh deposit chained to its length, because a token checked one
+ * transfer further has spent the one below; the search (boundary_search.ts) is bounded by BOUNDARY_PROBES.
  */
+const BOUNDARY_CERTIFICATES = 16;
+const BOUNDARY_PROBES = 16;
 async function boundary(w: Wallet, label: string, estimate: number): Promise<void> {
   const est = JSON.parse(readFileSync(join(WORK, 'out', `boundary-estimate-${label}e.json`), 'utf8'));
-  const g16 = big(est.probeGas);
-  const tries: { label: string; transfers: number; gas: bigint | null; real: string }[] = [];
-  let pass: { label: string; transfers: number } | null = null;
-  let fail: { label: string; transfers: number } | null = null;
-  let k = estimate;
-  for (let i = 0; i < 8; i++) {
-    const l = `${label}${i}`;
-    await deposit(w, l, 1n, undefined);
-    await chain(w, l, `${l}c`, k, false);
-    const t = w.token(`${l}c`);
+  const certificates = new Map<string, number>();
+  const judge = async (l: string, transfers: number): Promise<Probe> => {
+    const t = w.token(l);
     const p = await predict(w, t);
     // the real thing: planReturn's own preflight (it journals a plan; nothing irreversible)
     let real: string;
@@ -825,21 +832,30 @@ async function boundary(w: Wallet, label: string, estimate: number): Promise<voi
     } catch (e) {
       real = e instanceof Nb2Error ? e.rule : e instanceof WalletError ? e.reason : String(e);
     }
-    tries.push({ label: `${l}c`, transfers: k, gas: p.gas, real });
-    log(`  ${l}c: ${k} transfers, ${evidenceOf(t).length} evidence bytes, preflight gas ${p.gas}: planReturn ${real}`);
-    if (real === 'passes') { if (pass === null || k > pass.transfers) pass = { label: `${l}c`, transfers: k }; }
-    else if (real === 'CapacityPreflight') { if (fail === null || k < fail.transfers) fail = { label: `${l}c`, transfers: k }; }
-    else throw new Error(`the boundary probe was refused for another reason: ${real}`);
-    if (pass !== null && fail !== null && fail.transfers === pass.transfers + 1) break;
-    // the next length from the model's per-hop gas on these certificates
-    const h = p.gas !== null && k > 16 ? (p.gas - g16) / BigInt(k - 16) : MEASURED_VERIFIER.perTransfer;
-    const step = p.gas === null ? 1 : Number((pins.userGasLimit > p.gas ? pins.userGasLimit - p.gas : p.gas - pins.userGasLimit) / (h > 0n ? h : 1n));
-    k = real === 'passes' ? k + Math.max(1, step) : k - Math.max(1, step);
-    if (pass !== null && k <= pass.transfers) k = pass.transfers + 1;
-    if (fail !== null && k >= fail.transfers) k = fail.transfers - 1;
+    if (real !== 'passes' && real !== 'CapacityPreflight') throw new Error(`the boundary probe ${l} was refused for another reason: ${real}`);
+    const probe: Probe = { label: l, transfers, conditions: `${certificates.get(l)} certificates, need ${p.need}`, gas: p.gas, real: real as Verdict };
+    log(`  ${l}: ${transfers} transfers, ${evidenceOf(t).length} evidence bytes, ${probe.conditions}, preflight gas ${p.gas}: planReturn ${real}`);
+    return probe;
+  };
+  const probe = async (k: number, i: number): Promise<Probe> => {
+    const l = `${label}${i}`;
+    await deposit(w, l, 1n, undefined);
+    const c = await chain(w, l, `${l}c`, k, false, BOUNDARY_CERTIFICATES);
+    certificates.set(`${l}c`, c.certificates);
+    return judge(`${l}c`, c.transfers);
+  };
+  const rejudge = async (p: Probe): Promise<Probe> => judge(p.label, p.transfers);
+  let res;
+  try {
+    res = await findBoundary(probe, rejudge, {
+      estimate, limit: pins.userGasLimit, start: { transfers: est.probeTransfers, gas: big(est.probeGas) }, maxProbes: BOUNDARY_PROBES, min: BOUNDARY_CERTIFICATES,
+    });
+  } catch (e) {
+    if (e instanceof BoundaryNotFound) out(`boundary-${label}`, { pass: null, fail: null, tries: e.tries, error: e.message });
+    throw e;
   }
-  out(`boundary-${label}`, { pass, fail, tries });
-  if (pass === null || fail === null || fail.transfers !== pass.transfers + 1) throw new Error('no adjacent pass/refuse pair found');
+  out(`boundary-${label}`, { pass: res.pass, fail: res.fail, confirmed: res.confirmed, tries: res.tries, certificatesPerProbe: BOUNDARY_CERTIFICATES });
+  log(`  boundary: ${res.pass.transfers} transfers pass and ${res.fail.transfers} are refused, under ${res.pass.conditions}, confirmed back to back (${res.tries.length} probes)`);
 }
 
 /** The boundary estimate from a short live chain: the model's gas per further hop on this deployment's real certificates. */
@@ -1114,7 +1130,7 @@ async function main(): Promise<void> {
     case 'deposit': return deposit(await wallet(), pos[1], big(pos[2] ?? '0'), args.find((a) => a === '--plan-only' || a === '--adopt'));
     case 'transfer': return transfer(await wallet(), pos[1], pos[2], Number(pos[3]));
     case 'split': return split(await wallet(), pos[1], Number(pos[2]), pos.slice(3));
-    case 'chain': return chain(await wallet(), pos[1], pos[2], Number(pos[3]), flag('--rounds'));
+    case 'chain': await chain(await wallet(), pos[1], pos[2], Number(pos[3]), flag('--rounds')); return;
     case 'preflight': return preflight(await wallet(), pos[1]);
     case 'burn': return burn(await wallet(), pos[1], opt('--recipient'));
     case 'verdicts': return verdicts(await wallet(), pos.slice(1));
