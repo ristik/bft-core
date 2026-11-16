@@ -122,6 +122,9 @@ type q3SwitchResponse struct {
 	// Declined is a committed activation this root does not switch into in process (it installs across a restart), and why
 	Declined       uint64 `json:"declined,omitempty"`
 	DeclinedReason string `json:"declinedReason,omitempty"`
+	// Acquires says a root that does not hold the commit itself (a joiner, a follower, a lagging member) also switches in process, from an
+	// activation a root peer serves (#1086, PR 2); without it such a root installs across a restart
+	Acquires bool `json:"acquires,omitempty"`
 }
 
 func (a rootQ3API) statusResponse() (q3StatusResponse, error) {
@@ -132,7 +135,8 @@ func (a rootQ3API) statusResponse() (q3StatusResponse, error) {
 	out := q3StatusResponse{Network: st.Network, Genesis: hex.EncodeToString(st.Genesis[:]), ActiveEpoch: st.ActiveEpoch, Follower: st.Follower}
 	if st.InProcessSwitch {
 		out.Switch = &q3SwitchResponse{Phase: st.Switch.Phase.String(), Epoch: st.Switch.Epoch, Target: st.Switch.Target,
-			TookMs: st.Switch.Took.Milliseconds(), Error: st.Switch.Err, Declined: st.Switch.Declined, DeclinedReason: st.Switch.DeclinedReason}
+			TookMs: st.Switch.Took.Milliseconds(), Error: st.Switch.Err, Declined: st.Switch.Declined, DeclinedReason: st.Switch.DeclinedReason,
+			Acquires: st.AcquiresActivations}
 	}
 	if st.Staged != nil {
 		out.Staged = &q3StagedResponse{CandidateDigest: hex.EncodeToString(st.Staged.CandidateDigest[:]),

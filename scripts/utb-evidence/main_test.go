@@ -2,10 +2,10 @@ package main
 
 import (
 	"bytes"
+	"crypto"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"github.com/unicitynetwork/bft-core/bridgeprofile"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -22,6 +22,7 @@ import (
 	"github.com/unicitynetwork/bft-core/gettrustbase"
 	testcertificates "github.com/unicitynetwork/bft-core/internal/testutils/certificates"
 	"github.com/unicitynetwork/bft-core/internal/testutils/utbchain"
+	"github.com/unicitynetwork/bft-core/nb2ref"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/utbstore"
 )
@@ -189,13 +190,13 @@ func TestUCVerifyChecksEachCertificateUnderItsOwnEpoch(t *testing.T) {
 }
 
 // Several shards of one aggregator partition (the two-shard lane): a token holds certificates of both, each verifies under its own shard's configuration, and a
-// certificate of a configuration which was not given is refused, whichever order the configurations are listed in. Real two-shard certificates from the bridge
-// profile's aggregator world (one shard tree per certificate).
+// certificate of a configuration which was not given is refused, whichever order the configurations are listed in. Real two-shard certificates from the native
+// bridge v2 reference's aggregator fixture (nb2ref, one shard tree per certificate).
 func TestUCVerifyTwoShardsOfOnePartition(t *testing.T) {
 	dir := t.TempDir()
-	auth, err := bridgeprofile.NewAuthority("root-1")
+	auth, err := nb2ref.NewCommittee("root-1", 1)
 	require.NoError(t, err)
-	tb, err := auth.Genesis(bridgeprofile.DevNetwork, 1, 1)
+	tb, err := auth.Genesis(nb2ref.DevNetwork, 1, 1)
 	require.NoError(t, err)
 	gen, err := types.Cbor.Marshal(tb)
 	require.NoError(t, err)
@@ -205,25 +206,31 @@ func TestUCVerifyTwoShardsOfOnePartition(t *testing.T) {
 	require.NoError(t, os.WriteFile(bundleFile, bundle, 0o644))
 
 	left, right := types.ShardID{}.Split()
-	pdrL := bridgeprofile.FixtureShardPDR(bridgeprofile.DevNetwork, bridgeprofile.DevAggPart, left, bridgeprofile.DevChainID, "agg-0")
-	pdrR := bridgeprofile.FixtureShardPDR(bridgeprofile.DevNetwork, bridgeprofile.DevAggPart, right, bridgeprofile.DevChainID, "agg-1")
-	pdrOther := bridgeprofile.FixtureShardPDR(bridgeprofile.DevNetwork, bridgeprofile.DevAggPart, right, bridgeprofile.DevChainID, "agg-other") // not the one certified under
-	conf := func(name string, pdr *types.PartitionDescriptionRecord) string {
+	pdrL := nb2ref.FixturePDR(nb2ref.DevNetwork, nb2ref.DevAggPartition, left, 0, "agg-0")
+	pdrR := nb2ref.FixturePDR(nb2ref.DevNetwork, nb2ref.DevAggPartition, right, 0, "agg-1")
+	pdrOther := nb2ref.FixturePDR(nb2ref.DevNetwork, nb2ref.DevAggPartition, right, 0, "agg-other") // not the one certified under
+	conf := func(name string, pdr *types.PartitionDescriptionRecord) (string, *types.PartitionDescriptionRecord) {
 		enc, err := json.Marshal(pdr)
 		require.NoError(t, err)
 		f := filepath.Join(dir, name)
 		require.NoError(t, os.WriteFile(f, enc, 0o644))
-		return f
+		// certify under the configuration as the file holds it (the JSON form fills the fixture's unset fields)
+		var back types.PartitionDescriptionRecord
+		require.NoError(t, json.Unmarshal(enc, &back))
+		return f, &back
 	}
-	confL, confR, confOther := conf("l.json", pdrL), conf("r.json", pdrR), conf("o.json", pdrOther)
+	confL, pdrL := conf("l.json", pdrL)
+	confR, pdrR := conf("r.json", pdrR)
+	confOther, _ := conf("o.json", pdrOther)
 
-	world := &bridgeprofile.AggregatorWorld{PDRs: []*types.PartitionDescriptionRecord{pdrL, pdrR}, Auth: auth, TB: tb}
+	agg := &nb2ref.Aggregator{Network: nb2ref.DevNetwork, PDRs: []*types.PartitionDescriptionRecord{pdrL, pdrR}, Committee: auth,
+		Seal: nb2ref.SealOpts{Network: nb2ref.DevNetwork, Epoch: 1, RootRound: 5}}
 	var sl, sr [32]byte
 	sl[0], sr[0] = 0x00, 0x80 // the top bit picks the shard
 	sl[1], sr[1] = 1, 1
-	cert, err := world.Certify([]bridgeprofile.Leaf{{SID: sl, Value: sl}, {SID: sr, Value: sr}}, nil, 1_000, 5)
+	cert, err := agg.Certify([]nb2ref.Leaf{{SID: sl, Value: sl}, {SID: sr, Value: sr}}, nb2ref.CertOpts{IRTime: 1_000})
 	require.NoError(t, err)
-	require.Len(t, cert.Anchors, 2)
+	require.Len(t, cert, 2)
 	token := func(name string, ucs ...[]byte) string {
 		var arr []any
 		for _, u := range ucs {
@@ -238,12 +245,12 @@ func TestUCVerifyTwoShardsOfOnePartition(t *testing.T) {
 	run := func(tok string, confs ...string) error {
 		return cmdUCVerify([]string{"--token", tok, "--bundle", bundleFile, "--shard-conf", strings.Join(confs, ",")})
 	}
-	both := token("both.cbor", cert.Anchors[0].UC, cert.Anchors[1].UC)
+	both := token("both.cbor", cert[0].UC, cert[1].UC)
 	require.NoError(t, run(both, confL, confR), "a token holding a certificate of each shard verifies against both configurations")
 	require.NoError(t, run(both, confR, confL), "in either order")
 	require.ErrorContains(t, run(both, confL), "invalid shard configuration hash", "the right shard's certificate does not verify under the left shard's configuration alone")
 	require.ErrorContains(t, run(both, confL, confOther), "invalid shard configuration hash", "nor under a configuration it was not made under")
-	require.NoError(t, run(token("left.cbor", cert.Anchors[0].UC), confL, confR))
+	require.NoError(t, run(token("left.cbor", cert[0].UC), confL, confR))
 }
 
 // The printed signed-weight is what the seal rule counted: a member's slot holding junk, and a stranger, are not signed weight.
@@ -271,4 +278,28 @@ func TestSignedWeightCountsVerifiedSignaturesOnly(t *testing.T) {
 	require.EqualValues(t, 3, signedWeight(e, seal))
 	seal.Signatures["stranger"] = seal.Signatures["a"]
 	require.EqualValues(t, 3, signedWeight(e, seal), "an unknown ID adds nothing")
+}
+
+// The native PDR's JSON form is lossy for an empty PartitionParams: `omitempty` drops the empty map, which decodes as nil, and the
+// CBOR (so the shard configuration hash) of nil differs from that of an empty map. A certificate is therefore made under the
+// configuration as the JSON file holds it (TestUCVerifyTwoShardsOfOnePartition); nb2ref.FixturePDR is not at fault.
+func TestPDRJSONDropsAnEmptyPartitionParams(t *testing.T) {
+	left, _ := types.ShardID{}.Split()
+	pdr := nb2ref.FixturePDR(nb2ref.DevNetwork, nb2ref.DevAggPartition, left, 0, "agg-0")
+	require.NotNil(t, pdr.PartitionParams)
+	require.Empty(t, pdr.PartitionParams)
+	enc, err := json.Marshal(pdr)
+	require.NoError(t, err)
+	var back types.PartitionDescriptionRecord
+	require.NoError(t, json.Unmarshal(enc, &back))
+	require.Nil(t, back.PartitionParams)
+	h1, err := pdr.Hash(crypto.SHA256)
+	require.NoError(t, err)
+	h2, err := back.Hash(crypto.SHA256)
+	require.NoError(t, err)
+	require.NotEqual(t, h1, h2, "the round trip changes the configuration hash")
+	back.PartitionParams = map[string]string{}
+	h3, err := back.Hash(crypto.SHA256)
+	require.NoError(t, err)
+	require.Equal(t, h1, h3, "and only through PartitionParams")
 }

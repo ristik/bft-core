@@ -447,6 +447,50 @@ class Laptop:
         except (Failure, ValueError, subprocess.TimeoutExpired):
             return None
 
+    def strict_services_state(self):
+        """services_state for a decision that must not guess: None when the query failed or its output is not valid rows (an empty list is a failure too:
+        the entity's other services and the peer stubs always exist)."""
+        try:
+            text = self.dc('ps', '-a', '--format', 'json')
+            out = {}
+            for line in text.splitlines():
+                if line.strip():
+                    rows = json.loads(line)
+                    for row in rows if isinstance(rows, list) else [rows]:
+                        if not (isinstance(row, dict) and all(isinstance(row.get(k), str) and row[k] for k in ('Service', 'State'))):
+                            return None   # one invalid row makes the whole result unknown
+                        out[row['Service']] = row['State']
+        except (Failure, ValueError, KeyError, TypeError, subprocess.TimeoutExpired):
+            return None
+        return out or None
+
+    def is_member(self):
+        """True when this entity's root is in the committed signer set; False only when it is positively not a member (its root container is confirmed
+        stopped or absent, it is absent from a well-formed signer set, or q3/status says `follower` is true); None when that cannot be told (fail closed)."""
+        try:
+            states = self.strict_services_state()
+            if states is None:
+                return None
+            if f'root{self.entity}' not in states:
+                return False   # absent from a well-formed, non-empty list
+            state = states[f'root{self.entity}']
+            if state in ('exited', 'dead', 'created'):
+                return False
+            if state != 'running':
+                return None
+            code, body = self.root_post('/api/v1/q3/signers')
+            if code == 200:
+                signers = json.loads(body).get('signers')
+                if not isinstance(signers, list) or not signers or not all(isinstance(x, dict) and isinstance(x.get('nodeId'), str) and x['nodeId'] for x in signers):
+                    return None
+                return self.state['rootNodeId'] in [x['nodeId'] for x in signers]
+            code, body = self.root_post('/api/v1/q3/status')
+            if code == 200 and json.loads(body).get('follower') is True:
+                return False
+        except (Failure, ValueError, AttributeError, TypeError, subprocess.TimeoutExpired):
+            pass
+        return None
+
     def root_epoch(self):
         """The root's epoch: its committed certificate's (q3/signers) or, for a follower that holds none (422), its installed one from q3/status, which for
         an image that reports its in-process switch (bft-core#1086) is only a published one (handoff.status_epoch), never a raw activeEpoch."""
@@ -504,10 +548,12 @@ class Laptop:
         complete, status = self.install_complete(epoch)
         if complete:
             return handoff.installed_result(status, epoch) if (status or {}).get('switch') else {'already': True}
-        # a member of the old committee (not a follower there) may be switching at its own commit, as may a root whose status did not answer; a joiner
-        # (a follower) never switches, and an older image does not: both are restarted
-        if status is None or ((status.get('switch') or {}) and not status.get('follower')):
-            switch = handoff.switched_in_process(self.root_status, epoch)
+        # a member of the old committee (not a follower there) may be switching at its own commit, as may a root whose status did not answer; with
+        # bft-core#1086 PR 2 a joiner (a follower) switches too, from an activation a root peer serves, when its image acquires; an older image does not:
+        # it is restarted (handoff.awaits_switch)
+        wait = handoff.awaits_switch(status, True)
+        if wait is not None:
+            switch = handoff.switched_in_process(self.root_status, epoch, wait=wait)
             if switch is not None:
                 return {'already': True, 'inProcess': True, 'switchMs': switch.get('tookMs')}
         override = self.home / f'compose.install-epoch-{epoch}.json'
@@ -677,6 +723,11 @@ class Laptop:
 
     CUSTODY_CALLS = {'requestRetirement(uint64)': 'owner', 'mature(uint256[])': 'owner', 'claim(uint256,address)': 'withdrawal'}
 
+    # posrelayer/tx.go transientEstimate: the bound-execution node refuses an estimate whose block was built on a head that moved meanwhile (#1130)
+    TRANSIENT_ESTIMATE = 'bound execution input rejected the block'
+    ESTIMATE_ATTEMPTS = 6
+    ESTIMATE_BACKOFF = 2.0
+
     def op_custody_tx(self, signature, args):
         """A custody call signed HERE with this entity's owner or withdrawal key (cast in the node image, keys from the wallet volume, never printed): only
         requestRetirement, mature and claim, only to the deployment's custody. Sent to every host execution client (their pools do not gossip)."""
@@ -693,9 +744,15 @@ class Laptop:
                   f'raw=$(/tools/cast mktx --legacy --rpc-url http://ureth1:8545 --chain {chain} --private-key "$(cat /wallet/{signer}.key)" {custody} {shlex.quote(signature)} {quoted}); '
                   f'for u in {urls}; do /tools/cast publish --rpc-url $u "$raw" >/dev/null 2>&1 || true; done; '
                   f'h=$(/tools/cast keccak "$raw"); echo "tx $h"; /tools/cast receipt --rpc-url http://ureth1:8545 --confirmations 1 --json "$h" | tr -d "\\n" | grep -oE "\\"(status|blockNumber)\\":\\"0x[0-9a-f]+\\""')
-        done = self.one(self.node_image, ['-c', script], [f'{self.vol("wallet")}:/wallet:ro', f'{self.vol("tools")}:/tools:ro', f'{self.vol("network")}:/network:ro'],
-                        network=self.network(), entrypoint='sh', check=False)
-        out = (done.stdout + done.stderr).strip()
+        for attempt in range(1, self.ESTIMATE_ATTEMPTS + 1):
+            done = self.one(self.node_image, ['-c', script], [f'{self.vol("wallet")}:/wallet:ro', f'{self.vol("tools")}:/tools:ro', f'{self.vol("network")}:/network:ro'],
+                            network=self.network(), entrypoint='sh', check=False)
+            out = (done.stdout + done.stderr).strip()
+            # only the transient refusal is asked again (nothing was signed or published when the estimate failed); any other error, a revert too, stops at once
+            if not (done.returncode and self.TRANSIENT_ESTIMATE in out) or attempt == self.ESTIMATE_ATTEMPTS:
+                break
+            say(f'{signature}: the gas estimate was refused on a moving head (attempt {attempt}/{self.ESTIMATE_ATTEMPTS}); asking again')
+            time.sleep(min(self.ESTIMATE_BACKOFF * attempt, 10))
         if done.returncode:
             raise Failure(f'{signature}: exit {done.returncode}: {out[-400:]}')
         return {'out': out[-400:], 'signer': signer, 'address': self.state['accounts'][signer]}
@@ -909,6 +966,9 @@ def background(lap, name, args):
 
 
 def background_stop(lap):
+    member = lap.is_member()
+    if member is not False:   # fail closed: a member's tunnel is the validator's network; stopping it halts a committee member (#1130)
+        raise Failure(f'refusing to stop the tunnel and agent: the entity {"is still a committee member" if member else "membership cannot be established"}')
     for name in ('tunnel', 'agent'):
         pid_file = lap.home / 'run' / f'{name}.pid'
         if pid_file.is_file():

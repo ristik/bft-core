@@ -51,7 +51,12 @@ func newQ3Live(t *testing.T) *q3Live {
 // newQ3LiveWith is newQ3Live over a fixture of the given options; prepare, when set, configures each replica before it is opened.
 func newQ3LiveWith(t *testing.T, o q3fixture.Options, prepare func(int, *q3Replica)) *q3Live {
 	t.Helper()
-	f := q3fixture.New(t, o)
+	return newQ3LiveFrom(t, q3fixture.New(t, o), prepare)
+}
+
+// newQ3LiveFrom is newQ3LiveWith over a given fixture.
+func newQ3LiveFrom(t *testing.T, f *q3fixture.Fixture, prepare func(int, *q3Replica)) *q3Live {
+	t.Helper()
 	c := &q3Live{t: t, f: f, net: newSkewedNet(t), observed: map[observedKey]map[string]struct{}{}, lost: map[observedKey]string{}, lostSig: map[observedKey][]byte{},
 		cancel: map[int]context.CancelFunc{}, done: map[int]chan error{}}
 	c.cfg = votesig.Config{Scheme: votesig.SchemeDomainBound, Network: q3fixture.Network, Genesis: f.Genesis}

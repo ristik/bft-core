@@ -26,7 +26,6 @@ import (
 	"github.com/unicitynetwork/bft-core/b1paired"
 	"github.com/unicitynetwork/bft-core/b1registry"
 	"github.com/unicitynetwork/bft-core/b1state"
-	"github.com/unicitynetwork/bft-core/bridgeprofile"
 	"github.com/unicitynetwork/bft-core/q3active"
 	"github.com/unicitynetwork/bft-core/q3format"
 	"github.com/unicitynetwork/bft-core/recordsfeed"
@@ -764,14 +763,21 @@ func validateB1RunFlags(flags *shardNodeRunFlags) error {
 	return nil
 }
 
-// urethTxInputBytes is the pool's per-transaction size bound for the paired ureth: twice the bridge's envelope bound
-// (bridgeprofile.MaxEnvelopeBytes), so a redemption at that bound with its Cfg and call framing is admitted. The stock 128 KiB
-// default would refuse it (owner section 36, briefs/b7-direct-uncapped-design.md section 1).
-const urethTxInputBytes = 2 * bridgeprofile.MaxEnvelopeBytes
+// urethTxInputBytes is the pool's per-transaction encoded-size bound for the paired ureth (--txpool.max-tx-input-bytes, 4 MiB), the
+// only place a generation sets it (bft-core#1124): ureth refuses a second --txpool.max-tx-input-bytes ("cannot be used multiple times"),
+// so a deployment must not add its own. It must stay at or above native bridge v2's L_max (nb2LMaxBytes, the wallets' pinned limit, which
+// the NB2 release manifest refuses a pool below); the stock 128 KiB default would not. The value is the one the protocol 6/7 bridge
+// derived from its envelope (twice 2 MiB), kept unchanged as an explicit limit when that bridge was removed (bft-core#1106); narrowing it
+// towards L_max, chosen together with the gateway's raw-transaction body bound, is a separate decision.
+const urethTxInputBytes = 4 << 20
+
+// nb2LMaxBytes is native bridge v2's L_max (524,288 encoded bytes, deploy/testnet/bridge/nb2/release_nb2.py L_MAX): the floor of
+// urethTxInputBytes.
+const nb2LMaxBytes = 512 << 10
 
 // urethFlags are the flags that pin the paired ureth to the profile: the B1 bindings, and every mandatory hook the profile (and so its
 // hash) commits to. A ureth started without a hook flag the hash commits to would run a different chain under the same hash. The
-// pool is aligned with the profile's capacity: a transaction may use the whole ordinary capacity and carry a maximal bridge envelope.
+// pool is aligned with the profile's capacity: a transaction may use the whole ordinary capacity and a 4 MiB encoding (urethTxInputBytes).
 func urethFlags(p b1state.Profile, hash [32]byte) string {
 	s := fmt.Sprintf("--unicity.network-id=%d --unicity.root-genesis-id=%s --unicity.chain-id=%d --unicity.profile-hash=%s --unicity.max-epochs-per-update=%d --unicity.max-gas=%d --unicity.system-gas=%d --txpool.max-tx-gas=%d --txpool.max-tx-input-bytes=%d",
 		p.Network, hexutil.Encode(p.RootGenesisID[:]), p.ExecutionChainID, hexutil.Encode(hash[:]), p.MaxEpochsPerUpdate, p.MaxGas, p.SystemGas, p.OrdinaryCapacity, urethTxInputBytes)
