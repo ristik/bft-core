@@ -55,7 +55,7 @@ func TestSecondRootOnlyHandoffWaitsForTheEVMToAcknowledgeTheFirst(t *testing.T) 
 	}
 
 	// the first root-only handoff, epoch 1 -> 2: Prepare (2), Freeze (3), Commit (4), activation 7
-	tr, err := s.blockTree.Root().ShardState.States[evm].TR.Hash()
+	tr, err := s.tree().Root().ShardState.States[evm].TR.Hash()
 	require.NoError(t, err)
 	require.NoError(t, add(1, 2, makeRecord("prepare", 1, 2, 7, body1, tr), nil))
 	require.NoError(t, add(1, 3, makeRecord("freeze", 1, 3, 7, body1, tr), nil))
@@ -64,7 +64,7 @@ func TestSecondRootOnlyHandoffWaitsForTheEVMToAcknowledgeTheFirst(t *testing.T) 
 	h := mustBlock(t, s, 4)
 	require.NoError(t, add(1, 5, evmroot.OrderedHandoffRecord{}, nil))
 	suffix := mustBlock(t, s, 5)
-	_, err = s.blockTree.Commit(&rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 5, ParentRoundNumber: 4, Epoch: 1},
+	_, err = s.tree().Commit(&rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 5, ParentRoundNumber: 4, Epoch: 1},
 		LedgerCommitInfo: &types.UnicitySeal{Version: 1, RootChainRoundNumber: 4, Epoch: 1, Hash: h.RootHash}})
 	require.NoError(t, err)
 	checkpoint := &abdrc.CommittedBlock{Block: suffix.BlockData, Control: suffix.ShardState.Control,

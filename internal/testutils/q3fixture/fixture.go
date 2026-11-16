@@ -96,6 +96,9 @@ type Options struct {
 	// PeerEVM gives every EVM validator of the successor a real peer identity, as the production ingress subscribes a request's sender by its
 	// node id; otherwise a replaced member is named evm-N, which only a harness calling the manager directly can use.
 	PeerEVM bool
+	// NoJoiner keeps every old member in the successor and adds none: a re-weighting of the same committee (bft-core#1086: the default
+	// in-process switch, which a successor with a joiner does not take).
+	NoJoiner bool
 }
 
 // ExtraShard is a shard besides the EVM shard. A zero T2Timeout takes the EVM shard's.
@@ -229,6 +232,9 @@ func New(t *testing.T, o Options) *Fixture {
 	stay := 3 // a primary of four replaces one member; a larger committee keeps all four and adds, as a joiner does (continuity needs more than 2/3 unchanged)
 	if len(o.Weights) > 4 {
 		stay = 4
+	}
+	if o.NoJoiner {
+		stay = min(len(f.OldNodes), len(o.Weights))
 	}
 	f.NewNodes = append([]*testutils.TestNode(nil), f.OldNodes[:stay]...)
 	for len(f.NewNodes) < len(o.Weights) {

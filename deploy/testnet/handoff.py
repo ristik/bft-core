@@ -10,9 +10,67 @@ Compose override that adds the flag to each root's entrypoint, applied with `doc
 """
 import argparse
 import json
+import time
 from pathlib import Path
 
 FLAG = '--install-handoff-epoch'
+
+# bft-core#1086: how long the drive waits for a staying root that switches in process to report the successor before it installs it by the restart. The
+# switch is one install at the root's own commit (tens of milliseconds), and the drive reaches a root only once it serves its own commit.
+SWITCH_WAIT_SECONDS = 5
+
+
+def switch_complete(view, target):
+    """bft-core#1086: whether a root's q3/status answer (a dict, or None) shows `target` published: True for a switch state Running or Following in the
+    target, False for any other switch state (Switching, Faulted, still in the old epoch, declined), None when the root reports no switch state at all (an
+    older image, --in-process-epoch-switch=false, or no answer). A root that reports a switch state is never taken as installed from its raw activeEpoch:
+    the manager's trust base moves to the target inside the install, before the switch is published or after it faulted."""
+    switch = (view or {}).get('switch')
+    if not switch:
+        return None
+    return view.get('activeEpoch') == target and switch.get('epoch') == target and switch.get('phase') in ('running', 'following')
+
+
+def status_epoch(view):
+    """The installed epoch a successful q3/status answer establishes: a switch-aware image's published one (Running or Following; None while Switching,
+    Faulted or declined-and-not-yet-restarted can show another), an older image's activeEpoch. Never the raw activeEpoch of a root that reports a switch."""
+    switch = view.get('switch')
+    if not switch:
+        return view.get('activeEpoch')
+    if switch.get('phase') in ('running', 'following') and switch.get('epoch') == view.get('activeEpoch'):
+        return switch.get('epoch')
+    return None
+
+
+def installed_result(view, target):
+    """The install step's result for a root whose switch state shows `target` published (switch_complete): whether it got there in process."""
+    switch = view['switch']
+    if switch.get('target') == target:
+        return {'already': True, 'inProcess': True, 'switchMs': switch.get('tookMs')}
+    return {'already': True}
+
+
+def switched_in_process(status, target, wait=None, sleep=time.sleep, clock=time.monotonic):
+    """bft-core#1086: the root's in-process switch into `target` (its q3/status `switch`, phase running or following, with the target installed), else None.
+    `status` is the root's q3/status answer as a dict, or None while it does not answer (asked again until `wait`). A root that answers without a `switch`
+    does not switch in process (an older image, or --in-process-epoch-switch=false): None at once. A switch that is still switching, or a root still in the old epoch, is asked again until `wait`
+    has passed; a faulted switch (the root exits to its recovery) and a declined one (a successor with joiners, a leaver, no own evidence) are None at once. None means: install the root by the restart, through the same evidence gate."""
+    deadline = clock() + (SWITCH_WAIT_SECONDS if wait is None else wait)
+    while True:
+        view = status()
+        if view is None:   # unavailable: not evidence of anything
+            if clock() >= deadline:
+                return None
+            sleep(0.1)
+            continue
+        switch = view.get('switch')
+        if not switch:
+            return None
+        if switch_complete(view, target):
+            return switch
+        if switch.get('phase') == 'faulted' or switch.get('declined') == target or clock() >= deadline:
+            return None
+        sleep(0.1)
 
 
 def install_override(compose, epoch):

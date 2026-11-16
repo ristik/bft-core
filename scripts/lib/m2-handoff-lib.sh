@@ -64,6 +64,7 @@ m2_start_root() { # node installEpoch bootnode  (an empty install epoch starts a
       --address "/ip4/127.0.0.1/tcp/$(m2_p2p_port "$node")" \
       ${bootArgs[@]+"${bootArgs[@]}"} --trust-base test-nodes/trust-base.json \
       "${shardConfArgs[@]}" --profile-3 ${installArgs[@]+"${installArgs[@]}"} \
+      ${M2_IN_PROCESS_SWITCH:+--in-process-epoch-switch="$M2_IN_PROCESS_SWITCH"} \
       --rpc-server-address "127.0.0.1:$port" --log-format text --log-level debug \
       >>"test-nodes/root$node/debug.log" 2>&1 &
     pid=$!

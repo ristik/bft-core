@@ -53,7 +53,7 @@ func TestBlockTreeReadFrontierStorageViewOwnsSelectedData(t *testing.T) {
 	before, err := os.ReadFile(dbName)
 	require.NoError(t, err)
 
-	view, err := (&BlockStore{blockTree: tree}).ReadFrontierStorageView(partition, shard)
+	view, err := withTree(&BlockStore{}, tree).ReadFrontierStorageView(partition, shard)
 	require.NoError(t, err)
 	require.Equal(t, source.GetRound(), view.CommittedRootRound)
 	require.Equal(t, source.CommitQc.LedgerCommitInfo.NetworkID, view.RootNetworkID)
