@@ -230,6 +230,8 @@ func ConstantsTable() []Constant {
 		{"VERIFICATION_QUEUE", "(1 + n_s) * 4 * 2", "rule", "roots"},
 		{"REPLACEMENTS_PER_SENDER_VIEW", d(ReplacementsPerView), "rule", "roots"},
 		{"RECOVERY_RUN / SPACING / LEADER_LAG", "4 / 256 / 4n + 4", "existing", "roots"},
+		{"F_r", "(b+1)*256 + 4 rounds", "derived accounting bound (not an abort, replay or validity rule)", "-"},
+		{"live-vote residence wait", "T(L,v)*(1+rho) on the local monotonic clock since first learning the opening commit", "rule (local voting policy)", "roots"},
 		{"MAX_BASE_FEE", d(MaxBaseFee), "existing", "ureth"},
 		{"PARTITION_CEILING", d(PartitionCeiling), "rule", "roots"},
 		{"--target-block-interval", "default 450 ms, >= 100 ms, < LocalTimeout/2", "local, non-consensus", "roots"},

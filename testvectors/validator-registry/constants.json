@@ -355,6 +355,18 @@
    "owner": "roots"
   },
   {
+   "name": "F_r",
+   "value": "(b+1)*256 + 4 rounds",
+   "kind": "derived accounting bound (not an abort, replay or validity rule)",
+   "owner": "-"
+  },
+  {
+   "name": "live-vote residence wait",
+   "value": "T(L,v)*(1+rho) on the local monotonic clock since first learning the opening commit",
+   "kind": "rule (local voting policy)",
+   "owner": "roots"
+  },
+  {
    "name": "MAX_BASE_FEE",
    "value": "4611686018427387904",
    "kind": "existing",

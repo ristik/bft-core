@@ -52,22 +52,16 @@ type CandidateV6 struct {
 // DerivedChangeKind maps a VR root-side kind to the evmassign candidate change kind it is derived into.
 var DerivedChangeKind = map[uint8]uint64{KindReplaceAggregator: 1, KindAddPartition: 2, KindUpdatePartition: 3}
 
-// CheckRegistryChanges is the stateless shape of the RegistryChanges list: strictly ascending ids, at most 16 entries, at most 8
-// root-side, total payload at most 64 KiB, each payload at most 16 KiB, a bindable kind (never ModuleAction), a defined root verdict,
-// at most one entry of each singleton kind, and EVM-side and membership kinds (1, 3, 4, 5, 10) Accepted.
+// CheckRegistryChanges is the stateless shape of a candidate's RegistryChanges list: the bounds (checkRegistryBounds), a defined root
+// verdict, EVM-side and membership kinds (1, 3, 4, 5, 10) Accepted, and at most one entry per binding scope (ChangeScope: one per
+// singleton kind, one per shard across kinds 6 and 8, one per partition for kind 7, one per rule for kind 9), since VR's binding
+// selection defers every second change of a scope.
 func CheckRegistryChanges(rc []RegistryChange) error {
-	if len(rc) > MaxBoundTotal {
-		return fmt.Errorf("%w: %d registry changes", ErrOversize, len(rc))
+	if err := checkRegistryBounds(rc); err != nil {
+		return err
 	}
-	root, total := 0, 0
-	seen := map[uint64]bool{}
-	for i, c := range rc {
-		if i > 0 && rc[i-1].ID >= c.ID {
-			return ErrOrder
-		}
-		if c.ID == 0 || c.Kind == 0 || c.Kind > uint64(KindForceRemove) || c.Kind == uint64(KindModuleAction) {
-			return fmt.Errorf("%w: change kind %d", ErrUnknownKind, c.Kind)
-		}
+	seen := map[string]bool{}
+	for _, c := range rc {
 		k := uint8(c.Kind)
 		if c.Verdict > uint64(VerdictCeiling) {
 			return fmt.Errorf("%w: verdict %d", ErrRange, c.Verdict)
@@ -78,17 +72,39 @@ func CheckRegistryChanges(rc []RegistryChange) error {
 				return fmt.Errorf("%w: kind %d must be Accepted", ErrRange, k)
 			}
 		}
-		if Singleton(k) {
-			if seen[c.Kind] {
-				return fmt.Errorf("%w: second singleton kind %d", ErrRange, k)
+		scope, err := ChangeScope(k, c.Payload)
+		if err != nil {
+			continue // an unreadable scope is the fold's Malformed verdict; VR never binds it twice in one output
+		}
+		if scope != "" {
+			if seen[scope] {
+				return fmt.Errorf("%w: second change of scope %s", ErrRange, scope)
 			}
-			seen[c.Kind] = true
+			seen[scope] = true
+		}
+	}
+	return nil
+}
+
+// checkRegistryBounds: strictly ascending nonzero ids, at most 16 entries, at most 8 root-side, each payload at most 16 KiB and in
+// total at most 64 KiB, a bindable kind (never ModuleAction).
+func checkRegistryBounds(rc []RegistryChange) error {
+	if len(rc) > MaxBoundTotal {
+		return fmt.Errorf("%w: %d registry changes", ErrOversize, len(rc))
+	}
+	root, total := 0, 0
+	for i, c := range rc {
+		if i > 0 && rc[i-1].ID >= c.ID {
+			return ErrOrder
+		}
+		if c.ID == 0 || c.Kind == 0 || c.Kind > uint64(KindForceRemove) || c.Kind == uint64(KindModuleAction) {
+			return fmt.Errorf("%w: change kind %d", ErrUnknownKind, c.Kind)
 		}
 		if len(c.Payload) > MaxChangePayload {
 			return ErrOversize
 		}
 		total += len(c.Payload)
-		if RootSide(k) {
+		if RootSide(uint8(c.Kind)) {
 			root++
 		}
 	}
@@ -126,9 +142,7 @@ func (c CandidateV6) Encode() ([]byte, error) {
 	if err := CheckRegistryChanges(c.RegistryChanges); err != nil {
 		return nil, err
 	}
-	if c.RegistryChanges == nil {
-		c.RegistryChanges = []RegistryChange{}
-	}
+	c = c.canonicalLists()
 	b, err := types.Cbor.Marshal([]any{candidateDomain, c})
 	if err != nil {
 		return nil, err
@@ -137,6 +151,27 @@ func (c CandidateV6) Encode() ([]byte, error) {
 		return nil, ErrOversize
 	}
 	return b, nil
+}
+
+// canonicalLists encodes every list field as an array, empty or not; only Changes is null. A decoded null therefore never re-encodes
+// to the bytes read, so DecodeCandidateV6 refuses it.
+func (c CandidateV6) canonicalLists() CandidateV6 {
+	if c.RootMembers == nil {
+		c.RootMembers = []evmassign.RootMember{}
+	}
+	if c.PoPs == nil {
+		c.PoPs = []evmassign.PoP{}
+	}
+	if c.Bindings == nil {
+		c.Bindings = []evmassign.Binding{}
+	}
+	if c.Identities == nil {
+		c.Identities = []evmassign.Identity{}
+	}
+	if c.RegistryChanges == nil {
+		c.RegistryChanges = []RegistryChange{}
+	}
+	return c
 }
 
 // Digest is SHA-256 of Encode, the candidate digest.

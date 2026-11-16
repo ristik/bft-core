@@ -104,7 +104,7 @@ func TestOutputModelReleasesOnce(t *testing.T) {
 	m.Progress, m.UCTime = 2*DelayRounds, 2*DelaySeconds
 	require.NoError(t, m.Execute(id, fxModule, true))
 	r := w("r")
-	require.NoError(t, m.Reserve(r, fxModule, false, []uint64{id}, 0))
+	require.NoError(t, m.Reserve(r, fxModule, false, []uint64{id}, 0, MinEpochGap))
 	_, err := m.Publish(r)
 	require.NoError(t, err)
 	m.Import(LogRecord{Kind: RecOutputRejected, ResultID: r}, LogRecord{Kind: RecSessionClosed, ResultID: r}, LogRecord{Kind: RecSessionClosed, ResultID: r})

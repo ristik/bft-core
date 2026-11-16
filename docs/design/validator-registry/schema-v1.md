@@ -35,7 +35,10 @@ of them; neither silently wins.
   - Root side (every handoff message, rule support, VR-context PoP): bft-go-base `abcrypto` secp256k1 `SignBytes`, 65 bytes over
     SHA-256 of the signed bytes, with the recovery byte required to recover the key (as `evmassign.VerifyPoPs`). Messages are signed by
     the sender's **root key**; the only EVM-key signature is the PoP over `evmassign.PoPMessage`.
-- **Lists in CBOR** are arrays, never `null`, except fields this document says are `null`. Empty lists are empty arrays.
+- **Lists in CBOR** are arrays, never `null`: an empty list is the empty array `0x80`. The only `null` list is candidate v6's legacy
+  `Changes`. Optional structs and byte strings that this document calls absent (`Supersedes`, `Authorization`, `ReplacedAssignment`)
+  keep their v5 encoding. Every strict decoder re-encodes what it read canonically and refuses a difference, so a `null` where an array
+  is required is refused.
 - **Vectors** are JSON: `{schema, version, file, specification, notes, vectors: [{name, op, input, expect}]}`. Byte strings are
   `0x`-prefixed lowercase hex. Integers are JSON numbers; fields that may exceed 2^53 are decimal strings where the vector says so.
   Vectors are sorted by `(op, name)`.
@@ -94,7 +97,8 @@ rule) and *measured*.
 | `π_max` | enforced per-message verification cap; its value is fixed by VT-05b | rule |
 | local timer chunk | ≤ 3,600 s, re-check after each chunk; no `time.Duration` in consensus code | rule (local) |
 | recovery run / spacing / `LeaderLag(n)` | 4 / 256 / `4n + 4` | existing |
-| `F_r` | `(b+1)·256 + 4` rounds | rule (accounting) |
+| `F_r` | `(b+1)·256 + 4` rounds | derived accounting bound (never an abort, replay or validity rule) |
+| live-vote residence wait | `T(L, v)·(1+ρ)` on the local monotonic clock (§10.5) | rule (local voting policy) |
 | `MAX_BASE_FEE` | `1 << 62` | existing |
 | partition ceiling | 64 | rule |
 | `--target-block-interval` | default 450 ms, ≥ 100 ms, < `LocalTimeout/2` | local, non-consensus |
@@ -231,7 +235,7 @@ Solidity compiler** through the typed structs of §2.1 and §2.6 (unicity-pos-co
 
 | Code set | Values |
 |---|---|
-| invalidation reason (`invalidate`, word10) | `1` LOST (economic, never a module fault) · `2` WITHDRAWN · other nonzero: output-level · `0` refused (`BadReason`) |
+| invalidation reason (`invalidate`, word10) | `1` LOST (economic, never a module fault) · `2` WITHDRAWN · other nonzero: output-level · `0`: the storage sentinel "not invalidated", so `invalidate(R, 0)` by the source is a no-op in every state |
 | `OutputRejected` reason | `1` Expired · `2` Invalidated · `3` Invalid |
 | `onResolved` resolution | `1` Acknowledged · `2` Recovered · `3` Closed |
 | health | `0` Healthy · `1` Faulted · `2` Stalled · `3` Inconsistent |
@@ -367,27 +371,38 @@ Vectors: `codec.elect`, `codec.output`, `codec.adoption`, `codec.void`, `codec.m
 | 10 ForceRemove | `(uint64 id)` |
 
 Strict decoding accepts exactly `abi.encode` output: dynamic tails in field order directly after the head (canonical offsets), zero
-padding, narrow integers zero-extended, valid UTF-8 for `string`, and no trailing bytes. `shard` is bft-go-base `ShardID.Bytes()`
-(≤ 32 bytes); `pdr`/`successorPdr` is the canonical CBOR PDR; `pops` is the canonical CBOR array of `evmassign.PoP`
-(`[nodeId, key, signature]`), one per validator in validator order. `expectedOldPdrHash` is `evmassign.PDRHash`. `label` ≤ 64 bytes.
+padding, narrow integers zero-extended, and no trailing bytes. This is byte canonicality only: a `string` is any bytes (no UTF-8 rule)
+and no field has a length rule beyond the 16 KiB payload bound. `shard` is bft-go-base `ShardID.Bytes()` (a non-canonical form names
+no installed shard and is Invalid in the fold); `pdr`/`successorPdr` is the canonical CBOR PDR (CBOR tag 39008 around its array);
+`pops` is the canonical CBOR array of `evmassign.PoP` (`[nodeId, key, signature]`), one per validator in validator order.
+`expectedOldPdrHash` is `evmassign.PDRHash`.
 
 **VR-context PoP** (kinds 6, 7): each validator key signs `CBOR(["UNICITY_VR_CHANGE_POP", 1, network, VR, changeId, partition, shard,
 keccak256(pdr), nodeId])` with `network` the root network id (uint), VR the 20-byte address, `changeId` the id VR assigns at queue.
 
 ### 6.2 Queue-time checks (structural)
 
-Payload ≤ 16 KiB and the exact shape; fewer than 32 pending (`TooManyPending`). Per kind: SetModule/SetGovernor nonzero address and
-code hash (code presence and metadata are VR's chain checks); ModuleAction nonzero module and non-empty action; CommitteeLimits
-`1 ≤ nMin ≤ nTarget ≤ nMax ≤ 16`; FeeParams the ureth `BlockProfile.validate` equivalent (§12) plus a nonzero collector; shard kinds
-non-empty PDR and nonzero expected hash (kind 6 also non-empty PoPs); ScheduleActivation nonzero rule, label ≤ 64 bytes UTF-8,
-`rootEpoch ≥ knownRootEpoch + 3` (`ScheduleTooEarly`), `notBeforeUcTime ≥ ucTime + 3,600` (`ScheduleTooSoon`); ForceRemove id in
-the committee (`NotInCommittee`), fewer than 4 pending (`TooManyForceRemoves`). Vectors: `change.queue`.
+Payload ≤ 16 KiB and the exact shape; fewer than 32 pending (`TooManyPending`). Per kind, exactly the design's checks:
+SetModule/SetGovernor a nonzero address and code hash (what "code present, the hash matches" needs of the payload; code presence and
+metadata are VR's chain checks); CommitteeLimits `1 ≤ nMin ≤ nTarget ≤ nMax ≤ 16`; FeeParams the ureth `BlockProfile.validate`
+equivalent (§12) plus a nonzero collector; ScheduleActivation `rootEpoch ≥ knownRootEpoch + 3` (`ScheduleTooEarly`) and
+`notBeforeUcTime ≥ ucTime + 3,600` (`ScheduleTooSoon`); ForceRemove an id of the committee (`NotInCommittee`) and fewer than 4
+pending (`TooManyForceRemoves`). Two additions, recorded as freeze decisions: a nonzero `ruleId` (FD-24) and an AddPartition PDR
+whose partition id VR can read (`UnreadableScope`, FD-25). An empty ModuleAction and a label of any length are admitted. Vectors:
+`change.queue`.
 
-### 6.3 Binding selection
+### 6.3 Binding selection and scopes
 
-Ascending id; bind while ≤ 8 root-side (kinds 6, 7, 8, 10), ≤ 16 total, Σ payload ≤ 64 KiB, ≤ 1 per singleton kind (1, 3, 4, 5);
-a ForceRemove binds only if the chosen trial performs it; ModuleAction never binds. A change that does not fit is deferred and stays
-Scheduled. Vectors: `change.binding`.
+Every change has a **binding scope** (`ChangeScope`, design §3.5.1 "singleton per output"): its kind for 1, 3, 4 and 5; its shard
+`(partition, shard bytes)` for kinds 6 **and** 8, which share it, so one output changes a shard at most once; its partition for kind
+7; its `ruleId` for kind 9; none for 2 and 10. VR reads the kind 7 partition from the PDR's leading bytes without a CBOR decoder:
+the tag head `d9 98 60` (39008), a shortest-form array head of at least three items, then three shortest-form unsigned integers
+(version, network id, partition id ≤ 2^32−1).
+
+Selection scans Scheduled changes in ascending id and binds while ≤ 8 root-side (kinds 6, 7, 8, 10), ≤ 16 total, Σ payload ≤ 64 KiB
+and the change's scope is not yet bound in this output. A change that does not fit — including a second change of a scope — is
+**deferred** and stays Scheduled for a later output; it is never bound to be rejected. A ForceRemove binds only if the chosen trial
+performs it; ModuleAction never binds. Vectors: `change.binding`, `change.scope`.
 
 ---
 
@@ -450,12 +465,23 @@ RegistryChange = [ID uint, Kind uint, Payload bstr, Verdict uint]
 wrapped as `CBOR(["UNICITY_H3_EVM_ASSIGNMENT_CANDIDATE", candidate])`, at most 256 KiB; the digest is SHA-256 of that. `Changes` is
 `null`: the evmassign changes (kinds 1, 2, 3) are derived from the Accepted entries of kinds 6, 7, 8 at verification, so payloads
 appear once. `RegistryChanges`: strictly ascending ids, ≤ 16, ≤ 8 root-side, Σ payload ≤ 64 KiB, each ≤ 16 KiB, never ModuleAction,
-≤ 1 per singleton kind, verdict ≤ 9, and kinds 1, 3, 4, 5, 10 always Accepted.
+at most one entry per binding scope (§6.3), verdict ≤ 9, and kinds 1, 3, 4, 5, 10 always Accepted. Every list field is an array,
+the empty PoP list of the unsigned candidate included (§0).
 
 **Freeze v5** companion: `CBOR(["UNICITY_VR_FREEZE", 5, [candidate bstr, ViewCertificate, RuleSupportEvidence, witness bstr]])`, the
 candidate equal to the certificate's `Assembly.Candidate`, the witness over exactly one account (VR at the pinned address and code
-hash), `RuleSupportEvidence = [refs: [bstr32] (SHA-256 of committed support-table commitments, ascending), fresh: [SupportCommitment]
-(ascending by (stakingID, ruleId)), kReadiness: [Readiness] (this intent's K-member readiness)]`.
+hash), and
+
+```
+RuleSupportEvidence = [refs [bstr32], fresh [SupportCommitment], kReadiness [Readiness]]
+```
+
+- `refs`: SHA-256 of committed support-table commitments (§10.4), strictly ascending, at most 1,024;
+- `fresh`: commitments strictly ascending by `(stakingID, ruleId)`, at most 1,024;
+- `kReadiness`: this intent's K-member readiness messages, at most 16. Each carries at least one commitment, and all of its
+  commitments name one stakingID; the list is strictly ascending by that stakingID, so a second readiness of one K member is refused.
+
+Strict order refuses every duplicate. `DecodeFreezeV5` accepts exactly the canonical encoding.
 
 Vectors: `handoff.candidateV6`, `handoff.freezeV5`.
 
@@ -495,10 +521,12 @@ envelopeSig by the member's root key over
 ViewCertificate = [Assembly, [Readiness]]
 ```
 
-`receipt` is the unchanged q3format receipt over `ReceiptContext{…, CandidateDigest, BodyID, …}`; `trustBaseSig` signs the successor
-trust base derived from the intent. A certificate carries **exactly one** readiness per successor member, in the order of the
+`receipt` is `q3format.EncodeReceipts` of the **singleton set** `{[nodeID, signature]}`: the member's own q3format receipt over
+`ReceiptContext{network, genesis, predecessor, attempt, candidateDigest, bodyID, config}` (message `q3format.ReceiptContext.Message`),
+named for the member's root node id. Freeze merges a certificate's singletons into the set `q3format.VerifyReceipts` takes; a receipt
+set of another size or for another node is refused. `trustBaseSig` signs the successor trust base derived from the intent. A certificate carries **exactly one** readiness per successor member, in the order of the
 candidate's identities (ascending StakingID), each naming the assembly's `(intentDigest, slot, SHA-256(candidate), bodyID)` and
-carrying commitments whose `ruleSupportDigest` it states.
+carrying commitments whose `ruleSupportDigest` it states and the singleton receipt of that member.
 
 ### 10.4 Rule support
 
@@ -517,8 +545,14 @@ HandoffView of its block (`NotSoleHandoffView`); block UC time ≥ `openTime(vie
 deadline or a carry is never met). `openTime(v)` is the committed UC timestamp of the block that opened view v; view 0 opens at the
 anchor block.
 
-`T(L, v) = 10 · 2^(L + ⌊v/n⌋)` seconds, `never` when the exponent is ≥ 37 or T > 2^40; deadlines add with a carry check. The
-live-vote residence wait is `⌈T·1000·(1+ρ)⌉` ms; `T_req = ⌈D(1+ρ)⌉ + 1` s. Both are premise-side quantities.
+`T(L, v) = 10 · 2^(L + ⌊v/n⌋)` seconds, `never` when the exponent is ≥ 37 or T > 2^40; deadlines add with a carry check. Replay uses
+only this committed `openTime` floor.
+
+**Live-vote residence rule** (a voting rule every honest root applies, not a premise): a root votes for a proposal carrying
+`HandoffView(I, v+1)` only once `⌈T(L, v)·1000·(1+ρ)⌉` ms have passed on its **local monotonic clock** since it first held the
+opening commit of view v. A restart or re-learning resets that start to the re-learning time. A root that is not yet eligible defers its
+vote; it never marks the block invalid. Only ρ (the drift bound) and the adequacy `T ≥ T_req = ⌈D(1+ρ)⌉ + 1` s are premises. Local
+timers sleep in chunks of at most 3,600 s and re-check; no `time.Duration` appears in consensus code.
 
 ### 10.6 Backoff state
 
@@ -551,8 +585,16 @@ of a rule is effective. Fold verdict for a candidate with successor epoch `e`:
 4. a second schedule of the same rule in one list: **Conflict**.
 
 **Prepare time gate:** for every effective schedule with `E ≤ e_J + 1` (which includes J's recovery epoch), the Prepare's UC time is
-≥ `notBeforeUcTime` (`ActivationNotBefore`). It is a gate, never a verdict. **Latch:** at the Boundary installing root epoch e, every
-effective Active entry with `E ≤ e` becomes Latched, permanently. A node is under rule r in epoch e iff r's effective `E ≤ e`.
+≥ `notBeforeUcTime` (`ActivationNotBefore`). It is a gate, never a verdict.
+
+**Latch, two events.** A rule latches permanently
+1. **in root history** when the handoff into a root epoch `e ≥ E` commits (H committed), and
+2. **in VR** when the EVM applies that handoff's `Boundary`.
+
+The root event does not wait for VR: root history can advance while the EVM's acknowledgement import is delayed (recovery included).
+The roots' fold, cutoff and support gates read the **root's committed schedule** (`FoldInput.Schedule`, root-latched entries
+included); VR's `activations[]` is what ureth and EVM readers see. A node is under rule r in epoch e iff r's effective `E ≤ e`.
+Vectors: `activation.latch` (H committed, Boundary delayed, then imported).
 Vectors: `activation.*`, `fold.verdicts`.
 
 ---
@@ -591,28 +633,51 @@ Exactly three accounts at P; the verdict refuses, in this order: a handoff in fl
 - **Output table** (design §3.4.2): every state × event cell (`output.table`, 74 cells; the six unreachable "Boundary with pair"
   cells, where the Ack before it is an anomaly or a no-op, are omitted). A no-op writes nothing and never reverts; an anomaly sets Inconsistent, emits `RecordAnomaly` and advances the
   cursor.
+- **Scope of the models.** The VR and root models are abstractions of the rules they name; anything they do not model is a required
+  precondition of the implementation, cited here, and is not waived by the model's silence.
 - **Reservation gates** (module and native alike), in this order: not Inconsistent; VR cursor = SealRegistry imported count
   (`CursorBehind`); no open output (`OutputOpen`); no pending pair (`PairPending`); a fresh nonzero id; native only when Faulted or
-  Stalled, module only from the active module; every bound id Scheduled.
+  Stalled, module only from the active module; every bound id Scheduled. Native repair also needs Scheduled boundary work to bind
+  (`NoScheduledWork`) and `MIN_EPOCH_GAP` progress since the epoch's first ordinary round (`EpochGap`), design §3.6.2. A module
+  reservation's due rule (design §3.7.2) and the remaining §3.6.2 preconditions (no open output, `pendingPair == 0`) are the
+  module's and VR's own, outside these vectors.
 - **Release:** at SessionClosed the bound changes return to Scheduled; at Boundary they become Active or Rejected by the bitmap;
   each exactly once (`Released` counts). Replay of an applied index is never re-applied; a new malformed entry is an anomaly.
-- **Pointer switch** (`switch.sequence`): the old module's `onRecords` through and including the switching Boundary; code checks;
-  `adoptionReady` if `ADOPTION_CHECK`; detach old; set pointer; attach new; allocate the holder entry only if attach succeeded; the
-  remainder of the batch to the new pointer (to the old module when the switch was refused).
-- **S2a** (`s2a.*`): lapse, cooldown and pre-Freeze abort keep R (Published, Invalidated or Rejected); a RejectResult ordered first
+- **Pointer switch** (`switch.sequence`), design §3.6.1: the code-hash and liability-holder checks; `adoptionReady` if
+  `ADOPTION_CHECK`; then the old module's `onRecords` through and including the switching Boundary; detach old; set the pointer and
+  metadata; attach new; allocate the holder entry only if attach succeeded (P85 custody is holder 0); the remainder of the batch to the
+  new module. A refused switch (code or holder mismatch, adoption not ready) makes no module call before the rejection, and the old
+  module then receives the whole batch.
+- **S2a** (`s2a.*`): lapse, cooldown and pre-Freeze abort keep R (Reserved, Published, Invalidated or Rejected; a Reserved R has no
+  Prepare and becomes rejectable only at its expiry); a RejectResult ordered first
   refuses a later Prepare/Freeze before the EVM imports the closure, and a repeated RejectResult is refused; Prepare first then a
-  rejection only after cooldown and its due condition; success with Active and Rejected changes and a split Ack/Boundary import; abort
+  rejection only after cooldown and its due condition; a Prepare needs a defined next attempt (an exhausted counter is
+  `ErrHandoffApproval`, an undefined one `NoPlannableAttempt`, and the cooldown comparison never overflows: `root.prepare`); success with Active and Rejected changes and a split Ack/Boundary import; abort
   of a retained primary closes R, a recovery abort does not; the cursor gate; Inconsistent completing a committed pair.
 - **RejectResult due** (`reject.due`): Reserved/Published at `progress ≥ expiresAtProgress` → Expired; Invalidated → immediately;
   Published with a deterministic admission failure → Invalid; otherwise never.
 - **Change lifecycle** (`change.lifecycle`): both delays (2,000 progress and 3,600 s, captured at queue); cancel only Queued/Scheduled;
   ModuleAction executes into the active module only; the 33rd pending change is refused.
-- **Fold** (`fold.verdicts`, `fold.ackGate`) over a full `FoldInput` with real PDRs and signed VR-context PoPs (§16 FD-15). The
-  shard acknowledgement gate is evaluated at Freeze, not in the fold: verdicts are identical at intent, readiness and Freeze.
+- **Fold** (`fold.verdicts`, `fold.ackGate`, `fold.proofConfig`) over a full `FoldInput` with real PDRs and signed VR-context PoPs.
+  For each change, in this order: Duplicate (same kind and payload hash as an earlier **Accepted** change); Malformed (payload, PDR or
+  PoP list not canonical; no scope claimed); Conflict when its scope was already claimed by an earlier decoded change of the list
+  **whatever that change's verdict** (defensive: a bindable list never has one); then the kind's rules — stale expected hash Conflict;
+  Invalid for design §6, including the **protocol proof-configuration predicate** (below); Ceiling; BadPoP; PastCutoff, Earlier,
+  Latched. Only an Accepted change updates the tentative state (installed PDRs, partition count, effective schedule) and enters the
+  Duplicate set, so a change refused by any check, the proof predicate included, consumes nothing. The shard acknowledgement gate is
+  evaluated at Freeze, not in the fold: verdicts are identical at intent, readiness and Freeze.
+- **Proof configuration** (`ProofConfigValid`, kinds 6, 7 and 8, before any tentative mutation): an absent, empty or `none`
+  `proof_type` is valid; otherwise it must be one of `exec`, `aggregator_rsmt_v1`, `aggregator_zk_v1`, `sp1`, `light_client`
+  (`UnknownProofType`; `risc0` has no verifier); `sp1` needs a nonempty `vkey_path` and a `chain_id`; `light_client` a `chain_id`; a
+  `chain_id` is a canonical decimal uint64. **Local build support never enters a verdict:** a protocol-valid type the local binary
+  cannot verify (`zkverifier.IsProofTypeAvailable` false) is still Accepted; that root fences at installation (`ProofSupportMissing`),
+  as for an unknown activated rule.
 - **View judgments** (`view.trace`): the reference timing model in `viewtrace.go` — roots of weight 1, Byzantine roots vote for
-  anything replay-valid at once, silent roots never vote, an honest root becomes eligible at `seen + ⌈T(1+ρ)⌉` (a restart replaces
-  `seen` with the re-learning time); the next view commits no earlier than the moment strictly more than 2/3 are eligible; a view
-  completes if its assembler is honest and the last relevant learner plus D is not after that moment. Validity (the replay floor) is
+  anything replay-valid at once, silent roots never vote, an honest root becomes eligible at `seen + ⌈T(1+ρ)⌉` (the residence rule; a
+  restart replaces `seen` with the re-learning time); the next view commits no earlier than the moment strictly more than 2/3 are
+  eligible. `c_v` is when the first honest root holds the opening commit, and `D = Λ + δ + π_a + π_m` is measured **from `c_v`** (Λ
+  already contains the learning spread), so a view completes iff its assembler is honest and cooperating and `c_v + D` is not after
+  that moment. Validity (the replay floor) is
   exact; the liveness quantities are model outputs, not guarantees. `view.replay`, `view.leaderPolicy`, `view.certificateAdmissible`
   freeze the replay rule, the proposer priority and the certificate admission rule (any retained view ≤ the committed view, until the
   first committed Freeze).
@@ -626,11 +691,13 @@ Exactly three accounts at P; the verdict refuses, in this order: a handoff in fl
 | `vr-layout.json` | §2 as data: slots, packed fields, domains |
 | `constants.json` | §1 |
 | `encoding.json` | `domain`, `codec`, `digest`, `record`, `change`, `control`, `handoff` |
-| `statemachine.json` | `output`, `s2a`, `change`, `fold`, `backoff`, `view`, `reject`, `switch`, `activation`, `retirement` |
+| `statemachine.json` | `output`, `s2a`, `root`, `change`, `fold`, `backoff`, `view`, `reject`, `switch`, `activation`, `retirement` |
 | `arithmetic.json` | `arith`, `fee` |
 | `storage.json`, `storage-flat.json` | §2.8 (Go) |
 | `storage-forge.json` | §2.8 written by forge (unicity-pos-contracts `test/vr/fixtures/`) |
 | `MANIFEST.sha256` | `sha256sum` lines over every file above |
+
+The generator derives most expectations from the reference, so they show determinism and cross-language agreement. They are not independent evidence that the text is right. The boundaries the reviews named are different: the null-versus-array list encoding, invalidation reason 0, the switch order, scoped deferral, the PDR partition head, the proof predicate, the fold's rejected-first and invalid-proof cases, root attempt exhaustion and cooldown overflow, the native-repair preconditions, the root latch and the view completion times. For those the generator checks the reference against expectations written by hand from this text, and `independent_test.go` repeats them as literal tests.
 
 Regenerate with `go generate ./vrschema` (it keeps the imported `storage-forge.json` and re-manifests it). Consumers pin a file by its
 manifest line. Consumer stubs: unicity-pos-contracts `test/vr/` (storage fixture and encoding consumer) and ureth
@@ -651,7 +718,8 @@ Each is the reading most consistent with the approved chain; each is also in `br
   words, not other constants. The registration domains keep the design's exact strings without a version suffix.
 - **FD-4 Code numbering** (§3): the design names the states, outcomes and verdicts; their numbers are fixed here, with root verdicts
   1–9 and EVM-only reasons 16–21 kept apart.
-- **FD-5 Invalidation reason 0** is refused (`BadReason`); 1 LOST is the only economic reason; every other nonzero reason is
+- **FD-5 Invalidation reason 0** is the storage sentinel "not invalidated": `invalidate(R, 0)` by the source is a no-op in every state, so
+  `invalidate` stays total and never reverts for its source. 1 LOST is the only economic reason; every other nonzero reason is
   output-level.
 - **FD-6 PoA `exposureDigest`.** The corrected design uses "the evmassign custody formulas with deployment = (network word, chain id,
   VR address)". The custody per-exposure formula `ExposureID` takes an assignment word; a module composing an output knows only its
@@ -668,26 +736,35 @@ Each is the reading most consistent with the approved chain; each is also in `br
   same epoch needs a postponement). Inside one list the fold's Duplicate rule applies first.
 - **FD-13 Message encodings** (§10): the Intent carries the candidate as its canonical bytes (not a nested struct), the CBOR tuples
   and domain texts, readiness ordered by StakingID in the certificate, the support-set digest over ascending ruleId, and
-  `RuleSupportEvidence` as three lists.
+  `RuleSupportEvidence` as three strictly ordered, bounded lists (`kReadiness` by the one stakingID each names). `Readiness.receipt` is
+  the singleton q3format receipt set, so the existing receipt-set codec decodes it and Freeze merges the singletons.
 - **FD-14 VR-context PoP message** uses the root network id and the change id VR assigns at queue; a signer reads `nextChangeId`, and
   a lost race fails as BadPoP and is re-queued.
-- **FD-15 Fold order and verdict mapping.** Duplicate, then Malformed, then the kind's rules; a stale expected hash is Conflict; an
-  AddPartition of an already installed id is Invalid and a second addition in one list is Conflict; the ceiling has its own verdict; a
-  non-root kind that does not decode makes the list unbindable (the candidate is invalid). `verifyProofConfig` is an additional
-  Invalid check VT-05a applies with the root's proof configuration.
+- **FD-15 Fold order and verdict mapping** (§14): Duplicate, then Malformed, then the scope Conflict, then the kind's rules; a stale
+  expected hash is Conflict; an AddPartition of an already installed id is Invalid; the ceiling has its own verdict; a non-root kind
+  that does not decode makes the list unbindable. The proof-configuration check is the frozen protocol predicate `ProofConfigValid`
+  inside the fold, before any tentative mutation; the existing `verifyProofConfig`'s build-availability test is not part of it.
 - **FD-16 Binding preimages.** Member words commit to node ids and keys by hash; the strings and keys come from VR views. Because a
   later `proposeBinding` may overwrite the staged binding while an output that captured it is open, VT-02 must keep the captured
   preimages retrievable (for example a write-once preimage store keyed by the binding words). This is a VT-02 view, not a proven slot.
 - **FD-17 Reservation gate order** (§14): Inconsistent, cursor, open output, pair. With an Ack applied and its Boundary not yet, the
   output is still open, so `OutputOpen` is reported first.
 - **FD-18 Backoff state encoding** and `ApplyBlock` treating an undefined identity (including attempt exhaustion) as a no-op.
-- **FD-19 View judgment model** (§14) is the frozen model the trace vectors are judged by; it is not a liveness guarantee.
+- **FD-19 View judgment model** (§14) is the frozen model the trace vectors are judged by, with D measured from `c_v` as design §8.3
+  defines it; it is not a liveness guarantee.
 - **FD-20 Shard bytes** in payloads and keys are bft-go-base `ShardID.Bytes()`.
 - **FD-21 SealRegistry v2 dedup key text** `unicity.seal-registry/records.retirement.v2`, following the existing v1 prefix.
 - **FD-22 HolderRetirement check order** (§13).
 - **FD-23 Network words.** EVM-side `network` is the bytes32 deployment word VR stores at V+0 (opaque, pinned); root-side `network` is
   the uint root network id.
 
+- **FD-24 A zero `ruleId` is refused at queue** (an addition to design §3.5.3): zero is the absent activation entry for every reader.
+- **FD-25 AddPartition needs a readable partition id at queue** (an addition): VR must know the partition to defer a second addition of
+  it in one output (§6.3); a PDR whose leading bytes are not the canonical tag, array and three uints is refused (`UnreadableScope`).
+- **FD-26 Scope claims are made by the first decoded change of a scope** in the fold, whatever its verdict (so a rejected first
+  schedule of a rule still makes a second one Conflict); binding selection defers instead, so this rule is defensive.
+- **FD-27 Proof-configuration support is a fence, not a verdict:** a root whose build cannot verify an Accepted protocol-valid proof
+  type refuses to install that configuration (`ProofSupportMissing`) and needs a build with the support.
 ---
 
 ## 17. What this does not freeze

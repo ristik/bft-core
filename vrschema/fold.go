@@ -104,11 +104,18 @@ func sameValidators(a, b []*types.NodeInfo) bool {
 	return true
 }
 
-// FoldVerdicts derives the verdicts of the bound changes, in ascending id over a tentative state. Order of judgment for each change:
-// Duplicate (same kind and payload hash as an earlier Accepted change), Malformed (payload, PDR or PoP list not canonical), then the
-// kind's rules (Conflict, Invalid, Ceiling, BadPoP, PastCutoff, Earlier, Latched). EVM-side and membership kinds are Accepted. The
-// shard acknowledgement gate is not a fold input (AckGate). verifyProofConfig is an additional Invalid check VT-05a applies to kinds 6,
-// 7 and 8 with the root's proof configuration; it is outside this reference.
+// FoldVerdicts derives the verdicts of the bound changes, in ascending id over a tentative state. For each change, in this order:
+//  1. Duplicate: the same kind and payload hash as an earlier Accepted change;
+//  2. Malformed: the payload, PDR or PoP list is not canonical (no scope is claimed);
+//  3. Conflict: the change's scope (ChangeScope: its shard for kinds 6 and 8, its partition for kind 7, its rule for kind 9) was
+//     already claimed by an earlier decoded change of this list, whatever that change's verdict; a well-formed list never has one,
+//     because binding selection defers a second change of a scope, so this rule is defensive;
+//  4. the kind's rules: Conflict (stale expected hash, a partition added earlier in the list), Invalid (design section 6, including
+//     the protocol proof-configuration predicate ProofConfigValid), Ceiling, BadPoP, PastCutoff, Earlier, Latched.
+//
+// Only an Accepted change updates the tentative state (installed PDRs, the partition count, the effective schedule) and enters the
+// Duplicate set. EVM-side and membership kinds are Accepted. The shard acknowledgement gate is not a fold input (AckGate). Local proof
+// verification support is never consulted (proofconfig.go).
 func FoldVerdicts(in FoldInput, rc []RegistryChange) ([]uint8, error) {
 	if err := CheckRegistryChangesShape(rc); err != nil {
 		return nil, err
@@ -117,9 +124,8 @@ func FoldVerdicts(in FoldInput, rc []RegistryChange) ([]uint8, error) {
 	for k, v := range in.Installed {
 		tentative[k] = v
 	}
-	touched := map[ShardKey]bool{}
+	claimed := map[string]bool{}
 	added := map[uint32]bool{}
-	ruled := map[Word]bool{}
 	effective := Effective(in.Schedule)
 	accepted := map[string]bool{}
 	reserved := map[uint32]bool{}
@@ -148,18 +154,26 @@ func FoldVerdicts(in FoldInput, rc []RegistryChange) ([]uint8, error) {
 			}
 			verdict = VerdictMalformed
 		default:
-			switch k {
-			case KindReplaceAggregator, KindUpdatePartition:
-				verdict = foldShard(in, c.ID, k, v, tentative, touched)
-			case KindAddPartition:
-				verdict = foldAdd(in, c.ID, v, tentative, added, reserved, partitions())
-			case KindScheduleActivation:
-				s := Schedule{RuleID: v[0].(Word), ReleaseDigest: v[1].(Word), RootEpoch: v[2].(uint64), NotBeforeUcTime: v[3].(uint64)}
-				if ruled[s.RuleID] {
-					verdict = VerdictConflict
-				} else if verdict = ScheduleVerdict(s, in.SuccessorRootEpoch, effective); verdict == VerdictAccepted {
-					ruled[s.RuleID] = true
-					effective[s.RuleID] = Activation{RuleID: s.RuleID, RootEpoch: s.RootEpoch, NotBeforeUcTime: s.NotBeforeUcTime, State: ActActive, ChangeID: c.ID}
+			scope, serr := ChangeScope(k, c.Payload)
+			switch {
+			case serr != nil:
+				verdict = VerdictMalformed
+			case scope != "" && claimed[scope] && !Singleton(k):
+				verdict = VerdictConflict
+			default:
+				if scope != "" {
+					claimed[scope] = true
+				}
+				switch k {
+				case KindReplaceAggregator, KindUpdatePartition:
+					verdict = foldShard(in, c.ID, k, v, tentative)
+				case KindAddPartition:
+					verdict = foldAdd(in, c.ID, v, tentative, added, reserved, partitions())
+				case KindScheduleActivation:
+					s := Schedule{RuleID: v[0].(Word), ReleaseDigest: v[1].(Word), RootEpoch: v[2].(uint64), NotBeforeUcTime: v[3].(uint64)}
+					if verdict = ScheduleVerdict(s, in.SuccessorRootEpoch, effective); verdict == VerdictAccepted {
+						effective[s.RuleID] = Activation{RuleID: s.RuleID, RootEpoch: s.RootEpoch, NotBeforeUcTime: s.NotBeforeUcTime, State: ActActive, ChangeID: c.ID}
+					}
 				}
 			}
 		}
@@ -171,20 +185,21 @@ func FoldVerdicts(in FoldInput, rc []RegistryChange) ([]uint8, error) {
 	return out, nil
 }
 
-// CheckRegistryChangesShape is CheckRegistryChanges without the verdict values (the fold assigns them).
+// CheckRegistryChangesShape is the stateless list shape the fold requires (CheckRegistryChanges without verdict values and without
+// the scoped-singleton rule, which the fold judges defensively as Conflict).
 func CheckRegistryChangesShape(rc []RegistryChange) error {
 	cp := make([]RegistryChange, len(rc))
 	for i, c := range rc {
 		cp[i] = c
 		cp[i].Verdict = 0
 	}
-	if err := CheckRegistryChanges(cp); err != nil {
+	if err := checkRegistryBounds(cp); err != nil {
 		return errors.Join(ErrFoldList, err)
 	}
 	return nil
 }
 
-func foldShard(in FoldInput, id uint64, k uint8, v []any, tentative map[ShardKey]*types.PartitionDescriptionRecord, touched map[ShardKey]bool) uint8 {
+func foldShard(in FoldInput, id uint64, k uint8, v []any, tentative map[ShardKey]*types.PartitionDescriptionRecord) uint8 {
 	key := ShardKey{uint32(v[0].(uint64)), string(v[1].([]byte))}
 	expected, succBytes := v[2].(Word), v[3].([]byte)
 	succ, err := decodePDR(succBytes)
@@ -196,9 +211,6 @@ func foldShard(in FoldInput, id uint64, k uint8, v []any, tentative map[ShardKey
 		if pops, err = decodePoPs(v[4].([]byte)); err != nil {
 			return VerdictMalformed
 		}
-	}
-	if touched[key] {
-		return VerdictConflict
 	}
 	cur := tentative[key]
 	if cur == nil || cur.PartitionTypeID == evmassign.EVMPartitionTypeID {
@@ -214,19 +226,19 @@ func foldShard(in FoldInput, id uint64, k uint8, v []any, tentative map[ShardKey
 	}
 	switch k {
 	case KindReplaceAggregator:
-		if evmassign.ValidateSuccessor(cur, succ) != nil {
+		if evmassign.ValidateSuccessor(cur, succ) != nil || ProofConfigValid(succ.PartitionParams) != nil {
 			return VerdictInvalid
 		}
 		if verifyChangePoPs(in, id, succ, succBytes, pops) != nil {
 			return VerdictBadPoP
 		}
 	case KindUpdatePartition:
-		if succ.IsValid() != nil || succ.PartitionTypeID != cur.PartitionTypeID || succ.TypeIDLen != cur.TypeIDLen || succ.UnitIDLen != cur.UnitIDLen ||
+		if succ.IsValid() != nil || ProofConfigValid(succ.PartitionParams) != nil || succ.PartitionTypeID != cur.PartitionTypeID || succ.TypeIDLen != cur.TypeIDLen || succ.UnitIDLen != cur.UnitIDLen ||
 			cur.Epoch == ^uint64(0) || succ.Epoch != cur.Epoch+1 || succ.EpochStart != 0 || !sameValidators(cur.Validators, succ.Validators) {
 			return VerdictInvalid
 		}
 	}
-	tentative[key], touched[key] = succ, true
+	tentative[key] = succ
 	return VerdictAccepted
 }
 
@@ -250,7 +262,7 @@ func foldAdd(in FoldInput, id uint64, v []any, tentative map[ShardKey]*types.Par
 		}
 	}
 	if reserved[p] || pdr.PartitionTypeID == evmassign.EVMPartitionTypeID || uint64(pdr.NetworkID) != in.Network || pdr.Epoch != 0 ||
-		pdr.EpochStart != 0 || evmassign.ValidateAssignment(pdr) != nil {
+		pdr.EpochStart != 0 || evmassign.ValidateAssignment(pdr) != nil || ProofConfigValid(pdr.PartitionParams) != nil {
 		return VerdictInvalid
 	}
 	if uint32(count+1) > in.PartitionCeiling {

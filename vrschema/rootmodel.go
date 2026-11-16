@@ -35,17 +35,17 @@ func (r *RootModel) Quiet(round uint64) bool {
 	case CtlIdle, CtlAborted:
 		return true
 	case CtlPrepared:
-		return round > r.Control.OrderedRound+PrepareCooldown
+		// overflow-checked: a Prepare ordered within 48 rounds of 2^64 - 1 never becomes dead
+		return r.Control.OrderedRound <= ^uint64(0)-PrepareCooldown && round > r.Control.OrderedRound+PrepareCooldown
 	}
 	return false
 }
 
-func (r *RootModel) attempt(round uint64) uint64 {
-	k, _, _ := PlannableAttempt(r.Control, round)
-	return k
-}
+// ErrNoAttempt refuses a Prepare when the next attempt is undefined.
+var ErrNoAttempt = errors.New("NoPlannableAttempt")
 
-// Prepare orders a Prepare for R at a quiet state.
+// Prepare orders a Prepare for R at a quiet state; the attempt must be defined by the checked planning helper (an exhausted attempt
+// counter is ErrHandoffApproval), and nothing changes on a refusal.
 func (r *RootModel) Prepare(res Word, round uint64) error {
 	if !r.Quiet(round) {
 		return ErrNotQuiet
@@ -53,7 +53,14 @@ func (r *RootModel) Prepare(res Word, round uint64) error {
 	if r.Resolved[res] {
 		return ErrResolved
 	}
-	r.Control = ControlState{Kind: CtlPrepared, Attempt: r.attempt(round), OrderedRound: round}
+	k, ok, err := PlannableAttempt(r.Control, round)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return ErrNoAttempt
+	}
+	r.Control = ControlState{Kind: CtlPrepared, Attempt: k, OrderedRound: round}
 	r.Prepared, r.Retained = res, false
 	return nil
 }

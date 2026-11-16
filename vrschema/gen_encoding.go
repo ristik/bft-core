@@ -1,11 +1,21 @@
 package vrschema
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"fmt"
 
 	"github.com/unicitynetwork/bft-core/evmassign"
+	"github.com/unicitynetwork/bft-core/q3format"
+	"github.com/unicitynetwork/bft-go-base/types"
 )
+
+func mustEnc(b []byte, err error) []byte {
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
 
 type vb struct {
 	out []Vector
@@ -370,7 +380,6 @@ func genEncoding() ([]Vector, error) {
 		{"SetModule address high byte", KindSetModule, mutate(sm, 0, 1)},
 		{"CommitteeLimits nMin above uint32", KindCommitteeLimits, mutate(lim, 27, 1)},
 		{"CommitteeLimits 64 bytes", KindCommitteeLimits, lim[:64]},
-		{"ScheduleActivation invalid UTF-8", KindScheduleActivation, badUTF},
 		{"payload 16385 bytes", KindSetModule, mustOversize()},
 		{"unknown kind 11", 11, lim},
 	} {
@@ -381,6 +390,11 @@ func genEncoding() ([]Vector, error) {
 		b.add(bad.name, "change.payload", map[string]any{"kind": bad.kind, "payload": Hexb(bad.data)}, map[string]any{"ok": false, "error": err.Error()})
 	}
 	_ = sched
+	if _, err := DecodeChangePayload(KindScheduleActivation, badUTF); err != nil {
+		b.fail("non-UTF-8 label refused: %v", err)
+	}
+	b.add("ScheduleActivation label of non-UTF-8 bytes is canonical", "change.canonicality", map[string]any{"kind": KindScheduleActivation, "payload": Hexb(badUTF)},
+		map[string]any{"ok": true, "note": "byte canonicality only; no UTF-8 or length rule beyond the 16 KiB payload bound"})
 	env := QueueEnv{KnownRootEpoch: 4, UCTime: 10_000, Pending: 3, PendingForce: 1, Committee: []uint64{1, 2, 3, 4, 5}, MaxGas: 30_000_000, SystemGas: 2_000_000}
 	queue := []struct {
 		name string
@@ -400,7 +414,11 @@ func genEncoding() ([]Vector, error) {
 		{"schedule rootEpoch = known + 3", KindScheduleActivation, []any{RuleID("r"), w("rel"), uint64(7), uint64(13_600), ""}, nil},
 		{"schedule rootEpoch = known + 2", KindScheduleActivation, []any{RuleID("r"), w("rel"), uint64(6), uint64(13_600), ""}, nil},
 		{"schedule notBefore = ucTime + 3599", KindScheduleActivation, []any{RuleID("r"), w("rel"), uint64(7), uint64(13_599), ""}, nil},
-		{"schedule label 65 bytes", KindScheduleActivation, []any{RuleID("r"), w("rel"), uint64(7), uint64(13_600), string(make([]byte, 65))}, nil},
+		{"schedule label of 65 bytes (no label cap)", KindScheduleActivation, []any{RuleID("r"), w("rel"), uint64(7), uint64(13_600), string(make([]byte, 65))}, nil},
+		{"schedule zero ruleId (FD-24)", KindScheduleActivation, []any{Word{}, w("rel"), uint64(7), uint64(13_600), ""}, nil},
+		{"empty module action (no rule)", KindModuleAction, []any{fxModule, []byte{}}, nil},
+		{"AddPartition with an unreadable partition id (FD-25)", KindAddPartition, []any{[]byte{0x83, 1, 2, 3}, []byte{0x80}}, nil},
+		{"AddPartition with a readable PDR head", KindAddPartition, []any{mustCBOR(fxPDR(9, 3, 0, 10, 2)), []byte{0x80}}, nil},
 		{"force remove member", KindForceRemove, []any{uint64(3)}, nil},
 		{"force remove non-member", KindForceRemove, []any{uint64(9)}, nil},
 		{"force remove fifth pending", KindForceRemove, []any{uint64(3)}, func(e QueueEnv) QueueEnv { e.PendingForce = 4; return e }},
@@ -560,8 +578,24 @@ func genHandoffEncodings(b *vb, rid Word) {
 	}
 	cdig := sha256.Sum256(enc)
 	chd, _ := ChangesDigestOf(rc)
+	// independent check: the unsigned candidate's PoPs (field 10) is the empty CBOR array 0x80 and Changes (field 16) is null 0xf6
+	var generic []any
+	if err := types.Cbor.Unmarshal(enc, &generic); err != nil || len(generic) != 2 {
+		b.fail("candidate generic decode: %v", err)
+		return
+	}
+	fields := generic[1].([]any)
+	if pops, ok := fields[9].([]any); !ok || len(pops) != 0 || fields[15] != nil {
+		b.fail("candidate v6: PoPs %#v Changes %#v", fields[9], fields[15])
+	}
 	b.add("candidate v6 unsigned", "handoff.candidateV6", map[string]any{"sourceRef": Hexw(rid), "registryChanges": rcJSON(rc)},
-		map[string]any{"bytes": Hexb(enc), "digest": Hexb(cdig[:]), "rejectedBitmap": RejectedBitmap(rc), "changesDigest": Hexw(chd)})
+		map[string]any{"bytes": Hexb(enc), "digest": Hexb(cdig[:]), "rejectedBitmap": RejectedBitmap(rc), "changesDigest": Hexw(chd),
+			"popsField": "0x80 (empty array)", "changesField": "0xf6 (null)"})
+	nullPoPs, _ := types.Cbor.Marshal([]any{candidateDomain, c}) // c.PoPs is nil here: the non-canonical null form
+	if _, err := DecodeCandidateV6(nullPoPs); err == nil || bytes.Equal(nullPoPs, enc) {
+		b.fail("candidate with null PoPs accepted")
+	}
+	b.add("candidate v6 with PoPs null refused", "handoff.candidateV6", map[string]any{"bytes": Hexb(nullPoPs)}, map[string]any{"ok": false, "error": "non-canonical encoding"})
 	for name, f := range map[string]func(*CandidateV6){
 		"v5 version":         func(x *CandidateV6) { x.Version = 5 },
 		"empty SourceRef":    func(x *CandidateV6) { x.SourceRef = nil },
@@ -625,8 +659,24 @@ func genHandoffEncodings(b *vb, rid Word) {
 	for i := 1; i <= 4; i++ {
 		cs := []SupportCommitment{fxSupport(uint64(i), RuleID("vr-handoff-v2"), w("release-1.2.0"))}
 		d, _ := RuleSupportDigest(cs)
+		rctx := q3format.ReceiptContext{Network: fxRootNetwork, Genesis: w("genesis"), Predecessor: w("pred-body"), Attempt: 1, CandidateDigest: cdig,
+			BodyID: body, Config: w("q3-config")}
+		rcpt, err := q3format.SignReceipt(rctx, ids[i-1].RootNodeID, signerOf(genKey(2*i)))
+		if err != nil {
+			b.fail("receipt: %v", err)
+		}
+		rset, err := EncodeReadinessReceipt(rcpt)
+		if err != nil {
+			b.fail("receipt set: %v", err)
+		}
 		r := Readiness{IntentDigest: idg[:], Slot: 2, CandidateDigest: cdig[:], BodyID: body[:], RuleSupportDigest: d[:], Commitments: cs,
-			Receipt: []byte{0x80}, TrustBaseSig: []byte(fmt.Sprintf("trust-base-sig-%d", i))}
+			Receipt: rset, TrustBaseSig: []byte(fmt.Sprintf("trust-base-sig-%d", i))}
+		if i == 1 {
+			b.add("readiness receipt (singleton q3format receipt set)", "handoff.receipt", map[string]any{"network": rctx.Network, "genesis": Hexw(rctx.Genesis),
+				"predecessor": Hexw(rctx.Predecessor), "attempt": rctx.Attempt, "candidateDigest": Hexw(rctx.CandidateDigest), "bodyId": Hexw(rctx.BodyID),
+				"config": Hexw(rctx.Config), "nodeId": rcpt.NodeID, "signerKey": Hexb(pubOf(genKey(2)))},
+				map[string]any{"message": Hexb(rctx.Message(rcpt.NodeID)), "signature": Hexb(rcpt.Signature), "receipt": Hexb(rset)})
+		}
 		env, err := r.EnvelopeBytes()
 		if err != nil {
 			b.fail("readiness: %v", err)
@@ -636,14 +686,25 @@ func genHandoffEncodings(b *vb, rid Word) {
 		if i == 1 {
 			b.add("readiness envelope", "handoff.readiness", map[string]any{"intentDigest": Hexb(idg[:]), "slot": 2, "candidateDigest": Hexb(cdig[:]),
 				"bodyId": Hexw(body), "ruleSupportDigest": Hexb(d[:]), "trustBaseSig": Hexb(r.TrustBaseSig), "signerKey": Hexb(pubOf(genKey(2)))},
-				map[string]any{"envelopeBytes": Hexb(env), "envelopeSig": Hexb(r.EnvelopeSig), "bytes": Hexb(mustCBOR(r))})
+				map[string]any{"envelopeBytes": Hexb(env), "envelopeSig": Hexb(r.EnvelopeSig), "bytes": Hexb(mustEnc(r.Encode()))})
+			nr := r
+			nr.Commitments = nil
+			raw := mustCBOR(nr)
+			if _, err := DecodeReadiness(raw); err == nil {
+				b.fail("readiness with null commitments accepted")
+			}
+			b.add("readiness with commitments null refused", "handoff.readiness", map[string]any{"bytes": Hexb(raw)}, map[string]any{"ok": false})
 		}
 	}
+	var succIDs []string
+	for _, i := range ids {
+		succIDs = append(succIDs, i.RootNodeID)
+	}
 	cert := ViewCertificate{Assembly: asm, Readiness: readiness}
-	if err := cert.CheckShape(4, body[:]); err != nil {
+	if err := cert.CheckShape(succIDs, body[:]); err != nil {
 		b.fail("certificate: %v", err)
 	}
-	b.add("view certificate", "handoff.certificate", map[string]any{"successors": 4}, map[string]any{"bytes": Hexb(mustCBOR(cert)), "ok": true})
+	b.add("view certificate", "handoff.certificate", map[string]any{"successors": succIDs}, map[string]any{"bytes": Hexb(mustEnc(cert.Encode())), "ok": true})
 	for name, f := range map[string]func(*ViewCertificate){
 		"three readiness for four": func(c *ViewCertificate) { c.Readiness = c.Readiness[:3] },
 		"readiness of another slot": func(c *ViewCertificate) {
@@ -656,6 +717,19 @@ func genHandoffEncodings(b *vb, rid Word) {
 			r.BodyID = wb("x")
 			c.Readiness = append([]Readiness{c.Readiness[0], r}, c.Readiness[2:]...)
 		},
+		"receipt of another member": func(c *ViewCertificate) {
+			r := c.Readiness[1]
+			r.Receipt = c.Readiness[0].Receipt
+			c.Readiness = append([]Readiness{c.Readiness[0], r}, c.Readiness[2:]...)
+		},
+		"receipt set of two": func(c *ViewCertificate) {
+			r0, _ := ReadinessReceipt(c.Readiness[0].Receipt, succIDs[0])
+			r1, _ := ReadinessReceipt(c.Readiness[1].Receipt, succIDs[1])
+			two, _ := q3format.EncodeReceipts([]q3format.Receipt{r0, r1})
+			r := c.Readiness[0]
+			r.Receipt = two
+			c.Readiness = append([]Readiness{r}, c.Readiness[1:]...)
+		},
 		"rule support digest wrong": func(c *ViewCertificate) {
 			r := c.Readiness[2]
 			r.RuleSupportDigest = rse[:]
@@ -664,20 +738,50 @@ func genHandoffEncodings(b *vb, rid Word) {
 	} {
 		x := ViewCertificate{Assembly: cert.Assembly, Readiness: append([]Readiness{}, cert.Readiness...)}
 		f(&x)
-		err := x.CheckShape(4, body[:])
+		err := x.CheckShape(succIDs, body[:])
 		if err == nil {
 			b.fail("certificate %s accepted", name)
 		}
 		b.add("view certificate "+name, "handoff.certificate", map[string]any{"mutation": name}, map[string]any{"ok": false, "error": err.Error()})
 	}
 	ref, _ := fxSupport(3, RuleID("vr-handoff-v2"), w("release-1.2.0")).Digest()
-	fz := FreezeV5{Candidate: enc, Certificate: cert, RuleSupport: RuleSupportEvidence{Refs: [][]byte{ref[:]}, Fresh: []SupportCommitment{fxSupport(5, RuleID("vr-handoff-v2"), w("release-1.2.0"))}},
-		Witness: []byte("witness-bytes")}
+	kr := func(id uint64) Readiness {
+		cs := []SupportCommitment{fxSupport(id, RuleID("vr-handoff-v2"), w("release-1.2.0"))}
+		d, _ := RuleSupportDigest(cs)
+		r := Readiness{IntentDigest: idg[:], Slot: 2, CandidateDigest: cdig[:], BodyID: body[:], RuleSupportDigest: d[:], Commitments: cs,
+			Receipt: []byte{}, TrustBaseSig: []byte(fmt.Sprintf("k-trust-base-sig-%d", id))}
+		env, _ := r.EnvelopeBytes()
+		r.EnvelopeSig, _ = signerOf(genKey(int(2 * id))).SignBytes(env)
+		return r
+	}
+	fz := FreezeV5{Candidate: enc, Certificate: cert, RuleSupport: RuleSupportEvidence{Refs: [][]byte{ref[:]}, Fresh: []SupportCommitment{fxSupport(5, RuleID("vr-handoff-v2"), w("release-1.2.0"))},
+		KReadiness: []Readiness{kr(6), kr(7)}}, Witness: []byte("witness-bytes")}
 	fze, err := fz.Encode()
 	if err != nil {
 		b.fail("freeze: %v", err)
 	}
-	b.add("freeze v5", "handoff.freezeV5", map[string]any{"refs": 1, "fresh": 1, "kReadiness": 0}, map[string]any{"bytes": Hexb(fze), "witnessHash": Hexb(func() []byte { h := sha256.Sum256(fz.Witness); return h[:] }())})
+	if back, err := DecodeFreezeV5(fze); err != nil || len(back.RuleSupport.KReadiness) != 2 {
+		b.fail("freeze round trip: %v", err)
+	}
+	b.add("freeze v5", "handoff.freezeV5", map[string]any{"refs": 1, "fresh": 1, "kReadiness": []int{6, 7}}, map[string]any{"bytes": Hexb(fze), "witnessHash": Hexb(func() []byte { h := sha256.Sum256(fz.Witness); return h[:] }())})
+	for _, m := range []struct {
+		name string
+		ks   []Readiness
+	}{{"K readiness descending", []Readiness{kr(7), kr(6)}}, {"K readiness duplicate", []Readiness{kr(6), kr(6)}},
+		{"K readiness without commitments", func() []Readiness { r := kr(6); r.Commitments = []SupportCommitment{}; return []Readiness{r} }()}} {
+		x := fz
+		x.RuleSupport.KReadiness = m.ks
+		_, err := x.Encode()
+		if err == nil {
+			b.fail("freeze %s accepted", m.name)
+		}
+		b.add("freeze v5 "+m.name, "handoff.freezeV5", map[string]any{"mutation": m.name}, map[string]any{"ok": false, "error": err.Error()})
+	}
+	nullRefs, _ := types.Cbor.Marshal([]any{FreezeDomain, uint64(FreezeVersion), FreezeV5{Candidate: enc, Certificate: cert.canonical(), Witness: []byte("w")}})
+	if _, err := DecodeFreezeV5(nullRefs); err == nil {
+		b.fail("freeze with null lists accepted")
+	}
+	b.add("freeze v5 with null evidence lists refused", "handoff.freezeV5", map[string]any{"bytes": Hexb(nullRefs)}, map[string]any{"ok": false})
 	bo := HandoffBackoff{Level: 3, Epoch: 5, Attempt: 2, N: 4, Intent: idg[:], LastView: 6, Prepared: true}
 	boe, _ := bo.Encode()
 	bod, _ := bo.Digest()

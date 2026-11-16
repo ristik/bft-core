@@ -68,7 +68,7 @@ func (s *script) done(op string) {
 
 func (s *script) reserve(n string, bind []uint64, want string) Word {
 	r := s.id(n)
-	err := s.vr.Reserve(r, fxModule, false, bind, uint64(len(s.vr.Log)))
+	err := s.vr.Reserve(r, fxModule, false, bind, uint64(len(s.vr.Log)), MinEpochGap)
 	s.step("vr", "reserve", map[string]any{"result": n, "bind": bind}, err, want)
 	return r
 }
@@ -96,6 +96,7 @@ func genStateMachines() ([]Vector, error) {
 	genBackoff(b)
 	genViews(b)
 	genMisc(b)
+	genReviewBoundaries(b)
 	return b.out, b.err
 }
 
@@ -111,7 +112,7 @@ func genOutputTable(b *vb) {
 			r := w("result/R")
 			s.names[r] = "R"
 			if st != "Unknown" {
-				s.vr.Reserve(r, fxModule, false, nil, 0)
+				s.vr.Reserve(r, fxModule, false, nil, 0, MinEpochGap)
 			}
 			switch st {
 			case "Published", "Invalidated", "Rejected", "Closed", "Acknowledged", "Recovered":
@@ -166,6 +167,9 @@ func genOutputTable(b *vb) {
 				s.vr.Apply(1)
 			}
 			want := errName(err)
+			if ev == "invalidateReason0" && (err != nil || ret != false) {
+				s.b.fail("invalidate with reason 0 must be a non-reverting no-op in %s", st)
+			}
 			s.step("event", ev, map[string]any{"return": ret}, err, want)
 			s.done("output.table")
 		}
@@ -195,7 +199,7 @@ func genS2a(b *vb) {
 		s.step("root", "plannable", map[string]any{"round": 148, "attempt": k, "defined": ok}, nil, "")
 		k, ok, _ = PlannableAttempt(s.root.Control, 149)
 		s.step("root", "plannable", map[string]any{"round": 149, "attempt": k, "defined": ok}, nil, "")
-		err := s.vr.Reserve(s.id("R2"), fxModule, false, nil, uint64(len(s.vr.Log)))
+		err := s.vr.Reserve(s.id("R2"), fxModule, false, nil, uint64(len(s.vr.Log)), MinEpochGap)
 		s.step("vr", "reserve", map[string]any{"result": "R2", "note": "no replacement reservation while R is open"}, err, "OutputOpen")
 		s.done("s2a.lapse")
 	}
@@ -238,7 +242,7 @@ func genS2a(b *vb) {
 		recs := s.root.Out
 		s.root.Out = nil
 		s.record(recs[0], 1)
-		err := s.vr.Reserve(s.id("R2"), fxModule, false, nil, uint64(len(s.vr.Log)))
+		err := s.vr.Reserve(s.id("R2"), fxModule, false, nil, uint64(len(s.vr.Log)), MinEpochGap)
 		s.step("vr", "reserve", map[string]any{"result": "R2", "note": "split Ack/Boundary import: R stays open with its pair pending"}, err, "OutputOpen")
 		s.record(recs[1], 1)
 		s.step("vr", "redeliver", map[string]any{"index": 1, "replay": s.vr.Redeliver(1)}, nil, "")
@@ -274,10 +278,10 @@ func genS2a(b *vb) {
 		s.step("vr", "applyRootRecords", map[string]any{"apply": 2}, nil, "")
 		s.vr.Import(LogRecord{Kind: RecSessionClosed, ResultID: w("result/foreign")})
 		s.step("vr", "import", map[string]any{"imported": []int{int(RecSessionClosed)}, "apply": 0}, nil, "")
-		err := s.vr.Reserve(s.id("R2"), fxModule, false, nil, uint64(len(s.vr.Log)))
+		err := s.vr.Reserve(s.id("R2"), fxModule, false, nil, uint64(len(s.vr.Log)), MinEpochGap)
 		s.step("vr", "reserve", map[string]any{"result": "R2"}, err, "CursorBehind")
 		s.vr.Health = HealthFaulted
-		err = s.vr.Reserve(s.id("N"), [20]byte{}, true, nil, uint64(len(s.vr.Log)))
+		err = s.vr.Reserve(s.id("N"), [20]byte{}, true, nil, uint64(len(s.vr.Log)), MinEpochGap)
 		s.step("vr", "reserveNative", map[string]any{"result": "N", "health": "Faulted"}, err, "CursorBehind")
 		s.done("s2a.cursorGate")
 	}
@@ -289,7 +293,7 @@ func genS2a(b *vb) {
 		s.record(LogRecord{Kind: RecBoundary, ResultID: r}, 1)
 		s.record(LogRecord{Kind: RecAck, ResultID: r}, 1)
 		s.record(LogRecord{Kind: RecBoundary, ResultID: r}, 1)
-		err := s.vr.Reserve(s.id("R2"), fxModule, false, nil, uint64(len(s.vr.Log)))
+		err := s.vr.Reserve(s.id("R2"), fxModule, false, nil, uint64(len(s.vr.Log)), MinEpochGap)
 		s.step("vr", "reserve", map[string]any{"result": "R2"}, err, "Inconsistent")
 		_, err = s.vr.Publish(r)
 		s.step("vr", "publish", map[string]any{"result": "R"}, err, "Inconsistent")
@@ -373,8 +377,8 @@ func genChangeLifecycle(b *vb) {
 			}
 			return cs
 		}()},
-		{"bytes: 64 KiB total", []BindCandidate{{1, KindAddPartition, 16384, false}, {2, KindAddPartition, 16384, false}, {3, KindAddPartition, 16384, false},
-			{4, KindAddPartition, 16000, false}, {5, KindAddPartition, 1000, false}, {6, KindCommitteeLimits, 96, false}}},
+		{"bytes: 64 KiB total", []BindCandidate{{1, KindAddPartition, 16384, "", false}, {2, KindAddPartition, 16384, "", false}, {3, KindAddPartition, 16384, "", false},
+			{4, KindAddPartition, 16000, "", false}, {5, KindAddPartition, 1000, "", false}, {6, KindCommitteeLimits, 96, "", false}}},
 		{"root-side: 9 root-side, 8 bound", func() []BindCandidate {
 			var cs []BindCandidate
 			for i := 1; i <= 9; i++ {
@@ -382,15 +386,15 @@ func genChangeLifecycle(b *vb) {
 			}
 			return append(cs, BindCandidate{ID: 10, Kind: KindFeeParams, PayloadSize: 96})
 		}()},
-		{"singletons: a second SetModule and FeeParams defer", []BindCandidate{{1, KindSetModule, 160, false}, {2, KindFeeParams, 96, false}, {3, KindSetModule, 160, false},
-			{4, KindFeeParams, 96, false}, {5, KindSetGovernor, 64, false}}},
-		{"ForceRemove: only performed removals bind", []BindCandidate{{1, KindForceRemove, 32, false}, {2, KindForceRemove, 32, true}, {3, KindModuleAction, 64, false}}},
+		{"singletons: a second SetModule and FeeParams defer", []BindCandidate{{1, KindSetModule, 160, "kind:1", false}, {2, KindFeeParams, 96, "kind:5", false}, {3, KindSetModule, 160, "kind:1", false},
+			{4, KindFeeParams, 96, "kind:5", false}, {5, KindSetGovernor, 64, "kind:3", false}}},
+		{"ForceRemove: only performed removals bind", []BindCandidate{{1, KindForceRemove, 32, "", false}, {2, KindForceRemove, 32, "", true}, {3, KindModuleAction, 64, "", false}}},
 	}
 	for _, c := range sel {
 		bound, deferred := SelectBinding(c.cands)
 		var in []any
 		for _, x := range c.cands {
-			in = append(in, map[string]any{"id": x.ID, "kind": x.Kind, "payloadSize": x.PayloadSize, "performed": x.Performed})
+			in = append(in, map[string]any{"id": x.ID, "kind": x.Kind, "payloadSize": x.PayloadSize, "scope": x.Scope, "performed": x.Performed})
 		}
 		b.add(c.name, "change.binding", map[string]any{"scheduled": in}, map[string]any{"bound": bound, "deferred": deferred})
 	}
@@ -427,32 +431,50 @@ func genFold(b *vb) {
 		return RegistryChange{ID: id, Kind: uint64(KindScheduleActivation), Payload: mustChange(KindScheduleActivation, RuleID(rule), w("rel"), e, uint64(9000), "")}
 	}
 	limits := RegistryChange{ID: 1, Kind: uint64(KindCommitteeLimits), Payload: mustChange(KindCommitteeLimits, uint64(4), uint64(5), uint64(7))}
+	addP := func(id uint64, part uint32, popID uint64, params map[string]string) RegistryChange {
+		p := fxPDR(part, 3, 0, 20, 2)
+		p.PartitionParams = params
+		return RegistryChange{ID: id, Kind: uint64(KindAddPartition), Payload: mustChange(KindAddPartition, mustCBOR(p), fxChangePoPs(popID, p, 20))}
+	}
+	risc0 := map[string]string{"proof_type": "risc0"}
 	cases := []struct {
 		name string
 		in   func(FoldInput) FoldInput
 		rc   []RegistryChange
+		want []string // independent expectations, written by hand from the schema text
 	}{
-		{"replace accepted, then update of the same shard conflicts", nil, []RegistryChange{limits, replace(2, pdrHash(agg), 3), update(3, 7, agg, nil)}},
-		{"replace with a stale expected hash conflicts", nil, []RegistryChange{replace(2, w("stale"), 3)}},
+		{"replace accepted, then update of the same shard conflicts", nil, []RegistryChange{limits, replace(2, pdrHash(agg), 3), update(3, 7, agg, nil)}, []string{"Accepted", "Accepted", "Conflict"}},
+		{"replace with a stale expected hash conflicts", nil, []RegistryChange{replace(2, w("stale"), 3)}, []string{"Conflict"}},
 		{"replace with PoPs for another change id", nil, func() []RegistryChange {
 			c := replace(2, pdrHash(agg), 3)
 			c.ID = 4
 			return []RegistryChange{c}
-		}()},
-		{"update with changed validators is invalid", nil, []RegistryChange{update(2, 7, agg, func(p *types.PartitionDescriptionRecord) { p.Validators = fxPDR(7, 3, 3, 9, 3).Validators })}},
-		{"update of the EVM partition is invalid", nil, []RegistryChange{update(2, 2, evm, nil)}},
-		{"update with a changed type id length is invalid", nil, []RegistryChange{update(2, 7, agg, func(p *types.PartitionDescriptionRecord) { p.TypeIDLen = 16 })}},
-		{"two additions of partition 9: accepted, conflict", nil, []RegistryChange{add(2, 9, 3, 2), add(3, 9, 3, 3)}},
-		{"identical payload twice: accepted, duplicate", nil, []RegistryChange{add(2, 9, 3, 2), func() RegistryChange { c := add(3, 9, 3, 2); return c }()}},
-		{"addition of a reserved, an installed and an EVM-typed partition", nil, []RegistryChange{add(2, 1, 3, 2), add(3, 7, 3, 3), add(4, 11, 8, 4)}},
-		{"partition ceiling", func(in FoldInput) FoldInput { in.PartitionCeiling = 4; return in }, []RegistryChange{add(2, 9, 3, 2), add(3, 10, 3, 3)}},
-		{"malformed PDR bytes", nil, []RegistryChange{{ID: 2, Kind: uint64(KindAddPartition), Payload: mustChange(KindAddPartition, []byte{0x83, 1, 2, 3}, []byte{0x80})}}},
-		{"schedule: accepted, past cutoff, latched", nil, []RegistryChange{sched(2, "new-rule", 8), sched(3, "late-rule", 7), sched(4, "latched-rule", 20)}},
-		{"schedule postponement: later accepted", nil, []RegistryChange{sched(2, "scheduled-rule", 12)}},
-		{"schedule postponement: earlier refused", nil, []RegistryChange{sched(2, "scheduled-rule", 9)}},
-		{"schedule postponement: equal E conflicts", nil, []RegistryChange{sched(2, "scheduled-rule", 10)}},
-		{"schedule postponement past the current cutoff", func(in FoldInput) FoldInput { in.SuccessorRootEpoch = 9; return in }, []RegistryChange{sched(2, "scheduled-rule", 14)}},
-		{"two schedules of one rule in one list", nil, []RegistryChange{sched(2, "new-rule", 8), sched(3, "new-rule", 9)}},
+		}(), []string{"BadPoP"}},
+		{"update with changed validators is invalid", nil, []RegistryChange{update(2, 7, agg, func(p *types.PartitionDescriptionRecord) { p.Validators = fxPDR(7, 3, 3, 9, 3).Validators })}, []string{"Invalid"}},
+		{"update of the EVM partition is invalid", nil, []RegistryChange{update(2, 2, evm, nil)}, []string{"Invalid"}},
+		{"update with a changed type id length is invalid", nil, []RegistryChange{update(2, 7, agg, func(p *types.PartitionDescriptionRecord) { p.TypeIDLen = 16 })}, []string{"Invalid"}},
+		{"two additions of partition 9: accepted, conflict", nil, []RegistryChange{add(2, 9, 3, 2), add(3, 9, 3, 3)}, []string{"Accepted", "Conflict"}},
+		{"identical payload twice: accepted, duplicate", nil, []RegistryChange{add(2, 9, 3, 2), func() RegistryChange { c := add(3, 9, 3, 2); return c }()}, []string{"Accepted", "Duplicate"}},
+		{"addition of a reserved, an installed and an EVM-typed partition", nil, []RegistryChange{add(2, 1, 3, 2), add(3, 7, 3, 3), add(4, 11, 8, 4)}, []string{"Invalid", "Invalid", "Invalid"}},
+		{"partition ceiling", func(in FoldInput) FoldInput { in.PartitionCeiling = 4; return in }, []RegistryChange{add(2, 9, 3, 2), add(3, 10, 3, 3)}, []string{"Accepted", "Ceiling"}},
+		{"malformed PDR bytes", nil, []RegistryChange{{ID: 2, Kind: uint64(KindAddPartition), Payload: mustChange(KindAddPartition, []byte{0x83, 1, 2, 3}, []byte{0x80})}}, []string{"Malformed"}},
+		{"schedule: accepted, past cutoff, latched", nil, []RegistryChange{sched(2, "new-rule", 8), sched(3, "late-rule", 7), sched(4, "latched-rule", 20)}, []string{"Accepted", "PastCutoff", "Latched"}},
+		{"schedule postponement: later accepted", nil, []RegistryChange{sched(2, "scheduled-rule", 12)}, []string{"Accepted"}},
+		{"schedule postponement: earlier refused", nil, []RegistryChange{sched(2, "scheduled-rule", 9)}, []string{"Earlier"}},
+		{"schedule postponement: equal E conflicts", nil, []RegistryChange{sched(2, "scheduled-rule", 10)}, []string{"Conflict"}},
+		{"schedule postponement past the current cutoff", func(in FoldInput) FoldInput { in.SuccessorRootEpoch = 9; return in }, []RegistryChange{sched(2, "scheduled-rule", 14)}, []string{"PastCutoff"}},
+		{"two schedules of one rule in one list", nil, []RegistryChange{sched(2, "new-rule", 8), sched(3, "new-rule", 9)}, []string{"Accepted", "Conflict"}},
+		{"a rejected first schedule still claims its rule", nil, []RegistryChange{sched(2, "new-rule", 7), sched(3, "new-rule", 12)}, []string{"PastCutoff", "Conflict"}},
+		{"an invalid proof configuration consumes no partition slot", func(in FoldInput) FoldInput { in.PartitionCeiling = 4; return in },
+			[]RegistryChange{addP(2, 9, 2, risc0), add(3, 10, 3, 3)}, []string{"Invalid", "Accepted"}},
+		{"an invalid proof configuration, then the identical payload", nil, []RegistryChange{addP(2, 9, 2, risc0), addP(3, 9, 2, risc0)}, []string{"Invalid", "Conflict"}},
+		{"sp1 without vkey_path is invalid", nil, []RegistryChange{addP(2, 9, 2, map[string]string{"proof_type": "sp1", "chain_id": "3"})}, []string{"Invalid"}},
+		{"protocol-valid sp1 is accepted whatever the local build supports", nil,
+			[]RegistryChange{addP(2, 9, 2, map[string]string{"proof_type": "sp1", "vkey_path": "/keys/sp1.vk", "chain_id": "3"})}, []string{"Accepted"}},
+		{"update to an unknown proof type is invalid and leaves the shard installed", nil,
+			[]RegistryChange{update(2, 7, agg, func(p *types.PartitionDescriptionRecord) {
+				p.PartitionParams = map[string]string{"proof_type": "zk_magic"}
+			})}, []string{"Invalid"}},
 	}
 	for _, c := range cases {
 		in := base
@@ -467,6 +489,9 @@ func genFold(b *vb) {
 		names := make([]string, len(got))
 		for i, v := range got {
 			names[i] = VerdictNames[v]
+		}
+		if fmt.Sprint(names) != fmt.Sprint(c.want) {
+			b.fail("fold %s: reference gives %v, the schema text gives %v", c.name, names, c.want)
 		}
 		b.add(c.name, "fold.verdicts", foldJSON(in, c.rc), map[string]any{"verdicts": ints8(got), "names": names})
 	}
@@ -596,34 +621,49 @@ func genViews(b *vb) {
 		t    ViewTrace
 	}{
 		{"astra 1000/1002/1020/1005", ViewTrace{N: 4, Byzantine: []int{3}, Level: 1, View: 0, Assemblers: 4, OpenUCTime: 1000, SeenMs: astra,
-			ProposalMs: 1_002_000, ProposalUC: 1020, Assembler: 2, SuccessorMs: []uint64{1_005_000, 1_005_000}, DMs: 14_000}},
+			ProposalMs: 1_002_000, ProposalUC: 1020, Assembler: 2, DMs: 14_000}},
 		{"stale opening timestamp 900", ViewTrace{N: 4, Byzantine: []int{3}, Level: 1, View: 0, Assemblers: 4, OpenUCTime: 900, SeenMs: astra,
-			ProposalMs: 1_002_000, ProposalUC: 1002, Assembler: 2, SuccessorMs: []uint64{1_005_000}, DMs: 14_000}},
+			ProposalMs: 1_002_000, ProposalUC: 1002, Assembler: 2, DMs: 14_000}},
 		{"future opening: replay floor not met", ViewTrace{N: 4, Byzantine: []int{3}, Level: 1, View: 0, Assemblers: 4, OpenUCTime: 1010, SeenMs: astra,
-			ProposalMs: 1_002_000, ProposalUC: 1020, Assembler: 2, SuccessorMs: []uint64{1_005_000}, DMs: 14_000}},
+			ProposalMs: 1_002_000, ProposalUC: 1020, Assembler: 2, DMs: 14_000}},
 		{"accelerating assembler: early proposal waits for residence", ViewTrace{N: 4, Byzantine: []int{0}, Level: 0, View: 0, Assemblers: 4, OpenUCTime: 1000, SeenMs: seen(4, 1_000_000),
-			ProposalMs: 1_000_100, ProposalUC: 1010, Assembler: 1, SuccessorMs: []uint64{1_000_500}, DMs: 5_000}},
+			ProposalMs: 1_000_100, ProposalUC: 1010, Assembler: 1, DMs: 5_000}},
 		{"delayed opening delivery: T = T_req completes", ViewTrace{N: 4, Level: 0, View: 1, Assemblers: 4, OpenUCTime: 1000, SeenMs: seen(4, 1_000_000),
-			ProposalMs: 1_000_000, ProposalUC: 1100, Assembler: 1, SuccessorMs: []uint64{1_000_000}, DMs: 9_000}},
+			ProposalMs: 1_000_000, ProposalUC: 1100, Assembler: 1, DMs: 9_000}},
 		{"delayed opening delivery: window short by a second fails", ViewTrace{N: 4, Level: 0, View: 1, Assemblers: 4, OpenUCTime: 1000, SeenMs: seen(4, 1_000_000),
-			ProposalMs: 1_000_000, ProposalUC: 1100, Assembler: 1, SuccessorMs: []uint64{1_000_000}, DMs: 11_000}},
+			ProposalMs: 1_000_000, ProposalUC: 1100, Assembler: 1, DMs: 11_000}},
 		{"too-short timeout T=60 against D=100", ViewTrace{N: 16, Level: 0, View: 0, Assemblers: 16, TOverride: 60, OpenUCTime: 1000, SeenMs: seen(16, 1_000_000),
-			ProposalMs: 1_000_000, ProposalUC: 1060, Assembler: 4, SuccessorMs: []uint64{1_000_000}, DMs: 100_000}},
+			ProposalMs: 1_000_000, ProposalUC: 1060, Assembler: 4, DMs: 100_000}},
 		{"adequate timeout T=102 = T_req(D=100 s)", ViewTrace{N: 16, Level: 0, View: 0, Assemblers: 16, TOverride: 102, OpenUCTime: 1000, SeenMs: seen(16, 1_000_000),
-			ProposalMs: 1_000_000, ProposalUC: 1102, Assembler: 4, SuccessorMs: []uint64{1_000_000}, DMs: 100_000}},
+			ProposalMs: 1_000_000, ProposalUC: 1102, Assembler: 4, DMs: 100_000}},
 		{"late restart of a quorum-irrelevant root", ViewTrace{N: 4, Level: 1, View: 0, Assemblers: 4, OpenUCTime: 1000, SeenMs: seen(4, 1_000_000),
-			RestartMs: map[int]uint64{3: 1_024_000}, ProposalMs: 1_000_000, ProposalUC: 1020, Assembler: 0, SuccessorMs: []uint64{1_000_000}, DMs: 10_000}},
+			RestartMs: map[int]uint64{3: 1_024_000}, ProposalMs: 1_000_000, ProposalUC: 1020, Assembler: 0, DMs: 10_000}},
 		{"restart at c_v+T-1, re-learn at c_v+T+4, remaining quorum suffices", ViewTrace{N: 4, Byzantine: []int{3}, Level: 1, View: 0, Assemblers: 4, OpenUCTime: 1000,
-			SeenMs: seen(4, 1_000_000), RestartMs: map[int]uint64{1: 1_024_000}, ProposalMs: 1_000_000, ProposalUC: 1020, Assembler: 0, SuccessorMs: []uint64{1_000_000}, DMs: 10_000}},
+			SeenMs: seen(4, 1_000_000), RestartMs: map[int]uint64{1: 1_024_000}, ProposalMs: 1_000_000, ProposalUC: 1020, Assembler: 0, DMs: 10_000}},
 		{"restart at c_v+T-1, re-learn at c_v+T+4, quorum-relevant", ViewTrace{N: 4, Silent: []int{3}, Level: 1, View: 0, Assemblers: 4, OpenUCTime: 1000,
-			SeenMs: seen(4, 1_000_000), RestartMs: map[int]uint64{1: 1_024_000}, ProposalMs: 1_000_000, ProposalUC: 1020, Assembler: 0, SuccessorMs: []uint64{1_000_000}, DMs: 10_000}},
+			SeenMs: seen(4, 1_000_000), RestartMs: map[int]uint64{1: 1_024_000}, ProposalMs: 1_000_000, ProposalUC: 1020, Assembler: 0, DMs: 10_000}},
 		{"silent assembler", ViewTrace{N: 4, Silent: []int{2}, Level: 1, View: 0, Assemblers: 4, OpenUCTime: 1000, SeenMs: seen(4, 1_000_000),
-			ProposalMs: 1_020_002, ProposalUC: 1020, Assembler: 2, SuccessorMs: []uint64{1_000_000}, DMs: 1_000}},
+			ProposalMs: 1_020_002, ProposalUC: 1020, Assembler: 2, DMs: 1_000}},
+		{"D counted once from c_v (astra VT-16 example): T=20, D=15, successors by 10 s", ViewTrace{N: 4, Silent: []int{3}, Level: 1, View: 0, Assemblers: 4,
+			OpenUCTime: 1000, SeenMs: []uint64{0, 0, 0, 0}, ProposalMs: 0, ProposalUC: 1020, Assembler: 1, DMs: 15_000}},
 		{"saturated timeout is never", ViewTrace{N: 4, Level: 9, View: 112, Assemblers: 4, OpenUCTime: 1000, SeenMs: seen(4, 1_000_000), ProposalMs: 1, ProposalUC: ^uint64(0),
 			Assembler: 0, DMs: 1}},
 	}
+	// independent expectations for the boundary traces (hand-computed from the model text in schema section 14)
+	wantCompletes := map[string]bool{"astra 1000/1002/1020/1005": true, "stale opening timestamp 900": true,
+		"delayed opening delivery: T = T_req completes": true, "delayed opening delivery: window short by a second fails": false,
+		"too-short timeout T=60 against D=100": false, "adequate timeout T=102 = T_req(D=100 s)": true, "silent assembler": false,
+		"D counted once from c_v (astra VT-16 example): T=20, D=15, successors by 10 s": true}
+	wantCommit := map[string]uint64{"astra 1000/1002/1020/1005": 1_022_002, "D counted once from c_v (astra VT-16 example): T=20, D=15, successors by 10 s": 20_002,
+		"restart at c_v+T-1, re-learn at c_v+T+4, quorum-relevant": 1_044_002, "restart at c_v+T-1, re-learn at c_v+T+4, remaining quorum suffices": 1_020_002}
 	for _, c := range traces {
 		j := c.t.Judge()
+		if want, ok := wantCompletes[c.name]; ok && want != j.Completes {
+			b.fail("view %s: completes %v, the schema text gives %v", c.name, j.Completes, want)
+		}
+		if want, ok := wantCommit[c.name]; ok && want != j.EarliestCommitMs {
+			b.fail("view %s: earliest commit %d, the schema text gives %d", c.name, j.EarliestCommitMs, want)
+		}
 		b.add(c.name, "view.trace", map[string]any{"trace": c.t}, map[string]any{"judgment": j})
 	}
 	if TReq(100_000) != 102 {
@@ -752,4 +792,177 @@ func ints8(v []uint8) []int {
 		out[i] = int(x)
 	}
 	return out
+}
+
+// ---- the boundaries the VT-16 reviews named, each with a hand-written expectation the reference must meet ----
+
+func genReviewBoundaries(b *vb) {
+	// the protocol proof-configuration predicate
+	for _, c := range []struct {
+		name   string
+		params map[string]string
+		want   string
+	}{{"absent", nil, ""}, {"none", map[string]string{"proof_type": "none"}, ""}, {"aggregator_rsmt_v1", map[string]string{"proof_type": "aggregator_rsmt_v1"}, ""},
+		{"exec", map[string]string{"proof_type": "exec"}, ""}, {"aggregator_zk_v1", map[string]string{"proof_type": "aggregator_zk_v1"}, ""},
+		{"sp1 complete", map[string]string{"proof_type": "sp1", "vkey_path": "/k", "chain_id": "3"}, ""},
+		{"sp1 without vkey_path", map[string]string{"proof_type": "sp1", "chain_id": "3"}, "ProofVKeyPathMissing"},
+		{"sp1 without chain_id", map[string]string{"proof_type": "sp1", "vkey_path": "/k"}, "ProofChainIDMissing"},
+		{"light_client with chain_id", map[string]string{"proof_type": "light_client", "chain_id": "18446744073709551615"}, ""},
+		{"light_client with a non-decimal chain_id", map[string]string{"proof_type": "light_client", "chain_id": "0x3"}, "ProofChainIDMissing"},
+		{"risc0 (no verifier)", map[string]string{"proof_type": "risc0"}, "UnknownProofType"},
+		{"unknown type", map[string]string{"proof_type": "smt"}, "UnknownProofType"}} {
+		got := errName(ProofConfigValid(c.params))
+		if got != c.want {
+			b.fail("proof config %s: %q, want %q", c.name, got, c.want)
+		}
+		b.add(c.name, "fold.proofConfig", map[string]any{"params": c.params}, map[string]any{"ok": got == "", "error": got})
+	}
+
+	// scoped binding selection: deferral, never Conflict
+	pdrA := fxPDR(7, 3, 3, 3, 3)
+	repl := mustChange(KindReplaceAggregator, uint64(7), pdrA.ShardID.Bytes(), w("old"), mustCBOR(pdrA), []byte{0x80})
+	upd := mustChange(KindUpdatePartition, uint64(7), pdrA.ShardID.Bytes(), w("old"), mustCBOR(pdrA))
+	upd8 := mustChange(KindUpdatePartition, uint64(8), pdrA.ShardID.Bytes(), w("old"), mustCBOR(pdrA))
+	add9 := mustChange(KindAddPartition, mustCBOR(fxPDR(9, 3, 0, 10, 2)), []byte{0x80})
+	add9b := mustChange(KindAddPartition, mustCBOR(fxPDR(9, 3, 0, 12, 2)), []byte{0x80})
+	s1 := mustChange(KindScheduleActivation, RuleID("r"), w("1"), uint64(20), uint64(0), "")
+	s2 := mustChange(KindScheduleActivation, RuleID("r"), w("2"), uint64(30), uint64(0), "")
+	s3 := mustChange(KindScheduleActivation, RuleID("q"), w("1"), uint64(20), uint64(0), "")
+	cand := func(id uint64, kind uint8, payload []byte) BindCandidate {
+		sc, err := ChangeScope(kind, payload)
+		if err != nil {
+			b.fail("scope: %v", err)
+		}
+		return BindCandidate{ID: id, Kind: kind, PayloadSize: len(payload), Scope: sc}
+	}
+	for _, c := range []struct {
+		name     string
+		cs       []BindCandidate
+		bound    []uint64
+		deferred []uint64
+	}{
+		{"two schedules of one rule: the second defers", []BindCandidate{cand(1, KindScheduleActivation, s1), cand(2, KindScheduleActivation, s2), cand(3, KindScheduleActivation, s3)}, []uint64{1, 3}, []uint64{2}},
+		{"kinds 6 and 8 on one shard: the second defers", []BindCandidate{cand(1, KindReplaceAggregator, repl), cand(2, KindUpdatePartition, upd), cand(3, KindUpdatePartition, upd8)}, []uint64{1, 3}, []uint64{2}},
+		{"two additions of one partition: the second defers", []BindCandidate{cand(4, KindAddPartition, add9), cand(5, KindAddPartition, add9b)}, []uint64{4}, []uint64{5}},
+	} {
+		bound, deferred := SelectBinding(c.cs)
+		if fmt.Sprint(bound) != fmt.Sprint(c.bound) || fmt.Sprint(deferred) != fmt.Sprint(c.deferred) {
+			b.fail("binding %s: %v / %v", c.name, bound, deferred)
+		}
+		var in []any
+		for _, x := range c.cs {
+			in = append(in, map[string]any{"id": x.ID, "kind": x.Kind, "payloadSize": x.PayloadSize, "scope": x.Scope})
+		}
+		b.add(c.name, "change.binding", map[string]any{"scheduled": in}, map[string]any{"bound": c.bound, "deferred": c.deferred})
+	}
+	if p, err := PDRPartition(mustCBOR(fxPDR(9, 3, 0, 10, 2))); err != nil || p != 9 {
+		b.fail("PDRPartition: %d %v", p, err)
+	}
+	for _, c := range []struct {
+		name string
+		pdr  []byte
+		want string
+	}{{"canonical PDR of partition 9", mustCBOR(fxPDR(9, 3, 0, 10, 2)), "partition:9"},
+		{"canonical PDR of partition 70000", mustCBOR(fxPDR(70000, 3, 0, 10, 2)), "partition:70000"},
+		{"no tag", []byte{0x83, 1, 3, 9}, "UnreadableScope"},
+		{"non-shortest partition id", []byte{0xd9, 0x98, 0x60, 0x83, 1, 3, 0x18, 9}, "UnreadableScope"},
+		{"tag, array of 3, uints 1, 3, 9", []byte{0xd9, 0x98, 0x60, 0x83, 1, 3, 9}, "partition:9"}} {
+		got, err := ChangeScope(KindAddPartition, mustChange(KindAddPartition, c.pdr, []byte{0x80}))
+		if err != nil {
+			got = "UnreadableScope"
+		}
+		if got != c.want {
+			b.fail("scope %s: %s, want %s", c.name, got, c.want)
+		}
+		b.add(c.name, "change.scope", map[string]any{"kind": KindAddPartition, "pdr": Hexb(c.pdr)}, map[string]any{"scope": c.want})
+	}
+
+	// the pointer switch, in the design's order
+	want := "[checkCodeAndHolder adoptionReady onRecords(old,10,3) detach setPointer attach allocateHolder onRecords(new,13,3)]"
+	var got []string
+	for _, st := range SwitchSequence(10, 6, 12, true, true, true, true) {
+		if st.Step == "onRecords" {
+			got = append(got, fmt.Sprintf("onRecords(%s,%d,%d)", st.Module, st.From, st.Count))
+		} else {
+			got = append(got, st.Step)
+		}
+	}
+	if fmt.Sprint(got) != want {
+		b.fail("switch order %v", got)
+	}
+
+	// S2a with a Reserved R: attempt changes keep it; only expiry makes it rejectable
+	{
+		s := newScript(b, "S2a-1 attempt changes keep a Reserved R until its expiry")
+		c := s.schedule(KindCommitteeLimits)
+		r := s.reserve("R", []uint64{c}, "")
+		s.root.Abort(false)
+		s.step("root", "abort", map[string]any{"note": "an unrelated attempt ends; no Prepare exists against an unpublished R"}, nil, "")
+		k, ok, _ := PlannableAttempt(s.root.Control, 10)
+		s.step("root", "plannable", map[string]any{"attempt": k, "defined": ok}, nil, "")
+		_, due := RejectDue(OutReserved, 10_000+Lifetime-1, 10_000+Lifetime, false)
+		s.step("root", "reject", map[string]any{"result": "R", "progress": 10_000 + Lifetime - 1}, s.root.Reject(r, 20, due), "NotDue")
+		reason, due := RejectDue(OutReserved, 10_000+Lifetime, 10_000+Lifetime, false)
+		s.step("root", "reject", map[string]any{"result": "R", "progress": 10_000 + Lifetime, "reason": reason}, s.root.Reject(r, 21, due), "")
+		s.deliver(-1)
+		s.done("s2a.lapse")
+	}
+	// the root never restarts an exhausted or undefined attempt at zero
+	for _, c := range []struct {
+		name  string
+		ctl   ControlState
+		round uint64
+		want  string
+	}{
+		{"Prepare at OrderedRound near 2^64 never dies", ControlState{Kind: CtlPrepared, Attempt: 7, OrderedRound: ^uint64(0) - 20}, ^uint64(0) - 10, "NotQuiet"},
+		{"Prepare at the last round after a cooldown near 2^64", ControlState{Kind: CtlPrepared, Attempt: 7, OrderedRound: ^uint64(0) - 48}, ^uint64(0), "NotQuiet"},
+		{"aborted attempt 2^64-1 is exhausted", ControlState{Kind: CtlAborted, Attempt: ^uint64(0)}, 5, "ErrHandoffApproval"},
+		{"prepared attempt 2^64-1 after its cooldown is exhausted", ControlState{Kind: CtlPrepared, Attempt: ^uint64(0), OrderedRound: 100}, 149, "ErrHandoffApproval"},
+		{"aborted attempt 7 plans attempt 8", ControlState{Kind: CtlAborted, Attempt: 7}, 5, ""},
+	} {
+		rm := NewRootModel(5)
+		rm.Control = c.ctl
+		err := rm.Prepare(w("R"), c.round)
+		if errName(err) != c.want {
+			b.fail("root %s: %v", c.name, err)
+		}
+		exp := map[string]any{"error": errName(err), "controlAfter": rm.Control}
+		b.add(c.name, "root.prepare", map[string]any{"control": c.ctl, "round": Dec(c.round)}, exp)
+	}
+	// native repair preconditions
+	for _, c := range []struct {
+		name string
+		bind bool
+		gap  uint64
+		want string
+	}{{"native repair with work after MIN_EPOCH_GAP", true, MinEpochGap, ""}, {"native repair without Scheduled work", false, MinEpochGap, "NoScheduledWork"},
+		{"native repair before MIN_EPOCH_GAP", true, MinEpochGap - 1, "EpochGap"}} {
+		s := newScript(b, c.name)
+		var bind []uint64
+		if c.bind {
+			bind = []uint64{s.schedule(KindForceRemove)}
+		}
+		s.vr.Health = HealthFaulted
+		err := s.vr.Reserve(s.id("N"), [20]byte{}, true, bind, uint64(len(s.vr.Log)), c.gap)
+		s.step("vr", "reserveNative", map[string]any{"bind": bind, "sinceEpochStart": c.gap}, err, c.want)
+		s.done("s2a.native")
+	}
+	// the root latches at H; VR at its Boundary
+	{
+		rootSched := []Activation{{RuleID: RuleID("a"), ReleaseDigest: w("1"), RootEpoch: 7, NotBeforeUcTime: 5000, State: ActActive, ChangeID: 4}}
+		vrSched := append([]Activation(nil), rootSched...)
+		var trace []any
+		rootSched = Latch(rootSched, 7)
+		trace = append(trace, map[string]any{"event": "H committed into root epoch 7 (root history)", "root": rootSched, "vr": vrSched})
+		post := Schedule{RuleID: RuleID("a"), ReleaseDigest: w("2"), RootEpoch: 12, NotBeforeUcTime: 9000}
+		v := ScheduleVerdict(post, 8, Effective(rootSched))
+		if v != VerdictLatched {
+			b.fail("root latch: fold gives %d", v)
+		}
+		trace = append(trace, map[string]any{"event": "fold of a candidate into epoch 8 reads the root schedule, Boundary still delayed", "verdict": VerdictNames[v],
+			"withVRScheduleWouldBe": VerdictNames[ScheduleVerdict(post, 8, Effective(vrSched))]})
+		vrSched = Latch(vrSched, 7)
+		trace = append(trace, map[string]any{"event": "the matching Boundary is imported and applied", "root": rootSched, "vr": vrSched})
+		b.add("root latches at H, VR at the delayed Boundary", "activation.latch", map[string]any{"rule": "a", "E": 7}, map[string]any{"trace": trace})
+	}
 }

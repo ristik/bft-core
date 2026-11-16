@@ -4,13 +4,12 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"unicode/utf8"
 )
 
 // A minimal strict ABI codec for the flat tuples the change payloads use: address, bool, bytes32, uintN (N <= 64), bytes and string.
 // Encode produces the standard abi.encode bytes. DecodeABI accepts exactly those bytes and nothing else: every head offset must be the
 // canonical one (dynamic tails in field order, each directly after the previous), narrow integers and padding must be zero, a string
-// must be valid UTF-8 and the input must end exactly at the last tail.
+// is any bytes (no UTF-8 rule) and the input must end exactly at the last tail.
 
 func abiDynamic(t string) bool { return t == "bytes" || t == "string" }
 
@@ -118,10 +117,7 @@ func DecodeABI(types []string, data []byte) ([]any, error) {
 			}
 			b := append([]byte(nil), data[start:end]...)
 			if t == "string" {
-				if !utf8.Valid(b) {
-					return nil, ErrCanonical
-				}
-				out[i] = string(b)
+				out[i] = string(b) // byte canonicality only: any bytes (Solidity does not validate UTF-8)
 			} else {
 				out[i] = b
 			}

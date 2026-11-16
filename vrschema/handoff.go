@@ -8,6 +8,7 @@ import (
 	"sort"
 
 	"github.com/unicitynetwork/bft-core/evmassign"
+	"github.com/unicitynetwork/bft-core/q3format"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
@@ -163,7 +164,7 @@ type Readiness struct {
 	BodyID            []byte              `json:"bodyId"`
 	RuleSupportDigest []byte              `json:"ruleSupportDigest"`
 	Commitments       []SupportCommitment `json:"commitments"`
-	Receipt           []byte              `json:"receipt"`      // q3format receipt over ReceiptContext{..., CandidateDigest, BodyID, ...}, unchanged format
+	Receipt           []byte              `json:"receipt"`      // q3format.EncodeReceipts of the singleton set {[nodeID, sig]} over ReceiptContext{..., CandidateDigest, BodyID, ...}
 	TrustBaseSig      []byte              `json:"trustBaseSig"` // over the successor trust base derived from the intent
 	EnvelopeSig       []byte              `json:"envelopeSig"`
 }
@@ -185,11 +186,12 @@ type ViewCertificate struct {
 	Readiness []Readiness `json:"readiness"`
 }
 
-// CheckShape is the context and cardinality check of a certificate for `successors` members (signatures and receipts are verified by
-// the caller against the intent's successor keys and trust base).
-func (c ViewCertificate) CheckShape(successors int, bodyID []byte) error {
-	if len(c.Readiness) != successors {
-		return fmt.Errorf("%w: %d readiness for %d successors", ErrHandoff, len(c.Readiness), successors)
+// CheckShape is the context and cardinality check of a certificate for the successor root node ids in identity order (ascending
+// StakingID): exactly one readiness each, naming the assembly's context, with a consistent rule-support digest and a receipt that is the
+// singleton set of that member's receipt. Signatures are verified by the caller against the intent's successor keys and trust base.
+func (c ViewCertificate) CheckShape(successors []string, bodyID []byte) error {
+	if len(c.Readiness) != len(successors) {
+		return fmt.Errorf("%w: %d readiness for %d successors", ErrHandoff, len(c.Readiness), len(successors))
 	}
 	cd := sha256.Sum256(c.Assembly.Candidate)
 	for i, r := range c.Readiness {
@@ -201,13 +203,16 @@ func (c ViewCertificate) CheckShape(successors int, bodyID []byte) error {
 		if err != nil || !bytes.Equal(rs[:], r.RuleSupportDigest) {
 			return fmt.Errorf("%w: readiness %d rule-support digest", ErrHandoff, i)
 		}
+		if _, err := ReadinessReceipt(r.Receipt, successors[i]); err != nil {
+			return fmt.Errorf("readiness %d: %w", i, err)
+		}
 	}
 	return nil
 }
 
 // RuleSupportEvidence is the Freeze v5 rule-support set: references to committed support-table entries (Digest of the committed
-// commitment, ascending), fresh commitments (ascending by (stakingID, ruleId)), and this intent's K-member readiness carrying
-// commitments (ascending by envelope bytes).
+// commitment, strictly ascending), fresh commitments (strictly ascending by (stakingID, ruleId)), and this intent's K-member readiness,
+// each naming one binding through its commitments, strictly ascending by that stakingID. Duplicates are refused by the strict order.
 type RuleSupportEvidence struct {
 	_          struct{}            `cbor:",toarray"`
 	Refs       [][]byte            `json:"refs"`
@@ -233,31 +238,10 @@ func (f FreezeV5) Encode() ([]byte, error) {
 	if !bytes.Equal(f.Candidate, f.Certificate.Assembly.Candidate) {
 		return nil, fmt.Errorf("%w: freeze candidate is not the certified assembly's", ErrHandoff)
 	}
-	for i := 1; i < len(f.RuleSupport.Refs); i++ {
-		if bytes.Compare(f.RuleSupport.Refs[i-1], f.RuleSupport.Refs[i]) >= 0 {
-			return nil, fmt.Errorf("%w: rule-support references not strictly ascending", ErrHandoff)
-		}
+	if err := f.RuleSupport.check(); err != nil {
+		return nil, err
 	}
-	for i, r := range f.RuleSupport.Refs {
-		if len(r) != 32 {
-			return nil, fmt.Errorf("%w: rule-support reference %d", ErrHandoff, i)
-		}
-	}
-	for i := 1; i < len(f.RuleSupport.Fresh); i++ {
-		a, b := f.RuleSupport.Fresh[i-1], f.RuleSupport.Fresh[i]
-		if k := bytes.Compare(a.StakingID, b.StakingID); k > 0 || (k == 0 && bytes.Compare(a.RuleID, b.RuleID) >= 0) {
-			return nil, fmt.Errorf("%w: fresh commitments not strictly ascending", ErrHandoff)
-		}
-	}
-	if f.RuleSupport.Refs == nil {
-		f.RuleSupport.Refs = [][]byte{}
-	}
-	if f.RuleSupport.Fresh == nil {
-		f.RuleSupport.Fresh = []SupportCommitment{}
-	}
-	if f.RuleSupport.KReadiness == nil {
-		f.RuleSupport.KReadiness = []Readiness{}
-	}
+	f = f.canonical()
 	return types.Cbor.Marshal([]any{FreezeDomain, uint64(FreezeVersion), f})
 }
 
@@ -329,4 +313,195 @@ func VerifyHandoffView(r HandoffViewReplay, view uint64, blockUCTime uint64) err
 		return errors.New("BeforeReplayFloor")
 	}
 	return nil
+}
+
+// Bounds of the rule-support evidence: the support table is 16 members x 64 rules, K has at most 16 members.
+const (
+	MaxSupportRefs  = SupportMembers * SupportRules
+	MaxSupportFresh = SupportMembers * SupportRules
+	MaxKReadiness   = MaxCommittee
+)
+
+// KReadinessStakingID is the one stakingID every commitment of a K-member readiness names (a K readiness is evidence of exactly one
+// binding, and carries at least one commitment).
+func KReadinessStakingID(r Readiness) ([]byte, error) {
+	if len(r.Commitments) == 0 {
+		return nil, fmt.Errorf("%w: K readiness without commitments", ErrHandoff)
+	}
+	id := r.Commitments[0].StakingID
+	for _, c := range r.Commitments[1:] {
+		if !bytes.Equal(c.StakingID, id) {
+			return nil, fmt.Errorf("%w: K readiness names two bindings", ErrHandoff)
+		}
+	}
+	return id, nil
+}
+
+// check: refs are 32-byte digests strictly ascending (no duplicate), at most 1024; fresh commitments strictly ascending by
+// (stakingID, ruleId), at most 1024; K readiness strictly ascending by the stakingID it names (one per K member), at most 16.
+func (e RuleSupportEvidence) check() error {
+	if len(e.Refs) > MaxSupportRefs || len(e.Fresh) > MaxSupportFresh || len(e.KReadiness) > MaxKReadiness {
+		return fmt.Errorf("%w: rule-support evidence bounds", ErrOversize)
+	}
+	for i, r := range e.Refs {
+		if len(r) != 32 {
+			return fmt.Errorf("%w: rule-support reference %d", ErrHandoff, i)
+		}
+		if i > 0 && bytes.Compare(e.Refs[i-1], r) >= 0 {
+			return fmt.Errorf("%w: rule-support references not strictly ascending", ErrHandoff)
+		}
+	}
+	for i := 1; i < len(e.Fresh); i++ {
+		a, b := e.Fresh[i-1], e.Fresh[i]
+		if k := bytes.Compare(a.StakingID, b.StakingID); k > 0 || (k == 0 && bytes.Compare(a.RuleID, b.RuleID) >= 0) {
+			return fmt.Errorf("%w: fresh commitments not strictly ascending", ErrHandoff)
+		}
+	}
+	var prev []byte
+	for i, r := range e.KReadiness {
+		id, err := KReadinessStakingID(r)
+		if err != nil {
+			return err
+		}
+		if i > 0 && bytes.Compare(prev, id) >= 0 {
+			return fmt.Errorf("%w: K readiness not strictly ascending by stakingID", ErrHandoff)
+		}
+		prev = id
+	}
+	return nil
+}
+
+func (r Readiness) canonical() Readiness {
+	if r.Commitments == nil {
+		r.Commitments = []SupportCommitment{}
+	}
+	return r
+}
+
+func (e RuleSupportEvidence) canonical() RuleSupportEvidence {
+	if e.Refs == nil {
+		e.Refs = [][]byte{}
+	}
+	if e.Fresh == nil {
+		e.Fresh = []SupportCommitment{}
+	}
+	ks := make([]Readiness, len(e.KReadiness))
+	for i, r := range e.KReadiness {
+		ks[i] = r.canonical()
+	}
+	e.KReadiness = ks
+	return e
+}
+
+func (c ViewCertificate) canonical() ViewCertificate {
+	rs := make([]Readiness, len(c.Readiness))
+	for i, r := range c.Readiness {
+		rs[i] = r.canonical()
+	}
+	c.Readiness = rs
+	return c
+}
+
+func (f FreezeV5) canonical() FreezeV5 {
+	f.Certificate = f.Certificate.canonical()
+	f.RuleSupport = f.RuleSupport.canonical()
+	return f
+}
+
+// strict decodes raw into v, then requires the canonical re-encoding (every list an array, never null) to be exactly raw.
+func strict(raw []byte, v any, again func() ([]byte, error)) error {
+	if err := types.Cbor.Unmarshal(raw, v); err != nil {
+		return fmt.Errorf("%w: %v", ErrCanonical, err)
+	}
+	b, err := again()
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(b, raw) {
+		return ErrCanonical
+	}
+	return nil
+}
+
+// Encode is the canonical CBOR of a readiness message.
+func (r Readiness) Encode() ([]byte, error) {
+	if _, err := r.EnvelopeBytes(); err != nil {
+		return nil, err
+	}
+	return types.Cbor.Marshal(r.canonical())
+}
+
+// DecodeReadiness accepts exactly the canonical encoding.
+func DecodeReadiness(raw []byte) (Readiness, error) {
+	var r Readiness
+	err := strict(raw, &r, func() ([]byte, error) { return r.Encode() })
+	return r, err
+}
+
+// Encode is the canonical CBOR of a view certificate.
+func (c ViewCertificate) Encode() ([]byte, error) {
+	for _, r := range c.Readiness {
+		if _, err := r.EnvelopeBytes(); err != nil {
+			return nil, err
+		}
+	}
+	return types.Cbor.Marshal(c.canonical())
+}
+
+// DecodeViewCertificate accepts exactly the canonical encoding.
+func DecodeViewCertificate(raw []byte) (ViewCertificate, error) {
+	var c ViewCertificate
+	err := strict(raw, &c, func() ([]byte, error) { return c.Encode() })
+	return c, err
+}
+
+// DecodeIntent accepts exactly the canonical encoding of CBOR(["UNICITY_VR_HANDOFF_INTENT", intent]).
+func DecodeIntent(raw []byte) (Intent, error) {
+	var w struct {
+		_      struct{} `cbor:",toarray"`
+		Domain string
+		Body   Intent
+	}
+	err := strict(raw, &w, func() ([]byte, error) {
+		if w.Domain != IntentDomain {
+			return nil, ErrCanonical
+		}
+		return w.Body.Encode()
+	})
+	return w.Body, err
+}
+
+// DecodeFreezeV5 accepts exactly the canonical companion encoding.
+func DecodeFreezeV5(raw []byte) (FreezeV5, error) {
+	var w struct {
+		_       struct{} `cbor:",toarray"`
+		Domain  string
+		Version uint64
+		Body    FreezeV5
+	}
+	err := strict(raw, &w, func() ([]byte, error) {
+		if w.Domain != FreezeDomain || w.Version != FreezeVersion {
+			return nil, ErrCanonical
+		}
+		return w.Body.Encode()
+	})
+	return w.Body, err
+}
+
+// EncodeReadinessReceipt is Readiness.Receipt: the q3format receipt-set codec over the singleton set of this member's receipt, so the
+// Freeze side can merge the certificate's receipts into the set q3format.VerifyReceipts takes.
+func EncodeReadinessReceipt(r q3format.Receipt) ([]byte, error) {
+	return q3format.EncodeReceipts([]q3format.Receipt{r})
+}
+
+// ReadinessReceipt decodes Readiness.Receipt and requires exactly one receipt, named for nodeID.
+func ReadinessReceipt(raw []byte, nodeID string) (q3format.Receipt, error) {
+	rs, err := q3format.DecodeReceipts(raw)
+	if err != nil {
+		return q3format.Receipt{}, err
+	}
+	if len(rs) != 1 || rs[0].NodeID != nodeID {
+		return q3format.Receipt{}, fmt.Errorf("%w: readiness receipt is not the singleton of %q", ErrHandoff, nodeID)
+	}
+	return rs[0], nil
 }

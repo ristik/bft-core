@@ -43,7 +43,7 @@ func fxMembers(n int, resultID Word) []Member {
 func fxPDR(partition uint32, typeID uint32, epoch uint64, base, n int) *types.PartitionDescriptionRecord {
 	p := &types.PartitionDescriptionRecord{Version: 1, NetworkID: types.NetworkID(fxRootNetwork), PartitionID: types.PartitionID(partition),
 		PartitionTypeID: types.PartitionTypeID(typeID), TypeIDLen: 8, UnitIDLen: 256, T2Timeout: 2500 * time.Millisecond, Epoch: epoch,
-		PartitionParams: map[string]string{"proof_type": "smt"}}
+		PartitionParams: map[string]string{"proof_type": "aggregator_rsmt_v1"}}
 	for i := 0; i < n; i++ {
 		p.Validators = append(p.Validators, &types.NodeInfo{NodeID: fxNodeID(100 + base + i), SigKey: pubOf(genKey(100 + base + i)), Stake: 1})
 	}

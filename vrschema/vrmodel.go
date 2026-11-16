@@ -72,7 +72,8 @@ var (
 	ErrDelay              = errors.New("DelayNotElapsed")
 	ErrCancel             = errors.New("NotCancellable")
 	ErrTooManyPending     = errors.New("TooManyPending")
-	ErrBadReason          = errors.New("BadReason")
+	ErrNoWork             = errors.New("NoScheduledWork")
+	ErrEpochGap           = errors.New("EpochGap")
 )
 
 func (m *VRModel) emit(f string, a ...any) { m.Effects = append(m.Effects, fmt.Sprintf(f, a...)) }
@@ -148,7 +149,11 @@ func (m *VRModel) Cancel(id uint64) error {
 // Reserve opens an output. The gates hold for module and native reservations alike: not Inconsistent, no open output, no pending
 // pair, and VR's cursor caught up with the SealRegistry's imported count (imported records all applied). A module reservation must
 // come from the active module; a native one requires Faulted or Stalled health. Every bound id must be Scheduled.
-func (m *VRModel) Reserve(r Word, source [20]byte, native bool, bind []uint64, imported uint64) error {
+//
+// Native repair additionally needs Scheduled boundary work to bind (at least one id) and MIN_EPOCH_GAP progress units since the epoch's
+// first ordinary round (sinceEpochStart), design section 3.6.2. A module reservation's due rule (design section 3.7.2: no open output,
+// MIN_EPOCH_GAP since the last boundary and the epoch start, pending work) is the module's own and a precondition of the call here.
+func (m *VRModel) Reserve(r Word, source [20]byte, native bool, bind []uint64, imported uint64, sinceEpochStart uint64) error {
 	switch {
 	case m.Health == HealthInconsistent:
 		return ErrInconsistent
@@ -162,6 +167,10 @@ func (m *VRModel) Reserve(r Word, source [20]byte, native bool, bind []uint64, i
 		return ErrPreconditionFailed
 	case native && m.Health != HealthFaulted && m.Health != HealthStalled:
 		return ErrPreconditionFailed
+	case native && len(bind) == 0:
+		return ErrNoWork
+	case native && sinceEpochStart < MinEpochGap:
+		return ErrEpochGap
 	case !native && source != m.Active:
 		return ErrPreconditionFailed
 	}
@@ -203,7 +212,8 @@ func (m *VRModel) Publish(r Word) (uint8, error) {
 }
 
 // Invalidate is total and lock-exempt: by the source it moves Reserved or Published to Invalidated and is otherwise a no-op; by anyone
-// else it reverts NotSource for a known id and is a no-op for an unknown one. Reason 0 is refused.
+// else it reverts NotSource for a known id and is a no-op for an unknown one. Reason 0 is the storage sentinel "not invalidated", so a
+// source call with reason 0 is a no-op in every state; it never reverts.
 func (m *VRModel) Invalidate(r Word, by [20]byte, reason uint8) (bool, error) {
 	o := m.Outputs[r]
 	if o == nil {
@@ -213,7 +223,7 @@ func (m *VRModel) Invalidate(r Word, by [20]byte, reason uint8) (bool, error) {
 		return false, ErrNotSource
 	}
 	if reason == 0 {
-		return false, ErrBadReason
+		return false, nil
 	}
 	if o.State == OutReserved || o.State == OutPublished {
 		o.State = OutInvalidated
@@ -359,20 +369,22 @@ type BindCandidate struct {
 	ID          uint64 `json:"id"`
 	Kind        uint8  `json:"kind"`
 	PayloadSize int    `json:"payloadSize"`
+	Scope       string `json:"scope"`               // ChangeScope of its payload ("" for kinds 2 and 10)
 	Performed   bool   `json:"performed,omitempty"` // ForceRemove: the chosen trial performs it
 }
 
-// SelectBinding scans Scheduled changes ascending by id and binds while at most 8 root-side and 16 total changes, at most 64 KiB of
-// payload and at most one change of each singleton kind are bound; a change that does not fit is deferred and stays Scheduled. A
-// ForceRemove is bound only if the chosen trial performs it. ModuleAction never binds.
+// SelectBinding scans Scheduled changes ascending by id and binds while at most 8 root-side and 16 total changes and at most 64 KiB of
+// payload are bound and the change's scope (ChangeScope) is not yet bound in this output: one per singleton kind, one per shard across
+// kinds 6 and 8, one per partition for kind 7, one per rule for kind 9. A change that does not fit is deferred and stays Scheduled; it
+// is never bound to be rejected later. A ForceRemove is bound only if the chosen trial performs it. ModuleAction never binds.
 func SelectBinding(cands []BindCandidate) (bound, deferred []uint64) {
 	cs := append([]BindCandidate(nil), cands...)
 	sort.Slice(cs, func(i, j int) bool { return cs[i].ID < cs[j].ID })
 	root, total, bytes := 0, 0, 0
-	seen := map[uint8]bool{}
+	seen := map[string]bool{}
 	for _, c := range cs {
 		fits := c.Kind != KindModuleAction && total < MaxBoundTotal && bytes+c.PayloadSize <= MaxBoundPayload &&
-			(!RootSide(c.Kind) || root < MaxBoundRootSide) && (!Singleton(c.Kind) || !seen[c.Kind]) &&
+			(!RootSide(c.Kind) || root < MaxBoundRootSide) && (c.Scope == "" || !seen[c.Scope]) &&
 			(c.Kind != KindForceRemove || c.Performed)
 		if !fits {
 			deferred = append(deferred, c.ID)
@@ -384,7 +396,9 @@ func SelectBinding(cands []BindCandidate) (bound, deferred []uint64) {
 		if RootSide(c.Kind) {
 			root++
 		}
-		seen[c.Kind] = true
+		if c.Scope != "" {
+			seen[c.Scope] = true
+		}
 	}
 	return bound, deferred
 }
@@ -398,34 +412,31 @@ type SwitchStep struct {
 }
 
 // SwitchSequence is the frozen order of a batch [from, from+count) whose record at index boundaryAt applies a Boundary that switches
-// the pointer (design v2 section 6.5, audit item 3): the old module's onRecords through and including the Boundary; the code checks and
-// (if ADOPTION_CHECK) adoptionReady; detach of the old module; the pointer switch; attach of the new module; the holder entry allocated
-// only if attach succeeded and the new module is a liability holder; the remainder of the batch to the new module (to the old module
-// when the switch was refused). Repair mode follows a failed attach (health Faulted) and the remainder then goes to the new pointer
-// all the same, as a contained step whose failure is absorbed by Faulted.
+// the pointer (design section 3.6.1): the code-hash and liability-holder checks; adoptionReady when the module declares
+// ADOPTION_CHECK; then the old module's onRecords through and including the switching Boundary; detach of the old module; the pointer
+// and metadata switch; attach of the new module; the holder entry allocated only when attach succeeded and the new module is a
+// liability holder (health Faulted and repair mode when attach failed); the remainder of the batch to the new pointer. When the switch
+// is refused (code or holder mismatch, adoption not ready) the change is Rejected before any module call and the old module receives
+// the whole batch in one onRecords.
 func SwitchSequence(from, count, boundaryAt uint64, codeOK, adoptionReady, attachOK, holder bool) []SwitchStep {
-	out := []SwitchStep{{Step: "onRecords", Module: "old", From: from, Count: boundaryAt - from + 1}}
-	rest := from + count - boundaryAt - 1
+	out := []SwitchStep{{Step: "checkCodeAndHolder", Module: "new"}}
 	if !codeOK {
-		out = append(out, SwitchStep{Step: "reject", Module: "new"})
-	} else if !adoptionReady {
-		out = append(out, SwitchStep{Step: "adoptionReady", Module: "new"}, SwitchStep{Step: "reject", Module: "new"})
-	} else {
-		out = append(out, SwitchStep{Step: "adoptionReady", Module: "new"}, SwitchStep{Step: "detach", Module: "old"},
-			SwitchStep{Step: "setPointer", Module: "new"}, SwitchStep{Step: "attach", Module: "new"})
-		if attachOK && holder {
-			out = append(out, SwitchStep{Step: "allocateHolder", Module: "new"})
-		}
-		if !attachOK {
-			out = append(out, SwitchStep{Step: "fault", Module: "new"})
-		}
+		return append(out, SwitchStep{Step: "reject", Module: "new"}, SwitchStep{Step: "onRecords", Module: "old", From: from, Count: count})
 	}
-	target := "new"
-	if !codeOK || !adoptionReady {
-		target = "old"
+	out = append(out, SwitchStep{Step: "adoptionReady", Module: "new"})
+	if !adoptionReady {
+		return append(out, SwitchStep{Step: "reject", Module: "new"}, SwitchStep{Step: "onRecords", Module: "old", From: from, Count: count})
 	}
-	if rest > 0 {
-		out = append(out, SwitchStep{Step: "onRecords", Module: target, From: boundaryAt + 1, Count: rest})
+	out = append(out, SwitchStep{Step: "onRecords", Module: "old", From: from, Count: boundaryAt - from + 1}, SwitchStep{Step: "detach", Module: "old"},
+		SwitchStep{Step: "setPointer", Module: "new"}, SwitchStep{Step: "attach", Module: "new"})
+	if attachOK && holder {
+		out = append(out, SwitchStep{Step: "allocateHolder", Module: "new"})
+	}
+	if !attachOK {
+		out = append(out, SwitchStep{Step: "fault", Module: "new"})
+	}
+	if rest := from + count - boundaryAt - 1; rest > 0 {
+		out = append(out, SwitchStep{Step: "onRecords", Module: "new", From: boundaryAt + 1, Count: rest})
 	}
 	return out
 }

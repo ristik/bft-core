@@ -2,7 +2,6 @@ package vrschema
 
 import (
 	"fmt"
-	"unicode/utf8"
 )
 
 // ChangePayloadTypes are the frozen abi.encode field types of every change kind.
@@ -33,11 +32,8 @@ var ChangePayloadFields = map[uint8][]string{
 	KindForceRemove:        {"id"},
 }
 
-// Structural bounds inside payloads.
+// PoA ModuleAction actions, abi.encode(uint64 action, uint64 id).
 const (
-	MaxShardIDBytes         = 32 // a shard id bit string, length-prefixed as bft-go-base ShardID.Bytes()
-	MaxLabelBytes           = 64
-	MaxModuleAction         = MaxChangePayload
 	ModuleActionAdmit       = 1
 	ModuleActionRemove      = 2
 	ModuleActionConfirmExit = 3
@@ -82,8 +78,10 @@ type QueueEnv struct {
 	SystemGas      uint64
 }
 
-// QueueCheck is the structural, state-light queue-time validation of design section 3.5.3 (code presence and module metadata are
-// checked by VR against the chain and are not part of this pure function). It returns nil or the refusal.
+// QueueCheck is the structural, state-light queue-time validation of design section 3.5.3: the payload bound and exact ABI shape for
+// every kind, then the per-kind checks of the design. Code presence, the code hash and module metadata are VR's chain checks; a
+// nonzero address and code hash for SetModule and SetGovernor are what "code present, the hash matches" needs of the payload. The only
+// additions are FD-24 (a nonzero ruleId) and FD-25 (a readable AddPartition partition id). It returns nil or the refusal.
 func QueueCheck(kind uint8, payload []byte, env QueueEnv) error {
 	if kind == 0 || kind > KindForceRemove {
 		return fmt.Errorf("%w: change kind %d", ErrUnknownKind, kind)
@@ -101,10 +99,6 @@ func QueueCheck(kind uint8, payload []byte, env QueueEnv) error {
 		if v[0].([20]byte) == zeroAddr || v[1].(Word) == (Word{}) {
 			return fmt.Errorf("%w: zero address or code hash", ErrRange)
 		}
-	case KindModuleAction:
-		if v[0].([20]byte) == zeroAddr || len(v[1].([]byte)) == 0 {
-			return fmt.Errorf("%w: empty module action", ErrRange)
-		}
 	case KindCommitteeLimits:
 		l := CommitteeLimits{uint32(v[0].(uint64)), uint32(v[1].(uint64)), uint32(v[2].(uint64))}
 		if !l.Valid() {
@@ -115,22 +109,13 @@ func QueueCheck(kind uint8, payload []byte, env QueueEnv) error {
 		if err := ValidateProfile(env.MaxGas, env.SystemGas, f); err != nil {
 			return err
 		}
-	case KindReplaceAggregator, KindUpdatePartition:
-		shard := v[1].([]byte)
-		if len(shard) > MaxShardIDBytes || v[2].(Word) == (Word{}) || len(v[3].([]byte)) == 0 {
-			return fmt.Errorf("%w: shard change shape", ErrRange)
-		}
-		if kind == KindReplaceAggregator && len(v[4].([]byte)) == 0 {
-			return fmt.Errorf("%w: no PoPs", ErrRange)
-		}
 	case KindAddPartition:
-		if len(v[0].([]byte)) == 0 || len(v[1].([]byte)) == 0 {
-			return fmt.Errorf("%w: AddPartition shape", ErrRange)
+		if _, err := ChangeScope(kind, payload); err != nil {
+			return err // VR must read the partition id to defer a second addition of it (freeze decision FD-25)
 		}
 	case KindScheduleActivation:
-		label := v[4].(string)
-		if v[0].(Word) == (Word{}) || len(label) > MaxLabelBytes || !utf8.ValidString(label) {
-			return fmt.Errorf("%w: schedule shape", ErrRange)
+		if v[0].(Word) == (Word{}) {
+			return fmt.Errorf("%w: zero ruleId", ErrRange) // zero is the absent entry (freeze decision FD-24)
 		}
 		if v[2].(uint64) < env.KnownRootEpoch+3 || env.KnownRootEpoch > ^uint64(0)-3 {
 			return fmt.Errorf("ScheduleTooEarly")

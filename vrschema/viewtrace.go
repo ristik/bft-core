@@ -5,23 +5,23 @@ import "sort"
 // ViewTrace is a scripted single view transition v -> v+1 under the reference timing model of the view vectors. Times are real
 // milliseconds; UC times are integer seconds. Roots have weight 1. A root's seen time is when it first held the opening commit of v
 // (a restart replaces it with the re-learning time). The model is exact for validity (the replay floor) and is the frozen judgment
-// model for the liveness-side quantities (residence, earliest commit of v+1, the assembler's window, completion).
+// model for the liveness-side quantities (residence, earliest commit of v+1, the assembler's window, completion). The residence wait
+// is the live voting RULE every honest root applies (it is not a premise); only its drift bound rho and the adequacy of T are premises.
 type ViewTrace struct {
-	N           int            `json:"n"`
-	Byzantine   []int          `json:"byzantine"` // vote for anything replay-valid, at once
-	Silent      []int          `json:"silent"`    // non-cooperating: never vote
-	TOverride   uint64         `json:"tOverride"` // premise vectors only: a T off the 10*2^k ladder (0: T(level, view))
-	Level       uint8          `json:"level"`
-	View        uint64         `json:"view"`                // v
-	Assemblers  uint32         `json:"assemblers"`          // n of the attempt (for T)
-	OpenUCTime  uint64         `json:"openUcTime"`          // openTime(v)
-	SeenMs      []uint64       `json:"seenMs"`              // per root
-	RestartMs   map[int]uint64 `json:"restartMs,omitempty"` // root -> re-learning time
-	ProposalMs  uint64         `json:"proposalMs"`          // the v+1 proposal is made at
-	ProposalUC  uint64         `json:"proposalUc"`          // its block UC time
-	Assembler   int            `json:"assembler"`
-	SuccessorMs []uint64       `json:"successorMs"` // when each successor member learns the opening of v
-	DMs         uint64         `json:"dMs"`         // signing path D = Lambda + delta + pi_a + pi_m from the last learning
+	N          int            `json:"n"`
+	Byzantine  []int          `json:"byzantine"` // vote for anything replay-valid, at once
+	Silent     []int          `json:"silent"`    // non-cooperating: never vote
+	TOverride  uint64         `json:"tOverride"` // premise vectors only: a T off the 10*2^k ladder (0: T(level, view))
+	Level      uint8          `json:"level"`
+	View       uint64         `json:"view"`                // v
+	Assemblers uint32         `json:"assemblers"`          // n of the attempt (for T)
+	OpenUCTime uint64         `json:"openUcTime"`          // openTime(v)
+	SeenMs     []uint64       `json:"seenMs"`              // per root
+	RestartMs  map[int]uint64 `json:"restartMs,omitempty"` // root -> re-learning time
+	ProposalMs uint64         `json:"proposalMs"`          // the v+1 proposal is made at
+	ProposalUC uint64         `json:"proposalUc"`          // its block UC time
+	Assembler  int            `json:"assembler"`
+	DMs        uint64         `json:"dMs"` // the signing path D = Lambda + delta + pi_a + pi_m, measured from c_v
 }
 
 // ViewJudgment is the frozen outcome of a trace.
@@ -32,6 +32,7 @@ type ViewJudgment struct {
 	ResidenceWaitMs  uint64 `json:"residenceWaitMs"`
 	EarliestCommitMs uint64 `json:"earliestCommitMs"`
 	AssemblerWindow  int64  `json:"assemblerWindowMs"`
+	CvMs             uint64 `json:"cvMs"` // c_v
 	Completes        bool   `json:"completes"`
 }
 
@@ -91,11 +92,17 @@ func (t ViewTrace) Judge() ViewJudgment {
 	} else {
 		j.AssemblerWindow = -1
 	}
-	last := a
-	for _, s := range t.SuccessorMs {
-		last = max(last, s)
+	// c_v is when the first honest root holds the opening commit; D already contains the learning spread Lambda, so the view's
+	// certificate is complete at c_v + D (design section 8.3), provided its assembler is honest and cooperating
+	cv := ^uint64(0)
+	for i := 0; i < t.N; i++ {
+		if !byz[i] && !silent[i] {
+			cv = min(cv, t.SeenMs[i])
+		}
 	}
-	j.Completes = !byz[t.Assembler] && !silent[t.Assembler] && (j.EarliestCommitMs == ^uint64(0) || last+t.DMs <= j.EarliestCommitMs)
+	j.CvMs = cv
+	j.Completes = !byz[t.Assembler] && !silent[t.Assembler] && cv != ^uint64(0) &&
+		(j.EarliestCommitMs == ^uint64(0) || (cv <= ^uint64(0)-t.DMs && cv+t.DMs <= j.EarliestCommitMs))
 	return j
 }
 
