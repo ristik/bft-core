@@ -504,10 +504,12 @@ class Laptop:
         complete, status = self.install_complete(epoch)
         if complete:
             return handoff.installed_result(status, epoch) if (status or {}).get('switch') else {'already': True}
-        # a member of the old committee (not a follower there) may be switching at its own commit, as may a root whose status did not answer; a joiner
-        # (a follower) never switches, and an older image does not: both are restarted
-        if status is None or ((status.get('switch') or {}) and not status.get('follower')):
-            switch = handoff.switched_in_process(self.root_status, epoch)
+        # a member of the old committee (not a follower there) may be switching at its own commit, as may a root whose status did not answer; with
+        # bft-core#1086 PR 2 a joiner (a follower) switches too, from an activation a root peer serves, when its image acquires; an older image does not:
+        # it is restarted (handoff.awaits_switch)
+        wait = handoff.awaits_switch(status, True)
+        if wait is not None:
+            switch = handoff.switched_in_process(self.root_status, epoch, wait=wait)
             if switch is not None:
                 return {'already': True, 'inProcess': True, 'switchMs': switch.get('tookMs')}
         override = self.home / f'compose.install-epoch-{epoch}.json'

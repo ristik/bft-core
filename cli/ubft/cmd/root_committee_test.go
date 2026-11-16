@@ -89,3 +89,50 @@ func TestANonMemberKeepsNoCommitteeAndAWarmupIsBounded(t *testing.T) {
 	require.Less(t, time.Since(start), 2*time.Second, "a member that is down costs at most the warm-up")
 	require.Equal(t, []string{downID.String()}, c.status().Missing)
 }
+
+// stagedCommittee is a manager's staged successor committee as the keeper polls it.
+type stagedCommittee struct {
+	epoch uint64
+	ids   []string
+}
+
+func (s stagedCommittee) StagedCommittee() (uint64, []string) { return s.epoch, s.ids }
+
+// #1086 PR 2 (#1082): a joiner is a follower of the installed epoch and keeps no committee of it, but once its staged candidate names it
+// in the successor it keeps that committee connected, before the commit: the host member, which cannot dial it, is reached over the
+// joiner's own connection, and the joiner's status reports the staged view. A staged successor that does not name it keeps nothing; once it
+// switched into the successor in process, that committee is its installed one.
+func TestAJoinerKeepsItsStagedSuccessorsCommitteeConnectedBeforeTheCommit(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	log := logger.New(t)
+	host := committeeTestPeer(t, nil)
+	joiner := committeeTestPeer(t, []string{"/ip4/192.0.2.1/tcp/8000"})
+	joiner.Network().Peerstore().AddAddrs(host.ID(), host.MultiAddresses(), peerstore.PermanentAddrTTL)
+	installed := committeeTrust(8, host.ID())
+
+	c := keepRootCommittee(ctx, log, joiner, installed, time.Second)
+	require.False(t, c.member)
+	require.Nil(t, c.status().Staged)
+
+	other := committeeTestPeer(t, nil).ID()
+	c.stage(ctx, log, 9, []string{host.ID().String(), other.String()})
+	require.Nil(t, c.status().Staged, "a successor that does not name this root is not kept")
+	require.Empty(t, joiner.Network().ConnsToPeer(host.ID()))
+
+	go c.keepStaged(ctx, log, stagedCommittee{epoch: 9, ids: []string{host.ID().String(), joiner.ID().String()}})
+	require.Eventually(t, func() bool {
+		st := c.status().Staged
+		return st != nil && st.Epoch == 9 && len(st.Missing) == 0
+	}, 5*time.Second, 20*time.Millisecond, "the joiner dials the staged committee itself")
+	require.Equal(t, []string{host.ID().String()}, c.status().Staged.Connected)
+	require.NotEmpty(t, host.Network().ConnsToPeer(joiner.ID()), "the host reaches the joiner over the joiner's connection")
+	require.False(t, c.status().Member, "still a follower of epoch 8")
+
+	c.follow(ctx, log, committeeTrust(9, host.ID(), joiner.ID()))
+	st := c.status()
+	require.True(t, st.Member)
+	require.EqualValues(t, 9, st.Epoch)
+	require.Nil(t, st.Staged, "after the switch the staged committee is the installed one")
+	require.Empty(t, st.Missing)
+}

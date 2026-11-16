@@ -1075,7 +1075,10 @@ class Rehearsal:
         an unavailable or Switching answer is no evidence; a declined, faulted or late switch is not a switch); a root that reports none is not one."""
         out = set()
         for i in range(1, self.n + 1):
-            switch = handoff.switched_in_process(lambda i=i: self.q3_status(i, transport), self.target)
+            # PR 2: a joiner or follower whose image acquires the activation from a root peer is waited for as long as handoff.awaits_switch says; one
+            # on an older image is restarted at once
+            wait = handoff.awaits_switch(self.q3_status(i, transport), True)
+            switch = None if wait is None else handoff.switched_in_process(lambda i=i: self.q3_status(i, transport), self.target, wait=wait)
             # evidence of the in-process switch itself: its target is this epoch (a root restarted into the epoch reports Running in it with no target)
             if switch is not None and switch.get('target') == self.target:
                 out.add(i)

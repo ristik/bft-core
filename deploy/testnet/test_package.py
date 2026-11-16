@@ -2853,8 +2853,9 @@ class PosTooLateAfterAnInProcessSwitch(unittest.TestCase):
 
     def test_a_switched_root_that_stops_answering_fails(self):
         import rehearse
-        for name, answers in (('unavailable before and after', [self.published, None]),
-                              ('unavailable before, good after', [self.published] + [None] * 10 + [self.published])):
+        # the first two answers are switched_roots' (handoff.awaits_switch, then handoff.switched_in_process): the root has switched; then it stops answering
+        for name, answers in (('unavailable before and after', [self.published, self.published, None]),
+                              ('unavailable before, good after', [self.published, self.published] + [None] * 10 + [self.published])):
             with self.assertRaises(rehearse.Failure, msg=name) as raised:
                 self.run_too_late({1: list(answers), 2: self.published}, {1: None, 2: None})
             self.assertIn('reports its switch into epoch 2 published', str(raised.exception), name)
