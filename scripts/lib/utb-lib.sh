@@ -112,12 +112,11 @@ utb_lane_components() {
   fi
   [ -z "${UTB_SDK_JS:-}" ] || ! git -C "$UTB_SDK_JS" rev-parse HEAD >/dev/null 2>&1 || out+=("state-transition-sdk-js=$(git -C "$UTB_SDK_JS" rev-parse HEAD)")
   [ -z "${P85_CONTRACTS:-}" ] || ! git -C "$P85_CONTRACTS" rev-parse HEAD >/dev/null 2>&1 || out+=("contracts=$(git -C "$P85_CONTRACTS" rev-parse HEAD)")
-  [ -z "${NBP_DIR:-}" ] || ! git -C "$NBP_DIR" rev-parse HEAD >/dev/null 2>&1 || out+=("native-bridge-plugins=$(git -C "$NBP_DIR" rev-parse HEAD)")
   printf '%s ' "${out[@]+"${out[@]}"}"
 }
 
 
-# ---- lane steps (UTB_LANE=1; sourced by scripts/p85-recovery-steps.sh next to the any-age steps, which supply anyage_dir, anyage_nbp, p85_*, agg-lib.sh) ----------
+# ---- lane steps (UTB_LANE=1; sourced by scripts/p85-recovery-steps.sh next to the any-age steps, which supply anyage_dir, p85_*, agg-lib.sh) ----------
 # Each is a function the P85 step runner calls like its own (nonzero return = the lane fails and tears down). The evidence goes to $(utb_dir); the independent verifier is
 # utb-evidence (scripts/utb-evidence), which trusts no node. Entries: epoch 2 is the K->J handoff (activated, never acknowledged by J's EVM), epoch 3 the derived recovery.
 utb_dir() { mkdir -p "${H3_DIR:?}" && echo "$(cd "$H3_DIR" && pwd)/utb"; }
@@ -126,6 +125,13 @@ utb_agg_log() { echo "$PWD/$(agg_dir 1)/logs/aggregator.log"; }
 utb_agg_url() { utb_agg_history_url 1; }
 # The shard configurations the pack verifies certificates against: the EVM shard's and every aggregator shard's (shard-conf-aggregator.json is shard 1, -2.json shard 2).
 utb_manifest_confs() { local d=$1/manifest f out; out=$d/shard-conf.json; for f in "$d"/shard-conf-aggregator.json "$d"/shard-conf-aggregator-[0-9].json; do [ -f "$f" ] && out="$out,$f"; done; echo "$out"; }
+# utb_agg_latest_uc FILE: the unicity certificate of the aggregator's latest block (shard 1), as a token file utb-evidence uc-verify reads
+utb_agg_latest_uc() {
+  local hex
+  hex=$(curl -fsS -X POST "http://127.0.0.1:$(agg_port 1)/" -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"get_block","params":{"blockNumber":"latest"}}' 2>/dev/null \
+    | jq -r '.result.block.unicityCertificate // empty' | sed 's/^0x//')
+  [ -n "$hex" ] && printf '%s' "$hex" | xxd -r -p >"$1"
+}
 # the aggregator log lines (JSON) written since byte offset $1
 utb_agg_lines_since() { tail -c +"$(($1 + 1))" "$(utb_agg_log)" 2>/dev/null | grep -a '^{'; }
 utb_agg_offset() { wc -c <"$(utb_agg_log)" 2>/dev/null | tr -d ' ' || echo 0; }
@@ -183,13 +189,16 @@ utb_step_u1() {
   utb_ev verify --bundle "$out/bundle/initial.cbor" --pin "$(utb_pin)" | tee "$out/bundle/initial.verify.txt" || return 1
   grep -q '^ok: epochs 1\.\.1,' "$out/bundle/initial.verify.txt" || { echo "the aggregator held more than the genesis before any rotation" >&2; return 1; }
   grep -aq '"msg":"Signed trust-base history loaded"' "$(utb_agg_log)" || { echo "the aggregator did not report its history loaded" >&2; return 1; }
-  # the original proof, saved by L1a: the digest is recorded now and nothing refetches it
-  cp "$(anyage_dir)/l1/token.cbor" "$out/proofs/token.cbor" || return 1
+  # the original proof: a certificate of the genesis epoch, the aggregator's latest block's (the protocol 6/7 bridge token of L1a was removed
+  # with that bridge, bft-core#1106). Its digest is recorded now and nothing refetches it; U5 verifies the same bytes under the final history.
+  local i; for i in $(seq 1 30); do utb_agg_latest_uc "$out/proofs/token.cbor" && break; sleep 2; done
+  [ -s "$out/proofs/token.cbor" ] || { echo "the aggregator served no block certificate within 60 s" >&2; return 1; }
   shasum -a 256 "$out/proofs/token.cbor" | cut -d' ' -f1 >"$out/proofs/original-proof.sha256"
-  # the original proof is the bridge token's: certified for the EVM shard, so its certificates bind the EVM shard's full configuration (not the aggregator's)
+  # the pack verifies against the EVM shard's full configuration and every aggregator shard's
   cp test-nodes/evm-full-shard-conf-v2.json "$out/manifest/shard-conf.json" && cp "$(agg_conf 1)" "$out/manifest/shard-conf-aggregator.json" || return 1
   local k; for k in $(seq 2 "${aggShards:-1}"); do cp "$(agg_conf "$k")" "$out/manifest/shard-conf-aggregator-$k.json" || return 1; done
   utb_ev uc-verify --token "$out/proofs/token.cbor" --bundle "$out/bundle/initial.cbor" --shard-conf "$(utb_manifest_confs "$out")" | tee "$out/proofs/before-rotation-verify.txt" || return 1
+  grep -q '^certificate 0: epoch 1 ' "$out/proofs/before-rotation-verify.txt" || { echo "the original proof is not a certificate of the genesis epoch" >&2; return 1; }
   # the reference client starts from the genesis alone and holds it through the whole rotation
   utb_ev client --url "$(utb_agg_url)" --store "$out/client.db" --genesis test-nodes/utb-genesis.cbor --pin "$(utb_pin)" | tee "$out/history/client-start.log" || return 1
   echo "U1: the aggregator and the client hold the genesis only; the original proof ($(cut -c1-12 "$out/proofs/original-proof.sha256")...) verifies under it"
@@ -267,15 +276,11 @@ utb_step_u3b() {
 
 # After the acknowledgement: the post-recovery token (certified under the epoch-3 committee), the client's unknown-epoch gap, the aggregator's second restart.
 utb_step_u4() {
-  local out i hex; out=$(utb_dir)
-  # A certificate issued after the recovery: the aggregator's latest block carries the unicity certificate of its partition (the bridge's lock proofs cannot be made for the
-  # successor epoch: the dnb tool's lock proof binds the EVM shard configuration of epoch 1). The aggregator certifies a block every round, so the latest one is of the
-  # current root epoch (3) shortly after the aggregator is back on the recovered chain.
+  local out i; out=$(utb_dir)
+  # A certificate issued after the recovery: the aggregator's latest block carries the unicity certificate of its partition. The aggregator certifies a block every
+  # round, so the latest one is of the current root epoch (3) shortly after the aggregator is back on the recovered chain.
   for i in $(seq 1 60); do
-    hex=$(curl -fsS -X POST "http://127.0.0.1:$(agg_port 1)/" -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"get_block","params":{"blockNumber":"latest"}}' 2>/dev/null \
-      | jq -r '.result.block.unicityCertificate // empty' | sed 's/^0x//')
-    if [ -n "$hex" ]; then
-      printf '%s' "$hex" | xxd -r -p >"$out/proofs/post-recovery-token.cbor"
+    if utb_agg_latest_uc "$out/proofs/post-recovery-token.cbor"; then
       utb_ev fetch --url "$(utb_agg_url)" --out "$out/bundle/final-probe.cbor" >/dev/null 2>&1 && \
         utb_ev uc-verify --token "$out/proofs/post-recovery-token.cbor" --bundle "$out/bundle/final-probe.cbor" --shard-conf "$(agg_conf 1)" 2>&1 | grep -q '^certificate 0: epoch 3 ' && break
     fi
@@ -413,18 +418,17 @@ utb_step_s2() {
   cat "$out/root$node.txt"
 }
 
-# After L1c: the original proof verifies unchanged under its historical committee; the bridge receipt; the exported history reloads exactly.
+# After L2: the original proof verifies unchanged under its historical committee; the exported history reloads exactly.
 utb_step_u5() {
   local out got; out=$(utb_dir)
   [ "$(shasum -a 256 <"$out/proofs/token.cbor" | cut -d' ' -f1)" = "$(cat "$out/proofs/original-proof.sha256")" ] || { echo "the original proof changed" >&2; return 1; }
   utb_ev uc-verify --token "$out/proofs/token.cbor" --bundle "$out/bundle/final.cbor" --shard-conf "$(utb_manifest_confs "$out")" | tee "$out/proofs/historical-verify.log" || return 1
-  cp "$(anyage_dir)/l1/release.json" "$out/proofs/bridge-receipt.json" || return 1
   # the complete history is exported as one tagged file (the final bundle) and a fresh client store reloads it to exactly the same records and tip
   rm -f "$out/reload.db"
   utb_ev client --url "$(utb_agg_url)" --store "$out/reload.db" --genesis test-nodes/utb-genesis.cbor --pin "$(utb_pin)" --export "$out/history/reloaded.cbor" | tee "$out/history/client-reload.log" || return 1
   cmp -s "$out/history/reloaded.cbor" "$out/bundle/final.cbor" || { echo "the reloaded client history differs from the exported final bundle" >&2; return 1; }
   echo "final bundle sha256 $(shasum -a 256 <"$out/bundle/final.cbor" | cut -d' ' -f1)" >>"$out/history/client-reload.log"
-  echo "U5: the original proof verifies unchanged under its historical committee, the bridge receipt is kept, the client reload reproduces the final history"
+  echo "U5: the original proof verifies unchanged under its historical committee, the client reload reproduces the final history"
 }
 
 # The pack: the evidence files the checker requires, the manifest rewritten with relative paths (self-contained), then the checker.
@@ -435,7 +439,6 @@ utb_step_final() {
   "$UBFT" trust-base utb-manifest --trust-base "$out/manifest/trust-base.json" --out-dir "$out/manifest" --relative-paths $comp >/dev/null || return 1
   [ "$(python3 -c "import json;print(json.load(open('$out/manifest/utb-manifest.json'))['derived']['utbGenesisEntryId'])")" = "$(utb_pin)" ] || { echo "the pack manifest's genesis is not the deployment's" >&2; return 1; }
   { echo "bft-core ${LANE_PRODUCT_COMMIT:-$(git rev-parse HEAD)}${LANE_PRODUCT_COMMIT:+ harness=$(git rev-parse HEAD)} ubft sha256 $(shasum -a 256 "$UBFT" | cut -d' ' -f1)"; echo "utb-evidence sha256 $(shasum -a 256 "$UTB_EVIDENCE" | cut -d' ' -f1)"; echo "aggregator sha256 $(shasum -a 256 "$AGG_BIN" | cut -d' ' -f1)"
-    echo "native-bridge-plugins $(git -C "${NBP_DIR:?}" rev-parse HEAD) (prerequisite: its live driver reads the trust-base release bundle, native-bridge-plugins#27; reads trust-base.bundle.cbor: $(grep -c 'trust-base.bundle.cbor' "$NBP_DIR/tests/live/anyage.ts") places)"
     echo "state-transition-sdk-js $(git -C "${UTB_SDK_JS:?}" rev-parse HEAD)"
     echo "aggregator shards: ${aggShards:-1} (${aggShardIDs[*]:-0x80})"; } >"$out/manifest/build.txt"
   mkdir -p "$out/manifest/aggregator"; cp "$(utb_agg_provenance "$AGG_BIN" "${AGRE_ROOT:-$PWD/..}/builds")"/{commit.txt,gomod-pins.txt,sha256.txt} "$out/manifest/aggregator/" || return 1
@@ -476,7 +479,6 @@ handoff/recovery-closure.log
 proofs/token.cbor
 proofs/original-proof.sha256
 proofs/historical-verify.log
-proofs/bridge-receipt.json
 history/client-reload.log
 proofs/post-recovery-token.cbor
 history/client-stale.cbor
@@ -500,7 +502,7 @@ UTB_EVIDENCE=${UTB_EVIDENCE:-build/utb-evidence}
 #  - the UCResp sample is a version 3 response whose attachment is byte-identical to entries/ordinary-handoff.cbor;
 #  - proofs/token.cbor is the original (its digest is the recorded one) and its certificates verify under their own epochs' committees (the recorded output is the
 #    tool's output on these bytes);
-#  - the client reload recorded the final bundle's digest and tip; the two-entry gap was fetched in one sync; the bridge receipt is a successful redemption.
+#  - the client reload recorded the final bundle's digest and tip; the two-entry gap was fetched in one sync.
 utb_check_evidence() {
   local dir=$1 f missing=0 tool=$UTB_EVIDENCE pin out want got
   [ -d "$dir" ] || { echo "utb_check_evidence: $dir is not a directory" >&2; return 1; }
@@ -557,7 +559,6 @@ utb_check_evidence() {
   local ir; ir=$(ls "$dir"/state-import/root[0-9]*.txt 2>/dev/null | head -1)
   [ -n "$ir" ] && grep -Eq '^state imports \(completed recovery\): [1-9]' "$ir" && grep -q '^V3 freeze rules are not enabled: 0$' "$ir" && grep -q '^successor trust-base entry cannot be derived: 0$' "$ir" \
     && grep -q '^handoff record outcome: .*phase=committed' "$ir" && grep -q '^vote on the record block: .*signed vote' "$ir" || { echo "state-import/root<N>.txt does not show a state import before the V3 handoff, no refusal, and the committed record outcome" >&2; return 1; }
-  jq -e '(.redeem.gasUsed | tonumber) > 0 and (.claim.gasUsed | tonumber) > 0' "$dir/proofs/bridge-receipt.json" >/dev/null 2>&1 || { echo "proofs/bridge-receipt.json is not a successful redemption and claim" >&2; return 1; }
 }
 
 # ---- chain-free self-tests -----------------------------------------------------------------------------------------------------------------------------
@@ -627,12 +628,6 @@ utb_selftest() {
   utb_st "a refusal for another reason (a dropped invalid update) is not the retried one" bash -c "! python3 -I '$rc' '$t/rep/dropped.jsonl' '$t/rep/out.log' 2>&1 | grep -q 'no successful catch-up raised the tip'"
   utb_st_no "a repair with no finished catch-up is refused" python3 -I "$rc" "$t/rep/no-finish.jsonl" "$t/rep/out.log"
   utb_st_no "a repair with a dropped invalid update is refused" python3 -I "$rc" "$t/rep/dropped.jsonl" "$t/rep/out.log"
-  # the aggregator shards in the lane's derived inputs: one shard writes no shard table, two write each shard with its aggregator; the pack verifies against every shard's configuration
-  mkdir -p "$t/lc/test-nodes"; printf '{"BridgeVault":"0x1","TokenVerifier":"0x2"}\n' >"$t/lc/test-nodes/bridge-addresses.json"
-  for n in 1 2; do
-    utb_st "the lane config of a $n-shard deployment is as the driver expects" bash -c "cd '$t/lc' && export DNB_AGG_SHARDS=$n && source '$cwd/scripts/lib/agg-lib.sh' && validators=4 rethEthBase=8545 rootRpcPort=8000 chainID=31337 partitionID=8 DNB_TOOL=true bridge_write_config >/dev/null &&
-      if [ $n = 1 ]; then jq -e 'has(\"aggShards\") | not' test-nodes/lane-config.json; else jq -e '.aggShards == [{shard:\"40\",url:\"http://127.0.0.1:3001\"},{shard:\"c0\",url:\"http://127.0.0.1:3002\"}] and (.aggUrls | length) == 2' test-nodes/lane-config.json; fi"
-  done
   mkdir -p "$t/mc/manifest"; : >"$t/mc/manifest/shard-conf.json"; : >"$t/mc/manifest/shard-conf-aggregator.json"
   utb_st "one aggregator shard: the pack verifies against the EVM shard and the aggregator shard" bash -c "source '$cwd/scripts/lib/utb-lib.sh'; [ \"\$(utb_manifest_confs '$t/mc')\" = '$t/mc/manifest/shard-conf.json,$t/mc/manifest/shard-conf-aggregator.json' ]"
   : >"$t/mc/manifest/shard-conf-aggregator-2.json"
