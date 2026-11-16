@@ -54,10 +54,14 @@ func decodePDR(b []byte) (*types.PartitionDescriptionRecord, error) {
 	return &p, nil
 }
 
+// decodePoPs accepts exactly the canonical CBOR array of PoPs; null (0xf6) is not an array and re-encodes to 0x80, so it is refused.
 func decodePoPs(b []byte) ([]evmassign.PoP, error) {
 	var ps []evmassign.PoP
 	if len(b) == 0 || types.Cbor.Unmarshal(b, &ps) != nil {
 		return nil, ErrCanonical
+	}
+	if ps == nil {
+		ps = []evmassign.PoP{}
 	}
 	again, err := types.Cbor.Marshal(ps)
 	if err != nil || !bytes.Equal(again, b) {

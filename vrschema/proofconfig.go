@@ -28,8 +28,9 @@ var (
 )
 
 // ProofConfigValid is the protocol predicate: an absent, empty or "none" proof type is valid; any other type must be a protocol
-// proof type; sp1 needs a nonempty vkey_path and a chain_id; light_client needs a chain_id. A chain_id is a canonical decimal uint64
-// (strconv.ParseUint base 10, as zkverifier.ParseChainIDFromParams).
+// proof type; sp1 needs a nonempty vkey_path and a chain_id; light_client needs a chain_id. A chain_id is the canonical decimal
+// spelling of a uint64: ASCII digits, no sign, whitespace, separator or prefix, no leading zero (except "0" itself), value at most
+// 2^64 - 1 (FormatUint(ParseUint(s, 10, 64), 10) == s).
 func ProofConfigValid(params map[string]string) error {
 	pt := params[ParamProofType]
 	if pt == "" || pt == "none" {
@@ -47,8 +48,8 @@ func ProofConfigValid(params map[string]string) error {
 		if !ok || v == "" {
 			return false
 		}
-		_, err := strconv.ParseUint(v, 10, 64)
-		return err == nil
+		n, err := strconv.ParseUint(v, 10, 64)
+		return err == nil && strconv.FormatUint(n, 10) == v // the canonical spelling only (freeze decision FD-28)
 	}
 	switch pt {
 	case "sp1":

@@ -374,7 +374,8 @@ Strict decoding accepts exactly `abi.encode` output: dynamic tails in field orde
 padding, narrow integers zero-extended, and no trailing bytes. This is byte canonicality only: a `string` is any bytes (no UTF-8 rule)
 and no field has a length rule beyond the 16 KiB payload bound. `shard` is bft-go-base `ShardID.Bytes()` (a non-canonical form names
 no installed shard and is Invalid in the fold); `pdr`/`successorPdr` is the canonical CBOR PDR (CBOR tag 39008 around its array);
-`pops` is the canonical CBOR array of `evmassign.PoP` (`[nodeId, key, signature]`), one per validator in validator order.
+`pops` is the canonical CBOR array of `evmassign.PoP` (`[nodeId, key, signature]`), one per validator in validator order; `null`
+(`0xf6`) is not an array and is Malformed, while an empty array where validators need proofs is BadPoP.
 `expectedOldPdrHash` is `evmassign.PDRHash`.
 
 **VR-context PoP** (kinds 6, 7): each validator key signs `CBOR(["UNICITY_VR_CHANGE_POP", 1, network, VR, changeId, partition, shard,
@@ -670,7 +671,8 @@ Exactly three accounts at P; the verdict refuses, in this order: a handoff in fl
 - **Proof configuration** (`ProofConfigValid`, kinds 6, 7 and 8, before any tentative mutation): an absent, empty or `none`
   `proof_type` is valid; otherwise it must be one of `exec`, `aggregator_rsmt_v1`, `aggregator_zk_v1`, `sp1`, `light_client`
   (`UnknownProofType`; `risc0` has no verifier); `sp1` needs a nonempty `vkey_path` and a `chain_id`; `light_client` a `chain_id`; a
-  `chain_id` is a canonical decimal uint64. **Local build support never enters a verdict:** a protocol-valid type the local binary
+  `chain_id` is the canonical decimal spelling of a uint64 (ASCII digits only, no sign, whitespace, separator or prefix, no leading
+  zero except `0` itself, at most 2^64−1: `FormatUint(ParseUint(s), 10) == s`; FD-28). **Local build support never enters a verdict:** a protocol-valid type the local binary
   cannot verify (`zkverifier.IsProofTypeAvailable` false) is still Accepted; that root fences at installation (`ProofSupportMissing`),
   as for an unknown activated rule.
 - **View judgments** (`view.trace`): the reference timing model in `viewtrace.go` — roots of weight 1, Byzantine roots vote for
@@ -767,6 +769,9 @@ Each is the reading most consistent with the approved chain; each is also in `br
   schedule of a rule still makes a second one Conflict); binding selection defers instead, so this rule is defensive.
 - **FD-27 Proof-configuration support is a fence, not a verdict:** a root whose build cannot verify an Accepted protocol-valid proof
   type refuses to install that configuration (`ProofSupportMissing`) and needs a build with the support.
+- **FD-28 `chain_id` spelling.** The design names the parameter, not its grammar; `strconv.ParseUint` alone accepts leading zeros.
+  The proof predicate accepts only the canonical decimal spelling, so one value has one accepted text. Every existing PDR and fixture
+  (`3`, `1337`, `31337`, the 2^64−1 vector) already uses it.
 ---
 
 ## 17. What this does not freeze

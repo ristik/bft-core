@@ -112,3 +112,21 @@ func TestMalformedEmbeddingsClaimNoScope(t *testing.T) {
 		require.Equal(t, c.want, got)
 	}
 }
+
+// astra round 2: a null change-PoP list is Malformed; an empty array with validators required is BadPoP; chain_id is canonical decimal.
+func TestNullPoPsAndChainIDGrammar(t *testing.T) {
+	in := FoldInput{Network: fxRootNetwork, SuccessorRootEpoch: 6, PartitionCeiling: PartitionCeiling}
+	pdr := mustCBOR(fxPDR(9, 3, 0, 20, 2))
+	got, err := FoldVerdicts(in, []RegistryChange{{ID: 2, Kind: 7, Payload: mustChange(KindAddPartition, pdr, []byte{0xf6})}})
+	require.NoError(t, err)
+	require.Equal(t, []uint8{VerdictMalformed}, got)
+	got, err = FoldVerdicts(in, []RegistryChange{{ID: 2, Kind: 7, Payload: mustChange(KindAddPartition, pdr, []byte{0x80})}})
+	require.NoError(t, err)
+	require.Equal(t, []uint8{VerdictBadPoP}, got)
+	for _, ok := range []string{"0", "3", "31337", "18446744073709551615"} {
+		require.NoError(t, ProofConfigValid(map[string]string{"proof_type": "light_client", "chain_id": ok}), ok)
+	}
+	for _, bad := range []string{"00", "03", "00018446744073709551615", "+3", "-3", " 3", "3 ", "3_000", "0x3", "18446744073709551616", ""} {
+		require.ErrorIs(t, ProofConfigValid(map[string]string{"proof_type": "light_client", "chain_id": bad}), ErrProofChainID, bad)
+	}
+}
