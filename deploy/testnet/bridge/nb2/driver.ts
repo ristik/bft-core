@@ -1056,8 +1056,11 @@ async function sized(w: Wallet, nonce: bigint, length: number, file: string, gas
   const latest = await rpc.call<Record<string, string>>('eth_getBlockByNumber', ['latest', false]);
   const base = BigInt(latest.baseFeePerGas);
   let n = length - 120;
-  for (let i = 0; i < 10; i++) {
-    const tx = await signTx(w.signer, { chainId: cfg.chainId, nonce, maxPriorityFeePerGas: 1_000_000_000n, maxFeePerGas: 2n * base + 1_000_000_000n,
+  // the tip moves by one wei a try: a signature whose r or s encodes a byte short (one in 128) would otherwise send n back and forth between
+  // two lengths, one short and one over (the limits stage on #1126); every try is a new signing hash, so the length settles
+  for (let i = 0; i < 32; i++) {
+    const tip = 1_000_000_000n + BigInt(i);
+    const tx = await signTx(w.signer, { chainId: cfg.chainId, nonce, maxPriorityFeePerGas: tip, maxFeePerGas: 2n * base + tip,
       gas: gas ?? 21_000n + 4n * BigInt(n) + 10_000n, to: unhex('0x000000000000000000000000000000000000dead'), value: 0n, data: new Uint8Array(n) });
     if (tx.raw.length === length) {
       writeFileSync(file, hx(tx.raw));
