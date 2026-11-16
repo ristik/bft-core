@@ -35,7 +35,9 @@ on:
         options: [none, after-builds, in-lane]
         default: none
   push:
-    branches: ['ci-lane-run/**']
+    # integration/enshrined-evm: only a push that changes the ureth pin or how it is built or tested runs anything (lane `warm`: build-ureth and ureth-targeted,
+    # whose cache entries pull requests into integration then restore); every other push plans nothing and the gate passes at once.
+    branches: ['ci-lane-run/**', 'integration/enshrined-evm']
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     branches: [integration/enshrined-evm, main]
@@ -81,6 +83,8 @@ jobs:
           IN_PRODUCT: ${{ inputs.product }}
           PR_BASE: ${{ github.event.pull_request.base.sha }}
           PR_DRAFT: ${{ github.event.pull_request.draft }}
+          PUSH_REF: ${{ github.ref }}
+          PUSH_BEFORE: ${{ github.event.before }}
         run: |
           set -euo pipefail
           note=; selftests=false
@@ -89,8 +93,14 @@ jobs:
             lane=pr; inject=none
           elif [ "$EVENT" = workflow_dispatch ]; then lane=$IN_LANE; inject=$IN_INJECT; product=${IN_PRODUCT:-checkout}
           elif [ "$EVENT" = schedule ]; then lane=nightly; inject=none
+          elif [ "$EVENT" = push ] && [ "$PUSH_REF" = refs/heads/integration/enshrined-evm ]; then
+            inject=none; lane=none
+            if [[ -z "$PUSH_BEFORE" || "$PUSH_BEFORE" =~ ^0+$ ]] || ! git cat-file -e "$PUSH_BEFORE^{commit}" 2>/dev/null \
+              || [ -n "$(git diff --name-only "$PUSH_BEFORE" HEAD -- scripts/ci/lane-pins.json scripts/ci/build-ureth.sh scripts/ci/test-ureth.sh scripts/ci/ureth-cache.sh)" ]; then
+              lane=warm
+            fi
           else lane=$(jq -r .lane scripts/ci/run-inputs.json); inject=$(jq -r .inject_failure scripts/ci/run-inputs.json); product=$(jq -r '.product // "checkout"' scripts/ci/run-inputs.json); fi
-          case "$lane" in combined|overbound|abort|t6|ureth-targeted|all-live|x4-shadow|x4-rewards|x4-exit|nightly|build-only|pr) ;; *) echo "bad lane $lane" >&2; exit 1 ;; esac
+          case "$lane" in combined|overbound|abort|t6|ureth-targeted|all-live|x4-shadow|x4-rewards|x4-exit|nightly|build-only|pr|warm|none) ;; *) echo "bad lane $lane" >&2; exit 1 ;; esac
           case "$inject" in none|after-builds|in-lane) ;; *) echo "bad inject_failure $inject" >&2; exit 1 ;; esac
           case "$product" in checkout|pinned) ;; *) echo "bad product $product" >&2; exit 1 ;; esac
           lanes='[]'; t6=false; targeted=false
@@ -102,7 +112,7 @@ jobs:
             all-live|nightly) lanes='["combined","overbound","abort"]'; t6=true ;;
             t6) t6=true ;;
           esac
-          case "$lane" in ureth-targeted|nightly) targeted=true ;; esac
+          case "$lane" in ureth-targeted|nightly|warm) targeted=true ;; esac
           case "$lane" in nightly|all-live) selftests=true ;; esac
           if [ "$lane" = pr ]; then
             if [ "$PR_DRAFT" = true ]; then
@@ -123,7 +133,7 @@ jobs:
             fi
           fi
           need_lane_builds=false; [ "$lanes" = '[]' ] && [ "$lane" != build-only ] || need_lane_builds=true
-          need_ureth=false; [ "$lanes" != '[]' ] || [ "$t6" = true ] || [ "$lane" = build-only ] && need_ureth=true
+          need_ureth=false; [ "$lanes" != '[]' ] || [ "$t6" = true ] || [ "$lane" = build-only ] || [ "$lane" = warm ] && need_ureth=true
           sha=$(git rev-parse HEAD)
           { echo "sha=$sha"; echo "inject=$inject"; echo "product=$product"; echo "lanes=$lanes"; echo "t6=$t6"; echo "targeted=$targeted"
             echo "need_ureth=$need_ureth"; echo "need_lane_builds=$need_lane_builds"; echo "selftests=$selftests"; echo "note=$note"; } >>"$GITHUB_OUTPUT"
@@ -143,7 +153,24 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.plan.outputs.sha }}
+      - id: keys
+        run: scripts/ci/ureth-cache.sh keys | tee -a "$GITHUB_OUTPUT"
+      # Pull requests restore the binary another run built from exactly this pin, toolchain, cargo args, build script and runner image (exact key, no
+      # restore-keys); a PR's own cache writes stay in its own scope. Trusted events (push, schedule, dispatch) never restore: they build, then save.
+      - name: Restore unicity-reth of this pin (pull requests only)
+        id: cache
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/ureth-out
+          key: ${{ steps.keys.outputs.bin_key }}
+      - name: Verify the restored build (refused, never rebuilt over, on any mismatch)
+        if: ${{ steps.cache.outputs.cache-hit == 'true' }}
+        run: |
+          scripts/ci/ureth-cache.sh verify-bin "$RUNNER_TEMP/ureth-out"
+          echo "- unicity-reth restored from cache \`${{ steps.keys.outputs.bin_key }}\`, built in $(sed -n 's/^run_id //p' "$RUNNER_TEMP/ureth-out/run-identity.txt" | sed 's|^|run |')" >>"$GITHUB_STEP_SUMMARY"
       - name: Free disk (the runner's unused toolchains and images)
+        if: ${{ steps.cache.outputs.cache-hit != 'true' }}
         run: scripts/ci/prune-runner.sh
       - name: Sample resources
         run: |
@@ -152,7 +179,14 @@ jobs:
           echo $! >"$RUNNER_TEMP/res/sampler.pid"
           { uname -a; nproc; free -m; df -h; echo "image ${ImageVersion:-?}"; } >"$RUNNER_TEMP/res/runner.txt"
       - name: Build unicity-reth from the pin
+        if: ${{ steps.cache.outputs.cache-hit != 'true' }}
         run: scripts/ci/build-ureth.sh "$RUNNER_TEMP/ureth-out" "$RUNNER_TEMP/ureth-build"
+      - name: Save unicity-reth of this pin
+        if: ${{ steps.cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/ureth-out
+          key: ${{ steps.keys.outputs.bin_key }}
       - name: Resources of this job
         if: always()
         run: |
@@ -396,7 +430,24 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.plan.outputs.sha }}
+      - id: keys
+        run: scripts/ci/ureth-cache.sh keys | tee -a "$GITHUB_OUTPUT"
+      # The job tests the pinned ureth, not the change under review: a pull request skips it when a pass of exactly this commit, test selection, toolchain,
+      # test script and runner image is recorded (exact key). Trusted events (push, schedule, dispatch) always run it in full and record the pass.
+      - name: Restore the pass stamp of this pin (pull requests only)
+        id: cache
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/ureth-targeted-stamp
+          key: ${{ steps.keys.outputs.stamp_key }}
+      - name: Check the stamp (refused on any mismatch)
+        if: ${{ steps.cache.outputs.cache-hit == 'true' }}
+        run: |
+          scripts/ci/ureth-cache.sh check-stamp "$RUNNER_TEMP/ureth-targeted-stamp/stamp.json" | tee -a "$GITHUB_STEP_SUMMARY"
+          mkdir -p "$RUNNER_TEMP/ureth-test-out"; cp "$RUNNER_TEMP/ureth-targeted-stamp/stamp.json" "$RUNNER_TEMP/ureth-test-out/stamp.json"
       - name: Free disk
+        if: ${{ steps.cache.outputs.cache-hit != 'true' }}
         run: scripts/ci/prune-runner.sh
       - name: Sample resources
         run: |
@@ -405,7 +456,17 @@ jobs:
           echo $! >"$RUNNER_TEMP/res/sampler.pid"
           { uname -a; nproc; free -m; df -h; echo "image ${ImageVersion:-?}"; } >"$RUNNER_TEMP/res/runner.txt"
       - name: Targeted ureth tests (the Unicity crates of the pin, not the workspace)
+        if: ${{ steps.cache.outputs.cache-hit != 'true' }}
         run: scripts/ci/test-ureth.sh "$RUNNER_TEMP/ureth-test-out" "$RUNNER_TEMP/ureth-test"
+      - name: Record the pass of this pin
+        if: ${{ steps.cache.outputs.cache-hit != 'true' }}
+        run: scripts/ci/ureth-cache.sh write-stamp "$RUNNER_TEMP/ureth-test-out" "$RUNNER_TEMP/ureth-targeted-stamp/stamp.json"
+      - name: Save the pass stamp
+        if: ${{ steps.cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/ureth-targeted-stamp
+          key: ${{ steps.keys.outputs.stamp_key }}
       - name: Resources of this job
         if: always()
         run: |
@@ -444,6 +505,7 @@ jobs:
           scripts/ci/install-foundry-selftest.sh
           scripts/ci/install-foundry-selftest.sh
           scripts/ci/publish-selftest.sh
+          scripts/ci/ureth-cache.sh selftest
 
   lane-gate:
     # ALWAYS reports: the one check to require. Not-selected jobs are skipped and never block; a selected job that failed, was cancelled or never ran fails it.
