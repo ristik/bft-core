@@ -4,6 +4,9 @@
 Keep the four known slow packages apart, then greedily distribute the rest
 using test-source size as a cheap, deterministic estimate of work. Actual
 package timings are recorded by `go test -json` in each job.
+
+Shard 1 holds rootchain/consensus alone: go-ci splits its tests across
+several jobs (scripts/ci-test-split.py), so other packages go to shards 2-4.
 """
 
 import pathlib
@@ -42,7 +45,7 @@ def select(packages, selector):
     loads = [weight(shard[0]) for shard in shards]
     remaining = set(packages) - set(sum(shards, []))
     for package in sorted(remaining, key=lambda p: (-weight(p), p)):
-        target = min(range(4), key=lambda i: (loads[i], i))
+        target = min(range(1, 4), key=lambda i: (loads[i], i))
         shards[target].append(package)
         loads[target] += weight(package)
     return sorted(shards[int(selector) - 1])

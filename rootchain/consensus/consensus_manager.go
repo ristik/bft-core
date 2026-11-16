@@ -168,6 +168,7 @@ type (
 		future             futureMessages
 		switchDeclined     atomic.Pointer[switchDecline]
 		origins            MessageOrigins // the network's authenticated senders, tracked while the manager may switch epoch in process
+		acq                acquisition    // loop-owned: an activation this root fetches from a root peer (acquire.go, PR 2)
 		switchPublished    func()         // test seam: runs after a switch published its successor, before the successor's worker starts
 
 		log    *slog.Logger
@@ -711,11 +712,16 @@ func (x *ConsensusManager) loop(ctx context.Context) error {
 	}
 	sweep, stopSweep := x.futureSweep()
 	defer stopSweep()
+	acquireTick, stopAcquireTick := x.acquireTicker()
+	defer stopAcquireTick()
+	acquired := x.acquiredResults()
 	for {
 		// a committed activation this root switches into ends the context here, before anything else is handled in it (#1086)
 		if err := x.checkEpochSwitch(ctx); err != nil {
 			return err
 		}
+		// a root that does not hold the commit itself asks a root peer for the activation (#1086, PR 2)
+		x.checkAcquire(ctx, time.Now())
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -725,8 +731,11 @@ func (x *ConsensusManager) loop(ctx context.Context) error {
 			}
 			x.log.LogAttrs(ctx, logger.LevelTrace, fmt.Sprintf("received %T", msg), logger.Data(msg))
 			// a proposal, vote or timeout of the next epoch, sent by a member that switched into it first, waits for this root's own
-			// switch unverified, within the bounds its authenticated sender has; it is handled by the successor's worker or dropped (#1086)
-			if x.parkFuture(msg, x.takeOrigin(msg), time.Now()) {
+			// switch unverified, within the bounds its authenticated sender has; it is handled by the successor's worker or dropped (#1086).
+			// Any later epoch's message from an authenticated root also tells a root that is behind to acquire the activation (PR 2).
+			origin, now := x.takeOrigin(msg), time.Now()
+			x.noteAhead(msg, origin, now)
+			if x.parkFuture(msg, origin, now) {
 				continue
 			}
 			x.msgSeq++
@@ -755,6 +764,12 @@ func (x *ConsensusManager) loop(ctx context.Context) error {
 			x.handlePacemakerEvent(ctx, event)
 		case now := <-sweep:
 			x.sweepFuture(now)
+		case res := <-acquired:
+			// a bundle a root peer served: authenticated here, on the loop, before anything is staged (#1086, PR 2)
+			if err := x.onAcquired(ctx, res, time.Now()); err != nil {
+				return err
+			}
+		case <-acquireTick:
 		case req := <-x.frontierRequests():
 			x.handleFrontierRequest(ctx, req)
 		}
@@ -2381,6 +2396,21 @@ func (x *ConsensusManager) IsStagedRoot(nodeID string) bool {
 	}
 	_, ok := staged.roots[nodeID]
 	return ok
+}
+
+// StagedCommittee is the root committee of the successor the candidate staged on this root names, while that candidate is the next
+// epoch: its epoch and node identifiers (sorted); zero and nil otherwise. A joiner keeps it connected before the commit (#1086, #1082).
+func (x *ConsensusManager) StagedCommittee() (uint64, []string) {
+	staged := x.pendingStaged()
+	if staged == nil {
+		return 0, nil
+	}
+	out := make([]string, 0, len(staged.roots))
+	for id := range staged.roots {
+		out = append(out, id)
+	}
+	slices.Sort(out)
+	return staged.epoch, out
 }
 
 // pendingStaged is the staged candidate's members while its epoch is the next one, nil otherwise.

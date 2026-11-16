@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
-	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/logger"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -33,10 +32,21 @@ import (
 // Faulted: signing stays fenced and Run returns the error, so the process exits and its start-up recovery (the install journal's
 // Recover, or the install restart of the drive) takes over. A switch never resumes epoch E.
 //
-// Scope (PR 1 of #1086): the trigger is a root that is a member of both E and N and holds the activation's committed evidence itself,
-// of a successor without joiners. A joiner (a follower of E), a leaver (not a member of N), every member of a successor that has a
-// joiner (the joiner installs first, #1082), a root whose own evidence is not available, and a root that is down at the commit install
-// across a restart as before.
+// Scope (#1086). PR 1: a root that is a member of both E and N and holds the activation's committed evidence itself. PR 2: every root
+// that runs, whatever its role:
+//
+//   - a member of E that stays, and a leaver (a member of E that N does not name), switch at their own commit from their own evidence;
+//     the leaver's successor context is Following(N): it signs nothing, and goes on serving the activation evidence (its journal holds
+//     the bundle) and the shard subscriptions as a follower;
+//   - a root that does not hold the commit itself (a joiner, any follower of E, a member that lagged behind the commit, a root whose own
+//     evidence is incomplete) acquires the activation from a root peer (acquire.go): an authenticated root of its committee sends it a
+//     message of a later epoch, or it committed the handoff without the evidence, or (a joiner) its staged candidate names it. The
+//     bundle a peer serves is authenticated against this root's own history on the loop before anything is staged, and installed under
+//     the same barrier; a root several epochs behind installs the lineage one epoch at a time, each one a switch;
+//   - a successor with joiners is switched into like any other: its joiners switch at its first messages instead of being installed
+//     first across a restart (#1082), with their connections to the successor's committee kept from before the commit.
+//
+// A root that is down at the commit, faulted, or cannot get authenticated evidence from any peer installs across a restart as before.
 
 // SwitchPhase is the phase of the in-process epoch switch.
 type SwitchPhase uint32
@@ -81,7 +91,7 @@ type SwitchState struct {
 	Took time.Duration
 	Err  string
 	// Declined is the target of a committed activation this root does not switch into in process (it installs across a restart), with
-	// the reason: follower, leaving, joiners, no own evidence.
+	// the reason: no own evidence, for a switch that cannot acquire one from a peer.
 	Declined       uint64
 	DeclinedReason string
 }
@@ -121,6 +131,16 @@ type CapturedActivation interface {
 	// InstallVerifiedEpoch among them), then re-derives what the process derives from the installed epoch at its start (the request
 	// history selection, the committee it keeps connected). It runs with the worker stopped. An error is fatal for the process.
 	Install(ctx context.Context) error
+}
+
+// EpochAcquirer is an EpochSwitch that also installs an activation this root does not hold the commit of itself, from a bundle a root
+// peer serves (PR 2 of #1086): FetchActivation runs off the loop and trusts nothing, AdoptActivation authenticates the bytes on the loop
+// against this root's own history and install checks, exactly as the install restart authenticates a peer's bundle.
+type EpochAcquirer interface {
+	EpochSwitch
+	Acquires() bool
+	FetchActivation(ctx context.Context, from peer.ID, epoch uint64) ([]byte, error)
+	AdoptActivation(ctx context.Context, raw []byte, epoch uint64) (CapturedActivation, error)
 }
 
 // WithEpochSwitch enables the in-process epoch switch at a committed Q3 activation (#1086).
@@ -260,8 +280,10 @@ func (x *ConsensusManager) operator(fn func() error) error {
 }
 
 // checkEpochSwitch is the trigger, on the loop after every event: the committed root holds the commit of the handoff out of the
-// installed epoch, this root is a member of that epoch, its own evidence of the activation authenticates, and the successor body names
-// it. It is evaluated once per committed root. Anything else leaves the root in its epoch, to be installed across a restart.
+// installed epoch and this root's own evidence of the activation authenticates. It is evaluated once per committed root. The successor
+// context is Running(N) for a member of N and Following(N) for a root N does not name (a leaver, a follower), decided by the installed
+// committee after the install. A root that committed the handoff without its own evidence acquires it from a root peer, else it stays in
+// its epoch, to be installed across a restart.
 func (x *ConsensusManager) checkEpochSwitch(ctx context.Context) error {
 	if x.switcher == nil || x.q3 == nil {
 		return nil
@@ -277,35 +299,30 @@ func (x *ConsensusManager) checkEpochSwitch(ctx context.Context) error {
 	}
 	target := installed + 1
 	x.reconsiderSwitch(target)
-	if err := x.safety.member(installed); err != nil {
-		x.log.InfoContext(ctx, "the epoch's handoff is committed; this root follows the epoch and installs the successor across a restart",
-			"epoch", installed, "target", target)
-		x.declineSwitch(target, "follower")
-		return nil
-	}
 	captured, err := x.switcher.Capture(ctx, target)
 	if err != nil {
+		if x.acquirer() != nil {
+			x.log.WarnContext(ctx, "the epoch's handoff is committed but this root holds no evidence of its own: acquiring the activation from a root peer",
+				"epoch", installed, "target", target, logger.Error(err))
+			x.acq.committed = target
+			return nil
+		}
 		x.log.WarnContext(ctx, "the epoch's handoff is committed but its activation could not be captured: the install restart is the fallback",
 			"epoch", installed, "target", target, logger.Error(err))
 		x.declineSwitch(target, "no own evidence")
 		return nil
 	}
-	members := captured.Members()
-	if !slices.Contains(members, x.id.String()) {
-		x.log.InfoContext(ctx, "the epoch's handoff is committed and this root leaves the committee: the install restart makes it a follower",
-			"epoch", installed, "target", target)
-		x.declineSwitch(target, "leaving")
-		return nil
-	}
-	if joiners := newcomers(members, x.trustBase.Load()); len(joiners) != 0 && !switchesWithJoiners(x.switcher) {
-		// a joiner installs only once the commit exists, across its restart; started at once, the successor would time out the joiner's
-		// first leader slots until it is up (#1082). The drive installs the joiners first and then this root, as before.
-		x.log.InfoContext(ctx, "the epoch's handoff is committed and the successor has joiners: they install first and this root by the restart (#1082)",
-			"epoch", installed, "target", target, "joiners", joiners)
-		x.declineSwitch(target, "joiners")
-		return nil
-	}
-	return x.enterSwitching(installed, target, record, captured)
+	x.logRole(ctx, installed, target, captured.Members())
+	return x.enterSwitching(installed, target, record.ID(), captured)
+}
+
+// logRole states what the switch makes of this root: a member that stays, a leaver (Following), a follower that joins or follows.
+func (x *ConsensusManager) logRole(ctx context.Context, installed, target uint64, members []string) {
+	inE, inN := x.safety.member(installed) == nil, slices.Contains(members, x.id.String())
+	role := map[[2]bool]string{{true, true}: "stays", {true, false}: "leaves (follows the successor)", {false, true}: "joins",
+		{false, false}: "follows the successor"}[[2]bool{inE, inN}]
+	x.log.InfoContext(ctx, "switching into the committed activation in process: this root "+role, "epoch", installed, "target", target,
+		"joiners", newcomers(members, x.trustBase.Load()))
 }
 
 // switchDecline is a committed activation this root decided not to switch into in process, and why: what the drive reads to restart it
@@ -347,24 +364,25 @@ func newcomers(members []string, installed *types.RootTrustBaseV1) []string {
 	return out
 }
 
-// switchesWithJoiners reports whether the process's switch also switches into a successor that has joiners (a joiner that follows the old
-// epoch live and switches with it; PR 2 of #1086). The default does not.
-func switchesWithJoiners(s EpochSwitch) bool {
-	j, ok := s.(interface{ SwitchesWithJoiners() bool })
-	return ok && j.SwitchesWithJoiners()
+// acquirer is the process's switch when it can install an activation from a root peer, else nil.
+func (x *ConsensusManager) acquirer() EpochAcquirer {
+	if a, ok := x.switcher.(EpochAcquirer); ok && x.q3 != nil && a.Acquires() {
+		return a
+	}
+	return nil
 }
 
 // enterSwitching raises the barrier: it waits for the operator sections in flight, then publishes Switching(E, N, activation) under a
 // new generation, which refuses every signature (signingFence), every operator entry point and every completion of work started before
 // it. The barrier is held until the successor is published or the switch faults.
-func (x *ConsensusManager) enterSwitching(from, to uint64, record evmroot.OrderedHandoffRecord, captured CapturedActivation) error {
+func (x *ConsensusManager) enterSwitching(from, to uint64, id []byte, captured CapturedActivation) error {
 	started := time.Now()
+	x.stopAcquire() // a fetch in flight is of the context being left
 	x.ctxMu.Lock()
 	if x.frontier != nil {
 		x.frontier.eligible.Store(false)
 	}
 	gen := x.ctxGen.Add(1)
-	id := record.ID()
 	x.switchCtx.Store(&switchContext{SwitchState: SwitchState{Phase: SwitchSwitching, Epoch: from, Target: to, Activation: id, Generation: gen},
 		done: make(chan struct{})})
 	x.log.Info("switching epoch in process at the committed activation", "epoch", from, "target", to, "activation", fmt.Sprintf("%X", id))
@@ -419,6 +437,7 @@ func (x *ConsensusManager) resetVolatile() {
 	x.v3Planned.Store(nil)
 	x.q3Staged.Store(nil)
 	x.q3StagedEVM.Store(nil)
+	x.acq.resetAttempts() // what this root learnt of later epochs is kept: a root several epochs behind goes on with the next one
 }
 
 // publishSwitch publishes the successor context once, after every component is installed: a new generation, the phase, and the
@@ -446,6 +465,7 @@ func (x *ConsensusManager) faultSwitch(sw *errEpochSwitch, err error) {
 	x.ctxMu.Unlock()
 	x.pacemaker.Stop() // a successor's clock started before the failure stops; nothing signs anyway
 	x.dropFuture()
+	x.stopAcquire()
 	x.log.Error("in-process epoch switch failed: signing stays fenced and the process exits to its recovery", "epoch", sw.from, "target", sw.to,
 		logger.Error(err))
 }
