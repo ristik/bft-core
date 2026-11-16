@@ -16,11 +16,20 @@ import urllib.request
 PAYOUT = re.compile(r'[0-9]+(\.[0-9]+)?')
 
 
-def request(url, data=None, headers=None):
+class ResponseTooLarge(ValueError):
+    """An upstream answer above the caller's byte bound; nothing of it is parsed or relayed."""
+
+
+def request(url, data=None, headers=None, max_bytes=None):
     payload = None if data is None else json.dumps(data).encode()
     req = urllib.request.Request(url, payload, headers or {})
     with urllib.request.urlopen(req, timeout=8) as response:
-        return json.load(response)
+        if max_bytes is None:
+            return json.load(response)
+        raw = response.read(max_bytes + 1)
+        if len(raw) > max_bytes:
+            raise ResponseTooLarge(f'upstream answer above {max_bytes} bytes')
+        return json.loads(raw)
 
 
 class Guard:

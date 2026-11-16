@@ -37,9 +37,10 @@ def strip_follow(svc):
     return svc,value
 
 class FakeRelay:
-    def __init__(self): self.calls=[]
-    def call(self, method, params):
-        self.calls.append((method,params))
+    def __init__(self): self.calls=[]; self.max_bytes=[]; self.too_large=False
+    def call(self, method, params, max_bytes=None):
+        self.calls.append((method,params)); self.max_bytes.append(max_bytes)
+        if self.too_large: raise gateway.ResponseTooLarge('over')
         return {'jsonrpc':'2.0','id':1,'result':'0x1'}
 
 class LaneKeysAreNotInherited(unittest.TestCase):
@@ -1552,6 +1553,105 @@ class PublicRPC(unittest.TestCase):
     def test_public_preserves_id(self):
         status,result=self.rpc('eth_sendRawTransaction')
         self.assertEqual((status,result['id']),(200,17))
+    def call(self, method, params, rid=1):
+        return self.send(json.dumps({'jsonrpc':'2.0','id':rid,'method':method,'params':params}))
+    def test_wallet_evidence_reads_are_public(self):
+        # bft-core#1102: the native bridge v2 wallet builds every proof from these, with no bridge-specific service
+        block='0x'+'11'*32
+        for method,params in [('eth_getBlockByHash',[block,False]),('eth_getBlockReceipts',[block]),('unicity_getSealCompanionV1',[block]),
+                              ('unicity_sealCompanionHorizonV1',[]),('eth_getLogs',[{'address':'0x'+'22'*20,'blockHash':block}])]:
+            self.assertEqual(self.call(method,params,9)[0],200,method)
+            self.assertEqual(self.relay.calls[-1],(method,params))
+    def test_log_queries_name_one_address_and_a_bounded_window(self):
+        self.server.rpc_limit=self.server.heavy_limit=gateway.Limiter(1000,1000)   # this test is about the filter, not the limit
+        vault='0x'+'aB'*20
+        topics=[['0x'+'06'*32],['0x'+'00'*31+'05','0x'+'00'*31+'06']]
+        ok=[{'address':vault,'fromBlock':'0x0','toBlock':hex(gateway.LOG_BLOCK_RANGE-1),'topics':topics},
+            {'address':vault,'fromBlock':'0x10','toBlock':'0x10'},
+            {'address':vault,'blockHash':'0x'+'33'*32,'topics':[None,'0x'+'00'*32]}]
+        for f in ok:
+            self.assertEqual(self.call('eth_getLogs',[f])[0],200,f)
+        sent=len(self.relay.calls)
+        bad=[{'fromBlock':'0x0','toBlock':'0x1'},                                          # no address: every contract's logs
+             {'address':[vault,vault],'fromBlock':'0x0','toBlock':'0x1'},                  # a list of addresses
+             {'address':vault},                                                            # no window
+             {'address':vault,'fromBlock':'0x0','toBlock':hex(gateway.LOG_BLOCK_RANGE)},  # one block over the range
+             {'address':vault,'fromBlock':'0x5','toBlock':'0x4'},
+             {'address':vault,'fromBlock':'earliest','toBlock':'latest'},                 # tags: the window is fixed before it is asked for
+             {'address':vault,'fromBlock':'0x00','toBlock':'0x1'},                        # not a canonical quantity
+             {'address':vault,'fromBlock':'0x0','toBlock':'0x1','blockHash':'0x'+'33'*32},
+             {'address':vault,'fromBlock':'0x0','toBlock':'0x1','topics':'0x06'},
+             {'address':vault,'fromBlock':'0x0','toBlock':'0x1','extra':1}]
+        for f in bad:
+            status,result=self.call('eth_getLogs',[f])
+            self.assertEqual(status,400,f)
+            self.assertIn(str(gateway.LOG_BLOCK_RANGE),result['error'],'the refusal names the window a wallet pages by')
+        for params in [[],[ok[0],ok[0]],['0x1']]:
+            self.assertEqual(self.call('eth_getLogs',params)[0],400)
+        self.assertEqual(len(self.relay.calls),sent)
+    def refused(self, cases, status=400):
+        """Every (method, params) or raw body in CASES is refused with STATUS and reaches no upstream."""
+        sent=len(self.relay.calls)
+        for case in cases:
+            body=case if isinstance(case,str) else json.dumps({'jsonrpc':'2.0','id':3,'method':case[0],'params':case[1]})
+            self.assertEqual(self.send(body)[0],status,case)
+        self.assertEqual(len(self.relay.calls),sent,'a refused request reached the upstream')
+    def test_evidence_reads_take_exactly_their_params(self):
+        self.server.rpc_limit=self.server.heavy_limit=gateway.Limiter(1000,1000)
+        h='0x'+'ab'*32
+        for case in [('eth_getBlockByHash',[h,False]),('eth_getBlockReceipts',[h]),('eth_getBlockReceipts',['0x1f']),
+                     ('unicity_getSealCompanionV1',[h]),('unicity_sealCompanionHorizonV1',[])]:
+            self.assertEqual(self.call(*case)[0],200,case)
+        self.refused([('eth_getBlockByHash',[h,True]),             # full transactions
+                      ('eth_getBlockByHash',[h]),('eth_getBlockByHash',[h,False,1]),('eth_getBlockByHash',[h,0]),
+                      ('eth_getBlockByHash',['0x'+'ab'*31,False]),('eth_getBlockByHash',['0x'+'zz'*32,False]),
+                      ('eth_getBlockReceipts',[]),('eth_getBlockReceipts',[h,h]),('eth_getBlockReceipts',['latest']),
+                      ('eth_getBlockReceipts',['0x01']),('eth_getBlockReceipts',[31]),('eth_getBlockReceipts',['0x'+'g'*64]),
+                      ('unicity_getSealCompanionV1',[]),('unicity_getSealCompanionV1',[h,False]),('unicity_getSealCompanionV1',[h[:-1]+'x']),
+                      ('unicity_getSealCompanionV1',[{'hash':h}]),('unicity_sealCompanionHorizonV1',[1])])
+        status,result=self.call('eth_getBlockByHash',[h,True])
+        self.assertIn('[blockHash, false]',result['error'],'the refusal names the accepted shape')
+    def test_log_filter_edges_are_refused_before_any_upstream_call(self):
+        self.server.rpc_limit=self.server.heavy_limit=gateway.Limiter(1000,1000)
+        vault='0x'+'cd'*20; h='0x'+'11'*32
+        self.refused([json.dumps([{'jsonrpc':'2.0','id':1,'method':'eth_getLogs','params':[{'address':vault,'blockHash':h}]}]),   # a batch
+                      ('eth_getLogs',[{'address':vault,'fromBlock':'10','toBlock':'0x20'}]),        # decimal
+                      ('eth_getLogs',[{'address':vault,'fromBlock':'0x1','toBlock':'pending'}]),
+                      ('eth_getLogs',[{'address':vault,'fromBlock':'safe','toBlock':'0x2'}]),
+                      ('eth_getLogs',[{'address':vault,'fromBlock':'0x1'}]),                        # toBlock missing
+                      ('eth_getLogs',[{'address':vault,'toBlock':'0x1'}]),
+                      ('eth_getLogs',[{'address':vault,'blockHash':'0x'+'zz'*32}]),                 # malformed hashes
+                      ('eth_getLogs',[{'address':vault,'blockHash':'0x'+'11'*31+'1'}]),
+                      ('eth_getLogs',[{'address':vault,'blockHash':'11'*33}]),
+                      ('eth_getLogs',[{'address':'0x'+'zz'*20,'blockHash':h}]),
+                      ('eth_getLogs',[{'address':vault,'blockHash':h,'topics':[None]*5}]),          # topics
+                      ('eth_getLogs',[{'address':vault,'blockHash':h,'topics':['0x06']}]),
+                      ('eth_getLogs',[{'address':vault,'blockHash':h,'topics':[[]]}]),
+                      ('eth_getLogs',[{'address':vault,'blockHash':h,'topics':[[h]*(gateway.LOG_TOPIC_ALTERNATIVES+1)]}]),
+                      ('eth_getLogs',[{'address':vault,'blockHash':h,'topics':[[h,[h]]]}]),
+                      ('eth_getLogs',[{'address':vault,'blockHash':h,'topics':[7]}]),
+                      ('ETH_getLogs',[{'address':vault,'blockHash':h}]),                            # method spellings
+                      ('eth_getLogsX',[{'address':vault,'blockHash':h}]),('Eth_GetLogs',[{'address':vault,'blockHash':h}]),
+                      ('unicity_getSealCompanionV2',[h]),('unicity_getSealCompanion',[h]),('UNICITY_getSealCompanionV1',[h])])
+        ok={'address':vault,'blockHash':h,'topics':[None,h,[h]*gateway.LOG_TOPIC_ALTERNATIVES,None]}
+        self.assertEqual(self.call('eth_getLogs',[ok])[0],200)
+    def test_heavy_reads_have_their_own_rate_limit(self):
+        h='0x'+'ab'*32
+        self.server.rpc_limit=gateway.Limiter(1000,1000)
+        self.server.heavy_limit=gateway.Limiter(2,20)
+        with patch('gateway.time.monotonic',return_value=self.server.heavy_limit.window):
+            self.assertEqual([self.call('eth_getBlockReceipts',[h])[0] for _ in range(3)],[200,200,429])
+            self.assertEqual(self.call('eth_getLogs',[{'address':'0x'+'cd'*20,'blockHash':h}])[0],429)
+            self.assertEqual(self.call('unicity_getSealCompanionV1',[h])[0],200,'the light reads keep the general limit')
+        self.assertEqual(sum(1 for m,_ in self.relay.calls if m in gateway.HEAVY_METHODS),2)
+    def test_an_answer_above_the_size_cap_is_refused_with_413(self):
+        self.server.rpc_limit=self.server.heavy_limit=gateway.Limiter(1000,1000)
+        h='0x'+'ab'*32
+        self.relay.too_large=True
+        status,result=self.call('eth_getBlockReceipts',[h])
+        self.assertEqual(status,413)
+        self.assertIn(str(gateway.MAX_RESULT_BYTES),result['error'])
+        self.assertEqual(self.relay.max_bytes[-1],gateway.MAX_RESULT_BYTES,'the relay reads at most the cap')
     def test_privileged_never_reaches_upstream(self):
         for method in ['admin_nodeInfo','engine_newPayloadV3','personal_sign','eth_sign','debug_traceTransaction','eth_sendTransaction']:
             self.assertEqual(self.rpc(method)[0],400)

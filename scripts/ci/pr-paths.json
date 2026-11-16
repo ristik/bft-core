@@ -100,7 +100,8 @@
     ]
   },
   "informational": [
-    "deploy/testnet/pins.json"
+    "deploy/testnet/pins.json",
+    "deploy/testnet/gateway.py"
   ],
-  "informationalNote": "Read by a lane script only to print a note (scripts/utb-lane.sh line 88, 2>/dev/null, no assertion); a change to it cannot change a lane's verdict."
+  "informationalNote": "deploy/testnet/pins.json is read by a lane script only to print a note (scripts/utb-lane.sh line 88, 2>/dev/null, no assertion). deploy/testnet/gateway.py is only named in a comment of scripts/nb2-evidence/main.go (the gateway's eth_getLogs window), which the reachability scan pulls in through its 'main.go' token; no lane runs the gateway or the tool (its stage is NB2-09's, #1105), and testnet-package.yml tests the gateway. A change to either cannot change a lane's verdict."
 }
