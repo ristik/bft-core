@@ -1447,6 +1447,129 @@ class Register(unittest.TestCase):
         self.assertTrue(j.retirement_requested(12))
 
 
+class CustodyTxRetry(unittest.TestCase):
+    """op_custody_tx asks again only on the transient bound-parent estimate refusal (#1130), bounded; any other failure is returned at once."""
+    TRANSIENT = 'Failed to estimate gas: error code -32603: bound execution input rejected the block: bound parent hash mismatch'
+
+    def lap(self, outcomes):
+        lap = rj.Laptop.__new__(rj.Laptop)
+        lap.state = {'accounts': {'owner': '0xowner'}}
+        lap.node_image = 'img'
+        lap.vol_read = lambda vol, name: json.dumps({'custody': '0x' + '1' * 40, 'config': {'chainId': 7}})
+        lap.vol = lambda n: n
+        lap.network = lambda: 'net'
+        results = iter(outcomes)
+        lap.one = unittest.mock.Mock(side_effect=lambda *a, **k: next(results))
+        return lap
+
+    def done(self, rc, text):
+        return subprocess.CompletedProcess([], rc, text, '')
+
+    def call(self, lap):
+        with unittest.mock.patch.object(rj.time, 'sleep') as sleep, unittest.mock.patch.object(rj, 'say'):
+            self.sleep = sleep
+            return lap.op_custody_tx('requestRetirement(uint64)', ['3'])
+
+    def test_transient_then_success(self):
+        lap = self.lap([self.done(1, self.TRANSIENT), self.done(1, self.TRANSIENT), self.done(0, 'tx 0xab')])
+        self.assertIn('tx 0xab', self.call(lap)['out'])
+        self.assertEqual(lap.one.call_count, 3)
+        self.assertEqual(self.sleep.call_count, 2)
+
+    def test_permanent_error_is_not_retried(self):
+        lap = self.lap([self.done(1, 'Failed to estimate gas: execution reverted: not the owner'), self.done(0, 'tx 0xab')])
+        with self.assertRaises(rj.Failure):
+            self.call(lap)
+        self.assertEqual(lap.one.call_count, 1)
+        self.sleep.assert_not_called()
+
+    def test_retry_is_bounded(self):
+        lap = self.lap([self.done(1, self.TRANSIENT)] * 20)
+        with self.assertRaises(rj.Failure) as e:
+            self.call(lap)
+        self.assertEqual(lap.one.call_count, rj.Laptop.ESTIMATE_ATTEMPTS)
+        self.assertIn('bound parent hash mismatch', str(e.exception))
+
+
+class MemberTunnelGuard(unittest.TestCase):
+    """background-stop never stops the tunnel and agent of an entity that is a committee member or whose membership is unknown (#1130)."""
+
+    def lap(self, root='running', posts=(), signers_nodes=None):
+        lap = rj.Laptop.__new__(rj.Laptop)
+        lap.entity, lap.state = 5, {'rootNodeId': 'ROOT5'}
+        lap.strict_services_state = lambda: root if isinstance(root, dict) or root is None else {'root5': root, 'peer1': 'running'}
+        replies = iter(posts)
+        def post(path):
+            r = next(replies)
+            if isinstance(r, Exception):
+                raise r
+            return r
+        lap.root_post = post
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        lap.home = Path(tmp.name)
+        (lap.home / 'run').mkdir()
+        (lap.home / 'run' / 'tunnel.pid').write_text('4242')
+        return lap
+
+    def stop(self, lap):
+        with unittest.mock.patch.object(rj.os, 'killpg') as kill, unittest.mock.patch.object(rj, 'say'):
+            try:
+                rj.background_stop(lap)
+            finally:
+                self.kill = kill
+
+    def test_member_is_refused(self):
+        lap = self.lap(posts=[(200, json.dumps({'signers': [{'nodeId': 'ROOT1'}, {'nodeId': 'ROOT5'}]}))])
+        with self.assertRaises(rj.Failure):
+            self.stop(lap)
+        self.kill.assert_not_called()
+        self.assertTrue((lap.home / 'run' / 'tunnel.pid').is_file())
+
+    def test_unknown_membership_is_refused(self):
+        for posts in ([rj.Failure('down')], [(503, ''), (503, '')], [(422, ''), (200, json.dumps({'follower': None}))]):
+            with self.subTest(posts=posts):
+                lap = self.lap(posts=posts)
+                with self.assertRaises(rj.Failure):
+                    self.stop(lap)
+                self.kill.assert_not_called()
+
+    def test_unknown_states_are_refused(self):
+        sig = lambda v: (200, json.dumps({'signers': v}))
+        cases = {'ps failed': dict(root=None), 'transient state': dict(root='restarting'),
+                 'no signers key': dict(posts=[(200, '{}')]), 'null signers': dict(posts=[sig(None)]), 'empty signers': dict(posts=[sig([])]),
+                 'malformed entry': dict(posts=[sig(['ROOT1'])]), 'entry without nodeId': dict(posts=[sig([{'id': 'ROOT1'}])]),
+                 'not json': dict(posts=[(200, 'x')]),
+                 'follower 1': dict(posts=[(422, ''), (200, json.dumps({'follower': 1}))]),
+                 'follower string': dict(posts=[(422, ''), (200, json.dumps({'follower': 'false'}))])}
+        for name, kw in cases.items():
+            with self.subTest(name):
+                lap = self.lap(**kw)
+                with self.assertRaises(rj.Failure):
+                    self.stop(lap)
+                self.kill.assert_not_called()
+
+    def test_strict_services_state(self):
+        lap = rj.Laptop.__new__(rj.Laptop)
+        for text in ('', 'not json', '{"State": "running"}'):
+            lap.dc = lambda *a, **k: text
+            self.assertIsNone(lap.strict_services_state(), text)
+        for text in ('{"Service": "root5", "State": null}', '{"Service": 5, "State": "running"}', '{"Service": "", "State": "running"}',
+                     '[{"Service": "peer1", "State": "running"}, {"Service": "root5"}]', '["x"]'):
+            lap.dc = lambda *a, **k: text
+            self.assertIsNone(lap.strict_services_state(), text)
+        lap.dc = unittest.mock.Mock(side_effect=rj.Failure('docker down'))
+        self.assertIsNone(lap.strict_services_state())
+        lap.dc = lambda *a, **k: '{"Service": "root5", "State": "exited"}\n'
+        self.assertEqual(lap.strict_services_state(), {'root5': 'exited'})
+
+    def test_retired_or_follower_may_stop(self):
+        for lap in (self.lap(root='exited'), self.lap(posts=[(200, json.dumps({'signers': [{'nodeId': 'ROOT1'}]}))]),
+                    self.lap(posts=[(422, ''), (200, json.dumps({'follower': True}))])):
+            self.stop(lap)
+            self.kill.assert_called_once_with(4242, 15)
+
+
 class WorkflowAndModule(unittest.TestCase):
     """One join/retire/claim/catch-up command of an entity at a time; and remote_entity run as a script is one module with handoff_drive's
     (the lock tracking is not split between two copies, #1055 review)."""
@@ -1777,6 +1900,21 @@ class InstallRootAfterAnInProcessSwitch(unittest.TestCase):
         result, restarted = self.install({'activeEpoch': 3, 'follower': True})
         self.assertEqual(result, {'already': True})
         self.assertEqual(restarted, [])
+
+    def test_a_joiner_that_acquires_is_installed_in_process(self):
+        """bft-core#1086 PR 2: a follower whose image acquires the activation from a root peer switches; the drive waits for it instead of restarting."""
+        follower = {'activeEpoch': 2, 'follower': True, 'switch': {'phase': 'running', 'epoch': 2, 'acquires': True}}
+        lap = self.laptop(follower, follower, {'activeEpoch': 3, 'switch': {'phase': 'running', 'epoch': 3, 'target': 3, 'tookMs': 41, 'acquires': True}})
+        with unittest.mock.patch.object(rj, 'run', return_value=unittest.mock.Mock(returncode=0)), unittest.mock.patch.object(rj.handoff.time, 'sleep'), \
+                unittest.mock.patch.object(rj.time, 'sleep'):
+            result = lap.op_install_root(3)
+        self.assertEqual(result, {'already': True, 'inProcess': True, 'switchMs': 41})
+        self.assertEqual(lap.restarted, [])
+
+    def test_a_joiner_on_an_older_image_is_restarted_at_once(self):
+        result, calls = self.install({'activeEpoch': 2, 'follower': True, 'switch': {'phase': 'running', 'epoch': 2}})
+        self.assertNotIn('already', result)
+        self.assertTrue(self.restarted(calls))
 
     def test_a_root_installed_by_an_earlier_restart_is_installed(self):
         result, restarted = self.install({'activeEpoch': 3, 'switch': {'phase': 'running', 'epoch': 3}})

@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # The any-age final lane (briefs/anyage-final-lane-plan.md, briefs/b1-any-age-acceptance-matrix.md "Minimal final lane"): one fresh-genesis run with
-#   L1  retained old proofs verified after a handoff past the retired 30-round window, reused in the historical epoch after L2, one vault release;
 #   L2  the first post-freeze acknowledgement block of the P85 primary -> stalled successor -> exact recovery installs both entries (span 2).
+# The protocol 6/7 bridge checkpoints (L1a/L1b/L1c: a saved bridge token verified across the handoff and released from the vault) were removed
+# with that bridge (bft-core#1106).
 #
 #   scripts/anyage-lane.sh --preflight     checks every pin, binary, checkout and tool and prints the step plan; starts NOTHING, takes no lock
 #   scripts/anyage-lane.sh --plan          prints the step plan only
 #   scripts/anyage-lane.sh --selftest      chain-free tests of the lane's own logic (slot derivations, the offline checker, the L2 shell checks with a stub chain)
-#   scripts/anyage-lane.sh --prep          dry run of the genesis side (ANYAGE_PREP_ONLY): P85 genesis, profile, identities, aggregator shard configurations and the
-#                                          bridge deployment derived from them; starts no reth, root, validator or aggregator; needs the same env as the run
+#   scripts/anyage-lane.sh --prep          dry run of the genesis side (ANYAGE_PREP_ONLY): P85 genesis, profile, identities, and aggregator shard configurations;
+#                                          starts no reth, root, validator or aggregator; needs the same env as the run
 #   scripts/anyage-lane.sh                 the run: refuses unless the preflight is entirely ok; then the P85 runner under the devnet lock (owner "anyage")
 set -uo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -25,14 +26,12 @@ plan() {
   cat <<'PLAN'
 anyage lane steps (one fresh genesis; every step prints PASS/FAIL; evidence under briefs/devnet-runs/anyage-<utc>/):
   0  preflight (this script) and the devnet lock; run-mode, pins, pmset, SHA256SUMS as the P85 lane records them
-  1  genesis: PoS genesis (custody, election, four bonded entities) + bridge (aggregator shard(s), verifier, vault) on the permanent-layout registry   [gap G1]
+  1  genesis: PoS genesis (custody, election, four bonded entities) + aggregator shard(s) on the permanent-layout registry   [gap G1]
   2  baseline: registry dump (format 2, I=U=g..), the P85 baseline steps
-  3  L1a  burn/lock a supported token; SAVE its exact original UC/proof bytes and hashes; dump the registry (epoch/start/end/O)
-  4  P85: joiner nodes, onboarding, election reserved, proofs, [L1b], handoff (primary J), install/activation, [frozen parent recorded]
-  5  L1b  once O - r exceeds the old 30-round window, eth_call-verify the SAVED proofs in the current epoch; vault release prepared (NOT sent)
+  3  setup: record the block the registry checks start from and check the registry's shape there
+  4  P85: joiner nodes, onboarding, election reserved, proofs, handoff (primary J), install/activation, [frozen parent recorded]
   6  P85: J stalls (2 of 5 EVM validators), derived recovery back to K  ->  L2: locate the acknowledgement block, dump its parent and itself, offline check (parent = the frozen parent the root froze; custody cursor advances once; receipts kept):
         I jumps by 2 in ONE block built directly on the frozen parent, both entries consecutive, old tip closed once, I=U=E, hooks once
-  7  L1c  after L2, eth_call-verify the SAME saved proofs against the historical epoch; send the ONE vault release; claim; balance delta, nullifier
   8  restarts (P85), final dumps, teardown through scripts/p85-stop.sh only; evidence checksums
 PLAN
 }
@@ -51,7 +50,7 @@ preflight() {
   [ -x "$(lane_lock_script)" ] && yes "devnet lock helper present ($(lane_lock_script))" || no "devnet lock helper missing"
   if [ -d "$AGRE_ROOT/.devnet-lock" ]; then note "the devnet lock is HELD by: $(cat "$AGRE_ROOT/.devnet-lock/owner" 2>/dev/null) (the run would queue)"; else yes "devnet lock is free"; fi
   echo "-- merged prerequisites (read-only gh queries on ristik/*)"
-  for pr in "ristik/ureth 70" "ristik/unicity-pos-contracts 39" "ristik/native-bridge-plugins 19" "ristik/bft-core 611"; do
+  for pr in "ristik/ureth 70" "ristik/unicity-pos-contracts 39" "ristik/bft-core 611"; do
     set -- $pr; st=$(gh pr view "$2" -R "$1" --json state --jq .state 2>/dev/null || echo unknown)
     if [ "$st" = MERGED ]; then yes "$1#$2 merged"; else no "$1#$2 is $st (must be MERGED before the run)"; fi
   done
@@ -79,33 +78,21 @@ preflight() {
     want=$(sed -n 's/^const CodeHashHex = "\(0x[0-9a-f]*\)"/\1/p' "$REPO_ROOT/b1registry/artifact.go")
     if [ -n "$art" ] && [ "$art" = "$want" ]; then yes "contracts registry artifact code hash equals bft-core's pin ($want)"; else no "contracts registry code hash '$art' != bft-core pin '$want'"; fi
     check "xrepo shared fixtures identical to the contracts checkout" python3 "$REPO_ROOT/xrepo/check.py" --bft-core "$REPO_ROOT" --contracts "$P85_CONTRACTS"
-    check "BridgeDeploy script present" test -e "$P85_CONTRACTS/script/BridgeDeploy.s.sol"
   else
     no "set P85_CONTRACTS to a unicity-pos-contracts checkout containing contracts#39"
   fi
-  echo "-- plug-ins and aggregator"
-  if [ -n "${NBP_DIR:-}" ] && [ -d "$NBP_DIR/tests/live" ]; then
-    check "nbp checkout clean" bash -c "[ -z \"\$(git -C '$NBP_DIR' status --porcelain --untracked-files=no)\" ]"
-    check "nbp dependencies installed (node_modules)" test -d "$NBP_DIR/node_modules"
-    check "nbp live driver has the any-age entry points (anyage.ts)" test -e "$NBP_DIR/tests/live/anyage.ts"
-    # the driver is pinned to the commit that merged nbp#19: the checkout must contain it
-    mc=$(gh pr view 19 -R ristik/native-bridge-plugins --json mergeCommit --jq .mergeCommit.oid 2>/dev/null)
-    if [ -n "$mc" ] && git -C "$NBP_DIR" merge-base --is-ancestor "$mc" HEAD 2>/dev/null; then yes "nbp checkout contains the nbp#19 merge commit ${mc:0:10}"; else no "nbp checkout does not contain the nbp#19 merge commit '${mc:-unknown}'"; fi
-  else
-    no "set NBP_DIR to a native-bridge-plugins checkout containing nbp#19 (tests/live/anyage.ts)"
-  fi
+  echo "-- aggregator"
   [ -n "${AGG_BIN:-}" ] && [ -x "$AGG_BIN" ] && yes "AGG_BIN $AGG_BIN" || no "set AGG_BIN to the pinned aggregator-go binary"
-  [ -n "${DNB_TOOL:-}" ] && [ -x "$DNB_TOOL" ] && yes "DNB_TOOL $DNB_TOOL" || no "set DNB_TOOL to a dnb-tool built from this checkout (go build -o ... ./scripts/dnb-tool)"
   if (exec 3<>/dev/tcp/127.0.0.1/27117) 2>/dev/null; then yes "MongoDB replica set port 27117 answers"; else no "no MongoDB on 127.0.0.1:27117 (colima + the mongo:7 replset container; aggregator-go needs it)"; fi
   echo "-- substrate"
-  if grep -q 'ANYAGE_LANE' "$REPO_ROOT/scripts/reth-paired-devnet.sh" 2>/dev/null; then yes "reth-paired-devnet.sh supports ANYAGE_LANE (aggregator + bridge on the P85 genesis)"; else no "reth-paired-devnet.sh has no ANYAGE_LANE (PoS genesis + aggregator shard + bridge deploy in one genesis)"; fi
+  if grep -q 'ANYAGE_LANE' "$REPO_ROOT/scripts/reth-paired-devnet.sh" 2>/dev/null; then yes "reth-paired-devnet.sh supports ANYAGE_LANE (aggregator on the P85 genesis)"; else no "reth-paired-devnet.sh has no ANYAGE_LANE (PoS genesis + aggregator shard in one genesis)"; fi
   check "the combined genesis dry run was done on this HEAD (scripts/anyage-lane.sh --prep): record at briefs/devnet-runs/anyage-prep-<head>.ok" test -e "$AGRE_ROOT/briefs/devnet-runs/anyage-prep-${head:0:12}.ok"
   echo
   echo "preflight: $ok ok, $bad not ready"
   [ "$bad" -eq 0 ]
 }
 
-# The environment the P85 runner and the combined devnet read (CONTRACTS is the bridge deploy's name for the contracts checkout)
+# The environment the P85 runner and the combined devnet read
 lane_env() { export ANYAGE_LANE=1 P85_LOCK_OWNER=anyage P85_EVIDENCE_PREFIX=anyage CONTRACTS=${P85_CONTRACTS:-}; }
 
 case "${1:-}" in
@@ -117,7 +104,7 @@ case "${1:-}" in
     # A dry run of the genesis side. It takes the devnet lock (it writes test-nodes/ and ports are not touched, but the checkout is the lane's) and stops
     # before any reth, root, validator or aggregator is started.
     lane_env
-    [ -n "${P85_CONTRACTS:-}" ] && [ -n "${DNB_TOOL:-}" ] || { echo "--prep needs P85_CONTRACTS, M2_URETH_BIN, M2_URETH_COMMIT, DNB_TOOL (and P85_DEV_RUN=1 unless the provenance is attested)" >&2; exit 2; }
+    [ -n "${P85_CONTRACTS:-}" ] || { echo "--prep needs P85_CONTRACTS, M2_URETH_BIN, M2_URETH_COMMIT (and P85_DEV_RUN=1 unless the provenance is attested)" >&2; exit 2; }
     export ANYAGE_PREP_ONLY=1
     "$(lane_lock_script)" anyage-prep env P85_LANE_LOCKED=1 "$SCRIPT_DIR/p85-lane.sh"; rc=$?
     # a successful dry run is recorded for this exact HEAD; the preflight of the run asks for it (a development run says so in the record)

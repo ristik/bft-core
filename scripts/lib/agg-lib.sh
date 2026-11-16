@@ -1,5 +1,5 @@
-# Aggregator-go shard(s) and the bridge contracts for a paired devnet, shared by scripts/dnb-devnet.sh (the DN-B lane) and scripts/reth-paired-devnet.sh
-# (the any-age final lane, ANYAGE_LANE=1). Definitions only: sourcing this file starts nothing, reads nothing and takes no port.
+# Aggregator-go shard(s) for a paired devnet (scripts/reth-paired-devnet.sh, the any-age final lane, ANYAGE_LANE=1). The protocol 6/7 bridge
+# deploy (bridge_deploy_vault, bridge_write_config) was removed with that bridge (bft-core#1106). Definitions only: sourcing this file starts nothing, reads nothing and takes no port.
 #
 # The caller defines (before calling a function): info, rpc, root_alive, boot_node (helper.sh), stop_pidfile (helper.sh), and the variables
 # validators, partitionID, chainID, rethEthBase, rootRpcPort, rootPortStart (helper.sh). Optional: aggPartition (7), DNB_AGG_SHARDS (1).
@@ -65,54 +65,6 @@ restart_agg() { # [K]: one aggregator shard, or all of them
   for k in $ks; do [ -f "$(agg_dir "$k")/pid" ] && stop_pidfile "$(agg_dir "$k")/pid" 'aggregator' || true; done
   sleep 2
   for k in $ks; do start_agg "$k"; done
-}
-
-# Deploys the TokenVerifier and the BridgeVault (unicity-pos-contracts script/BridgeDeploy.s.sol, which refuses a vault whose rootGenesis,
-# executionGenesis or b1ProfileHash differ from the genesis') on the running devnet. Needs CONTRACTS (a checkout with the script), forge, DNB_TOOL;
-# BRIDGE_IDENTITIES is the genesis identities file the finalized genesis wrote.
-bridge_deploy_vault() {
-  : "${CONTRACTS:?set CONTRACTS to a unicity-pos-contracts checkout with script/BridgeDeploy.s.sol}" "${DNB_TOOL:?set DNB_TOOL to the built dnb-tool}"
-  local ids=${BRIDGE_IDENTITIES:-test-nodes/genesis-identities.json}
-  local dep=$CONTRACTS/script/bridge-deploy key=${DNB_DEPLOYER_KEY:-0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80} k
-  "$DNB_TOOL" deployment --identities "$ids" --agg-conf "$(for k in $(seq 1 "$aggShards"); do printf '%s,' "$(agg_conf "$k")"; done | sed 's/,$//')" --out test-nodes/bridge-deployment.json
-  cp "$ids" "$dep/genesis.json"; cp test-nodes/bridge-deployment.json "$dep/deployment.json"
-  root_alive || return 1
-  (cd "$CONTRACTS" && BRIDGE_GENESIS=script/bridge-deploy/genesis.json BRIDGE_DEPLOYMENT=script/bridge-deploy/deployment.json \
-     timeout "${DNB_FORGE_TIMEOUT:-600}" forge script script/BridgeDeploy.s.sol --rpc-url "http://127.0.0.1:$rethEthBase" --private-key "$key" --broadcast --slow) | tee test-nodes/vault-deploy.log
-  python3 - "$CONTRACTS" "$chainID" <<'PY'
-import json, sys
-run = json.load(open(sys.argv[1] + "/broadcast/BridgeDeploy.s.sol/%s/run-latest.json" % sys.argv[2]))
-addr = {t["contractName"]: t["contractAddress"] for t in run["transactions"] if t.get("contractName") in ("BridgeVault", "TokenVerifier")}
-json.dump(addr, open("test-nodes/bridge-addresses.json", "w"), indent=2)
-print(addr)
-PY
-  rm -f "$dep/genesis.json" "$dep/deployment.json"
-}
-
-# Writes the lane's derived inputs next to the devnet state (trust-base release bundle and pin, EVM PDR, config for the plug-in driver).
-# BRIDGE_FULL_CONF is the full shard configuration the root certifies (the EVM genesis' evm-full-shard-conf*.json).
-bridge_write_config() {
-  : "${DNB_TOOL:?set DNB_TOOL to the built dnb-tool}"
-  local full=${BRIDGE_FULL_CONF:-test-nodes/evm-full-shard-conf.json}
-  # the plug-in driver reads the full shard configuration as <lane dir>/evm-full-shard-conf.json (the DN-B lane's name; the P85 genesis writes -v2)
-  [ "$full" = test-nodes/evm-full-shard-conf.json ] || cp "$full" test-nodes/evm-full-shard-conf.json
-  # the genesis-only release bundle and its pin: past a root epoch change, replace the bundle with the exported history
-  # (ubft trust-base utb-export from a root's store) or a lock of the later epoch is ErrNoEntryForEpoch; the pin stays the same
-  "$DNB_TOOL" trust-bundle --trust-base test-nodes/trust-base.json --out test-nodes/trust-base.bundle.cbor --out-pin test-nodes/trust-base.genesis.entryid
-  "$DNB_TOOL" pdr --full-shard-conf "$full" --out test-nodes/evm-pdr.cbor
-  python3 - "$PWD" "$validators" "$rethEthBase" "$rootRpcPort" "$chainID" "$partitionID" "$aggPartition" "$aggShards" "${AGG_PORT:-3001}" "${BRIDGE_ARCHIVE:-test-nodes/archives}" "${aggShardIDs[*]}" <<'PY'
-import json, sys
-pwd, validators, eth_base, root_rpc, chain, evm_part, agg_part, shards, agg_port, archive, shard_ids = sys.argv[1:]
-a = json.load(open("test-nodes/bridge-addresses.json"))
-validators, eth_base, shards, agg_port = int(validators), int(eth_base), int(shards), int(agg_port)
-# the any-age driver routes a leaf to the aggregator whose shard prefix covers its state ID (native shard ID bytes, hex: 0x40 -> "40")
-agg_shards = [{"shard": sid[2:], "url": "http://127.0.0.1:%d" % (agg_port + i)} for i, sid in enumerate(shard_ids.split())] if shards > 1 else None
-json.dump({"dir": pwd + "/test-nodes", "ethUrls": ["http://127.0.0.1:%d" % (eth_base + i) for i in range(validators)],
-  "aggUrl": "http://127.0.0.1:%d" % agg_port, "aggUrls": ["http://127.0.0.1:%d" % (agg_port + i) for i in range(shards)],
-  "vault": a["BridgeVault"], "verifier": a["TokenVerifier"], "rootRpc": "http://127.0.0.1:" + root_rpc, "chainId": int(chain),
-  "evmPartition": int(evm_part), "aggPartition": int(agg_part), "archive": pwd + "/" + archive + "/evm1", **({"aggShards": agg_shards} if agg_shards else {})},
-  open("test-nodes/lane-config.json", "w"), indent=2)
-PY
 }
 
 # Fails fast when the root chain is not advancing (the stall that otherwise leaves a deploy waiting for a first block forever).

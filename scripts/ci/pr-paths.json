@@ -20,7 +20,6 @@
     ".github/workflows/testnet-package.yml",
     ".github/workflows/xrepo.yml",
     ".github/workflows/q4-gates.yml",
-    ".github/workflows/bridgeprofile.yml",
     ".github/workflows/x4-shadow-selftest.yml",
     ".github/workflows/stock-reth-control.yml",
     ".github/workflows/stock-reth-fault-control.yml",

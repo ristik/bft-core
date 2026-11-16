@@ -27,10 +27,10 @@ import (
 // the committed root holds the commit of the handoff into epoch 2, which is exactly the state of a member right after the activation
 // commit. The first three successor members are members of epoch 1 (they stay); the fourth is a joiner.
 
-// ownSwitch is a stayer's switch: its own evidence is the fixture's bundle, installed through the replica's runtime. The fixture's
-// successor has a joiner, installed first by the tests as the drive does, so the switch is allowed with joiners.
+// ownSwitch is a root's switch from its own evidence: the fixture's bundle, installed through the replica's runtime. It fetches from no
+// peer (no Fetch): a root without the commit installs across a restart.
 func ownSwitch(r *q3Replica) EpochSwitch {
-	return &Q3EpochSwitch{Runtime: r.rt, Bundle: func(context.Context, uint64) (q3active.Bundle, error) { return r.bundle(), nil }, WithJoiners: true}
+	return &Q3EpochSwitch{Runtime: r.rt, Bundle: func(context.Context, uint64) (q3active.Bundle, error) { return r.bundle(), nil }}
 }
 
 const joinerIndex = 3
@@ -240,9 +240,10 @@ func TestInProcessSwitchPublishesTheSuccessorAndFencesTheOldEpoch(t *testing.T) 
 	require.NoError(t, m.contextOpen(m.contextGen()))
 }
 
-// A member that does not stay (a leaver: a member of epoch 1 the successor does not name) and a joiner (not a member of epoch 1) do
-// not switch in process in this slice: they stay in their epoch and the install restart is their path, as before.
-func TestInProcessSwitchLeaverAndJoinerStayForTheRestart(t *testing.T) {
+// PR 2: a member that does not stay (a leaver: a member of epoch 1 the successor does not name) and a joiner that holds the commit (not a
+// member of epoch 1) both switch in process at their own commit: the leaver into Following(2), where it signs nothing and still serves the
+// activation from its journal, the joiner into Running(2).
+func TestInProcessSwitchLeaverFollowsAndJoinerJoins(t *testing.T) {
 	f := q3fixture.New(t, q3fixture.Options{})
 	leaver := newQ3Replica(t, f, f.OldNodes[3])
 	require.NotContains(t, f.NewNodes, f.OldNodes[3], "the fixture's fourth old member leaves")
@@ -253,25 +254,33 @@ func TestInProcessSwitchLeaverAndJoinerStayForTheRestart(t *testing.T) {
 	joiner := openAlone(t, f, joinerIndex, func(r *q3Replica) { r.switchFor = ownSwitch })
 	for name, r := range map[string]*q3Replica{"leaver": leaver, "joiner": joiner} {
 		_, done := runAlone(t, r)
-		require.Eventually(t, func() bool { return r.manager.pacemaker.GetCurrentRound() != 0 }, 2*time.Second, 5*time.Millisecond)
-		time.Sleep(500 * time.Millisecond) // the loop evaluates the committed root at once
+		require.Eventually(t, func() bool { return r.manager.SwitchState().Epoch == 2 }, 5*time.Second, 5*time.Millisecond, name)
 		s := r.manager.SwitchState()
-		require.Equal(t, SwitchRunning, s.Phase, name)
-		require.EqualValues(t, 1, s.Epoch, name)
-		require.EqualValues(t, 2, s.Declined, name)
-		require.Equal(t, map[string]string{"leaver": "leaving", "joiner": "follower"}[name], s.DeclinedReason)
-		require.EqualValues(t, 1, r.manager.InstalledRootEpoch(), name)
+		require.Equal(t, map[string]SwitchPhase{"leaver": SwitchFollowing, "joiner": SwitchRunning}[name], s.Phase, name)
+		require.EqualValues(t, 2, s.Target, name)
+		require.Zero(t, s.Declined, name)
+		require.EqualValues(t, 2, r.manager.InstalledRootEpoch(), name)
+		require.NoError(t, r.rt.Gate(context.Background(), f.Claim), name)
+		_, staged, err := r.rt.StagedBundleAt(context.Background(), 2)
+		require.NoError(t, err)
+		require.True(t, staged, "%s serves the activation from its journal", name)
 		select {
 		case err := <-done:
 			t.Fatalf("%s: Run ended: %v", name, err)
 		default:
 		}
 	}
+	// the leaver signs nothing of the successor, and nothing of the epoch it left
+	m := leaver.manager
+	require.ErrorIs(t, m.safety.Sign(2, &abdrc.ProposalMsg{Block: &drctypes.BlockData{Epoch: 2}}), ErrNotAMember)
+	_, err := m.safety.MakeVote(&drctypes.BlockData{Epoch: 2}, nil, nil, nil)
+	require.ErrorIs(t, err, ErrNotAMember)
+	require.ErrorIs(t, m.safety.Sign(1, &abdrc.ProposalMsg{Block: &drctypes.BlockData{Epoch: 1}}), ErrStaleContext)
 }
 
-// By default a successor that names a joiner is not switched into in process: its members install across a restart after the joiner
-// (#1082), and nothing is fenced or staged here.
-func TestInProcessSwitchWaitsForTheRestartWhenTheSuccessorHasAJoiner(t *testing.T) {
+// PR 2: a successor that names a joiner is switched into in process by default: the staying member does not wait for a restart after the
+// joiner (#1082 is kept by the joiner's own switch and its staged committee connections).
+func TestInProcessSwitchIntoASuccessorWithAJoiner(t *testing.T) {
 	f := q3fixture.New(t, q3fixture.Options{})
 	r := openAlone(t, f, 0, func(r *q3Replica) {
 		r.switchFor = func(r *q3Replica) EpochSwitch {
@@ -280,12 +289,11 @@ func TestInProcessSwitchWaitsForTheRestartWhenTheSuccessorHasAJoiner(t *testing.
 	})
 	require.Equal(t, []string{f.NewNodes[joinerIndex].PeerConf.ID.String()}, newcomers(nodeIDs(f), r.manager.trustBase.Load()))
 	_, done := runAlone(t, r)
-	time.Sleep(500 * time.Millisecond) // the loop evaluates the committed root at once
-	require.Equal(t, SwitchState{Phase: SwitchRunning, Epoch: 1, Declined: 2, DeclinedReason: "joiners"}, r.manager.SwitchState())
-	require.Nil(t, r.manager.switchCtx.Load())
-	_, staged, err := r.rt.StagedBundleAt(context.Background(), 2)
-	require.NoError(t, err)
-	require.False(t, staged)
+	require.Eventually(t, func() bool { return r.manager.SwitchState().Epoch == 2 }, 5*time.Second, 5*time.Millisecond)
+	s := r.manager.SwitchState()
+	require.Equal(t, SwitchRunning, s.Phase)
+	require.EqualValues(t, 2, s.Target)
+	require.Zero(t, s.Declined)
 	select {
 	case err := <-done:
 		t.Fatalf("Run ended: %v", err)
@@ -312,7 +320,7 @@ func TestInProcessSwitchWithoutOwnEvidenceStaysInTheEpoch(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			r := openAlone(t, f, 0, func(r *q3Replica) {
 				r.switchFor = func(r *q3Replica) EpochSwitch {
-					return &Q3EpochSwitch{Runtime: r.rt, Bundle: bundle, WithJoiners: true}
+					return &Q3EpochSwitch{Runtime: r.rt, Bundle: bundle}
 				}
 			})
 			_, done := runAlone(t, r)
@@ -344,7 +352,7 @@ func TestInProcessSwitchFailureFencesAndTheRestartRecovers(t *testing.T) {
 		}},
 		{name: "the after-install derivation fails", setup: func(r *q3Replica) EpochSwitch {
 			return &Q3EpochSwitch{Runtime: r.rt, Bundle: func(context.Context, uint64) (q3active.Bundle, error) { return r.bundle(), nil },
-				After: func(context.Context, uint64) error { return errors.New("injected") }, WithJoiners: true}
+				After: func(context.Context, uint64) error { return errors.New("injected") }}
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -396,8 +404,6 @@ type lateSwitch struct {
 	s    EpochSwitch
 }
 
-func (l *lateSwitch) SwitchesWithJoiners() bool { return true }
-
 func (l *lateSwitch) Capture(ctx context.Context, epoch uint64) (CapturedActivation, error) {
 	l.once.Do(func() { l.s = l.make() })
 	return l.s.Capture(ctx, epoch)
@@ -435,7 +441,7 @@ func TestInProcessSwitchBarrier(t *testing.T) {
 	<-inside
 	raised := make(chan *errEpochSwitch)
 	go func() {
-		err := m.enterSwitching(1, 2, evmroot.OrderedHandoffRecord{Epoch: 1, Kind: "commit"}, fixedCapture{})
+		err := m.enterSwitching(1, 2, evmroot.OrderedHandoffRecord{Epoch: 1, Kind: "commit"}.ID(), fixedCapture{})
 		var sw *errEpochSwitch
 		require.ErrorAs(t, err, &sw)
 		raised <- sw
@@ -613,7 +619,7 @@ func TestInProcessSwitchShardFacingReadsSeeOneStartedContext(t *testing.T) {
 		<-inside
 		raised := make(chan struct{})
 		go func() {
-			_ = m.enterSwitching(1, 2, evmroot.OrderedHandoffRecord{Epoch: 1, Kind: "commit"}, fixedCapture{})
+			_ = m.enterSwitching(1, 2, evmroot.OrderedHandoffRecord{Epoch: 1, Kind: "commit"}.ID(), fixedCapture{})
 			close(raised)
 		}()
 		select {
@@ -674,7 +680,7 @@ func TestInProcessSwitchCertificationRequestsAreOfOneContext(t *testing.T) {
 	f := q3fixture.New(t, q3fixture.Options{})
 	r := openAlone(t, f, 0, nil)
 	m := r.manager
-	sw := m.enterSwitching(1, 2, evmroot.OrderedHandoffRecord{Epoch: 1, Kind: "commit"}, fixedCapture{}).(*errEpochSwitch)
+	sw := m.enterSwitching(1, 2, evmroot.OrderedHandoffRecord{Epoch: 1, Kind: "commit"}.ID(), fixedCapture{}).(*errEpochSwitch)
 	sent := make(chan certRequest, 1)
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -716,7 +722,7 @@ func TestInProcessSwitchAccountsForEveryManagerField(t *testing.T) {
 	kept := []string{"timeoutVerify", "shadow", "backoff", "msgSeq", "profile", "certCacheStart", "certReqCh", "certResultCh", "ucSink", "params", "id", "net",
 		"trustBaseStore", "safety", "blockStore", "orchestration", "viewResolver", "frontier", "recoveryProfile2", "utbPrevious", "utbStore", "evidence",
 		"utbConfig", "recoveryHistory", "stageRecovery", "proposalRequestCheck", "posPrefetching", "witnesses", "q3", "primaryWitness",
-		"approvalSink", "judgeHook", "handoffMu", "switcher", "ctxMu", "ctxGen", "switchCtx", "workerRunning", "future", "switchDeclined", "origins",
+		"approvalSink", "judgeHook", "handoffMu", "switcher", "ctxMu", "ctxGen", "switchCtx", "workerRunning", "future", "switchDeclined", "origins", "acq",
 		"switchPublished", "log", "tracer",
 		"leaderCnt", "execMsgCnt", "execMsgDur", "voteCnt", "proposedCR", "qcSize", "qcVoters", "susVotes", "recoveryReq", "frontierFault", "addBlockDur"}
 	reset := []string{"pacemaker", "voteBuffer", "recovery", "irReqBuffer", "retained", "leaderCheckedRound", "switchCheckedRound", "posQueue",

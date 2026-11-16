@@ -40,12 +40,6 @@
       "note": "contracts#78 squash-merged to main as 7b510f6b (tree identical to the reviewed 6a1185c5): protocol 7 bridge-golden pins. Before: main at the contracts#77 merge (the testnet package's pin): on the protocol 6 vault (#67, #68) and contracts#53 (GovernanceParams #50, RewardPool #51), the RewardPool tail cap (#72: the tail closes up to the open result's reservation progress), the RejectResult fixtures (#74) and the election's outsider skip (#76); X4 #856 needs #72 for the closed intervals of the accumulated chain",
       "branch": "main"
     },
-    "native-bridge-plugins": {
-      "repository": "https://github.com/ristik/native-bridge-plugins.git",
-      "commit": "73bee544de82f52c399c60587a39332bdf6fd686",
-      "branch": "main",
-      "note": "nbp#71 merged to main as 73bee544: the port to the reconciled staging SDK heads (JS c5840ef5 re-vendored, Rust unicity-token de79e6c1). Before: nbp#63 squash-merged to main as 838b08ce (tree identical to the sealed de6eb8df): protocol 7, the upstream seal rule and the 7,200 gas coefficient, vendored JS SDK 75c5be7f. Before: the squash merge of nbp#52 (split PR5, protocol 6: the V2 composition, per-part redemption, anyage.ts on the (nonce, partId) return), on nbp#40 (B7 PR 3: profile v6, the 2 MiB envelope, long-history)"
-    },
     "state-transition-sdk-js": {
       "repository": "https://github.com/ristik/state-transition-sdk-js.git",
       "commit": "c5840ef5f59201c52ea6cf7034ee02cb48d54007",
@@ -81,12 +75,10 @@
   },
   "lane": {
     "aggShards": 2,
-    "note": "the aggregator partition runs as two bft-shard aggregators (0x40, 0xc0); the any-age L1 token spans both and one more token is redeemed through the SDK's consolidation (#526 step 4)",
+    "note": "the aggregator partition runs as two bft-shard aggregators (0x40, 0xc0); the UTB steps verify the aggregator's certificates under every shard's configuration. The protocol 6/7 bridge steps (the any-age L1 token over both shards, the consolidated and the long-history redemptions) and the native-bridge-plugins pin were removed with that bridge (bft-core#1106)",
     "txGossip": true,
     "evmT2Ms": 15000,
-    "evmT2Note": "the EVM shard's T2 in the CI lane (milliseconds; the Mac default stays 5000). After the recovery only 3 of the 4 enrolled validators run, so a round needs all three signatures and its latency is the slowest of three: measured first-UC-to-third-signature up to 14.3 s on a standard runner (bft-core#728, run 39554461091), while T2 = 5 s turned every late round into a permanent livelock. 15 s passed the combined lane with all steps; the margin over the measured tail is small, see #728.",
-    "longHistory": true,
-    "longHistoryNote": "B7 PR 3 (briefs/dev4-b7-pr3-plan.md 4.2): anyage_step_long_history redeems a token transferred live past every former bridge bound, one gas short (reverts, vault unchanged) and then funded. Needs the 0x0105 stack (ureth with BRIDGE_COMPOSE_V2 since protocol 6, contracts with the 0x0105 TokenVerifier) and the nbp driver's long-history command."
+    "evmT2Note": "the EVM shard's T2 in the CI lane (milliseconds; the Mac default stays 5000). After the recovery only 3 of the 4 enrolled validators run, so a round needs all three signatures and its latency is the slowest of three: measured first-UC-to-third-signature up to 14.3 s on a standard runner (bft-core#728, run 39554461091), while T2 = 5 s turned every late round into a permanent livelock. 15 s passed the combined lane with all steps; the margin over the measured tail is small, see #728."
   },
   "t6": {
     "comment": "T6 pins its own inputs in scripts/t6-rehearsal.sh (its defaults); they differ from the lane's on purpose and are not unified silently. check-pins.sh t6 refuses a script whose defaults differ from this record.",
