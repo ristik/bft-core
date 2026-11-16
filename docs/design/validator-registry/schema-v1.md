@@ -659,9 +659,10 @@ Exactly three accounts at P; the verdict refuses, in this order: a handoff in fl
 - **Change lifecycle** (`change.lifecycle`): both delays (2,000 progress and 3,600 s, captured at queue); cancel only Queued/Scheduled;
   ModuleAction executes into the active module only; the 33rd pending change is refused.
 - **Fold** (`fold.verdicts`, `fold.ackGate`, `fold.proofConfig`) over a full `FoldInput` with real PDRs and signed VR-context PoPs.
-  For each change, in this order: Duplicate (same kind and payload hash as an earlier **Accepted** change); Malformed (payload, PDR or
-  PoP list not canonical; no scope claimed); Conflict when its scope was already claimed by an earlier decoded change of the list
-  **whatever that change's verdict** (defensive: a bindable list never has one); then the kind's rules — stale expected hash Conflict;
+  For each change, in this order: Duplicate (same kind and payload hash as an earlier **Accepted** change); Malformed (the payload, or
+  an embedded PDR or PoP list, not canonical; every embedded encoding is checked before the scope, so a Malformed change claims no
+  scope and is Malformed even when its scope is already claimed); Conflict when its scope was already claimed by an earlier
+  well-formed change of the list **whatever that change's verdict** (defensive: a bindable list never has one); then the kind's rules — stale expected hash Conflict;
   Invalid for design §6, including the **protocol proof-configuration predicate** (below); Ceiling; BadPoP; PastCutoff, Earlier,
   Latched. Only an Accepted change updates the tentative state (installed PDRs, partition count, effective schedule) and enters the
   Duplicate set, so a change refused by any check, the proof predicate included, consumes nothing. The shard acknowledgement gate is
@@ -761,7 +762,8 @@ Each is the reading most consistent with the approved chain; each is also in `br
 - **FD-24 A zero `ruleId` is refused at queue** (an addition to design §3.5.3): zero is the absent activation entry for every reader.
 - **FD-25 AddPartition needs a readable partition id at queue** (an addition): VR must know the partition to defer a second addition of
   it in one output (§6.3); a PDR whose leading bytes are not the canonical tag, array and three uints is refused (`UnreadableScope`).
-- **FD-26 Scope claims are made by the first decoded change of a scope** in the fold, whatever its verdict (so a rejected first
+- **FD-26 Scope claims are made by the first well-formed change of a scope** (payload and embedded PDR and PoP list canonical) in the
+  fold, whatever its later verdict (so a rejected first
   schedule of a rule still makes a second one Conflict); binding selection defers instead, so this rule is defensive.
 - **FD-27 Proof-configuration support is a fence, not a verdict:** a root whose build cannot verify an Accepted protocol-valid proof
   type refuses to install that configuration (`ProofSupportMissing`) and needs a build with the support.

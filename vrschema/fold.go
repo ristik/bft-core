@@ -106,7 +106,8 @@ func sameValidators(a, b []*types.NodeInfo) bool {
 
 // FoldVerdicts derives the verdicts of the bound changes, in ascending id over a tentative state. For each change, in this order:
 //  1. Duplicate: the same kind and payload hash as an earlier Accepted change;
-//  2. Malformed: the payload, PDR or PoP list is not canonical (no scope is claimed);
+//  2. Malformed: the payload, an embedded PDR or PoP list is not canonical; judged before the scope, so it claims none and a later
+//     change of that scope is judged on its own;
 //  3. Conflict: the change's scope (ChangeScope: its shard for kinds 6 and 8, its partition for kind 7, its rule for kind 9) was
 //     already claimed by an earlier decoded change of this list, whatever that change's verdict; a well-formed list never has one,
 //     because binding selection defers a second change of a scope, so this rule is defensive;
@@ -156,8 +157,8 @@ func FoldVerdicts(in FoldInput, rc []RegistryChange) ([]uint8, error) {
 		default:
 			scope, serr := ChangeScope(k, c.Payload)
 			switch {
-			case serr != nil:
-				verdict = VerdictMalformed
+			case serr != nil || embeddedMalformed(k, v):
+				verdict = VerdictMalformed // claims no scope
 			case scope != "" && claimed[scope] && !Singleton(k):
 				verdict = VerdictConflict
 			default:
@@ -183,6 +184,25 @@ func FoldVerdicts(in FoldInput, rc []RegistryChange) ([]uint8, error) {
 		out[i] = verdict
 	}
 	return out, nil
+}
+
+// embeddedMalformed reports a root-side payload whose embedded encodings are not canonical: the CBOR PDR (kinds 6, 7, 8) and the
+// CBOR PoP list (kinds 6, 7). It is judged before the scope, so a Malformed change never claims one.
+func embeddedMalformed(k uint8, v []any) bool {
+	switch k {
+	case KindReplaceAggregator:
+		_, e1 := decodePDR(v[3].([]byte))
+		_, e2 := decodePoPs(v[4].([]byte))
+		return e1 != nil || e2 != nil
+	case KindUpdatePartition:
+		_, e := decodePDR(v[3].([]byte))
+		return e != nil
+	case KindAddPartition:
+		_, e1 := decodePDR(v[0].([]byte))
+		_, e2 := decodePoPs(v[1].([]byte))
+		return e1 != nil || e2 != nil
+	}
+	return false
 }
 
 // CheckRegistryChangesShape is the stateless list shape the fold requires (CheckRegistryChanges without verdict values and without

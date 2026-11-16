@@ -81,3 +81,34 @@ func TestScopedSingletonsDefer(t *testing.T) {
 	require.Equal(t, []uint64{2}, deferred)
 	require.Error(t, CheckRegistryChanges([]RegistryChange{{ID: 1, Kind: 9, Payload: s1}, {ID: 2, Kind: 9, Payload: s2}}))
 }
+
+// sol round 2: embedded encodings are judged before the scope, in both orders.
+func TestMalformedEmbeddingsClaimNoScope(t *testing.T) {
+	agg := fxPDR(7, 3, 2, 0, 3)
+	in := FoldInput{Network: fxRootNetwork, SuccessorRootEpoch: 6, PartitionCeiling: PartitionCeiling,
+		Installed: map[ShardKey]*types.PartitionDescriptionRecord{{7, string(agg.ShardID.Bytes())}: agg}}
+	good := fxPDR(7, 3, 3, 0, 3)
+	good.Validators = agg.Validators
+	good.T2Timeout += 500_000_000
+	valid := RegistryChange{Kind: 8, Payload: mustChange(KindUpdatePartition, uint64(7), agg.ShardID.Bytes(), pdrHash(agg), mustCBOR(good))}
+	bad := RegistryChange{Kind: 8, Payload: mustChange(KindUpdatePartition, uint64(7), agg.ShardID.Bytes(), pdrHash(agg), []byte{0x80})}
+	addPDR := fxPDR(9, 3, 0, 20, 2)
+	addOK := func(id uint64) RegistryChange {
+		return RegistryChange{Kind: 7, Payload: mustChange(KindAddPartition, mustCBOR(addPDR), fxChangePoPs(id, addPDR, 20))}
+	}
+	addBad := RegistryChange{Kind: 7, Payload: mustChange(KindAddPartition, mustCBOR(addPDR), []byte{0x83, 1, 2, 3})}
+	for _, c := range []struct {
+		a, b RegistryChange
+		want []uint8
+	}{
+		{bad, valid, []uint8{VerdictMalformed, VerdictAccepted}},
+		{valid, bad, []uint8{VerdictAccepted, VerdictMalformed}},
+		{addBad, addOK(3), []uint8{VerdictMalformed, VerdictAccepted}},
+		{addOK(2), addBad, []uint8{VerdictAccepted, VerdictMalformed}},
+	} {
+		c.a.ID, c.b.ID = 2, 3
+		got, err := FoldVerdicts(in, []RegistryChange{c.a, c.b})
+		require.NoError(t, err)
+		require.Equal(t, c.want, got)
+	}
+}

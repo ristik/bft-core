@@ -437,6 +437,16 @@ func genFold(b *vb) {
 		return RegistryChange{ID: id, Kind: uint64(KindAddPartition), Payload: mustChange(KindAddPartition, mustCBOR(p), fxChangePoPs(popID, p, 20))}
 	}
 	risc0 := map[string]string{"proof_type": "risc0"}
+	badUpdate := func(id uint64) RegistryChange {
+		return RegistryChange{ID: id, Kind: uint64(KindUpdatePartition), Payload: mustChange(KindUpdatePartition, uint64(7), agg.ShardID.Bytes(), pdrHash(agg), []byte{0x80})}
+	}
+	badPoPsAdd := func(id uint64) RegistryChange {
+		return RegistryChange{ID: id, Kind: uint64(KindAddPartition), Payload: mustChange(KindAddPartition, mustCBOR(fxPDR(9, 3, 0, 20, 2)), []byte{0x83, 1, 2, 3})}
+	}
+	badPoPsReplace := func(id uint64) RegistryChange {
+		succ := fxPDR(7, 3, 3, 3, 3)
+		return RegistryChange{ID: id, Kind: uint64(KindReplaceAggregator), Payload: mustChange(KindReplaceAggregator, uint64(7), succ.ShardID.Bytes(), pdrHash(agg), mustCBOR(succ), []byte{0x83, 1, 2, 3})}
+	}
 	cases := []struct {
 		name string
 		in   func(FoldInput) FoldInput
@@ -467,6 +477,11 @@ func genFold(b *vb) {
 		{"a rejected first schedule still claims its rule", nil, []RegistryChange{sched(2, "new-rule", 7), sched(3, "new-rule", 12)}, []string{"PastCutoff", "Conflict"}},
 		{"an invalid proof configuration consumes no partition slot", func(in FoldInput) FoldInput { in.PartitionCeiling = 4; return in },
 			[]RegistryChange{addP(2, 9, 2, risc0), add(3, 10, 3, 3)}, []string{"Invalid", "Accepted"}},
+		{"a malformed embedded PDR claims no scope: malformed, then valid update", nil, []RegistryChange{badUpdate(2), update(3, 7, agg, nil)}, []string{"Malformed", "Accepted"}},
+		{"a malformed embedded PDR after a valid update of its shard is Malformed", nil, []RegistryChange{update(2, 7, agg, nil), badUpdate(3)}, []string{"Accepted", "Malformed"}},
+		{"a malformed PoP list claims no partition: malformed, then valid addition", nil, []RegistryChange{badPoPsAdd(2), add(3, 9, 3, 3)}, []string{"Malformed", "Accepted"}},
+		{"a malformed PoP list after a valid addition of its partition is Malformed", nil, []RegistryChange{add(2, 9, 3, 2), badPoPsAdd(3)}, []string{"Accepted", "Malformed"}},
+		{"a replace with a malformed PoP list claims no shard", nil, []RegistryChange{badPoPsReplace(2), replace(3, pdrHash(agg), 3)}, []string{"Malformed", "Accepted"}},
 		{"an invalid proof configuration, then the identical payload", nil, []RegistryChange{addP(2, 9, 2, risc0), addP(3, 9, 2, risc0)}, []string{"Invalid", "Conflict"}},
 		{"sp1 without vkey_path is invalid", nil, []RegistryChange{addP(2, 9, 2, map[string]string{"proof_type": "sp1", "chain_id": "3"})}, []string{"Invalid"}},
 		{"protocol-valid sp1 is accepted whatever the local build supports", nil,
