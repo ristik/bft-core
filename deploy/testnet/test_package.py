@@ -3113,4 +3113,74 @@ class PosInstallAfterAnInProcessSwitch(unittest.TestCase):
             self.run_install({1: {'activeEpoch': 1}}, {1: 2})   # a certificate of the epoch before the restart: the barrier fails
 
 
+
+class PosTooLateAfterAnInProcessSwitch(unittest.TestCase):
+    """bft-core#1095: pos-too-late after the commit. A root that switched into the epoch at its commit certifies it and the Abort does not move it; a root that did not
+    switch still certifies the old epoch, before and after; a root read mid-switch is not taken for either."""
+
+    def run_too_late(self, statuses, signers, after_signers=None):
+        import rehearse
+        gen = Path(tempfile.mkdtemp())
+        phase = {'after': False}
+
+        class Transport:
+            def post(self, i, path, body):
+                if path == '/api/v1/q3/status':
+                    s = statuses[i]
+                    if isinstance(s, list):   # answers in turn, the last one repeating
+                        s = s.pop(0) if len(s) > 1 else s[0]
+                    return (503, b'') if s is None else (200, json.dumps(s).encode())
+                epochs = after_signers if (phase['after'] and after_signers) else signers
+                return (422, b'{}') if epochs[i] is None else (200, json.dumps({'epoch': epochs[i]}).encode())
+
+        class Fake(rehearse.Rehearsal):
+            def __init__(self):
+                self.n, self.gen, self.target, self.joiners = len(statuses), gen, 2, set()
+                self.committed_target = {'network': 3, 'oldEpoch': 1, 'predecessorBodyId': '0x' + '11' * 32, 'attempt': 1, 'nextBodyId': '0x' + '22' * 32}
+            def say(self, *a): pass
+            def evh(self): return gen
+            def keep_redacted(self, path, text): path.write_text(text)
+            def expect(self, ok, what, detail=''):
+                if not ok: raise rehearse.Failure(f'{what}: {detail}')
+
+        out = ''.join(f'entity {i}: exit 1\ntoo late: matching handoff H is committed as record 0xab at round 7; Abort was not ordered\n' for i in statuses)
+
+        def run(cmd, **k):
+            phase['after'] = True
+            return unittest.mock.Mock(returncode=1, stdout=out, stderr='')
+        with unittest.mock.patch.object(handoff_ops, 'DockerTransport', lambda gen: Transport()), \
+                unittest.mock.patch.object(handoff, 'SWITCH_WAIT_SECONDS', 0), unittest.mock.patch('subprocess.run', side_effect=run), \
+                unittest.mock.patch.object(rehearse.time, 'sleep'):
+            Fake().pos_too_late()
+
+    published = {'activeEpoch': 2, 'switch': {'phase': 'running', 'epoch': 2, 'target': 2}}
+
+    def test_every_root_switched_at_the_commit(self):
+        self.run_too_late({i: self.published for i in (1, 2, 3, 4)}, {1: None, 2: None, 3: 2, 4: 2})   # the raw signers mid-switch do not matter
+
+    def test_a_root_that_did_not_switch_stays_in_the_old_epoch(self):
+        import rehearse
+        statuses = {1: {'activeEpoch': 1}, 2: self.published}
+        self.run_too_late(statuses, {1: 1, 2: None})
+        with self.assertRaises(rehearse.Failure):
+            self.run_too_late(statuses, {1: 1, 2: None}, after_signers={1: 2, 2: None})   # it moved during the Abort
+        with self.assertRaises(rehearse.Failure):
+            self.run_too_late(statuses, {1: 2, 2: None})   # it had installed the epoch without a switch
+
+    def test_a_restarted_root_is_not_taken_for_a_switched_one(self):
+        import rehearse
+        restarted = {'activeEpoch': 2, 'switch': {'phase': 'running', 'epoch': 2}}   # Running in the epoch with no switch target: installed by a restart
+        with self.assertRaises(rehearse.Failure) as raised:
+            self.run_too_late({1: restarted, 2: self.published}, {1: 2, 2: None})
+        self.assertIn('installed nothing', str(raised.exception), 'it gets the certificate check, which a root already in the epoch fails')
+
+    def test_a_switched_root_that_stops_answering_fails(self):
+        import rehearse
+        # the first two answers are switched_roots' (handoff.awaits_switch, then handoff.switched_in_process): the root has switched; then it stops answering
+        for name, answers in (('unavailable before and after', [self.published, self.published, None]),
+                              ('unavailable before, good after', [self.published, self.published] + [None] * 10 + [self.published])):
+            with self.assertRaises(rehearse.Failure, msg=name) as raised:
+                self.run_too_late({1: list(answers), 2: self.published}, {1: None, 2: None})
+            self.assertIn('reports its switch into epoch 2 published', str(raised.exception), name)
+
 if __name__=='__main__': unittest.main()

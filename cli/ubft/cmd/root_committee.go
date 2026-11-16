@@ -31,6 +31,8 @@ So a member of the installed epoch, before it starts consensus in it (after the 
     nobody. A member that is down costs at most the warm-up, once.
 
 A root that is not a member of the installed epoch (a follower, a leaver) keeps no committee: it never dials a committee it is not in.
+The one exception is a joiner whose staged candidate names it in the successor (#1086 PR 2): it keeps that committee connected from its
+readiness on, before the commit, because it switches into the successor in process and its leader slots come right after the activation.
 */
 
 // committeeKeep paces the keeper (astra on #1088): a member is retried every 250 ms for the first 30 s (the handoff, when every root
@@ -51,31 +53,102 @@ type rootCommittee struct {
 	epoch   uint64
 	member  bool
 	members []peer.ID // the others of the committee
-	keeper  *network.MemberProtector
-	host    *network.Peer
+	// staged is the successor committee of the candidate staged here when it names this root (#1086 PR 2): a joiner keeps it connected
+	// from then on, before the commit, so that it switches into the successor in process with its connections up
+	stagedEpoch uint64
+	staged      []peer.ID
+	keeper      *network.MemberProtector
+	host        *network.Peer
 }
 
 // follow moves the keeper to the committee of tb, the epoch this root switched into in process (#1086), without a warm-up wait: the
 // connections the committees share are kept, a member that joins is dialled, and a member that left is no longer protected. A root that
-// is not a member of tb keeps no committee.
+// is not a member of tb keeps no committee (beyond a staged successor that names it).
 func (c *rootCommittee) follow(ctx context.Context, log *slog.Logger, tb *types.RootTrustBaseV1) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	members, member := committeePeers(tb, c.host.ID())
 	c.epoch, c.member, c.members = tb.Epoch, member, members
-	if !member {
+	if c.stagedEpoch <= c.epoch {
+		c.stagedEpoch, c.staged = 0, nil // the staged successor is the installed epoch now
+	}
+	if missing := c.keepLocked(ctx); c.member && len(missing) != 0 {
+		log.Info("keeping the switched-into root committee connected", "epoch", tb.Epoch, "missing", peerStrings(missing))
+	}
+}
+
+// stage keeps the successor committee a candidate staged here names (members, which include this root) connected besides the installed
+// one; a successor that does not name this root, or none (epoch zero), keeps nothing beyond the installed committee.
+func (c *rootCommittee) stage(ctx context.Context, log *slog.Logger, epoch uint64, ids []string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var others []peer.ID
+	named := false
+	for _, s := range ids {
+		id, err := peer.Decode(s)
+		if err != nil {
+			continue
+		}
+		if id == c.host.ID() {
+			named = true
+			continue
+		}
+		others = append(others, id)
+	}
+	if !named || epoch <= c.epoch {
+		epoch, others = 0, nil
+	}
+	if epoch == c.stagedEpoch && slices.Equal(others, c.staged) {
+		return
+	}
+	c.stagedEpoch, c.staged = epoch, others
+	if epoch != 0 {
+		log.Info("keeping the staged successor's root committee connected before its activation (#1086)", "epoch", epoch, "members", len(others)+1,
+			"missing", peerStrings(c.keepLocked(ctx)))
+		return
+	}
+	c.keepLocked(ctx)
+}
+
+// keepLocked protects the union of the installed committee (when this root is a member) and the staged successor's, and returns those
+// not connected now. c.mu is held.
+func (c *rootCommittee) keepLocked(ctx context.Context) []peer.ID {
+	var keep []peer.ID
+	if c.member {
+		keep = append(keep, c.members...)
+	}
+	for _, id := range c.staged {
+		if !slices.Contains(keep, id) {
+			keep = append(keep, id)
+		}
+	}
+	if len(keep) == 0 {
 		if c.keeper != nil {
 			c.keeper.Set(ctx, nil)
 		}
-		return
+		return nil
 	}
 	if c.keeper == nil {
 		c.keeper = c.host.NewMemberProtector("root-committee")
 		go c.keeper.Maintain(ctx, committeeKeep)
 	}
-	c.keeper.Set(ctx, members)
-	if missing := c.keeper.Disconnected(); len(missing) != 0 {
-		log.Info("keeping the switched-into root committee connected", "epoch", tb.Epoch, "missing", peerStrings(missing))
+	c.keeper.Set(ctx, keep)
+	return c.keeper.Disconnected()
+}
+
+// keepStaged follows the candidate staged on the manager until ctx ends (stage): a joiner keeps its successor's committee connected from
+// its readiness on. It polls, since staging is an operator call and rare.
+func (c *rootCommittee) keepStaged(ctx context.Context, log *slog.Logger, cm interface{ StagedCommittee() (uint64, []string) }) {
+	tick := time.NewTicker(250 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		epoch, ids := cm.StagedCommittee()
+		c.stage(ctx, log, epoch, ids)
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
 	}
 }
 
@@ -132,10 +205,19 @@ func keepRootCommittee(ctx context.Context, log *slog.Logger, host *network.Peer
 }
 
 // rootCommitteeStatus is the status endpoint's answer: the installed epoch, whether this root is in its committee, and which other members
-// it is connected to now. A joiner's readiness is that it reports no member missing.
+// it is connected to now. A joiner's readiness is that it reports no member missing; before the commit, that its Staged view (the
+// successor committee its staged candidate names it in, #1086 PR 2) reports none missing.
 type rootCommitteeStatus struct {
+	Epoch     uint64                     `json:"epoch"`
+	Member    bool                       `json:"member"`
+	Connected []string                   `json:"connected"`
+	Missing   []string                   `json:"missing"`
+	Staged    *rootCommitteeStagedStatus `json:"staged,omitempty"`
+}
+
+// rootCommitteeStagedStatus is the staged successor committee's connectivity, seen from a root it names.
+type rootCommitteeStagedStatus struct {
 	Epoch     uint64   `json:"epoch"`
-	Member    bool     `json:"member"`
 	Connected []string `json:"connected"`
 	Missing   []string `json:"missing"`
 }
@@ -148,12 +230,24 @@ func (c *rootCommittee) status() rootCommitteeStatus {
 		return out
 	}
 	missing := c.keeper.Disconnected()
-	for _, id := range c.members {
-		if slices.Contains(missing, id) {
-			out.Missing = append(out.Missing, id.String())
-		} else {
-			out.Connected = append(out.Connected, id.String())
+	split := func(ids []peer.ID) (connected, absent []string) {
+		connected, absent = []string{}, []string{}
+		for _, id := range ids {
+			if slices.Contains(missing, id) {
+				absent = append(absent, id.String())
+			} else {
+				connected = append(connected, id.String())
+			}
 		}
+		return connected, absent
+	}
+	if c.member {
+		out.Connected, out.Missing = split(c.members)
+	}
+	if c.stagedEpoch != 0 {
+		st := &rootCommitteeStagedStatus{Epoch: c.stagedEpoch}
+		st.Connected, st.Missing = split(c.staged)
+		out.Staged = st
 	}
 	return out
 }

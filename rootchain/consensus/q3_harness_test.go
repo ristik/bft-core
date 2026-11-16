@@ -77,6 +77,9 @@ type q3Replica struct {
 	tune func(*Parameters)
 	// switchFor, when set, gives the manager an in-process epoch switch built over the replica as opened (#1086)
 	switchFor func(*q3Replica) EpochSwitch
+	// noCheckpoint opens the first start on its genesis state instead of the old epoch's committed checkpoint: a root that does not hold
+	// the commit (a joiner that received no traffic of the old epoch, a member that lagged behind it; #1086 PR 2)
+	noCheckpoint bool
 }
 
 func newQ3Replica(t *testing.T, f *q3fixture.Fixture, node *testutils.TestNode) *q3Replica {
@@ -162,7 +165,7 @@ func (r *q3Replica) open(withQ3 bool) error {
 		return err
 	}
 	r.manager = manager
-	if r.opened == 0 {
+	if r.opened == 0 && !r.noCheckpoint {
 		// the first start holds the old epoch's committed checkpoint, as the stopped old committee leaves it
 		inputs := manager.blockStore.LeaderInputs()
 		manager.blockStore, err = storage.NewFromCheckpoint(crypto.SHA256, r.f.Snapshot, db, orchestration, obs.Logger(), storage.ProfileHandoff)
