@@ -177,6 +177,7 @@ class NB2Rehearsal(Rehearsal):
         self.expect(pins['deploymentBlock'] == dep[dep['primary']]['vault']['block'] and pins['build'] == 'test' and dep['test']['K'] == 4, 'the wallets\' pins: the test build with K = 4, logs read from the vault\'s block')
         self.expect(int(pins['userGasLimit']) == json.loads((self.gen / 'network/b1-profile.json').read_text())['ordinaryCapacity'], 'userGasLimit is the profile\'s ordinary capacity')
         self.expect(self.call('unicity_sealCompanionHorizonV1', []) is None, 'the companion horizon is null through the gateway: nothing pruned (retention)')
+        self.make_keys()   # gamma-check and admission open the main wallet (no transaction: its key, not its funds)
         self.driver('gamma-check')
         self.driver('admission')
         adm = self.outfile('admission')
@@ -280,13 +281,17 @@ class NB2Rehearsal(Rehearsal):
         (self.evidence / 'nb2/limits.json').write_text(json.dumps(res, indent=2) + '\n')
 
     # --- fund ------------------------------------------------------------------------------------------------------------------
-    def fund(self):
+    def make_keys(self):
+        """The run's driver keys (bridge/nb2/driver.env, 0600), made once: deploy's installation check opens a wallet with one, fund funds them."""
         self.nb2.mkdir(parents=True, exist_ok=True)
         env = self.nb2 / 'driver.env'
         if not env.exists():
             env.touch()
             os.chmod(env, 0o600)
             env.write_text(''.join(f'NB2_KEY_{w.upper()}=0x{secrets.token_hex(32)}\n' for w in WALLETS))
+
+    def fund(self):
+        self.make_keys()
         for w in WALLETS:
             a = self.address(w)
             if self.balance(a) < FUNDS[w] // 2:
@@ -629,7 +634,6 @@ def main():
     a = p.parse_args()
     if not 1 <= a.long_transfers <= 254:
         p.error('--long-transfers must be 1 to 254')
-    # the stages fund a key before deploy needs one only for the driver: run fund first when both are asked
     wanted = a.stages.split(',')
     unknown = set(wanted) - {s for s, _ in STAGES}
     if unknown:
@@ -639,7 +643,10 @@ def main():
     r.long_transfers = a.long_transfers
     r.prefix = a.prefix
     (a.evidence / 'nb2').mkdir(parents=True, exist_ok=True)
-    order = ['fund'] + [s for s in wanted if s != 'fund'] if 'fund' in wanted else wanted
+    # every driver command reads bridge/nb2/lane.json, which deploy writes (fund too: the driver derives the keys' addresses), and every later
+    # stage spends the keys fund funds: deploy, then fund, then the rest as asked
+    first = [s for s in ('deploy', 'fund') if s in wanted]
+    order = first + [s for s in wanted if s not in first]
     methods = dict(STAGES)
     code = 0
     try:

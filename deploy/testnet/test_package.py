@@ -2153,6 +2153,27 @@ class NB2DriverKeys(unittest.TestCase):
             with patch.object(m.NB2Rehearsal,'say',say):
                 with self.assertRaises(OSError): self.run_main(m,gen,Path(tmp)/'ev3','--stages','fund','--keep-keys')
             self.assertTrue((gen/'bridge/nb2/driver.env').exists())
+    def test_deploy_runs_before_fund_and_fund_before_the_rest(self):
+        # every driver command reads lane.json, which deploy writes; fund derives the keys' addresses through the driver (#1126's lane, ENOENT)
+        m=self.module()
+        for stages,want in (('fund,limits,deploy',['deploy','fund','limits']),('limits,fund',['fund','limits']),('deploy,fund,pos-deposit',['deploy','fund','pos-deposit']),('pos-return,custody',['pos-return','custody'])):
+            ran=[]
+            rec=lambda name:(lambda r:ran.append(name))
+            with tempfile.TemporaryDirectory() as tmp, patch.object(m.NB2Rehearsal,'deploy',rec('deploy')), patch.object(m.NB2Rehearsal,'fund',rec('fund')), \
+                    patch.object(m.NB2Rehearsal,'limits',rec('limits')), patch.object(m.NB2Rehearsal,'pos_deposit',rec('pos-deposit')), \
+                    patch.object(m.NB2Rehearsal,'pos_return',rec('pos-return')), patch.object(m.NB2Rehearsal,'custody',rec('custody')):
+                code,_=self.run_main(m,self.generation(tmp),Path(tmp)/'ev','--stages',stages)
+            self.assertEqual((code,ran),(0,want),stages)
+    def test_the_keys_exist_before_any_driver_command(self):
+        m=self.module()
+        with tempfile.TemporaryDirectory() as tmp:
+            gen=self.generation(tmp);r=m.NB2Rehearsal(gen,Path(tmp)/'ev','/bin/false')
+            r.make_keys();env=gen/'bridge/nb2/driver.env';first=env.read_text()
+            self.assertEqual(oct(env.stat().st_mode&0o777),'0o600');self.assertEqual(len(first.splitlines()),len(m.WALLETS))
+            r.make_keys();self.assertEqual(env.read_text(),first,'made once: deploy and fund share the keys')
+        src=(Path(__file__).parent/'bridge/nb2/rehearse_nb2.py').read_text()
+        deploy=src[src.index('    def deploy(self):'):src.index('    def ',src.index('    def deploy(self):')+10)]
+        self.assertLess(deploy.index('self.make_keys()'),deploy.index("self.driver('gamma-check')"),'deploy makes the keys before its driver commands open a wallet')
     def test_no_key_is_given_to_a_command_line(self):
         src=(Path(__file__).parent/'bridge/nb2/rehearse_nb2.py').read_text()
         self.assertNotIn('--private-key',src);self.assertNotIn('self.key(',src)
