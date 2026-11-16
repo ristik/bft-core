@@ -60,7 +60,9 @@ q3_status_of() {   # the stubbed root's next answer; an empty one is unavailable
 }
 q3_signers_of() { local s; s=$(cat "signers-$1"); [ -n "$s" ] || return 22; printf '%s' "$s"; }
 h3_restart_roots() { echo "restart roots=[$H3_ROOTS] epoch=$1 boot=[${H3_BOOT_ROOT:-}] wait=[${H3_WAIT_ROOT:-}]" >restart.txt; }
-Q3_SWITCH_WAIT=1 H3_ROOTS="` + strings.Join(sortStrings(ids), " ") + `" q3_install_roots 3
+# bash's SECONDS counts whole seconds, so a wait of N lasts between N-1 and N seconds: a wait of 1 could expire within milliseconds and restart a root
+# whose stubbed status sequence had not reached "published" yet (a CI flake). 3 leaves at least 2 s for the cases that must not reach the deadline.
+Q3_SWITCH_WAIT=3 H3_ROOTS="` + strings.Join(sortStrings(ids), " ") + `" q3_install_roots 3
 `
 	cmd := exec.Command("bash", "-c", script)
 	cmd.Dir = dir
