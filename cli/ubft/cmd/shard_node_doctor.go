@@ -15,6 +15,7 @@ import (
 	"github.com/unicitynetwork/bft-core/network"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/zkverifier"
+	"github.com/unicitynetwork/bft-core/shardnode"
 )
 
 // doctorCheck is one preflight check. Framework checks apply to any shard
@@ -40,6 +41,8 @@ type shardNodeDoctorFlags struct {
 	JWTSecret string
 
 	DialTimeout time.Duration
+	// BlockInterval is the --block-interval the node runs with (shard-node run): checked against the shard conf's T2.
+	BlockInterval time.Duration
 }
 
 func shardNodeDoctorCmd(baseFlags *baseFlags) *cobra.Command {
@@ -65,6 +68,7 @@ they're specific to what that executor needs (an Engine API endpoint to reach).`
 	cmd.Flags().StringVar(&flags.EthURL, "eth-url", "http://127.0.0.1:8545", "engine-api executor only: eth_* endpoint")
 	cmd.Flags().StringVar(&flags.JWTSecret, "jwt-secret", "", "engine-api executor only: path to the JWT secret (default: $UBFT_HOME/jwt.hex)")
 	cmd.Flags().DurationVar(&flags.DialTimeout, "dial-timeout", 5*time.Second, "timeout for network-reachability checks")
+	cmd.Flags().DurationVar(&flags.BlockInterval, "block-interval", 0, "the --block-interval this node runs with; checked against the shard conf's T2")
 	return cmd
 }
 
@@ -193,6 +197,16 @@ func frameworkChecks(flags *shardNodeDoctorFlags) []doctorCheck {
 						"regenerate the shard conf with a larger --t2-timeout"
 				}
 				return true, fmt.Sprintf("T2=%s, root block rate=%dms, margin=%s", shardConf.T2Timeout, consensus.BlockRate, margin), ""
+			},
+		},
+		{
+			name: "block interval",
+			run: func(ctx context.Context) (bool, string, string) {
+				shardConf, err := loadOneShardConf(flags)
+				if err != nil {
+					return false, err.Error(), ""
+				}
+				return blockIntervalCheck(flags.BlockInterval, shardConf.T2Timeout, consensus.BlockRate*time.Millisecond)
 			},
 		},
 	}
@@ -328,4 +342,16 @@ func loadJWTSecret(flags *shardNodeDoctorFlags) (engineapi.Secret, error) {
 		return engineapi.Secret{}, fmt.Errorf("reading JWT secret %q: %w", jwtPath, err)
 	}
 	return engineapi.ParseSecret(strings.TrimSpace(string(data)))
+}
+
+// blockIntervalCheck is the doctor's view of shardnode.CheckBlockInterval, the same rule `shard-node run` refuses to start on.
+func blockIntervalCheck(interval, t2, rootBlockRate time.Duration) (bool, string, string) {
+	if err := shardnode.CheckBlockInterval(interval, t2, rootBlockRate); err != nil {
+		return false, err.Error(), fmt.Sprintf("regenerate the shard conf with --t2-timeout of at least %d (ms), or lower --block-interval",
+			shardnode.MinT2ForBlockInterval(interval, rootBlockRate).Milliseconds())
+	}
+	if interval == 0 {
+		return true, "not set: one block per certification round trip", ""
+	}
+	return true, fmt.Sprintf("interval=%s, T2=%s covers it (needs at least %s)", interval, t2, shardnode.MinT2ForBlockInterval(interval, rootBlockRate)), ""
 }

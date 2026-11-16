@@ -44,6 +44,31 @@ DEFAULT_SUBNETS = {'faucet': '172.30.88.0/24', 'edge': '172.30.89.0/24'}
 # handoff every ~8 min) the roots ran at their 0.5 quota with 34 % of cgroup periods throttled at 34 epochs, while the EVM slowed from 0.62 to 0.15 blocks/s.
 # The install restart recreates a root from compose.yaml (compose.install-epoch-N.json sets no limits), so the quota holds across handoffs.
 ROOT_CPUS = 2.0
+# The EVM shard's target block interval (bft-core#1167, owner 2026-11-16: about one block every 10 s is fine for the testnet; the code default, 0, is one block per
+# certification round trip, about 1.6 to 2 s). Best effort and per node (`shard-node run --block-interval`): the leader delays its build, nothing checks it. The shard
+# conf's T2 must cover it, so it is derived from it (t2_for_block_interval); rehearsals and CI pass --block-interval-ms 0 and keep today's cadence and T2.
+BLOCK_INTERVAL_MS = 10000
+# The T2 of a shard without a block interval: what every lane and earlier generation used.
+BASE_T2_MS = 5000
+ROOT_BLOCK_RATE_MS = 900   # the roots' --block-rate default (consensus.BlockRate); the package does not change it
+FOLLOWER_AWAIT_CAP_MS = 5000   # shardnode.DefaultAwaitTimeout, the cap of a follower's wait for its leader's block
+
+def min_t2_ms(interval_ms, root_block_rate_ms=ROOT_BLOCK_RATE_MS):
+    """shardnode.MinT2ForBlockInterval in milliseconds: T2 >= interval + min(T2/2, 5 s) + one root round, solved for T2 (0 without an interval)."""
+    if interval_ms <= 0: return 0
+    t2 = 2 * (interval_ms + root_block_rate_ms)
+    return t2 if t2 // 2 <= FOLLOWER_AWAIT_CAP_MS else interval_ms + FOLLOWER_AWAIT_CAP_MS + root_block_rate_ms
+
+def t2_for_block_interval(interval_ms):
+    """The EVM shard conf's T2 (ms) for a block interval: the base T2, or the minimum `shard-node run` accepts with a quarter more as margin, rounded up to whole
+    seconds (10 s -> 20 s). A larger T2 also means a silent leader's round times out later: 20 s instead of 5 s at the testnet's interval."""
+    if interval_ms < 0: raise ValueError(f'--block-interval-ms must not be negative, got {interval_ms}')
+    need = min_t2_ms(interval_ms) * 5 // 4
+    return max(BASE_T2_MS, -(-need // 1000) * 1000)
+
+def block_interval_flags(interval_ms):
+    """The shard node's `--block-interval` argument; none without an interval, so a fast package's command line is exactly the earlier one."""
+    return ['--block-interval', f'{interval_ms}ms'] if interval_ms else []
 
 def uct_wei(text, what):
     """Wei of a decimal number of UCT (18 decimals), exactly: '200' -> 200 * 10**18. Refuses anything else."""
@@ -189,9 +214,10 @@ def check_authorities_unchanged(boot, final, n):
                                'never recreated, so everything it is started with must be known when it is first started')
 
 def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, with_pos=False, rpc_bind=operator_rpc.DEFAULT_BIND, utb=None, utb_aggregator='integration', *,
-             payout=FAUCET_PAYOUT, subnets=None, root_cpus=ROOT_CPUS):
+             payout=FAUCET_PAYOUT, subnets=None, root_cpus=ROOT_CPUS, block_interval_ms=0):
     """JSON is a YAML subset, accepted directly by Docker Compose. `utb`: the pinned EntryID of the UTB genesis entry (0x..), or None for the package without the signed history.
-    `payout`: the faucet signer's payout per claim (UCT, network.json's). `subnets`: bridged_subnets(), the faucet and edge networks. `root_cpus`: each root's CPU quota."""
+    `payout`: the faucet signer's payout per claim (UCT, network.json's). `subnets`: bridged_subnets(), the faucet and edge networks. `root_cpus`: each root's CPU quota.
+    `block_interval_ms`: the shard nodes' --block-interval (0: none)."""
     subnets = subnets or bridged_subnets()
     services = {}
     def service(name, image, command, mounts=(), memory='256m', cpu=0.5, networks=None, pod=None, **extra):
@@ -249,7 +275,7 @@ def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, wit
             '--execution-journal','/state/execution-journal.db','--archive-store','/archive',
             '--archive-prune','--archive-public-reads','--journal-candidates','256','--trust-history-profile-2','--rpc-server-address',operator_rpc.listen(rpc_bind,operator_rpc.SHARD_PORT),'--metrics','prometheus',
             '--signing-authority-socket','/authority/client.sock','--signing-authority-credential','/authority/client.cred']
-            + utb_node_flags(utb) + common,   # no --archive-replica: the node derives its replicas from the shard's validators (the next three in peer-ID order, any two make a block durable)
+            + block_interval_flags(block_interval_ms) + utb_node_flags(utb) + common,   # no --archive-replica: the node derives its replicas from the shard's validators (the next three in peer-ID order, any two make a block durable)
             [evm,auth,network,'./validator%d/jwt:/jwt:ro'%i,'./validator%d/archive:/archive'%i],memory='2048m',cpu=1.5,pod='pod%d'%i)
         # 2 GiB / 1.5 CPU, not 512 MiB / 0.75 (#1018): the cgroup also pays the kernel's dentry/inode cache of the per-block archive tree (about 490 MiB of 512 MiB
         # after 25 h on staging), and at 512 MiB the shards swapped until the round deadlines failed. The journal bound is the shard node's default 256 again, not 32 (#1019).
@@ -308,10 +334,12 @@ def main():
     p.add_argument('--faucet-daily-claims',type=int,default=FAUCET_DAILY_CLAIMS,help=f'claims in any 24 hours (default {FAUCET_DAILY_CLAIMS})')
     p.add_argument('--faucet-per-ip-limit',action='store_true',help='also one claim per client IP per 24 hours (off by default: clients behind one NAT would share a claim)')
     p.add_argument('--faucet-subnet',default=DEFAULT_SUBNETS['faucet'],help=f'the faucet network (default {DEFAULT_SUBNETS["faucet"]}); its first address is the guard\'s trusted proxy')
+    p.add_argument('--block-interval-ms',type=int,default=BLOCK_INTERVAL_MS,help=f'the EVM shard nodes\' target block interval in ms (default {BLOCK_INTERVAL_MS}; 0: one block per certification round trip, as the lanes run); the shard conf\'s T2 is derived from it')
     p.add_argument('--root-cpus',type=float,default=ROOT_CPUS,help=f'each root node\'s CPU quota (default {ROOT_CPUS}; 0.25..8)')
     p.add_argument('--edge-subnet',default=DEFAULT_SUBNETS['edge'],help=f'the edge network (default {DEFAULT_SUBNETS["edge"]}); its first address is the RPC gateway\'s and the lock-proof endpoint\'s trusted proxy')
     a=p.parse_args()
     if not 0.25 <= a.root_cpus <= 8: p.error(f'--root-cpus must be 0.25..8, got {a.root_cpus}')
+    if not 0 <= a.block_interval_ms <= 60000: p.error(f'--block-interval-ms must be 0..60000, got {a.block_interval_ms}')
     try:
         faucet=faucet_settings(a.faucet_payout,a.faucet_balance,a.faucet_daily_claims,a.faucet_per_ip_limit)
         subnets=bridged_subnets(a.faucet_subnet,a.edge_subnet)
@@ -345,6 +373,8 @@ def main():
         version=subprocess.check_output(['go','version','-m',tool],text=True)
         if 'vcs.revision='+PINS['bft'] not in version or 'vcs.modified=true' in version:
             p.error(f'{Path(tool).name} must be built from clean pinned BFT source')
+    if a.block_interval_ms and '--block-interval' not in subprocess.run([ubft,'shard-node','run','--help'],capture_output=True,text=True).stdout:
+        p.error('the pinned ubft has no shard-node run --block-interval (bft-core#1167): bump pins.json past it, or pass --block-interval-ms 0')
     if not a.offline_validation:
         if os.geteuid()!=0: p.error('live generation must run as root on Linux to assign UID 10001 ownership')
         subprocess.run(['docker','info'],check=True,stdout=subprocess.DEVNULL)
@@ -400,7 +430,7 @@ def main():
             # the authorities are started from THIS compose and never recreated (their keys exist only in their memory): every argument their
             # entrypoint takes, the UTB lineage pin included, must be known here already (bft-core#1091: started without --lineage-utb-genesis,
             # every authority of a --utb generation refused the first activation); main() checks the final compose names the same entrypoints
-            boot=immutable(topology(out,a.validators,{'root':roots,'evm':evms},records['images'],a.captcha_sitekey,utb=utb_pin,payout=a.faucet_payout,subnets=subnets,root_cpus=a.root_cpus))
+            boot=immutable(topology(out,a.validators,{'root':roots,'evm':evms},records['images'],a.captcha_sitekey,utb=utb_pin,payout=a.faucet_payout,subnets=subnets,root_cpus=a.root_cpus,block_interval_ms=a.block_interval_ms))
             write(out/'compose.yaml',boot)
             def authority(i,*args):
                 auth=out/f'validator{i}/auth'
@@ -434,7 +464,7 @@ def main():
                         time.sleep(.1)
                 else: raise RuntimeError('authority startup timeout')
             cli('shard-conf','generate','--home',home,'--network-id','3','--partition-id','8','--partition-type-id','8',
-                '--shard-id','0x80','--epoch-start','1','--t2-timeout','5000','--partition-params',evm_partition_params(a.chain_id),
+                '--shard-id','0x80','--epoch-start','1','--t2-timeout',str(t2_for_block_interval(a.block_interval_ms)),'--partition-params',evm_partition_params(a.chain_id),
                 *sum((['--node-info',out/f'validator{i}/auth/node-info.json'] for i in range(1,a.validators+1)),[]))
             # One B1 profile, then a genesis allocated from it (permanent registry layout), funded with the package's random faucet and unique entropy.
             trust=home/'trust-base.json'
@@ -540,13 +570,14 @@ def main():
             trusted_proxy_ip=subnets['faucet']['gateway'],**faucet['network'])
         write(out/'network/network.json',network)
         flags=[*flags,'--unicity.genesis-commitment='+genesis_commitment(json.loads((home/'genesis.json').read_text()))]
-        final=immutable(topology(out,a.validators,{'root':roots,'evm':evms},records['images'],a.captcha_sitekey,flags,max_gas,bool(genesis),a.rpc_bind,utb_pin,a.utb_aggregator,payout=a.faucet_payout,subnets=subnets,root_cpus=a.root_cpus))
+        final=immutable(topology(out,a.validators,{'root':roots,'evm':evms},records['images'],a.captcha_sitekey,flags,max_gas,bool(genesis),a.rpc_bind,utb_pin,a.utb_aggregator,payout=a.faucet_payout,subnets=subnets,root_cpus=a.root_cpus,block_interval_ms=a.block_interval_ms))
         if not a.offline_validation:
             check_authorities_unchanged(boot,final,a.validators)
         write(out/'compose.yaml',final)
         manifest={'offline_validation_only':a.offline_validation,'generation':out.name,'chain_id':a.chain_id,'genesis_hash':'0x'+block,'validators':a.validators,'operator_rpc':{'bind':a.rpc_bind,'root_port':operator_rpc.ROOT_PORT,'shard_port':operator_rpc.SHARD_PORT},
             'faucet_address':next(iter(alloc)), 'artifacts':records,
             'faucet':{**faucet['network'],'genesis_balance_wei':str(faucet['balance_wei'])},'networks':subnets,'root_cpus':a.root_cpus,
+            'evm_block':{'interval_ms':a.block_interval_ms,'t2_ms':t2_for_block_interval(a.block_interval_ms)},
             'utb':({'genesis_id':utb_pin,'genesis_sha256':hashlib.sha256((out/'network/utb-genesis.cbor').read_bytes()).hexdigest(),'genesis_file':'network/utb-genesis.cbor',
                     'aggregator':a.utb_aggregator,
                     **({'bundle_file':'network/utb-bundle.cbor','bundle_sha256':hashlib.sha256((out/'network/utb-bundle.cbor').read_bytes()).hexdigest(),'expected_network':TRUST_BASE_NETWORK_ID}

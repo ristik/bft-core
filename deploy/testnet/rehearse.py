@@ -1871,7 +1871,9 @@ class Rehearsal:
         a = self.reset_args
         out = subprocess.run([sys.executable, str(Path(__file__).with_name('reset.py')), '--old', str(old), '--lose-all-assets', '--', '--out', str(new),
                               '--validators', str(self.n), '--chain-id', str(self.chain_id), '--ubft', a['ubft'], '--b1genesis', a['b1genesis'], '--keygen', a['keygen'],
-                              '--captcha-sitekey', a['captcha_sitekey'], '--captcha-secret-file', a['captcha_secret_file']], check=True, text=True, capture_output=True).stdout
+                              '--captcha-sitekey', a['captcha_sitekey'], '--captcha-secret-file', a['captcha_secret_file'],
+                              # the new network keeps the old one's block interval (bft-core#1167): a generation from before it has none, the cadence it ran at
+                              '--block-interval-ms', str((self.manifest.get('evm_block') or {}).get('interval_ms', 0))], check=True, text=True, capture_output=True).stdout
         self.say('  ' + out.strip().splitlines()[-1])
         self.expect(not old.exists(), 'the old generation directory is gone')
         retired = old.with_suffix('.retired-manifest.json')

@@ -103,7 +103,7 @@ jobs:
           umask 077
           echo rehearsal-not-a-real-secret > /tmp/captcha-secret
           sudo -E env "PATH=$PATH" python3 deploy/testnet/generate.py --out /srv/tn-bridge-pos --validators 4 --chain-id 31337 \
-            --ubft pinned-bft/build/ubft --b1genesis /tmp/tn-b1genesis --keygen /tmp/tn-keygen \
+            --ubft pinned-bft/build/ubft --b1genesis /tmp/tn-b1genesis --keygen /tmp/tn-keygen --block-interval-ms 0 \
             --captcha-sitekey rehearsal-sitekey --captcha-secret-file /tmp/captcha-secret \
             --pos --pos-contracts pinned-contracts --utb \
             --pos-cadence-seconds "$CADENCE_SECONDS" --pos-cadence-rounds "$CADENCE_ROUNDS"

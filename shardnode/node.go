@@ -214,6 +214,11 @@ func (n *Node) SetAwaitTimeout(d time.Duration) {
 	n.round.SetAwaitTimeout(d)
 }
 
+// SetBlockInterval sets the best-effort minimum interval between this node's blocks (Round.SetBlockInterval); zero disables it.
+func (n *Node) SetBlockInterval(d time.Duration) {
+	n.round.SetBlockInterval(d)
+}
+
 // SetMetrics attaches an optional Metrics recorder to both the round loop
 // and the root-chain client. Call after New, before Run.
 func (n *Node) SetMetrics(m *Metrics) {

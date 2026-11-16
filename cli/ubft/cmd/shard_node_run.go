@@ -57,6 +57,7 @@ import (
 	"github.com/unicitynetwork/bft-core/recordsfeed"
 	"github.com/unicitynetwork/bft-core/registrygenesis"
 	"github.com/unicitynetwork/bft-core/registryproof"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
 	"github.com/unicitynetwork/bft-core/rootinput"
@@ -324,7 +325,8 @@ type shardNodeRunFlags struct {
 	ArchiveReplicas      []string
 	ArchivePublicReads   bool // serve archive reads to non-validators under a separate budget
 	UCRelayAfter         time.Duration
-	FollowSources        []string // non-root bootstrap peers; set, roots are refused while this node is not active
+	BlockInterval        time.Duration // best-effort minimum interval between blocks (bft-core#1167); 0 = one per certification round trip
+	FollowSources        []string      // non-root bootstrap peers; set, roots are refused while this node is not active
 	ArchivePrune         bool
 	TrustHistoryProfile2 bool
 	UTBGenesisFile       string // enables the signed trust-base entry (UTB) profile: the canonical genesis entry (trust-base utb-genesis)
@@ -449,6 +451,9 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 		"local certified archive directory; requires --execution-journal. Replicas are derived from the shard's validators (the next three after this node in peer-ID order, any two sufficing) unless exactly two --archive-replica peer IDs are given")
 	cmd.Flags().DurationVar(&flags.UCRelayAfter, "uc-relay-after", time.Second,
 		"with no adopted certificate for this long, ask two active shard peers for the certificate they hold (verified like a root's response); 0 disables")
+	cmd.Flags().DurationVar(&flags.BlockInterval, "block-interval", 0,
+		"best-effort minimum interval between this validator's blocks: the leader delays building until it has passed since its previous block, and a follower waits that much longer for it. "+
+			"Not part of block validity; peers and replay never check it. 0 (the default) builds one block per certification round trip. The shard conf's T2 must cover it (see 'shard-node doctor')")
 	cmd.Flags().BoolVar(&flags.ArchivePublicReads, "archive-public-reads", false,
 		"serve archive reads (never writes) to peers that are not validators, such as root-free followers, under a separate bounded budget")
 	cmd.Flags().StringSliceVar(&flags.FollowSources, "follow-source", nil,
@@ -567,6 +572,10 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	shardConf, err := loadRunShardConf(flags, changed)
 	if err != nil {
 		return err
+	}
+	// A block interval the shard's T2 cannot cover turns every paced round into a root-chain timeout: refuse it before anything starts.
+	if err := shardnode.CheckBlockInterval(flags.BlockInterval, shardConf.T2Timeout, consensus.BlockRate*time.Millisecond); err != nil {
+		return fmt.Errorf("--block-interval: %w (regenerate the shard conf with a larger --t2-timeout, or lower the interval)", err)
 	}
 
 	// How certification requests are signed is decided once, here, before anything is built: with the
@@ -943,7 +952,8 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	// --uc-relay-after it asks two active peers for theirs; a relayed pair is verified and admitted exactly like a root's response
 	peer.RegisterProtocolHandler(shardnode.UCRelayProtocol, shardnode.NewUCRelayServer(node.HeldPair, activePeers.Allowed).Handler)
 	if flags.UCRelayAfter > 0 {
-		node.SetRelay(peer, activePeers.Peers, flags.UCRelayAfter)
+		// with a block interval, a certificate is not expected sooner than the interval after the previous one: the relay waits that long on top
+		node.SetRelay(peer, activePeers.Peers, flags.UCRelayAfter+flags.BlockInterval)
 	}
 	if follower.enabled {
 		// a root-free follower: while this node is not a validator of the installed assignment it takes certificates from its follow
@@ -1678,6 +1688,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	// every deployment ran the 5s default whatever its T2 was.
 	awaitTimeout := shardnode.AwaitTimeoutForT2(shardConf.T2Timeout)
 	node.SetAwaitTimeout(awaitTimeout)
+	node.SetBlockInterval(flags.BlockInterval)
 
 	// The certified-block record (#14): nothing is constructed unless a store path is configured, and then
 	// the record is reloaded and reported without changing voting. See startCertifiedRecord.
@@ -1715,7 +1726,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 
 	flags.observe.Logger().Info("shard node starting",
 		"nodeID", peer.ID().String(), "partitionID", shardConf.PartitionID, "executor", flags.Executor,
-		"t2Timeout", shardConf.T2Timeout, "leaderAwaitTimeout", awaitTimeout, "certificationSigning", signing.describe)
+		"t2Timeout", shardConf.T2Timeout, "leaderAwaitTimeout", awaitTimeout, "blockInterval", flags.BlockInterval, "certificationSigning", signing.describe)
 
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error { return node.Run(gctx) })
