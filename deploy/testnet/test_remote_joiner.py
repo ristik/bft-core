@@ -1554,6 +1554,10 @@ class MemberTunnelGuard(unittest.TestCase):
         for text in ('', 'not json', '{"State": "running"}'):
             lap.dc = lambda *a, **k: text
             self.assertIsNone(lap.strict_services_state(), text)
+        for text in ('{"Service": "root5", "State": null}', '{"Service": 5, "State": "running"}', '{"Service": "", "State": "running"}',
+                     '[{"Service": "peer1", "State": "running"}, {"Service": "root5"}]', '["x"]'):
+            lap.dc = lambda *a, **k: text
+            self.assertIsNone(lap.strict_services_state(), text)
         lap.dc = unittest.mock.Mock(side_effect=rj.Failure('docker down'))
         self.assertIsNone(lap.strict_services_state())
         lap.dc = lambda *a, **k: '{"Service": "root5", "State": "exited"}\n'

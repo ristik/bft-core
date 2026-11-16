@@ -457,6 +457,8 @@ class Laptop:
                 if line.strip():
                     rows = json.loads(line)
                     for row in rows if isinstance(rows, list) else [rows]:
+                        if not (isinstance(row, dict) and all(isinstance(row.get(k), str) and row[k] for k in ('Service', 'State'))):
+                            return None   # one invalid row makes the whole result unknown
                         out[row['Service']] = row['State']
         except (Failure, ValueError, KeyError, TypeError, subprocess.TimeoutExpired):
             return None
@@ -469,8 +471,10 @@ class Laptop:
             states = self.strict_services_state()
             if states is None:
                 return None
-            state = states.get(f'root{self.entity}')
-            if state in (None, 'exited', 'dead', 'created'):
+            if f'root{self.entity}' not in states:
+                return False   # absent from a well-formed, non-empty list
+            state = states[f'root{self.entity}']
+            if state in ('exited', 'dead', 'created'):
                 return False
             if state != 'running':
                 return None
