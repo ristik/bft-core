@@ -49,7 +49,7 @@ import { HE, HU } from '../../../packages/native-bridge-plugin/src/nb2/crypto.js
 import { decodeReceiptBacking } from '../../../packages/native-bridge-plugin/src/nb2/deposit.js';
 import { u256 } from '../../../packages/native-bridge-plugin/src/nb2/cbor.js';
 import { TrustInput } from '../../../packages/native-bridge-plugin/src/trust.js';
-import { BoundaryNotFound, findBoundary, type Probe, type Verdict } from './boundary_search.js';
+import { BoundaryNotFound, findBoundary, ownShape, type Probe, type Verdict } from './boundary_search.js';
 import { marginals, type TokenShape } from './boundary_shape.js';
 import { refreshAll } from '../../../tester/trust.js';
 
@@ -501,48 +501,6 @@ async function chain(w: Wallet, from: string, to: string, n: number, rounds: boo
   return { transfers: decodeToken(token).transfers.length, certificates: ucs.size };
 }
 
-/**
- * N transfers of each FROM, kept as its TO, certified together: GROUPS rounds, and each round's group of every chain submitted at once and
- * proven before the next round's, so the chains share their rounds (the same certificates, the same aggregator state). For the boundary
- * stage's window builds; chain() is the single form.
- */
-async function chainTogether(w: Wallet, specs: { from: string; to: string; n: number }[], groups: number): Promise<{ transfers: number; certificates: number }[]> {
-  const agg = new LaneAggregator(lane.agg);
-  const plans: { to: string; token: Uint8Array; owner: number; pending: { tx: Uint8Array; cd: Uint8Array }[] }[] = [];
-  for (const s of specs) {
-    const token = w.token(s.from);
-    let owner = w.entry(s.from).owner;
-    const pending: { tx: Uint8Array; cd: Uint8Array }[] = [];
-    let virt = token;
-    for (let k = 0; k < s.n; k++) {
-      const next = (owner + 1) % 4;
-      const req = await transferRequest(virt, w.owner(owner), { recipient: signaturePredicate(w.ownerPub(next)), mask: freshMask(), data: null, deadline: null });
-      pending.push(req);
-      virt = appendTransfer(virt, req.tx, placeholderProof(decodeToken(token)));
-      owner = next;
-    }
-    plans.push({ to: s.to, token, owner, pending });
-  }
-  const g = Math.min(groups, ...plans.map((p) => p.pending.length));
-  const slices = plans.map((p) => Array.from({ length: g }, (_, j) => p.pending.slice(Math.round((p.pending.length * j) / g), Math.round((p.pending.length * (j + 1)) / g))));
-  for (let j = 0; j < g; j++) {
-    const round = slices.flatMap((sl) => sl[j]);
-    for (let i = 0; i < round.length; i += 32) await Promise.all(round.slice(i, i + 32).map((p) => agg.submit(p.cd)));
-    for (let x = 0; x < plans.length; x++) for (const p of slices[x][j]) plans[x].token = appendTransfer(plans[x].token, p.tx, await agg.proof(p.cd));
-  }
-  const res: { transfers: number; certificates: number }[] = [];
-  for (const p of plans) {
-    const v = await w.bridge.verifyToken(p.token);
-    w.keep(p.to, p.token, p.owner, { amount: v.amount.toString() });
-    const d = decodeToken(p.token);
-    const ucs = new Set(d.proofs.map((q) => hx(HU(q.uc))));
-    out(`chain-${p.to}`, { transfers: d.transfers.length, distinctCertificates: ucs.size, bytes: p.token.length });
-    log(`  ${p.to}: ${d.transfers.length} transfers under ${ucs.size} certificates, ${p.token.length} bytes (built together with ${plans.length - 1} more)`);
-    res.push({ transfers: d.transfers.length, certificates: ucs.size });
-  }
-  return res;
-}
-
 /** The token's certificates as one condition: their count and a digest of the sorted set of their hashes. */
 function certificateSet(token: Uint8Array): string {
   const hs = [...new Set(decodeToken(token).proofs.map((q) => hx(HU(q.uc))))].sort();
@@ -859,11 +817,10 @@ async function predict(w: Wallet, token: Uint8Array): Promise<{ ok: boolean; gas
 }
 
 /**
- * The largest transfer history whose return passes the wallet's preflight (the gas bound binds before L_max on this deployment), found on
- * live tokens: one held at the boundary (returned by the lane) and one a transfer above it (refused with CapacityPreflight), under the same
- * conditions: the same distinct certificates (each probe is certified in BOUNDARY_CERTIFICATES rounds, whatever its length) and the same
- * segment need, both judged again back to back at the end. Each probe is a fresh deposit chained to its length, because a token checked one
- * transfer further has spent the one below; the search (boundary_search.ts) is bounded by BOUNDARY_PROBES.
+ * Where the wallet's preflight stops admitting a return (the gas bound binds before L_max on this deployment), located on live tokens within
+ * BOUNDARY_MARGIN transfers (boundary_search.ts): single fresh tokens, each a deposit chained to its length in BOUNDARY_CERTIFICATES rounds,
+ * judged by planReturn and the lane's replay of its inputs, until the newest probes hold an admission and a refusal at most the margin apart.
+ * Every probe is reported (out/boundary-<label>.json) with its shape diagnostics; rehearse_nb2.py then executes every one (soundness).
  */
 /**
  * TOKEN's shape as MeasuredGasModel.redeemGasLimit (measured-nb2-05) charges it, and the gas of one more and one fewer transfer of that shape
@@ -931,8 +888,11 @@ async function shapeOf(token: Uint8Array, lT: number): Promise<{ up: bigint | nu
 }
 
 const BOUNDARY_CERTIFICATES = 16;
-const BOUNDARY_PROBES = 10; // single tokens of the coarse phase
-const BOUNDARY_BUILDS = 6; // window builds (N - 1 .. N + 2 together)
+const BOUNDARY_PROBES = 12;
+// m, the owner's default (briefs/owner-questions.md): fresh tokens' gas deviates about 0.6 step and drifts about 0.5 step a probe (runs
+// 43994509728, 44003156840), so within the newest three probes a verdict at one length moves by up to about a transfer either way; two
+// transfers bound the highest admission against the lowest refusal there (each of the three runs reached it within its first five probes)
+const BOUNDARY_MARGIN = 2;
 async function boundary(w: Wallet, label: string, estimate: number): Promise<void> {
   const est = JSON.parse(readFileSync(join(WORK, 'out', `boundary-estimate-${label}e.json`), 'utf8'));
   const judge = async (l: string, transfers: number): Promise<Probe> => {
@@ -959,30 +919,21 @@ async function boundary(w: Wallet, label: string, estimate: number): Promise<voi
     const c = await chain(w, l, `${l}c`, k, false, BOUNDARY_CERTIFICATES);
     return judge(`${l}c`, c.transfers);
   };
-  // a window: one deposit a length, every chain certified in the same rounds, then every token judged at once, in order
-  const build = async (lengths: number[], i: number): Promise<Probe[]> => {
-    const ls = lengths.map((_, x) => `${label}${i}${'abcdefgh'[x]}`);
-    for (const l of ls) await deposit(w, l, 1n, undefined);
-    const cs = await chainTogether(w, lengths.map((n, x) => ({ from: ls[x], to: `${ls[x]}c`, n })), BOUNDARY_CERTIFICATES);
-    const toks: Probe[] = [];
-    for (let x = 0; x < ls.length; x++) toks.push(await judge(`${ls[x]}c`, cs[x].transfers));
-    return toks;
-  };
-  const rejudge = async (p: Probe): Promise<Probe> => judge(p.label, p.transfers);
+  const withShape = (ts: Probe[]): (Probe & { shape: ReturnType<typeof ownShape> })[] => ts.map((t) => ({ ...t, shape: ownShape(t, pins.userGasLimit) }));
   let res;
   try {
-    res = await findBoundary(probe, build, rejudge, {
-      estimate, limit: pins.userGasLimit, start: { transfers: est.probeTransfers, gas: big(est.probeGas) }, maxProbes: BOUNDARY_PROBES, maxPairs: BOUNDARY_BUILDS,
+    res = await findBoundary(probe, {
+      estimate, limit: pins.userGasLimit, start: { transfers: est.probeTransfers, gas: big(est.probeGas) }, maxProbes: BOUNDARY_PROBES, margin: BOUNDARY_MARGIN,
       min: BOUNDARY_CERTIFICATES,
     });
   } catch (e) {
-    if (e instanceof BoundaryNotFound) out(`boundary-${label}`, { pass: null, fail: null, tries: e.tries, windows: e.windows, drift: e.drift, error: e.message });
+    if (e instanceof BoundaryNotFound) out(`boundary-${label}`, { admitted: null, refused: null, margin: BOUNDARY_MARGIN, tries: withShape(e.tries), drift: e.drift, error: e.message });
     throw e;
   }
-  out(`boundary-${label}`, { pass: res.pass, fail: res.fail, confirmed: res.confirmed, tries: res.tries, windows: res.windows, drift: res.drift, certificatesPerProbe: BOUNDARY_CERTIFICATES });
-  const last = res.windows[res.windows.length - 1];
-  log(`  boundary: ${res.pass.transfers} transfers pass and ${res.fail.transfers} are refused, built together (${last.labels.join(', ')}) under ${res.pass.conditions}, `
-    + `confirmed back to back (${res.tries.length} tokens, ${res.windows.length} window builds); residuals ${JSON.stringify(last.residuals)}; drift ${JSON.stringify(res.drift)}`);
+  out(`boundary-${label}`, { admitted: res.admitted, refused: res.refused, spread: res.spread, margin: res.margin, window: res.window, tries: withShape(res.tries), drift: res.drift,
+    certificatesPerProbe: BOUNDARY_CERTIFICATES });
+  log(`  boundary: within ${res.spread} of ${res.margin} transfers: ${res.admitted.transfers} admitted (${res.admitted.label}), ${res.refused.transfers} refused (${res.refused.label}), `
+    + `from the newest ${res.window.join(', ')} (${res.tries.length} probes); drift ${JSON.stringify(res.drift)}`);
 }
 
 /** The boundary estimate from a short live chain: the model's gas per further hop on this deployment's real certificates. */
@@ -1283,7 +1234,6 @@ main().catch((e) => {
   if (e instanceof BoundaryNotFound) {
     // one line a probe, the newest last (the lane's console keeps the last lines; every probe is in out/boundary-<label>.json)
     for (const t of e.tries) console.error(`  ${t.label}: ${t.transfers} transfers, ${t.conditions}, gas ${t.gas} (+${t.up}/-${t.down}): ${t.real}`);
-    for (const x of e.windows) console.error(`  window ${x.lengths.join(',')}: ${x.verdicts.join(',')} ${x.outcome}${x.reason ? ` (${x.reason})` : ''}; residuals ${x.residuals.join(',')}`);
     console.error(`  drift ${JSON.stringify(e.drift)}`);
     console.error(`BoundaryNotFound: ${e.message}`);
     process.exit(1);

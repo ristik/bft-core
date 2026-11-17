@@ -2264,20 +2264,76 @@ class NB2DriverKeys(unittest.TestCase):
         src=(Path(__file__).parent/'bridge/nb2/rehearse_nb2.py').read_text()
         deploy=src[src.index('    def deploy(self):'):src.index('    def ',src.index('    def deploy(self):')+10)]
         self.assertLess(deploy.index('self.make_keys()'),deploy.index("self.driver('gamma-check')"),'deploy makes the keys before its driver commands open a wallet')
-    def test_a_failed_boundary_search_keeps_every_probe_in_the_evidence(self):
-        # the console keeps the driver's last lines only: run 43985010186 lost all but two of its twenty probes
+    # the boundary stage (the owner's default claim): every probe executed as the preflight judged it, and the bound within the margin
+    LIM=60_000_000
+    def boundary_run(self,tmp,tries,search,redeem=None,preflight=None,code=0):
+        """rehearse_nb2.boundary() against a driver that plays the search's file (TRIES, SEARCH) and the burns, redemptions and preflights it asks."""
         m=self.module()
+        gen=self.generation(tmp);r=m.NB2Rehearsal(gen,Path(tmp)/'ev','/bin/false')
+        (r.nb2/'public').mkdir(parents=True,exist_ok=True);(r.nb2/'public/nb2-release.json').write_text(json.dumps({'pins':{'userGasLimit':str(self.LIM)}}))
+        asked=[]
+        def driver(rr,*args,check=True):
+            out=rr.nb2/'out';out.mkdir(parents=True,exist_ok=True);asked.append(args)
+            if args[0]=='boundary-estimate': (out/'boundary-estimate-ge.json').write_text(json.dumps({'estimate':255}));return 0,''
+            if args[0]=='boundary':
+                self.assertFalse(check,'the search runs unchecked, so its file is kept first')
+                (out/'boundary-g.json').write_text(json.dumps({'tries':tries,**search}));return code,''
+            l=args[2]
+            if args[0]=='burn': (out/f'burn-{l}.json').write_text(json.dumps({'preflightGas':str(self.LIM-1)}))
+            if args[0]=='redeem': (out/f'redeem-{l}.json').write_text(json.dumps((redeem or {}).get(l,{'result':'paid','paid':{'gasLimit':str(self.LIM),'gasUsed':'36607007'}})))
+            if args[0]=='preflight': (out/f'preflight-{l}.json').write_text(json.dumps((preflight or {}).get(l,{'ok':False,'rule':'CapacityPreflight','detail':'over'})))
+            return 0,''
+        return m,r,driver,asked
+    def probe(self,label,k,gas,real):
+        return {'label':label,'transfers':k,'conditions':'30 certificates ab, need 64','gas':str(gas),'up':'265000','down':'265000','real':real,'shape':{}}
+    def tries(self):
+        L=self.LIM
+        return [self.probe('g0c',255,L+11_000_000,'CapacityPreflight'),self.probe('g1c',208,L+260_000,'CapacityPreflight'),
+                self.probe('g2c',204,L-350_000,'passes'),self.probe('g3c',206,L+600_000,'CapacityPreflight')]
+    def test_the_boundary_stage_executes_every_probe_as_judged_and_locates_the_bound_within_the_margin(self):
         with tempfile.TemporaryDirectory() as tmp:
-            gen=self.generation(tmp);r=m.NB2Rehearsal(gen,Path(tmp)/'ev','/bin/false')
-            def driver(rr,*args,check=True):
-                out=rr.nb2/'out';out.mkdir(parents=True,exist_ok=True)
-                if args[0]=='boundary-estimate': (out/'boundary-estimate-ge.json').write_text(json.dumps({'estimate':255}));return 0,''
-                (out/'boundary-g.json').write_text(json.dumps({'pass':None,'fail':None,'tries':[{'label':'g0c'}],'error':'no pair'}))
-                self.assertFalse(check,'the boundary search runs unchecked, so its file is kept first');return 1,'BoundaryNotFound'
+            t=self.tries();search={'admitted':t[2],'refused':t[3],'spread':2,'margin':2,'window':['g1c','g2c','g3c']}
+            m,r,driver,asked=self.boundary_run(tmp,t,search)
+            with patch.object(m.NB2Rehearsal,'driver',driver): r.boundary()
+            self.assertEqual([a[:3] for a in asked if a[0] in ('burn','redeem','preflight')],
+                             [('preflight','big','g0c'),('preflight','big','g1c'),('burn','big','g2c'),('redeem','big','g2c'),('preflight','big','g3c')],
+                             'every probe: the admitted one burned and redeemed, every refused one judged again and never burned')
+            sound=json.loads((Path(tmp)/'ev/nb2/boundary-soundness.json').read_text())
+            self.assertEqual([(x['label'],x['verdict']) for x in sound],[('g0c','refused'),('g1c','refused'),('g2c','admitted'),('g3c','refused')])
+            for f in ('boundary-g','boundary-estimate-ge','burn-g2c','redeem-g2c','preflight-g0c','preflight-g3c'): self.assertTrue((Path(tmp)/f'ev/nb2/{f}.json').is_file(),f)
+    def test_any_probe_that_execution_contradicts_fails_the_stage(self):
+        L=self.LIM
+        cases={
+            'an admitted token not paid':({'redeem':{'g2c':{'result':'unconfirmed'}}},'g2c .* admitted'),
+            'an admitted token whose redemption needs more than userGasLimit':({'redeem':{'g2c':{'result':'paid','paid':{'gasLimit':str(L+1),'gasUsed':'36607007'}}}},'g2c .* admitted'),
+            'a refused token the wallet admits when asked again':({'preflight':{'g3c':{'ok':True}}},'g3c .* refused'),
+            'a refused token refused for another rule':({'preflight':{'g1c':{'ok':False,'rule':'StaleEndpoint'}}},'g1c .* refused'),
+        }
+        for name,(kw,msg) in cases.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
+                t=self.tries();m,r,driver,_=self.boundary_run(tmp,t,{'admitted':t[2],'refused':t[3],'spread':2,'margin':2,'window':['g1c','g2c','g3c']},**kw)
+                with patch.object(m.NB2Rehearsal,'driver',driver):
+                    with self.assertRaisesRegex(m.Failure,msg): r.boundary()
+        # a refused probe whose own gas is within the limit: the preflight's verdict and its gas disagree
+        with tempfile.TemporaryDirectory() as tmp:
+            t=self.tries();t[1]=self.probe('g1c',208,L,'CapacityPreflight')
+            m,r,driver,_=self.boundary_run(tmp,t,{'admitted':t[2],'refused':t[3],'spread':2,'margin':2,'window':['g1c','g2c','g3c']})
+            with patch.object(m.NB2Rehearsal,'driver',driver):
+                with self.assertRaisesRegex(m.Failure,'g1c .* refused'): r.boundary()
+    def test_a_spread_over_the_margin_fails_the_location(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            t=self.tries();m,r,driver,_=self.boundary_run(tmp,t,{'admitted':t[2],'refused':t[1],'spread':4,'margin':2,'window':['g1c','g2c','g3c']})
+            with patch.object(m.NB2Rehearsal,'driver',driver):
+                with self.assertRaisesRegex(m.Failure,'within 2 transfers'): r.boundary()
+    def test_a_failed_boundary_search_keeps_every_probe_in_the_evidence_and_still_executes_them(self):
+        # the console keeps the driver's last lines only: run 43985010186 lost all but two of its twenty probes
+        with tempfile.TemporaryDirectory() as tmp:
+            t=self.tries();m,r,driver,asked=self.boundary_run(tmp,t,{'admitted':None,'refused':None,'margin':2,'error':'no bound within 2'},code=1)
             with patch.object(m.NB2Rehearsal,'driver',driver):
                 with self.assertRaisesRegex(m.Failure,'boundary-g.json'): r.boundary()
-            self.assertEqual(json.loads((Path(tmp)/'ev/nb2/boundary-g.json').read_text())['tries'],[{'label':'g0c'}])
+            self.assertEqual(len(json.loads((Path(tmp)/'ev/nb2/boundary-g.json').read_text())['tries']),4)
             self.assertTrue((Path(tmp)/'ev/nb2/boundary-estimate-ge.json').is_file())
+            self.assertIn(('redeem','big','g2c'),[a[:3] for a in asked],'soundness is judged on every probe even when the search failed')
     def test_a_failed_creation_reports_casts_own_reason(self):
         # the intermittent production-vault creation on testnet-bridge-pos (run 43994509917) left only the initcode in the log
         import importlib.util

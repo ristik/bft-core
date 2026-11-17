@@ -28,8 +28,11 @@ PoS sequence's first invocation (deploy,fund,pos-deposit) keeps them, and its la
                 nested, typed and legacy receipts, 16 and 17 claims); isolated mutations (each certificate's seal, RSMT paths, unlock recovery IDs 2
                 and 3, canonical encoding) judged by all three; fault injection of 0x0100, 0x0102 and the helper's code (eth_call state overrides)
   gas           real transaction gas of the returns (long, nested, claims), with the measured refusals
-  boundary      the capacity boundary: a token at the largest transfer history the preflight admits, returned; one transfer more refused before
-                the burn (CapacityPreflight), reported as the documented limit, not as recovery
+  boundary      the capacity bound on live tokens: every token the stage builds executed as the preflight judged it (each admitted one burned and
+                paid within userGasLimit, each refused one over it by the preflight's own gas and refused before any burn: CapacityPreflight, the
+                documented limit, not recovery), and the bound located within 2 transfers (among the newest three probes the highest admitted and
+                the lowest refused lengths at most 2 apart: fresh tokens' gas varies by about a transfer's step, so an exact adjacent pair is not
+                observable live; the owner's default, briefs/owner-questions.md)
   cold          a burned part redeemed after every derived wallet cache is deleted (journal, token and burn kept)
   custody       the vault's books from its events: deposits once each, every Paid once, Q = deposits - payouts = state().outstanding, balance >= Q,
                 the segment logs fold to the stored head
@@ -535,41 +538,57 @@ class NB2Rehearsal(Rehearsal):
 
     # --- boundary --------------------------------------------------------------------------------------------------------------------
     def boundary(self):
+        """The preflight's capacity bound on live tokens (the owner's default claim, briefs/owner-questions.md): every probe the search builds is
+        executed as the preflight judged it (soundness: an admitted token is burned and paid within userGasLimit, a refused one is over it by the
+        preflight's own gas and is never burned), and the bound lies within the pinned margin (location: among the newest probes the highest
+        admitted length and the lowest refused one are at most `margin` transfers apart). The shape diagnostics are recorded, not judged."""
         self.driver('boundary-estimate', 'big', 'ge')
         est = self.outfile('boundary-estimate-ge')['estimate']
         code, _ = self.driver('boundary', 'big', 'g', str(est), check=False)
-        # every probe, the pairs refused and the reason reach the evidence whatever the search found (the console keeps the driver's last lines only)
+        # every probe reaches the evidence whatever the search found (the console keeps the driver's last lines only)
         self.keep('boundary-estimate-ge', 'boundary-g')
-        if code != 0:
-            raise Failure(f'the driver failed: boundary big g {est} (every probe: evidence nb2/boundary-g.json)')
-        b = self.outfile('boundary-g')
-        self.say(f'  boundary: {json.dumps(b["tries"], default=str)}')
-        # what the first window runs measure (the claim's footing): each window build, its residuals (the gap of each adjacent two built together
-        # beyond the lower one's own one-transfer step) and the gas drift a build over every token
-        for x in b.get('windows', []):
-            self.say(f'  window {x["lengths"]}: {x["verdicts"]} {x["outcome"]}{" (" + x["reason"] + ")" if x.get("reason") else ""}; residuals {x["residuals"]}')
-        self.say(f'  drift: {json.dumps(b.get("drift"))}')
-        c = b['confirmed']
+        b = self.outfile('boundary-g') if (self.nb2 / 'out/boundary-g.json').is_file() else None
+        if b is None:
+            raise Failure(f'the driver failed: boundary big g {est}, and wrote no probes')
         lim = int(self.release()['pins']['userGasLimit'])
-        step = {'pass': 'up', 'fail': 'down'}   # the pass's forward step, the refusal's backward one (sol r8: they differ where the excess clips)
-        g = {k: (int(c[k]['gas']), int(c[k][step[k]])) for k in step} if all(c[k].get('gas') is not None and c[k].get(step[k]) is not None for k in step) else None
-        # sol r7 on #1126: the boundary holds under each token's own shape (its bytes and signatures), not only under the recorded conditions
-        self.expect(g is not None and g['pass'][0] <= lim < g['pass'][0] + g['pass'][1] and g['fail'][0] - g['fail'][1] <= lim < g['fail'][0],
-                    f'under each token\'s own shape the boundary is the pair\'s: {b["pass"]["label"]} with one more transfer is over {lim}, {b["fail"]["label"]} with one fewer is within it',
-                    json.dumps({'confirmed': c, 'refused': b.get('refused')}, default=str))
-        self.expect(b['fail']['transfers'] == b['pass']['transfers'] + 1 and b['fail']['conditions'] == b['pass']['conditions']
-                    and (c['pass']['real'], c['fail']['real']) == ('passes', 'CapacityPreflight') and c['pass']['conditions'] == c['fail']['conditions'] == b['pass']['conditions'],
-                    f'the boundary pair is adjacent ({b["pass"]["transfers"]} and {b["fail"]["transfers"]} transfers) under the same conditions ({b["pass"]["conditions"]}), '
-                    f'both judged again back to back ({len(b["tries"])} probes)', json.dumps(c, default=str))
-        self.driver('burn', 'big', b['pass']['label'])
-        self.driver('redeem', 'big', b['pass']['label'])
-        o = self.outfile(f'redeem-{b["pass"]["label"]}')
-        self.driver('preflight', 'big', b['fail']['label'])
-        p = self.outfile(f'preflight-{b["fail"]["label"]}')
-        self.expect(o['result'] == 'paid' and not p['ok'] and p['rule'] == 'CapacityPreflight',
-                    f'the token with {b["pass"]["transfers"]} transfers (the largest the preflight admits) is returned (gas {o["paid"]["gasUsed"]}, {o["paid"]["inputBytes"]} calldata bytes); '
-                    f'one with {b["fail"]["transfers"]} is refused before its burn with CapacityPreflight: the documented capacity limit, not recovery', json.dumps(p))
-        self.keep('boundary-estimate-ge', 'boundary-g', f'redeem-{b["pass"]["label"]}', f'preflight-{b["fail"]["label"]}', f'burn-{b["pass"]["label"]}')
+        for t in b['tries']:
+            d = t.get('detail', {})
+            self.say(f'  probe {t["label"]}: {t["transfers"]} transfers, {t["conditions"]}, preflight gas {t["gas"]} (+{t["up"]}/-{t["down"]}), {t["real"]}; '
+                     f'shape {json.dumps(t.get("shape"))}; evidence {d.get("evidenceBytes")} bytes')
+        self.say(f'  drift: {json.dumps(b.get("drift"))}')
+        # soundness, every probe, strict: the preflight's verdict is what execution does
+        sound = []
+        for t in b['tries']:
+            label = t['label']
+            if t['real'] == 'passes':
+                self.driver('burn', 'big', label)
+                self.driver('redeem', 'big', label)
+                burn, o = self.outfile(f'burn-{label}'), self.outfile(f'redeem-{label}')
+                paid = o.get('paid') or {}
+                ok = (o.get('result') == 'paid' and int(t['gas']) <= lim and int(burn['preflightGas']) <= lim and int(paid.get('gasLimit', lim + 1)) <= lim
+                      and int(paid.get('gasUsed', lim + 1)) <= lim)
+                self.expect(ok, f'{label} ({t["transfers"]} transfers) admitted by the preflight (gas {t["gas"]}) is burned and paid within userGasLimit {lim}: '
+                                f'redeem gas limit {paid.get("gasLimit")}, used {paid.get("gasUsed")}', json.dumps({'burn': burn, 'redeem': o}, default=str))
+                self.keep(f'burn-{label}', f'redeem-{label}')
+                sound.append({'label': label, 'transfers': t['transfers'], 'verdict': 'admitted', 'preflightGas': t['gas'], 'gasLimit': paid.get('gasLimit'), 'gasUsed': paid.get('gasUsed')})
+            else:
+                self.driver('preflight', 'big', label)
+                p = self.outfile(f'preflight-{label}')
+                ok = (not p['ok'] and p['rule'] == 'CapacityPreflight' and t['gas'] is not None and int(t['gas']) > lim
+                      and not (self.nb2 / 'out' / f'burn-{label}.json').exists())
+                self.expect(ok, f'{label} ({t["transfers"]} transfers) refused by the preflight is over userGasLimit {lim} by its own gas ({t["gas"]}) and refused again before any burn '
+                                f'(CapacityPreflight, no burn made)', json.dumps(p))
+                self.keep(f'preflight-{label}')
+                sound.append({'label': label, 'transfers': t['transfers'], 'verdict': 'refused', 'preflightGas': t['gas'], 'detail': p.get('detail')})
+        (self.evidence / 'nb2/boundary-soundness.json').write_text(json.dumps(sound, indent=2, default=str) + '\n')
+        if code != 0:
+            raise Failure(f'the driver failed: boundary big g {est}: {b.get("error")} (every probe: evidence nb2/boundary-g.json)')
+        a, r = b['admitted'], b['refused']
+        self.expect(b['spread'] <= b['margin'] and b['spread'] == abs(r['transfers'] - a['transfers']) and a['real'] == 'passes' and r['real'] == 'CapacityPreflight'
+                    and a['label'] in b['window'] and r['label'] in b['window'],
+                    f'the preflight\'s bound lies within {b["margin"]} transfers: among the newest probes ({", ".join(b["window"])}) the highest admitted length is {a["transfers"]} '
+                    f'and the lowest refused one {r["transfers"]} ({b["spread"]} apart); all {len(b["tries"])} probes executed as judged',
+                    json.dumps({'admitted': a, 'refused': r}, default=str))
 
     # --- cold ------------------------------------------------------------------------------------------------------------------------
     def cold(self):
