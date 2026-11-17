@@ -214,7 +214,7 @@ func TestRequestContinuationRefusesACandidateThatTouchesTheShard(t *testing.T) {
 		want   string
 	}{
 		"an unsupported change kind": {func(*q3fixture.Fixture) evmassign.Change {
-			return evmassign.Change{Kind: evmassign.ChangeSplitShard, Payload: []byte{1}}
+			return evmassign.Change{Kind: evmassign.ChangeUpdatePartition, Payload: []byte{1}}
 		},
 			"unsupported"},
 		"a replacement of this shard's validators": {func(f *q3fixture.Fixture) evmassign.Change {

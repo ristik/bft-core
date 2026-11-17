@@ -78,7 +78,7 @@ func TestFreezeAdmitsAnAggregatorKeyReplacementOnlyWhenItReplacesTheInstalledCon
 		}, evmassign.ErrChange},
 		{"a reserved kind", func(t *testing.T, f *assignmentFixture, a aggregatorShard) []evmassign.Change {
 			ch := f.replace(t, a, a.conf, nil)
-			ch.Kind = evmassign.ChangeSplitShard
+			ch.Kind = evmassign.ChangeUpdatePartition
 			return []evmassign.Change{ch}
 		}, evmassign.ErrUnsupportedChange},
 	}
