@@ -108,10 +108,14 @@ type BundleSource interface {
 // Proposer builds the mandatory CloseLiability control a leader includes, from the root's own retained bundle. The witness is the exact
 // canonical bundle bytes; the control commits to their SHA-256 and to the closure the verifier establishes from them, and the digests
 // are derived from the frozen identity records, never read from the bundle's submitter.
+//
+// On a validator-registry chain Registry is set and Deployment names VR: its network and chain id words, and VR's address in place of
+// custody's. The control is then a UNICITY_VR_CONTROL op 1 whose exposure digest is formed in the VR domain (design section 5.6).
 type Proposer struct {
 	Source     BundleSource
 	Authority  Authority
 	Deployment storage.PosDeployment
+	Registry   bool
 }
 
 // WitnessSource is a BundleSource that serves the canonical witness itself, whatever the body version of the handoff.
@@ -149,7 +153,7 @@ func (p Proposer) Closure(closedEpoch, orderingEpoch, orderingRound uint64) (rct
 	}
 	data := storage.ClosureData{AssignmentID: ev.AssignmentID, HRound: ev.HRound, HRecordID: ev.HRecordID, TerminalRoot: ev.TerminalRoot,
 		ExposureDigest: exposure, KeyHistoryDigest: keys}
-	return rctypes.PosControl{Network: p.Deployment.RootNetwork, ChainID: p.Deployment.ChainID, Custody: p.Deployment.Custody,
+	return rctypes.PosControl{Registry: p.Registry, Network: p.Deployment.RootNetwork, ChainID: p.Deployment.ChainID, Custody: p.Deployment.Custody,
 		OrderingEpoch: orderingEpoch, OrderingRound: orderingRound, Op: rctypes.OpCloseLiability,
 		Close: &rctypes.CloseContext{ClosedEpoch: closedEpoch, BundleSemanticID: ev.BundleID}, Data: data.Encode(),
 		WitnessHash: sha256.Sum256(raw)}, raw, nil

@@ -46,6 +46,7 @@ Bundle.Proof.Control.PredecessorBodyID hashed
 Bundle.Proof.Control.PreviousDigest hashed
 Bundle.Proof.Control.RecordBytes hashed
 Bundle.Proof.Control.UnackedParent hashed
+Bundle.Proof.Control.VR hashed
 Bundle.Proof.ControlPath.HashSteps[].Hash hashed
 Bundle.Proof.ControlPath.HashSteps[].Key hashed
 Bundle.Proof.ControlPath.Partition hashed
@@ -205,6 +206,7 @@ Bundle.Snapshot.Control.PredecessorBodyID hashed
 Bundle.Snapshot.Control.PreviousDigest hashed
 Bundle.Snapshot.Control.RecordBytes hashed
 Bundle.Snapshot.Control.UnackedParent hashed
+Bundle.Snapshot.Control.VR hashed
 Bundle.Snapshot.Leader.Epoch hashed
 Bundle.Snapshot.Leader.Genesis hashed
 Bundle.Snapshot.Leader.Lag hashed

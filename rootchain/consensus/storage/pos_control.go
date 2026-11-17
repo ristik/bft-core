@@ -230,6 +230,9 @@ type PosServices struct {
 	// Primary, when set together with Deployment.Election, makes the EVM proof of a primary candidate a condition of its Freeze: the
 	// companion must be version 4 and carry a proof that evmassign.VerifyPrimary accepts against the frozen parent's state root.
 	Primary PrimaryAuthority
+	// Registry, when set, holds the validator-registry mode collaborators; a VR-mode chain (one whose control state carries the VR root
+	// state) refuses every control, Freeze v5 and acknowledgement without them.
+	Registry *VRServices
 }
 
 // RequiresPrimaryProof reports whether Freeze admission demands the EVM proof of a primary candidate on this chain.
@@ -251,7 +254,12 @@ type posEnv struct {
 	LatestEVMOK    bool
 	// InFlight reports a prepared or endorsed handoff, or a committed one not yet acknowledged.
 	InFlight bool
+	// vr is the VR-mode half of the environment; nil on a P85 chain.
+	vr *vrEnv
 }
+
+// vrOn reports a VR-mode block.
+func (e posEnv) vrOn() bool { return e.vr != nil && e.vr.step != nil && e.vr.step.on }
 
 // maxBlockRecords is the most records one root block may project, Ack and Abort projections included.
 const maxBlockRecords = rootrecords.MaxImport
@@ -259,13 +267,26 @@ const maxBlockRecords = rootrecords.MaxImport
 // controls executes the block's PosControls in payload order. It returns the control state a RejectResult replaced, or nil.
 func (p *posStep) controls(block *rctypes.BlockData, svc *PosServices, env posEnv) (*evmroot.ControlState, error) {
 	if len(block.Payload.PosControls) == 0 {
-		return nil, errors.Join(p.recordCap(), p.closuresDone(svc))
+		return nil, errors.Join(p.recordCap(), p.closuresDone(svc, env))
 	}
 	if !p.on || svc == nil || svc.Authority == nil || svc.Witnesses == nil {
 		return nil, ErrPosControls
 	}
 	var replaced *evmroot.ControlState
 	for i, c := range block.Payload.PosControls {
+		if c.Registry || env.vrOn() {
+			if !c.Registry {
+				return nil, fmt.Errorf("%w: control %d is a P85 control on a VR chain", ErrVRMode, i)
+			}
+			control, err := p.vrControl(i, c, block, svc, env)
+			if err != nil {
+				return nil, fmt.Errorf("control %d: %w", i, err)
+			}
+			if control != nil {
+				replaced, env.Control = control, control
+			}
+			continue
+		}
 		if c.Network != svc.Deployment.RootNetwork || c.ChainID != svc.Deployment.ChainID || c.Custody != svc.Deployment.Custody ||
 			c.OrderingEpoch != block.Epoch || c.OrderingRound != block.Round {
 			return nil, fmt.Errorf("%w: control %d names another deployment, epoch or round than this block", ErrPosControlRefused, i)
@@ -288,13 +309,14 @@ func (p *posStep) controls(block *rctypes.BlockData, svc *PosServices, env posEn
 			return nil, fmt.Errorf("control %d: %w", i, err)
 		}
 	}
-	return replaced, errors.Join(p.recordCap(), p.closuresDone(svc))
+	return replaced, errors.Join(p.recordCap(), p.closuresDone(svc, env))
 }
 
-// closuresDone refuses a block that leaves a closure outstanding on a chain that enforces the duty. The closures come first in the
-// payload, so by the end of the controls every awaiting epoch is closed or the block is invalid.
-func (p *posStep) closuresDone(svc *PosServices) error {
-	if p.on && svc.mandatory() && len(p.state.Awaiting) > 0 {
+// closuresDone refuses a block that leaves a closure outstanding on a chain that enforces the duty: every chain with a closure authority,
+// and every VR-mode chain (the duty is always on in VR mode, PoA included: design section 5.6). The closures come first in the payload,
+// so by the end of the controls every awaiting epoch is closed or the block is invalid.
+func (p *posStep) closuresDone(svc *PosServices, env posEnv) error {
+	if p.on && (svc.mandatory() || env.vrOn()) && len(p.state.Awaiting) > 0 {
 		return fmt.Errorf("%w: epoch %d", ErrClosureMissing, p.state.Awaiting[0].Epoch)
 	}
 	return nil
@@ -323,9 +345,6 @@ func witnessOf(c rctypes.PosControl, svc *PosServices) ([]byte, error) {
 // against; the block hash is only named when the parent's round certified a block, and is the zero word otherwise (an unauthenticated
 // field is fixed, not free).
 func certifiedState(blockHash, stateRoot [32]byte, svc *PosServices, env posEnv) error {
-	if svc.EVM == nil {
-		return ErrPosControls
-	}
 	if !env.LatestEVMOK || stateRoot != env.LatestEVMRoot {
 		return errors.Join(ErrPosControlRefused, ErrNotLatestEVM)
 	}
@@ -347,6 +366,9 @@ func (p *posStep) retire(c rctypes.PosControl, block *rctypes.BlockData, svc *Po
 	}
 	if env.InFlight {
 		return errors.Join(ErrPosControlRefused, ErrHandoffInFlight)
+	}
+	if svc.EVM == nil {
+		return ErrPosControls
 	}
 	if err := certifiedState(c.Retire.EVMBlockHash, c.Retire.EVMStateRoot, svc, env); err != nil {
 		return err
@@ -425,6 +447,9 @@ func (p *posStep) reject(c rctypes.PosControl, block *rctypes.BlockData, svc *Po
 		return nil, fmt.Errorf("%w: another predecessor than the root's authority", ErrPosControlRefused)
 	case c.Reject.Attempt != next:
 		return nil, errors.Join(ErrPosControlRefused, ErrRejectAttempt, fmt.Errorf("attempt %d is not the next attempt %d", c.Reject.Attempt, next))
+	}
+	if svc.EVM == nil {
+		return nil, ErrPosControls
 	}
 	if err := certifiedState(c.Reject.EVMBlockHash, c.Reject.EVMStateRoot, svc, env); err != nil {
 		return nil, err
@@ -550,6 +575,12 @@ func word64(w []byte) (uint64, bool) {
 }
 
 func (p *posStep) closeLiability(c rctypes.PosControl, block *rctypes.BlockData, svc *PosServices) error {
+	return p.closeLiabilityIn(c, block, svc, svc.Deployment.Deployment)
+}
+
+// closeLiabilityIn is CloseLiability with the exposure digest of the given deployment domain: custody's on a P85 chain, VR's address on a
+// VR one (design section 5.6, op 1).
+func (p *posStep) closeLiabilityIn(c rctypes.PosControl, block *rctypes.BlockData, svc *PosServices, domain evmassign.Deployment) error {
 	epoch := c.Close.ClosedEpoch
 	hRound, awaiting := p.state.HRoundAwaiting(epoch)
 	if !awaiting {
@@ -583,7 +614,7 @@ func (p *posStep) closeLiability(c rctypes.PosControl, block *rctypes.BlockData,
 	case facts.AssignmentID != assignmentID:
 		return fmt.Errorf("%w: another assignment", ErrPosControlRefused)
 	}
-	wantExposure, err := evmassign.AssignmentExposureDigest(svc.Deployment.Deployment, facts.AssignmentID, facts.Closed)
+	wantExposure, err := evmassign.AssignmentExposureDigest(domain, facts.AssignmentID, facts.Closed)
 	if err != nil {
 		return errors.Join(ErrPosControlRefused, err)
 	}

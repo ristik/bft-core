@@ -166,10 +166,15 @@ type (
 		workerRunning      atomic.Bool
 		switchCheckedRound uint64
 		future             futureMessages
-		switchDeclined     atomic.Pointer[switchDecline]
-		origins            MessageOrigins // the network's authenticated senders, tracked while the manager may switch epoch in process
-		acq                acquisition    // loop-owned: an activation this root fetches from a root peer (acquire.go, PR 2)
-		switchPublished    func()         // test seam: runs after a switch published its successor, before the successor's worker starts
+		// residence and deferred are the HandoffView live-vote residence rule of a VR chain (vr_residence.go); deferredReady wakes the loop
+		// when a deferred vote's wait ends.
+		residence       *vrResidence
+		deferred        *deferredVote
+		deferredReady   chan struct{}
+		switchDeclined  atomic.Pointer[switchDecline]
+		origins         MessageOrigins // the network's authenticated senders, tracked while the manager may switch epoch in process
+		acq             acquisition    // loop-owned: an activation this root fetches from a root peer (acquire.go, PR 2)
+		switchPublished func()         // test seam: runs after a switch published its successor, before the successor's worker starts
 
 		log    *slog.Logger
 		tracer trace.Tracer
@@ -414,6 +419,7 @@ func NewConsensusManager(
 		certReqCh:        make(chan certRequest),
 		certResultCh:     make(chan *certification.CertificationResponse),
 		ucSink:           make(chan []*certification.CertificationResponse, 1),
+		deferredReady:    make(chan struct{}, 1),
 		params:           cParams,
 		id:               nodeID,
 		net:              net,
@@ -779,6 +785,8 @@ func (x *ConsensusManager) loop(ctx context.Context) error {
 		case <-acquireTick:
 		case req := <-x.frontierRequests():
 			x.handleFrontierRequest(ctx, req)
+		case <-x.deferredReady:
+			x.voteDeferred(ctx)
 		}
 		x.timeoutUnknownLeader(ctx)
 		x.profile.report(x.log, time.Now())
@@ -1529,13 +1537,33 @@ func (x *ConsensusManager) onProposalMsg(ctx context.Context, proposal *abdrc.Pr
 	// the block is the candidate parent of the next proposal: collect the Retirement proofs against the EVM state it certified
 	x.prepareRetirements(ctx, proposal.Block)
 	x.prepareRejection(ctx, proposal.Block)
-	// make vote
-	voteMsg, err := x.safety.MakeVote(proposal.Block, execStateId, x.blockStore.GetHighQc(), x.pacemaker.LastRoundTC())
+	// a HandoffView of a validator-registry chain waits for the live-vote residence rule: a deferred vote, never an invalid block
+	if deferred, err := x.residenceDefers(proposal.Block, execStateId); deferred || err != nil {
+		if err != nil {
+			return fmt.Errorf("vote withheld: %w", err)
+		}
+		x.log.InfoContext(ctx, "vote deferred by the HandoffView residence rule", "round", proposal.Block.Round)
+		return nil
+	}
+	if err := x.castVote(ctx, proposal.Block, execStateId); err != nil {
+		return err
+	}
+	// if everything goes fine, but the node is in recovery state, then clear it
+	// most likely ended up here because proposal was late and votes arrived before
+	if x.recovery.Clear() != nil {
+		x.log.DebugContext(ctx, "clearing recovery state on proposal")
+	}
+	return nil
+}
+
+// castVote signs, stores and sends the vote for an executed proposal.
+func (x *ConsensusManager) castVote(ctx context.Context, block *drctypes.BlockData, execStateId []byte) error {
+	voteMsg, err := x.safety.MakeVote(block, execStateId, x.blockStore.GetHighQc(), x.pacemaker.LastRoundTC())
 	if err != nil {
 		// wait for timeout, if others make progress this node will need to recover
 		return fmt.Errorf("failed to sign vote: %w", err)
 	}
-	x.log.InfoContext(ctx, "signed vote", "round", proposal.Block.Round, "messageID", voteMessageID(voteMsg))
+	x.log.InfoContext(ctx, "signed vote", "round", block.Round, "messageID", voteMessageID(voteMsg))
 	// stored before it is sent, and not sent if it cannot be stored (see onLocalTimeout); the round then ends by timeout
 	if err = x.blockStore.StoreLastVote(voteMsg); err != nil {
 		return fmt.Errorf("vote not sent: storing it failed: %w", err)
@@ -1545,17 +1573,12 @@ func (x *ConsensusManager) onProposalMsg(ctx context.Context, proposal *abdrc.Pr
 	if err != nil {
 		return fmt.Errorf("could not determine next leader to send vote: %w", err)
 	}
-	x.log.LogAttrs(ctx, logger.LevelTrace, fmt.Sprintf("sending vote to next leader %s, round %d", nextLeader.String(), proposal.Block.Round))
+	x.log.LogAttrs(ctx, logger.LevelTrace, fmt.Sprintf("sending vote to next leader %s, round %d", nextLeader.String(), block.Round))
 	x.voteCnt.Add(ctx, 1, attrSetVoteForQC)
 	if err = x.net.Send(ctx, voteMsg, nextLeader); err != nil {
 		return fmt.Errorf("failed to send vote to next leader: %w", err)
 	}
 	x.replayVoteBuffer(ctx)
-	// if everything goes fine, but the node is in recovery state, then clear it
-	// most likely ended up here because proposal was late and votes arrived before
-	if x.recovery.Clear() != nil {
-		x.log.DebugContext(ctx, "clearing recovery state on proposal")
-	}
 	return nil
 }
 
@@ -2303,6 +2326,13 @@ func (x *ConsensusManager) voteAfterRecovery(ctx context.Context, prop *abdrc.Pr
 	stateHash, err := x.blockStore.Add(prop.Block, x.irReqVerifier)
 	if err != nil {
 		return fmt.Errorf("recovery failed to execute proposal: %w", err)
+	}
+	// the residence rule applies after recovery as well; a recovered root re-learns the view at its re-learning time
+	if deferred, err := x.residenceDefers(prop.Block, stateHash); deferred || err != nil {
+		if err != nil {
+			return fmt.Errorf("vote after recovery withheld: %w", err)
+		}
+		return nil
 	}
 	// send a vote message to next leader
 	voteMsg, err := x.safety.MakeVote(prop.Block, stateHash, x.blockStore.GetHighQc(), x.pacemaker.LastRoundTC())

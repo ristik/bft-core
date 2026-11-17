@@ -17,6 +17,7 @@ import (
 	"github.com/unicitynetwork/bft-core/q3format"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
+	"github.com/unicitynetwork/bft-core/vradmit"
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/types/hex"
 )
@@ -319,7 +320,21 @@ func (x *ConsensusManager) handoffPredecessor() ([]byte, error) {
 
 // plannedAttempt is the attempt number the next handoff uses, given the control state at a block round: 0 on a fresh chain, the
 // next number after an abort or after a Prepare whose freeze lapsed. Any other phase has a handoff in progress.
+//
+// On a validator-registry chain (a control state that carries the VR root state) planning is aligned with the cooldown predicate
+// (design section 5.5.2): between a Prepare's lapse and the end of its cooldown no next attempt exists, exactly as the backoff identity,
+// the intent's attemptOpenRound and Prepare validation read it (vradmit.PlannedAttempt). The pre-VR planner keeps its lapse rule.
 func plannedAttempt(control *evmroot.ControlState, round uint64) (uint64, error) {
+	if control != nil && len(control.VR) != 0 {
+		k, ok, err := vradmit.PlannedAttempt(control, round)
+		switch {
+		case err != nil:
+			return 0, errors.Join(ErrHandoffApproval, err)
+		case !ok:
+			return 0, fmt.Errorf("%w: no plannable attempt in phase %s at round %d", ErrHandoffApproval, control.Phase, round)
+		}
+		return k, nil
+	}
 	switch {
 	case control == nil:
 		return 0, ErrHandoffApproval

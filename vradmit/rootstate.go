@@ -21,22 +21,43 @@ type RootState struct {
 	// whose time the executor supplies).
 	OpenUCTime uint64
 	Support    SupportTable
+	// Acknowledged is the root's acknowledged result (design section 5.2 item 2): GENESIS_RESULT at genesis, then the result of every
+	// projected Boundary, primary or recovered (a recovery reproduces J's authorization, so its result is J's).
+	Acknowledged vrschema.Word
+	// PrepareUCTime is the committed UC time of the block that ordered the stored attempt's Prepare, which the activation time gate reads
+	// at the Freeze (section 7.1); zero until a Prepare of the attempt is committed, and reset with the attempt.
+	PrepareUCTime uint64
+	// Staged is the primary a committed Freeze admitted, until its Boundary: the successor body the commit and the acknowledgement name it
+	// by, its result and the Boundary's rejectedBitmap (bit i: RegistryChanges entry i is not Accepted, design section 4.1). StagedBody is
+	// zero when none is staged.
+	StagedBody   [32]byte
+	StagedResult vrschema.Word
+	StagedBitmap uint16
+	// StagedSupport are the staged primary's own readiness commitments (by J's exact bindings), which enter the support table at its
+	// primary Boundary (MaterializeJ); a recovered Boundary drops them.
+	StagedSupport SupportTable
 }
 
 type rootStateWire struct {
-	_          struct{} `cbor:",toarray"`
-	Domain     string
-	Version    uint64
-	Backoff    hex.Bytes
-	OpenUCTime uint64
-	Support    hex.Bytes
+	_             struct{} `cbor:",toarray"`
+	Domain        string
+	Version       uint64
+	Backoff       hex.Bytes
+	OpenUCTime    uint64
+	Support       hex.Bytes
+	Acknowledged  hex.Bytes
+	PrepareUCTime uint64
+	StagedBody    hex.Bytes
+	StagedResult  hex.Bytes
+	StagedBitmap  uint64
+	StagedSupport hex.Bytes
 }
 
 const rootStateDomain = "UNICITY_VR_ROOT_STATE"
 
 // GenesisRootState initializes the state at the genesis epoch with the genesis committee size (no open, no settle).
 func GenesisRootState(epoch uint64, n uint32) RootState {
-	return RootState{Backoff: vrschema.GenesisBackoff(epoch, n)}
+	return RootState{Backoff: vrschema.GenesisBackoff(epoch, n), Acknowledged: vrschema.GenesisResult}
 }
 
 // Encode is the canonical encoding the control state carries.
@@ -52,7 +73,16 @@ func (s RootState) Encode() ([]byte, error) {
 	if (s.Backoff.LastView == 0) && s.OpenUCTime != 0 {
 		return nil, fmt.Errorf("%w: an open time without a committed view", ErrRootState)
 	}
-	return types.Cbor.Marshal(rootStateWire{Domain: rootStateDomain, Version: 1, Backoff: b, OpenUCTime: s.OpenUCTime, Support: t})
+	if (s.StagedBody == [32]byte{}) != (s.StagedResult == vrschema.Word{}) || (s.StagedBody == [32]byte{} && (s.StagedBitmap != 0 || len(s.StagedSupport.Entries) != 0)) {
+		return nil, fmt.Errorf("%w: a staged boundary without its body or result", ErrRootState)
+	}
+	st, err := s.StagedSupport.Encode()
+	if err != nil {
+		return nil, err
+	}
+	return types.Cbor.Marshal(rootStateWire{Domain: rootStateDomain, Version: 1, Backoff: b, OpenUCTime: s.OpenUCTime, Support: t, StagedSupport: st,
+		Acknowledged: s.Acknowledged[:], PrepareUCTime: s.PrepareUCTime, StagedBody: s.StagedBody[:], StagedResult: s.StagedResult[:],
+		StagedBitmap: uint64(s.StagedBitmap)})
 }
 
 // Digest is SHA-256 of Encode.
@@ -86,7 +116,15 @@ func DecodeRootState(raw []byte) (RootState, error) {
 	if err != nil {
 		return RootState{}, errors.Join(ErrRootState, err)
 	}
-	s := RootState{Backoff: bw.State, OpenUCTime: w.OpenUCTime, Support: t}
+	staged, err := DecodeSupportTable(w.StagedSupport)
+	if err != nil {
+		return RootState{}, errors.Join(ErrRootState, err)
+	}
+	if len(w.Acknowledged) != 32 || len(w.StagedBody) != 32 || len(w.StagedResult) != 32 || w.StagedBitmap > 0xFFFF {
+		return RootState{}, fmt.Errorf("%w: field widths", ErrRootState)
+	}
+	s := RootState{Backoff: bw.State, OpenUCTime: w.OpenUCTime, Support: t, Acknowledged: vrschema.Word(w.Acknowledged), PrepareUCTime: w.PrepareUCTime,
+		StagedBody: [32]byte(w.StagedBody), StagedResult: vrschema.Word(w.StagedResult), StagedBitmap: uint16(w.StagedBitmap), StagedSupport: staged}
 	again, err := s.Encode()
 	if err != nil || !bytes.Equal(again, raw) {
 		return RootState{}, fmt.Errorf("%w: not canonical", ErrRootState)
@@ -135,9 +173,14 @@ func (s RootState) ApplyHandoffView(intent []byte, view uint64, env ViewEnv) (Ro
 }
 
 // ApplyPrepare and ApplyFreeze are the PR and FZ transitions of a committed Prepare or Freeze of the stored attempt (vStar is the
-// certificate's view).
-func (s RootState) ApplyPrepare(epoch, attempt uint64) (RootState, error) {
-	return s.event(vrschema.BackoffEvent{Op: "PR", Epoch: epoch, Attempt: attempt})
+// certificate's view). ucTime is the committed UC time of the block that ordered the Prepare.
+func (s RootState) ApplyPrepare(epoch, attempt, ucTime uint64) (RootState, error) {
+	n, err := s.event(vrschema.BackoffEvent{Op: "PR", Epoch: epoch, Attempt: attempt})
+	if err != nil {
+		return s, err
+	}
+	n.PrepareUCTime = ucTime
+	return n, nil
 }
 
 func (s RootState) ApplyFreeze(epoch, attempt, vStar uint64) (RootState, error) {
@@ -163,7 +206,7 @@ func (s RootState) EndBlock(epoch, round uint64, after vrschema.ControlState, co
 		return s, err
 	}
 	if b.Epoch != s.Backoff.Epoch || b.Attempt != s.Backoff.Attempt {
-		s.OpenUCTime = 0
+		s.OpenUCTime, s.PrepareUCTime = 0, 0
 	}
 	s.Backoff = b
 	return s, nil
