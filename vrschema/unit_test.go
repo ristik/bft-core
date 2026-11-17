@@ -102,7 +102,7 @@ func TestOutputModelReleasesOnce(t *testing.T) {
 	m.Progress, m.UCTime = DelayRounds, DelaySeconds
 	id, _ := m.Queue(KindCommitteeLimits, 96)
 	m.Progress, m.UCTime = 2*DelayRounds, 2*DelaySeconds
-	require.NoError(t, m.Execute(id, fxModule, true))
+	require.NoError(t, m.Execute(id, fxModule, StepOK))
 	r := w("r")
 	require.NoError(t, m.Reserve(r, fxModule, false, []uint64{id}, 0, MinEpochGap))
 	_, err := m.Publish(r)
