@@ -1700,6 +1700,26 @@ class PublicRPC(unittest.TestCase):
         for method in ['admin_nodeInfo','engine_newPayloadV3','personal_sign','eth_sign','debug_traceTransaction','eth_sendTransaction']:
             self.assertEqual(self.rpc(method)[0],400)
         self.assertEqual(self.relay.calls,[])
+    def test_the_nb2_limits_stage_reads_the_over_bound_refusal_as_the_gateway_gives_it(self):
+        # #1126's limits stage (rehearse_nb2.py): the accepted eth_call body plus whitespace to one byte over MAX_RAW_TX_BODY, through Rehearsal.http.
+        # gateway.py refuses it on the declared length with 400, unread; the client sees the 400 or a broken pipe. It expected a 413 once and
+        # passed only while the pipe broke first (8fdf699f8), failing when the 400 arrived (a84f4ce18).
+        import importlib.util
+        for d in ('bridge','bridge/nb2'):
+            sys.path.insert(0,str(Path(__file__).parent/d)); self.addCleanup(sys.path.remove,str(Path(__file__).parent/d))
+        spec=importlib.util.spec_from_file_location('rehearse_nb2',Path(__file__).parent/'bridge/nb2/rehearse_nb2.py')
+        m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+        big=json.dumps({'jsonrpc':'2.0','id':1,'method':'eth_call','params':[{'to':'0x'+'11'*20,'data':'0x'+'00'*(gateway.MAX_RAW_TX_BODY//2-200)},'latest']}).encode()
+        host='%s:%d'%self.server.server_address
+        status,text=m.Rehearsal.http(host,'POST','/',big+b' '*(gateway.MAX_RAW_TX_BODY-len(big)+1),{'Content-Type':'application/json'})
+        self.assertTrue(m.gateway_size_refusal(status,text),(status,text[:120]))
+        self.assertEqual(self.relay.calls,[],'nothing relayed')
+        status,text=m.Rehearsal.http(host,'POST','/',big,{'Content-Type':'application/json'})
+        self.assertEqual(status,200,'the same body at the bound is read and relayed')
+        for status,text in ((413,'{"error": "body too large"}'),(200,'{"result": "0x"}'),(400,'{"error": "eth_getLogs: ..."}'),(400,'not json'),(0,'TimeoutError'),(0,'RemoteDisconnected')):
+            self.assertFalse(m.gateway_size_refusal(status,text),(status,text))
+        self.assertTrue(m.gateway_size_refusal(0,'ConnectionResetError'))
+        self.assertTrue(m.gateway_size_refusal(400,'{"error": "invalid or forbidden JSON-RPC request"}'),'the answer a84f4ce18\'s lane saw (run 43973406475)')
     def test_malformed_batch_and_size(self):
         for body in ['{','[]','null',json.dumps([{'method':'eth_chainId'}])]:
             self.assertEqual(self.send(body)[0],400)

@@ -58,6 +58,17 @@ WALLETS = ('main', 'rot', 'big', 'size', 'gascap')
 FUNDS = {'main': 20 * 10 ** 18, 'rot': 20 * 10 ** 18, 'big': 20 * 10 ** 18, 'size': 5 * 10 ** 18, 'gascap': 5 * 10 ** 18}
 
 
+def gateway_size_refusal(status, text):
+    """gateway.py's answer to a body declared over MAX_RAW_TX_BODY, as Rehearsal.http reports it: its 400 before any read, or the connection it closed
+    while the client still sent (status 0, a broken pipe or a reset). Nothing else: a 413, a 200 or another 400 is not that refusal."""
+    if status == 0:
+        return text in ('BrokenPipeError', 'ConnectionResetError')
+    try:
+        return status == 400 and json.loads(text) == {'error': 'invalid or forbidden JSON-RPC request'}
+    except ValueError:
+        return False
+
+
 class NB2Rehearsal(Rehearsal):
     def __init__(self, *args, **kwargs):
         self._addresses = {}
@@ -253,14 +264,18 @@ class NB2Rehearsal(Rehearsal):
         res['exact'] = {'tx': tx, 'status': receipt['status'], 'block': int(receipt['blockNumber'], 16), 'blockSize': int(block['size'], 16), 'gasUsed': int(receipt['gasUsed'], 16),
                         'secondsToReceipt': round(mined, 1), 'validators': blocks}
         self.expect(receipt['status'] == '0x1', f'it is included (block {int(receipt["blockNumber"], 16)}, {int(block["size"], 16)} bytes) and every validator imported that block over the shard\'s payload protocol')
-        # the gateway's body bound: 2 L_max + 64 KiB of hex body fits; one byte over MAX_RAW_TX_BODY is 413
+        # the gateway's body bound: 2 L_max + 64 KiB of hex body fits; one byte over MAX_RAW_TX_BODY is refused on the declared length
         gw = release_nb2.gateway_limits()
         big = json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'eth_call', 'params': [{'to': size, 'data': '0x' + '00' * (gw['MAX_RAW_TX_BODY'] // 2 - 200)}, 'latest']}).encode()
         s1, _ = self.rpc(big, PROXY_IPS[0] + '42')
         s2, t2 = self.rpc(big + b' ' * (gw['MAX_RAW_TX_BODY'] - len(big) + 1), PROXY_IPS[0] + '43')
-        # above the bound the gateway answers 413 from the declared length and closes without reading: the client may see the 413 or a broken pipe
-        refused = s2 == 413 or (s2 == 0 and ('Pipe' in t2 or 'Reset' in t2))
-        self.expect(s1 == 200 and refused, f'the gateway reads an eth_call body of {len(big)} bytes and refuses one over {gw["MAX_RAW_TX_BODY"]} (413, unread)', f'{s1} {s2} {t2[:120]}')
+        # above the bound gateway.py refuses on the declared length before any read: 400 "invalid or forbidden JSON-RPC request" (its own test pins it,
+        # test_package PublicRPC.test_malformed_batch_and_size), then closes, so the client sees that 400 or, while it still sends, a broken pipe or
+        # a reset (which one is timing: 8fdf699f8 saw the pipe, a84f4ce18 the 400). The body is the accepted one plus whitespace: a 400 here is the
+        # size refusal, never the request's shape
+        refused = gateway_size_refusal(s2, t2)
+        self.expect(s1 == 200 and refused, f'the gateway reads an eth_call body of {len(big)} bytes and refuses one over {gw["MAX_RAW_TX_BODY"]} on its declared length, unread',
+                    f'{s1} {s2} {t2[:120]}')
         res['gatewayBody'] = {'accepted': len(big), 'refusedAbove': gw['MAX_RAW_TX_BODY']}
         # user gas: a transaction with gasLimit = userGasLimit is included; one above it (up to the block gas limit) is observed, not assumed
         gc = self.address('gascap')
