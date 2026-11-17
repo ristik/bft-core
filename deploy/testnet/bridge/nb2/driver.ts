@@ -41,10 +41,10 @@ import { UnicityCertificate } from '@unicitylabs/state-transition-sdk/lib/api/bf
 
 import { concat, eq, toHex } from '../../../packages/native-bridge-plugin/src/bytes.js';
 import {
-  ASSET_UCT, AmbiguousBroadcast, HttpJsonRpc, MEASURED, MEASURED_VERIFIER, Nb2Error, RpcError, SELECTOR, WalletError,
+  ASSET_UCT, AmbiguousBroadcast, HttpJsonRpc, MeasuredGasModel, Nb2Error, RpcError, SELECTOR, WalletError,
   burnPairBound, buildParams, classifyRedeemError, construct, decodeConfig, decodeEvidence, decodeRevert, decodeToken, encodeReturnData,
-  encodeToken, evidenceOf, gapProofLen, log2, maxProofs, otherBytes, redeemCalldata, redeemCalldataLength, redeemTxFraming, revertDataOf, signTx,
-  verdictAbi, verifyPart, type ReturnRecord,
+  encodeToken, evidenceOf, gapProofLen, log2, maxProofs, otherBytes, redeemCalldata, redeemCalldataLength, redeemFeatures, redeemGasTerms, redeemTxFraming,
+  revertDataOf, signTx, verdictAbi, verifyPart, type ReturnRecord,
 } from '../../../packages/native-bridge-plugin/src/nb2/index.js';
 import { appendTransfer, headOf, transferRequest, freshMask } from '../../../packages/native-bridge-plugin/src/nb2/tokenops.js';
 import { signaturePredicate, encodeProof, type Token } from '../../../packages/native-bridge-plugin/src/nb2/token.js';
@@ -52,7 +52,8 @@ import { HE, HU } from '../../../packages/native-bridge-plugin/src/nb2/crypto.js
 import { decodeReceiptBacking } from '../../../packages/native-bridge-plugin/src/nb2/deposit.js';
 import { u256 } from '../../../packages/native-bridge-plugin/src/nb2/cbor.js';
 import { BoundaryNotFound, findBoundary, ownShape, type Probe, type Verdict } from './boundary_search.js';
-import { marginals, type TokenShape } from './boundary_shape.js';
+import { marginals } from './boundary_shape.js';
+import { history, template } from './envelope_shape.js';
 import { readLedger, type Answer } from './ledger_check.js';
 import { LANE_OPEN } from './lane_open.js';
 import {
@@ -213,58 +214,85 @@ async function gammaCheck(): Promise<void> {
   log('Γ accepted by the plug-in; the installation check passed', res);
 }
 
-/** The operating envelope (section 12.5) from the pinned limits, by the plug-in's measured gas model (gas.ts MeasuredGasModel). */
+/**
+ * The operating envelope (section 12.5) from the pinned limits, by the plug-in's gas bound (gas.ts MeasuredGasModel, bound-nb2-1179) on parts
+ * built from the lane's template (envelope_shape.ts): per split depth, the largest root history in ENVELOPE_CERTIFICATES certificates whose
+ * return passes the pre-burn preflight at returnReserveSegments (the burn at the decoder bounds), and the proofs that fit beside it at
+ * redemption; for the reference part (one transfer, two split levels), the return delay its proofs support.
+ */
+const ENVELOPE_CERTIFICATES = 16;
 function envelope(file: string): void {
-  const m = MEASURED_VERIFIER;
   const K = cfg.K;
   const gp = BigInt(gapProofLen(K));
-  // a part with `hops` further transfers and `levels` split levels, burned: the model's gas limit with P historical proofs, and its bytes
-  const bytesOf = (hops: number, levels: number): number => m.baseBytes + m.bytesPerTransfer * hops + m.bytesPerSplitLevel * levels;
-  const gasOf = (hops: number, levels: number, P: bigint, pendingBurn: boolean): bigint => {
-    const evidence = bytesOf(hops, levels) + (pendingBurn ? burnPairBound(encodeReturnData({ d: new Uint8Array(32), asset: ASSET_UCT, recipient: new Uint8Array(20), amount: (1n << 255n), minIndex: (1n << 47n) }).length) - m.bytesPerTransfer : 0);
-    const excess = BigInt(Math.max(0, evidence - bytesOf(hops, levels)));
-    const extraSigs = pendingBurn ? BigInt(m.maxSignatures - m.measuredSignatures) : 0n;
-    const verifier = m.base + m.perTransfer * BigInt(hops) + m.perSplitLevel * BigInt(levels) + m.perExcessByte * excess + m.perExtraSignature * extraSigs;
-    const history = P === 0n ? 0n : 16n * (32n + P * gp);
-    return verifier + m.vaultWorstCall + m.perSegment * P + history + MEASURED.gasReserve;
+  const tp = template(Uint8Array.from(readFileSync(new URL('./envelope_template.cbor', import.meta.url))));
+  const rLen = encodeReturnData({ d: new Uint8Array(32), asset: ASSET_UCT, recipient: new Uint8Array(20), amount: (1n << 255n), minIndex: (1n << 47n) }).length;
+  const model = new MeasuredGasModel();
+  // a part's lineage, its evidence bytes (burned: the template's burn pair; before the burn: the pair at its bound), the bound with P proofs
+  const shapeOf = (lineage: Token[], pending: boolean) => {
+    const part = encodeToken(lineage[lineage.length - 1]).length + 2;
+    return { evidenceBytes: part + (pending ? burnPairBound(rLen) : 1 + tp.pair.raw.length + encodeProof(tp.pair.proof).length), lineage, pending };
   };
-  const sizeFits = (hops: number, levels: number, P: bigint, pending: boolean): boolean => {
-    const lT = BigInt(bytesOf(hops, levels) + (pending ? burnPairBound(64) - m.bytesPerTransfer : 0));
+  const gasOf = (lineage: Token[], P: bigint, pending: boolean): bigint | null => {
+    const s = shapeOf(lineage, pending);
+    let l = s.lineage;
+    if (!pending) l = [...l.slice(0, -1), { ...l[l.length - 1], transfers: [tp.pair.tx], proofs: [tp.pair.proof], transfersRaw: [tp.pair.raw] }];
+    return model.redeemGasLimit({ evidenceBytes: s.evidenceBytes, lineage: l, pendingTransactions: pending ? 1 : 0, proofs: P, K });
+  };
+  const fits = (lineage: Token[], P: bigint, pending: boolean): boolean => {
+    const lT = BigInt(shapeOf(lineage, pending).evidenceBytes);
     const mp = maxProofs(pins.maxEncodedTxBytes, lT, BigInt(otherBytes(Number(lT))), K);
     return mp.baseFits && P <= mp.pMax;
   };
   const reserve = pins.returnReserveSegments;
+  const admitted = (h: number, levels: number): boolean => {
+    const l = history(tp, h, levels, ENVELOPE_CERTIFICATES);
+    const g = gasOf(l, reserve, true);
+    return g !== null && g <= pins.userGasLimit && fits(l, reserve, true);
+  };
+  const proofsBeside = (l: Token[]): { byBytes: bigint; byGas: bigint } => {
+    const lT = BigInt(shapeOf(l, false).evidenceBytes);
+    const byBytes = maxProofs(pins.maxEncodedTxBytes, lT, BigInt(otherBytes(Number(lT))), K).pMax;
+    let lo = 0n;
+    let hi = byBytes + 1n;
+    while (hi - lo > 1n) {
+      const mid = (lo + hi) / 2n;
+      const g = gasOf(l, mid, false);
+      if (g !== null && g <= pins.userGasLimit) lo = mid;
+      else hi = mid;
+    }
+    return { byBytes, byGas: lo };
+  };
   const shapes: Record<string, unknown>[] = [];
   for (const levels of [0, 1, 2]) {
-    // the largest history that passes the pre-burn preflight at P = returnReserveSegments (the burn counted at the decoder bounds)
-    let hops = 0;
-    while (gasOf(hops + 1, levels, reserve, true) <= pins.userGasLimit && sizeFits(hops + 1, levels, reserve, true)) hops++;
-    const bytes = bytesOf(hops, levels);
-    // and how many historical proofs fit beside it at redemption, by bytes and by gas
-    const lT = BigInt(bytes);
-    const byBytes = maxProofs(pins.maxEncodedTxBytes, lT, BigInt(otherBytes(bytes)), K).pMax;
-    let byGas = 0n;
-    while (gasOf(hops, levels, byGas + 1n, false) <= pins.userGasLimit) byGas++;
-    shapes.push({ splitLevels: levels, maxTransfersPreBurn: hops, evidenceBytes: bytes, proofsByBytes: byBytes, proofsByGas: byGas, binding: byGas < byBytes ? 'gas' : 'bytes' });
+    let lo = 0;
+    let hi = 2048;
+    while (hi - lo > 1) {
+      const mid = (lo + hi) >> 1;
+      if (admitted(mid, levels)) lo = mid;
+      else hi = mid;
+    }
+    const l = history(tp, lo, levels, ENVELOPE_CERTIFICATES);
+    const p = proofsBeside(l);
+    shapes.push({ splitLevels: levels, maxTransfersPreBurn: lo, binds: fits(history(tp, lo + 1, levels, ENVELOPE_CERTIFICATES), reserve, true) ? 'gas' : 'bytes',
+      evidenceBytes: shapeOf(l, false).evidenceBytes, preflightGas: gasOf(l, reserve, true), proofsByBytes: p.byBytes, proofsByGas: p.byGas, binding: p.byGas < p.byBytes ? 'gas' : 'bytes' });
   }
   // the reference part (one transfer, two split levels): the return delay its proofs support at stated rates
-  const refHops = 1;
-  const refLevels = 2;
-  const refBytes = bytesOf(refHops, refLevels);
-  const pBytes = maxProofs(pins.maxEncodedTxBytes, BigInt(refBytes), BigInt(otherBytes(refBytes)), K).pMax;
-  let pGas = 0n;
-  while (gasOf(refHops, refLevels, pGas + 1n, false) <= pins.userGasLimit) pGas++;
-  const pMax = pGas < pBytes ? pGas : pBytes;
+  const ref = history(tp, 1, 2, 1);
+  const rp = proofsBeside(ref);
+  const pMax = rp.byGas < rp.byBytes ? rp.byGas : rp.byBytes;
   const payments = pMax * K;
   const delay = (perSecond: number): number => Number(payments) / perSecond;
+  const bare = history(tp, 0, 0, 1);
   const env = {
-    model: 'native-bridge-plugins MeasuredGasModel (measured-nb2-05); bytes from MEASURED_VERIFIER',
-    assumptions: 'an estimate, not an admission rule: it assumes the measured token shape (1,026 bytes and 3 seal signatures per hop). Real tokens with larger inclusion proofs or more signatures reach userGasLimit sooner, and the wallet preflight (section 12.5) on the actual token is what admits a burn. Live on the K = 4 lane: 204 batch-certified transfers (about 1,485 bytes per hop, 4 signatures) were the largest admitted history.',
+    model: `native-bridge-plugins MeasuredGasModel (${model.name}) on parts built from envelope_template.cbor`,
+    assumptions: `an estimate, not an admission rule: the lane's token shape (its template's mint, transfer and ${tp.pair.proof.uc.length}-byte UC in every place, `
+      + `${ENVELOPE_CERTIFICATES} certificates, the whole history upstream of the splits). Tokens with more certificates, larger proofs or more signatures `
+      + 'reach userGasLimit sooner; the wallet preflight (section 12.5) on the actual token is what admits a burn.',
     K, gapProofBytes: Number(gp), maxEncodedTxBytes: pins.maxEncodedTxBytes, userGasLimit: pins.userGasLimit, gasReserve: pins.gasReserve, returnReserveSegments: reserve,
-    preBurnBurnBound: { bytes: burnPairBound(64), gas: gasOf(0, 0, 0n, true) - gasOf(0, 0, 0n, false) },
+    preBurnBurnBound: { bytes: burnPairBound(rLen), gas: (gasOf(bare, 0n, true) ?? 0n) - (gasOf(bare, 0n, false) ?? 0n) },
     largestToken: shapes,
     referencePart: {
-      transfers: refHops, splitLevels: refLevels, evidenceBytes: refBytes, proofsByBytes: pBytes, proofsByGas: pGas, binding: pGas < pBytes ? 'gas' : 'bytes',
+      transfers: 1, splitLevels: 2, evidenceBytes: shapeOf(ref, false).evidenceBytes, proofsByBytes: rp.byBytes, proofsByGas: rp.byGas, binding: rp.byGas < rp.byBytes ? 'gas' : 'bytes',
       interveningPayments: payments, returnDelaySeconds: { at1PerSecond: delay(1), at10PerSecond: delay(10), at100PerSecond: delay(100) },
     },
   };
@@ -693,7 +721,7 @@ async function rotate(w: Wallet, n: number, mode: string | undefined): Promise<v
 // ---- the capacity boundary ----------------------------------------------------------------------------------------------------------------
 
 /** The wallet's section 12.5 pre-burn preflight of `token`, replayed outside the plug-in (the same functions and inputs as planReturn). */
-async function predict(w: Wallet, token: Uint8Array): Promise<{ ok: boolean; gas: bigint | null; need: bigint; bytes: number; detail: string }> {
+async function predict(w: Wallet, token: Uint8Array): Promise<{ ok: boolean; gas: bigint | null; need: bigint; bytes: number; detail: string; over?: 'bytes' | 'gas' }> {
   const { capacityPreflight, burnIndex, lineageOf } = await import('../../../packages/native-bridge-plugin/src/nb2/index.js');
   const sr = await w.bridge.newestSealReceipt();
   const { a } = burnIndex(cfg, w.bridge.domain, sr?.receipt ?? null);
@@ -709,7 +737,11 @@ async function predict(w: Wallet, token: Uint8Array): Promise<{ ok: boolean; gas
     const r = capacityPreflight({ lMax: pins.maxEncodedTxBytes, lT, lO, K: cfg.K, a, cObs, reserve: pins.returnReserveSegments, gasAt, userGasLimit: pins.userGasLimit });
     return { ok: true, gas: r.gas, need: r.need, bytes: Number(lT), detail: 'fits' };
   } catch (e) {
-    return { ok: false, gas, need: cObs - a + pins.returnReserveSegments, bytes: Number(lT), detail: String((e as Error).message) };
+    // a refusal by bytes never reaches the gas: the bound is recorded anyway, and which limit refused
+    const need = cObs - a + pins.returnReserveSegments;
+    const over = gas === null ? 'bytes' : 'gas';
+    if (gas === null) gasAt(need);
+    return { ok: false, gas, need, bytes: Number(lT), detail: String((e as Error).message), over };
   }
 }
 
@@ -720,68 +752,27 @@ async function predict(w: Wallet, token: Uint8Array): Promise<{ ok: boolean; gas
  * Every probe is reported (out/boundary-<label>.json) with its shape diagnostics; rehearse_nb2.py then executes every one (soundness).
  */
 /**
- * TOKEN's shape as MeasuredGasModel.redeemGasLimit (measured-nb2-05) charges it, and the gas of one more and one fewer transfer of that shape
- * (boundary_shape.ts marginals): its hops and split levels, LT (the evidence length the preflight charges, predict's bytes), its transfers'
- * average pair bytes and seal signatures beyond the measured 3. Null steps when a seal does not decode or exceeds the bound. The rest of the
- * model (the mint's and the deposit's certificates, the pending burn, the gap proofs) is the token's fixed share, inside its gas. The steps
- * feed the probe's shape diagnostics (boundary_search.ts ownShape), recorded and never gating.
+ * TOKEN's terms as the plug-in's bound prices it at the preflight (bound-nb2-1179: the burn pair at its bound, NEED proofs), and the gas of one
+ * more and one fewer transfer of its own shape (boundary_shape.ts: its last pair repeated or dropped, priced by the same bound). Null steps
+ * where the counterfactual does not exist or the bound is null. The steps feed the probe's shape diagnostics (boundary_search.ts ownShape),
+ * recorded and never gating; the terms are the evidence of where the gas goes.
  */
-async function shapeOf(token: Uint8Array, lT: number): Promise<{ up: bigint | null; down: bigint | null; shape: TokenShape | null; detail?: Record<string, number | string> }> {
+async function shapeOf(w: Wallet, token: Uint8Array, lT: number, need: bigint): Promise<{ up: bigint | null; down: bigint | null; detail?: Record<string, number | string> }> {
   const { lineageOf } = await import('../../../packages/native-bridge-plugin/src/nb2/index.js');
-  const m = MEASURED_VERIFIER;
   const t = decodeToken(token);
   const lineage = lineageOf(t);
-  const levels = lineage.length - 1;
-  const hops = lineage.reduce((n, x) => n + x.transfers.length, 0) + 1 - lineage.length; // the pending burn is a transfer of the walk
-  const n = t.transfers.length;
-  const none = { up: null, down: null, shape: null };
-  if (n === 0 || t.transfersRaw.length !== n) return none;
-  let bytes = 0;
-  let extra = 0;
-  const sigs = new Map<string, number | null>();
-  for (let i = 0; i < n; i++) {
-    bytes += 1 + t.transfersRaw[i].length + encodeProof(t.proofs[i]).length; // the pair: a 2-array head, the transaction, its proof
-    const uc = t.proofs[i].uc;
-    const key = hx(HU(uc));
-    if (!sigs.has(key)) {
-      try {
-        const wit = UnicityCertificate.fromCBOR(uc).unicitySeal.witnesses as unknown as Map<unknown, unknown> | null;
-        sigs.set(key, wit === null ? 0 : wit.size);
-      } catch {
-        sigs.set(key, null);
-      }
-    }
-    const c = sigs.get(key)!;
-    if (c === null || c > m.maxSignatures) return none;
-    extra += Math.max(0, c - m.measuredSignatures);
-  }
-  const shape: TokenShape = { evidenceBytes: lT, hops, levels, pairBytes: Math.floor(bytes / n), extraSignatures: Math.floor(extra / n) };
-  // the diagnosis of a probe (the evidence, not a verdict): the model's terms as this token pays them, so fresh tokens of one length and conditions
-  // can be compared term by term (run 43985010186's search did not converge)
-  const count = (uc: Uint8Array): number | null => {
-    try {
-      const wit = UnicityCertificate.fromCBOR(uc).unicitySeal.witnesses as unknown as Map<unknown, unknown> | null;
-      return wit === null ? 0 : wit.size;
-    } catch {
-      return null;
-    }
+  const part = lineage[lineage.length - 1];
+  const shape = (p: Token) => ({ evidenceBytes: lT + encodeToken(p).length - token.length, lineage: [...lineage.slice(0, -1), p], pendingTransactions: 1, proofs: need, K: cfg.K });
+  const { up, down } = marginals(part, (p) => w.bridge.gas.redeemGasLimit(shape(p)));
+  const f = redeemFeatures(shape(part));
+  const terms = redeemGasTerms(shape(part));
+  if (f === null || terms === null) return { up, down };
+  const detail: Record<string, number | string> = {
+    evidenceBytes: lT, steps: f.steps, tokens: f.tokens, distinctClaims: f.claims.length, siblings: f.siblings, ucBytes: f.ucBytes, ucSignatures: f.ucSignatures,
+    items: f.items, keyLookups: f.keyLookups, decompressions: f.decompressions, probes: f.probes, memoryWords: terms.memoryWords,
   };
-  let evmSigs: number | null = null;
-  try {
-    if (t.mint.justification !== null) evmSigs = count(decodeReceiptBacking(t.mint.justification).proof.uc);
-  } catch { /* not a root token's J */ }
-  const mintSigs = count(t.mintProof.uc);
-  const shaped = m.baseBytes + m.bytesPerTransfer * hops + m.bytesPerSplitLevel * levels;
-  const excess = Math.max(0, lT - shaped);
-  const fixedSigs = Math.max(0, (mintSigs ?? 0) - m.measuredSignatures) + Math.max(0, (evmSigs ?? 0) - m.measuredSignatures) + (m.maxSignatures - m.measuredSignatures);
-  const histogram = [...sigs.values()].reduce<Record<string, number>>((h, c) => ({ ...h, [String(c)]: (h[String(c)] ?? 0) + 1 }), {});
-  const detail = {
-    evidenceBytes: lT, shapedBytes: shaped, excessBytes: excess, pairBytesTotal: bytes, mintBytes: t.mintRaw.length + encodeProof(t.mintProof).length,
-    distinctCertificates: sigs.size, signaturesPerCertificate: JSON.stringify(histogram), transferExtraSignatures: extra, mintSignatures: String(mintSigs),
-    evmUcSignatures: String(evmSigs), gasHops: (m.perTransfer * BigInt(hops)).toString(), gasExcessBytes: (m.perExcessByte * BigInt(excess)).toString(),
-    gasSignatures: (m.perExtraSignature * BigInt(extra + fixedSigs)).toString(),
-  };
-  return { ...marginals(shape, m), shape, detail };
+  for (const [k, v] of Object.entries(terms)) if (typeof v === 'bigint') detail[`gas.${k}`] = v.toString();
+  return { up, down, detail };
 }
 
 const BOUNDARY_CERTIFICATES = 16;
@@ -804,9 +795,10 @@ async function boundary(w: Wallet, label: string, estimate: number): Promise<voi
       real = e instanceof Nb2Error ? e.rule : e instanceof WalletError ? e.reason : String(e);
     }
     if (real !== 'passes' && real !== 'CapacityPreflight') throw new Error(`the boundary probe ${l} was refused for another reason: ${real}`);
-    const sh = await shapeOf(t, p.bytes);
-    const probe: Probe = { label: l, transfers, conditions: `${certificateSet(t)}, need ${p.need}`, gas: p.gas, up: sh.up, down: sh.down, real: real as Verdict, detail: sh.detail };
-    log(`  ${l}: ${transfers} transfers, ${evidenceOf(t).length} evidence bytes (${sh.shape?.pairBytes} a transfer, ${sh.shape?.extraSignatures} extra signatures), ${probe.conditions}, `
+    const sh = await shapeOf(w, t, p.bytes, p.need);
+    const probe: Probe = { label: l, transfers, conditions: `${certificateSet(t)}, need ${p.need}`, gas: p.gas, up: sh.up, down: sh.down, real: real as Verdict,
+      detail: { ...sh.detail, ...(p.over ? { over: p.over } : {}) } };
+    log(`  ${l}: ${transfers} transfers, ${evidenceOf(t).length} evidence bytes, ${probe.conditions}, `
       + `preflight gas ${p.gas} (one transfer more +${sh.up}, one fewer -${sh.down}): planReturn ${real}`);
     return probe;
   };
@@ -833,17 +825,23 @@ async function boundary(w: Wallet, label: string, estimate: number): Promise<voi
     + `from the newest ${res.window.join(', ')} (${res.tries.length} probes); drift ${JSON.stringify(res.drift)}`);
 }
 
-/** The boundary estimate from a short live chain: the model's gas per further hop on this deployment's real certificates. */
+/**
+ * The boundary estimate from a short live chain: the bound's own step of one more transfer on this deployment's real certificates (its
+ * last pair repeated, boundary_shape.ts), widened by a fifth for the verifier's memory term, which grows the step with the length (about 1.2
+ * times the 16-transfer step by 300 on the K = 4 lane, bft-core#1179). The search corrects it from the first probe on.
+ */
 async function boundaryEstimate(w: Wallet, label: string): Promise<void> {
   await deposit(w, label, 1n, undefined);
   await chain(w, label, `${label}c`, 16, false);
   const t16 = w.token(`${label}c`);
   const p16 = await predict(w, t16);
-  const perHop = MEASURED_VERIFIER.perTransfer;
-  const room = pins.userGasLimit - (p16.gas ?? 0n);
-  const k = 16 + Number(room / (perHop + 2n * MEASURED_VERIFIER.perExtraSignature));
+  const sh = await shapeOf(w, t16, p16.bytes, p16.need);
+  if (p16.gas === null || sh.up === null || sh.up <= 0n) throw new Error(`the 16-transfer probe has no bound or no step (${p16.detail})`);
+  const perHop = (sh.up * 6n) / 5n;
+  const room = pins.userGasLimit - p16.gas;
+  const k = 16 + Number(room / perHop);
   out(`boundary-estimate-${label}`, { probeTransfers: 16, probeGas: p16.gas, perHop, estimate: k });
-  log(`  boundary estimate: about ${k} transfers (probe ${p16.gas} gas at 16)`);
+  log(`  boundary estimate: about ${k} transfers (probe ${p16.gas} gas at 16, ${perHop} a further transfer)`);
 }
 
 // ---- mutations: one isolated change of one burned part, judged by the plug-in and by the deployed verifier (the lane adds Go) ----------

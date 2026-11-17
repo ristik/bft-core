@@ -1,44 +1,43 @@
 /**
- * The boundary stage's counterfactuals (driver.ts marginalOf, boundary_search.ts shapeHolds): the gas of a token with one more and with one
- * fewer transfer of its own average shape, by the terms of the plug-in's MeasuredGasModel (measured-nb2-05): a hop, the evidence bytes beyond
- * the measured shape (clipped at zero), the seal signatures beyond the measured 3. The two steps differ where the clip binds: a token at or
- * under its measured bytes pays nothing for its excess, so one more pair of more than the measured bytes costs its excess, while removing
- * one saves only the hop (sol's review r8 of #1126: 1,100-byte pairs at zero excess, +200,064 forward, -190,000 back).
+ * The boundary stage's counterfactuals (driver.ts shapeOf, boundary_search.ts shapeHolds): the token with one more transfer of its own shape
+ * and the token with one fewer, as tokens the plug-in's gas bound (MeasuredGasModel, bound-nb2-1179) prices like any other. One more repeats
+ * the part's last transfer pair (its transaction and inclusion proof: the same UC, path and keys, so no new claim); one fewer drops it. The
+ * bound counts what the verifier counts (proofs, bytes, items, siblings, distinct claims, keys, memory), so each step is the model's own
+ * answer on that token, not an average (bft-core#1179 replaced the per-hop arithmetic of the measured-nb2-05 schedule).
  *
- * Pure, with the model's constants passed in (MEASURED_VERIFIER), so the arithmetic is tested against the model itself
- * (boundary_shape.test.ts).
+ * Pure: only the plug-in's token type, so the unit tests run without a chain (boundary_shape.test.ts).
  */
+import type { Token } from '../../../packages/native-bridge-plugin/src/nb2/token.js';
 
-/** The terms of MEASURED_VERIFIER the counterfactuals use. */
-export interface ShapeModel {
-  perTransfer: bigint;
-  perExcessByte: bigint;
-  perExtraSignature: bigint;
-  baseBytes: number;
-  bytesPerTransfer: number;
-  bytesPerSplitLevel: number;
+/** PART with its last transfer pair repeated; null when it has no transfer of its own. */
+export function withOneMore(part: Token): Token | null {
+  const n = part.transfers.length;
+  if (n === 0) return null;
+  return {
+    ...part,
+    transfers: [...part.transfers, part.transfers[n - 1]],
+    proofs: [...part.proofs, part.proofs[n - 1]],
+    transfersRaw: [...part.transfersRaw, part.transfersRaw[n - 1]],
+  };
 }
 
-/** A token as the model sees it: the evidence length the preflight charges, its hops and split levels, and its transfers' average shape. */
-export interface TokenShape {
-  evidenceBytes: number;
-  hops: number;
-  levels: number;
-  pairBytes: number; // a transfer's pair (transaction and inclusion proof), averaged over the token, rounded down
-  extraSignatures: number; // a transfer certificate's seal signatures beyond the measured, averaged likewise, rounded down
+/** PART without its last transfer pair; null when it has no transfer of its own to remove. */
+export function withOneFewer(part: Token): Token | null {
+  const n = part.transfers.length;
+  if (n === 0) return null;
+  return { ...part, transfers: part.transfers.slice(0, -1), proofs: part.proofs.slice(0, -1), transfersRaw: part.transfersRaw.slice(0, -1) };
 }
 
 /**
- * up: G(one more transfer) - G(token); down: G(token) - G(one fewer transfer); null when there is no transfer to remove. Both are rounded
- * down (the averages are), which makes each side of shapeHolds stricter: a smaller up keeps a pass's counterfactual within the limit, a
- * smaller down keeps a refusal's over it.
+ * up: G(one more) - G(token); down: G(token) - G(one fewer); null where the counterfactual does not exist or the bound is null. G is the
+ * caller's bound of a part (the preflight's, its pending burn and reserve included).
  */
-export function marginals(s: TokenShape, m: ShapeModel): { up: bigint; down: bigint | null } {
-  const shaped = (hops: number): number => m.baseBytes + m.bytesPerTransfer * hops + m.bytesPerSplitLevel * s.levels;
-  const excess = (bytes: number, hops: number): number => Math.max(0, bytes - shaped(hops));
-  const now = excess(s.evidenceBytes, s.hops);
-  const sig = m.perExtraSignature * BigInt(s.extraSignatures);
-  const up = m.perTransfer + m.perExcessByte * BigInt(excess(s.evidenceBytes + s.pairBytes, s.hops + 1) - now) + sig;
-  const down = s.hops < 1 ? null : m.perTransfer + m.perExcessByte * BigInt(now - excess(s.evidenceBytes - s.pairBytes, s.hops - 1)) + sig;
-  return { up, down };
+export function marginals(part: Token, G: (t: Token) => bigint | null): { up: bigint | null; down: bigint | null } {
+  const g = G(part);
+  if (g === null) return { up: null, down: null };
+  const more = withOneMore(part);
+  const fewer = withOneFewer(part);
+  const gm = more === null ? null : G(more);
+  const gf = fewer === null ? null : G(fewer);
+  return { up: gm === null ? null : gm - g, down: gf === null ? null : g - gf };
 }
