@@ -380,20 +380,20 @@ func RequestContinuationFromVerifiedV3(previous *RequestActivation, entry Verifi
 		trHash: bytes.Clone(previous.trHash), version: previous.version, continuation: true, predecessorRootBody: bytes.Clone(previous.rootBody)}, nil
 }
 
-// DeriveActivatedConfigsAt is DeriveActivatedPDR plus the configurations the same candidate installs with it: one per P85 aggregator
+// DeriveActivatedConfigsAt is DeriveActivatedPDR, over a retained successor body of either version (rawBody), plus the configurations the same candidate installs with it: one per P85 aggregator
 // validator replacement (sorted as committed) and, for a VR handoff, one per shard its Accepted root-side changes touch, installed against
 // installed, the configurations in effect at the record's ordering round (the startup reconciliation of archived handoffs derives every
 // committed epoch again, so it passes the orchestration's configurations of each epoch's ordering round). The EVM configuration is first;
 // all are verified against the record, body and preimage, with the shared provenance. The state-dependent half of a P85 replacement (it
 // replaces exactly the installed configuration of an existing non-EVM shard) is checked by the callers that hold the shard states.
-func DeriveActivatedConfigsAt(record evmroot.OrderedHandoffRecord, body evmroot.TrustBaseBodyV2, preimage []byte,
+func DeriveActivatedConfigsAt(record evmroot.OrderedHandoffRecord, rawBody, preimage []byte,
 	installed map[types.PartitionShardID]*types.PartitionDescriptionRecord) ([]*types.PartitionDescriptionRecord, []byte, error) {
-	id := body.Identity()
-	if installed == nil {
-		installed = map[types.PartitionShardID]*types.PartitionDescriptionRecord{}
+	body, err := decodeRetainedBody(rawBody)
+	if err != nil {
+		return nil, nil, err
 	}
-	confs, provenance, _, err := deriveActivatedConfigs(record, retainedBody{id: id[:], epoch: body.Epoch, earliest: body.EarliestActivation,
-		changeRecordHash: body.ChangeRecordHash, mode: weightvalidation.ModeUnit}, preimage, nil, installed)
+	// nil is "no configurations known", refused for a VR handoff's root-side changes; an empty map is a known empty set
+	confs, provenance, _, err := deriveActivatedConfigs(record, body, preimage, nil, installed)
 	return confs, provenance, err
 }
 

@@ -178,6 +178,22 @@ func V5Of(c vrschema.CandidateV6) evmassign.Candidate {
 		Supersedes: c.Supersedes, Bindings: c.Bindings, Identities: c.Identities, Authorization: c.Authorization, ReplacedAssignment: c.ReplacedAssignment}
 }
 
+// supersessionChanges is the supersession rule of item 5: a supersession carries no Accepted kind 6, 7 or 8 change (a rejected one
+// installs nothing and is allowed). It reads the carried verdicts; item 6 requires them to equal the fold's, so a change that is
+// actually Accepted cannot pass by being labelled rejected.
+func supersessionChanges(c vrschema.CandidateV6) error {
+	if c.Supersedes == nil {
+		return nil
+	}
+	for _, rc := range c.RegistryChanges {
+		if rc.Verdict == uint64(vrschema.VerdictAccepted) && (uint8(rc.Kind) == vrschema.KindReplaceAggregator || uint8(rc.Kind) == vrschema.KindAddPartition ||
+			uint8(rc.Kind) == vrschema.KindUpdatePartition) {
+			return fmt.Errorf("%w: a supersession carries Accepted root-side change %d", ErrH3, rc.ID)
+		}
+	}
+	return nil
+}
+
 // VerifyRegistryOutput is registry-mode admission of a primary candidate (design section 5.2), every item, in order except that the
 // view certificate (9) is verified before the activation gates (7) read its readiness. A recovery
 // candidate re-installs K by DeriveRecovery and is not a registry output.
@@ -240,13 +256,8 @@ func VerifyRegistryOutput(a Admission) (Verified, error) {
 	// (5) a supersession carries no root-side change (design section 6.3): the superseded H's changes are already installed and never
 	// replayed, and an Accepted one here would have to be installed after the Commit. The carried verdicts are checked against the fold
 	// in item 6, so judging them here refuses exactly what that admission would install.
-	if c.Supersedes != nil {
-		for _, rc := range c.RegistryChanges {
-			if rc.Verdict == uint64(vrschema.VerdictAccepted) && (uint8(rc.Kind) == vrschema.KindReplaceAggregator || uint8(rc.Kind) == vrschema.KindAddPartition ||
-				uint8(rc.Kind) == vrschema.KindUpdatePartition) {
-				return out, fmt.Errorf("%w: a supersession carries Accepted root-side change %d", ErrH3, rc.ID)
-			}
-		}
+	if err := supersessionChanges(c); err != nil {
+		return out, err
 	}
 	// (5) the H3/#85 checks, unchanged: coupling, identities, quantization, continuity O->J and J->K, span and supersession, the
 	// root-context PoP of every successor key (readiness of every member is item 9)

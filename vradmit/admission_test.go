@@ -158,3 +158,27 @@ func TestServedBindingsAreHashVerified(t *testing.T) {
 	bad[1].EVMNodeID = "z"
 	require.ErrorIs(t, VerifyMembers(bad, w.state.Output.MembersDigest), ErrCommit)
 }
+
+// The supersession rule of item 5 (F6, approved by astra): an Accepted change of kind 6, 7 or 8 in a supersession is refused, a rejected
+// one is allowed (it installs nothing), other kinds are unaffected, and a change the fold Accepts cannot pass labelled rejected: item 6
+// refuses the false verdict.
+func TestASupersessionCarriesNoAcceptedRootSideChange(t *testing.T) {
+	sup := &evmassign.Supersession{}
+	for _, k := range []uint8{vrschema.KindReplaceAggregator, vrschema.KindAddPartition, vrschema.KindUpdatePartition} {
+		c := vrschema.CandidateV6{Supersedes: sup, RegistryChanges: []vrschema.RegistryChange{{ID: 5, Kind: uint64(k)}}}
+		require.ErrorIs(t, supersessionChanges(c), ErrH3, "kind %d", k)
+		c.RegistryChanges[0].Verdict = uint64(vrschema.VerdictInvalid)
+		require.NoError(t, supersessionChanges(c), "kind %d rejected: the control", k)
+		c.Supersedes = nil
+		c.RegistryChanges[0].Verdict = 0
+		require.NoError(t, supersessionChanges(c), "kind %d outside a supersession", k)
+	}
+	require.NoError(t, supersessionChanges(vrschema.CandidateV6{Supersedes: sup, RegistryChanges: []vrschema.RegistryChange{{ID: 4, Kind: uint64(vrschema.KindCommitteeLimits)}}}))
+
+	// a false rejected verdict on a change the fold Accepts passes the item 5 rule by its label and is refused at item 6
+	w := newWorld(t)
+	a := w.admission()
+	a.Candidate.RegistryChanges[0].Verdict = uint64(vrschema.VerdictConflict)
+	_, err := VerifyRegistryOutput(a)
+	require.ErrorIs(t, err, ErrVerdicts)
+}
