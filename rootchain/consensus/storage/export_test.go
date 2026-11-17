@@ -148,3 +148,20 @@ func DeriveActivatedConfigsForTest(record evmroot.OrderedHandoffRecord, rawBody,
 func RetainVRFreezeForTest(x *BlockStore, executed *ExecutedBlock) error {
 	return x.retainVRFreeze(executed.BlockData, executed.vrFrozen)
 }
+
+// VRQueryForTest is the intent query the executor derives over a block as the parent of the next one: its control state, backoff, epoch,
+// certified EVM state and root facts (with the authority's successor link).
+func VRQueryForTest(b *ExecutedBlock, orch Orchestration, svc *PosServices, a *TestVRAuthority) (VRIntentQuery, error) {
+	confs, err := orch.ShardConfigs(b.GetRound())
+	if err != nil {
+		return VRIntentQuery{}, err
+	}
+	s, err := vradmit.DecodeRootState(b.ShardState.Control.VR)
+	if err != nil {
+		return VRIntentQuery{}, err
+	}
+	root, block, ok := certifiedEVM(b.ShardState, confs)
+	return VRIntentQuery{Control: b.ShardState.Control, Backoff: s.Backoff, Epoch: b.BlockData.Epoch, Round: b.GetRound(), LatestEVMRoot: root,
+		LatestEVMBlock: block, LatestEVMOK: ok,
+		Root: vrRootFacts(b.ShardState, confs, orch, svc.Registry, b.ShardState.Control.Network, b.BlockData.Epoch, a)}, nil
+}

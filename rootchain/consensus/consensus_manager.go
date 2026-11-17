@@ -141,6 +141,7 @@ type (
 		posQueue             posSubmissions                   // submitted Retirement and RejectResult controls waiting for a leader
 		witnesses            WitnessFetcher                   // nil: control witnesses are only what the store already holds
 		q3                   Q3Authority                      // the verified Q3 history, nil when the binary does not know it
+		vr                   *vrHandoff                       // the VR handoff root side (EnableVRHandoff); nil on a chain that is not in VR mode
 		v3Planned            atomic.Pointer[V3Candidate]      // the last candidate PlanV3Candidate derived: the exact body the members declared readiness for
 		q3Staged             atomic.Pointer[Q3Staged]         // the V3 candidate this validator last derived for its operator
 		q3StagedEVM          atomic.Pointer[stagedEVMMembers] // the EVM validators of the successor assignment of the candidate last staged here
@@ -2137,6 +2138,9 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 	}
 	// the replacement store executes the recovery blocks and then the live ones: it needs the control collaborators of the one it replaces
 	blockStore.SetPosServices(x.blockStore.PosServices())
+	if x.vr != nil {
+		blockStore.SetCommitObserver(x.vr.onCommit)
+	}
 	blockStore.SetLeaderInputs(x.blockStore.LeaderInputs())
 	if x.utbPrevious != nil {
 		blockStore.SetUTBBinding(utbBindingFor(x.utbSigningConfig(), blockStore, x.utbPrevious))
@@ -2726,6 +2730,9 @@ func (x *ConsensusManager) validateRecoveryState(rsp *abdrc.StateMsg) error {
 				}
 			}
 			bs.SetPosServices(x.blockStore.PosServices())
+			if x.vr != nil {
+				bs.SetCommitObserver(x.vr.onCommit)
+			}
 			bs.SetLeaderInputs(x.blockStore.LeaderInputs())
 			if x.utbPrevious != nil {
 				bs.SetUTBBinding(utbBindingFor(x.utbSigningConfig(), bs, x.utbPrevious))

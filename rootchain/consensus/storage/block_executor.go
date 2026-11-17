@@ -334,7 +334,8 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 				// a VR chain judges Freeze v5 itself and admits only the exact-recovery V3 companion besides it
 				recordAuthority = &vrFreezeAuthority{handoffAuthority: authority, vr: &vr, svc: services.Registry, parent: bytes.Clone(nextShardState.Control.FrozenParent),
 					query: VRIntentQuery{Control: nextShardState.Control, Backoff: vr.state.Backoff, Epoch: newBlock.Epoch, Round: newBlock.Round,
-						LatestEVMRoot: latestRoot, LatestEVMBlock: latestBlock, LatestEVMOK: latestEVMOK}}
+						LatestEVMRoot: latestRoot, LatestEVMBlock: latestBlock, LatestEVMOK: latestEVMOK,
+						Root: vrRootFacts(nextShardState, shardConfs, orchestration, services.Registry, nextShardState.Control.Network, newBlock.Epoch, authority)}}
 			}
 			control, err := applyHandoffRecord(nextShardState.Control, newBlock.Payload.HandoffRecords[0], uint64(orchestration.NetworkID()), newBlock.Epoch, newBlock.Round, recordAuthority, companion)
 			if err != nil {
@@ -553,7 +554,8 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 	if vr.on {
 		env.vr = &vrEnv{step: &vr, svc: services.Registry, committee: vrCommittee(nextShardState, shardConfs, orchestration),
 			query: VRIntentQuery{Control: nextShardState.Control, Epoch: newBlock.Epoch, Round: newBlock.Round, LatestEVMRoot: latestRoot,
-				LatestEVMBlock: latestBlock, LatestEVMOK: latestEVMOK}}
+				LatestEVMBlock: latestBlock, LatestEVMOK: latestEVMOK,
+				Root: vrRootFacts(nextShardState, shardConfs, orchestration, services.Registry, nextShardState.Control.Network, newBlock.Epoch, authority)}}
 	}
 	replaced, err := pos.controls(newBlock, services, env)
 	if err != nil {
@@ -569,7 +571,7 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 	if nextShardState.Control != nil {
 		pos.store(nextShardState.Control) // an acknowledgement or a control changes the state the control digest commits
 		// the backoff's Open step, once at the end of the block, after all records and controls (design section 5.5.2)
-		if err := vr.endBlock(newBlock.Epoch, newBlock.Round, nextShardState.Control, authority); err != nil {
+		if err := vr.endBlock(newBlock.Epoch, newBlock.Round, newBlock.Timestamp, nextShardState.Control, authority); err != nil {
 			return nil, err
 		}
 		if err := vr.store(nextShardState.Control); err != nil {

@@ -67,6 +67,55 @@ type VRIntentQuery struct {
 	LatestEVMBlock []byte
 	LatestEVMOK    bool
 	Candidate      []byte
+	// Witness is the Freeze v5's witness over VR at P (LatestEVMRoot is then P's state root: the EVM is frozen since the Prepare); nil
+	// for a HandoffView and the committed opening.
+	Witness []byte
+	// Root derives the root half of the intent's context from the block's state (the installed EVM configuration, its lifecycle, the
+	// fold's input and the successor body's predecessor link); nil where the caller has none.
+	Root func() (VRRootFacts, error)
+}
+
+// VRRootFacts is the root half of an intent's context at one block: the designated EVM shard's installed configuration and lifecycle
+// (K, the acknowledged committee, with its assignment hash), the fold input of the successor root epoch, and the predecessor link a
+// successor body of the current epoch carries (nil where no authority links one: the committed opening derives no body).
+type VRRootFacts struct {
+	Installed *types.PartitionDescriptionRecord
+	Lifecycle evmassign.LifecycleContext
+	Fold      vrschema.FoldInput
+	Link      []byte
+}
+
+// vrRootFacts is VRIntentQuery.Root over a block's state: the designated EVM shard of the configurations, its committed lifecycle, the fold
+// input of epoch+1 over the installed configurations and the committed schedule, and the authority's successor link.
+func vrRootFacts(state ShardStates, confs map[types.PartitionShardID]*types.PartitionDescriptionRecord, orchestration Orchestration, svc *VRServices,
+	network, epoch uint64, authority handoffAuthority) func() (VRRootFacts, error) {
+	return func() (VRRootFacts, error) {
+		var f VRRootFacts
+		key, found, err := frozenEVMShard(state, confs)
+		if err != nil || !found {
+			return f, errors.Join(ErrVRUnavailable, errors.New("no designated EVM shard"), err)
+		}
+		si := state.States[key]
+		if si == nil || si.IR == nil || confs[key] == nil {
+			return f, fmt.Errorf("%w: the EVM shard has no certified state", ErrVRUnavailable)
+		}
+		f.Installed = confs[key]
+		if f.Lifecycle, err = LifecycleFor(orchestration, si.PartitionID, si.ShardID, si.IR.Epoch, f.Installed); err != nil {
+			return f, errors.Join(ErrVRUnavailable, err)
+		}
+		schedule, err := svc.schedule(epoch)
+		if err != nil {
+			return f, err
+		}
+		f.Fold = vradmit.FoldContext{Network: network, SuccessorRootEpoch: epoch + 1, Installed: confs, EVMPartition: key.PartitionID,
+			ControlPartition: evmroot.D4ControlPartition, Schedule: schedule}.Input()
+		if linker, ok := authority.(vrBodyLinker); ok && authority != nil {
+			if f.Link, err = linker.vrSuccessorLink(network, epoch); err != nil {
+				return f, errors.Join(ErrVRUnavailable, err)
+			}
+		}
+		return f, nil
+	}
 }
 
 // VRIntent is the derivable intent of the stored attempt: its digest, the committed UC time of its anchor block (openTime(0)), and, for a
@@ -180,16 +229,17 @@ func vrCommitteeSize(authority handoffAuthority, stored uint32) uint32 {
 }
 
 // endBlock is the Open step, once at the end of every executed block, after all records and controls.
-func (v *vrStep) endBlock(epoch, round uint64, after *evmroot.ControlState, authority handoffAuthority) error {
+func (v *vrStep) endBlock(epoch, round, ucTime uint64, after *evmroot.ControlState, authority handoffAuthority) error {
 	if !v.on {
 		return nil
 	}
-	next, err := v.state.EndBlock(epoch, round, vradmit.ControlOf(after), vrCommitteeSize(authority, v.state.Backoff.N))
+	next, err := v.state.EndBlockAt(epoch, round, ucTime, vradmit.ControlOf(after), vrCommitteeSize(authority, v.state.Backoff.N))
 	if err != nil {
 		return errors.Join(ErrVRMode, err)
 	}
 	// the Open step changes only the backoff and the attempt's times: an unchanged block leaves the committed encoding as it was
-	if !backoffEqual(next.Backoff, v.state.Backoff) || next.OpenUCTime != v.state.OpenUCTime || next.PrepareUCTime != v.state.PrepareUCTime {
+	if !backoffEqual(next.Backoff, v.state.Backoff) || next.OpenUCTime != v.state.OpenUCTime || next.PrepareUCTime != v.state.PrepareUCTime ||
+		next.AttemptOpenRound != v.state.AttemptOpenRound || next.AttemptOpenUCTime != v.state.AttemptOpenUCTime {
 		v.set(next)
 	}
 	return nil
@@ -260,7 +310,7 @@ func (a *vrFreezeAuthority) verifyV5(r evmroot.OrderedHandoffRecord, fv vrschema
 		return nil, fmt.Errorf("%w: no frozen parent bound", ErrVRFreeze)
 	}
 	q := a.query
-	q.Candidate = fv.Candidate
+	q.Candidate, q.Witness = fv.Candidate, fv.Witness
 	in, ok, err := a.svc.Intents.Intent(q)
 	if err != nil {
 		return nil, errors.Join(ErrVRUnavailable, err)
@@ -563,32 +613,55 @@ func (x *BlockStore) CommittedVROpening() (VROpening, bool, error) {
 }
 
 func (x *BlockStore) committedVR(derive bool) (VROpening, bool, error) {
-	if x.profile != ProfileHandoff {
-		return VROpening{}, false, nil
+	q, s, round, ok, err := x.committedVRQuery()
+	if err != nil || !ok {
+		return VROpening{}, ok, err
 	}
-	root := x.tree().Root()
-	if root == nil || root.ShardState.Control == nil || len(root.ShardState.Control.VR) == 0 {
-		return VROpening{}, false, nil
-	}
-	s, err := vradmit.DecodeRootState(root.ShardState.Control.VR)
-	if err != nil {
-		return VROpening{}, false, err
-	}
-	o := VROpening{State: s, CommittedRound: root.GetRound()}
+	o := VROpening{State: s, CommittedRound: round}
 	x.lock.RLock()
 	svc := x.pos
 	x.lock.RUnlock()
 	if !derive || s.Backoff.LastView != 0 || svc == nil || svc.Registry == nil || svc.Registry.Intents == nil {
 		return o, true, nil
 	}
+	o.Intent, o.IntentOK, err = svc.Registry.Intents.Intent(q)
+	return o, true, err
+}
+
+// CommittedVRQuery is the intent query over the committed root block (its control state, backoff, epoch and round, the EVM state it
+// certifies, and the root facts with the successor link of the store's authority): what the operator and the protocol service derive
+// the current intent over. ok is false on a chain that is not in VR mode.
+func (x *BlockStore) CommittedVRQuery() (VRIntentQuery, bool, error) {
+	q, _, _, ok, err := x.committedVRQuery()
+	return q, ok, err
+}
+
+func (x *BlockStore) committedVRQuery() (VRIntentQuery, vradmit.RootState, uint64, bool, error) {
+	if x.profile != ProfileHandoff {
+		return VRIntentQuery{}, vradmit.RootState{}, 0, false, nil
+	}
+	root := x.tree().Root()
+	if root == nil || root.ShardState.Control == nil || len(root.ShardState.Control.VR) == 0 {
+		return VRIntentQuery{}, vradmit.RootState{}, 0, false, nil
+	}
+	s, err := vradmit.DecodeRootState(root.ShardState.Control.VR)
+	if err != nil {
+		return VRIntentQuery{}, s, 0, false, err
+	}
+	x.lock.RLock()
+	svc, auth := x.pos, x.handoffAuth
+	x.lock.RUnlock()
 	confs, err := x.orchestration.ShardConfigs(root.GetRound())
 	if err != nil {
-		return o, true, err
+		return VRIntentQuery{}, s, 0, true, err
 	}
 	latestRoot, latestBlock, latestOK := certifiedEVM(root.ShardState, confs)
-	o.Intent, o.IntentOK, err = svc.Registry.Intents.Intent(VRIntentQuery{Control: root.ShardState.Control, Backoff: s.Backoff, Epoch: root.BlockData.Epoch,
-		Round: root.GetRound(), LatestEVMRoot: latestRoot, LatestEVMBlock: latestBlock, LatestEVMOK: latestOK})
-	return o, true, err
+	q := VRIntentQuery{Control: root.ShardState.Control, Backoff: s.Backoff, Epoch: root.BlockData.Epoch, Round: root.GetRound(), LatestEVMRoot: latestRoot,
+		LatestEVMBlock: latestBlock, LatestEVMOK: latestOK}
+	if svc != nil && svc.Registry != nil {
+		q.Root = vrRootFacts(root.ShardState, confs, x.orchestration, svc.Registry, root.ShardState.Control.Network, root.BlockData.Epoch, auth)
+	}
+	return q, s, root.GetRound(), true, nil
 }
 
 // HandoffViewOf is the HandoffView a block carries, if any (at most one, by the payload rule).

@@ -39,6 +39,7 @@ type (
 		// the attempt whose lapse was last reported (reported once)
 		lapseLogged                          bool
 		lapseLoggedEpoch, lapseLoggedAttempt uint64
+		onCommit                             func([]*ExecutedBlock) // the commit observer (SetCommitObserver)
 	}
 
 	PersistentStore interface {
@@ -556,12 +557,27 @@ func (x *BlockStore) ProcessQc(qc *rctypes.QuorumCert) ([]*certification.Certifi
 		return nil, nil
 	}
 	// If the QC commits a state committed block becomes the new root
+	committed := x.tree().CommitPath(qc)
 	ucs, err := x.tree().Commit(qc, x.log)
 	if err != nil {
 		return nil, fmt.Errorf("committing new root block: %w", err)
 	}
 	x.logHandoffOutcome(x.tree().Root())
+	x.lock.RLock()
+	observe := x.onCommit
+	x.lock.RUnlock()
+	if observe != nil && len(committed) > 0 {
+		observe(committed)
+	}
 	return ucs, nil
+}
+
+// SetCommitObserver installs a function every commit calls with the blocks it committed, oldest first (the validator-registry source
+// observer, VT-05b). It is called on the consensus loop and must not block.
+func (x *BlockStore) SetCommitObserver(f func([]*ExecutedBlock)) {
+	x.lock.Lock()
+	defer x.lock.Unlock()
+	x.onCommit = f
 }
 
 // logHandoffOutcome reports the terminal outcomes of a handoff attempt when the committed root passes them: the committed or aborted

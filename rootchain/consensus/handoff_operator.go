@@ -1250,6 +1250,10 @@ func (x *ConsensusManager) handoffRecordsForRound(round uint64, parentQC *rctype
 			}
 		}
 	}
+	// a validator-registry chain orders its records for the complete verified view certificate this root holds (VT-05b)
+	if x.vr != nil && len(control.VR) != 0 {
+		return x.vrRecordsForRound(round, parent, parentQC)
+	}
 	// A Prepare whose freeze lapsed is dead: no Freeze is ordered for it, and once the cooldown has passed the leader may start the
 	// next attempt exactly as after an abort.
 	lapsed := storage.PrepareLapsed(control, round)
