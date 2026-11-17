@@ -23,6 +23,8 @@ type validatorStatusReport struct {
 	Block    uint64 `json:"block"`
 	Registry string `json:"registry"`
 
+	// Identity is "found", "none" (the lookup succeeded and found nothing) or "unknown" (it failed; see Unknown).
+	Identity   string `json:"identity"`
 	ID         uint64 `json:"id,omitempty"`
 	Owner      string `json:"owner,omitempty"`
 	Generation uint64 `json:"generation,omitempty"`
@@ -55,10 +57,12 @@ type validatorStatusReport struct {
 	Activations   []string `json:"activations,omitempty"`
 	PublicHead    uint64   `json:"publicHead"`
 	PublicHeadAge string   `json:"publicHeadAge"`
-	PublicSyncing bool     `json:"publicSyncing"`
+	PublicSyncing *bool    `json:"publicSyncing"` // null: eth_syncing failed (see Unknown)
 	LocalRPC      string   `json:"localRpc,omitempty"`
 	LocalHead     *uint64  `json:"localHead,omitempty"`
-	LocalSync     string   `json:"localSync,omitempty"`
+	LocalSync     string   `json:"localSync,omitempty"` // "in sync", "syncing …", "behind by …", "unreachable: …" or "unknown: …"
+	// Unknown lists every read that failed; status then exits with an error after printing what it could read.
+	Unknown []string `json:"unknown,omitempty"`
 }
 
 type validatorStatusFlags struct {
@@ -73,19 +77,19 @@ func validatorStatusCmd(base *baseFlags) *cobra.Command {
 		Short: "Show the validator's VR record, PoA state, the committee, epoch, next boundary and sync state (public RPC)",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			r, err := validatorStatus(cmd.Context(), f)
-			if err != nil {
+			if r == nil {
 				return err
 			}
 			if f.JSON {
-				b, err := json.MarshalIndent(r, "", "  ")
-				if err != nil {
-					return err
+				b, merr := json.MarshalIndent(r, "", "  ")
+				if merr != nil {
+					return merr
 				}
-				_, err = fmt.Fprintln(cmd.OutOrStdout(), string(b))
-				return err
+				fmt.Fprintln(cmd.OutOrStdout(), string(b))
+			} else {
+				r.text(cmd.OutOrStdout())
 			}
-			r.text(cmd.OutOrStdout())
-			return nil
+			return err
 		},
 	}
 	f.validatorFlags.add(cmd)
@@ -104,12 +108,20 @@ func blockInfo(ctx context.Context, c *rpc.Client, tag string) (number, ts uint6
 	return uint64(h.Number), uint64(h.Timestamp), nil
 }
 
+// syncing is eth_syncing: false, or a progress object (true). Any other answer is an error.
 func syncing(ctx context.Context, c *rpc.Client) (bool, error) {
 	var raw json.RawMessage
 	if err := c.CallContext(ctx, &raw, "eth_syncing"); err != nil {
 		return false, err
 	}
-	return strings.TrimSpace(string(raw)) != "false", nil
+	switch t := strings.TrimSpace(string(raw)); {
+	case t == "false":
+		return false, nil
+	case strings.HasPrefix(t, "{"):
+		return true, nil
+	default:
+		return false, fmt.Errorf("eth_syncing answered %q", t)
+	}
 }
 
 func validatorStatus(ctx context.Context, f *validatorStatusFlags) (*validatorStatusReport, error) {
@@ -131,12 +143,25 @@ func validatorStatus(ctx context.Context, f *validatorStatusFlags) (*validatorSt
 		Epoch: ch.cfg.KnownRootEpoch, EpochStart: ch.cfg.EpochStartProgress,
 		Limits: fmt.Sprintf("nMin %d, nTarget %d, nMax %d", ch.cfg.NMin, ch.cfg.NTarget, ch.cfg.NMax)}
 
-	// the identity: --id or the config's, else the operator account's from VR's logs
+	// the identity: --id or the config's, else the operator account's from VR's logs. Only a lookup that succeeded says "none".
 	keys, kerr := v.keys()
 	id := v.cfg.ID
-	if id == 0 && kerr == nil {
-		if got, ok, err := findID(ctx, v, ch, operatorAddress(keys)); err == nil && ok {
-			id = got
+	switch {
+	case id != 0:
+		r.Identity = "found"
+	case kerr != nil:
+		r.Identity = "unknown"
+		r.Unknown = append(r.Unknown, fmt.Sprintf("identity: the operator key is not readable, so its identity was not looked up (pass --id): %v", kerr))
+	default:
+		got, ok, err := findID(ctx, v, ch, operatorAddress(keys))
+		switch {
+		case err != nil:
+			r.Identity = "unknown"
+			r.Unknown = append(r.Unknown, "identity: "+err.Error())
+		case ok:
+			id, r.Identity = got, "found"
+		default:
+			r.Identity = "none"
 		}
 	}
 	committee, err := vr.Committee(ctx)
@@ -280,12 +305,22 @@ func validatorStatus(ctx context.Context, f *validatorStatusFlags) (*validatorSt
 	}
 	r.PublicHead = n
 	r.PublicHeadAge = time.Since(time.Unix(int64(ts), 0)).Round(time.Second).String()
-	r.PublicSyncing, _ = syncing(ctx, ch.rpc)
+	if busy, err := syncing(ctx, ch.rpc); err != nil {
+		r.Unknown = append(r.Unknown, "public sync: eth_syncing: "+err.Error())
+	} else {
+		r.PublicSyncing = &busy
+	}
 	if v.cfg.LocalRPC != "" {
 		r.LocalRPC = v.cfg.LocalRPC
 		lctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
 		r.LocalSync = localSync(lctx, v.cfg.LocalRPC, n, &r.LocalHead)
+		if strings.HasPrefix(r.LocalSync, "unknown:") {
+			r.Unknown = append(r.Unknown, "local sync: "+strings.TrimPrefix(r.LocalSync, "unknown: "))
+		}
+	}
+	if len(r.Unknown) > 0 {
+		return r, fmt.Errorf("%w: status is incomplete: %s", ErrValidator, strings.Join(r.Unknown, "; "))
 	}
 	return r, nil
 }
@@ -301,8 +336,10 @@ func localSync(ctx context.Context, url string, publicHead uint64, head **uint64
 		return "unreachable: " + err.Error()
 	}
 	*head = &n
-	busy, _ := syncing(ctx, c)
+	busy, err := syncing(ctx, c)
 	switch {
+	case err != nil:
+		return fmt.Sprintf("unknown: head %d, eth_syncing failed: %v", n, err)
 	case busy:
 		return fmt.Sprintf("syncing (block %d of %d)", n, publicHead)
 	case n+2 < publicHead:
@@ -325,9 +362,12 @@ func decodeU64(payload []byte) (uint64, error) {
 
 func (r *validatorStatusReport) text(w io.Writer) {
 	fmt.Fprintf(w, "chain %s via %s, block %d; ValidatorRegistry %s\n", r.ChainID, r.RPC, r.Block, r.Registry)
-	if r.ID == 0 {
+	switch r.Identity {
+	case "none":
 		fmt.Fprintln(w, "validator: no VR identity for this operator (run `ubft validator apply`)")
-	} else {
+	case "unknown":
+		fmt.Fprintln(w, "validator: UNKNOWN (the identity lookup failed; see below)")
+	default:
 		fmt.Fprintf(w, "validator %d (owner %s, binding generation %d)\n", r.ID, r.Owner, r.Generation)
 		fmt.Fprintf(w, "  root node   %s\n  EVM node    %s\n  payee       %s\n", r.RootNodeID, r.EVMNodeID, r.Payee)
 		if r.Staged != nil {
@@ -360,9 +400,16 @@ func (r *validatorStatusReport) text(w io.Writer) {
 	for _, a := range r.Activations {
 		fmt.Fprintf(w, "activation: %s\n", a)
 	}
-	fmt.Fprintf(w, "sync: public head %d (%s old, syncing %v)", r.PublicHead, r.PublicHeadAge, r.PublicSyncing)
+	pub := "syncing UNKNOWN"
+	if r.PublicSyncing != nil {
+		pub = fmt.Sprintf("syncing %v", *r.PublicSyncing)
+	}
+	fmt.Fprintf(w, "sync: public head %d (%s old, %s)", r.PublicHead, r.PublicHeadAge, pub)
 	if r.LocalRPC != "" {
 		fmt.Fprintf(w, "; local ureth %s: %s", r.LocalRPC, r.LocalSync)
 	}
 	fmt.Fprintln(w)
+	for _, u := range r.Unknown {
+		fmt.Fprintf(w, "UNKNOWN: %s\n", u)
+	}
 }

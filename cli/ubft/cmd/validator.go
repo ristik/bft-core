@@ -35,6 +35,7 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/util"
 
+	"github.com/unicitynetwork/bft-core/engineapi"
 	"github.com/unicitynetwork/bft-core/vrclient"
 )
 
@@ -142,16 +143,146 @@ func (v *loadedValidator) abs(p string) string {
 	return filepath.Join(v.home, p)
 }
 
+// save rewrites the config (apply records the id). It refuses a config path that is also a key path, and replaces the file through a
+// temporary file and a rename, so a reader never sees half a config.
 func (v *loadedValidator) save() error {
-	return writeValidatorConfig(v.path, v.cfg)
-}
-
-func writeValidatorConfig(path string, cfg validatorConfig) error {
-	b, err := json.MarshalIndent(cfg, "", "  ")
+	if err := v.checkPaths(); err != nil {
+		return err
+	}
+	b, err := configBytes(v.cfg)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(b, '\n'), 0o600)
+	tmp, err := writeTemp(v.path, b)
+	if err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, v.path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+func configBytes(cfg validatorConfig) ([]byte, error) {
+	b, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(b, '\n'), nil
+}
+
+// writeTemp writes b to a new 0600 file next to path and returns its name.
+func writeTemp(path string, b []byte) (string, error) {
+	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return "", err
+	}
+	name := f.Name()
+	_, werr := f.Write(b)
+	serr := f.Sync()
+	cerr := f.Close()
+	if err := errors.Join(werr, serr, cerr, os.Chmod(name, 0o600)); err != nil {
+		_ = os.Remove(name)
+		return "", err
+	}
+	return name, nil
+}
+
+// createExclusive installs b at path only if nothing is there: the content is written to a temporary file first and then hard-linked
+// into place, which fails if path exists. So a concurrent creator never overwrites a winner, and a reader never sees a partial file.
+// It reports false (and no error) when another file is already at path.
+func createExclusive(path string, b []byte) (bool, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return false, err
+	}
+	tmp, err := writeTemp(path, b)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = os.Remove(tmp) }()
+	err = os.Link(tmp, path)
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, os.ErrExist):
+		return false, nil
+	}
+	// a file system without hard links: exclusive open (a concurrent reader may then see the file before it is complete)
+	f, oerr := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) // #nosec G304 -- operator supplied local path
+	if errors.Is(oerr, os.ErrExist) {
+		return false, nil
+	}
+	if oerr != nil {
+		return false, errors.Join(err, oerr)
+	}
+	_, werr := f.Write(b)
+	if err := errors.Join(werr, f.Sync(), f.Close()); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// keyPaths are every file init creates or keeps, by role: no two may be the same file.
+func (v *loadedValidator) keyPaths() []struct{ name, path string } {
+	root, evm := v.abs(v.cfg.RootKeys), v.abs(v.cfg.EVMKeys)
+	return []struct{ name, path string }{
+		{"validator config", v.path},
+		{"root node keys", root}, {"root node info", filepath.Join(filepath.Dir(root), nodeInfoFileName)},
+		{"EVM shard node keys", evm}, {"EVM shard node info", filepath.Join(filepath.Dir(evm), nodeInfoFileName)},
+		{"ureth devp2p key", v.abs(v.cfg.UrethKey)}, {"Engine JWT", v.abs(v.cfg.JWT)}, {"operator key", v.abs(v.cfg.OperatorKey)},
+	}
+}
+
+// canonicalPath resolves symlinks of the longest existing prefix, so two spellings of one file compare equal before it exists.
+func canonicalPath(p string) string {
+	p, err := filepath.Abs(p)
+	if err != nil {
+		return filepath.Clean(p)
+	}
+	dir, rest := p, ""
+	for {
+		if r, err := filepath.EvalSymlinks(dir); err == nil {
+			return filepath.Join(r, rest)
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return p
+		}
+		rest = filepath.Join(filepath.Base(dir), rest)
+		dir = parent
+	}
+}
+
+// checkPaths refuses a layout in which two roles share a file (a config written over a key, two services' keys or node infos in one
+// file), by resolved path and, for existing files, by identity (hard links).
+func (v *loadedValidator) checkPaths() error {
+	ps := v.keyPaths()
+	var errs []error
+	for i := range ps {
+		if ps[i].path == "" {
+			errs = append(errs, fmt.Errorf("no path for the %s", ps[i].name))
+			continue
+		}
+		for j := i + 1; j < len(ps); j++ {
+			if ps[j].path == "" {
+				continue
+			}
+			same := canonicalPath(ps[i].path) == canonicalPath(ps[j].path)
+			if !same {
+				a, errA := os.Stat(ps[i].path)
+				b, errB := os.Stat(ps[j].path)
+				same = errA == nil && errB == nil && os.SameFile(a, b)
+			}
+			if same {
+				errs = append(errs, fmt.Errorf("the %s and the %s are the same file %s", ps[i].name, ps[j].name, ps[i].path))
+			}
+		}
+	}
+	if err := errors.Join(errs...); err != nil {
+		return fmt.Errorf("%w: every key and the config need their own file: %w", ErrValidator, err)
+	}
+	return nil
 }
 
 func (v *loadedValidator) registry() (common.Address, error) {
@@ -312,61 +443,84 @@ type keyOutcome struct {
 	public     string
 }
 
+// ensureKeyConf loads the key file at path, or creates it exclusively when absent. Of concurrent creators exactly one installs its keys;
+// the others load the winner's file. An existing file is never replaced.
 func ensureKeyConf(path string) (*KeyConf, bool, error) {
-	if util.FileExists(path) {
-		kc, err := readKeyConf(path)
-		return kc, false, err
+	if !util.FileExists(path) {
+		kc, err := generateKeys()
+		if err != nil {
+			return nil, false, err
+		}
+		b, err := json.MarshalIndent(kc, "", "  ")
+		if err != nil {
+			return nil, false, err
+		}
+		created, err := createExclusive(path, b)
+		if err != nil {
+			return nil, false, err
+		}
+		if created {
+			return kc, true, nil
+		}
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return nil, false, err
-	}
-	kc, err := generateKeys()
-	if err != nil {
-		return nil, false, err
-	}
-	if err := util.WriteJsonFile(path, kc); err != nil {
-		return nil, false, err
-	}
-	return kc, true, nil
+	kc, err := readKeyConf(path)
+	return kc, false, err
 }
 
-// writeNodeInfo writes node-info.json next to a key file, as `root-node init` and `shard-node init` do, if it is not there.
+// writeNodeInfo writes node-info.json next to a key file, as `root-node init` and `shard-node init` do, if it is not there. An existing
+// node info must describe these keys.
 func writeNodeInfo(keyPath string, kc *KeyConf) error {
 	p := filepath.Join(filepath.Dir(keyPath), nodeInfoFileName)
-	if util.FileExists(p) {
-		return nil
-	}
 	nk, err := nodeKeys(kc)
 	if err != nil {
 		return err
 	}
-	return util.WriteJsonFile(p, &types.NodeInfo{NodeID: nk.NodeID, SigKey: nk.Public(), Stake: 1})
+	b, err := json.MarshalIndent(&types.NodeInfo{NodeID: nk.NodeID, SigKey: nk.Public(), Stake: 1}, "", "  ")
+	if err != nil {
+		return err
+	}
+	if created, err := createExclusive(p, b); err != nil || created {
+		return err
+	}
+	var have types.NodeInfo
+	raw, err := os.ReadFile(p) // #nosec G304 -- operator supplied local path
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(raw, &have); err != nil || have.NodeID != nk.NodeID || !bytes.Equal(have.SigKey, nk.Public()) {
+		return fmt.Errorf("%w: %s does not describe the keys in %s (kept as it is)", ErrValidator, p, keyPath)
+	}
+	return nil
 }
 
-// ensureSecretHex makes a 32-byte secret as 64 hex digits (no newline) in a 0600 file in a 0700 directory, once; an existing file is
-// kept, never replaced.
+// ensureSecretHex makes a 32-byte secret (a secp256k1 scalar in [1, n-1]) as 64 hex digits, prefixed and without a newline, in a 0600
+// file in a 0700 directory, exclusively; an existing file is kept, never replaced, and the caller validates it.
 func ensureSecretHex(path, prefix string) (bool, error) {
 	if util.FileExists(path) {
 		return false, nil
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return false, err
 	}
 	for {
 		var b [32]byte
 		if _, err := rand.Read(b[:]); err != nil {
 			return false, err
 		}
-		if _, err := ethcrypto.ToECDSA(b[:]); err != nil { // a scalar in [1, n-1]
+		if _, err := ethcrypto.ToECDSA(b[:]); err != nil {
 			continue
 		}
-		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) // #nosec G304 -- operator supplied local path
-		if err != nil {
-			return false, err
-		}
-		_, werr := f.WriteString(prefix + hex.EncodeToString(b[:]))
-		return true, errors.Join(werr, f.Close())
+		return createExclusive(path, []byte(prefix+hex.EncodeToString(b[:])))
 	}
+}
+
+// readJWT reads the Engine API secret with the parser the shard node and doctor use (engineapi.ParseSecret: 32 bytes of hex).
+func readJWT(path string) error {
+	raw, err := os.ReadFile(path) // #nosec G304 -- operator supplied local path
+	if err != nil {
+		return err
+	}
+	if _, err := engineapi.ParseSecret(string(raw)); err != nil {
+		return fmt.Errorf("%s: %w", path, err)
+	}
+	return nil
 }
 
 type validatorInitFlags struct {
@@ -432,7 +586,12 @@ func validatorInit(cmd *cobra.Command, f *validatorInitFlags) error {
 	if v.cfg.Registry == "" {
 		v.cfg.Registry = strings.ToLower(vrclient.DefaultRegistry.Hex())
 	}
+	// before anything is created: no two roles in one file (a config over a key would destroy the key)
+	if err := v.checkPaths(); err != nil {
+		return err
+	}
 	var out []keyOutcome
+	var kcs []*KeyConf
 	for _, s := range []struct {
 		name string
 		path string
@@ -441,9 +600,7 @@ func validatorInit(cmd *cobra.Command, f *validatorInitFlags) error {
 		if err != nil {
 			return fmt.Errorf("%w: %s keys: %w", ErrValidator, s.name, err)
 		}
-		if err := writeNodeInfo(s.path, kc); err != nil {
-			return err
-		}
+		kcs = append(kcs, kc)
 		nk, err := nodeKeys(kc)
 		if err != nil {
 			return err
@@ -459,9 +616,18 @@ func validatorInit(cmd *cobra.Command, f *validatorInitFlags) error {
 		}
 		out = append(out, keyOutcome{name: s.name, path: s.path, created: created})
 	}
+	if err := readJWT(v.abs(f.JWT)); err != nil {
+		return fmt.Errorf("%w: the existing Engine JWT is not usable (kept as it is; replace it by hand): %w", ErrValidator, err)
+	}
 	keys, err := v.keys()
 	if err != nil {
 		return err
+	}
+	// node infos only for keys that passed the separation check
+	for i, p := range []string{v.abs(f.RootKeys), v.abs(f.EVMKeys)} {
+		if err := writeNodeInfo(p, kcs[i]); err != nil {
+			return err
+		}
 	}
 	operator := ethcrypto.PubkeyToAddress(keys.Operator.PublicKey)
 	out[2].public = "enode public key " + hex.EncodeToString(ethcrypto.FromECDSAPub(&keys.Ureth.PublicKey)[1:])
@@ -473,8 +639,22 @@ func validatorInit(cmd *cobra.Command, f *validatorInitFlags) error {
 	if _, err := v.payee(); err != nil {
 		return err
 	}
-	if err := v.save(); err != nil {
-		return err
+	if f.Force {
+		if err := v.save(); err != nil {
+			return err
+		}
+	} else {
+		b, err := configBytes(v.cfg)
+		if err != nil {
+			return err
+		}
+		created, err := createExclusive(path, b)
+		if err != nil {
+			return err
+		}
+		if !created {
+			return fmt.Errorf("%w: %s was created by another init meanwhile (kept; use --force to rewrite it)", ErrValidator, path)
+		}
 	}
 	w := cmd.OutOrStdout()
 	for _, o := range out {

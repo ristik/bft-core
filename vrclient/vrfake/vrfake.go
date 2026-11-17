@@ -70,6 +70,10 @@ type Chain struct {
 	Sent [][]byte
 	// NoLogs makes eth_getLogs fail, as an endpoint that refuses wide log queries.
 	NoLogs bool
+	// ExtraLogs are returned by every eth_getLogs, unfiltered: a non-compliant or hostile endpoint.
+	ExtraLogs []map[string]any
+	// FailSyncing makes eth_syncing fail.
+	FailSyncing bool
 }
 
 // New returns a chain with VR at 0xff..03, PoaElection at 0xff..07 and the SealRegistry at 0xff..02, chain id 3, no identities.
@@ -203,6 +207,9 @@ func (c *Chain) dispatch(req request) (any, *rpcError) {
 	case "eth_blockNumber":
 		return hexutil.Uint64(c.Head), nil
 	case "eth_syncing":
+		if c.FailSyncing {
+			return nil, &rpcError{Code: -32601, Message: "the method eth_syncing does not exist/is not available"}
+		}
 		return false, nil
 	case "eth_getBlockByNumber":
 		return map[string]any{"number": hexutil.Uint64(c.Head), "timestamp": hexutil.Uint64(c.HeadTime), "baseFeePerGas": (*hexutil.Big)(c.BaseFee)}, nil
@@ -295,7 +302,7 @@ func (c *Chain) dispatch(req request) (any, *rpcError) {
 				out = append(out, l)
 			}
 		}
-		return out, nil
+		return append(out, c.ExtraLogs...), nil
 	}
 	return nil, &rpcError{Code: -32601, Message: "method not found: " + req.Method}
 }

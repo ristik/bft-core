@@ -293,22 +293,39 @@ func EncodeModuleAction(module ethcommon.Address, action, id uint64) ([]byte, er
 	return vrschema.EncodeABI([]string{"address", "bytes"}, []any{[20]byte(module), inner})
 }
 
-// IdentitiesOf finds the identities registered by owner from VR's Registered(id indexed, owner indexed, bindingRef) logs, oldest first.
-// A public endpoint may refuse a log query over the whole chain; the caller then asks for the id.
+// IdentitiesOf finds the identities registered by owner from VR's Registered(id indexed, owner indexed, bindingRef) logs, oldest first,
+// each once. Every returned log must be VR's Registered event for this owner with a uint64 id; any other answer is refused as malformed
+// (it does not establish ownership: callers check VR.ownerOf). A public endpoint may refuse a log query over the whole chain; the caller
+// then asks for the id.
 func (c *Client) IdentitiesOf(ctx context.Context, owner ethcommon.Address) ([]uint64, error) {
 	ev := VRABI.Events["Registered"]
-	q := map[string]any{"address": c.Registry, "fromBlock": "0x0", "toBlock": c.block(),
-		"topics": []any{ev.ID, nil, ethcommon.BytesToHash(owner.Bytes())}}
+	ownerTopic := ethcommon.BytesToHash(owner.Bytes())
+	q := map[string]any{"address": c.Registry, "fromBlock": "0x0", "toBlock": c.block(), "topics": []any{ev.ID, nil, ownerTopic}}
 	var logs []struct {
-		Topics []ethcommon.Hash `json:"topics"`
+		Address ethcommon.Address `json:"address"`
+		Topics  []ethcommon.Hash  `json:"topics"`
+		Removed bool              `json:"removed"`
 	}
 	if err := c.RPC.CallContext(ctx, &logs, "eth_getLogs", q); err != nil {
 		return nil, err
 	}
 	var ids []uint64
-	for _, l := range logs {
-		if len(l.Topics) == 3 {
-			ids = append(ids, new(big.Int).SetBytes(l.Topics[1].Bytes()).Uint64())
+	seen := map[uint64]bool{}
+	for i, l := range logs {
+		if l.Removed {
+			continue
+		}
+		if l.Address != c.Registry || len(l.Topics) != 3 || l.Topics[0] != ev.ID || l.Topics[2] != ownerTopic {
+			return nil, fmt.Errorf("%w: eth_getLogs answer %d is not VR's Registered log for %s (address %s, %d topics)", ErrVR, i,
+				owner.Hex(), l.Address.Hex(), len(l.Topics))
+		}
+		idw := new(big.Int).SetBytes(l.Topics[1].Bytes())
+		if !idw.IsUint64() || idw.Sign() == 0 {
+			return nil, fmt.Errorf("%w: eth_getLogs answer %d has id topic %s", ErrVR, i, l.Topics[1].Hex())
+		}
+		if id := idw.Uint64(); !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
 		}
 	}
 	return ids, nil

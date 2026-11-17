@@ -308,6 +308,11 @@ func keyChecks(v *loadedValidator) []doctorCheck {
 			if err != nil {
 				return false, err.Error(), "run `ubft validator init` (it creates missing keys and keeps existing ones)"
 			}
+			if k.name == "engine JWT" {
+				if err := readJWT(path); err != nil {
+					return false, err.Error(), "write 32 random bytes as 64 hex digits (openssl rand -hex 32), the same file for this entity's shard node and ureth"
+				}
+			}
 			if mode&0o077 != 0 {
 				return true, fmt.Sprintf("%s (mode %o)", path, mode), "chmod 600 " + path
 			}
@@ -315,6 +320,9 @@ func keyChecks(v *loadedValidator) []doctorCheck {
 		}})
 	}
 	cs = append(cs, doctorCheck{"key separation", func(context.Context) (bool, string, string) {
+		if err := v.checkPaths(); err != nil {
+			return false, err.Error(), "give each key and the config their own file"
+		}
 		if _, err := v.keys(); err != nil {
 			return false, err.Error(), "give each service its own key"
 		}

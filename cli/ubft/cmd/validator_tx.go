@@ -178,13 +178,25 @@ func findID(ctx context.Context, v *loadedValidator, ch *validatorChain, owner c
 	if err != nil {
 		return 0, false, fmt.Errorf("%w: looking up the operator's identities in VR's logs (pass --id if the endpoint refuses log queries): %w", ErrValidator, err)
 	}
-	switch len(ids) {
+	// the logs name candidates; VR's ownerOf decides (an identity's owner never changes in VR v1, but the answer is the endpoint's)
+	var owned []uint64
+	for _, id := range ids {
+		o, err := ch.vr.OwnerOf(ctx, id)
+		if err != nil {
+			return 0, false, err
+		}
+		if o != owner {
+			return 0, false, fmt.Errorf("%w: VR's logs name identity %d for %s, but VR says its owner is %s", ErrValidator, id, owner.Hex(), o.Hex())
+		}
+		owned = append(owned, id)
+	}
+	switch len(owned) {
 	case 0:
 		return 0, false, nil
 	case 1:
-		return ids[0], true, nil
+		return owned[0], true, nil
 	}
-	return 0, false, fmt.Errorf("%w: the operator account owns identities %v; pass --id", ErrValidator, ids)
+	return 0, false, fmt.Errorf("%w: the operator account owns identities %v; pass --id", ErrValidator, owned)
 }
 
 // registration is this validator's registration from its keys and payee.
