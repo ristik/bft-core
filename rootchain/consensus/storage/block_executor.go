@@ -38,6 +38,10 @@ type (
 		Qc         *rctypes.QuorumCert // block's quorum certificate (from next view)
 		CommitQc   *rctypes.QuorumCert // block's commit certificate
 		ShardState ShardStates
+
+		// vrFrozen is what the store retains for a Freeze v5 this block admitted (never serialized: the store retains it when the block
+		// is added, as it retains a V3 companion's body, receipts and candidate).
+		vrFrozen *vrRetention
 	}
 
 	IRChangeReqVerifier interface {
@@ -268,7 +272,7 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 		parentState.States = states
 		parentState.Control = &evmroot.ControlState{Network: parentState.Control.Network,
 			Epoch: newBlock.Epoch, PredecessorBodyID: bytes.Clone(record.NextBodyID), Phase: "idle", Pos: parentState.Control.Pos,
-			UnackedParent: bytes.Clone(parentState.Control.UnackedParent)}
+			UnackedParent: bytes.Clone(parentState.Control.UnackedParent), VR: parentState.Control.VR}
 	}
 	nextShardState, switched, err := parentState.nextBlockSwitching(shardConfs, hash, orchestration)
 	if err != nil {
@@ -300,11 +304,18 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 	if err := pos.block(newBlock.Epoch, newBlock.Round); err != nil {
 		return nil, err
 	}
+	vr, err := loadVR(nextShardState.Control)
+	if err != nil {
+		return nil, err
+	}
+	if vr.on && (!pos.on || services == nil || services.Registry == nil) {
+		return nil, fmt.Errorf("%w: a VR-mode chain needs the projection state and the VR services", ErrVRMode)
+	}
 	// P of a Retirement or RejectResult: the EVM state certified in the parent, frozen before this block's certifications
 	var latestRoot [32]byte
 	var latestBlock []byte
 	latestEVMOK := false
-	if pos.on {
+	if pos.on || vr.on {
 		latestRoot, latestBlock, latestEVMOK = certifiedEVM(nextShardState, shardConfs)
 	}
 	// Apply the ordered control record before shard requests. A freeze takes
@@ -318,9 +329,22 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 			if len(newBlock.Payload.HandoffRecords) == 2 {
 				companion = newBlock.Payload.HandoffRecords[1]
 			}
-			control, err := applyHandoffRecord(nextShardState.Control, newBlock.Payload.HandoffRecords[0], uint64(orchestration.NetworkID()), newBlock.Epoch, newBlock.Round, authority, companion)
+			recordAuthority := authority
+			if vr.on && authority != nil {
+				// a VR chain judges Freeze v5 itself and admits only the exact-recovery V3 companion besides it
+				recordAuthority = &vrFreezeAuthority{handoffAuthority: authority, vr: &vr, svc: services.Registry, parent: bytes.Clone(nextShardState.Control.FrozenParent),
+					query: VRIntentQuery{Control: nextShardState.Control, Backoff: vr.state.Backoff, Epoch: newBlock.Epoch, Round: newBlock.Round,
+						LatestEVMRoot: latestRoot, LatestEVMBlock: latestBlock, LatestEVMOK: latestEVMOK}}
+			}
+			control, err := applyHandoffRecord(nextShardState.Control, newBlock.Payload.HandoffRecords[0], uint64(orchestration.NetworkID()), newBlock.Epoch, newBlock.Round, recordAuthority, companion)
 			if err != nil {
 				return nil, err
+			}
+			if control.Phase == "prepared" {
+				// PR: a Prepare of the stored attempt (VR mode; a no-op on a P85 chain)
+				if err := vr.prepare(newBlock.Epoch, control.Attempt, newBlock.Timestamp); err != nil {
+					return nil, err
+				}
 			}
 			if control.Phase == "prepared" {
 				// The root, not the operator, binds the frozen parent: the EVM IR certified in this branch when the Prepare is
@@ -345,12 +369,28 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 				if err != nil {
 					return nil, err
 				}
-				if len(companion) != 0 && control.Phase == "endorsed" {
+				if len(companion) != 0 && control.Phase == "endorsed" && vr.fv5 != nil {
+					// a primary Freeze v5: registry-mode admission, the FZ transition and the staged Boundary
+					record, err := decodeOrderedRecord(newBlock.Payload.HandoffRecords[0])
+					if err != nil {
+						return nil, err
+					}
+					if err := x.admitV5(&vr, &pos, services.Registry, record, newBlock, nextShardState.States[frozen], shardConfs[frozen], nextShardState.States,
+						shardConfs, orchestration, authority, frozen); err != nil {
+						return nil, err
+					}
+				} else if len(companion) != 0 && control.Phase == "endorsed" {
 					if err := verifyFreezeAssignment(companion, nextShardState.States[frozen], shardConfs[frozen], orchestration, authority.CurrentRoot(), nextShardState.States, shardConfs, services, v3RulesOf(authority)); err != nil {
 						return nil, err
 					}
 					if err := pos.refuseResolved(companion); err != nil {
 						return nil, err
+					}
+					// the primary result the Freeze retains enters the authenticated endorsed state: a later Abort closes it from there
+					if fc, err := ParseFreezeCompanion(companion); err == nil && pos.on {
+						if control.PrimaryResult, err = primaryResultOf(fc.Preimage); err != nil {
+							return nil, err
+						}
 					}
 				}
 				if control.Phase == "committed" && nextShardState.Control.Phase == "endorsed" {
@@ -375,10 +415,21 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 				}
 			}
 			if control.Phase == "aborted" {
-				// an Abort of a retained primary closes its Election result at this block's progress and committed time
+				// An Abort of an attempt whose Freeze retained a primary closes its result at this block's progress and committed time. The
+				// decision is the branch's: only an Abort of an endorsed attempt (its Freeze is an ancestor) can close anything. A Freeze
+				// this root executed and retained on another branch, which never got a certificate, must not change what the same Abort
+				// does here (#1177 review, astra 1).
 				if aborted, derr := decodeOrderedRecord(newBlock.Payload.HandoffRecords[0]); derr == nil && aborted.Kind == "abort" {
-					if err := pos.abort(candidates, aborted, newBlock.Round, newBlock.Timestamp); err != nil {
-						return nil, err
+					if vr.on {
+						// VR: from the staged primary alone; a pre-Freeze Abort and a recovery Abort never close R
+						if err := pos.abortVR(&vr, aborted, newBlock.Round, newBlock.Timestamp); err != nil {
+							return nil, err
+						}
+					} else if nextShardState.Control.Phase == "endorsed" {
+						// P85: the primary result the endorsed state recorded at the Freeze, never a retained candidate (#1177 review r2)
+						if err := pos.closeAborted(nextShardState.Control.PrimaryResult, newBlock.Round, newBlock.Timestamp); err != nil {
+							return nil, err
+						}
 					}
 				}
 			}
@@ -464,7 +515,12 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 			}
 			if pos.acknowledges(awaiting, si.IR.Epoch, si.TR.Epoch, shardKey, evm, found) {
 				// the acknowledgement is certified in this block: project it at this block's progress and committed time
-				if err := pos.ack(candidates, newBlock.Round, newBlock.Timestamp, si.IR.Epoch); err != nil {
+				if vr.on {
+					err = pos.ackVR(&vr, candidates, newBlock.Round, newBlock.Timestamp, si.IR.Epoch)
+				} else {
+					err = pos.ack(candidates, newBlock.Round, newBlock.Timestamp, si.IR.Epoch)
+				}
+				if err != nil {
 					return nil, err
 				}
 			}
@@ -494,6 +550,11 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 	// the P85 controls follow the certifications, in payload order
 	env := posEnv{Control: nextShardState.Control, LatestEVMRoot: latestRoot, LatestEVMBlock: latestBlock, LatestEVMOK: latestEVMOK,
 		InFlight: handoffInFlight(pos, nextShardState.Control)}
+	if vr.on {
+		env.vr = &vrEnv{step: &vr, svc: services.Registry, committee: vrCommittee(nextShardState, shardConfs, orchestration),
+			query: VRIntentQuery{Control: nextShardState.Control, Epoch: newBlock.Epoch, Round: newBlock.Round, LatestEVMRoot: latestRoot,
+				LatestEVMBlock: latestBlock, LatestEVMOK: latestEVMOK}}
+	}
 	replaced, err := pos.controls(newBlock, services, env)
 	if err != nil {
 		return nil, err
@@ -507,6 +568,13 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 	}
 	if nextShardState.Control != nil {
 		pos.store(nextShardState.Control) // an acknowledgement or a control changes the state the control digest commits
+		// the backoff's Open step, once at the end of the block, after all records and controls (design section 5.5.2)
+		if err := vr.endBlock(newBlock.Epoch, newBlock.Round, nextShardState.Control, authority); err != nil {
+			return nil, err
+		}
+		if err := vr.store(nextShardState.Control); err != nil {
+			return nil, err
+		}
 	}
 	nextShardState.Records = pos.records
 	if nextShardState.Leader, err = nextLeaderState(x, newBlock, bootstrapChild, leaders); err != nil {
@@ -521,6 +589,7 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 		HashAlgo:   hash,
 		RootHash:   ut.RootHash(),
 		ShardState: nextShardState,
+		vrFrozen:   vr.frozen,
 	}, nil
 }
 

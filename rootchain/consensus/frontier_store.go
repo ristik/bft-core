@@ -26,6 +26,8 @@ var _ interface {
 	HandoffReceipts([]byte) ([]byte, error)
 	StoreHandoffCandidate([]byte, []byte) error
 	HandoffCandidate([]byte) ([]byte, error)
+	StoreHandoffVRCandidate([]byte, []byte) error
+	HandoffVRCandidate([]byte) ([]byte, error)
 	StoreHandoffCheckpoint(uint64, []byte) error
 	HandoffCheckpoint(uint64) ([]byte, error)
 	handoffBundleArchive
@@ -261,6 +263,20 @@ func (s *frontierPersistentStore) HandoffCandidate(id []byte) ([]byte, error) {
 		return store.HandoffCandidate(id)
 	}
 	return nil, nil // callers treat a store with no candidates as having none
+}
+
+func (s *frontierPersistentStore) StoreHandoffVRCandidate(id, candidate []byte) error {
+	if store, ok := s.PersistentStore.(interface{ StoreHandoffVRCandidate([]byte, []byte) error }); ok {
+		return store.StoreHandoffVRCandidate(id, candidate)
+	}
+	return storage.ErrAssignmentHistory
+}
+
+func (s *frontierPersistentStore) HandoffVRCandidate(id []byte) ([]byte, error) {
+	if store, ok := s.PersistentStore.(interface{ HandoffVRCandidate([]byte) ([]byte, error) }); ok {
+		return store.HandoffVRCandidate(id)
+	}
+	return nil, nil
 }
 
 // StoreHandoffCheckpoint and HandoffCheckpoint forward the canonical handoff checkpoint. Without them the block tree sees no checkpoint

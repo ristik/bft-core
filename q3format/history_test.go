@@ -9,9 +9,9 @@ import (
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/handoff"
 	testtrustbase "github.com/unicitynetwork/bft-core/internal/testutils/trustbase"
-	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
+	"github.com/unicitynetwork/bft-core/rootrecords"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/types/hex"
@@ -66,8 +66,11 @@ func commitProof(t *testing.T, tb *types.RootTrustBaseV1, s signers, rec evmroot
 func commitProofCfg(t *testing.T, tb *types.RootTrustBaseV1, s signers, rec evmroot.OrderedHandoffRecord, cfg votesig.Config, signedBy ...string) handoff.OldCommitProof {
 	t.Helper()
 	net := tb.NetworkID
-	parent, err := storage.NewGenesisBlock(net, crypto.SHA256, storage.ProfileHandoff)
-	require.NoError(t, err)
+	// The genesis control state of a handoff-profile root (storage.initialControl), restated: q3format's internal tests cannot import the
+	// root store, which imports vradmit, which imports q3format. The genesis state has no shards and no leader leaf, so its unicity tree is
+	// the control leaf alone.
+	head := &evmroot.ControlState{Network: uint64(net), Epoch: 1, PredecessorBodyID: make([]byte, 32), Phase: "idle",
+		Pos: rootrecords.NewState(1, rctypes.GenesisRootRound+1).Bytes()}
 	zero := make([]byte, 32)
 	steps := []struct {
 		round       uint64
@@ -77,12 +80,12 @@ func commitProofCfg(t *testing.T, tb *types.RootTrustBaseV1, s signers, rec evmr
 	for _, st := range steps {
 		ordered := rec
 		ordered.OrderedRound, ordered.Kind, ordered.FrozenID, ordered.SuccessorTRHash = st.round, st.kind, st.frozen, st.tr
-		previous := parent.ShardState.Control
-		parent.ShardState.Control = &evmroot.ControlState{Network: rec.Network, Epoch: rec.Epoch, PredecessorBodyID: rec.PredecessorBodyID,
+		previous := head
+		head = &evmroot.ControlState{Network: rec.Network, Epoch: rec.Epoch, PredecessorBodyID: rec.PredecessorBodyID,
 			Attempt: rec.Attempt, Phase: st.phase, OrderedRound: st.round, RecordBytes: ordered.Bytes(), PreviousDigest: previous.Digest()}
 	}
-	control := *parent.ShardState.Control
-	tree, _, err := parent.ShardState.UnicityTree(crypto.SHA256)
+	control := *head
+	tree, err := types.NewUnicityTree(crypto.SHA256, []*types.UnicityTreeData{{Partition: evmroot.D4ControlPartition, ShardTreeRoot: control.Digest()}})
 	require.NoError(t, err)
 	path, err := tree.Certificate(evmroot.D4ControlPartition)
 	require.NoError(t, err)
