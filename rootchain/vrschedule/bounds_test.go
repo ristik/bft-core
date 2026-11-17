@@ -1,0 +1,345 @@
+package vrschedule
+
+import (
+	"crypto/sha256"
+	"fmt"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-core/evmroot"
+	"github.com/unicitynetwork/bft-core/q3format"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
+	"github.com/unicitynetwork/bft-core/vradmit"
+	"github.com/unicitynetwork/bft-core/vrhandoff"
+	"github.com/unicitynetwork/bft-core/vrschema"
+	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
+)
+
+// The regressions of review #1188's message-handling findings (B1 to B7, B11).
+
+func (w *world) signerOf(root string) abcrypto.Signer {
+	for _, m := range w.Members {
+		if m.Root == root {
+			return m.RK.Signer
+		}
+	}
+	w.T.Fatalf("no member %s", root)
+	return nil
+}
+
+// held is a service at view 0 holding every proof and view 0's assembly.
+func (w *world) held(c Committed) (*Service, vrhandoff.Assembly) {
+	s := w.service("x")
+	s.Update(c)
+	pops := w.PoPs(w.in)
+	a := w.Assembly(w.in, w.d, 0, pops)
+	for i := range pops {
+		_, _, _ = s.Offer("peer", Message{PoP: &pops[i]})
+	}
+	o, _, err := s.Offer(w.assembler(0), Message{Assembly: &a})
+	require.NoError(w.T, err)
+	require.Equal(w.T, Retained, o)
+	return s, a
+}
+
+func (w *world) trustBase() []byte {
+	_, tb, err := vrhandoff.TrustBase(w.in, w.RC.RootEpoch)
+	require.NoError(w.T, err)
+	return tb
+}
+
+// B1: a successor member re-signing its readiness (50 distinct, valid copies) yields one evidence record; only the first conflict is
+// verified, every later copy is dropped unverified.
+func TestReadinessEquivocationIsOneRecord(t *testing.T) {
+	w := newWorld(t)
+	s, a := w.held(w.committed(0))
+	body, err := vrhandoff.DeriveBody(w.in, w.RC.RootEpoch, sha256.Sum256(a.Candidate), w.BC)
+	require.NoError(t, err)
+	tb := w.trustBase()
+	m := w.J[0]
+	signer := w.ByStaking(m.StakingID).RK.Signer
+	r0, err := vrhandoff.SignReadiness(w.in, a, body, m.RootNodeID, tb, nil, signer)
+	require.NoError(t, err)
+	o, _, err := s.Offer("byz", Message{Readiness: &r0})
+	require.NoError(t, err)
+	require.Equal(t, Retained, o)
+	outcomes := map[Outcome]int{}
+	for i := 0; i < 50; i++ {
+		var rule vrschema.Word
+		rule[0], rule[1] = byte(i), 0xAA
+		c, err := vrhandoff.SignCommitment(w.in.Network, m, rule, rule, signer)
+		require.NoError(t, err)
+		r, err := vrhandoff.SignReadiness(w.in, a, body, m.RootNodeID, tb, []vrhandoff.SupportCommitment{c}, signer)
+		require.NoError(t, err)
+		j := s.Prepare("byz", Message{Readiness: &r})
+		if i > 0 {
+			require.Nil(t, j.Verify, "copy %d is not verified: the member already equivocated in the view", i)
+		}
+		o, _, _ := s.Offer("byz", Message{Readiness: &r})
+		outcomes[o]++
+	}
+	require.Equal(t, map[Outcome]int{Equivocated: 1, Dropped: 49}, outcomes)
+	ev := s.Evidence()
+	require.Len(t, ev, 1)
+	require.Equal(t, m.RootNodeID, ev[0].Signer)
+	o, _, _ = s.Offer("peer", Message{Readiness: &r0})
+	require.Equal(t, Duplicate, o, "the retained readiness stays")
+
+	// the evidence goes with its view's retention window
+	s.Update(w.committed(RetainedViews))
+	require.Empty(t, s.Evidence())
+}
+
+// B1: an assembler signing a second assembly of its view yields one evidence record; later ones are dropped unverified.
+func TestAssemblyEquivocationIsOneRecord(t *testing.T) {
+	w := newWorld(t)
+	s, a := w.held(w.committed(0))
+	signer := w.signerOf(w.assembler(0))
+	outcomes := map[Outcome]int{}
+	for i := 0; i < 20; i++ {
+		other := a
+		other.Candidate = append(append([]byte(nil), a.Candidate...), byte(i))
+		msg, err := other.SignedBytes()
+		require.NoError(t, err)
+		other.Sig, err = signer.SignBytes(msg)
+		require.NoError(t, err)
+		o, _, _ := s.Offer("relay", Message{Assembly: &other})
+		outcomes[o]++
+	}
+	require.Equal(t, map[Outcome]int{Equivocated: 1, Dropped: 19}, outcomes)
+	ev := s.Evidence()
+	require.Len(t, ev, 1)
+	require.Equal(t, w.assembler(0), ev[0].Signer)
+	require.False(t, s.lastSeats()["relay"], "a relay of a valid conflict is not penalised")
+}
+
+// B1: a readiness with more commitments than the support table can hold is dropped before anything is verified or buffered.
+func TestAnOversizedReadinessIsNeverVerified(t *testing.T) {
+	w := newWorld(t)
+	s, a := w.held(w.committed(0))
+	r := w.readiness(a)[w.J[0].RootNodeID]
+	r.Commitments = make([]vrschema.SupportCommitment, vrschema.SupportRules+1)
+	j := s.Prepare("byz", Message{Readiness: &r})
+	require.Nil(t, j.Verify)
+	require.Equal(t, Dropped, j.Outcome)
+}
+
+// B2: a bogus or dead digest holds no slot: messages for a not-yet-derived intent from other senders are buffered within their own quota,
+// a bogus digest's messages expire, and a dead intent's late messages are dropped outright.
+func TestNoDigestHoldsTheBuffer(t *testing.T) {
+	w := newWorld(t)
+	s := w.service("x")
+	s.Update(w.committed(0))
+	pops := w.PoPs(w.in)
+	bogus := pops[0]
+	bogus.IntentDigest = make([]byte, 32)
+	bogus.IntentDigest[0] = 0xEE
+	o, _, _ := s.Offer("byz", Message{PoP: &bogus})
+	require.Equal(t, Buffered, o)
+	next := pops[1]
+	next.IntentDigest = make([]byte, 32)
+	next.IntentDigest[0] = 0x11
+	o, _, _ = s.Offer("honest", Message{PoP: &next})
+	require.Equal(t, Buffered, o, "a message for the next intent is buffered, not dropped")
+	for i := 0; i <= PendingExpiry; i++ {
+		s.Update(w.committed(0))
+	}
+	s.mu.Lock()
+	require.Empty(t, s.buffered, "both expired")
+	s.mu.Unlock()
+
+	// the current intent dies: its late messages are dropped, not buffered
+	dead := w.committed(0)
+	dead.Derivable = false
+	s.Update(dead)
+	o, _, _ = s.Offer("late", Message{PoP: &pops[2]})
+	require.Equal(t, Dropped, o, "a dead intent's message")
+	s.Update(w.committed(0))
+	o, _, _ = s.Offer("late", Message{PoP: &pops[2]})
+	require.Equal(t, Retained, o, "the same intent derived again is current")
+}
+
+// B3: before an intent is derived the bound is the largest committee's; at the bound a sender with fewer queued messages displaces the
+// longest queue's newest, so two flooding senders cannot starve an honest one.
+func TestQueueAdmissionIsFair(t *testing.T) {
+	w := newWorld(t)
+	s := w.service("x")
+	q := NewQueue(s, 0)
+	pops := w.PoPs(w.in)
+	admitted := 0
+	for i := 0; i < 16; i++ {
+		p := pops[i%len(pops)]
+		if q.Submit(fmt.Sprintf("s%02d", i), Message{PoP: &p}) {
+			admitted++
+		}
+	}
+	require.Equal(t, 16, admitted, "no intent: n_s is MAX_COMMITTEE")
+	require.Equal(t, QueueBound(vrschema.MaxCommittee), q.bound())
+
+	s.Update(w.committed(0))
+	q = NewQueue(s, 0)
+	bound := q.bound()
+	p := pops[0]
+	for i := 0; i < MaxQueuedPerPeer; i++ {
+		q.Submit("byz1", Message{PoP: &p})
+		q.Submit("byz2", Message{PoP: &p})
+	}
+	require.Equal(t, bound, q.Len())
+	for i := 0; i < 3; i++ {
+		require.True(t, q.Submit(fmt.Sprintf("honest%d", i), Message{PoP: &p}), "an honest sender is admitted at the bound")
+	}
+	require.Equal(t, bound, q.Len())
+	q.mu.Lock()
+	require.LessOrEqual(t, len(q.per["byz1"])-len(q.per["byz2"]), 1)
+	q.mu.Unlock()
+	require.False(t, q.Submit("byz1", Message{PoP: &p}), "a flooding sender displaces nobody")
+}
+
+// B3: an invalid proof is verified at most 1 + MaxReplacements times per sender and successor.
+func TestInvalidProofsHaveAnAllowance(t *testing.T) {
+	w := newWorld(t)
+	s := w.service("x")
+	s.Update(w.committed(0))
+	p := w.PoPs(w.in)[0]
+	p.PoP.Signature = append([]byte(nil), p.PoP.Signature...)
+	p.PoP.Signature[3] ^= 1
+	var got []Outcome
+	for i := 0; i < 5; i++ {
+		o, _, _ := s.Offer("byz", Message{PoP: &p})
+		got = append(got, o)
+	}
+	require.Equal(t, []Outcome{Refused, Refused, Dropped, Dropped, Dropped}, got)
+	good := w.PoPs(w.in)[0]
+	o, _, _ := s.Offer("honest", Message{PoP: &good})
+	require.Equal(t, Retained, o, "another sender's valid proof")
+}
+
+// B5: with a verification queue, buffered messages that become judgeable go back through the queue (verified there, off the service's
+// lock), not inline.
+func TestBufferedMessagesAreRequeued(t *testing.T) {
+	w := newWorld(t)
+	s := w.service("x")
+	s.Update(w.committed(0))
+	q := NewQueue(s, 0)
+	ms := w.messages(1)
+	for _, m := range ms {
+		_, _, _ = s.Offer("peer", m)
+	}
+	require.Zero(t, q.Len())
+	s.Update(w.committed(1))
+	require.NotZero(t, q.Len(), "view 1's assembly went to the queue")
+	for q.Step() {
+	}
+	_, ok := s.Plan()
+	require.True(t, ok, "the queue re-judged the buffered view, its readiness after its assembly")
+}
+
+// B6: a readiness naming another assembly of the view is dropped without charging its sender or moving its seat.
+func TestAReadinessOfAnotherAssemblyIsNotCharged(t *testing.T) {
+	w := newWorld(t)
+	s, a := w.held(w.committed(0))
+	other := a
+	other.Candidate = append(append([]byte(nil), a.Candidate...), 1)
+	body, err := vrhandoff.DeriveBody(w.in, w.RC.RootEpoch, sha256.Sum256(other.Candidate), w.BC)
+	require.NoError(t, err)
+	tb := w.trustBase()
+	m := w.J[0]
+	r, err := vrhandoff.SignReadiness(w.in, other, body, m.RootNodeID, tb, nil, w.ByStaking(m.StakingID).RK.Signer)
+	require.NoError(t, err)
+	for i := 0; i < 3; i++ {
+		o, _, _ := s.Offer("honest", Message{Readiness: &r})
+		require.Equal(t, Dropped, o)
+	}
+	require.False(t, s.lastSeats()["honest"])
+	good := w.readiness(a)[m.RootNodeID]
+	o, _, _ := s.Offer("honest", Message{Readiness: &good})
+	require.Equal(t, Retained, o, "the sender's allowance is intact")
+}
+
+// B7: a readiness lacking the support an effective rule requires is refused (its sender keeps its seat) and a covering replacement is
+// retained; no complete set without that support ever enters I-RET.
+func TestAReadinessMustCarryTheRequiredSupport(t *testing.T) {
+	w := newWorld(t)
+	rule, release := vrschema.Word{0x51}, vrschema.Word{0x52}
+	c := w.committed(0)
+	c.Schedule = []vrschema.Activation{{RuleID: rule, ReleaseDigest: release, RootEpoch: w.RC.RootEpoch, State: vrschema.ActActive, ChangeID: 1}}
+	s, a := w.held(c)
+	rs := w.readiness(a) // no commitments
+	m := w.J[0]
+	bare := rs[m.RootNodeID]
+	o, _, err := s.Offer("member", Message{Readiness: &bare})
+	require.Equal(t, Refused, o)
+	require.ErrorIs(t, err, vradmit.ErrSupportWait)
+	require.False(t, s.lastSeats()["member"], "an unsupported readiness keeps its sender's seat")
+
+	body, err := vrhandoff.DeriveBody(w.in, w.RC.RootEpoch, sha256.Sum256(a.Candidate), w.BC)
+	require.NoError(t, err)
+	tb := w.trustBase()
+	signer := w.ByStaking(m.StakingID).RK.Signer
+	cm, err := vrhandoff.SignCommitment(w.in.Network, m, rule, release, signer)
+	require.NoError(t, err)
+	covered, err := vrhandoff.SignReadiness(w.in, a, body, m.RootNodeID, tb, []vrhandoff.SupportCommitment{cm}, signer)
+	require.NoError(t, err)
+	o, _, err = s.Offer("member", Message{Readiness: &covered})
+	require.NoError(t, err)
+	require.Equal(t, Retained, o, "the covering replacement")
+	for id, r := range rs {
+		if id != m.RootNodeID {
+			r := r
+			_, _, _ = s.Offer(id, Message{Readiness: &r})
+		}
+	}
+	_, _, complete, _ := s.Current()
+	require.False(t, complete, "the other members lack the support: no certificate is held")
+}
+
+// B11: when the served sender's queue empties, the next sender is served next, not skipped.
+func TestRoundRobinSkipsNoSender(t *testing.T) {
+	w := newWorld(t)
+	s := w.service("x")
+	s.Update(w.committed(0))
+	q := NewQueue(s, 0)
+	p := w.PoPs(w.in)[0]
+	q.Submit("a", Message{PoP: &p})
+	q.Submit("b", Message{PoP: &p})
+	q.Submit("b", Message{PoP: &p})
+	q.Submit("c", Message{PoP: &p})
+	var order []string
+	for q.Len() > 0 {
+		m, _ := q.pop()
+		order = append(order, m.sender)
+	}
+	require.Equal(t, []string{"a", "b", "c", "b"}, order)
+}
+
+// The on-demand output read (review #1188 test gaps): Derive reads VR's output at an uncached certified EVM state through Fetch and caches
+// it; DeriveCached, the leader's check, never fetches and reports the state unavailable.
+func TestDeriveFetchesOnDemandAndDeriveCachedNever(t *testing.T) {
+	st := vradmit.GenesisRootState(1, 4)
+	raw, err := st.Encode()
+	require.NoError(t, err)
+	sources, err := NewSources("")
+	require.NoError(t, err)
+	root := [32]byte{7}
+	fetches := 0
+	p := &Intents{Config: func() (q3format.ProtocolConfig, error) { return q3format.ProtocolConfig{}, nil }, Sources: sources, Outputs: NewOutputs(),
+		Fetch: func(_, r [32]byte) (*vrhandoff.Output, error) {
+			fetches++
+			require.Equal(t, root, r)
+			return nil, nil // no open Published output there
+		}}
+	q := storage.VRIntentQuery{Control: &evmroot.ControlState{VR: raw}, Backoff: st.Backoff, Epoch: st.Backoff.Epoch, LatestEVMRoot: root,
+		LatestEVMBlock: make([]byte, 32), LatestEVMOK: true, Root: func() (storage.VRRootFacts, error) { return storage.VRRootFacts{}, nil }}
+	_, ok, err := p.DeriveCached(q)
+	require.ErrorIs(t, err, ErrUnavailable)
+	require.False(t, ok)
+	require.Zero(t, fetches, "the leader's check never reads the execution client")
+	_, ok, err = p.Derive(q)
+	require.NoError(t, err)
+	require.False(t, ok, "fetched: no open output there")
+	require.Equal(t, 1, fetches)
+	_, _, err = p.DeriveCached(q)
+	require.NoError(t, err, "now cached")
+	_, _, _ = p.Derive(q)
+	require.Equal(t, 1, fetches, "cached: not fetched again")
+}

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -91,6 +92,30 @@ func enableVRHandoff(ctx context.Context, cm *consensus.ConsensusManager, dep vr
 		go func() { <-ctx.Done(); host.RemoveProtocolHandler(vrschedule.ProtocolID) }()
 	}
 	return nil
+}
+
+// enableVRHandoffInVRMode wires the VR handoff root side on a VR-mode root, one whose VR services (the generation's deployment and the
+// state authority over the pinned VR) are installed, that reads VR through rpcURL: it is the root side of every VR generation's handoff,
+// replacing the P85 operator script (handoff_drive.py) there. A root outside VR mode is unchanged; a VR-mode root without an execution
+// client follows the chain but takes no part in the protocol. It reports whether the root side is on.
+func enableVRHandoffInVRMode(ctx context.Context, cm *consensus.ConsensusManager, shardConfs []*types.PartitionDescriptionRecord, rpcURL, home string,
+	signer abcrypto.Signer, host *network.Peer, log *slog.Logger) (bool, error) {
+	reg := cm.VRServices()
+	if reg == nil {
+		return false, nil
+	}
+	if rpcURL == "" {
+		log.Warn("VR handoff: a VR-mode root without --pos-evm-rpc takes no part in the handoff protocol")
+		return false, nil
+	}
+	a, ok := reg.State.(vrstate.Authority)
+	if !ok {
+		return false, fmt.Errorf("%w: the VR state authority carries no pins", ErrVRHandoffCmd)
+	}
+	if err := enableVRHandoff(ctx, cm, reg.Deployment, a.Pins, shardConfs, rpcURL, home, signer, host); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 type vrHandoffOperator interface {

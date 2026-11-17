@@ -3,6 +3,7 @@ package consensus
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -56,7 +57,6 @@ type vrHandoff struct {
 	commits  chan []vrschedule.CertifiedEVM
 	peers    func() []peer.ID
 	update   func() (vrschedule.Committed, error)
-	restored bool
 	prefetch chan vrschedule.CertifiedEVM
 	wmu      sync.Mutex
 	witness  struct {
@@ -65,7 +65,27 @@ type vrHandoff struct {
 		payload []byte
 	}
 	fetching bool
+
+	// the stage pull (GetStage): a (re)started root rebuilds its view state from its peers until one answers; while the current intent
+	// holds no complete certificate it pulls again from one peer at a time every PullInterval, the re-send path for messages its queue or
+	// buffer dropped
+	pmu      sync.Mutex
+	restored bool
+	pulling  bool
+	lastPull time.Time
+	pullNext int
+	now      func() time.Time
+
+	// the committed state and leader inputs the manager's VR paths read (the block store's, the executor's intents; replaced in tests)
+	opening func() (storage.VROpening, bool, error)
+	queryAt func(*storage.ExecutedBlock) (storage.VRIntentQuery, bool, error)
+	derive  func(storage.VRIntentQuery) (vrschedule.Derived, bool, error)
+	leader  func(vrschedule.PreparePlan, *storage.ExecutedBlock, uint64, types.PartitionShardID, func(p, root [32]byte) ([]byte, error), crypto.Hash) (vrschedule.LeaderStep, error)
+	reject  func(ctx context.Context, parentRound, round uint64, qc *rctypes.QuorumCert) bool
 }
+
+// PullInterval is how often a root whose current intent holds no complete certificate pulls a peer's stage set.
+const PullInterval = 5 * time.Second
 
 // EnableVRHandoff installs the VR handoff root side on a VR-mode manager: the intent provider into the executor's VR services, the commit
 // observer, the protocol service with its verification queue, and their workers (stopped with ctx). It must be called before the manager
@@ -97,6 +117,12 @@ func (x *ConsensusManager) EnableVRHandoff(ctx context.Context, cfg VRHandoffCon
 	}
 	v.peers = func() []peer.ID { return x.vrPeers(v) }
 	v.update = x.vrCommitted
+	v.now = time.Now
+	v.opening = x.blockStore.CommittedVROpening
+	v.queryAt = x.blockStore.VRQueryAt
+	v.derive = cfg.Intents.DeriveCached // the leader's checks never wait on the execution client (review #1188 B9)
+	v.leader = vrschedule.LeaderRecords
+	v.reject = x.preferRejection
 	// a HandoffView is judged over its parent, normally executed but not yet committed: VR's output there is prefetched when the parent is
 	// executed, and read on demand (bounded) when the judgment comes first
 	reader := cfg.Reader
@@ -149,6 +175,14 @@ func (v *vrHandoff) prefetchRun(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// VRServices are the VR-mode collaborators installed into the control executor (nil on a root that is not in VR mode).
+func (x *ConsensusManager) VRServices() *storage.VRServices {
+	if svc := x.blockStore.PosServices(); svc != nil {
+		return svc.Registry
+	}
+	return nil
 }
 
 // VRService is the protocol service, for the peer protocol's server.
@@ -257,25 +291,68 @@ func (v *vrHandoff) refresh(ctx context.Context) {
 	v.svc.Update(c)
 	if c.Prepared && c.FrozenParent != ([32]byte{}) {
 		if p, ok := v.svc.Prepared(); ok {
-			v.fetchWitness(ctx, c.FrozenParent, c.FrozenRoot, p)
+			// in the background: the commit worker never waits on the execution client (review #1188 B8); fetchWitness de-duplicates
+			go v.fetchWitness(ctx, c.FrozenParent, c.FrozenRoot, p)
 		}
 	}
-	if intent, view, _, ok := v.svc.Current(); ok && !v.restored && v.cfg.Opener != nil {
-		v.restored = true
-		from := uint64(0)
-		if view >= vrschedule.RetainedViews {
-			from = view - vrschedule.RetainedViews + 1
+	v.pull(ctx)
+}
+
+// pull starts a stage pull when one is due (never more than one at a time, never on the commit worker): after a (re)start from every peer
+// until one answers, then while the current intent holds no complete certificate from one peer at a time every PullInterval.
+func (v *vrHandoff) pull(ctx context.Context) {
+	intent, view, complete, ok := v.svc.Current()
+	if !ok || v.cfg.Opener == nil {
+		return
+	}
+	v.pmu.Lock()
+	now := v.now()
+	due := !v.pulling && (!v.restored || (!complete && now.Sub(v.lastPull) >= PullInterval))
+	if !due {
+		v.pmu.Unlock()
+		return
+	}
+	v.pulling, v.lastPull = true, now
+	restoring := !v.restored
+	peers := v.peers()
+	if !restoring && len(peers) > 0 {
+		peers = []peer.ID{peers[v.pullNext%len(peers)]}
+		v.pullNext++
+	}
+	v.pmu.Unlock()
+	from := uint64(0)
+	if view >= vrschedule.RetainedViews {
+		from = view - vrschedule.RetainedViews + 1
+	}
+	go func() {
+		answered := v.pullFrom(ctx, peers, intent, from)
+		v.pmu.Lock()
+		defer v.pmu.Unlock()
+		v.pulling = false
+		if answered {
+			v.restored = true
 		}
-		for _, p := range v.peers() {
-			set, err := vrschedule.GetStage(ctx, v.cfg.Opener, p, intent, from)
-			if err != nil {
-				continue
-			}
-			for _, m := range set.Offers() {
-				v.queue.Submit(p.String(), m)
+	}()
+}
+
+// pullFrom asks the peers for their stage sets of intent and offers each set's messages in order (proofs, assemblies, readiness) as that
+// peer's; a set is abandoned at its first refused message. It reports whether any peer answered.
+func (v *vrHandoff) pullFrom(ctx context.Context, peers []peer.ID, intent [32]byte, from uint64) bool {
+	answered := false
+	for _, p := range peers {
+		set, err := vrschedule.GetStage(ctx, v.cfg.Opener, p, intent, from)
+		if err != nil {
+			continue
+		}
+		answered = true
+		for _, m := range set.Offers() {
+			if o, _, _ := v.svc.Offer(p.String(), m); o == vrschedule.Refused {
+				v.cfg.Log.Debug("VR handoff: a peer's stage set holds a refused message", "peer", p.String())
+				break
 			}
 		}
 	}
+	return answered
 }
 
 // vrCommitted is what the protocol learns from the committed root block: the derived intent, its committed view, a committed Prepare of its
@@ -442,31 +519,41 @@ func (x *ConsensusManager) SubmitVRCertificate(c vrschema.ViewCertificate) error
 // the witness from the cache the commit of the Prepare filled (the proposal path never waits on the execution client).
 func (x *ConsensusManager) vrRecordsForRound(round uint64, parent *storage.ExecutedBlock, parentQC *rctypes.QuorumCert) ([][]byte, error) {
 	control := parent.ShardState.Control
-	plan, ok := x.vr.svc.Plan()
+	v := x.vr
+	if control == nil {
+		return nil, nil
+	}
+	plan, ok := v.svc.Plan()
 	if control.Phase == "prepared" || control.Phase == "endorsed" {
-		plan, ok = x.vr.svc.Prepared()
+		plan, ok = v.svc.Prepared()
 	}
 	if !ok {
 		return nil, nil
 	}
-	step, err := vrschedule.LeaderRecords(plan, parent, round, x.vr.cfg.EVM, func(p, root [32]byte) ([]byte, error) { return x.vr.witnessAt(p, root, plan) },
-		x.params.HashAlgorithm)
+	step, err := v.leader(plan, parent, round, v.cfg.EVM, func(p, root [32]byte) ([]byte, error) { return v.witnessAt(p, root, plan) }, x.params.HashAlgorithm)
 	if err != nil {
 		x.log.Warn("VR handoff: no handoff record ordered", "round", round, "attempt", plan.Attempt, "error", err)
 		return nil, nil
 	}
 	if step.Kind == "" {
+		if step.Reason == vrschedule.ReasonOtherBody {
+			// review #1188 B13: this root's I-RET certificate is of another view's body than the committed Prepare's; only roots holding
+			// the prepared body order its Freeze
+			x.log.Info("VR handoff: the prepared body is not this root's certificate; another leader orders its Freeze", "round", round,
+				"attempt", plan.Attempt)
+			return nil, nil
+		}
 		x.log.Debug("VR handoff: no handoff record ordered", "round", round, "reason", step.Reason)
 		return nil, nil
 	}
 	if step.Kind == "prepare" {
 		// the planned certificate's intent must still be the one derivable at this parent (it may have died for a reason the epoch and
-		// attempt do not show: R no longer open, another fold or schedule)
-		q, on, qerr := x.blockStore.VRQueryAt(parent)
+		// attempt do not show: R no longer open, another fold or schedule); judged from the cache only (a miss: not this round)
+		q, on, qerr := v.queryAt(parent)
 		if qerr != nil || !on {
 			return nil, nil
 		}
-		d, derivable, derr := x.vr.cfg.Intents.Derive(q)
+		d, derivable, derr := v.derive(q)
 		if derr != nil || !derivable || d.Digest != plan.Intent {
 			x.log.Debug("VR handoff: the planned intent is not the one derivable at this parent", "round", round, "error", derr)
 			return nil, nil
@@ -478,7 +565,7 @@ func (x *ConsensusManager) vrRecordsForRound(round uint64, parent *storage.Execu
 				return nil, nil
 			}
 		}
-		if x.preferRejection(context.Background(), parentQC.GetRound(), round, parentQC) {
+		if v.reject(context.Background(), parentQC.GetRound(), round, parentQC) {
 			return nil, nil
 		}
 	}
@@ -540,7 +627,7 @@ func (x *ConsensusManager) orderHandoffViewWith(ctx context.Context, block *rcty
 	if _, ok := x.vr.svc.Plan(); ok {
 		return // a complete verified certificate: the Prepare comes first, never another view
 	}
-	o, on, err := x.blockStore.CommittedVROpening()
+	o, on, err := x.vr.opening()
 	if err != nil || !on {
 		return
 	}

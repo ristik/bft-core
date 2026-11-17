@@ -117,6 +117,9 @@ func VerifyPlan(d Derived, incumbents map[string][]byte, committedView uint64, c
 		Result: vrschema.Word(cand.SourceRef), Body: body, Certificate: c}, nil
 }
 
+// ReasonOtherBody is the LeaderStep reason when the committed Prepare is of another attempt or body than the plan's.
+const ReasonOtherBody = "another attempt or body is prepared"
+
 // LeaderStep is what a leader orders for a plan over a parent block: the records (none when Reason says why not) and their kind.
 type LeaderStep struct {
 	Kind    string // "prepare", "freeze", "commit", or "" when nothing is ordered
@@ -167,7 +170,7 @@ func LeaderRecords(p PreparePlan, parent *storage.ExecutedBlock, round uint64, e
 			return LeaderStep{}, err
 		}
 		if previous.Attempt != p.Attempt || !bytes.Equal(previous.NextBodyID, id[:]) {
-			return LeaderStep{Reason: "another attempt or body is prepared"}, nil
+			return LeaderStep{Reason: ReasonOtherBody}, nil
 		}
 		si := parent.ShardState.States[evm]
 		if si == nil || si.IR == nil || len(control.FrozenParent) != 32 || !bytes.Equal(si.IR.BlockHash, control.FrozenParent) || len(si.IR.Hash) != 32 {

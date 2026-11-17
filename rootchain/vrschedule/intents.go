@@ -57,7 +57,15 @@ type Derived struct {
 }
 
 // Derive is Intent with the intent itself.
-func (p *Intents) Derive(q storage.VRIntentQuery) (Derived, bool, error) {
+func (p *Intents) Derive(q storage.VRIntentQuery) (Derived, bool, error) { return p.derive(q, true) }
+
+// DeriveCached is Derive from the observer's cache only: an uncached output is unavailable, never fetched (a leader's own checks, which
+// must not wait on the execution client).
+func (p *Intents) DeriveCached(q storage.VRIntentQuery) (Derived, bool, error) {
+	return p.derive(q, false)
+}
+
+func (p *Intents) derive(q storage.VRIntentQuery, fetch bool) (Derived, bool, error) {
 	var none Derived
 	if q.Control == nil || q.Root == nil || p.Config == nil || p.Sources == nil {
 		return none, false, fmt.Errorf("%w: no context", ErrUnavailable)
@@ -91,7 +99,7 @@ func (p *Intents) Derive(q storage.VRIntentQuery) (Derived, bool, error) {
 			return none, false, nil
 		}
 		o, ok := p.Outputs.At(q.LatestEVMRoot)
-		if !ok && p.Fetch != nil && len(q.LatestEVMBlock) == 32 {
+		if !ok && fetch && p.Fetch != nil && len(q.LatestEVMBlock) == 32 {
 			fetched, err := p.Fetch([32]byte(q.LatestEVMBlock), q.LatestEVMRoot)
 			if err == nil {
 				p.Outputs.Put(q.LatestEVMRoot, fetched)

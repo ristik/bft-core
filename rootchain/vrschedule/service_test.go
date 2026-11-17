@@ -320,7 +320,7 @@ type stepClock struct{ now time.Time }
 func (c *stepClock) Now() time.Time { return c.now }
 
 // The verification queue: bounded to (1 + n_s) x 4 x 2, 64 per peer, served round-robin by sender with a sender whose message failed
-// verification seated last; a verification over PiMax is dropped without evidence and keeps the sender's seat and replacement.
+// verification seated last; a verification over PiMax on the wall clock keeps its result.
 func TestTheVerificationQueue(t *testing.T) {
 	w := newWorld(t)
 	s := w.service("x")
@@ -347,7 +347,7 @@ func TestTheVerificationQueue(t *testing.T) {
 	for q.Step() {
 	}
 
-	// a budget overrun: the clock jumps past PiMax inside the verification
+	// a verification that takes longer than PiMax on the wall clock keeps its result (review #1188 B4): PiMax is a cost bound
 	slow := w.service("x")
 	slow.Update(w.committed(0))
 	sq := NewQueue(slow, 100*time.Millisecond)
@@ -365,13 +365,8 @@ func TestTheVerificationQueue(t *testing.T) {
 	p := *ms[0].PoP
 	sq.Submit("a", Message{PoP: &p})
 	sq.Step()
-	require.Equal(t, []Outcome{Refused}, outs, "over its budget: dropped, no evidence")
-	require.Empty(t, slow.Evidence())
-	require.False(t, slow.lastSeats()["a"], "a budget overrun keeps the sender's seat")
-	sq.now = time.Now
-	sq.Submit("a", Message{PoP: &p})
-	sq.Step()
-	require.Equal(t, Retained, outs[1], "the replacement is verified in time")
+	require.Equal(t, []Outcome{Retained}, outs, "a slow verification is kept, never discarded")
+	require.False(t, slow.lastSeats()["a"])
 }
 
 // The transport may read the service while it sends (its peers are the service's members): Send runs outside the service's lock (found on
