@@ -63,7 +63,7 @@ import {
 
 // ---- configuration ------------------------------------------------------------------------------------------------------------------
 
-const WORK = process.env.NB2_WORK ?? '/work/nb2';
+export const WORK = process.env.NB2_WORK ?? '/work/nb2';
 interface Lane {
   rpc: string; // the public gateway
   agg: string; // the gateway's /aggregator route
@@ -77,22 +77,22 @@ interface Lane {
   production?: { vault: string; verifier: string; gamma: string; vaultInitcode?: string };
   test?: { gamma: string; vaultInitcode?: string };
 }
-const lane: Lane = JSON.parse(readFileSync(join(WORK, 'lane.json'), 'utf8'));
+export const lane: Lane = JSON.parse(readFileSync(join(WORK, 'lane.json'), 'utf8'));
 const release = JSON.parse(readFileSync(lane.release, 'utf8'));
-const UNIT = BigInt(lane.unit);
+export const UNIT = BigInt(lane.unit);
 
-const unhex = (s: string): Uint8Array => Uint8Array.from(Buffer.from(s.replace(/^0x/, ''), 'hex'));
-const hx = (b: Uint8Array): string => `0x${toHex(b)}`;
+export const unhex = (s: string): Uint8Array => Uint8Array.from(Buffer.from(s.replace(/^0x/, ''), 'hex'));
+export const hx = (b: Uint8Array): string => `0x${toHex(b)}`;
 const big = (s: string | number | bigint): bigint => BigInt(s);
 
-const pins = pinsOf(release);
-const cfg = decodeConfig(pins.gamma, buildParams(pins.build));
+export const pins = pinsOf(release);
+export const cfg = decodeConfig(pins.gamma, buildParams(pins.build));
 
-const out = (name: string, v: unknown): void => {
+export const out = (name: string, v: unknown): void => {
   mkdirSync(join(WORK, 'out'), { recursive: true });
   writeFileSync(join(WORK, 'out', `${name}.json`), JSON.stringify(v, (_k, x) => (typeof x === 'bigint' ? x.toString() : x instanceof Uint8Array ? hx(x) : x), 2) + '\n');
 };
-const log = (...a: unknown[]): void => console.log(...a.map((x) => (typeof x === 'bigint' ? x.toString() : x)));
+export const log = (...a: unknown[]): void => console.log(...a.map((x) => (typeof x === 'bigint' ? x.toString() : x)));
 
 // ---- wallets: the reference wallet (native-bridge-plugins wallet/core.ts), one directory per lane wallet -------------------------------------
 
@@ -108,7 +108,7 @@ function laneKey(name: string): Uint8Array {
  * gateway RPC counted for the ambiguous-broadcast check. Opened as LANE_OPEN says: without the installation check unless asked (gamma-check
  * runs it), and without the wallet lock (a killed container's lock would block every later command on the wallet).
  */
-class Wallet extends ReferenceWallet {
+export class Wallet extends ReferenceWallet {
   public readonly name: string;
   public constructor(name: string) {
     super(join(WORK, 'wallets', name), laneKey(name), { release: lane.release, trustBundle: lane.trustBundle, trustPin: lane.trustPin, rpc: lane.rpc, aggregator: lane.agg });
@@ -151,17 +151,17 @@ class CountingRpc {
 
 const js = (v: unknown): string => JSON.stringify(v, (_k, x) => (typeof x === 'bigint' ? x.toString() : x instanceof Uint8Array ? hx(x) : x));
 
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+export const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 /** The wallet's retry of a step that is not ready yet (CompanionUnknown and the like), told on the console. */
 const retrying = (what: string) => (reason: string): void => log(`  ${what}: ${reason}, retrying`);
 const retry = <T>(what: string, f: () => Promise<T>): Promise<T> => walletRetry(f, retrying(what));
 
-const rpc = new HttpJsonRpc(lane.rpc, { retries: 20, timeoutMs: 120_000 });
-const direct = new HttpJsonRpc(lane.direct, { retries: 5, timeoutMs: 120_000 });
+export const rpc = new HttpJsonRpc(lane.rpc, { retries: 20, timeoutMs: 120_000 });
+export const direct = new HttpJsonRpc(lane.direct, { retries: 5, timeoutMs: 120_000 });
 
 /** The rule name of revert data (the vault's or the verifier's), with VerifierRefused's inner rule. */
-function ruleOf(data: Uint8Array | null): string {
+export function ruleOf(data: Uint8Array | null): string {
   if (data === null || data.length === 0) return data === null ? 'no-data' : 'empty';
   const e = decodeRevert(data);
   if (e === null) return `unknown:${hx(data.subarray(0, Math.min(36, data.length)))}`;
@@ -169,7 +169,7 @@ function ruleOf(data: Uint8Array | null): string {
 }
 
 /** eth_call of the deployed verifier's verifyReturn(Γ, evidence): the 192-byte return, or the rule it reverts with. */
-async function solidityVerdict(verifier: string, gamma: Uint8Array, evidence: Uint8Array, via: HttpJsonRpc = rpc): Promise<{ verdict?: string; rule?: string }> {
+export async function solidityVerdict(verifier: string, gamma: Uint8Array, evidence: Uint8Array, via: HttpJsonRpc = rpc): Promise<{ verdict?: string; rule?: string }> {
   const data = abiBytes2(SELECTOR.verifyReturn, gamma, evidence);
   try {
     const r = await via.call<string>('eth_call', [{ to: verifier, data: hx(data), gas: '0x3938700' }, 'latest']);
@@ -180,14 +180,14 @@ async function solidityVerdict(verifier: string, gamma: Uint8Array, evidence: Ui
   }
 }
 
-function abiBytes2(selector: Uint8Array, a: Uint8Array, b: Uint8Array): Uint8Array {
+export function abiBytes2(selector: Uint8Array, a: Uint8Array, b: Uint8Array): Uint8Array {
   const pad = (x: Uint8Array): Uint8Array => concat(x, new Uint8Array((32 - (x.length % 32)) % 32));
   const ta = concat(u256(a.length), pad(a));
   return concat(selector, u256(64), u256(64 + ta.length), ta, u256(b.length), pad(b));
 }
 
 /** The plug-in's verdict ABI or rule. */
-async function tsVerdict(w: Wallet, evidence: Uint8Array): Promise<{ verdict?: string; rule?: string }> {
+export async function tsVerdict(w: Wallet, evidence: Uint8Array): Promise<{ verdict?: string; rule?: string }> {
   try {
     return { verdict: hx(verdictAbi(await verifyPart(cfg, w.bridge.domain, w.trust, decodeEvidence(evidence)))) };
   } catch (e) {
@@ -197,7 +197,7 @@ async function tsVerdict(w: Wallet, evidence: Uint8Array): Promise<{ verdict?: s
   }
 }
 
-const evidenceFile = (label: string): string => join(WORK, 'evidence', `${label}.cbor`);
+export const evidenceFile = (label: string): string => join(WORK, 'evidence', `${label}.cbor`);
 
 // ---- commands ---------------------------------------------------------------------------------------------------------------------------
 
@@ -300,7 +300,7 @@ function envelope(file: string): void {
   log('envelope', readFileSync(file, 'utf8'));
 }
 
-async function deposit(w: Wallet, label: string, units: bigint, mode: string | undefined): Promise<void> {
+export async function deposit(w: Wallet, label: string, units: bigint, mode: string | undefined): Promise<void> {
   if (mode === '--adopt') {
     const intent = big(w.entry(label).intent!);
     const r = await sendDeposit(w, label); // no send of its own: the lane's legacy deposit is found by its rho
@@ -329,7 +329,7 @@ async function transfer(w: Wallet, from: string, to: string, owner: number): Pro
   log(`  ${from} -> ${to} (owner ${owner})`);
 }
 
-async function split(w: Wallet, from: string, owner: number, outs: string[]): Promise<void> {
+export async function split(w: Wallet, from: string, owner: number, outs: string[]): Promise<void> {
   const parts = outs.map((s) => { const [l, a] = s.split('='); return { label: l, amount: big(a) * UNIT }; });
   await walletSplit(w, from, owner, parts);
   log(`  split ${from} into ${outs.join(' + ')}`);
@@ -340,7 +340,7 @@ async function split(w: Wallet, from: string, owner: number, outs: string[]): Pr
  * batch by default (the rounds the batch happens to span), one round each with ROUNDS, or as GROUPS consecutive groups, each certified before
  * the next is submitted: GROUPS distinct certificates whatever the length (one more when a group straddles a round), for the boundary probes.
  */
-async function chain(w: Wallet, from: string, to: string, n: number, rounds: boolean, groups?: number): Promise<{ transfers: number; certificates: number }> {
+export async function chain(w: Wallet, from: string, to: string, n: number, rounds: boolean, groups?: number): Promise<{ transfers: number; certificates: number }> {
   const agg = new GatewayAggregator(lane.agg);
   let token = w.token(from);
   let owner = w.entry(from).owner;
@@ -455,7 +455,7 @@ async function ledger(w: Wallet, label: string, notBefore: bigint): Promise<void
   process.stdout.write('', () => process.exit(0));
 }
 
-async function burn(w: Wallet, label: string, recipient?: string): Promise<void> {
+export async function burn(w: Wallet, label: string, recipient?: string): Promise<void> {
   const e = w.entry(label);
   if (e.returnId) {
     const rec = await w.bridge.journal.ret(e.returnId);
@@ -499,7 +499,7 @@ async function verdicts(w: Wallet, labels: string[]): Promise<void> {
   out(`verdicts-${labels.join('-')}`, res);
 }
 
-async function vaultState(): Promise<Record<string, unknown>> {
+export async function vaultState(): Promise<Record<string, unknown>> {
   const st = await new Wallet('main').open().then((x) => x.bridge.evm.vaultState(cfg.vault));
   return { segment: st.segment, population: st.population, deposits: st.deposits, outstanding: st.outstanding, head: st.head, previousHead: st.previousHead };
 }
@@ -508,7 +508,7 @@ async function receiptOf(hash: Uint8Array): Promise<Record<string, unknown> | nu
   return rpc.call<Record<string, unknown> | null>('eth_getTransactionReceipt', [hx(hash)]);
 }
 
-async function waitReceipt(hash: Uint8Array, seconds = 180): Promise<Record<string, unknown>> {
+export async function waitReceipt(hash: Uint8Array, seconds = 180): Promise<Record<string, unknown>> {
   for (let i = 0; i < seconds; i++) {
     const r = await receiptOf(hash);
     if (r !== null) return r;
@@ -541,7 +541,7 @@ async function simulateRule(from: Uint8Array, calldata: Uint8Array, gas: bigint,
   }
 }
 
-async function redeem(w: Wallet, label: string, mode?: string): Promise<void> {
+export async function redeem(w: Wallet, label: string, mode?: string): Promise<void> {
   const rec = await w.returnRecord(label);
   const id = unhex(rec.returnId);
   if (rec.status === 'paid') {
@@ -676,7 +676,7 @@ async function forgedHistory(w: Wallet, rec: ReturnRecord, eta: Uint8Array, a: b
   return buildHistory(segs, neighbour, a, c, unhex(rec.startHead)).history;
 }
 
-async function rotate(w: Wallet, n: number, mode: string | undefined): Promise<void> {
+export async function rotate(w: Wallet, n: number, mode: string | undefined): Promise<void> {
   const idx = JSON.parse(existsSync(join(w.dir, 'tokens.json')) ? readFileSync(join(w.dir, 'tokens.json'), 'utf8') : '{}') as Record<string, TokenEntry>;
   if (mode !== '--pay') {
     const base = Object.keys(idx).filter((k) => /^r[0-9]+$/.test(k)).length;
@@ -721,7 +721,7 @@ async function rotate(w: Wallet, n: number, mode: string | undefined): Promise<v
 // ---- the capacity boundary ----------------------------------------------------------------------------------------------------------------
 
 /** The wallet's section 12.5 pre-burn preflight of `token`, replayed outside the plug-in (the same functions and inputs as planReturn). */
-async function predict(w: Wallet, token: Uint8Array): Promise<{ ok: boolean; gas: bigint | null; need: bigint; bytes: number; detail: string; over?: 'bytes' | 'gas' }> {
+export async function predict(w: Wallet, token: Uint8Array): Promise<{ ok: boolean; gas: bigint | null; need: bigint; bytes: number; detail: string; over?: 'bytes' | 'gas' }> {
   const { capacityPreflight, burnIndex, lineageOf } = await import('../../../packages/native-bridge-plugin/src/nb2/index.js');
   const sr = await w.bridge.newestSealReceipt();
   const { a } = burnIndex(cfg, w.bridge.domain, sr?.receipt ?? null);
@@ -1126,7 +1126,8 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((e) => {
+// measurement drivers beside this one (measure_gas_refit.ts) import its wallet and commands without running its main
+if (/driver\.ts$/.test(process.argv[1] ?? '')) main().catch((e) => {
   if (e instanceof BoundaryNotFound) {
     // one line a probe, the newest last (the lane's console keeps the last lines; every probe is in out/boundary-<label>.json)
     for (const t of e.tries) console.error(`  ${t.label}: ${t.transfers} transfers, ${t.conditions}, gas ${t.gas} (+${t.up}/-${t.down}): ${t.real}`);
