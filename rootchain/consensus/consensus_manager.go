@@ -1807,11 +1807,12 @@ func (x *ConsensusManager) recoveryRunStart(round uint64) bool {
 }
 
 // refreshProposers publishes, for the proposal ingress priority (#1113, EligibleProposer), the leaders of the pacemaker's round and of the
-// round after it, on every root and whenever the round moved since the last publication (a QC, a TC, a recovery, a new context): the loop
-// calls it before each event. resetVolatile clears it, so a new epoch's selector is asked afresh.
+// round after it, on every root: the loop calls it before each event. The publication is kept only while the round is the same and both
+// leaders are known; a leader the selector could not name yet (its committed history unavailable) is asked again, and a recovery or an
+// epoch switch (resetVolatile) clears the publication, since either can change what the selector answers for the same round.
 func (x *ConsensusManager) refreshProposers() {
 	round := x.pacemaker.GetCurrentRound()
-	if p := x.proposers.Load(); p != nil && p.round == round {
+	if p := x.proposers.Load(); p != nil && p.round == round && p.ids[0] != "" && p.ids[1] != "" {
 		return
 	}
 	l, err := x.leaderSelector.GetLeaderForRound(round)
@@ -2207,6 +2208,8 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 			x.frontier.latchFault(fmt.Errorf("leader selector after recovery: %w", err))
 		}
 	}
+	// the recovered state and the updated selector can name other leaders for the same round: they are published afresh (#1113)
+	x.proposers.Store(nil)
 	// Replay is complete. Ordinary live admission errors of the trigger below are not uncertain writes: the latch is armed again once the
 	// trigger is admitted (a proposal executed and signed after a recovery can fail after it has written).
 	recoveryWriteStarted = false

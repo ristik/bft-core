@@ -152,8 +152,8 @@ func fitProposal(p *abdrc.ProposalMsg, limit uint64) ([]*drctypes.IRChangeReq, e
 
 // proposalSignatureRoom is what fitProposal leaves of abdrc.MaxProposalFrame for the proposal's signature: a signature is under 100 bytes.
 // proposalControlRoom is what it leaves for the controls ordered after it (orderRejection, orderSubmittedControl, orderRetirements): at
-// most drctypes.MaxPosControls fixed-shape controls, each well under a KiB (its record payload is at most 192 bytes and its witness is
-// referenced by hash); TestProposalControlRoom holds the bound.
+// most drctypes.MaxPosControls controls, the widest a RuleSupport of drctypes.MaxRuleSupportCommitments commitments (about 13 KiB; the
+// others are fixed shapes under a KiB, their witnesses referenced by hash); TestProposalControlRoom holds the bound.
 const (
 	proposalSignatureRoom = 1 << 10
 	proposalControlRoom   = 1 << 20
