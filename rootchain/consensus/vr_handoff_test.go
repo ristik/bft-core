@@ -3,6 +3,7 @@ package consensus
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"testing"
 	"time"
@@ -16,22 +17,6 @@ import (
 	"github.com/unicitynetwork/bft-core/vrschema"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
-
-// I-RET: the first verified certificate of an intent is held; a later one of the same intent and epoch is not taken, one of another intent
-// replaces it.
-func TestTheFirstCertificateOfAnIntentWins(t *testing.T) {
-	v := &vrHandoff{}
-	p := vrschedule.PreparePlan{Intent: [32]byte{1}, Epoch: 1, Certificate: vrschema.ViewCertificate{Assembly: vrschema.Assembly{Slot: 0}}}
-	require.True(t, v.hold(p))
-	later := p
-	later.Certificate.Assembly.Slot = 3
-	require.False(t, v.hold(later))
-	require.EqualValues(t, 0, v.current().cert.Assembly.Slot)
-	next := p
-	next.Intent = [32]byte{2}
-	require.True(t, v.hold(next))
-	require.Equal(t, [32]byte{2}, v.current().intent)
-}
 
 type recordingReader struct {
 	out map[[32]byte]*vrhandoff.Output
@@ -50,7 +35,8 @@ func TestTheCommitWorkerRecordsTheSource(t *testing.T) {
 	sources, err := vrschedule.NewSources("")
 	require.NoError(t, err)
 	outputs := vrschedule.NewOutputs()
-	v := &vrHandoff{cfg: VRHandoffConfig{EVM: evm, Log: slog.New(slog.DiscardHandler)}, queue: make(chan []vrschedule.CertifiedEVM, 4),
+	v := &vrHandoff{cfg: VRHandoffConfig{EVM: evm, Log: slog.New(slog.DiscardHandler)}, commits: make(chan []vrschedule.CertifiedEVM, 4),
+		update: func() (vrschedule.Committed, error) { return vrschedule.Committed{}, errors.New("not derivable in this test") },
 		observer: &vrschedule.Observer{Reader: recordingReader{out: map[[32]byte]*vrhandoff.Output{{2}: published}}, Sources: sources, Outputs: outputs}}
 	block := func(round, parent uint64, ts uint64, evmBlock, root byte) *storage.ExecutedBlock {
 		si := &storage.ShardInfo{IR: &types.InputRecord{BlockHash: bytes.Repeat([]byte{evmBlock}, 32), Hash: append([]byte{root}, make([]byte, 31)...), RoundNumber: uint64(evmBlock)}}

@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
-	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/q3format"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
@@ -437,106 +436,54 @@ func (x *ConsensusManager) SubmitVRCertificate(c vrschema.ViewCertificate) error
 	return nil
 }
 
-// vrRecordsForRound is the leader's handoff record of a VR chain for the round: the Prepare of the planned certificate's attempt at a quiet
-// control state whose stored attempt is that one (a due rejection first), then its Freeze v5 once the Prepare bound the frozen parent,
-// then H. A plan of another epoch, attempt or predecessor orders nothing (its intent died).
+// vrRecordsForRound is the leader's handoff record of a VR chain for the round (vrschedule.LeaderRecords): the Prepare of the planned
+// certificate (proposer priority: a due rejection first), its Freeze v5 once the Prepare bound the frozen parent, then H. A Prepare is
+// ordered only for a plan whose intent is still the one derivable at this parent and whose activation time gate holds; the Freeze reads
+// the witness from the cache the commit of the Prepare filled (the proposal path never waits on the execution client).
 func (x *ConsensusManager) vrRecordsForRound(round uint64, parent *storage.ExecutedBlock, parentQC *rctypes.QuorumCert) ([][]byte, error) {
 	control := parent.ShardState.Control
-	switch control.Phase {
-	case "prepared", "endorsed":
-		return x.vrFreezeOrCommit(round, parent, control)
+	plan, ok := x.vr.svc.Plan()
+	if control.Phase == "prepared" || control.Phase == "endorsed" {
+		plan, ok = x.vr.svc.Prepared()
 	}
-	h, ok := x.vr.svc.Plan()
-	if !ok || h.Epoch != control.Epoch {
+	if !ok {
 		return nil, nil
 	}
-	lapsed := storage.PrepareLapsed(control, round)
-	if lapsed && !storage.PrepareMayFollowLapse(control, round) {
+	step, err := vrschedule.LeaderRecords(plan, parent, round, x.vr.cfg.EVM, func(p, root [32]byte) ([]byte, error) { return x.vr.witnessAt(p, root, plan) },
+		x.params.HashAlgorithm)
+	if err != nil {
+		x.log.Warn("VR handoff: no handoff record ordered", "round", round, "attempt", plan.Attempt, "error", err)
 		return nil, nil
 	}
-	if control.Phase != "idle" && control.Phase != "aborted" && !lapsed {
+	if step.Kind == "" {
+		x.log.Debug("VR handoff: no handoff record ordered", "round", round, "reason", step.Reason)
 		return nil, nil
 	}
-	attempt, err := plannedAttempt(control, round)
-	if err != nil || attempt != h.Attempt {
-		return nil, nil
-	}
-	// the attempt must be the stored backoff identity: a Prepare in the block whose end opens its attempt is refused
-	s, err := vradmit.DecodeRootState(control.VR)
-	if err != nil || s.Backoff.Epoch != control.Epoch || s.Backoff.Attempt != attempt || s.Backoff.Prepared {
-		return nil, nil
-	}
-	// the activation time gate (design 7.1): the Prepare's UC time is at least T of every effective schedule with E <= e_J + 1
-	if q, on, qerr := x.blockStore.CommittedVRQuery(); qerr == nil && on && q.Root != nil {
-		if facts, ferr := q.Root(); ferr == nil {
-			if vrschema.PrepareTimeGate(control.Epoch+1, uint64(types.NewTimestamp()), vrschema.Effective(facts.Fold.Schedule)) != nil {
+	if step.Kind == "prepare" {
+		// the planned certificate's intent must still be the one derivable at this parent (it may have died for a reason the epoch and
+		// attempt do not show: R no longer open, another fold or schedule)
+		q, on, qerr := x.blockStore.VRQueryAt(parent)
+		if qerr != nil || !on {
+			return nil, nil
+		}
+		d, derivable, derr := x.vr.cfg.Intents.Derive(q)
+		if derr != nil || !derivable || d.Digest != plan.Intent {
+			x.log.Debug("VR handoff: the planned intent is not the one derivable at this parent", "round", round, "error", derr)
+			return nil, nil
+		}
+		// the activation time gate (design 7.1): the Prepare's UC time is at least T of every effective schedule with E <= e_J + 1
+		if q.Root != nil {
+			if facts, ferr := q.Root(); ferr == nil &&
+				vrschema.PrepareTimeGate(control.Epoch+1, uint64(types.NewTimestamp()), vrschema.Effective(facts.Fold.Schedule)) != nil {
 				return nil, nil
 			}
 		}
-	}
-	// the planned certificate's intent must still be the one derivable at this parent (it may have died for a reason the epoch, attempt
-	// and predecessor do not show: R no longer open, another fold or schedule)
-	if q, on, qerr := x.blockStore.VRQueryAt(parent); qerr != nil || !on {
-		return nil, nil
-	} else if d, ok, derr := x.vr.cfg.Intents.Derive(q); derr != nil || !ok || d.Digest != h.Intent {
-		return nil, nil
-	}
-	if x.preferRejection(context.Background(), parentQC.GetRound(), round, parentQC) {
-		return nil, nil
-	}
-	raw, err := vrschedule.PrepareRecord(h, control, round)
-	if err != nil {
-		return nil, ErrHandoffApproval
-	}
-	x.log.Info("VR handoff: ordering the Prepare", "round", round, "attempt", attempt, "view", h.Certificate.Assembly.Slot)
-	return [][]byte{raw}, nil
-}
-
-// vrFreezeOrCommit orders the Freeze v5 of the prepared attempt's certificate (I-RET, checked again against the derivable intent) and
-// then H.
-func (x *ConsensusManager) vrFreezeOrCommit(round uint64, parent *storage.ExecutedBlock, control *evmroot.ControlState) ([][]byte, error) {
-	previous, err := storage.DecodeOrderedHandoffRecord(control.RecordBytes)
-	if err != nil {
-		return nil, nil
-	}
-	h, ok := x.vr.svc.Prepared()
-	if !ok || h.Attempt != previous.Attempt || h.Epoch != control.Epoch {
-		return nil, nil
-	}
-	bodyID := h.Body.Identity()
-	if !bytes.Equal(previous.NextBodyID, bodyID[:]) {
-		return nil, nil
-	}
-	if control.Phase == "prepared" {
-		if storage.PrepareLapsed(control, round) || len(control.FrozenParent) != 32 {
+		if x.preferRejection(context.Background(), parentQC.GetRound(), round, parentQC) {
 			return nil, nil
 		}
-		si := parent.ShardState.States[x.vr.cfg.EVM]
-		if si == nil || si.IR == nil || !bytes.Equal(si.IR.BlockHash, control.FrozenParent) || len(si.IR.Hash) != 32 {
-			return nil, nil
-		}
-		witness, err := x.vr.witnessAt([32]byte(control.FrozenParent), [32]byte(si.IR.Hash), h)
-		if err != nil {
-			x.log.Warn("VR handoff: the Freeze witness at the frozen parent is unavailable; Freeze not ordered", "attempt", h.Attempt, "error", err)
-			return nil, nil
-		}
-		records, err := vrschedule.FreezeRecord(h, control, round, witness)
-		if err != nil {
-			return nil, nil
-		}
-		x.log.Info("VR handoff: ordering the Freeze v5", "round", round, "attempt", h.Attempt, "view", h.Certificate.Assembly.Slot)
-		return records, nil
 	}
-	key, err := x.blockStore.CertifiedEVMShardAt(parent.GetRound(), control.FrozenParent)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrHandoffApproval, err)
-	}
-	raw, err := vrschedule.CommitRecord(h, control, round, parent.ShardState.States[key], x.params.HashAlgorithm)
-	if err != nil {
-		return nil, err
-	}
-	x.log.Info("VR handoff: ordering H", "round", round, "attempt", h.Attempt)
-	return [][]byte{raw}, nil
+	x.log.Info("VR handoff: ordering the "+step.Kind, "round", round, "attempt", plan.Attempt, "view", plan.Certificate.Assembly.Slot)
+	return step.Records, nil
 }
 
 // witnessAt is the Freeze witness at the frozen parent, from the cache only: the proposal path never waits on the execution client. A miss
