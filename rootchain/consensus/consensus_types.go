@@ -3,6 +3,8 @@ package consensus
 import (
 	"context"
 	"crypto"
+	"errors"
+	"fmt"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -54,6 +56,12 @@ type (
 		Evidence *rootevidence.Observer
 		// EpochSwitch, set, makes a member that stays in the committee switch into a committed Q3 activation in process (#1086).
 		EpochSwitch EpochSwitch
+		// TargetBlockInterval is this node's local, non-consensus target round length (VR design section 5.7, --target-block-interval).
+		// It feeds only the pacemaker's minRoundLen: a round that would otherwise be faster waits for it, a slower round gets nothing
+		// added. Unset (no WithTargetBlockInterval) keeps the genesis-derived BlockRate/2; a set value, zero included, is validated.
+		// Validity, voting, timeouts and replay never read it.
+		TargetBlockInterval    time.Duration
+		TargetBlockIntervalSet bool
 	}
 
 	Option func(c *Optional)
@@ -65,6 +73,28 @@ func NewConsensusParams() *Parameters {
 		LocalTimeout:  time.Duration(LocalTimeout) * time.Millisecond,
 		HashAlgorithm: HashAlgorithm,
 	}
+}
+
+// Target block interval bounds (VR design section 5.7): at least 100 ms, and strictly below LocalTimeout/2.
+const (
+	DefaultTargetBlockInterval = 450 * time.Millisecond
+	MinTargetBlockInterval     = 100 * time.Millisecond
+)
+
+// ErrTargetBlockInterval refuses a target block interval outside its bounds, before any pacemaker is built.
+var ErrTargetBlockInterval = errors.New("invalid target block interval")
+
+// ValidateTargetBlockInterval is the entry check of --target-block-interval: >= 100 ms and strictly < localTimeout/2.
+func ValidateTargetBlockInterval(target, localTimeout time.Duration) error {
+	if target < MinTargetBlockInterval || target >= localTimeout/2 {
+		return fmt.Errorf("%w: %s must be at least %s and below LocalTimeout/2 = %s", ErrTargetBlockInterval, target, MinTargetBlockInterval, localTimeout/2)
+	}
+	return nil
+}
+
+// WithTargetBlockInterval sets this node's local target round length (see Optional.TargetBlockInterval).
+func WithTargetBlockInterval(target time.Duration) Option {
+	return func(c *Optional) { c.TargetBlockInterval, c.TargetBlockIntervalSet = target, true }
 }
 
 func WithConsensusParams(params Parameters) Option {

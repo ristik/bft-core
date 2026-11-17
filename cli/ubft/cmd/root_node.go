@@ -94,9 +94,12 @@ type (
 		Q3JournalDBFile    string
 		B1Registry         bool // the deployment carries the B1 registry: a handoff above its 16 members is refused at admission
 
-		BlockRate        uint32
-		MaxRequests      uint   // certification request channel capacity
-		RPCServerAddress string // address on which http server is exposed with metrics endpoint
+		BlockRate uint32
+		// TargetBlockInterval is this node's local, non-consensus target round length (--target-block-interval): it feeds only the
+		// pacemaker's minRoundLen, never validity, voting or replay.
+		TargetBlockInterval time.Duration
+		MaxRequests         uint   // certification request channel capacity
+		RPCServerAddress    string // address on which http server is exposed with metrics endpoint
 		// OperatorAllowedSources lists the addresses and CIDR prefixes whose requests the operator endpoints answer (default loopback only)
 		OperatorAllowedSources string
 	}
@@ -135,6 +138,10 @@ func rootNodeRunCmd(baseFlags *baseFlags) *cobra.Command {
 		Use:   "run",
 		Short: "Run a node",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// every configured target, the 450 ms default and an explicit 0 included, is checked at entry (VR design section 5.7)
+			if err := consensus.ValidateTargetBlockInterval(flags.TargetBlockInterval, consensus.NewConsensusParams().LocalTimeout); err != nil {
+				return fmt.Errorf("--target-block-interval: %w", err)
+			}
 			return rootNodeRun(cmd.Context(), flags)
 		},
 	}
@@ -191,6 +198,10 @@ func rootNodeRunCmd(baseFlags *baseFlags) *cobra.Command {
 		fmt.Sprintf("profile-2 trust history database (default: %s)", filepath.Join("$UBFT_HOME", rootTrustHistoryDBFileName)))
 
 	cmd.Flags().Uint32Var(&flags.BlockRate, "block-rate", consensus.BlockRate, "block rate (consensus parameter)")
+	cmd.Flags().DurationVar(&flags.TargetBlockInterval, "target-block-interval", consensus.DefaultTargetBlockInterval,
+		"this node's local target root round length (not a consensus parameter): a round that would be faster waits for it, a slower round "+
+			"gets nothing added; at least 100ms and below half the local timeout. Nodes may run different values; blocks, votes and proofs are "+
+			"judged identically")
 
 	hideFlags(cmd, "block-rate", "q3-lane", "q3-journal-db")
 	return cmd
@@ -209,6 +220,13 @@ func getBootStrapNodes(bootNodesStr []string) ([]peer.AddrInfo, error) {
 }
 
 func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
+	// the command checks the flag at entry (an explicit 0 is refused there); a zero value here only comes from a unit test that drives
+	// this function directly without the command, and keeps the genesis-derived BlockRate/2
+	if flags.TargetBlockInterval != 0 {
+		if err := consensus.ValidateTargetBlockInterval(flags.TargetBlockInterval, consensus.NewConsensusParams().LocalTimeout); err != nil {
+			return err
+		}
+	}
 	operatorLog := slog.Default() // (a unit test drives this function with no base flags)
 	if flags.baseFlags != nil {
 		operatorLog = operatorLogger(flags.observe)
@@ -327,6 +345,9 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 	consensusParams := consensus.NewConsensusParams()
 	consensusParams.BlockRate = time.Duration(flags.BlockRate) * time.Millisecond
 	var options []consensus.Option
+	if flags.TargetBlockInterval != 0 {
+		options = append(options, consensus.WithTargetBlockInterval(flags.TargetBlockInterval))
+	}
 	if flags.Q3Lane && !flags.HandoffProfile {
 		return errors.New("q3-lane requires profile 3")
 	}
