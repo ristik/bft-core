@@ -11,6 +11,9 @@ deployment values (`L_max`, `Qmax`, `returnReserveSegments`), pinned by NB2-09 (
 carries the same bytes. If the two ever differ, this document is the reference and the difference is a bug.
 
 Section 1 is the plain-language picture. Sections 3 to 13 are the rules. Section 14 lists every rejection rule by name.
+A wallet developer starts from the wallet integration guide instead, native-bridge-plugins
+[`docs/nb2-wallet-guide.md`](https://github.com/ristik/native-bridge-plugins/blob/main/docs/nb2-wallet-guide.md) (NB2-11, #1107), which walks
+through the reference command-line wallet (`wallet/nb2-wallet.ts`) and points back here for the rules.
 
 ## 1. How it works, in plain words
 
@@ -1043,5 +1046,6 @@ hierarchies or MMRs over segments, issuance evidence outside the hashed mint.
 - Design `briefs/native-bridge-checkpoint-segments-design-v2.md` and review `briefs/native-bridge-checkpoint-segments-review-v2.md`
   (agre workspace, 2026-11-15); this document supersedes both for implementation.
 - Unchanged token and split wire: native-bridge-plugins `protocol/interop.md`; `docs/design/bridge-split-lineage-spec.md`.
+- Wallet integration: native-bridge-plugins `docs/nb2-wallet-guide.md` and the reference wallet `wallet/` (NB2-11, #1107).
 - EVM certification and offline event proofs: `docs/pos/specification/evm-partition.tex`.
 - Gas primitives: EIP-2028, EIP-2200, EIP-2929, EIP-1153 (Cancun). Gas figures are #1098's measurements where marked (Sections 12.4, 15); the rest are planning values.

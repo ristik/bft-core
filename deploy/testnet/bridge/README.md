@@ -14,6 +14,14 @@ public gateway (spec section 12.7).
 | `nb2/release_nb2.py` | the release manifest `GENERATION/bridge/nb2/public/nb2-release.json` (below) |
 | `nb2/driver.ts` | the live driver: the TypeScript wallet plug-in (native-bridge-plugins `packages/native-bridge-plugin/src/nb2`, NB2-07) through the public gateway only. It runs in the bridge tools image with this directory mounted read-only at `tests/live/nb2lane/` of the image's plug-in checkout |
 | `nb2/rehearse_nb2.py` | the lane stages (below) |
+| `nb2/lane_open.ts` | how every driver command opens its wallet: no installation check unless asked, and no wallet lock, since a `docker kill`ed command's lock would block every later command on that wallet (`lane_open.test.ts`) |
+
+The wallet is the reference command-line wallet of native-bridge-plugins (`wallet/nb2-wallet.ts` on `wallet/core.ts`, bft-core#1107), and the wallet
+integration guide is native-bridge-plugins
+[`docs/nb2-wallet-guide.md`](https://github.com/ristik/native-bridge-plugins/blob/main/docs/nb2-wallet-guide.md). The driver's deposit, mint,
+transfer, split, burn and redeem are that wallet's core functions on that wallet's directory layout, so there is one wallet implementation; the
+driver adds the lane's measurements, mutations and fault injection. The `walkthrough` stage runs the command-line wallet itself, exactly as the
+guide does, and keeps its transcript (`nb2/walkthrough.txt` in the evidence).
 
 ```
 python3 deploy/testnet/bridge/build-bridge-image.py --bft-source <bft at deploy/testnet/pins.json> --contracts-source <contracts at pin> --nbp-source <plug-ins at pin>
@@ -62,6 +70,7 @@ expectations and outputs are in the script's docstring; the outputs (`out/*.json
 | `gas` | the real gas of every paid return beside its preflight limit, and the refusals' gas |
 | `boundary` | soundness, every token the stage builds: each one the wallet's preflight admits is burned and paid within `userGasLimit`, each one it refuses is over the limit by the preflight's own gas, refused again (CapacityPreflight: the documented capacity limit, not a recovery) and unspent by the ledger afterwards (the aggregator's non-inclusion proof of its state, verified against the trust base); location: among the newest three probes the highest admitted and the lowest refused lengths are at most 2 transfers apart (the margin, from the measured gas noise between fresh tokens). Each probe's shape diagnostics and the gas drift are recorded, not judged |
 | `cold` | a burned part redeemed by a wallet whose derived caches (trust history, held witnesses) were deleted; journal, token and burn kept |
+| `walkthrough` | the wallet guide's walk-through with the reference command-line wallet (native-bridge-plugins `wallet/nb2-wallet.ts`) in the tools image, its key `NB2_KEY_WALK` from the driver keys: `init` (the installation check), `address`, `deposit coin 0.1`, `mint coin`, `split coin keep=0.06 back=0.04`, `status`, `plan-return back`, `burn back`, `redeem back` twice (the second answers paid with the same transaction, one send), `status`, `tokens` (only the unspent part); the transcript is `nb2/walkthrough.txt`. Whether `redeem` waited out the seal registry's lag (#1125) is recorded (`nb2/walkthrough-lag.json`; the driver's redeems record it as `registryLagSeconds`) |
 | `custody` | from the vault's events: each deposit number once, each redemption paid once, Q = deposits − payouts = `state().outstanding`, balance ≥ Q, segments sealed once each in order, and Go reads the whole segment history |
 | `pos-deposit`, `pos-return` | PoS lane: a deposit, mint and transfer in epoch 1; after the epoch change a transfer, a split, the burn, the three verdicts under the wallet's extended trust history, and the redeem |
 
@@ -75,7 +84,6 @@ expectations and outputs are in the script's docstring; the outputs (`out/*.json
 | `Dockerfile.tools`, `build-bridge-image.py` | `tnops-bridge:<bft12>-<id12>` (an immutable tag per pin and image, #1092; every consumer runs the image by the ID in `artifacts/bridge-images.json`, and `:verified` is only a human alias): forge/cast, the built contracts, the plug-in driver, and dnb-tool built from the node images' bft pin (`--bft-source`, deploy/testnet/pins.json; `overlay.py` refuses an image recorded for another pin, #1075). The build refuses a source that is not at its pin or not clean, and records the image ID in `../artifacts/bridge-images.json`. |
 | `deploy_bridge.py` | an operator action on a running generation: the deployment document (`dnb-tool deployment`), then `BridgeDeploy.s.sol` signed with the generation's faucet keystore. The script refuses a vault whose genesis identities differ from the chain's. It also reads the vault's CFG and writes the trust bundle, the PDR, the driver configuration and the release manifest. Everything goes under `GENERATION/bridge/`. |
 | `release.py` | the bridge release manifest, `GENERATION/bridge/public/bridge-release.json` (below) |
-| `tester/index.html` | the tester page: the fake-value disclosure, the network's endpoints (read from `tester-config.json` beside it), the tester's steps and a read of the visitor's vault credit through their EVM wallet |
 | `overlay.py` | `GENERATION/compose.bridge.yaml`, the Compose overlay with the bridge's services |
 | `RECOVERY.md` | the operator's bridge recovery runbook: roles, what depends on what, the checks after any procedure, and each failure's procedure |
 | `rehearse_bridge.py` | the bridge stages of the runner rehearsal (`.github/workflows/testnet-bridge.yml`) |
@@ -115,7 +123,8 @@ GET /healthz
 
 ### The bridge tester
 
-`deploy_bridge.py` writes `GENERATION/bridge/public/`, the one directory to publish for testers. It holds the page, `tester-config.json` and the four public
+The protocol 7 tester (its CLI and its page) is removed: the native bridge v2 reference wallet replaces it (`nb2/`, above). `deploy_bridge.py`
+still writes `GENERATION/bridge/public/`, the one directory to publish for testers. It holds `tester-config.json` and the four public
 files that config names: the trust-base bundle, its genesis entry id, the EVM shard's PDR and the deployment document. Publish nothing else from
 `GENERATION/bridge`: it also holds the driver's key (`driver.env`) and the rehearsal's wallets. The config names the endpoints a tester reaches. Set them with
 `--tester-eth-url`, `--tester-redeem-eth-url`, `--tester-agg-url` and `--tester-lockproof-url`. The defaults are the package's public gateway as the
