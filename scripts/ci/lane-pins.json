@@ -4,7 +4,7 @@
   "components": {
     "ureth": {
       "repository": "https://github.com/ristik/ureth.git",
-      "commit": "7fdc5a32fcc6acdb6d3d4c6544f7f7c5beb89dbd",
+      "commit": "b8a50547b732b5ddaaf18c7aaef00b1e8ff77338",
       "package": "unicity-reth",
       "cargoArgs": [
         "build",
@@ -14,7 +14,7 @@
         "unicity-reth"
       ],
       "features": "default (jemalloc)",
-      "note": "ureth vt15/lane-pin (7fdc5a32): the lane pin 10552af2 plus the VT-15 commit of ristik/ureth#101 (record kinds 6 to 8 and the SealRegistry pin 0xebbadc64, the runtime this bft-core genesis carries; the previous ureth refuses it). It stays on 10552af2 rather than unicity/main because unicity/main has removed the bridge precompile (ureth#97) that engineapi/profile.go still pins. Move it to a unicity/main commit once both land. Before: ureth unicity/main at the merge of ureth#94 (10552af2: the snapshots of the resealed corpus) on ureth#93 (870c1d01, the native B1 precompile on the upstream seal rule, 7,200 gas per supplied seal signature, protocol 7, bft-core#920). Before: ureth unicity/main at the merge of #88 (protocol 6: BRIDGE_COMPOSE_V2 registered at 0x0105, the lineage relation of #84 with #86's oracle parity), on B7 PR 3 (#83: the 2 MiB envelope, #82, #81) and #75's transaction gossip",
+      "note": "ureth unicity/main at the merge of ureth#103 (b8a50547: VT-14 VR batch pins on #102, the VT-02 hook, and #101, VT-15: record kinds 6 to 8 and the SealRegistry pin 0xebbadc64, the runtime this bft-core genesis carries), which includes ureth#97: the protocol 6/7 bridge precompile 0x0105 removed, so engineapi/profile.go no longer requires it (bft-core#1139; a consensus change, a fresh network generation). Before: ureth vt15/lane-pin (7fdc5a32): the lane pin 10552af2 plus the VT-15 commit of ristik/ureth#101, kept off unicity/main while engineapi still required 0x0105. Before: ureth unicity/main at the merge of ureth#94 (10552af2: the snapshots of the resealed corpus) on ureth#93 (870c1d01, the native B1 precompile on the upstream seal rule, 7,200 gas per supplied seal signature, protocol 7, bft-core#920)",
       "targetedPackages": [
         "reth-unicity-b1",
         "reth-unicity-execution",
@@ -36,8 +36,8 @@
     },
     "contracts": {
       "repository": "https://github.com/ristik/unicity-pos-contracts.git",
-      "commit": "7b510f6b5a9cf3987ccc5d7dc77d39f33de12330",
-      "note": "contracts#78 squash-merged to main as 7b510f6b (tree identical to the reviewed 6a1185c5): protocol 7 bridge-golden pins. Before: main at the contracts#77 merge (the testnet package's pin): on the protocol 6 vault (#67, #68) and contracts#53 (GovernanceParams #50, RewardPool #51), the RewardPool tail cap (#72: the tail closes up to the open result's reservation progress), the RejectResult fixtures (#74) and the election's outsider skip (#76); X4 #856 needs #72 for the closed intervals of the accumulated chain",
+      "commit": "4fd6b1a3ddf53f13ed31e7f9c44eb2808776ba4f",
+      "note": "contracts main at the merge of contracts#91 (4fd6b1a3: VT-14 VR genesis on #89 VT-02 hook fixtures, #88 VT-15 record kinds 6 to 8 in the SealRegistry, custody and RewardPool, #87 PoA election, #86/#84 VT-16 vectors, #85 the ValidatorRegistry, #83 the protocol 6/7 bridge removed, #81/#82 the NB2 vault and verifier; bft-core#1139). Before: contracts#78 squash-merged to main as 7b510f6b: protocol 7 bridge-golden pins",
       "branch": "main"
     },
     "state-transition-sdk-js": {
