@@ -437,6 +437,8 @@ func (x *ConsensusManager) resetVolatile() {
 	x.v3Planned.Store(nil)
 	x.q3Staged.Store(nil)
 	x.q3StagedEVM.Store(nil)
+	// the old epoch's leaders lose the proposal ingress priority; the successor's first round publishes its own
+	x.proposers.Store(nil)
 	x.acq.resetAttempts() // what this root learnt of later epochs is kept: a root several epochs behind goes on with the next one
 }
 

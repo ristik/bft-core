@@ -30,6 +30,7 @@ import (
 
 	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/logger"
+	"github.com/unicitynetwork/bft-core/network"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/observability"
@@ -144,9 +145,12 @@ type (
 		v3Planned            atomic.Pointer[V3Candidate]      // the last candidate PlanV3Candidate derived: the exact body the members declared readiness for
 		q3Staged             atomic.Pointer[Q3Staged]         // the V3 candidate this validator last derived for its operator
 		q3StagedEVM          atomic.Pointer[stagedEVMMembers] // the EVM validators of the successor assignment of the candidate last staged here
-		epochAnchor          *drctypes.EpochAnchor
-		primaryWitness       atomic.Pointer[PrimaryWitnessSource] // the execution client's side of a primary candidate's EVM proof
-		primaryCache         primaryCache
+		// admitted and proposers answer the root consensus network's gate on received proposals (#1113, proposal_ingress.go)
+		admitted       atomic.Pointer[admittedRoots]
+		proposers      atomic.Pointer[[2]peer.ID]
+		epochAnchor    *drctypes.EpochAnchor
+		primaryWitness atomic.Pointer[PrimaryWitnessSource] // the execution client's side of a primary candidate's EVM proof
+		primaryCache   primaryCache
 		// approvalSink and judgeHook are test seams: where a released parked approval goes, and the intake's proof judgement
 		approvalSink func(*abdrc.HandoffApprovalMsg) error
 		judgeHook    func(*abdrc.HandoffApprovalMsg) error
@@ -451,6 +455,14 @@ func NewConsensusManager(
 			origins.TrackOrigins()
 			consensusManager.origins = origins
 		}
+	}
+
+	// a root consensus network admits proposals only from the roots this manager names, and keeps part of its proposal budget for the
+	// leaders of the current and the next round (#1113)
+	if gated, ok := net.(interface {
+		SetRootConsensusGate(network.RootConsensusGate)
+	}); ok {
+		gated.SetRootConsensusGate(consensusManager)
 	}
 
 	if err := consensusManager.initMetrics(observe); err != nil {
@@ -1799,6 +1811,9 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 	round := x.pacemaker.GetCurrentRound()
 
 	l, err := x.leaderSelector.GetLeaderForRound(round)
+	// the leaders of this round and the next have the protected share of the proposal ingress budget (#1113)
+	next, nextErr := x.leaderAfter(round)
+	x.publishProposers(leaderIf(err == nil, l), leaderIf(nextErr == nil, next))
 	if err != nil {
 		if !errors.Is(err, drctypes.ErrHistoryUnavailable) {
 			x.log.WarnContext(ctx, "could not determine leader for new round, awaiting proposal", "round", round, logger.Error(err))
@@ -1968,6 +1983,16 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 	proposalMsg := &abdrc.ProposalMsg{
 		Block:       block,
 		LastRoundTc: x.pacemaker.LastRoundTC(),
+	}
+	// every root refuses a proposal frame over abdrc.MaxProposalFrame before reading it (#1113): the change requests that do not fit are
+	// left for a later proposal
+	dropped, err := fitProposal(proposalMsg, abdrc.MaxProposalFrame-proposalSignatureRoom)
+	for _, r := range dropped {
+		x.log.WarnContext(ctx, "change request left out of the proposal: the proposal frame limit", logger.Shard(r.Partition, r.Shard))
+	}
+	if err != nil {
+		x.log.WarnContext(ctx, "cannot propose within the proposal frame limit", logger.Error(err))
+		return
 	}
 	// safety makes simple sanity checks and signs if everything is ok
 	if err = x.safety.Sign(proposalMsg.Block.Epoch, proposalMsg); err != nil {
