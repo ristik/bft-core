@@ -229,7 +229,8 @@ func (o *Observer) Reset() {
 	o.primed, o.prev = false, vrschema.Word{}
 }
 
-// Observe reads one committed root block's certified EVM block. A failed read breaks the run.
+// Observe reads one committed root block's certified EVM block. A failed read observes nothing: retrying the same block continues the
+// run, and giving it up breaks the run at the next block (whose parent was not observed).
 func (o *Observer) Observe(ctx context.Context, c CertifiedEVM) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -238,7 +239,8 @@ func (o *Observer) Observe(ctx context.Context, c CertifiedEVM) error {
 	if !cached {
 		var err error
 		if out, err = o.Reader.OpenOutput(ctx, c.BlockHash, c.StateRoot); err != nil {
-			o.primed, o.prev = false, vrschema.Word{}
+			// nothing is observed: the worker retries this very block (its execution client may not hold it yet); a block it gives up on is
+			// a gap the next block's parent round shows
 			return err
 		}
 		o.Outputs.Put(c.StateRoot, out)
