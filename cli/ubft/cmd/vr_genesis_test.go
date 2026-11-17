@@ -387,3 +387,84 @@ func TestUrethArgumentsParseBothFormsAndRefuseRepeats(t *testing.T) {
 	_, err = parseUrethArgs("--unicity.max-gas=5 stray")
 	require.ErrorIs(t, err, ErrVRGenesis)
 }
+
+// ---- dev funding: the premine of a development generation (testdata/vr-genesis-dev: vr_genesis.py --dev-fund) ----------------------------
+
+const vrDevGeneration = "gen-devfund"
+
+func vrDevFixtureInput(t *testing.T) vrVerifyInput {
+	t.Helper()
+	dir := func(n string) string { return filepath.Join("testdata", "vr-genesis-dev", n) }
+	var v vrVerifyInput
+	var err error
+	require.NoError(t, vrStrictJSON(dir("input.json"), &v.input))
+	require.NoError(t, vrStrictJSON(dir("deployment.json"), &v.deployment))
+	v.genesis, err = os.ReadFile(dir("genesis.json"))
+	require.NoError(t, err)
+	v.full, err = readShardConf(dir("full-shard-conf.json"))
+	require.NoError(t, err)
+	v.tb, err = readTrustBase(dir("trust-base.json"))
+	require.NoError(t, err)
+	v.profile, v.profileFile, err = readB1ProfileFile(dir("b1-profile.json"))
+	require.NoError(t, err)
+	v.identities, _, err = readIdentities(dir("genesis-identities.json"))
+	require.NoError(t, err)
+	v.fresh, err = readVRHookMeasurement(dir("vr-hook-measurement-fresh.json"))
+	require.NoError(t, err)
+	flags, err := os.ReadFile(dir("ureth-flags.txt"))
+	require.NoError(t, err)
+	v.urethFlags, v.feeCollector = strings.TrimSpace(string(flags)), "0x00000000000000000000000000000000000000fe"
+	var funded map[string]string
+	require.NoError(t, vrStrictJSON(dir("dev-funded-accounts.json"), &funded))
+	v.funded = map[common.Address]vrschema.Word{}
+	for k, b := range funded {
+		w, ok := bigWord(b)
+		require.True(t, ok)
+		v.funded[common.HexToAddress(k)] = w
+	}
+	v.devGeneration = vrDevGeneration
+	return v
+}
+
+func TestADevGenerationsPremineIsExpectedNeverAHole(t *testing.T) {
+	_, err := vrVerify(vrDevFixtureInput(t))
+	require.NoError(t, err, "the dev generation with its premine verifies")
+	owner := common.HexToAddress(vrDevFixtureInput(t).input.Identities[0].Owner)
+	signer := common.HexToAddress(vrDevFixtureInput(t).input.GovernorSigners[0])
+	for name, edit := range map[string]func(*vrVerifyInput){
+		"no dev generation":             func(v *vrVerifyInput) { v.devGeneration = "" },
+		"another dev generation's name": func(v *vrVerifyInput) { v.devGeneration = "gen-other" },
+		"an owner not funded":           func(v *vrVerifyInput) { delete(v.funded, owner) },
+		"a signer not funded":           func(v *vrVerifyInput) { delete(v.funded, signer) },
+		"a listed premine not allocated": func(v *vrVerifyInput) {
+			v.funded[common.HexToAddress("0x000000000000000000000000000000000000beef")] = vrschema.U64(1)
+		},
+		"a premine balance changed": func(v *vrVerifyInput) {
+			editGenesis(t, v, func(g map[string]any) { allocOf(g, owner)["balance"] = "0x1" })
+		},
+		"an unlisted premine": func(v *vrVerifyInput) {
+			editGenesis(t, v, func(g map[string]any) {
+				g["alloc"].(map[string]any)["0x000000000000000000000000000000000000cafe"] = map[string]any{"balance": "0x3635c9adc5dea00000"}
+			})
+		},
+		"a premine with code": func(v *vrVerifyInput) {
+			editGenesis(t, v, func(g map[string]any) { allocOf(g, owner)["code"] = "0x00" })
+		},
+		"no funded list": func(v *vrVerifyInput) { v.funded = nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			v := vrDevFixtureInput(t)
+			edit(&v)
+			_, err := vrVerify(v)
+			require.ErrorIs(t, err, ErrVRGenesis)
+		})
+	}
+	// and a non-dev generation takes no funding at all
+	v := vrFixtureInput(t)
+	v.funded = map[common.Address]vrschema.Word{owner: vrschema.U64(1)}
+	_, err = vrVerify(v)
+	require.ErrorIs(t, err, ErrVRGenesis)
+	v.devGeneration = "gen-dev1"
+	_, err = vrVerify(v)
+	require.ErrorIs(t, err, ErrVRGenesis, "a testnet network word is not a dev generation's")
+}

@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "networkId": 3,
+  "partitionId": 8,
+  "shardId": "0x80",
+  "partitionTypeId": 8,
+  "typeIdLength": 8,
+  "unitIdLength": 256,
+  "summaryTrustBase": "",
+  "t2timeout": 5000000000,
+  "feeCreditBill": null,
+  "partitionParams": {
+    "chain_id": "3",
+    "continuity_max_distance": "1/2",
+    "proof_type": "exec",
+    "seal_registry_genesis": "748ca8833317818c870e9e62aabdf1a9438fb3d65c6cdba10112ef019dad9815",
+    "validator_coupling": "true",
+    "validator_registry": "0xff00000000000000000000000000000000000003",
+    "validator_registry_code_hash": "0x19094777cb74c783f82392439d1f6c79fe62b6b57c2915790f00a9e16ee490e9"
+  },
+  "epoch": 0,
+  "epochStart": 1,
+  "validators": [
+    {
+      "nodeId": "16Uiu2HAmQVbLKC4xkSSgg2BbS9tPkEbjYmERVEVDHxZw1WoH9kMQ",
+      "sigKey": "0x038317fd490f496e757173d4caca3a5f89ec6d9155b8b69667ad49c9a46f496809",
+      "stake": 1
+    },
+    {
+      "nodeId": "16Uiu2HAmJWB59TZM9DMJebKpFpk3RB7ZXKFzo1zS5HDmmFvykNpr",
+      "sigKey": "0x02df8bda82fb73ca08aa89d416ae33b9077ecbdcc26fe7bd09b446896c4033d778",
+      "stake": 1
+    },
+    {
+      "nodeId": "16Uiu2HAmT6YbqHaUeHpSLGnDFs58V5SAkV6EKQnPYvRJGjLZbMwF",
+      "sigKey": "0x0261a68244860b93334a1a03c398a0fb40cd1d2f453a23ff3be49e260ef23a8b61",
+      "stake": 1
+    },
+    {
+      "nodeId": "16Uiu2HAm6sRxHEzWHib6uopHQDvak3Vm2qgyMuDQUdjBeo9BEDCD",
+      "sigKey": "0x02916fa80a635638af22368680100b3d21c99d5b2028f274669720c343685f3e12",
+      "stake": 1
+    }
+  ]
+}
