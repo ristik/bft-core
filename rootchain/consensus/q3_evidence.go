@@ -38,7 +38,8 @@ type q3EvidenceSource interface {
 	HandoffCheckpoint() (*abdrc.CommittedBlock, *basetypes.UnicityTreeCertificate, evmroot.OrderedHandoffRecord, error)
 	HandoffBody(id []byte) ([]byte, error)
 	HandoffReceipts(id []byte) ([]byte, error)
-	HandoffCandidate(id []byte) ([]byte, error)
+	// HandoffCommittedPreimage is the committed candidate the body binds: a VR handoff's candidate v6, never its retained v5 view.
+	HandoffCommittedPreimage(id []byte) ([]byte, error)
 }
 
 func q3ActivationEvidence(src q3EvidenceSource, epoch uint64) (q3format.Link, *abdrc.CommittedBlock, []byte, error) {
@@ -62,7 +63,7 @@ func q3ActivationEvidence(src q3EvidenceSource, epoch uint64) (q3format.Link, *a
 	if err != nil {
 		return none, nil, nil, fmt.Errorf("%w: no retained readiness receipts", ErrNoQ3Evidence)
 	}
-	candidate, err := src.HandoffCandidate(record.NextBodyID)
+	candidate, err := src.HandoffCommittedPreimage(record.NextBodyID)
 	if err != nil {
 		return none, nil, nil, errors.Join(ErrNoQ3Evidence, err)
 	}

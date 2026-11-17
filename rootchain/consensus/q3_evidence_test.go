@@ -31,7 +31,7 @@ func (s fixtureSource) HandoffCheckpoint() (*abdrc.CommittedBlock, *basetypes.Un
 }
 func (s fixtureSource) HandoffBody([]byte) ([]byte, error)      { return s.body, nil }
 func (s fixtureSource) HandoffReceipts([]byte) ([]byte, error)  { return s.receipts, nil }
-func (s fixtureSource) HandoffCandidate([]byte) ([]byte, error) { return s.candidate, nil }
+func (s fixtureSource) HandoffCommittedPreimage([]byte) ([]byte, error) { return s.candidate, nil }
 
 func sourceOf(t *testing.T, f *q3fixture.Fixture) fixtureSource {
 	t.Helper()

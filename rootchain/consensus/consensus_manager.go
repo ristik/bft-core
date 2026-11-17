@@ -1071,9 +1071,10 @@ var ErrChangeOfAnotherRootEpoch = errors.New("certification request of another r
 // ErrNoRequestHistory is returned when the view-aware branch is selected without a request history.
 var ErrNoRequestHistory = errors.New("consensus: no request history to select")
 
-// HandoffCandidate is the retained candidate preimage of a committed successor body: the source a request history serves from.
+// HandoffCandidate is the committed candidate of a committed successor body (a VR handoff's candidate v6, whose digest the body binds): the
+// source a request history serves from.
 func (x *ConsensusManager) HandoffCandidate(bodyID []byte) ([]byte, error) {
-	return x.blockStore.HandoffCandidate(bodyID)
+	return x.blockStore.HandoffCommittedCandidate(bodyID)
 }
 
 // HandoffCommittedPreimage is the committed candidate of a successor body in the form the body binds (the candidate v6 of a VR handoff):
