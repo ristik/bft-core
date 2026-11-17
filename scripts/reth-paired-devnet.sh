@@ -955,6 +955,13 @@ if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
   pass "three aggregator shards certified alongside the EVM partition; UC/TR/EVM trace recorded"
 fi
 
+if [ "${VR_LANE:-0}" = 1 ]; then
+  # a VR generation: the genesis committee reads back from VR through ureth; its handoffs are VT-05b's (the P85/Q3 operator handoffs do not
+  # apply in VR mode), so the profile-2 handoff steps are skipped
+  vr_readback "http://127.0.0.1:$rethEthBase" || { fail "the VR views do not read back the genesis committee"; exit 1; }
+  pass "VR reads back the genesis committee, the PoA module and GENESIS_RESULT through ureth"
+  POST_M2A_SKIP_HANDOFF=1
+fi
 if [ "${M2_PROFILE2:-0}" = 1 ] && [ "${POST_M2A_SKIP_HANDOFF:-0}" != 1 ]; then
   echo "=== M2 profile-2: two certified root handoffs with paid execution ==="
   if [ "${F8_MIXED_LANE:-0}" = 1 ]; then

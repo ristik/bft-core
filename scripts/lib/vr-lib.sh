@@ -9,6 +9,7 @@
 #   vr_merge_alloc <src>    adds the VR accounts and the dev premine to a genesis source's alloc
 #   vr_verify <genesis> <full-conf>   vr-genesis verify of the finished set; writes the roots' --vr-deployment
 #   vr_root_flags <i> <rpc> the flags a root of the lane runs with
+#   vr_readback <rpc>       VR's views through ureth: the genesis committee, the PoA module, GENESIS_RESULT, Healthy
 #
 # Inputs (environment):
 #   VR_CONTRACTS            a unicity-pos-contracts checkout with script/vr-genesis.sh (forge and cast on PATH)
@@ -127,4 +128,19 @@ vr_verify() { # <finalized genesis> <full shard conf>
 
 vr_root_flags() { # <i> <ureth rpc>: the VR-mode roots: the genesis committee, the VR deployment, and the execution client VT-05b's root side reads
   echo --genesis-identities "$VR_DIR/genesis-identities.json" --vr-deployment "$VR_DIR/vr-deployment.json" --pos-evm-rpc "$2"
+}
+
+vr_readback() { # <ureth rpc>: VR's views at the latest block read back what the plan put there
+  local rpc=$1 vr=0xff00000000000000000000000000000000000003 ids want raw module acked health
+  ids=$(cast call --rpc-url "$rpc" "$vr" 'committeeIds()(uint64[])') || vr_die "committeeIds() failed" || return 1
+  want="[$(seq -s ', ' 1 "${validators:-4}")]"
+  [ "$ids" = "$want" ] || vr_die "VR's committee is $ids, the plan's $want" || return 1
+  raw=$(cast call --rpc-url "$rpc" "$vr" 'activeModule()') || vr_die "activeModule() failed" || return 1
+  module=$(python3 -c "import sys;h=sys.argv[1][2:];w=[h[i:i+64] for i in range(0,len(h),64)];k=1 if int(w[0],16)==32 else 0;print('0x'+w[k][24:])" "$raw")
+  [ "$module" = 0xff00000000000000000000000000000000000007 ] || vr_die "VR's active module is $module" || return 1
+  acked=$(cast call --rpc-url "$rpc" "$vr" 'lastAcked()(bytes32)')
+  [ "$acked" = "$(cast keccak unicity.vr.genesis-result.v1)" ] || vr_die "VR's lastAcked is $acked" || return 1
+  health=$(cast call --rpc-url "$rpc" "$vr" 'health()(uint8)')
+  [ "$health" = 0 ] || vr_die "VR's health is $health" || return 1
+  echo "vr: committee $ids, module $module, lastAcked GENESIS_RESULT, health $health (block $(cast block-number --rpc-url "$rpc"))"
 }
