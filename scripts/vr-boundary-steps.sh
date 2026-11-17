@@ -49,12 +49,20 @@ vrb_main() {
   keys=$VR_DIR/dev-keys/keys.json
   owner=$(python3 -c "import json;print(json.load(open('$keys'))['owners'][3]['privateKey'])")
   payee=0x$(openssl rand -hex 20)
+  # identity 4's own homes: the identities follow ascending root node id, not the devnet's numbering
+  local rid eid rhome= ehome= h
+  rid=$(python3 -c "import json;print(json.load(open('$VR_DIR/genesis-identities.json'))[3]['rootNodeId'])")
+  eid=$(python3 -c "import json;print(json.load(open('$VR_DIR/genesis-identities.json'))[3]['evmNodeId'])")
+  for h in test-nodes/root*/; do [ "$(build/ubft node-id --home "$h" 2>/dev/null | tail -n1)" = "$rid" ] && rhome=${h%/}; done
+  for h in test-nodes/evm*/; do [ "$(build/ubft node-id --home "$h" 2>/dev/null | tail -n1)" = "$eid" ] && ehome=${h%/}; done
+  [ -n "$rhome" ] && [ -n "$ehome" ] || { vrb_log "FAIL: identity 4's homes not found"; return 1; }
+  vrb_log "identity 4 is $rhome / $ehome"
   cfg=$(mktemp -d)
   printf '%s\n' "$owner" >"$cfg/operator.key"; chmod 600 "$cfg/operator.key"
   openssl rand -hex 32 >"$cfg/ureth.key"
   cat >"$cfg/validator.json" <<EOF
-{"format":"unicity.validator.config.v1","rpc":"$vrb_rpc","registry":"$vrb_vr","rootKeys":"$PWD/test-nodes/root4/keys.json",
- "evmKeys":"$PWD/test-nodes/evm4/keys.json","urethKey":"$cfg/ureth.key","jwt":"$cfg/none","operatorKey":"$cfg/operator.key",
+{"format":"unicity.validator.config.v1","rpc":"$vrb_rpc","registry":"$vrb_vr","rootKeys":"$PWD/$rhome/keys.json",
+ "evmKeys":"$PWD/$ehome/keys.json","urethKey":"$cfg/ureth.key","jwt":"$cfg/none","operatorKey":"$cfg/operator.key",
  "payee":"$(python3 -c "import json;print(json.load(open('$keys'))['owners'][3]['address'])")","id":4}
 EOF
   build/ubft validator rotate --validator-config "$cfg/validator.json" --new-payee "$payee" 2>&1 | tee "$VR_EVIDENCE/rotate.log" || { vrb_log "FAIL: rotate"; return 1; }
