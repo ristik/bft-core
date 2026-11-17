@@ -36,7 +36,9 @@ func TestTheCommitWorkerRecordsTheSource(t *testing.T) {
 	require.NoError(t, err)
 	outputs := vrschedule.NewOutputs()
 	v := &vrHandoff{cfg: VRHandoffConfig{EVM: evm, Log: slog.New(slog.DiscardHandler)}, commits: make(chan []vrschedule.CertifiedEVM, 4),
-		update: func() (vrschedule.Committed, error) { return vrschedule.Committed{}, errors.New("not derivable in this test") },
+		update: func() (vrschedule.Committed, error) {
+			return vrschedule.Committed{}, errors.New("not derivable in this test")
+		},
 		observer: &vrschedule.Observer{Reader: recordingReader{out: map[[32]byte]*vrhandoff.Output{{2}: published}}, Sources: sources, Outputs: outputs}}
 	block := func(round, parent uint64, ts uint64, evmBlock, root byte) *storage.ExecutedBlock {
 		si := &storage.ShardInfo{IR: &types.InputRecord{BlockHash: bytes.Repeat([]byte{evmBlock}, 32), Hash: append([]byte{root}, make([]byte, 31)...), RoundNumber: uint64(evmBlock)}}
