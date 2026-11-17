@@ -1,0 +1,78 @@
+{
+  "chainId": 3,
+  "continuity": {
+    "distDen": 2,
+    "distNum": 1,
+    "maxM": 4
+  },
+  "epochStartProgress": 0,
+  "fees": {
+    "baseFeeFloor": 1000000,
+    "changeDenominator": 8,
+    "feeCollector": "0x00000000000000000000000000000000000000fe"
+  },
+  "format": "unicity.vr.genesis-input.v1",
+  "governorSigners": [
+    "0x1668e46d2e43ded056ddfc77e1cb463a162ca3a0",
+    "0x8b228510e895c62ca563722c4484426ba00f2c84",
+    "0xbe447084c92c71871be21fbc87aad435f121dfb2",
+    "0xc4a945bcf026a18a916589f3a83306cf9852352f",
+    "0xd92aaf9bdb19ce205d710efdebefb33fdbe21e95"
+  ],
+  "identities": [
+    {
+      "evmKey": "0x0268883a713cd1fc4846986971c1a3f66f883a99a3f96833185b863e301325220c",
+      "evmNodeID": "e2e-evm-1",
+      "id": 1,
+      "owner": "0xe431b78ef00676b601274e572bf8168ac2a3df10",
+      "payee": "0xe273b160d38b6228869a242f85b14bee02e72cc7",
+      "rawWeight": 1,
+      "rootKey": "0x02b87627f74be7085e9c181dc8fcde42f4d359ba4feab63fb844bf133a50eb8bbe",
+      "rootNodeID": "e2e-root-1"
+    },
+    {
+      "evmKey": "0x0303c59e6128d3488afde50e16bd9918dff5226681753a8af42bded70bbfa11e08",
+      "evmNodeID": "e2e-evm-2",
+      "id": 2,
+      "owner": "0x40827484158d3a44291fe29f9ef5d686dff0873c",
+      "payee": "0x368b79734fa5417217a50ab615d119d1059421af",
+      "rawWeight": 1,
+      "rootKey": "0x023eafa14b8e88483f57bd9bf7c58f69e1574b52acb6da1c6c4c85d7352124100c",
+      "rootNodeID": "e2e-root-2"
+    },
+    {
+      "evmKey": "0x03048dc2ee16741974fc1f098377f7ba94d7e44c8b3871db9ebb9aa2a4587f85a4",
+      "evmNodeID": "e2e-evm-3",
+      "id": 3,
+      "owner": "0xb62991e5ab1c82cc4346ef552ee80c1eb0fbccbd",
+      "payee": "0xaad2078cecd1b3774dfea12b9dbb13fe56f71444",
+      "rawWeight": 1,
+      "rootKey": "0x021de6958847f9353d57fca73fb449ca0f8ca5981b4585561dbd5be7786bc4221e",
+      "rootNodeID": "e2e-root-3"
+    },
+    {
+      "evmKey": "0x03510e9d28f813c5e76150702030a7d9b654f448ca71a919bbcd7e841c2eaabc14",
+      "evmNodeID": "e2e-evm-4",
+      "id": 4,
+      "owner": "0xee636104e33fbf1749bae980714ae5ea7f753c47",
+      "payee": "0x1794cce1f91b0531fc82760cbf3230d36d81ecce",
+      "rawWeight": 1,
+      "rootKey": "0x02dc6d5d1b6329f193ab8ea9555ee7002dba8c9bac7b42ee26df0ab596fc70cb1c",
+      "rootNodeID": "e2e-root-4"
+    }
+  ],
+  "identityCount": 4,
+  "knownRootEpoch": 1,
+  "limits": {
+    "lMax": 1,
+    "maxBatch": 32,
+    "nMax": 16,
+    "nMin": 4,
+    "nTarget": 4,
+    "rMax": 4,
+    "vMax": 16
+  },
+  "maxGas": 184729388,
+  "network": "0x531e1b2f277c86f2423439f91baddbdd2118fdf6b88a58448d4eca3e31c6d74d",
+  "systemGas": 124729388
+}
