@@ -1,0 +1,426 @@
+{
+ "constants": [
+  {
+   "name": "schemaVersion",
+   "value": "1",
+   "kind": "schema",
+   "owner": "all"
+  },
+  {
+   "name": "SYSTEM_CALLER",
+   "value": "0xff00000000000000000000000000000000000001",
+   "kind": "existing",
+   "owner": "ureth"
+  },
+  {
+   "name": "SEAL_REGISTRY",
+   "value": "0xff00000000000000000000000000000000000002",
+   "kind": "existing",
+   "owner": "ureth"
+  },
+  {
+   "name": "VALIDATOR_REGISTRY",
+   "value": "0xff00000000000000000000000000000000000003",
+   "kind": "genesis",
+   "owner": "VR"
+  },
+  {
+   "name": "VR_NAMESPACE",
+   "value": "0x2015195c564edf8b5942ad7bb1fe48e96d190815eb762db2ddff1d85ce73f900",
+   "kind": "schema",
+   "owner": "VR"
+  },
+  {
+   "name": "LIABILITY_NAMESPACE",
+   "value": "0xb2905100cfe7c1af5dee2b1b6726fdfd755820e0f51ef675ed653be4f1102d00",
+   "kind": "schema",
+   "owner": "holders"
+  },
+  {
+   "name": "GENESIS_RESULT",
+   "value": "0xa8f78bb06266dfd716c6f47493cefe6dfc3bea1ec2b85965ecddbc9947d01c12",
+   "kind": "schema",
+   "owner": "VR, roots"
+  },
+  {
+   "name": "REGISTRY_NATIVE",
+   "value": "0x8bb02fcf42fe403f85792d37a3a81d283a4ec1b9cbc8a55da23527d8dfc7b9fe",
+   "kind": "schema",
+   "owner": "VR, roots"
+  },
+  {
+   "name": "MEMBERS_DOMAIN",
+   "value": "0x36b9aba546beffe2efc054be8bb544701e0dfbc3015f989045cb5989cdb901b5",
+   "kind": "schema",
+   "owner": "VR, roots"
+  },
+  {
+   "name": "CHANGES_DOMAIN",
+   "value": "0x81f1c9ff5b6b872bdf628e72a36befd46d489d132e2cd8c7754d7571fa00bc55",
+   "kind": "schema",
+   "owner": "VR, roots"
+  },
+  {
+   "name": "OUTPUT_DOMAIN",
+   "value": "0x7022f759bdf16252d3448773698ed539c63440a03c2b77dd7c6b764f67c799aa",
+   "kind": "schema",
+   "owner": "VR, roots"
+  },
+  {
+   "name": "VR_RESULT_DOMAIN",
+   "value": "0x04a3856b2ba424cb9e30e6c1d7b6b087a1ead7001e45d74362ce4ad502893fb3",
+   "kind": "schema",
+   "owner": "VR"
+  },
+  {
+   "name": "REGISTER_DOMAIN",
+   "value": "0x101696c29e5e72bf37c16ca74302fe86d76e21bbf57b3e3926a7fc5d355243a0",
+   "kind": "schema",
+   "owner": "VR, CLI"
+  },
+  {
+   "name": "BINDING_DOMAIN",
+   "value": "0x5a5bc51918db2053987512595e34b48781b5e27db5260dca647518b5d38f6756",
+   "kind": "schema",
+   "owner": "VR, CLI"
+  },
+  {
+   "name": "EXPOSURE_DOMAIN (custody, reused by PoA)",
+   "value": "0x4423be7c86bd872ed92508e1d1626d3f80b299a87103c5df6385efed783d17dc",
+   "kind": "existing",
+   "owner": "PoA, custody, roots"
+  },
+  {
+   "name": "POA_MODULE_TAG",
+   "value": "0xbcaea3db6891e775ad29d518c8f60e5bd039e96222333877246cf89d5c77e3bd",
+   "kind": "schema",
+   "owner": "PoA"
+  },
+  {
+   "name": "RECORDS_RETIREMENT_V2",
+   "value": "0x8555079b2919f53b200996613c44b8cd85beeaf231b4a9bfe62d837e88ebad09",
+   "kind": "schema",
+   "owner": "SealRegistry, roots"
+  },
+  {
+   "name": "RetirementRequested topic",
+   "value": "0x1c365a570b27d3752591f304a03ab5f06fecb66c11b0f7e38b73050e479e8903",
+   "kind": "schema",
+   "owner": "holders, roots"
+  },
+  {
+   "name": "LIFETIME",
+   "value": "16384",
+   "kind": "rule (provisional)",
+   "owner": "roots, VR"
+  },
+  {
+   "name": "DELAY_ROUNDS",
+   "value": "2000",
+   "kind": "rule",
+   "owner": "VR"
+  },
+  {
+   "name": "DELAY_SECONDS",
+   "value": "3600",
+   "kind": "rule",
+   "owner": "VR"
+  },
+  {
+   "name": "MAX_PENDING_CHANGES",
+   "value": "32",
+   "kind": "rule",
+   "owner": "VR"
+  },
+  {
+   "name": "MAX_BOUND_ROOT_SIDE",
+   "value": "8",
+   "kind": "rule",
+   "owner": "VR, roots"
+  },
+  {
+   "name": "MAX_BOUND_TOTAL",
+   "value": "16",
+   "kind": "rule",
+   "owner": "VR, roots"
+  },
+  {
+   "name": "MAX_BOUND_PAYLOAD",
+   "value": "65536",
+   "kind": "rule",
+   "owner": "VR, roots"
+  },
+  {
+   "name": "MAX_CHANGE_PAYLOAD",
+   "value": "16384",
+   "kind": "rule",
+   "owner": "VR"
+  },
+  {
+   "name": "MAX_PENDING_FORCE_REMOVE",
+   "value": "4",
+   "kind": "rule",
+   "owner": "VR"
+  },
+  {
+   "name": "MAX_COMMITTEE",
+   "value": "16",
+   "kind": "rule",
+   "owner": "roots, VR"
+  },
+  {
+   "name": "MIN_EPOCH_GAP",
+   "value": "100",
+   "kind": "rule",
+   "owner": "VR, modules"
+  },
+  {
+   "name": "FORCE_DEADLINE",
+   "value": "maxElectionInterval + 2*LIFETIME",
+   "kind": "rule",
+   "owner": "VR"
+  },
+  {
+   "name": "STALL_DEADLINE",
+   "value": "maxElectionInterval + 2*LIFETIME",
+   "kind": "rule",
+   "owner": "VR"
+  },
+  {
+   "name": "PARK_PERIOD",
+   "value": "32768",
+   "kind": "rule",
+   "owner": "PoA"
+  },
+  {
+   "name": "COMPOSER_POOL",
+   "value": "6",
+   "kind": "rule",
+   "owner": "PoA"
+  },
+  {
+   "name": "COMPOSER_TRIALS",
+   "value": "64",
+   "kind": "rule",
+   "owner": "PoA"
+  },
+  {
+   "name": "MAX_HOLDERS",
+   "value": "8",
+   "kind": "rule",
+   "owner": "VR"
+  },
+  {
+   "name": "MAX_ACTIVATIONS",
+   "value": "64",
+   "kind": "rule",
+   "owner": "VR"
+  },
+  {
+   "name": "SUPPORT_TABLE",
+   "value": "16 x 64",
+   "kind": "rule",
+   "owner": "roots"
+  },
+  {
+   "name": "RECORD_WIDTHS",
+   "value": "32/128/288/192/96/224/128/128",
+   "kind": "schema",
+   "owner": "all"
+  },
+  {
+   "name": "RECORDS_PER_ROOT_BLOCK",
+   "value": "32",
+   "kind": "existing",
+   "owner": "roots"
+  },
+  {
+   "name": "MAX_RET",
+   "value": "elect 160, ready 5408, pending/notMine 96, adoption 96, void 0",
+   "kind": "rule",
+   "owner": "VR"
+  },
+  {
+   "name": "METADATA_STATICCALL_GAS",
+   "value": "50000",
+   "kind": "rule",
+   "owner": "VR"
+  },
+  {
+   "name": "MAX_RET_METADATA",
+   "value": "256 (32 x 8), exact per getter: moduleTag 32, capabilities 32, gasBounds 256, maxElectionInterval 32, liabilityHolder 64",
+   "kind": "rule",
+   "owner": "VR"
+  },
+  {
+   "name": "MAX_CANDIDATE_BYTES",
+   "value": "262144",
+   "kind": "existing",
+   "owner": "roots"
+  },
+  {
+   "name": "TIMER_CHUNK",
+   "value": "3600 s",
+   "kind": "rule (local)",
+   "owner": "roots, nodes"
+  },
+  {
+   "name": "CUSTODY_HOLDER_INDEX",
+   "value": "0",
+   "kind": "rule",
+   "owner": "VR, PoS prototype"
+  },
+  {
+   "name": "pi_max",
+   "value": "enforced per-message verification budget (value fixed by VT-05b)",
+   "kind": "rule",
+   "owner": "roots"
+  },
+  {
+   "name": "GAS_MARGIN",
+   "value": "measured compound worst case * 5/4",
+   "kind": "rule",
+   "owner": "profile"
+  },
+  {
+   "name": "T0",
+   "value": "10 s",
+   "kind": "rule",
+   "owner": "roots"
+  },
+  {
+   "name": "LMAX",
+   "value": "9",
+   "kind": "rule",
+   "owner": "roots"
+  },
+  {
+   "name": "TIMEOUT_SATURATION",
+   "value": "exponent >= 37 or T > 2^40 s: never",
+   "kind": "rule",
+   "owner": "roots"
+  },
+  {
+   "name": "EARLIEST_ACTIVATION_OFFSET",
+   "value": "16",
+   "kind": "rule",
+   "owner": "roots"
+  },
+  {
+   "name": "PREPARE_LAPSE",
+   "value": "24",
+   "kind": "existing",
+   "owner": "roots"
+  },
+  {
+   "name": "PREPARE_COOLDOWN",
+   "value": "dead after > 48",
+   "kind": "existing",
+   "owner": "roots"
+  },
+  {
+   "name": "ACTIVATION_FLOOR",
+   "value": "24 + 8",
+   "kind": "existing",
+   "owner": "roots"
+  },
+  {
+   "name": "RETAINED_VIEWS / BUFFERED_AHEAD / INTENTS",
+   "value": "4 / 2 / 2",
+   "kind": "rule",
+   "owner": "nodes, roots"
+  },
+  {
+   "name": "PEER_MESSAGE / PEER_QUEUE",
+   "value": "262144 / 64",
+   "kind": "rule",
+   "owner": "nodes, roots"
+  },
+  {
+   "name": "VERIFICATION_QUEUE",
+   "value": "(1 + n_s) * 4 * 2",
+   "kind": "rule",
+   "owner": "roots"
+  },
+  {
+   "name": "REPLACEMENTS_PER_SENDER_VIEW",
+   "value": "1",
+   "kind": "rule",
+   "owner": "roots"
+  },
+  {
+   "name": "RECOVERY_RUN / SPACING / LEADER_LAG",
+   "value": "4 / 256 / 4n + 4",
+   "kind": "existing",
+   "owner": "roots"
+  },
+  {
+   "name": "F_r",
+   "value": "(b+1)*256 + 4 rounds",
+   "kind": "derived accounting bound (not an abort, replay or validity rule)",
+   "owner": "-"
+  },
+  {
+   "name": "live-vote residence wait",
+   "value": "T(L,v)*(1+rho) on the local monotonic clock since first learning the opening commit",
+   "kind": "rule (local voting policy)",
+   "owner": "roots"
+  },
+  {
+   "name": "MAX_BASE_FEE",
+   "value": "4611686018427387904",
+   "kind": "existing",
+   "owner": "ureth"
+  },
+  {
+   "name": "PARTITION_CEILING",
+   "value": "64",
+   "kind": "rule",
+   "owner": "roots"
+  },
+  {
+   "name": "--target-block-interval",
+   "value": "default 450 ms, >= 100 ms, < LocalTimeout/2",
+   "kind": "local, non-consensus",
+   "owner": "roots"
+  },
+  {
+   "name": "MaxClockSkew / LocalTimeout",
+   "value": "30 s / 10 s",
+   "kind": "existing",
+   "owner": "roots"
+  },
+  {
+   "name": "rho",
+   "value": "1/10000",
+   "kind": "premise",
+   "owner": "-"
+  },
+  {
+   "name": "G_f",
+   "value": "8 (provisional)",
+   "kind": "premise",
+   "owner": "-"
+  },
+  {
+   "name": "tau_tgt",
+   "value": "450 ms",
+   "kind": "premise",
+   "owner": "-"
+  },
+  {
+   "name": "C_Fz",
+   "value": "32",
+   "kind": "premise",
+   "owner": "-"
+  },
+  {
+   "name": "Q_max, O_max, Lambda, Lambda_r, delta, D, T_req",
+   "value": "measured",
+   "kind": "premise",
+   "owner": "-"
+  }
+ ],
+ "schema": "unicity.vr.schema/v1",
+ "version": 1
+}
