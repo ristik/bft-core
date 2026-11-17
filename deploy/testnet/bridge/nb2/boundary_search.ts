@@ -33,6 +33,7 @@ export interface Probe {
   up: bigint | null;
   down: bigint | null;
   real: Verdict; // planReturn's own verdict
+  detail?: Record<string, number | string>; // the token's gas terms, for the evidence only (never read by the search)
 }
 
 /**

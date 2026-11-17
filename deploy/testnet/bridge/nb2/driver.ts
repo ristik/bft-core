@@ -824,7 +824,7 @@ async function predict(w: Wallet, token: Uint8Array): Promise<{ ok: boolean; gas
  * The rest of the model (the mint's and the deposit's certificates, the pending burn, the gap proofs) is the token's fixed share: inside its
  * gas, and judged by shapeHolds on both sides.
  */
-async function shapeOf(token: Uint8Array, lT: number): Promise<{ up: bigint | null; down: bigint | null; shape: TokenShape | null }> {
+async function shapeOf(token: Uint8Array, lT: number): Promise<{ up: bigint | null; down: bigint | null; shape: TokenShape | null; detail?: Record<string, number | string> }> {
   const { lineageOf } = await import('../../../packages/native-bridge-plugin/src/nb2/index.js');
   const m = MEASURED_VERIFIER;
   const t = decodeToken(token);
@@ -854,7 +854,32 @@ async function shapeOf(token: Uint8Array, lT: number): Promise<{ up: bigint | nu
     extra += Math.max(0, c - m.measuredSignatures);
   }
   const shape: TokenShape = { evidenceBytes: lT, hops, levels, pairBytes: Math.floor(bytes / n), extraSignatures: Math.floor(extra / n) };
-  return { ...marginals(shape, m), shape };
+  // the diagnosis of a probe (the evidence, not a verdict): the model's terms as this token pays them, so fresh tokens of one length and conditions
+  // can be compared term by term (run 43985010186's search did not converge)
+  const count = (uc: Uint8Array): number | null => {
+    try {
+      const wit = UnicityCertificate.fromCBOR(uc).unicitySeal.witnesses as unknown as Map<unknown, unknown> | null;
+      return wit === null ? 0 : wit.size;
+    } catch {
+      return null;
+    }
+  };
+  let evmSigs: number | null = null;
+  try {
+    if (t.mint.justification !== null) evmSigs = count(decodeReceiptBacking(t.mint.justification).proof.uc);
+  } catch { /* not a root token's J */ }
+  const mintSigs = count(t.mintProof.uc);
+  const shaped = m.baseBytes + m.bytesPerTransfer * hops + m.bytesPerSplitLevel * levels;
+  const excess = Math.max(0, lT - shaped);
+  const fixedSigs = Math.max(0, (mintSigs ?? 0) - m.measuredSignatures) + Math.max(0, (evmSigs ?? 0) - m.measuredSignatures) + (m.maxSignatures - m.measuredSignatures);
+  const histogram = [...sigs.values()].reduce<Record<string, number>>((h, c) => ({ ...h, [String(c)]: (h[String(c)] ?? 0) + 1 }), {});
+  const detail = {
+    evidenceBytes: lT, shapedBytes: shaped, excessBytes: excess, pairBytesTotal: bytes, mintBytes: t.mintRaw.length + encodeProof(t.mintProof).length,
+    distinctCertificates: sigs.size, signaturesPerCertificate: JSON.stringify(histogram), transferExtraSignatures: extra, mintSignatures: String(mintSigs),
+    evmUcSignatures: String(evmSigs), gasHops: (m.perTransfer * BigInt(hops)).toString(), gasExcessBytes: (m.perExcessByte * BigInt(excess)).toString(),
+    gasSignatures: (m.perExtraSignature * BigInt(extra + fixedSigs)).toString(),
+  };
+  return { ...marginals(shape, m), shape, detail };
 }
 
 const BOUNDARY_CERTIFICATES = 16;
@@ -875,7 +900,7 @@ async function boundary(w: Wallet, label: string, estimate: number): Promise<voi
     }
     if (real !== 'passes' && real !== 'CapacityPreflight') throw new Error(`the boundary probe ${l} was refused for another reason: ${real}`);
     const sh = await shapeOf(t, p.bytes);
-    const probe: Probe = { label: l, transfers, conditions: `${certificates.get(l)} certificates, need ${p.need}`, gas: p.gas, up: sh.up, down: sh.down, real: real as Verdict };
+    const probe: Probe = { label: l, transfers, conditions: `${certificates.get(l)} certificates, need ${p.need}`, gas: p.gas, up: sh.up, down: sh.down, real: real as Verdict, detail: sh.detail };
     log(`  ${l}: ${transfers} transfers, ${evidenceOf(t).length} evidence bytes (${sh.shape?.pairBytes} a transfer, ${sh.shape?.extraSignatures} extra signatures), ${probe.conditions}, `
       + `preflight gas ${p.gas} (one transfer more +${sh.up}, one fewer -${sh.down}): planReturn ${real}`);
     return probe;
