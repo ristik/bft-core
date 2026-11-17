@@ -494,6 +494,16 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		if err = enableVRServices(cm, orchestration, trustBaseStore, trustBase, shardConfs, flags.VRDeploymentFile); err != nil {
 			return err
 		}
+		if flags.PosEVMRPC != "" {
+			// VT-05b: the VR handoff root side (observer, intent, the staged protocol, the leader path) reads VR through the execution client
+			dep, pins, depErr := loadVRRootDeployment(flags.VRDeploymentFile, uint64(trustBase.NetworkID), shardConfs)
+			if depErr != nil {
+				return depErr
+			}
+			if err = enableVRHandoff(ctx, cm, dep, pins, shardConfs, flags.PosEVMRPC, flags.PathWithDefault("", ""), signer, host); err != nil {
+				return err
+			}
+		}
 		stopWitnesses := serveWitnesses(host, cm)
 		defer stopWitnesses()
 	}
@@ -674,6 +684,9 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 			}
 			if flags.PosDeploymentFile != "" || flags.VRDeploymentFile != "" {
 				mux.HandleFunc("POST /api/v1/pos/control", rootPosControlHandler(cm))
+				if flags.VRDeploymentFile != "" && flags.PosEVMRPC != "" {
+					registerVRHandoffRoutes(mux, cm)
+				}
 			}
 			mux.HandleFunc("POST /api/v1/handoff/abort", rootHandoffAbortHandler(cm))
 			mux.HandleFunc("POST /api/v1/handoff/abort/status", rootHandoffAbortStatusHandler(cm))
