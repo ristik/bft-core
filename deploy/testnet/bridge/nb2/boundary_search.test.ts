@@ -7,7 +7,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { BoundaryNotFound, driftOf, findBoundary, ownShape, shapeHolds, type Probe, type SearchOptions, type SearchResult } from './boundary_search.js';
+import { BoundaryNotFound, driftOf, findBoundary, ownShape, refusalOf, shapeHolds, type Probe, type SearchOptions, type SearchResult } from './boundary_search.js';
 
 const LIMIT = 60_000_000n;
 const STEP = 265_000;
@@ -150,4 +150,14 @@ test('shapeHolds (the diagnostic): forward for the admission, backward for the r
   assert.equal(shapeHolds(probeOf('p', 20, LIMIT - 50_000n, 200_064n, 190_000n), probeOf('f', 21, 60_185_000n, 200_064n, 190_000n), LIMIT), null);
   assert.notEqual(shapeHolds(probeOf('p', 20, LIMIT - 50_000n, null), probeOf('f', 21, LIMIT + 50_000n, 100_000n), LIMIT), null);
   assert.notEqual(shapeHolds(probeOf('p', 20, LIMIT + 1n, 100_000n), probeOf('f', 21, LIMIT + 50_000n, 100_000n), LIMIT), null);
+});
+
+test('a refusal is labelled from the preflight\'s own checks: a null bound with the bytes fitting is unbounded, never bytes (astra P2, #1186)', () => {
+  const lim = 60_000_000n;
+  assert.equal(refusalOf({ baseFits: true, need: 64n, pMax: 400n, gas: null, limit: lim }), 'unbounded');
+  assert.equal(refusalOf({ baseFits: true, need: 64n, pMax: 400n, gas: 60_000_001n, limit: lim }), 'gas');
+  assert.equal(refusalOf({ baseFits: true, need: 401n, pMax: 400n, gas: null, limit: lim }), 'bytes');
+  assert.equal(refusalOf({ baseFits: false, need: 64n, pMax: 0n, gas: 1n, limit: lim }), 'bytes');
+  // a bound within the limit and the bytes fitting is no refusal by either: unbounded (the stage does not count it)
+  assert.equal(refusalOf({ baseFits: true, need: 64n, pMax: 400n, gas: lim, limit: lim }), 'unbounded');
 });
