@@ -39,8 +39,9 @@ address is in `--operator-allowed-sources` (also `UBFT_OPERATOR_ALLOWED_SOURCES`
 
 Root (`cli/ubft/cmd/root_node.go`). "Loopback peer" = the endpoint refuses a request whose TCP peer is not in the operator sources (loopback by default,
 see above) and needs
-`Content-Type: application/json` without an `Origin` header (blocks browser CSRF); it is a safeguard against a *network* caller, not
-authentication.
+`Content-Type: application/json` without an `Origin` header (blocks browser CSRF), and a `Host` that is an IP literal, `localhost` or a name
+listed in `--operator-allowed-hosts` (a DNS-rebound name is refused: a same-origin GET after rebinding need not carry `Origin`, so the Origin
+check alone is not rebinding protection). It is a safeguard against a *network* caller, not authentication.
 
 | Endpoint | Guard | Effect if exposed (and the guard does not hold) |
 |---|---|---|
