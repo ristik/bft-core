@@ -217,7 +217,14 @@ func NewConsensusManager(
 	}
 
 	cParams := optional.Params
-	pm, err := NewPacemaker(cParams.BlockRate/2, cParams.LocalTimeout, observe)
+	minRoundLen := cParams.BlockRate / 2
+	if target := optional.TargetBlockInterval; optional.TargetBlockIntervalSet {
+		if err := ValidateTargetBlockInterval(target, cParams.LocalTimeout); err != nil {
+			return nil, err
+		}
+		minRoundLen = target
+	}
+	pm, err := NewPacemaker(minRoundLen, cParams.LocalTimeout, observe)
 	if err != nil {
 		return nil, fmt.Errorf("creating Pacemaker: %w", err)
 	}

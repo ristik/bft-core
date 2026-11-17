@@ -105,9 +105,24 @@ func (m *VRModel) Queue(kind uint8, payloadSize int) (uint64, error) {
 	return id, nil
 }
 
-// Execute moves a Queued change past both delays to Scheduled; a ModuleAction instead executes into the active module (ok reports the
-// contained onGovernance outcome).
-func (m *VRModel) Execute(id uint64, target [20]byte, ok bool) error {
+// StepOutcome is the outcome class of a contained module step (design section 3.3.1).
+type StepOutcome uint8
+
+const (
+	StepOK          StepOutcome = 0 // the step succeeded
+	StepFault       StepOutcome = 1 // fully funded, preconditions met, and it reverted, exceeded its cap or returned malformed data
+	StepBudgetShort StepOutcome = 2 // too little gas for the step's budget: refused before the call, no health change
+)
+
+// ErrBudgetShort is the public-call refusal of a step the caller did not fund.
+var ErrBudgetShort = errors.New("BudgetShort")
+
+// Execute moves a Queued change past both delays to Scheduled. A ModuleAction instead executes into the active module through a
+// contained onGovernance step: StepOK makes it Active; a fully funded StepFault rejects it (ActionFailed) and faults the module
+// (health Faulted, sticky; never over Inconsistent, which refuses execute anyway); StepBudgetShort reverts BudgetShort with the change
+// still Queued and health unchanged, so anyone may retry with enough gas. A ModuleAction naming a module that is not active is
+// rejected (NotActive) without a module call and without a fault.
+func (m *VRModel) Execute(id uint64, target [20]byte, step StepOutcome) error {
 	c := m.Changes[id]
 	if c == nil || c.State != ChQueued {
 		return ErrPreconditionFailed
@@ -122,8 +137,13 @@ func (m *VRModel) Execute(id uint64, target [20]byte, ok bool) error {
 		switch {
 		case target != m.Active:
 			c.State, c.RejectReason = ChRejected, RejectNotActive
-		case !ok:
+		case step == StepBudgetShort:
+			m.emit("BudgetShort(%d)", id)
+			return ErrBudgetShort
+		case step == StepFault:
 			c.State, c.RejectReason = ChRejected, RejectActionFailed
+			m.Health = HealthFaulted
+			m.emit("ModuleFault(onGovernance)")
 		default:
 			c.State = ChActive
 		}
@@ -241,7 +261,7 @@ func (m *VRModel) release(r Word, o *ModelOutput, resolution uint8, bitmap uint1
 		case resolution == ResClosed:
 			c.State, c.BoundTo = ChScheduled, Word{}
 		case bitmap&(1<<uint(i)) != 0:
-			c.State, c.RejectReason = ChRejected, VerdictConflict // the committed verdict; the reason byte is the verdict code
+			c.State, c.RejectReason = ChRejected, VerdictConflict // the Boundary carries only the bitmap: Conflict is the generic root-rejection marker (schema 3.3)
 		default:
 			c.State = ChActive
 		}
