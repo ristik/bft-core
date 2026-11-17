@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
@@ -161,7 +162,37 @@ func (v *loadedValidator) save() error {
 		_ = os.Remove(tmp)
 		return err
 	}
-	return nil
+	return syncDir(filepath.Dir(v.path))
+}
+
+// syncDir fsyncs a directory, so a link or rename just made in it survives a power loss.
+func syncDir(dir string) error {
+	d, err := os.Open(dir) // #nosec G304 -- the directory of an operator supplied path
+	if err != nil {
+		return err
+	}
+	return errors.Join(d.Sync(), d.Close())
+}
+
+// tempPattern is the name of init's temporary files next to path; staleTemp is the age after which one is a crash's leftover.
+func tempPattern(path string) string { return "." + filepath.Base(path) + ".tmp-*" }
+
+const staleTemp = 10 * time.Minute
+
+// removeStaleTemps deletes this tool's temporary files next to each path that are older than staleTemp: what a crash between writing
+// and linking left behind (key material, mode 0600). A younger one may belong to a concurrent init and is left alone.
+func removeStaleTemps(paths []string, now time.Time) {
+	for _, p := range paths {
+		matches, err := filepath.Glob(filepath.Join(filepath.Dir(p), tempPattern(p)))
+		if err != nil {
+			continue
+		}
+		for _, m := range matches {
+			if st, err := os.Lstat(m); err == nil && st.Mode().IsRegular() && now.Sub(st.ModTime()) > staleTemp {
+				_ = os.Remove(m)
+			}
+		}
+	}
 }
 
 func configBytes(cfg validatorConfig) ([]byte, error) {
@@ -174,7 +205,7 @@ func configBytes(cfg validatorConfig) ([]byte, error) {
 
 // writeTemp writes b to a new 0600 file next to path and returns its name.
 func writeTemp(path string, b []byte) (string, error) {
-	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	f, err := os.CreateTemp(filepath.Dir(path), tempPattern(path))
 	if err != nil {
 		return "", err
 	}
@@ -204,7 +235,7 @@ func createExclusive(path string, b []byte) (bool, error) {
 	err = os.Link(tmp, path)
 	switch {
 	case err == nil:
-		return true, nil
+		return true, syncDir(filepath.Dir(path))
 	case errors.Is(err, os.ErrExist):
 		return false, nil
 	}
@@ -220,7 +251,7 @@ func createExclusive(path string, b []byte) (bool, error) {
 	if err := errors.Join(werr, f.Sync(), f.Close()); err != nil {
 		return false, err
 	}
-	return true, nil
+	return true, syncDir(filepath.Dir(path))
 }
 
 // keyPaths are every file init creates or keeps, by role: no two may be the same file.
@@ -475,12 +506,15 @@ func writeNodeInfo(keyPath string, kc *KeyConf) error {
 	if err != nil {
 		return err
 	}
-	b, err := json.MarshalIndent(&types.NodeInfo{NodeID: nk.NodeID, SigKey: nk.Public(), Stake: 1}, "", "  ")
-	if err != nil {
-		return err
-	}
-	if created, err := createExclusive(p, b); err != nil || created {
-		return err
+	// an existing node info is only read (the key directory may be read-only); a missing one is created exclusively
+	if !util.FileExists(p) {
+		b, err := json.MarshalIndent(&types.NodeInfo{NodeID: nk.NodeID, SigKey: nk.Public(), Stake: 1}, "", "  ")
+		if err != nil {
+			return err
+		}
+		if created, err := createExclusive(p, b); err != nil || created {
+			return err
+		}
 	}
 	var have types.NodeInfo
 	raw, err := os.ReadFile(p) // #nosec G304 -- operator supplied local path
@@ -590,6 +624,11 @@ func validatorInit(cmd *cobra.Command, f *validatorInitFlags) error {
 	if err := v.checkPaths(); err != nil {
 		return err
 	}
+	var all []string
+	for _, kp := range v.keyPaths() {
+		all = append(all, kp.path)
+	}
+	removeStaleTemps(all, time.Now())
 	var out []keyOutcome
 	var kcs []*KeyConf
 	for _, s := range []struct {
@@ -615,6 +654,11 @@ func validatorInit(cmd *cobra.Command, f *validatorInitFlags) error {
 			return fmt.Errorf("%w: %s key: %w", ErrValidator, s.name, err)
 		}
 		out = append(out, keyOutcome{name: s.name, path: s.path, created: created})
+	}
+	// again, now that every file exists: an alias that only resolves once its target exists (a dangling directory symlink, a case
+	// variant on a case-insensitive file system) is caught by file identity before anything uses the files
+	if err := v.checkPaths(); err != nil {
+		return err
 	}
 	if err := readJWT(v.abs(f.JWT)); err != nil {
 		return fmt.Errorf("%w: the existing Engine JWT is not usable (kept as it is; replace it by hand): %w", ErrValidator, err)

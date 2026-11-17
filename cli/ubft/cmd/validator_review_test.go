@@ -328,3 +328,88 @@ func runDoctor(t *testing.T, home string) (string, error) {
 	err := validatorDoctor(context.Background(), &out, f, host)
 	return out.String(), err
 }
+
+// TestValidatorInitAliasAfterCreation: an alias that resolves only once its target exists (here a dangling directory symlink, so the
+// JWT path names the ureth devp2p key) is refused after the keys exist, before node infos or the config are written (review r2, P-B).
+func TestValidatorInitAliasAfterCreation(t *testing.T) {
+	home := t.TempDir()
+	require.NoError(t, os.Symlink("ureth-key", filepath.Join(home, "jwtlink")))
+	out, err := runValidator(t, home, "init", "--rpc", "http://127.0.0.1:1", "--jwt", "jwtlink/p2p-secret")
+	require.ErrorContains(t, err, "the ureth devp2p key and the Engine JWT are the same file", out)
+	_, err = readUrethKey(filepath.Join(home, "ureth-key", "p2p-secret"))
+	require.NoError(t, err, "the ureth key is intact")
+	for _, p := range []string{validatorConfigFile, "root/" + nodeInfoFileName, "evm/" + nodeInfoFileName} {
+		_, err := os.Stat(filepath.Join(home, p))
+		require.True(t, os.IsNotExist(err), "%s is not written", p)
+	}
+}
+
+// TestValidatorInitReadOnlyKeyDirs: with every file present, init --force only reads the key directories (review r2, P-E).
+func TestValidatorInitReadOnlyKeyDirs(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory modes")
+	}
+	home := t.TempDir()
+	out, err := runValidator(t, home, "init", "--rpc", "http://127.0.0.1:1")
+	require.NoError(t, err, out)
+	dirs := []string{"root", "evm", "ureth-key", "jwt", "operator"}
+	digests := map[string][32]byte{}
+	for _, p := range []string{"root/keys.json", "root/node-info.json", "evm/keys.json", "evm/node-info.json", "ureth-key/p2p-secret", "jwt/jwt.hex", "operator/key"} {
+		digests[p] = fileDigest(t, filepath.Join(home, p))
+	}
+	for _, d := range dirs {
+		require.NoError(t, os.Chmod(filepath.Join(home, d), 0o500))
+	}
+	t.Cleanup(func() {
+		for _, d := range dirs {
+			_ = os.Chmod(filepath.Join(home, d), 0o700)
+		}
+	})
+	out, err = runValidator(t, home, "init", "--rpc", "http://127.0.0.1:2", "--force")
+	require.NoError(t, err, out)
+	for p, d := range digests {
+		require.Equal(t, d, fileDigest(t, filepath.Join(home, p)), p)
+	}
+	require.Equal(t, "http://127.0.0.1:2", readConfig(t, home).RPC)
+}
+
+// TestValidatorInitRemovesStaleTemps: init deletes its own temporary files a crash left (older than staleTemp), and leaves a fresh one
+// (a concurrent init's) and any other file alone.
+func TestValidatorInitRemovesStaleTemps(t *testing.T) {
+	home := t.TempDir()
+	out, err := runValidator(t, home, "init", "--rpc", "http://127.0.0.1:1")
+	require.NoError(t, err, out)
+	stale := filepath.Join(home, "operator", ".key.tmp-123")
+	fresh := filepath.Join(home, "root", ".keys.json.tmp-456")
+	other := filepath.Join(home, "operator", ".other.tmp-789")
+	for _, p := range []string{stale, fresh, other} {
+		require.NoError(t, os.WriteFile(p, []byte("x"), 0o600))
+	}
+	old := time.Now().Add(-time.Hour)
+	require.NoError(t, os.Chtimes(stale, old, old))
+	require.NoError(t, os.Chtimes(other, old, old))
+	out, err = runValidator(t, home, "init", "--rpc", "http://127.0.0.1:1", "--force")
+	require.NoError(t, err, out)
+	_, err = os.Stat(stale)
+	require.True(t, os.IsNotExist(err), "the stale temporary key file is removed")
+	_, err = os.Stat(fresh)
+	require.NoError(t, err, "a fresh one may be a concurrent init's")
+	_, err = os.Stat(other)
+	require.NoError(t, err, "only this tool's names are touched")
+}
+
+// TestValidatorApplyChecksPathsFirst: a hand-edited config whose JWT is the operator key is refused before any transaction.
+func TestValidatorApplyChecksPathsFirst(t *testing.T) {
+	chain, url := fakeNetwork(t)
+	home := initHome(t, url)
+	_, keys := loadHome(t, home)
+	chain.Fund(ethcrypto.PubkeyToAddress(keys.Operator.PublicKey), big.NewInt(1e18))
+	cfg := readConfig(t, home)
+	cfg.JWT = cfg.OperatorKey
+	b, err := configBytes(cfg)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(home, validatorConfigFile), b, 0o600))
+	_, err = runValidator(t, home, "apply")
+	require.ErrorContains(t, err, "the Engine JWT and the operator key are the same file")
+	require.Zero(t, chain.Sends())
+}

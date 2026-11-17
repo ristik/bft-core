@@ -149,6 +149,10 @@ func openTx(cmd *cobra.Command, f *txFlags) (*loadedValidator, *validatorKeys, *
 	if err != nil {
 		return nil, nil, nil, vrclient.Sender{}, err
 	}
+	// before any transaction: apply records the id in the config, which must not share a file with a key
+	if err := v.checkPaths(); err != nil {
+		return nil, nil, nil, vrclient.Sender{}, err
+	}
 	keys, err := v.keys()
 	if err != nil {
 		return nil, nil, nil, vrclient.Sender{}, err
@@ -183,7 +187,7 @@ func findID(ctx context.Context, v *loadedValidator, ch *validatorChain, owner c
 	for _, id := range ids {
 		o, err := ch.vr.OwnerOf(ctx, id)
 		if err != nil {
-			return 0, false, err
+			return 0, false, fmt.Errorf("%w: checking the owner of identity %d (pass --id to skip the log lookup): %w", ErrValidator, id, err)
 		}
 		if o != owner {
 			return 0, false, fmt.Errorf("%w: VR's logs name identity %d for %s, but VR says its owner is %s", ErrValidator, id, owner.Hex(), o.Hex())
