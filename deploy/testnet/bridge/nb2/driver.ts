@@ -52,6 +52,7 @@ import { u256 } from '../../../packages/native-bridge-plugin/src/nb2/cbor.js';
 import { TrustInput } from '../../../packages/native-bridge-plugin/src/trust.js';
 import { BoundaryNotFound, findBoundary, ownShape, type Probe, type Verdict } from './boundary_search.js';
 import { marginals, type TokenShape } from './boundary_shape.js';
+import { readLedger, type Answer } from './ledger_check.js';
 import { refreshAll } from '../../../tester/trust.js';
 
 // ---- configuration ------------------------------------------------------------------------------------------------------------------
@@ -531,75 +532,54 @@ async function preflight(w: Wallet, label: string): Promise<void> {
 }
 
 /**
- * The ledger's word on LABEL's source state, authenticated (the boundary stage's no-burn evidence, sol r12 on #1126): the aggregator's
- * non-inclusion proof of the state a burn (or any transfer) of the token would spend, verified against the wallet's trust history
- * (verifyNonInclusion: the certificate, the seal under its epoch's committee, the path to the certified root), at a snapshot whose seal is
- * not older than NOT_BEFORE (Unix seconds, the caller's time of the refusal: the seal timestamp is consensus-certified time) and whose root
- * round is past the token's own newest certificate. Polled while the snapshot is older, up to 120 s. The verdict is `unspent` only for a
- * verified absence that meets both; a proof the state is included, a service that says it is, a rejection, an older snapshot or any error is
- * not, and is written as it is (the lane fails closed on anything but `unspent`).
+ * The ledger's word on LABEL's source state, authenticated (the boundary stage's no-burn evidence, sol r12 and r13 on #1126): the
+ * aggregator's non-inclusion proof of the state a burn (or any transfer) of the token would spend, verified against the wallet's trust history
+ * (verifyNonInclusion: the certificate, the seal under its epoch's committee, the path to the certified root), at a snapshot sealed at or
+ * after NOT_BEFORE (Unix seconds: the first whole second after the refusal completed; the seal timestamp is consensus-certified time) and past
+ * the token's own newest certificate round. ledger_check.ts readLedger polls it within LEDGER_DEADLINE_MS, every request under an abort signal
+ * and a timer for what is left of it; the report is written whatever happens, `unspent` only for a verified absence that meets both.
  */
+const LEDGER_DEADLINE_MS = 120_000;
 async function ledger(w: Wallet, label: string, notBefore: bigint): Promise<void> {
   const { verifyNonInclusion } = await import('@unicitylabs/state-transition-sdk/lib/api/NonInclusionVerification.js');
   const { UnicityCertificateVerifier } = await import('@unicitylabs/state-transition-sdk/lib/api/bft/verification/UnicityCertificateVerifier.js');
   const { UnicitySealQuorumSignaturesVerificationRule } = await import('@unicitylabs/state-transition-sdk/lib/api/bft/verification/rule/UnicitySealQuorumSignaturesVerificationRule.js');
   const { Secp256k1SignatureVerifier } = await import('@unicitylabs/state-transition-sdk/lib/crypto/secp256k1/Secp256k1SignatureVerifier.js');
-  const token = w.token(label);
-  const t = decodeToken(token);
-  // the state a burn would spend: the head of the token, as the transfer request the wallet's burn would build names it (never submitted)
-  const req = await transferRequest(token, w.owner(w.entry(label).owner), { recipient: signaturePredicate(w.ownerPub(0)), mask: freshMask(), data: null, deadline: null });
-  const sid = await StateId.fromCertificationData(CertificationData.fromCBOR(req.cd));
-  const newest = [t.mintProof, ...t.proofs].reduce((m, p) => {
-    const r = UnicityCertificate.fromCBOR(p.uc).unicitySeal.rootChainRoundNumber;
-    return r > m ? r : m;
-  }, 0n);
-  const client = new AggregatorClient(lane.agg);
-  const context = {
-    trustBase: w.trust.history,
-    unicityCertificateVerifier: new UnicityCertificateVerifier(new UnicitySealQuorumSignaturesVerificationRule(new Secp256k1SignatureVerifier(), undefined, { maxSignatures: 16 })),
-  };
-  const res: Record<string, unknown> = { label, stateId: hx(sid.toCBOR()), notBefore, tokenNewestRootRound: newest, network: w.trust.network.id };
-  const deadline = Date.now() + 120_000;
-  for (let attempt = 1; ; attempt++) {
-    res.attempts = attempt;
-    try {
-      const r = await client.getNonInclusionProof(sid);
-      if (r.kind === 'state_included_hint') {
-        res.verdict = 'included';
-        res.reason = 'the service says the state is certified (state_included_hint)';
-        break;
-      }
-      res.proof = hx(r.proof.toCBOR());
+  const res: Record<string, unknown> = { label, notBefore, network: w.trust.network.id, deadlineMs: LEDGER_DEADLINE_MS };
+  try {
+    const token = w.token(label);
+    const t = decodeToken(token);
+    // the state a burn would spend: the head of the token, as the transfer request the wallet's burn would build names it (never submitted)
+    const req = await transferRequest(token, w.owner(w.entry(label).owner), { recipient: signaturePredicate(w.ownerPub(0)), mask: freshMask(), data: null, deadline: null });
+    const sid = await StateId.fromCertificationData(CertificationData.fromCBOR(req.cd));
+    const newest = [t.mintProof, ...t.proofs].reduce((m, p) => {
+      const r = UnicityCertificate.fromCBOR(p.uc).unicitySeal.rootChainRoundNumber;
+      return r > m ? r : m;
+    }, 0n);
+    Object.assign(res, { stateId: hx(sid.toCBOR()), tokenNewestRootRound: newest });
+    const client = new AggregatorClient(lane.agg);
+    const context = {
+      trustBase: w.trust.history,
+      unicityCertificateVerifier: new UnicityCertificateVerifier(new UnicitySealQuorumSignaturesVerificationRule(new Secp256k1SignatureVerifier(), undefined, { maxSignatures: 16 })),
+    };
+    const ask = async (signal: AbortSignal): Promise<Answer> => {
+      const r = await client.getNonInclusionProof(sid, { signal });
+      if (r.kind === 'state_included_hint') return { kind: 'hint' };
+      const proof = hx(r.proof.toCBOR());
       const v = await verifyNonInclusion(r.proof, context);
-      res.verification = v.verdict;
-      if (v.snapshot === null) {
-        res.verdict = 'rejected';
-        res.reason = v.reason;
-        break;
-      }
-      res.snapshot = { networkId: v.snapshot.networkId, rootEpoch: v.snapshot.rootEpoch, rootRound: v.snapshot.rootRound, sealTimestampSeconds: v.snapshot.sealTimestampSeconds,
-        shardRound: v.snapshot.shardRound };
-      if (v.verdict === 'included_at_snapshot') {
-        res.verdict = 'included';
-        res.reason = 'a verified proof that the state is certified: the token is spent';
-        break;
-      }
-      const fresh = v.snapshot.networkId === w.trust.network.id && v.snapshot.sealTimestampSeconds >= notBefore && v.snapshot.rootRound > newest;
-      if (fresh) {
-        res.verdict = 'unspent';
-        break;
-      }
-      res.verdict = 'stale';
-      res.reason = `absent at root round ${v.snapshot.rootRound} (sealed ${v.snapshot.sealTimestampSeconds}): not after the refusal (${notBefore}) and the token's newest round (${newest})`;
-    } catch (e) {
-      res.verdict = 'error';
-      res.reason = String((e as Error)?.message ?? e);
-    }
-    if (Date.now() > deadline) break;
-    await sleep(3_000);
+      if (v.snapshot === null) return { kind: 'rejected', reason: `${v.verdict}: ${v.reason}`, proof };
+      const s = v.snapshot;
+      return { kind: 'verified', verdict: v.verdict, proof,
+        snapshot: { networkId: s.networkId, rootEpoch: s.rootEpoch, rootRound: s.rootRound, sealTimestampSeconds: s.sealTimestampSeconds, shardRound: s.shardRound } };
+    };
+    Object.assign(res, await readLedger(ask, { notBefore, newestRound: newest, networkId: w.trust.network.id, deadlineMs: LEDGER_DEADLINE_MS, pollMs: 3_000 }));
+  } catch (e) {
+    Object.assign(res, { verdict: 'error', reason: String((e as Error)?.message ?? e) });
   }
   out(`ledger-${label}`, res);
   log(`  ledger of ${label}: ${res.verdict}${res.reason ? ` (${res.reason})` : ''}`);
+  // an abandoned request may keep its socket open: the report is written, so the command ends once its output is flushed
+  process.stdout.write('', () => process.exit(0));
 }
 
 async function burn(w: Wallet, label: string, recipient?: string): Promise<void> {

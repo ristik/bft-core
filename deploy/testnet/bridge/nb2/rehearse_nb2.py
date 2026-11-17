@@ -58,6 +58,8 @@ from rehearse import PROXY_IPS, PUBLIC_RPC, Failure, Rehearsal   # noqa: E402
 import release_nb2   # noqa: E402
 
 WALLETS = ('main', 'rot', 'big', 'size', 'gascap')
+STEP_TIMEOUT = 900     # seconds: one burn, redemption or preflight of a boundary probe
+LEDGER_TIMEOUT = 240   # seconds: the ledger read (its own deadline is 120 s, driver.ts LEDGER_DEADLINE_MS)
 FUNDS = {'main': 20 * 10 ** 18, 'rot': 20 * 10 ** 18, 'big': 20 * 10 ** 18, 'size': 5 * 10 ** 18, 'gascap': 5 * 10 ** 18}
 
 
@@ -98,17 +100,26 @@ class NB2Rehearsal(Rehearsal):
             if src.is_file():
                 shutil.copy(src, self.evidence / 'nb2' / src.name)
 
-    def driver(self, *args, check=True):
+    def driver(self, *args, check=True, timeout=None):
+        """One driver command in its container; with TIMEOUT (seconds) the container is named and killed when it runs over: exit status 124 and
+        the output so far, so the caller's evidence path always runs (sol r13)."""
         env = self.nb2 / 'driver.env'
         if os.getuid() == 0:
             subprocess.run(['chown', '-R', '10001:10001', str(self.gen / 'bridge')], check=True)
         t0 = time.monotonic()
-        out = subprocess.run(release_nb2.driver_cmd(self.gen, *args, env_file=env if env.exists() else None), text=True, capture_output=True)
-        text = (out.stdout + out.stderr).strip()
+        name = f'nb2-driver-{secrets.token_hex(6)}'
+        cmd = release_nb2.driver_cmd(self.gen, *args, env_file=env if env.exists() else None, extra=('--name', name) if timeout else ())
+        try:
+            out = subprocess.run(cmd, text=True, capture_output=True, timeout=timeout)
+            code, text = out.returncode, (out.stdout + out.stderr).strip()
+        except subprocess.TimeoutExpired as expired:
+            subprocess.run(['docker', 'kill', name], capture_output=True)
+            part = lambda b: b.decode(errors='replace') if isinstance(b, bytes) else (b or '')   # noqa: E731
+            code, text = 124, (part(expired.stdout) + part(expired.stderr)).strip() + f'\n[killed: over its {timeout} s]'
         self.say(f'  $ driver {" ".join(args)} ({time.monotonic() - t0:.0f} s)\n    ' + '\n    '.join(text.splitlines()[-20:]))
-        if check and out.returncode != 0:
+        if check and code != 0:
             raise Failure(f'the driver failed: {" ".join(args)}')
-        return out.returncode, text
+        return code, text
 
     def go(self, *args):
         return subprocess.run([str(self.nb2_evidence), *args], check=True, text=True, capture_output=True).stdout
@@ -579,11 +590,11 @@ class NB2Rehearsal(Rehearsal):
                 s['status'] = 'executing'
                 save()
                 if t['real'] == 'passes':
-                    burned, _ = self.driver('burn', 'big', label, check=False)
+                    burned, _ = self.driver('burn', 'big', label, check=False, timeout=STEP_TIMEOUT)
                     self.keep(f'burn-{label}')
                     redeemed = None
                     if burned == 0:
-                        redeemed, _ = self.driver('redeem', 'big', label, check=False)
+                        redeemed, _ = self.driver('redeem', 'big', label, check=False, timeout=STEP_TIMEOUT)
                         self.keep(f'redeem-{label}')
                     burn, o = read(f'burn-{label}'), read(f'redeem-{label}')
                     paid = (o or {}).get('paid') or {}
@@ -595,16 +606,18 @@ class NB2Rehearsal(Rehearsal):
                     self.expect(ok, f'{label} ({t["transfers"]} transfers) admitted by the preflight (gas {t["gas"]}) is burned and paid within userGasLimit {lim}: '
                                     f'redeem gas limit {paid.get("gasLimit")}, used {paid.get("gasUsed")}', json.dumps({'burn': burn, 'redeem': o}, default=str))
                 else:
-                    refused_at = int(time.time())
-                    judged, _ = self.driver('preflight', 'big', label, check=False)
+                    judged, _ = self.driver('preflight', 'big', label, check=False, timeout=STEP_TIMEOUT)
                     self.keep(f'preflight-{label}')
-                    # the ledger's own word that the token's state is unspent, after this refusal: a verified non-inclusion proof (sol r12)
-                    looked, _ = self.driver('ledger', 'big', label, str(refused_at), check=False)
+                    # the ledger's own word that the token's state is unspent after this refusal: a verified non-inclusion proof (sol r12) at a
+                    # snapshot sealed in the first whole second after the refusal completed or later (sol r13: never one sealed while it ran)
+                    not_before = int(time.time()) + 1
+                    s['ledgerNotBefore'] = not_before
+                    looked, _ = self.driver('ledger', 'big', label, str(not_before), check=False, timeout=LEDGER_TIMEOUT)
                     self.keep(f'ledger-{label}')
                     p, ledger = read(f'preflight-{label}'), read(f'ledger-{label}')
                     ok = (judged == 0 and p is not None and not p.get('ok', True) and p.get('rule') == 'CapacityPreflight' and t['gas'] is not None and int(t['gas']) > lim
                           and looked == 0 and ledger is not None and ledger.get('verdict') == 'unspent')
-                    s.update(status='sound' if ok else 'contradicted', preflightExit=judged, rule=(p or {}).get('rule'), detail=(p or {}).get('detail'),
+                    s.update(status='sound' if ok else 'contradicted', preflightExit=judged, ledgerExit=looked, rule=(p or {}).get('rule'), detail=(p or {}).get('detail'),
                              ledger=(ledger or {}).get('verdict'), ledgerSnapshot=(ledger or {}).get('snapshot'), ledgerReason=(ledger or {}).get('reason'))
                     save()
                     self.expect(ok, f'{label} ({t["transfers"]} transfers) refused by the preflight is over userGasLimit {lim} by its own gas ({t["gas"]}), refused again '

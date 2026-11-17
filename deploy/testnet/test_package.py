@@ -2266,15 +2266,17 @@ class NB2DriverKeys(unittest.TestCase):
         self.assertLess(deploy.index('self.make_keys()'),deploy.index("self.driver('gamma-check')"),'deploy makes the keys before its driver commands open a wallet')
     # the boundary stage (the owner's default claim): every probe executed as the preflight judged it, and the bound within the margin
     LIM=60_000_000
-    def boundary_run(self,tmp,tries,search,redeem=None,preflight=None,ledger=None,code=0,exits=None):
+    def boundary_run(self,tmp,tries,search,redeem=None,preflight=None,ledger=None,code=0,exits=None,hooks=None):
         """rehearse_nb2.boundary() against a driver that plays the search's file (TRIES, SEARCH) and the burns, redemptions, preflights and ledger
         reads it asks (LEDGER[label]: the ledger file, None for none written; EXITS[(command, label)]: the driver's exit status)."""
         m=self.module()
         gen=self.generation(tmp);r=m.NB2Rehearsal(gen,Path(tmp)/'ev','/bin/false')
         (r.nb2/'public').mkdir(parents=True,exist_ok=True);(r.nb2/'public/nb2-release.json').write_text(json.dumps({'pins':{'userGasLimit':str(self.LIM)}}))
         asked=[]
-        def driver(rr,*args,check=True):
+        def driver(rr,*args,check=True,timeout=None):
             out=rr.nb2/'out';out.mkdir(parents=True,exist_ok=True);asked.append(args)
+            if args[0]!='boundary-estimate' and args[0]!='boundary': self.assertIsNotNone(timeout,f'{args[0]} runs under a timeout')
+            if hooks and args[0] in hooks: hooks[args[0]](args)
             if args[0]=='boundary-estimate': (out/'boundary-estimate-ge.json').write_text(json.dumps({'estimate':255}));return 0,''
             if args[0]=='boundary':
                 self.assertFalse(check,'the search runs unchecked, so its file is kept first')
@@ -2283,6 +2285,7 @@ class NB2DriverKeys(unittest.TestCase):
             if args[0]=='ledger':
                 self.assertFalse(check);self.assertEqual(len(args),4,'the refusal time is passed')
                 v=(ledger or {}).get(l,{'verdict':'unspent','snapshot':{'rootRound':'900','sealTimestampSeconds':args[3]}})
+                if callable(v): v=v(args)
                 if v is not None: (out/f'ledger-{l}.json').write_text(json.dumps(v))
             if args[0]=='burn': (out/f'burn-{l}.json').write_text(json.dumps({'preflightGas':str(self.LIM-1)}))
             if args[0]=='redeem': (out/f'redeem-{l}.json').write_text(json.dumps((redeem or {}).get(l,{'result':'paid','paid':{'gasLimit':str(self.LIM),'gasUsed':'36607007'}})))
@@ -2361,6 +2364,50 @@ class NB2DriverKeys(unittest.TestCase):
             sound=json.loads((ev/'boundary-soundness.json').read_text())
             self.assertEqual([(x['label'],x['status']) for x in sound],[('g0c','sound'),('g1c','contradicted'),('g2c','not executed'),('g3c','not executed')])
             self.assertEqual(sound[1]['ledger'],'included')
+    def test_the_ledger_snapshot_must_be_sealed_after_the_refusal_completed(self):
+        # sol r13: a preflight that starts at 1000.2 and completes at 1005.4 asks the ledger for a seal at 1006 or later; a snapshot sealed at
+        # 1005 (while it ran, in its last second) is not fresh. Completing exactly at 1005.0 still asks for 1006: the seal second is whole
+        for done,snapshot,fresh in ((1005.4,1005,False),(1005.4,1006,True),(1005.0,1005,False),(1005.0,1006,True),(1005.4,1001,False)):
+            with self.subTest(done=done,snapshot=snapshot), tempfile.TemporaryDirectory() as tmp:
+                clock=[1000.2]
+                def preflight_runs(args,clock=clock,done=done): clock[0]=done
+                def chain_ledger(args,snapshot=snapshot):   # the driver's rule: unspent only when sealed at or after the threshold it is given
+                    return {'verdict':'unspent' if snapshot>=int(args[3]) else 'stale','snapshot':{'sealTimestampSeconds':str(snapshot)}}
+                t=[self.probe('g0c',206,self.LIM+260_000,'CapacityPreflight'),self.probe('g1c',204,self.LIM-300_000,'passes')]
+                m,r,driver,asked=self.boundary_run(tmp,t,{'admitted':t[1],'refused':t[0],'spread':2,'margin':2,'window':['g0c','g1c']},
+                                                   ledger={'g0c':chain_ledger},hooks={'preflight':preflight_runs})
+                with patch.object(m.NB2Rehearsal,'driver',driver), patch.object(m.time,'time',lambda clock=clock: clock[0]):
+                    if fresh:
+                        r.boundary()
+                    else:
+                        with self.assertRaisesRegex(m.Failure,'g0c .* refused'): r.boundary()
+                self.assertEqual([a[3] for a in asked if a[0]=='ledger'],['1006'])
+                sound=json.loads((Path(tmp)/'ev/nb2/boundary-soundness.json').read_text())
+                self.assertEqual((sound[0]['ledgerNotBefore'],sound[0]['status']),(1006,'sound' if fresh else 'contradicted'))
+    def test_a_driver_command_over_its_timeout_is_killed_and_reported(self):
+        # sol r13: a stalled command (a ledger read whose transport never completes) cannot hold the stage: the container is killed, the
+        # command reports 124, and the soundness file is still written
+        m=self.module()
+        with tempfile.TemporaryDirectory() as tmp:
+            gen=self.generation(tmp);r=m.NB2Rehearsal(gen,Path(tmp)/'ev','/bin/false')
+            ran=[]
+            def run(cmd,*a,**kw):
+                ran.append((cmd,kw.get('timeout')))
+                if cmd[:2]==['docker','kill']: return subprocess.CompletedProcess(cmd,0,'','')
+                raise subprocess.TimeoutExpired(cmd,kw['timeout'],output=b'polling the aggregator',stderr=b'')
+            with patch.object(m.subprocess,'run',run), patch.object(m.os,'getuid',lambda: 1000), patch.object(m.release_nb2,'driver_cmd',lambda gen,*args,env_file=None,extra=(): ['docker','run',*extra,'img',*args]):
+                code,text=r.driver('ledger','big','g0c','1006',check=False,timeout=240)
+            self.assertEqual(code,124);self.assertIn('[killed: over its 240 s]',text);self.assertIn('polling the aggregator',text)
+            name=ran[0][0][ran[0][0].index('--name')+1]
+            self.assertEqual(ran[0][1],240);self.assertEqual(ran[1][0],['docker','kill',name])
+        with tempfile.TemporaryDirectory() as tmp:
+            t=self.tries();m,r,driver,_=self.boundary_run(tmp,t,{'admitted':t[2],'refused':t[3],'spread':2,'margin':2,'window':['g1c','g2c','g3c']},
+                                                           ledger={'g0c':None},exits={('ledger','g0c'):124})
+            with patch.object(m.NB2Rehearsal,'driver',driver):
+                with self.assertRaisesRegex(m.Failure,'g0c .* refused'): r.boundary()
+            sound=json.loads((Path(tmp)/'ev/nb2/boundary-soundness.json').read_text())
+            self.assertEqual((sound[0]['status'],sound[0]['ledgerExit'],sound[0]['ledger']),('contradicted',124,None))
+            self.assertEqual([x['status'] for x in sound[1:]],['not executed']*3)
     def test_a_spread_over_the_margin_fails_the_location(self):
         with tempfile.TemporaryDirectory() as tmp:
             t=self.tries();m,r,driver,_=self.boundary_run(tmp,t,{'admitted':t[2],'refused':t[1],'spread':4,'margin':2,'window':['g1c','g2c','g3c']})

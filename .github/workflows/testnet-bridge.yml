@@ -85,7 +85,7 @@ jobs:
         run: |
           img=$(python3 -c "import sys; sys.path[:0] = ['deploy/testnet/bridge', 'deploy/testnet']; import deploy_bridge; print(deploy_bridge.image())")
           docker run --rm --read-only --network none --user 10001:10001 --tmpfs /tmp -e HOME=/tmp/home -v "$PWD/deploy/testnet/bridge/nb2:/opt/bridge/native-bridge-plugins/tests/live/nb2lane:ro" \
-            -w /opt/bridge/native-bridge-plugins "$img" npx --no-install tsx --test tests/live/nb2lane/boundary_search.test.ts tests/live/nb2lane/boundary_shape.test.ts
+            -w /opt/bridge/native-bridge-plugins "$img" npx --no-install tsx --test tests/live/nb2lane/boundary_search.test.ts tests/live/nb2lane/boundary_shape.test.ts tests/live/nb2lane/ledger_check.test.ts
       - run: go build -o /tmp/tn-keygen ./deploy/testnet/keygen
       - run: go build -C pinned-bft -o /tmp/tn-b1genesis ./scripts/b1genesis
       - name: The Go reference verifier and wallet-evidence tool (nb2ref), from this checkout
