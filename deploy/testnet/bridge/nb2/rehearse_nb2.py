@@ -29,8 +29,8 @@ PoS sequence's first invocation (deploy,fund,pos-deposit) keeps them, and its la
                 and 3, canonical encoding) judged by all three; fault injection of 0x0100, 0x0102 and the helper's code (eth_call state overrides)
   gas           real transaction gas of the returns (long, nested, claims), with the measured refusals
   boundary      the capacity bound on live tokens: every token the stage builds executed as the preflight judged it (each admitted one burned and
-                paid within userGasLimit, each refused one over it by the preflight's own gas and refused before any burn: CapacityPreflight, the
-                documented limit, not recovery), and the bound located within 2 transfers (among the newest three probes the highest admitted and
+                paid within userGasLimit, each refused one over it by the preflight's own gas, refused again (CapacityPreflight, the documented
+                limit, not recovery) and unspent by the ledger after the refusal: a verified non-inclusion proof), and the bound located within 2 transfers (among the newest three probes the highest admitted and
                 the lowest refused lengths at most 2 apart: fresh tokens' gas varies by about a transfer's step, so an exact adjacent pair is not
                 observable live; the owner's default, briefs/owner-questions.md)
   cold          a burned part redeemed after every derived wallet cache is deleted (journal, token and burn kept)
@@ -540,7 +540,8 @@ class NB2Rehearsal(Rehearsal):
     def boundary(self):
         """The preflight's capacity bound on live tokens (the owner's default claim, briefs/owner-questions.md): every probe the search builds is
         executed as the preflight judged it (soundness: an admitted token is burned and paid within userGasLimit, a refused one is over it by the
-        preflight's own gas and is never burned), and the bound lies within the pinned margin (location: among the newest probes the highest
+        preflight's own gas, is refused again and its state is unspent by the ledger afterwards: the aggregator's verified non-inclusion proof),
+        and the bound lies within the pinned margin (location: among the newest probes the highest
         admitted length and the lowest refused one are at most `margin` transfers apart). The shape diagnostics are recorded, not judged."""
         self.driver('boundary-estimate', 'big', 'ge')
         est = self.outfile('boundary-estimate-ge')['estimate']
@@ -556,31 +557,61 @@ class NB2Rehearsal(Rehearsal):
             self.say(f'  probe {t["label"]}: {t["transfers"]} transfers, {t["conditions"]}, preflight gas {t["gas"]} (+{t["up"]}/-{t["down"]}), {t["real"]}; '
                      f'shape {json.dumps(t.get("shape"))}; evidence {d.get("evidenceBytes")} bytes')
         self.say(f'  drift: {json.dumps(b.get("drift"))}')
-        # soundness, every probe, strict: the preflight's verdict is what execution does
-        sound = []
-        for t in b['tries']:
-            label = t['label']
-            if t['real'] == 'passes':
-                self.driver('burn', 'big', label)
-                self.driver('redeem', 'big', label)
-                burn, o = self.outfile(f'burn-{label}'), self.outfile(f'redeem-{label}')
-                paid = o.get('paid') or {}
-                ok = (o.get('result') == 'paid' and int(t['gas']) <= lim and int(burn['preflightGas']) <= lim and int(paid.get('gasLimit', lim + 1)) <= lim
-                      and int(paid.get('gasUsed', lim + 1)) <= lim)
-                self.expect(ok, f'{label} ({t["transfers"]} transfers) admitted by the preflight (gas {t["gas"]}) is burned and paid within userGasLimit {lim}: '
-                                f'redeem gas limit {paid.get("gasLimit")}, used {paid.get("gasUsed")}', json.dumps({'burn': burn, 'redeem': o}, default=str))
-                self.keep(f'burn-{label}', f'redeem-{label}')
-                sound.append({'label': label, 'transfers': t['transfers'], 'verdict': 'admitted', 'preflightGas': t['gas'], 'gasLimit': paid.get('gasLimit'), 'gasUsed': paid.get('gasUsed')})
-            else:
-                self.driver('preflight', 'big', label)
-                p = self.outfile(f'preflight-{label}')
-                ok = (not p['ok'] and p['rule'] == 'CapacityPreflight' and t['gas'] is not None and int(t['gas']) > lim
-                      and not (self.nb2 / 'out' / f'burn-{label}.json').exists())
-                self.expect(ok, f'{label} ({t["transfers"]} transfers) refused by the preflight is over userGasLimit {lim} by its own gas ({t["gas"]}) and refused again before any burn '
-                                f'(CapacityPreflight, no burn made)', json.dumps(p))
-                self.keep(f'preflight-{label}')
-                sound.append({'label': label, 'transfers': t['transfers'], 'verdict': 'refused', 'preflightGas': t['gas'], 'detail': p.get('detail')})
-        (self.evidence / 'nb2/boundary-soundness.json').write_text(json.dumps(sound, indent=2, default=str) + '\n')
+        # soundness, every probe, strict: the preflight's verdict is what execution does. Each probe's outputs are kept and its entry of
+        # nb2/boundary-soundness.json written before anything is judged: a contradiction leaves its evidence, and the probes after it stay
+        # recorded as not executed
+        sound = [{'label': t['label'], 'transfers': t['transfers'], 'verdict': 'admitted' if t['real'] == 'passes' else 'refused', 'preflightGas': t['gas'],
+                  'status': 'not executed'} for t in b['tries']]
+        path = self.evidence / 'nb2/boundary-soundness.json'
+
+        def save():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(sound, indent=2, default=str) + '\n')
+
+        def read(name):
+            f = self.nb2 / 'out' / f'{name}.json'
+            return json.loads(f.read_text()) if f.is_file() else None
+
+        save()
+        try:
+            for t, s in zip(b['tries'], sound):
+                label = t['label']
+                s['status'] = 'executing'
+                save()
+                if t['real'] == 'passes':
+                    burned, _ = self.driver('burn', 'big', label, check=False)
+                    self.keep(f'burn-{label}')
+                    redeemed = None
+                    if burned == 0:
+                        redeemed, _ = self.driver('redeem', 'big', label, check=False)
+                        self.keep(f'redeem-{label}')
+                    burn, o = read(f'burn-{label}'), read(f'redeem-{label}')
+                    paid = (o or {}).get('paid') or {}
+                    ok = (burned == 0 and redeemed == 0 and burn is not None and o is not None and o.get('result') == 'paid' and int(t['gas']) <= lim
+                          and int(burn['preflightGas']) <= lim and int(paid.get('gasLimit', lim + 1)) <= lim and int(paid.get('gasUsed', lim + 1)) <= lim)
+                    s.update(status='sound' if ok else 'contradicted', burnExit=burned, redeemExit=redeemed, result=(o or {}).get('result'),
+                             gasLimit=paid.get('gasLimit'), gasUsed=paid.get('gasUsed'))
+                    save()
+                    self.expect(ok, f'{label} ({t["transfers"]} transfers) admitted by the preflight (gas {t["gas"]}) is burned and paid within userGasLimit {lim}: '
+                                    f'redeem gas limit {paid.get("gasLimit")}, used {paid.get("gasUsed")}', json.dumps({'burn': burn, 'redeem': o}, default=str))
+                else:
+                    refused_at = int(time.time())
+                    judged, _ = self.driver('preflight', 'big', label, check=False)
+                    self.keep(f'preflight-{label}')
+                    # the ledger's own word that the token's state is unspent, after this refusal: a verified non-inclusion proof (sol r12)
+                    looked, _ = self.driver('ledger', 'big', label, str(refused_at), check=False)
+                    self.keep(f'ledger-{label}')
+                    p, ledger = read(f'preflight-{label}'), read(f'ledger-{label}')
+                    ok = (judged == 0 and p is not None and not p.get('ok', True) and p.get('rule') == 'CapacityPreflight' and t['gas'] is not None and int(t['gas']) > lim
+                          and looked == 0 and ledger is not None and ledger.get('verdict') == 'unspent')
+                    s.update(status='sound' if ok else 'contradicted', preflightExit=judged, rule=(p or {}).get('rule'), detail=(p or {}).get('detail'),
+                             ledger=(ledger or {}).get('verdict'), ledgerSnapshot=(ledger or {}).get('snapshot'), ledgerReason=(ledger or {}).get('reason'))
+                    save()
+                    self.expect(ok, f'{label} ({t["transfers"]} transfers) refused by the preflight is over userGasLimit {lim} by its own gas ({t["gas"]}), refused again '
+                                    f'(CapacityPreflight), and its state is unspent by the ledger after the refusal (a verified non-inclusion proof)',
+                                json.dumps({'preflight': p, 'ledger': {k: v for k, v in (ledger or {}).items() if k != 'proof'}}, default=str))
+        finally:
+            save()
         if code != 0:
             raise Failure(f'the driver failed: boundary big g {est}: {b.get("error")} (every probe: evidence nb2/boundary-g.json)')
         a, r = b['admitted'], b['refused']

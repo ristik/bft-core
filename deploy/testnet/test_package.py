@@ -2266,8 +2266,9 @@ class NB2DriverKeys(unittest.TestCase):
         self.assertLess(deploy.index('self.make_keys()'),deploy.index("self.driver('gamma-check')"),'deploy makes the keys before its driver commands open a wallet')
     # the boundary stage (the owner's default claim): every probe executed as the preflight judged it, and the bound within the margin
     LIM=60_000_000
-    def boundary_run(self,tmp,tries,search,redeem=None,preflight=None,code=0):
-        """rehearse_nb2.boundary() against a driver that plays the search's file (TRIES, SEARCH) and the burns, redemptions and preflights it asks."""
+    def boundary_run(self,tmp,tries,search,redeem=None,preflight=None,ledger=None,code=0,exits=None):
+        """rehearse_nb2.boundary() against a driver that plays the search's file (TRIES, SEARCH) and the burns, redemptions, preflights and ledger
+        reads it asks (LEDGER[label]: the ledger file, None for none written; EXITS[(command, label)]: the driver's exit status)."""
         m=self.module()
         gen=self.generation(tmp);r=m.NB2Rehearsal(gen,Path(tmp)/'ev','/bin/false')
         (r.nb2/'public').mkdir(parents=True,exist_ok=True);(r.nb2/'public/nb2-release.json').write_text(json.dumps({'pins':{'userGasLimit':str(self.LIM)}}))
@@ -2279,10 +2280,14 @@ class NB2DriverKeys(unittest.TestCase):
                 self.assertFalse(check,'the search runs unchecked, so its file is kept first')
                 (out/'boundary-g.json').write_text(json.dumps({'tries':tries,**search}));return code,''
             l=args[2]
+            if args[0]=='ledger':
+                self.assertFalse(check);self.assertEqual(len(args),4,'the refusal time is passed')
+                v=(ledger or {}).get(l,{'verdict':'unspent','snapshot':{'rootRound':'900','sealTimestampSeconds':args[3]}})
+                if v is not None: (out/f'ledger-{l}.json').write_text(json.dumps(v))
             if args[0]=='burn': (out/f'burn-{l}.json').write_text(json.dumps({'preflightGas':str(self.LIM-1)}))
             if args[0]=='redeem': (out/f'redeem-{l}.json').write_text(json.dumps((redeem or {}).get(l,{'result':'paid','paid':{'gasLimit':str(self.LIM),'gasUsed':'36607007'}})))
             if args[0]=='preflight': (out/f'preflight-{l}.json').write_text(json.dumps((preflight or {}).get(l,{'ok':False,'rule':'CapacityPreflight','detail':'over'})))
-            return 0,''
+            return (exits or {}).get((args[0],l),0),''
         return m,r,driver,asked
     def probe(self,label,k,gas,real):
         return {'label':label,'transfers':k,'conditions':'30 certificates ab, need 64','gas':str(gas),'up':'265000','down':'265000','real':real,'shape':{}}
@@ -2295,12 +2300,15 @@ class NB2DriverKeys(unittest.TestCase):
             t=self.tries();search={'admitted':t[2],'refused':t[3],'spread':2,'margin':2,'window':['g1c','g2c','g3c']}
             m,r,driver,asked=self.boundary_run(tmp,t,search)
             with patch.object(m.NB2Rehearsal,'driver',driver): r.boundary()
-            self.assertEqual([a[:3] for a in asked if a[0] in ('burn','redeem','preflight')],
-                             [('preflight','big','g0c'),('preflight','big','g1c'),('burn','big','g2c'),('redeem','big','g2c'),('preflight','big','g3c')],
-                             'every probe: the admitted one burned and redeemed, every refused one judged again and never burned')
+            self.assertEqual([a[:3] for a in asked if a[0] in ('burn','redeem','preflight','ledger')],
+                             [('preflight','big','g0c'),('ledger','big','g0c'),('preflight','big','g1c'),('ledger','big','g1c'),('burn','big','g2c'),('redeem','big','g2c'),
+                              ('preflight','big','g3c'),('ledger','big','g3c')],
+                             'every probe: the admitted one burned and redeemed, every refused one judged again and read from the ledger, never burned')
+            self.assertEqual([a[0] for a in asked].count('burn'),1)
             sound=json.loads((Path(tmp)/'ev/nb2/boundary-soundness.json').read_text())
-            self.assertEqual([(x['label'],x['verdict']) for x in sound],[('g0c','refused'),('g1c','refused'),('g2c','admitted'),('g3c','refused')])
-            for f in ('boundary-g','boundary-estimate-ge','burn-g2c','redeem-g2c','preflight-g0c','preflight-g3c'): self.assertTrue((Path(tmp)/f'ev/nb2/{f}.json').is_file(),f)
+            self.assertEqual([(x['label'],x['verdict'],x['status']) for x in sound],[('g0c','refused','sound'),('g1c','refused','sound'),('g2c','admitted','sound'),('g3c','refused','sound')])
+            self.assertEqual([x.get('ledger') for x in sound if x['verdict']=='refused'],['unspent']*3)
+            for f in ('boundary-g','boundary-estimate-ge','burn-g2c','redeem-g2c','preflight-g0c','preflight-g3c','ledger-g0c','ledger-g3c'): self.assertTrue((Path(tmp)/f'ev/nb2/{f}.json').is_file(),f)
     def test_any_probe_that_execution_contradicts_fails_the_stage(self):
         L=self.LIM
         cases={
@@ -2308,6 +2316,13 @@ class NB2DriverKeys(unittest.TestCase):
             'an admitted token whose redemption needs more than userGasLimit':({'redeem':{'g2c':{'result':'paid','paid':{'gasLimit':str(L+1),'gasUsed':'36607007'}}}},'g2c .* admitted'),
             'a refused token the wallet admits when asked again':({'preflight':{'g3c':{'ok':True}}},'g3c .* refused'),
             'a refused token refused for another rule':({'preflight':{'g1c':{'ok':False,'rule':'StaleEndpoint'}}},'g1c .* refused'),
+            # sol r12: a certified burn with no local burn report: the ledger shows the state spent
+            'a refused token whose state the ledger shows spent':({'ledger':{'g1c':{'verdict':'included','reason':'a verified proof that the state is certified'}}},'g1c .* refused'),
+            'a refused token with no ledger evidence':({'ledger':{'g1c':None},'exits':{('ledger','g1c'):1}},'g1c .* refused'),
+            'a refused token whose ledger proof does not verify':({'ledger':{'g3c':{'verdict':'rejected','reason':'authority_rejected'}}},'g3c .* refused'),
+            'a refused token whose ledger snapshot is older than the refusal':({'ledger':{'g0c':{'verdict':'stale'}}},'g0c .* refused'),
+            'a refused token whose preflight command failed':({'exits':{('preflight','g3c'):1}},'g3c .* refused'),
+            'an admitted token whose burn command failed':({'exits':{('burn','g2c'):1}},'g2c .* admitted'),
         }
         for name,(kw,msg) in cases.items():
             with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
@@ -2320,6 +2335,32 @@ class NB2DriverKeys(unittest.TestCase):
             m,r,driver,_=self.boundary_run(tmp,t,{'admitted':t[2],'refused':t[3],'spread':2,'margin':2,'window':['g1c','g2c','g3c']})
             with patch.object(m.NB2Rehearsal,'driver',driver):
                 with self.assertRaisesRegex(m.Failure,'g1c .* refused'): r.boundary()
+    def test_a_contradicted_probe_leaves_its_evidence_and_the_soundness_file_so_far(self):
+        # sol r12: the admitted g2c is not paid: the stage fails, with g2c's burn and redeem outputs and the soundness file kept, g0c and g1c
+        # sound, g2c contradicted, g3c not executed
+        with tempfile.TemporaryDirectory() as tmp:
+            t=self.tries();m,r,driver,asked=self.boundary_run(tmp,t,{'admitted':t[2],'refused':t[3],'spread':2,'margin':2,'window':['g1c','g2c','g3c']},
+                                                              redeem={'g2c':{'result':'unconfirmed'}})
+            with patch.object(m.NB2Rehearsal,'driver',driver):
+                with self.assertRaisesRegex(m.Failure,'g2c .* admitted'): r.boundary()
+            ev=Path(tmp)/'ev/nb2'
+            self.assertEqual(json.loads((ev/'redeem-g2c.json').read_text())['result'],'unconfirmed')
+            self.assertTrue((ev/'burn-g2c.json').is_file())
+            sound=json.loads((ev/'boundary-soundness.json').read_text())
+            self.assertEqual([(x['label'],x['status']) for x in sound],[('g0c','sound'),('g1c','sound'),('g2c','contradicted'),('g3c','not executed')])
+            self.assertEqual(sound[2]['result'],'unconfirmed')
+            self.assertNotIn(('preflight','big','g3c'),[a[:3] for a in asked])
+        # a refused probe the ledger shows spent: its ledger file is kept beside the soundness file
+        with tempfile.TemporaryDirectory() as tmp:
+            t=self.tries();m,r,driver,_=self.boundary_run(tmp,t,{'admitted':t[2],'refused':t[3],'spread':2,'margin':2,'window':['g1c','g2c','g3c']},
+                                                           ledger={'g1c':{'verdict':'included','reason':'certified'}})
+            with patch.object(m.NB2Rehearsal,'driver',driver):
+                with self.assertRaisesRegex(m.Failure,'g1c'): r.boundary()
+            ev=Path(tmp)/'ev/nb2'
+            self.assertEqual(json.loads((ev/'ledger-g1c.json').read_text())['verdict'],'included')
+            sound=json.loads((ev/'boundary-soundness.json').read_text())
+            self.assertEqual([(x['label'],x['status']) for x in sound],[('g0c','sound'),('g1c','contradicted'),('g2c','not executed'),('g3c','not executed')])
+            self.assertEqual(sound[1]['ledger'],'included')
     def test_a_spread_over_the_margin_fails_the_location(self):
         with tempfile.TemporaryDirectory() as tmp:
             t=self.tries();m,r,driver,_=self.boundary_run(tmp,t,{'admitted':t[2],'refused':t[1],'spread':4,'margin':2,'window':['g1c','g2c','g3c']})

@@ -17,6 +17,7 @@
  *   chain W FROM TO N [--rounds]   N transfers, certified in one aggregator batch (or one round each with --rounds)
  *   burn W LABEL [--recipient ADDR]   plan the return (preflight) and certify the burn; the evidence and the three verdicts' inputs
  *   preflight W LABEL      plan the return only (the capacity preflight), never burn
+ *   ledger W LABEL T       the aggregator's verified non-inclusion of LABEL's head state at a snapshot sealed at T or later: unspent, never burned
  *   verdicts W LABEL...    the plug-in's verdict and the deployed verifier's (eth_call verifyReturn), byte for byte
  *   redeem W LABEL [--low-gas|--hold|--stale|--expect-ambiguous]
  *   replay W LABEL         the paid redemption again: the exact calldata re-sent, and the wallet's own refusal
@@ -529,6 +530,78 @@ async function preflight(w: Wallet, label: string): Promise<void> {
   }
 }
 
+/**
+ * The ledger's word on LABEL's source state, authenticated (the boundary stage's no-burn evidence, sol r12 on #1126): the aggregator's
+ * non-inclusion proof of the state a burn (or any transfer) of the token would spend, verified against the wallet's trust history
+ * (verifyNonInclusion: the certificate, the seal under its epoch's committee, the path to the certified root), at a snapshot whose seal is
+ * not older than NOT_BEFORE (Unix seconds, the caller's time of the refusal: the seal timestamp is consensus-certified time) and whose root
+ * round is past the token's own newest certificate. Polled while the snapshot is older, up to 120 s. The verdict is `unspent` only for a
+ * verified absence that meets both; a proof the state is included, a service that says it is, a rejection, an older snapshot or any error is
+ * not, and is written as it is (the lane fails closed on anything but `unspent`).
+ */
+async function ledger(w: Wallet, label: string, notBefore: bigint): Promise<void> {
+  const { verifyNonInclusion } = await import('@unicitylabs/state-transition-sdk/lib/api/NonInclusionVerification.js');
+  const { UnicityCertificateVerifier } = await import('@unicitylabs/state-transition-sdk/lib/api/bft/verification/UnicityCertificateVerifier.js');
+  const { UnicitySealQuorumSignaturesVerificationRule } = await import('@unicitylabs/state-transition-sdk/lib/api/bft/verification/rule/UnicitySealQuorumSignaturesVerificationRule.js');
+  const { Secp256k1SignatureVerifier } = await import('@unicitylabs/state-transition-sdk/lib/crypto/secp256k1/Secp256k1SignatureVerifier.js');
+  const token = w.token(label);
+  const t = decodeToken(token);
+  // the state a burn would spend: the head of the token, as the transfer request the wallet's burn would build names it (never submitted)
+  const req = await transferRequest(token, w.owner(w.entry(label).owner), { recipient: signaturePredicate(w.ownerPub(0)), mask: freshMask(), data: null, deadline: null });
+  const sid = await StateId.fromCertificationData(CertificationData.fromCBOR(req.cd));
+  const newest = [t.mintProof, ...t.proofs].reduce((m, p) => {
+    const r = UnicityCertificate.fromCBOR(p.uc).unicitySeal.rootChainRoundNumber;
+    return r > m ? r : m;
+  }, 0n);
+  const client = new AggregatorClient(lane.agg);
+  const context = {
+    trustBase: w.trust.history,
+    unicityCertificateVerifier: new UnicityCertificateVerifier(new UnicitySealQuorumSignaturesVerificationRule(new Secp256k1SignatureVerifier(), undefined, { maxSignatures: 16 })),
+  };
+  const res: Record<string, unknown> = { label, stateId: hx(sid.toCBOR()), notBefore, tokenNewestRootRound: newest, network: w.trust.network.id };
+  const deadline = Date.now() + 120_000;
+  for (let attempt = 1; ; attempt++) {
+    res.attempts = attempt;
+    try {
+      const r = await client.getNonInclusionProof(sid);
+      if (r.kind === 'state_included_hint') {
+        res.verdict = 'included';
+        res.reason = 'the service says the state is certified (state_included_hint)';
+        break;
+      }
+      res.proof = hx(r.proof.toCBOR());
+      const v = await verifyNonInclusion(r.proof, context);
+      res.verification = v.verdict;
+      if (v.snapshot === null) {
+        res.verdict = 'rejected';
+        res.reason = v.reason;
+        break;
+      }
+      res.snapshot = { networkId: v.snapshot.networkId, rootEpoch: v.snapshot.rootEpoch, rootRound: v.snapshot.rootRound, sealTimestampSeconds: v.snapshot.sealTimestampSeconds,
+        shardRound: v.snapshot.shardRound };
+      if (v.verdict === 'included_at_snapshot') {
+        res.verdict = 'included';
+        res.reason = 'a verified proof that the state is certified: the token is spent';
+        break;
+      }
+      const fresh = v.snapshot.networkId === w.trust.network.id && v.snapshot.sealTimestampSeconds >= notBefore && v.snapshot.rootRound > newest;
+      if (fresh) {
+        res.verdict = 'unspent';
+        break;
+      }
+      res.verdict = 'stale';
+      res.reason = `absent at root round ${v.snapshot.rootRound} (sealed ${v.snapshot.sealTimestampSeconds}): not after the refusal (${notBefore}) and the token's newest round (${newest})`;
+    } catch (e) {
+      res.verdict = 'error';
+      res.reason = String((e as Error)?.message ?? e);
+    }
+    if (Date.now() > deadline) break;
+    await sleep(3_000);
+  }
+  out(`ledger-${label}`, res);
+  log(`  ledger of ${label}: ${res.verdict}${res.reason ? ` (${res.reason})` : ''}`);
+}
+
 async function burn(w: Wallet, label: string, recipient?: string): Promise<void> {
   const e = w.entry(label);
   if (e.returnId) {
@@ -825,9 +898,9 @@ async function predict(w: Wallet, token: Uint8Array): Promise<{ ok: boolean; gas
 /**
  * TOKEN's shape as MeasuredGasModel.redeemGasLimit (measured-nb2-05) charges it, and the gas of one more and one fewer transfer of that shape
  * (boundary_shape.ts marginals): its hops and split levels, LT (the evidence length the preflight charges, predict's bytes), its transfers'
- * average pair bytes and seal signatures beyond the measured 3. Null steps, never a pair, when a seal does not decode or exceeds the bound.
- * The rest of the model (the mint's and the deposit's certificates, the pending burn, the gap proofs) is the token's fixed share: inside its
- * gas, and judged by shapeHolds on both sides.
+ * average pair bytes and seal signatures beyond the measured 3. Null steps when a seal does not decode or exceeds the bound. The rest of the
+ * model (the mint's and the deposit's certificates, the pending burn, the gap proofs) is the token's fixed share, inside its gas. The steps
+ * feed the probe's shape diagnostics (boundary_search.ts ownShape), recorded and never gating.
  */
 async function shapeOf(token: Uint8Array, lT: number): Promise<{ up: bigint | null; down: bigint | null; shape: TokenShape | null; detail?: Record<string, number | string> }> {
   const { lineageOf } = await import('../../../packages/native-bridge-plugin/src/nb2/index.js');
@@ -1210,6 +1283,7 @@ async function main(): Promise<void> {
     case 'split': return split(await wallet(), pos[1], Number(pos[2]), pos.slice(3));
     case 'chain': await chain(await wallet(), pos[1], pos[2], Number(pos[3]), flag('--rounds')); return;
     case 'preflight': return preflight(await wallet(), pos[1]);
+    case 'ledger': return ledger(await wallet(), pos[1], big(pos[2]));
     case 'burn': return burn(await wallet(), pos[1], opt('--recipient'));
     case 'verdicts': return verdicts(await wallet(), pos.slice(1));
     case 'redeem':
