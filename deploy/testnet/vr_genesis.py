@@ -1,0 +1,192 @@
+#!/usr/bin/env python3
+"""The genesis plan of a validator-registry (VR) generation (VT-14, ristik/bft-core#1158; design section 2.1 "Genesis consistency").
+
+One command produces every artifact of the generation and refuses any mismatch between them:
+
+  keys              root and EVM node keys of N validators (root-node / shard-node init)
+  trust-base.json   the genesis root trust base, signed by every root
+  shard-conf        the EVM shard configuration, pinning VR (validator_registry, validator_registry_code_hash) from the measurement
+  b1-profile.json   both hooks on VR, priced from the complete-path measurement (engine-api b1-profile --vr-hook-measurement)
+  vr/input.json     the contracts genesis input; genesis-identities.json the roots' --genesis-identities (ubft vr-genesis plan)
+  vr/alloc.json     VR + facets, PoaElection, PoaComposerEngine (first, checked), FoundationMultisig (contracts script/vr-genesis.sh)
+  genesis.json      the EVM genesis with the SealRegistry and the VR accounts; full-shard-conf.json (engine-api genesis)
+  vr-deployment.json the roots' --vr-deployment, written by `ubft vr-genesis verify` only when everything agrees
+  ureth-flags.txt   the paired ureth's --unicity.* flags (the profile's, plus the genesis commitment)
+
+The measurement is ureth's (crates/unicity/execution/tests/vr_hook.rs vr_hook_measurement, at the genesis addresses); its VR and module code
+hashes are what the PDR pins before anything is deployed, and `verify` holds the deployed alloc to them. A fresh measurement passed with
+--fresh-measurement is checked against the pins too (raise M_H, never keep stale pins).
+
+This builds a development generation's files only: it starts nothing, and it never touches a running network. A later staging regeneration
+uses the same steps (deploy/testnet/generate.py --vr is the follow-up that wires them into the Compose package).
+
+    deploy/testnet/vr_genesis.py --ubft build/ubft --contracts ../unicity-pos-contracts \\
+        --measurement vr-hook-measurement.json --validators 4 --out /tmp/vr-gen
+"""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import secrets
+import shutil
+import subprocess
+import sys
+
+HERE = Path(__file__).resolve().parent
+NETWORK_ID, PARTITION, CHAIN_ID = 3, 8, 3
+FEE_COLLECTOR = '0x00000000000000000000000000000000000000fe'   # generate.py FEE: the shard nodes' --engine-fee-collector
+CONTINUITY = '1/2'                                                # generate.py EVM_CONTINUITY_MAX_DISTANCE
+MAX_EPOCHS, DELTA_EV, DELTA_HOLD = 2, 16, 17                      # generate.py
+VR = '0xff00000000000000000000000000000000000003'
+
+
+class VRGenesisError(RuntimeError):
+    pass
+
+
+def run(*args, cwd=None, env=None):
+    done = subprocess.run([str(a) for a in args], text=True, capture_output=True, cwd=cwd, env=env)
+    if done.returncode != 0:
+        raise VRGenesisError(' '.join(map(str, args[:4])) + ' failed\n' + done.stdout + done.stderr)
+    return done.stdout
+
+
+def network_word(generation):
+    return '0x' + hashlib.sha256(('unicity.testnet.vr.' + generation).encode()).hexdigest()
+
+
+def dev_signers(generation):
+    """Five DEV multisig signers nobody holds a key for (a development generation; a real one passes --governor-signers)."""
+    return [('0x' + hashlib.sha256(f'unicity.vr.dev-signer/{generation}/{i}'.encode()).hexdigest()[:40]) for i in range(5)]
+
+
+def partition_params(chain_id, measurement):
+    return ','.join([f'proof_type=exec', f'chain_id={chain_id}', f'continuity_max_distance={CONTINUITY}',
+                     f'validator_registry={measurement["registry"]}', f'validator_registry_code_hash={measurement["registryCodeHash"]}'])
+
+
+def funded_base_genesis(chain_id, max_gas, entropy):
+    return {'config': {'chainId': chain_id, 'homesteadBlock': 0, 'eip150Block': 0, 'eip155Block': 0, 'eip158Block': 0, 'byzantiumBlock': 0,
+        'constantinopleBlock': 0, 'petersburgBlock': 0, 'istanbulBlock': 0, 'berlinBlock': 0, 'londonBlock': 0, 'mergeNetsplitBlock': 0,
+        'shanghaiTime': 0, 'cancunTime': 0, 'terminalTotalDifficulty': 0, 'terminalTotalDifficultyPassed': True},
+        'nonce': '0x0', 'timestamp': '0x0', 'extraData': '0x' + entropy, 'gasLimit': hex(max_gas), 'difficulty': '0x0',
+        'mixHash': '0x' + '00' * 32, 'coinbase': '0x' + '00' * 20, 'baseFeePerGas': '0x3b9aca00', 'alloc': {}}
+
+
+def merge_alloc(genesis, extra):
+    have = {k.lower().removeprefix('0x') for k in genesis['alloc']}
+    for address in extra:
+        if address.lower().removeprefix('0x') in have:
+            raise VRGenesisError(f'the genesis alloc already has {address}')
+    genesis['alloc'].update(extra)
+    return genesis
+
+
+def genesis_commitment(genesis):
+    slot = run('cast', 'keccak', 'unicity.seal-registry/genesisCommitment').strip().lower()
+    alloc = {k.lower().removeprefix('0x'): v for k, v in genesis['alloc'].items()}
+    storage = {k.lower(): v for k, v in alloc['ff00000000000000000000000000000000000002']['storage'].items()}
+    word = storage.get(slot)
+    if not word or int(word, 16) == 0:
+        raise VRGenesisError('genesisCommitment is not set in the registry storage of the finalized genesis')
+    return '0x' + word.lower().removeprefix('0x').rjust(64, '0')
+
+
+def plan(a):
+    out = Path(a.out).resolve()
+    if out.exists():
+        raise VRGenesisError(f'{out} exists: a generation is never regenerated in place')
+    ubft, contracts = str(Path(a.ubft).resolve()), Path(a.contracts).resolve()
+    measurement_path = Path(a.measurement).resolve()
+    measurement = json.loads(measurement_path.read_text())
+    if measurement.get('registry') != VR:
+        raise VRGenesisError(f'the measurement is of a registry at {measurement.get("registry")}, not {VR}')
+    if not (contracts / 'script/vr-genesis.sh').is_file():
+        raise VRGenesisError(f'{contracts} is not a unicity-pos-contracts checkout with script/vr-genesis.sh')
+    generation = a.generation or out.name
+    home = out / 'home'
+    (out / 'vr').mkdir(parents=True)
+    home.mkdir()
+    shutil.copy2(measurement_path, out / 'vr-hook-measurement.json')
+
+    roots, evms = [], []
+    for i in range(1, a.validators + 1):
+        run(ubft, 'root-node', 'init', '--home', home / f'root{i}', '--generate')
+        run(ubft, 'shard-node', 'init', '--home', home / f'evm{i}', '--generate')
+        roots.append(run(ubft, 'node-id', '--home', home / f'root{i}').strip().splitlines()[-1])
+        evms.append(run(ubft, 'node-id', '--home', home / f'evm{i}').strip().splitlines()[-1])
+    run(ubft, 'trust-base', 'generate', '--home', home, '--epoch', '1', '--epoch-start', '1', '--network-id', NETWORK_ID,
+        *sum((['--node-info', home / f'root{i}/node-info.json'] for i in range(1, a.validators + 1)), []))
+    for i in range(1, a.validators + 1):
+        run(ubft, 'trust-base', 'sign', '--home', home / f'root{i}', '--trust-base', home / 'trust-base.json')
+    run(ubft, 'shard-conf', 'generate', '--home', home, '--network-id', NETWORK_ID, '--partition-id', PARTITION, '--partition-type-id', PARTITION,
+        '--shard-id', '0x80', '--epoch-start', '1', '--t2-timeout', '5000', '--partition-params', partition_params(a.chain_id, measurement),
+        *sum((['--node-info', home / f'evm{i}/node-info.json'] for i in range(1, a.validators + 1)), []))
+    trust, conf = home / 'trust-base.json', home / f'shard-conf-{PARTITION}_0.json'
+
+    profile_out = run(ubft, 'engine-api', 'b1-profile', '--shard-conf', conf, '--trust-base', trust, '--max-epochs-per-update', MAX_EPOCHS,
+                      '--delta-ev', DELTA_EV, '--delta-hold', DELTA_HOLD, '--out', out / 'b1-profile.json', '--vr-hook-measurement', measurement_path)
+    flags = [l.split(':', 1)[1].strip() for l in profile_out.splitlines() if l.startswith('ureth flags:')]
+    if len(flags) != 1:
+        raise VRGenesisError('b1-profile printed no single "ureth flags:" line')
+    profile = json.loads((out / 'b1-profile.json').read_text())
+
+    (out / 'genesis-bindings.json').write_text(json.dumps([{'rootNodeId': roots[i], 'evmNodeId': evms[i]} for i in range(a.validators)], indent=1) + '\n')
+    signers = a.governor_signers.split(',') if a.governor_signers else dev_signers(generation)
+    run(ubft, 'vr-genesis', 'plan', '--trust-base', trust, '--shard-conf', conf, '--bindings', out / 'genesis-bindings.json',
+        '--b1-profile', out / 'b1-profile.json', '--network-word', a.network_word or network_word(generation), '--governor-signers', ','.join(signers),
+        '--limits', a.limits, '--fee-collector', FEE_COLLECTOR, '--out-input', out / 'vr/input.json', '--out-identities', out / 'genesis-identities.json',
+        *(['--owners', Path(a.owners).resolve()] if a.owners else []))
+    run(contracts / 'script/vr-genesis.sh', out / 'vr/input.json', out / 'vr', cwd=contracts)
+
+    funded = funded_base_genesis(a.chain_id, int(profile['maxGas']), secrets.token_hex(32))
+    merge_alloc(funded, json.loads((out / 'vr/alloc.json').read_text()))
+    (home / 'funded.json').write_text(json.dumps(funded, indent=2) + '\n')
+    print(run(ubft, 'engine-api', 'genesis', '--shard-conf', conf, '--trust-base', trust, '--b1-profile', out / 'b1-profile.json',
+              '--alloc-source', home / 'funded.json', '--out', out / 'genesis.json', '--full-shard-conf', out / 'full-shard-conf.json',
+              '--identities-out', out / 'b1-identities.json'))
+    genesis = json.loads((out / 'genesis.json').read_text())
+    ureth = flags[0] + f' --unicity.genesis-commitment={genesis_commitment(genesis)}'
+    (out / 'ureth-flags.txt').write_text(ureth + '\n')
+    shutil.copy2(trust, out / 'trust-base.json')
+
+    verified = run(ubft, 'vr-genesis', 'verify', '--input', out / 'vr/input.json', '--deployment', out / 'vr/deployment.json', '--genesis', out / 'genesis.json',
+                   '--shard-conf', out / 'full-shard-conf.json', '--trust-base', trust, '--b1-profile', out / 'b1-profile.json',
+                   '--genesis-identities', out / 'genesis-identities.json', '--vr-hook-measurement', Path(a.fresh_measurement or measurement_path).resolve(),
+                   '--ureth-flags', ureth, '--fee-collector', FEE_COLLECTOR, '--out-root-deployment', out / 'vr-deployment.json')
+    print(verified.strip())
+    summary = {'generation': generation, 'validators': a.validators, 'chainId': a.chain_id, 'networkId': NETWORK_ID,
+               'deployment': json.loads((out / 'vr/deployment.json').read_text()), 'profile': {k: profile[k] for k in ('hRecords', 'hookRecordGas', 'electGas', 'systemGas', 'maxGas')},
+               'ureth': ureth, 'roots': roots, 'evms': evms}
+    (out / 'vr-genesis-summary.json').write_text(json.dumps(summary, indent=1) + '\n')
+    return summary
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument('--ubft', default=str(HERE.parents[1] / 'build/ubft'))
+    p.add_argument('--contracts', required=True, help='a unicity-pos-contracts checkout with script/vr-genesis.sh (forge, cast and python3 on PATH)')
+    p.add_argument('--measurement', required=True, help='the complete-path VR hook measurement the profile is pinned from')
+    p.add_argument('--fresh-measurement', help='a fresh measurement to hold the pins to at genesis (default: the recorded one)')
+    p.add_argument('--validators', type=int, default=4)
+    p.add_argument('--chain-id', type=int, default=CHAIN_ID)
+    p.add_argument('--generation', help='the generation name (default: the output directory name)')
+    p.add_argument('--network-word', help="VR's network word (default: sha256('unicity.testnet.vr.' + generation))")
+    p.add_argument('--governor-signers', help='the FoundationMultisig signers, five comma-separated addresses (default: DEV keyless signers)')
+    p.add_argument('--owners', help='JSON [{owner, payee}] per identity in ascending root node id (default: DEV keyless addresses)')
+    p.add_argument('--limits', default='4,4,16', help='CommitteeLimits nMin,nTarget,nMax')
+    p.add_argument('--out', required=True)
+    a = p.parse_args()
+    if not 1 <= a.validators <= 16:
+        p.error('--validators must be 1..16')
+    try:
+        summary = plan(a)
+    except VRGenesisError as e:
+        sys.exit(f'vr-genesis: {e}')
+    print(json.dumps({k: summary[k] for k in ('generation', 'validators', 'profile')}, indent=1))
+
+
+if __name__ == '__main__':
+    main()
