@@ -295,3 +295,29 @@ func TestVRLeaderRecordsThroughTheExecutor(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, step.Kind, "H committed: nothing more")
 }
+
+// At the genesis epoch the control state carries no predecessor (zero): the intent, its PoPs and body, and the leader's Prepare name the
+// authority's predecessor, which is what every record of the epoch must name (found on the live run, where the Prepare was refused).
+func TestVRIntentNamesTheAuthoritysPredecessorAtGenesis(t *testing.T) {
+	f := newVXReal(t)
+	f.zeroGenesisPred = true
+	f.g = f.genesis()
+	q, err := storage.VRQueryForTest(f.g, f.orch, f.svc, f.auth)
+	require.NoError(t, err)
+	d, ok, err := f.p.Derive(q)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, f.body0(), []byte(d.Intent.PredecessorBodyID), "the authority's predecessor, not the control state's zero")
+	f.in, f.d, f.bc = d.Intent, d.Digest, d.Body
+	f.certificate(0)
+	keys := map[string][]byte{}
+	for _, m := range f.kRoot {
+		keys[m.NodeID] = m.Key
+	}
+	plan, err := vrschedule.VerifyPlan(d, keys, 0, f.cert)
+	require.NoError(t, err)
+	step, err := vrschedule.LeaderRecords(plan, f.g, 11, vxShard, nil, crypto.SHA256)
+	require.NoError(t, err)
+	require.Equal(t, "prepare", step.Kind)
+	f.must(f.g, f.block(f.g, 11, 1_010, step.Records))
+}

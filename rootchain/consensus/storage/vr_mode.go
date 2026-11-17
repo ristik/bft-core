@@ -83,6 +83,9 @@ type VRRootFacts struct {
 	Lifecycle evmassign.LifecycleContext
 	Fold      vrschema.FoldInput
 	Link      []byte
+	// Predecessor is the authority's current body identity, the predecessor every record of this epoch names (at the genesis epoch the
+	// V1 anchor's hash, which the control state does not carry); nil where no authority is given.
+	Predecessor []byte
 }
 
 // vrRootFacts is VRIntentQuery.Root over a block's state: the designated EVM shard of the configurations, its committed lifecycle, the fold
@@ -109,6 +112,9 @@ func vrRootFacts(state ShardStates, confs map[types.PartitionShardID]*types.Part
 		}
 		f.Fold = vradmit.FoldContext{Network: network, SuccessorRootEpoch: epoch + 1, Installed: confs, EVMPartition: key.PartitionID,
 			ControlPartition: evmroot.D4ControlPartition, Schedule: schedule}.Input()
+		if authority != nil {
+			f.Predecessor = bytes.Clone(authority.Predecessor())
+		}
 		if linker, ok := authority.(vrBodyLinker); ok && authority != nil {
 			if f.Link, err = linker.vrSuccessorLink(network, epoch); err != nil {
 				return f, errors.Join(ErrVRUnavailable, err)

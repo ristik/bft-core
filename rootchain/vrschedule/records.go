@@ -42,7 +42,7 @@ func PrepareRecord(p PreparePlan, control *evmroot.ControlState, round uint64) (
 	}
 	id := p.Body.Identity()
 	r := evmroot.OrderedHandoffRecord{Network: control.Network, Epoch: control.Epoch, Attempt: p.Attempt, OrderedRound: round,
-		ActivationRound: max(p.Body.EarliestActivation, round+storage.PrepareActivationFloorRounds), PredecessorBodyID: bytes.Clone(control.PredecessorBodyID),
+		ActivationRound: max(p.Body.EarliestActivation, round+storage.PrepareActivationFloorRounds), PredecessorBodyID: bytes.Clone(p.Predecessor),
 		NextBodyID: id[:], Kind: "prepare", FrozenID: make([]byte, 32), SuccessorTRHash: make([]byte, 32)}
 	return r.Bytes(), nil
 }
@@ -135,8 +135,8 @@ func LeaderRecords(p PreparePlan, parent *storage.ExecutedBlock, round uint64, e
 		return LeaderStep{Reason: "no control state"}, nil
 	}
 	control := parent.ShardState.Control
-	if p.Epoch != control.Epoch || !bytes.Equal(p.Predecessor, control.PredecessorBodyID) {
-		return LeaderStep{Reason: "the plan is of another epoch or predecessor (its intent died)"}, nil
+	if p.Epoch != control.Epoch {
+		return LeaderStep{Reason: "the plan is of another epoch (its intent died)"}, nil
 	}
 	lapsed := storage.PrepareLapsed(control, round)
 	if lapsed && !storage.PrepareMayFollowLapse(control, round) {

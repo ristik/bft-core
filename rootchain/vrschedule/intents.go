@@ -109,10 +109,15 @@ func (p *Intents) Derive(q storage.VRIntentQuery) (Derived, bool, error) {
 	if err != nil {
 		return none, false, err
 	}
-	if len(q.Control.PredecessorBodyID) != 32 {
+	// the predecessor every record of the epoch names is the authority's (the control state carries zero at the genesis epoch)
+	predecessor := facts.Predecessor
+	if predecessor == nil {
+		predecessor = q.Control.PredecessorBodyID
+	}
+	if len(predecessor) != 32 {
 		return none, false, fmt.Errorf("%w: predecessor", ErrUnavailable)
 	}
-	rc := vrhandoff.RootContext{Deployment: p.Deployment, Genesis: cfg.Genesis, RootEpoch: q.Epoch, Predecessor: [32]byte(q.Control.PredecessorBodyID),
+	rc := vrhandoff.RootContext{Deployment: p.Deployment, Genesis: cfg.Genesis, RootEpoch: q.Epoch, Predecessor: [32]byte(predecessor),
 		Attempt: b.Attempt, AttemptOpenRound: state.AttemptOpenRound, Installed: facts.Installed, Lifecycle: facts.Lifecycle, Fold: facts.Fold}
 	in, d, err := vrhandoff.NewIntent(rc, src.Source, out)
 	if errors.Is(err, vrhandoff.ErrIntent) {
