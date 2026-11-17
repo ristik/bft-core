@@ -34,6 +34,9 @@ PoS sequence's first invocation (deploy,fund,pos-deposit) keeps them, and its la
                 the lowest refused lengths at most 2 apart: fresh tokens' gas varies by about a transfer's step, so an exact adjacent pair is not
                 observable live; the owner's default, briefs/owner-questions.md)
   cold          a burned part redeemed after every derived wallet cache is deleted (journal, token and burn kept)
+  walkthrough   the wallet guide's walk-through (native-bridge-plugins docs/nb2-wallet-guide.md) with the reference command-line wallet
+                (wallet/nb2-wallet.ts, bft-core#1107) exactly as a wallet developer runs it: init, deposit, mint, split, status, plan-return, burn,
+                redeem (and again: a resumed command sends nothing), status; its transcript is the evidence nb2/walkthrough.txt the guide quotes
   custody       the vault's books from its events: deposits once each, every Paid once, Q = deposits - payouts = state().outstanding, balance >= Q,
                 the segment logs fold to the stored head
   pos-deposit, pos-return
@@ -57,11 +60,11 @@ sys.path.insert(0, str(HERE.parent.parent))
 from rehearse import PROXY_IPS, PUBLIC_RPC, Failure, Rehearsal   # noqa: E402
 import release_nb2   # noqa: E402
 
-WALLETS = ('main', 'rot', 'big', 'size', 'gascap')
+WALLETS = ('main', 'rot', 'big', 'size', 'gascap', 'walk')
 STEP_TIMEOUT = 900     # seconds: one burn, redemption or preflight of a boundary probe
 LEDGER_TIMEOUT = 240   # seconds: the ledger read (its own deadline is 120 s, driver.ts LEDGER_DEADLINE_MS)
 KILL_TIMEOUT = 30      # seconds: docker kill of a command over its timeout
-FUNDS = {'main': 20 * 10 ** 18, 'rot': 20 * 10 ** 18, 'big': 20 * 10 ** 18, 'size': 5 * 10 ** 18, 'gascap': 5 * 10 ** 18}
+FUNDS = {'main': 20 * 10 ** 18, 'rot': 20 * 10 ** 18, 'big': 20 * 10 ** 18, 'size': 5 * 10 ** 18, 'gascap': 5 * 10 ** 18, 'walk': 5 * 10 ** 18}
 
 
 def gateway_size_refusal(status, text):
@@ -660,6 +663,67 @@ class NB2Rehearsal(Rehearsal):
         self.expect(self.outfile('redeem-d1a')['result'] == 'paid', 'the nested part is redeemed by a cold wallet: its history rebuilt from the segment logs, its trust refetched')
         self.keep('redeem-d1a')
 
+    # --- walkthrough ------------------------------------------------------------------------------------------------------------------
+    def wallet(self, *args):
+        """One command of the reference command-line wallet in its container, from bridge/nb2/walkthrough (its wallet is ./nb2-wallet there), its key
+        NB2_KEY_WALK from the driver keys' environment file. The command and its output go to the console and the transcript, redacted."""
+        env = self.nb2 / 'driver.env'
+        if os.getuid() == 0:
+            subprocess.run(['chown', '-R', '10001:10001', str(self.gen / 'bridge')], check=True)
+        t0 = time.monotonic()
+        cmd = release_nb2.wallet_cmd(self.gen, '/work/nb2/walkthrough', *args, env_file=env if env.exists() else None)
+        try:
+            p = subprocess.run(cmd, text=True, capture_output=True, timeout=STEP_TIMEOUT)
+            code, text = p.returncode, (p.stdout + p.stderr).strip()
+        except subprocess.TimeoutExpired:
+            code, text = 124, f'[over its {STEP_TIMEOUT} s]'
+        text = self.scrub(text)
+        self.transcript.append(f'$ nb2-wallet {" ".join(args)}\n{text}\n')
+        self.say(f'  $ nb2-wallet {" ".join(args)} ({time.monotonic() - t0:.0f} s)\n    ' + '\n    '.join(text.splitlines()))
+        if code != 0:
+            raise Failure(f'the reference wallet failed: {" ".join(args)}')
+        return text
+
+    def walkthrough(self):
+        work = self.nb2 / 'walkthrough'
+        shutil.rmtree(work, ignore_errors=True)   # a new wallet on every run
+        work.mkdir(parents=True)
+        self.transcript = []
+        w = self.wallet
+        try:
+            t = w('init', '--release', '/work/nb2/public/nb2-release.json', '--rpc', self.lane_json()['rpc'], '--key-env', 'NB2_KEY_WALK')
+            self.expect('installation check passed' in t, 'init: the installation check passes (chain ID, config() = the pinned Γ, the runtime code hash)')
+            w('address')
+            t = w('deposit', 'coin', '0.1')
+            self.expect('deposit ' in t and ' in block ' in t, 'deposit: the planned deposit is sent and included')
+            t = w('mint', 'coin')
+            self.expect('minted coin: 0.1 UCT' in t, 'mint: the receipt proof is built once the block is certified, and the token is minted')
+            t = w('split', 'coin', 'keep=0.06', 'back=0.04')
+            self.expect('keep (0.06 UCT) + back (0.04 UCT)' in t, 'split: 0.1 into 0.06 + 0.04')
+            t = w('status')
+            self.expect('coin: deposit intent 0 of 100000000000000000: minted' in t, 'status: the deposit is minted', t)
+            t = w('plan-return', 'back')
+            self.expect('the preflight passes' in t and 'nothing is burned' in t, 'plan-return: the capacity preflight passes and burns nothing')
+            t = w('burn', 'back')
+            self.expect('burned back' in t, 'burn: the preflight again on fresh state, then the burn')
+            first = w('redeem', 'back')
+            self.expect('paid 0.04 UCT' in first and '; 1 redeem transaction sent' in first, 'redeem: the witness built from the chain, sent once and paid')
+            lag = 'answers QuorumNotMet' in first
+            self.say(f'  the seal registry lag (#1125): {"waited out" if lag else "not seen"}')
+            again = w('redeem', 'back')
+            tx = lambda text: next((x.split('(tx ')[1].split(')')[0] for x in text.splitlines() if x.startswith('paid ')), None)   # noqa: E731
+            self.expect('paid 0.04 UCT' in again and '; 1 redeem transaction sent' in again and tx(again) == tx(first) is not None,
+                        'redeem again: the paid return answers paid with the same transaction, and nothing more was sent')
+            t = w('status')
+            self.expect('back: return' in t and ': paid' in t, 'status: the return is paid', t)
+            t = w('tokens')
+            self.expect(t.splitlines() == ['keep: 0.06 UCT'], 'tokens: only the unspent part is held (the split parent and the burned part are spent)', t)
+            (self.evidence / 'nb2').mkdir(parents=True, exist_ok=True)
+            (self.evidence / 'nb2/walkthrough-lag.json').write_text(json.dumps({'registryLagSeen': lag}) + '\n')
+        finally:
+            (self.evidence / 'nb2').mkdir(parents=True, exist_ok=True)
+            (self.evidence / 'nb2/walkthrough.txt').write_text('\n'.join(self.transcript))
+
     # --- custody ---------------------------------------------------------------------------------------------------------------------
     def custody(self):
         rel = self.release()
@@ -725,7 +789,7 @@ class NB2Rehearsal(Rehearsal):
 
 
 STAGES = (('deploy', 'deploy'), ('limits', 'limits'), ('fund', 'fund'), ('circulate', 'circulate'), ('returns', 'returns'), ('evidence', 'evidence_stage'),
-          ('verifier', 'verifier'), ('gas', 'gas'), ('boundary', 'boundary'), ('cold', 'cold'), ('pos-deposit', 'pos_deposit'), ('pos-return', 'pos_return'),
+          ('verifier', 'verifier'), ('gas', 'gas'), ('boundary', 'boundary'), ('cold', 'cold'), ('walkthrough', 'walkthrough'), ('pos-deposit', 'pos_deposit'), ('pos-return', 'pos_return'),
           ('custody', 'custody'))
 POS_STAGES = ('pos-deposit', 'pos-return')
 

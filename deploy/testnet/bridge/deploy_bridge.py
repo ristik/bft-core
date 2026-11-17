@@ -9,7 +9,7 @@ network against validator 1's execution client (an operator action: the public g
   2. forge script BridgeDeploy.s.sol, which refuses a vault whose rootGenesis, executionGenesis or b1ProfileHash differ from the genesis', signed with the
      generation's genesis-funded faucet keystore (the key never leaves its file);
   3. dnb-tool trust-bundle / pdr, then GENERATION/bridge/lane-config.json for tests/live/anyage.ts and GENERATION/bridge/public/, the one directory
-     to publish for testers: the tester page (bridge/tester/index.html), tester-config.json for the bridge tester (native-bridge-plugins tester/), which
+     to publish for testers: tester-config.json for the protocol 7 bridge tester (removed: the native bridge v2 wallet is native-bridge-plugins wallet/), which
      names the endpoints a tester reaches (--tester-*-url; the defaults are the internal names), and the four public files it names;
   4. the bridge release manifest (release.py), GENERATION/bridge/public/bridge-release.json.
 Writes everything under GENERATION/bridge/.
@@ -143,7 +143,6 @@ def main():
     files = {'trustBundle': 'trust-base.bundle.cbor', 'trustEntryId': 'trust-base.genesis.entryid', 'evmPdr': 'evm-pdr.cbor', 'deployment': 'bridge-deployment.json'}
     for name in files.values():
         (public / name).write_bytes((work / name).read_bytes())
-    (public / 'index.html').write_bytes((Path(__file__).parent / 'tester/index.html').read_bytes())
     # genesisHash: the tester checks block 0 against it before sending anything (a reset generation keeps the chain ID)
     tester = {'ethUrl': a.tester_eth_url, 'aggUrl': a.tester_agg_url, 'lockProofUrl': a.tester_lockproof_url, 'chainId': manifest['chain_id'],
               'genesisHash': manifest['genesis_hash'], 'vault': addr['BridgeVault'], 'files': files}

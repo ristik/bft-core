@@ -66,6 +66,17 @@ def driver_cmd(gen, *args, env_file=None, extra=()):
             'npx', '--no-install', 'tsx', 'tests/live/nb2lane/driver.ts', *args]
 
 
+def wallet_cmd(gen, cwd, *args, env_file=None):
+    """The docker command of one reference-wallet command (native-bridge-plugins wallet/nb2-wallet.ts, bft-core#1107) in the bridge tools image, as
+    a wallet developer runs it: from the working directory CWD (a directory of GENERATION/bridge, at /work), on the validators network, as the tools
+    user, its key from the environment file. The wallet is the image's own plug-in checkout's: nothing of this directory is mounted."""
+    from deploy_bridge import image, validators_network
+    envs = ['--env-file', str(env_file)] if env_file else []
+    return ['docker', 'run', '--rm', '--read-only', '--network', validators_network(gen), '--user', '10001:10001', *envs, '-e', 'HOME=/tmp/home',
+            '--tmpfs', '/tmp', '-v', f'{gen / "bridge"}:/work', '-w', cwd, image(gen),
+            'node', f'{NBP}/node_modules/.bin/tsx', f'{NBP}/wallet/nb2-wallet.ts', *args]
+
+
 def driver(gen, *args, env_file=None):
     if os.getuid() == 0:
         subprocess.run(['chown', '-R', '10001:10001', str(gen / 'bridge')], check=True)
