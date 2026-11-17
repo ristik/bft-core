@@ -49,7 +49,7 @@ keys while a run lasts (`rehearse_nb2.py` deletes it at the end unless `--keep-k
 
 The pools admit more than L_max (4 MiB, set by the B1 profile for the protocol 6/7 envelope), so L_max binds in the wallet's preflight, not in a
 pool. Gas binds first on this deployment, just before bytes: at `userGasLimit` 60M the largest admitted unsplit history is about 280 to 290 transfers in
-16 certificate groups (282 admitted and 284 refused in the bft-core#1179 dev-server run on a grown tree, 294 and 295 on a fresh one; about 450 KB of evidence; a consolidated one of 300
+16 certificate groups (in the bft-core#1179 dev-server runs 282 admitted and 284 refused on a grown tree, and 286 and 288 on a fresh one with the final model; about 450 KB of evidence; a consolidated one of 300
 transfers passes), and L_max binds at about 310. The `boundary` stage locates
 the bound on live tokens within two transfers and executes every token it builds as the preflight judged it (a refusal is sound over
 `userGasLimit` by its own gas or over L_max by bytes; fresh tokens' gas varies by about one transfer's step between builds, so an exact adjacent pair
