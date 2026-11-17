@@ -63,11 +63,15 @@ func TestVRActivationEvidenceCarriesTheCandidateV6(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []byte(f.Proof.Record.SuccessorTRHash), tr)
 
-	// the defect #1177 recorded: evidence assembled from the retained v5 view is refused by the history
+	// the defect #1177 recorded: evidence over the retained v5 view is never assembled (and a history would refuse it)
 	stale := sourceOf(t, f)
 	stale.candidate = view
-	staleLink, _, _, err := q3ActivationEvidence(stale, f.Claim.Epoch)
-	require.NoError(t, err)
+	_, _, _, err = q3ActivationEvidence(stale, f.Claim.Epoch)
+	require.ErrorIs(t, err, ErrNoQ3Evidence, "the v5 view is not the candidate the committed body binds")
+	staleLink := link
+	staleLink.Preimage = view
+	sv := sha256.Sum256(view)
+	staleLink.Evidence.CandidateDigest = sv[:]
 	_, err = f.NewHistory(t).WithV3(staleLink)
 	require.Error(t, err, "a link over the v5 view does not bind the committed digest")
 

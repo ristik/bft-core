@@ -1,6 +1,7 @@
 package consensus
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -87,6 +88,11 @@ func q3ActivationEvidence(src q3EvidenceSource, epoch uint64) (q3format.Link, *a
 			return none, nil, nil, errors.Join(ErrNoQ3Evidence, err)
 		}
 		digest = operator[:]
+	}
+	// The exported preimage and its digest are the ones the committed body binds: never a view of them (a VR handoff's retained v5 view
+	// hashes to another digest), so nothing is served that the receiver's history must refuse.
+	if !bytes.Equal(body.ChangeRecordHash, evmroot.D4CandidateContextHash(record.Network, record.PredecessorBodyID, record.Attempt, digest, body.EarliestActivation)) {
+		return none, nil, nil, fmt.Errorf("%w: the retained candidate is not the one the committed body binds", ErrNoQ3Evidence)
 	}
 	proof, err := basetypes.Cbor.Marshal(handoff.OldCommitProof{Profile: evmroot.D4Profile, Record: record, Control: *head.Control, ControlPath: path, CommitQC: head.CommitQc})
 	if err != nil {
