@@ -13,6 +13,14 @@
 //	nb2-evidence verify -proof FILE -emitter ADDR -partition P -shard S -trust-bundle B -event deposited|sealed [-k K]
 //	                                                                                   section 6.2 steps 2 to 5 (and the event's topic and
 //	                                                                                   data shape) with nb2ref.VerifyReceiptLog
+//	nb2-evidence gamma -network N -root-genesis H -execution-genesis H -chain-id N -evm-partition P -evm-shard S
+//	                   -aggregator-partition P -vault ADDR -verifier ADDR -verifier-code-hash H -profile-hash H -k K -b B -qmax Q
+//	                                                                                   Γ (section 4.1) with the section 4.2 derivations, and D,
+//	                                                                                   as JSON; with -decode FILE, the fields of an encoded Γ
+//	nb2-evidence verify-return -gamma FILE -trust-bundle B -pin P [-build test|production] EVIDENCE...
+//	                                                                                   the reference verifier (nb2ref.VerifyReturn) on each
+//	                                                                                   evidence file: one JSON line per file with the 192-byte
+//	                                                                                   verdict ABI, or the section 14 rule that refuses it
 //	nb2-evidence seed -rpc URL -chain-id N                                            devnet only: deploy a two-topic log emitter with the
 //	                                                                                   public Anvil key and emit one Deposited and one
 //	                                                                                   SegmentSealed event of the exact ABI shape (until the
@@ -60,7 +68,7 @@ const LogBlockRange = 10000
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: nb2-evidence receipt|newest-seal|segments|verify|seed [flags]")
+		fmt.Fprintln(os.Stderr, "usage: nb2-evidence receipt|newest-seal|segments|verify|gamma|verify-return|seed [flags]")
 		os.Exit(2)
 	}
 	var err error
@@ -73,6 +81,10 @@ func main() {
 		err = segmentsCmd(os.Args[2:])
 	case "verify":
 		err = verifyCmd(os.Args[2:])
+	case "gamma":
+		err = gammaCmd(os.Args[2:])
+	case "verify-return":
+		err = verifyReturnCmd(os.Args[2:])
 	case "seed":
 		err = seedCmd(os.Args[2:])
 	default:
@@ -141,6 +153,10 @@ func (c *Client) call(ctx context.Context, method string, params []any, out any)
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if xff := os.Getenv("NB2_EVIDENCE_FORWARDED_FOR"); xff != "" {
+		// the package gateway reached through its trusted proxy address (a host-side lane run) names the client as the proxy would
+		req.Header.Set("X-Forwarded-For", xff)
+	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		return err

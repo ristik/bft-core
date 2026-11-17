@@ -36,7 +36,7 @@ import pos_owner
 import pos_reject
 import pos_sample
 
-PUBLIC_RPC = '127.0.0.1:8545'
+PUBLIC_RPC = os.environ.get('TN_PUBLIC_RPC', '127.0.0.1:8545')   # a generation co-hosted beside another publishes its gateway elsewhere (its compose.yaml ports)
 
 # How long the survivors may take to mine a transaction while one validator is down (pod_restart). 240 s is what the PoA package (root epoch 1) needs many times over.
 # Rotated epochs (pos-restart, pos-restart-2) wait the design's one-stage ceiling for a fault transition (bft-core #886, briefs: 360 s), so a red there means that ceiling was
@@ -144,7 +144,7 @@ def next_open_result(open_result, done):
     return open_result if open_result != '0x' + '00' * 32 and open_result != done else None
 
 
-FAUCET = '127.0.0.1:8088'
+FAUCET = os.environ.get('TN_FAUCET', '127.0.0.1:8088')   # with TN_PUBLIC_RPC: a co-hosted generation's faucet port
 PROXY_IPS = ('203.0.113.', '198.51.100.')   # documentation ranges: the client addresses the nginx in front would have set in X-Forwarded-For
 
 

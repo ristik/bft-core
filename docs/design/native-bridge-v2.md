@@ -213,18 +213,22 @@ The `-nb2` family string keeps v2 tokens apart from protocol 6/7 tokens.
 
 ### 4.3 Deployment manifest pins (not in D)
 
-The authenticated deployment manifest (schema written by NB2-09, #1105) pins, outside `D`:
+The authenticated deployment manifest (schema written by NB2-09, #1105) is `GENERATION/bridge/nb2/public/nb2-release.json`; its schema and the
+source of every value are in `deploy/testnet/bridge/README.md` ("The release manifest"). It pins, outside `D`:
 
 - `vaultRuntimeCodeHash`: the vault's runtime code hash. It is not in Γ, because the vault's immutables contain `D`.
   Wallets check it once at installation against certified EVM state.
-- `maxEncodedTxBytes` (`L_max`): the effective encoded-transaction limit of the deployment's pool and RPC path.
+- `maxEncodedTxBytes` (`L_max`): the effective encoded-transaction limit of the deployment's pool and RPC path. On the
+  testnet package the pools already admit 4 MiB, set by the B1 profile's ureth flags (`--txpool.max-tx-input-bytes`, #1124), and
+  the gateway carries about 2.2 MiB, so `L_max` binds in the wallet preflight (Section 12.5), not in a pool.
 - `userGasLimit`: the block gas available to user transactions (`max_gas - system_gas` of the production profile).
 - `gasReserve` and `returnReserveSegments`: Section 12.
 - `deploymentBlock`: the vault's creation block, where segment scanning starts.
 - `stateReadOnly`: `true` only on test deployments, where a plain `state()` read may replace the receipt rule of 12.2.
 
-> **PARAM** `L_max`: {131072, 524288}, default **524288 (512 KiB)**, pending the owner decision of Section 15 and the
-> pool/RPC/peer measurement of NB2-09 (#1105).
+> **PARAM** `L_max`: {131072, 524288}, default **524288 (512 KiB)**, pending the owner decision of Section 15. Measured by
+> NB2-09 (#1105) on the package: a 524,288-byte transaction is admitted by every pool through the gateway, included, and its
+> block imported by every validator; a transaction above the pools' 4 MiB is refused by each.
 
 The vault is immutable: no owner, upgrade, pause, administrative payout, `receive` or `fallback`. It emits no event
 except the three of Section 13.2.
@@ -955,8 +959,9 @@ Open owner decisions (recorded in `briefs/owner-questions.md` with these default
 
 1. **Continuation before real value.** Default: a real-value deployment requires NB2-12 (#1108) or an explicit owner
    acceptance of the capacity limit of Section 12.5; test deployments ship without it.
-2. **Encoded-transaction limit.** Default: pin 512 KiB in the deployment's pool and RPC configuration, falling back to
-   128 KiB if #1105 finds that RPC bodies or peer propagation cannot carry it. At `K = 64` (257 B per segment) with
+2. **Encoded-transaction limit.** Default: pin 512 KiB as the manifest's `L_max`, falling back to 128 KiB if RPC bodies or
+   peer propagation cannot carry it (#1105 measured that they carry it). The package's pools already admit 4 MiB through the
+   B1 profile's ureth flags (#1124), so `L_max` binds in the wallet preflight, not in the pool. At `K = 64` (257 B per segment) with
    20 KiB of evidence and 2 KiB of framing, the byte bound is `P_max = 1,952` segments (124,928 intervening payments)
    against 422 at 128 KiB. At the measured 5,950 gas per segment, 1,952 segments cost about 11.7M gas of replay alone
    (before token verification and evidence calldata), so on most deployments `userGasLimit` binds before 512 KiB does;

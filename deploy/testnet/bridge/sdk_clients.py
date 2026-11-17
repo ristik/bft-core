@@ -97,13 +97,16 @@ class SdkClients:
         self.expect(bool(self.manifest.get('pos')) and bool(utb), 'the generation is a PoS generation with the signed trust-base history (--pos --utb)')
         self.expect(bool(self.ubft), 'the pinned ubft verifies the roots\' served history offline (--ubft): the clients are compared with it')
         public = self.gen / 'bridge' / 'public'
+        if not (public / 'tester-config.json').exists():   # the native bridge v2 lanes (NB2-09): the trust bundle is published under bridge/nb2/public
+            public = self.gen / 'bridge' / 'nb2' / 'public'
         self.sdk_pin = utb['genesis_id'].lower().removeprefix('0x')
         shipped = (public / 'trust-base.genesis.entryid').read_text().strip().lower().removeprefix('0x')
         self.expect(shipped == self.sdk_pin, 'the operator\'s shipped genesis pin is the generation\'s UTB genesis EntryID', self.sdk_pin[:16])
         # the shipped genesis bundle holds the epoch-1 entry alone; its EntryID is the pin (the clients check it themselves, from the SDK's decoded entry)
         _, genesis_entries = utbcbor.history((public / 'trust-base.bundle.cbor').read_bytes())
         self.expect(len(genesis_entries) == 1 and utbcbor.entry_id(genesis_entries[0]).hex() == self.sdk_pin, 'the shipped trust-base bundle is the genesis entry alone, of the pinned EntryID')
-        self.sdk_agg_url = json.loads((public / 'tester-config.json').read_text())['aggUrl']
+        self.sdk_agg_url = (json.loads((public / 'tester-config.json').read_text())['aggUrl'] if (public / 'tester-config.json').exists()
+                            else json.loads((public.parent / 'lane.json').read_text())['agg'])
         out = self.evidence / 'pos-bridge' / 'sdk-clients'
         out.mkdir(parents=True, exist_ok=True)
         images = self.build_sdk_clients()
