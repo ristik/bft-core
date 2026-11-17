@@ -5,6 +5,7 @@ import (
 	"crypto"
 	"crypto/sha256"
 	"errors"
+	"fmt"
 
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/q3format"
@@ -12,6 +13,7 @@ import (
 	"github.com/unicitynetwork/bft-core/vradmit"
 	"github.com/unicitynetwork/bft-core/vrhandoff"
 	"github.com/unicitynetwork/bft-core/vrschema"
+	"github.com/unicitynetwork/bft-go-base/types"
 )
 
 // The leader's handoff records of a planned certificate (stage 5 and 6): the Prepare at the quiet control state, the Freeze v5 at the
@@ -113,4 +115,80 @@ func VerifyPlan(d Derived, incumbents map[string][]byte, committedView uint64, c
 	}
 	return PreparePlan{Intent: d.Digest, Epoch: d.RootEpoch, Attempt: d.Intent.Attempt, Predecessor: bytes.Clone(d.Intent.PredecessorBodyID),
 		Result: vrschema.Word(cand.SourceRef), Body: body, Certificate: c}, nil
+}
+
+// LeaderStep is what a leader orders for a plan over a parent block: the records (none when Reason says why not) and their kind.
+type LeaderStep struct {
+	Kind    string // "prepare", "freeze", "commit", or "" when nothing is ordered
+	Records [][]byte
+	Reason  string
+}
+
+// LeaderRecords is the leader's handoff record of a VR chain for a plan over the parent block (design 5.3.1 stages 5 and 6): the Prepare
+// of the plan's attempt at a quiet control state whose stored backoff attempt is that one, then its Freeze v5 once the Prepare bound the
+// frozen parent (the witness is read there), then H. A plan of another epoch, predecessor, attempt or body orders nothing (its intent
+// died); a Prepare whose lapse has not cooled down orders nothing. The attempt and body are checked before the witness is read. A due
+// rejection's priority over a Prepare is the caller's.
+func LeaderRecords(p PreparePlan, parent *storage.ExecutedBlock, round uint64, evm types.PartitionShardID, witness func(p, root [32]byte) ([]byte, error),
+	hash crypto.Hash) (LeaderStep, error) {
+	if parent == nil || parent.ShardState.Control == nil {
+		return LeaderStep{Reason: "no control state"}, nil
+	}
+	control := parent.ShardState.Control
+	if p.Epoch != control.Epoch || !bytes.Equal(p.Predecessor, control.PredecessorBodyID) {
+		return LeaderStep{Reason: "the plan is of another epoch or predecessor (its intent died)"}, nil
+	}
+	lapsed := storage.PrepareLapsed(control, round)
+	if lapsed && !storage.PrepareMayFollowLapse(control, round) {
+		return LeaderStep{Reason: "a lapsed Prepare's cooldown"}, nil
+	}
+	id := p.Body.Identity()
+	switch {
+	case control.Phase == "idle" || control.Phase == "aborted" || lapsed:
+		attempt, ok, err := vradmit.PlannedAttempt(control, round)
+		if err != nil {
+			return LeaderStep{}, err
+		}
+		if !ok || attempt != p.Attempt {
+			return LeaderStep{Reason: "the plan is of another attempt"}, nil
+		}
+		// the attempt must be the stored backoff identity: a Prepare in the block whose end opens its attempt is refused
+		if s, err := vradmit.DecodeRootState(control.VR); err != nil || s.Backoff.Epoch != control.Epoch || s.Backoff.Attempt != attempt {
+			return LeaderStep{Reason: "the attempt is not opened yet"}, nil
+		}
+		raw, err := PrepareRecord(p, control, round)
+		if err != nil {
+			return LeaderStep{}, err
+		}
+		return LeaderStep{Kind: "prepare", Records: [][]byte{raw}}, nil
+	case control.Phase == "prepared", control.Phase == "endorsed":
+		previous, err := storage.DecodeOrderedHandoffRecord(control.RecordBytes)
+		if err != nil {
+			return LeaderStep{}, err
+		}
+		if previous.Attempt != p.Attempt || !bytes.Equal(previous.NextBodyID, id[:]) {
+			return LeaderStep{Reason: "another attempt or body is prepared"}, nil
+		}
+		si := parent.ShardState.States[evm]
+		if si == nil || si.IR == nil || len(control.FrozenParent) != 32 || !bytes.Equal(si.IR.BlockHash, control.FrozenParent) || len(si.IR.Hash) != 32 {
+			return LeaderStep{Reason: "the EVM shard does not certify the frozen parent"}, nil
+		}
+		if control.Phase == "endorsed" {
+			raw, err := CommitRecord(p, control, round, si, hash)
+			if err != nil {
+				return LeaderStep{}, err
+			}
+			return LeaderStep{Kind: "commit", Records: [][]byte{raw}}, nil
+		}
+		w, err := witness([32]byte(control.FrozenParent), [32]byte(si.IR.Hash))
+		if err != nil {
+			return LeaderStep{}, fmt.Errorf("the Freeze witness at the frozen parent: %w", err)
+		}
+		records, err := FreezeRecord(p, control, round, w)
+		if err != nil {
+			return LeaderStep{}, err
+		}
+		return LeaderStep{Kind: "freeze", Records: records}, nil
+	}
+	return LeaderStep{Reason: "a handoff is in flight (" + control.Phase + ")"}, nil
 }

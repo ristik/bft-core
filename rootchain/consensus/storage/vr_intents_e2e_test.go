@@ -226,3 +226,72 @@ func TestVRIntentAnchorsAtAnAttemptOpenedAfterItsSource(t *testing.T) {
 	require.ErrorIs(t, err, storage.ErrVRControlRefused, "T(0, 0) = 10 s from openTime(0) = 1020")
 	f.must(ab, f.block(ab, 13, 1_030, nil, view))
 }
+
+// The leader's records (vrschedule.LeaderRecords, PrepareRecord, FreezeRecord, CommitRecord) for a verified plan, executed by the real
+// executor: the Prepare at the quiet state, the Freeze v5 with the witness read at the frozen parent, H; and what orders nothing.
+func TestVRLeaderRecordsThroughTheExecutor(t *testing.T) {
+	f := newVXReal(t)
+	f.certificate(0)
+	g := f.g
+	keys := map[string][]byte{}
+	for _, m := range f.kRoot {
+		keys[m.NodeID] = m.Key
+	}
+	q, err := storage.VRQueryForTest(g, f.orch, f.svc, f.auth)
+	require.NoError(t, err)
+	d, ok, err := f.p.Derive(q)
+	require.NoError(t, err)
+	require.True(t, ok)
+	plan, err := vrschedule.VerifyPlan(d, keys, 0, f.cert)
+	require.NoError(t, err)
+	witnesses := 0
+	witness := func(p, root [32]byte) ([]byte, error) {
+		witnesses++
+		w, _, err := vrstate.BuildOutputWitness(context.Background(), f.world, f.pins, f.r)
+		return w, err
+	}
+
+	// what orders nothing
+	other := plan
+	other.Attempt = 1
+	step, err := vrschedule.LeaderRecords(other, g, 11, vxShard, witness, crypto.SHA256)
+	require.NoError(t, err)
+	require.Empty(t, step.Kind)
+	require.Contains(t, step.Reason, "another attempt")
+	dead := plan
+	dead.Epoch = 2
+	step, err = vrschedule.LeaderRecords(dead, g, 11, vxShard, witness, crypto.SHA256)
+	require.NoError(t, err)
+	require.Contains(t, step.Reason, "intent died")
+
+	// Prepare, Freeze v5, H, each executed
+	step, err = vrschedule.LeaderRecords(plan, g, 11, vxShard, witness, crypto.SHA256)
+	require.NoError(t, err)
+	require.Equal(t, "prepare", step.Kind)
+	prep := f.must(g, f.block(g, 11, 1_010, step.Records))
+	require.Zero(t, witnesses)
+	wrong := plan
+	wrong.Body.EarliestActivation++
+	step, err = vrschedule.LeaderRecords(wrong, prep, 12, vxShard, witness, crypto.SHA256)
+	require.NoError(t, err)
+	require.Contains(t, step.Reason, "another attempt or body")
+	require.Zero(t, witnesses, "the attempt and body are checked before the witness is read")
+	step, err = vrschedule.LeaderRecords(plan, prep, 12, vxShard, witness, crypto.SHA256)
+	require.NoError(t, err)
+	require.Equal(t, "freeze", step.Kind)
+	require.Equal(t, 1, witnesses)
+	fz := f.must(prep, f.block(prep, 12, 1_020, step.Records))
+	require.Equal(t, "endorsed", fz.ShardState.Control.Phase)
+	_, _, v5, _, ok := storage.VRRetainedForTest(fz)
+	require.True(t, ok)
+	staged := rootState(t, fz).StagedBody
+	f.candidates[string(staged[:])] = v5
+	step, err = vrschedule.LeaderRecords(plan, fz, 13, vxShard, witness, crypto.SHA256)
+	require.NoError(t, err)
+	require.Equal(t, "commit", step.Kind)
+	h := f.must(fz, f.block(fz, 13, 1_030, step.Records))
+	require.Equal(t, "committed", h.ShardState.Control.Phase)
+	step, err = vrschedule.LeaderRecords(plan, h, 14, vxShard, witness, crypto.SHA256)
+	require.NoError(t, err)
+	require.Empty(t, step.Kind, "H committed: nothing more")
+}

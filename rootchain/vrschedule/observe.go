@@ -222,13 +222,6 @@ type Observer struct {
 	prev      vrschema.Word // the open Published output at the last observed block, zero when none
 }
 
-// Reset breaks the run: the next observation only primes.
-func (o *Observer) Reset() {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	o.primed, o.prev = false, vrschema.Word{}
-}
-
 // Observe reads one committed root block's certified EVM block. A failed read observes nothing: retrying the same block continues the
 // run, and giving it up breaks the run at the next block (whose parent was not observed).
 func (o *Observer) Observe(ctx context.Context, c CertifiedEVM) error {

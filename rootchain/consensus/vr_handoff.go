@@ -14,7 +14,6 @@ import (
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootchain/vrschedule"
-	"github.com/unicitynetwork/bft-core/vradmit"
 	"github.com/unicitynetwork/bft-core/vrhandoff"
 	"github.com/unicitynetwork/bft-core/vrschema"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -223,15 +222,24 @@ func (x *ConsensusManager) SubmitVRCertificate(c vrschema.ViewCertificate) error
 	if err != nil {
 		return errors.Join(ErrVRHandoff, err)
 	}
-	x.vr.mu.Lock()
-	defer x.vr.mu.Unlock()
-	if h := x.vr.held; h != nil && h.intent == d.Digest && h.epoch == d.RootEpoch {
+	if !x.vr.hold(p) {
 		return nil // I-RET keeps the first complete certificate of the intent
 	}
-	x.vr.held = &vrHeld{epoch: p.Epoch, attempt: p.Attempt, predecessor: p.Predecessor, intent: p.Intent, cert: c, body: p.Body, result: p.Result}
 	x.log.Info("VR handoff: a complete verified certificate is held", "intent", fmt.Sprintf("%x", d.Digest[:8]), "view", c.Assembly.Slot,
 		"rootEpoch", d.RootEpoch, "attempt", d.Intent.Attempt)
 	return nil
+}
+
+// hold keeps a verified plan in the I-RET slot unless a certificate of the same intent and epoch is held already (the first one wins); it
+// reports whether the plan was taken.
+func (v *vrHandoff) hold(p vrschedule.PreparePlan) bool {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if h := v.held; h != nil && h.intent == p.Intent && h.epoch == p.Epoch {
+		return false
+	}
+	v.held = &vrHeld{epoch: p.Epoch, attempt: p.Attempt, predecessor: p.Predecessor, intent: p.Intent, cert: p.Certificate, body: p.Body, result: p.Result}
+	return true
 }
 
 func (v *vrHandoff) current() *vrHeld {
@@ -250,63 +258,25 @@ func (h *vrHeld) plan() vrschedule.PreparePlan {
 // control state whose stored attempt is that one (a due rejection first), then its Freeze v5 once the Prepare bound the frozen parent,
 // then H. A certificate of another epoch, attempt or predecessor orders nothing (its intent died).
 func (x *ConsensusManager) vrRecordsForRound(round uint64, parent *storage.ExecutedBlock, parentQC *rctypes.QuorumCert) ([][]byte, error) {
-	control := parent.ShardState.Control
 	h := x.vr.current()
-	if h == nil || h.epoch != control.Epoch || !bytes.Equal(h.predecessor, control.PredecessorBodyID) {
+	if h == nil {
 		return nil, nil
 	}
-	lapsed := storage.PrepareLapsed(control, round)
-	if lapsed && !storage.PrepareMayFollowLapse(control, round) {
+	step, err := vrschedule.LeaderRecords(h.plan(), parent, round, x.vr.cfg.EVM, func(p, root [32]byte) ([]byte, error) { return x.vr.witnessAt(p, root, h) },
+		x.params.HashAlgorithm)
+	if err != nil {
+		x.log.Warn("VR handoff: no handoff record ordered", "round", round, "attempt", h.attempt, "error", err)
 		return nil, nil
 	}
-	switch {
-	case control.Phase == "idle" || control.Phase == "aborted" || lapsed:
-		attempt, err := plannedAttempt(control, round)
-		if err != nil || attempt != h.attempt {
-			return nil, nil
-		}
-		// the attempt must be the stored backoff identity: a Prepare in the block whose end opens its attempt is refused
-		if s, err := vradmit.DecodeRootState(control.VR); err != nil || s.Backoff.Epoch != control.Epoch || s.Backoff.Attempt != attempt {
-			return nil, nil
-		}
-		if x.preferRejection(context.Background(), parentQC.GetRound(), round, parentQC) {
-			return nil, nil
-		}
-		raw, err := vrschedule.PrepareRecord(h.plan(), control, round)
-		if err != nil {
-			return nil, ErrHandoffApproval
-		}
-		x.log.Info("VR handoff: ordering the Prepare", "round", round, "attempt", attempt)
-		return [][]byte{raw}, nil
-	case control.Phase == "prepared":
-		si := parent.ShardState.States[x.vr.cfg.EVM]
-		if si == nil || si.IR == nil || len(control.FrozenParent) != 32 || !bytes.Equal(si.IR.BlockHash, control.FrozenParent) || len(si.IR.Hash) != 32 {
-			return nil, nil
-		}
-		witness, err := x.vr.witnessAt([32]byte(control.FrozenParent), [32]byte(si.IR.Hash), h)
-		if err != nil {
-			x.log.Warn("VR handoff: the Freeze witness at the frozen parent is unavailable; Freeze not ordered", "attempt", h.attempt, "error", err)
-			return nil, nil
-		}
-		records, err := vrschedule.FreezeRecord(h.plan(), control, round, witness)
-		if err != nil {
-			return nil, nil
-		}
-		x.log.Info("VR handoff: ordering the Freeze v5", "round", round, "attempt", h.attempt, "view", h.cert.Assembly.Slot)
-		return records, nil
-	case control.Phase == "endorsed":
-		key, err := x.blockStore.CertifiedEVMShardAt(parent.GetRound(), control.FrozenParent)
-		if err != nil {
-			return nil, fmt.Errorf("%w: %w", ErrHandoffApproval, err)
-		}
-		raw, err := vrschedule.CommitRecord(h.plan(), control, round, parent.ShardState.States[key], x.params.HashAlgorithm)
-		if err != nil {
-			return nil, nil
-		}
-		x.log.Info("VR handoff: ordering H", "round", round, "attempt", h.attempt)
-		return [][]byte{raw}, nil
+	if step.Kind == "" {
+		x.log.Debug("VR handoff: no handoff record ordered", "round", round, "reason", step.Reason)
+		return nil, nil
 	}
-	return nil, nil
+	if step.Kind == "prepare" && x.preferRejection(context.Background(), parentQC.GetRound(), round, parentQC) {
+		return nil, nil
+	}
+	x.log.Info("VR handoff: ordering the "+step.Kind, "round", round, "attempt", h.attempt, "view", h.cert.Assembly.Slot)
+	return step.Records, nil
 }
 
 func (v *vrHandoff) witnessAt(p, root [32]byte, h *vrHeld) ([]byte, error) {

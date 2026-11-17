@@ -194,15 +194,6 @@ func TestAGapNeverRecordsALaterSource(t *testing.T) {
 	_, ok = skip.Get(r)
 	require.False(t, ok)
 
-	reset, err := NewSources("")
-	require.NoError(t, err)
-	o = &Observer{Reader: &fakeReader{at: map[[32]byte]*vrhandoff.Output{{2}: published(r)}}, Sources: reset, Outputs: NewOutputs()}
-	require.NoError(t, o.Observe(ctx, cert(10, 1, 1)))
-	o.Reset()
-	require.NoError(t, o.Observe(ctx, cert(11, 2, 2)))
-	_, ok = reset.Get(r)
-	require.False(t, ok, "after a reset the next observation only primes")
-
 	// a failed read retried for the same block is no gap: the run continues and the first published block is recorded
 	retry, err := NewSources("")
 	require.NoError(t, err)
