@@ -258,9 +258,6 @@ func VerifyRuleSupport(in SupportInput) error {
 	if _, err := MaterializeJ(in.Table, in.Readiness, in.J); err != nil {
 		return fmt.Errorf("%w: J's support does not materialize: %w", ErrSupport, err)
 	}
-	if len(rules) == 0 {
-		return nil
-	}
 	ev := in.Evidence
 	// every evidence item must verify, whether or not it is needed
 	var pool []vrschema.SupportCommitment
@@ -315,6 +312,11 @@ func VerifyRuleSupport(in SupportInput) error {
 			}
 			pool = append(pool, c)
 		}
+	}
+	// only the support and weight checks of the required rules depend on a gate being due (review #1172 r2): every evidence item above
+	// is resolved and authenticated whether or not it is needed
+	if len(rules) == 0 {
+		return nil
 	}
 	covers := func(cs []vrschema.SupportCommitment, m evmassign.Identity, rule vrschema.Word) bool {
 		kh := ethcrypto.Keccak256(m.RootKey)

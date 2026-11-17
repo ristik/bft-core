@@ -115,3 +115,35 @@ func TestWrongNetworkWordIsRejectable(t *testing.T) {
 	require.ErrorIs(t, VerifyReject(s, vrschema.OutputRejected{ResultID: r, Reason: vrschema.RejInvalid}, dep, vrschema.GenesisResult, vrschema.Word{}),
 		ErrReject, "a Reserved R is never Invalid")
 }
+
+// sol r2: with a scheduled rule not yet due (E = 50, e_J = 2), every evidence item is still resolved and authenticated: a fresh
+// commitment with a forged signature, a reference absent from the committed table and a K readiness with a forged envelope are refused.
+func TestEvidenceVerifiesWhenNoGateIsDue(t *testing.T) {
+	w := newWorld(t)
+	far := vrschema.Activation{RuleID: vrschema.RuleID("far"), RootEpoch: 50, State: vrschema.ActActive, ChangeID: 1}
+	admit := func(ev vrschema.RuleSupportEvidence) error {
+		a := w.admission()
+		a.Fold.Schedule = []vrschema.Activation{far}
+		a.Support.Evidence = ev
+		_, err := VerifyRegistryOutput(a)
+		return err
+	}
+	require.NoError(t, admit(vrschema.RuleSupportEvidence{}), "the control: no evidence, no gate due")
+	good := w.commitment(w.k[0], far.RuleID)
+	require.NoError(t, admit(vrschema.RuleSupportEvidence{Fresh: []vrschema.SupportCommitment{good}}), "a valid fresh commitment")
+
+	forged := good
+	forged.Sig = make([]byte, 65)
+	require.ErrorIs(t, admit(vrschema.RuleSupportEvidence{Fresh: []vrschema.SupportCommitment{forged}}), ErrSupport, "a 65-zero-byte signature")
+
+	ref, err := good.Digest()
+	require.NoError(t, err)
+	require.ErrorIs(t, admit(vrschema.RuleSupportEvidence{Refs: [][]byte{ref[:]}}), ErrSupport, "a reference absent from the committed table")
+
+	raw, err := w.cand.Encode()
+	require.NoError(t, err)
+	kr := w.readiness(w.k[0], 0, raw, []vrschema.SupportCommitment{good})
+	require.NoError(t, admit(vrschema.RuleSupportEvidence{KReadiness: []vrschema.Readiness{kr}}), "a valid K readiness")
+	kr.EnvelopeSig = w.readiness(w.k[1], 0, raw, nil).EnvelopeSig
+	require.ErrorIs(t, admit(vrschema.RuleSupportEvidence{KReadiness: []vrschema.Readiness{kr}}), ErrSupport, "a forged K-readiness envelope")
+}
