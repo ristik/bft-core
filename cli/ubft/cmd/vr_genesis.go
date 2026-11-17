@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 	"os"
 	"reflect"
@@ -280,6 +281,9 @@ func vrPlan(in vrPlanInput) (vrGenesisInput, []evmassign.Identity, error) {
 	}
 	if !in.profile.HookEnabled() || in.profile.RecordsCustody != vrschema.ValidatorRegistry || in.profile.ElectionContract != vrschema.ValidatorRegistry {
 		return out, nil, fmt.Errorf("%w: the profile's hooks are not both on VR (engine-api b1-profile --vr-hook-measurement)", ErrVRGenesis)
+	}
+	if in.network == ([32]byte{}) {
+		return out, nil, fmt.Errorf("%w: a zero network word (ValidatorRegistry's constructor refuses it: BadGenesis(1))", ErrVRGenesis)
 	}
 	if len(in.governorSigners) != 5 {
 		return out, nil, fmt.Errorf("%w: the FoundationMultisig takes exactly 5 signers, got %d", ErrVRGenesis, len(in.governorSigners))
@@ -613,14 +617,57 @@ func parseUrethArgs(line string) (urethArgs, error) {
 	return out, nil
 }
 
+// urethAccountingWindow is ureth's recovery ACCOUNTING_WINDOW (crates/unicity/payload/src/recovery.rs), and urethRepairLimit the default of
+// --unicity.accounting-repair-limit: a companion retention depth below their sum is refused at start-up (UnicityArgs::validate_retention).
+const (
+	urethAccountingWindow uint64 = 16
+	urethRepairLimit      uint64 = 64
+)
+
+// typed holds every argument to the client's own parsing: addresses and 32-byte hashes as such, every other value as a Rust u64
+// (decimal digits with an optional leading +), and the retention relation the client checks before it starts.
+func (a urethArgs) typed() error {
+	for flag, value := range a {
+		switch flag {
+		case "--unicity.no-proof-source":
+		case "--unicity.fee-collector", "--unicity.records-custody", "--unicity.election":
+			if !common.IsHexAddress(value) {
+				return fmt.Errorf("%w: ureth %s=%q is not an address", ErrVRGenesis, flag, value)
+			}
+		case "--unicity.root-genesis-id", "--unicity.profile-hash", "--unicity.genesis-commitment":
+			if _, err := hex.DecodeString(strings.TrimPrefix(value, "0x")); err != nil || len(strings.TrimPrefix(value, "0x")) != 64 {
+				return fmt.Errorf("%w: ureth %s=%q is not a 32-byte hash", ErrVRGenesis, flag, value)
+			}
+		default:
+			if _, err := a.uint(flag, 0); err != nil {
+				return err
+			}
+		}
+	}
+	depth, hasDepth := a["--unicity.companion-retention-depth"]
+	if !hasDepth {
+		return nil
+	}
+	d, _ := a.uint("--unicity.companion-retention-depth", 0)
+	repair, _ := a.uint("--unicity.accounting-repair-limit", urethRepairLimit)
+	if repair > math.MaxUint64-urethAccountingWindow {
+		return fmt.Errorf("%w: ureth's accounting repair limit %d overflows the companion retention rule", ErrVRGenesis, repair)
+	}
+	if d < urethAccountingWindow+repair {
+		return fmt.Errorf("%w: ureth's companion retention depth %s is below the accounting window + repair limit (%d)", ErrVRGenesis, depth, urethAccountingWindow+repair)
+	}
+	return nil
+}
+
 // uint is the effective numeric value of a flag: its value, or the client's default when absent.
 func (a urethArgs) uint(flag string, def uint64) (uint64, error) {
 	v, ok := a[flag]
 	if !ok {
 		return def, nil
 	}
-	n, okN := new(big.Int).SetString(v, 10)
-	if !okN || !n.IsUint64() {
+	digits := strings.TrimPrefix(v, "+")
+	n, okN := new(big.Int).SetString(digits, 10)
+	if digits == "" || strings.ContainsAny(digits, "+-_") || !okN || !n.IsUint64() {
 		return 0, fmt.Errorf("%w: ureth %s=%q is not a number", ErrVRGenesis, flag, v)
 	}
 	return n.Uint64(), nil
@@ -688,6 +735,14 @@ func vrVerify(v vrVerifyInput) (vrRootDeployment, error) {
 		nonce, okN := bigWord(cmpOr(acct.Nonce, "0x0"))
 		if !funded || !okBal || !okN || bal != want || nonce != (vrschema.Word{}) || strings.TrimPrefix(cmpOr(acct.Code, "0x"), "0x") != "" || len(acct.Storage) != 0 {
 			return fail("the genesis allocates %s, which the plan does not (only the SealRegistry, the seven VR accounts and listed balance-only accounts)", a)
+		}
+	}
+	for a := range v.funded {
+		if a == common.Address(vrschema.SealRegistry) || a == vrGenesisAddress(1) || vrGenesisRole(a) != "" || a == (common.Address{}) {
+			return fail("the funded account %s collides with a reserved genesis account", a)
+		}
+		if _, ok := alloc[a]; !ok {
+			return fail("the planned funded account %s is not allocated", a)
 		}
 	}
 	if g.Config.ChainID != in.ChainID || g.Config.ShanghaiTime == nil || *g.Config.ShanghaiTime != 0 || g.Config.CancunTime == nil || *g.Config.CancunTime != 0 {
@@ -872,6 +927,9 @@ func vrVerify(v vrVerifyInput) (vrRootDeployment, error) {
 		if got, ok := args[flag]; !ok || !strings.EqualFold(got, value) {
 			return fail("ureth %s is %q, the generation pins %q", flag, got, value)
 		}
+	}
+	if err := args.typed(); err != nil {
+		return out, err
 	}
 	for flag, want := range map[string]uint64{"--unicity.base-fee-floor": in.Fees.BaseFeeFloor, "--unicity.base-fee-change-denominator": in.Fees.ChangeDenominator,
 		"--unicity.elasticity": 2} {

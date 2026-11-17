@@ -20,9 +20,15 @@ import (
 	"github.com/unicitynetwork/bft-core/vrschema"
 )
 
-// The reviewed runtimes VR's code hash does not cover (unicity-pos-contracts#91, solc 0.8.37, via-IR, no metadata): the composer engine
-// (PoaElection commits to its address only) and the FoundationMultisig (VR's governor, held in storage). The VR core and the module are
-// bound by the measurement and the EVM PDR; the facets by the hashes the pinned core carries as immutables.
+// The reviewed runtimes VR's code hash does not cover: the composer engine (PoaElection commits to its address only) and the
+// FoundationMultisig (VR's governor, held in storage). The VR core and the module are bound by the measurement and the EVM PDR; the facets
+// by the hashes the pinned core carries as immutables.
+//
+// Provenance (astra, VT-14 r1 and r2, review-code-hashes.json): unicity-pos-contracts f922d04ccc421e88598c1ed76aa9fa5f3c044e32
+// (ristik/unicity-pos-contracts#91), forge 1.8.1, solc 0.8.37, via-IR, cancun, bytecode_hash none, no CBOR metadata:
+//   - out/PoaComposer.sol/PoaComposerEngine.json, deployed runtime 8,603 bytes (optimizer runs 200);
+//   - out/FoundationMultisig.sol/FoundationMultisig.p85.json, deployed runtime 3,643 bytes: the optimizer-runs-1 "p85" compiler profile
+//     variant that script/VRGenesis.s.sol deploys (the runs-200 variant hashes differently).
 const (
 	vrReviewedComposerCodeHash = "0x519fea7b1685ee52bfb93083b0436980ec0ebba6a2469d3e00dd30a3d2a83e40"
 	vrReviewedGovernorCodeHash = "0x189b2d0eb755de9007a6e944c4f753fd4b6a283075d08315ac50d872cf67ad07"

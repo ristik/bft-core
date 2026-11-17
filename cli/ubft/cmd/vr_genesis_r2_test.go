@@ -45,11 +45,11 @@ func opusCode(g map[string]any, low byte) string {
 
 func opusHash(code string) string { return ethcrypto.Keccak256Hash(common.FromHex(code)).Hex() }
 
-// benignR2 are the variants that must still verify: the ones the review found harmless, a retention depth (an operator's storage choice,
-// not consensus), the case of an address in the report, and the measurement's informational source string (its provenance is recorded
-// by the plan, F7). A non-canonical key in input.json, which the review asked about, is refused: the plan is re-derived byte for byte.
+// benignR2 are the variants that must still verify: the ones the review found harmless, the case of an address in the report, and the
+// measurement's informational source string (its provenance is recorded by the plan, F7). A non-canonical key in input.json, which the
+// review asked about, is refused: the plan is re-derived byte for byte. A companion retention depth of 1 is refused (astra r2: the client
+// does not start with it).
 var benignR2 = map[string]bool{
-	"ureth: companion retention depth 1":                                   true,
 	"deployment: composer address case":                                    true,
 	"fresh: source string":                                                 true,
 	"ureth: pinned value in space form (legit, should pass)":               true,
