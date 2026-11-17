@@ -373,3 +373,33 @@ func TestTheVerificationQueue(t *testing.T) {
 	sq.Step()
 	require.Equal(t, Retained, outs[1], "the replacement is verified in time")
 }
+
+// The transport may read the service while it sends (its peers are the service's members): Send runs outside the service's lock (found on
+// the live run, where the assembler root deadlocked its consensus loop).
+func TestSendRunsOutsideTheServicesLock(t *testing.T) {
+	w := newWorld(t)
+	who := w.assembler(0)
+	var s *Service
+	sent := 0
+	for _, m := range w.Members {
+		if m.Root == who {
+			s = NewService(ServiceConfig{Self: who, Signer: m.RK.Signer, Send: func(Message) { _ = s.Members(); _, _ = s.Plan(); sent++ }})
+		}
+	}
+	require.NotNil(t, s)
+	s.Update(w.committed(0))
+	done := make(chan struct{})
+	go func() {
+		for _, p := range w.PoPs(w.in) {
+			p := p
+			_, _, _ = s.Offer("peer", Message{PoP: &p})
+		}
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the assembler's Send deadlocked on the service")
+	}
+	require.Equal(t, 1, sent)
+}

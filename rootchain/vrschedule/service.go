@@ -112,7 +112,7 @@ type StageSet struct {
 type ServiceConfig struct {
 	Self   string          // this root's node id
 	Signer abcrypto.Signer // its root key: the assembly
-	// Send hands an outbound message (this root's assembly) to the transport; nil sends nothing.
+	// Send hands an outbound message (this root's assembly) to the transport, never under the service's lock; nil sends nothing.
 	Send func(Message)
 	Log  *slog.Logger
 }
@@ -173,6 +173,22 @@ func (s *Service) log() *slog.Logger {
 // Update applies one committed root block. A changed or underivable intent kills the current one (stage 0 restarts); a newly committed
 // view prunes the retention window and re-evaluates the buffered messages. It returns the messages this root sends (its assembly).
 func (s *Service) Update(c Committed) []Message {
+	out := s.update(c)
+	s.send(out)
+	return out
+}
+
+// send hands this root's own messages to the transport, outside the service's lock (the transport reads the service's members).
+func (s *Service) send(out []Message) {
+	if s.cfg.Send == nil {
+		return
+	}
+	for _, m := range out {
+		s.cfg.Send(m)
+	}
+}
+
+func (s *Service) update(c Committed) []Message {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.k, s.tab, s.sch = c.K, c.Table, c.Schedule
@@ -387,13 +403,14 @@ func (s *Service) prepareLocked(sender string, m Message) Job {
 // dropped; a verified second assembly or readiness of one signer in one view is equivocation evidence.
 func (s *Service) Apply(j Job, verr error) (Outcome, []Message, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	o, err := s.applyLocked(j, verr)
 	var out []Message
 	if o == Retained {
 		out = append(out, s.reevaluate()...)
 		out = append(out, s.assembleLocked()...)
 	}
+	s.mu.Unlock()
+	s.send(out)
 	return o, out, err
 }
 
@@ -600,11 +617,7 @@ func (s *Service) assembleLocked() []Message {
 		return nil
 	}
 	s.log().Info("VR handoff: assembled", "intent", fmt.Sprintf("%x", st.digest[:8]), "view", st.view)
-	m := Message{Assembly: &a}
-	if s.cfg.Send != nil {
-		s.cfg.Send(m)
-	}
-	return []Message{m}
+	return []Message{{Assembly: &a}}
 }
 
 // Plan is the Prepare a leader may order (design 5.3.1 stage 5): the current intent's I-RET certificate with the rule-support evidence the
