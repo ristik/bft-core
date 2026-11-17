@@ -8,7 +8,6 @@ import (
 	"math/bits"
 	"sort"
 
-	"github.com/unicitynetwork/bft-core/vrschema"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -530,7 +529,7 @@ func DecodeState(data []byte) (State, error) {
 			x.ID, g1 = hf[1].(uint64)
 			x.Generation, g2 = hf[2].(uint64)
 			ref, g3 := hf[3].([]byte)
-			if !g0 || holder >= vrschema.MaxHolders || !g1 || !g2 || !g3 || len(ref) != 32 {
+			if !g0 || holder >= MaxHolders || !g1 || !g2 || !g3 || len(ref) != 32 {
 				return State{}, fmt.Errorf("%w: holder retired field", ErrState)
 			}
 			x.Holder = uint8(holder)

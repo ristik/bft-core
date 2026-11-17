@@ -3,8 +3,6 @@ package rootrecords
 import (
 	"errors"
 	"fmt"
-
-	"github.com/unicitynetwork/bft-core/vrschema"
 )
 
 // The validator-registry projections (design section 4, schema v1 section 7). They extend the P85 ones without changing them: a VR
@@ -30,16 +28,16 @@ func (s State) AckBoundary(round, timestamp uint64, resultID, assignmentID [32]b
 		return State{}, nil, ErrNoPending
 	}
 	j, last := s.Pending[0], s.Pending[len(s.Pending)-1]
-	b := vrschema.Boundary{ResultID: resultID, ChangesEpoch: j.RootEpoch, InstalledRootEpoch: last.RootEpoch, InstalledShardEpoch: evmEpoch,
-		ActivationRound: last.First, Recovered: len(s.Pending) == 2, RejectedBitmap: rejectedBitmap}
-	if b.Recovered && (j.RootEpoch == ^uint64(0) || last.RootEpoch != j.RootEpoch+1) {
+	recovered := len(s.Pending) == 2
+	payload := BoundaryPayload(resultID, j.RootEpoch, last.RootEpoch, evmEpoch, last.First, recovered, rejectedBitmap)
+	if recovered && (j.RootEpoch == ^uint64(0) || last.RootEpoch != j.RootEpoch+1) {
 		return State{}, nil, fmt.Errorf("%w: K's root epoch %d after J's %d", ErrBoundary, last.RootEpoch, j.RootEpoch)
 	}
 	next, ack, err := s.Ack(round, timestamp, resultID, assignmentID, evmEpoch)
 	if err != nil {
 		return State{}, nil, err
 	}
-	next, bnd, err := next.append(KindBoundary, b.Encode(), Anchor{ack.Progress, ack.UCTime})
+	next, bnd, err := next.append(KindBoundary, payload, Anchor{ack.Progress, ack.UCTime})
 	if err != nil {
 		return State{}, nil, err
 	}
@@ -51,8 +49,8 @@ func (s State) AckBoundary(round, timestamp uint64, resultID, assignmentID [32]b
 // acknowledged result, is ErrResultResolved and projects nothing; a payload the schema refuses (reason outside 1..3, memberID outside
 // Invalid, readyBitmap outside Expired, a zero result id) is ErrPayload and projects nothing either.
 func (s State) RejectOutput(resultID [32]byte, reason uint8, memberID uint64, readyBitmap uint16, round, timestamp uint64) (State, []Record, error) {
-	o := vrschema.OutputRejected{ResultID: resultID, Reason: reason, MemberID: memberID, ReadyBitmap: readyBitmap}
-	if err := checkPayload(KindOutputRejected, o.Encode()); err != nil {
+	payload := OutputRejectedPayload(resultID, reason, memberID, readyBitmap)
+	if err := checkPayload(KindOutputRejected, payload); err != nil {
 		return State{}, nil, err
 	}
 	progress, err := s.Progress(round)
@@ -63,7 +61,7 @@ func (s State) RejectOutput(resultID [32]byte, reason uint8, memberID uint64, re
 		return State{}, nil, err
 	}
 	at := Anchor{progress, timestamp}
-	s, rej, err := s.append(KindOutputRejected, o.Encode(), at)
+	s, rej, err := s.append(KindOutputRejected, payload, at)
 	if err != nil {
 		return State{}, nil, err
 	}
@@ -110,8 +108,8 @@ func (s State) IsHolderRetired(holder uint8, id, generation uint64) (ref [32]byt
 // another digest is ErrRetirementConflict, a block below maxAnchor is ErrRetireEarly. The key is (holder, id, generation): the SealRegistry's
 // v2 dedup key, so the same (id, generation) at two holders are two retirements.
 func (s State) HolderRetire(holder uint8, id, generation uint64, ref [32]byte, maxAnchor, round, timestamp uint64) (State, *Record, error) {
-	h := vrschema.HolderRetirement{Holder: holder, ID: id, Generation: generation, RefDigest: ref}
-	if err := checkPayload(KindHolderRetirement, h.Encode()); err != nil {
+	payload := HolderRetirementPayload(holder, id, generation, ref)
+	if err := checkPayload(KindHolderRetirement, payload); err != nil {
 		return State{}, nil, err
 	}
 	i, found := s.holderRetiredAt(holder, id, generation)
@@ -132,7 +130,7 @@ func (s State) HolderRetire(holder uint8, id, generation uint64, ref [32]byte, m
 	s.HolderRetired = append(s.HolderRetired, HolderRetired{})
 	copy(s.HolderRetired[i+1:], s.HolderRetired[i:])
 	s.HolderRetired[i] = HolderRetired{holder, id, generation, ref}
-	next, rec, err := s.append(KindHolderRetirement, h.Encode(), Anchor{progress, timestamp})
+	next, rec, err := s.append(KindHolderRetirement, payload, Anchor{progress, timestamp})
 	if err != nil {
 		return State{}, nil, err
 	}

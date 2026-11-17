@@ -266,10 +266,74 @@ func TestStateVersionTwoRefusals(t *testing.T) {
 
 func TestVerifyRefusesNonCanonicalNewKinds(t *testing.T) {
 	var l Log
-	bad := vrschema.Boundary{ResultID: id32(1), ChangesEpoch: 5, InstalledRootEpoch: 5}.Encode()
+	bad := BoundaryPayload(id32(1), 5, 5, 0, 0, false, 0)
 	bad[5*32+31] = 2 // recovered = 2
 	_, err := l.Append(KindBoundary, bad, Anchor{1, 1})
 	require.ErrorIs(t, err, ErrPayload)
 	_, err = l.Append(Kind(9), make([]byte, 32), Anchor{1, 1})
 	require.ErrorIs(t, err, ErrKind)
+}
+
+// vrschemaVerdict is the frozen reference's verdict on a payload: its width and word check, and for kinds 6 to 8 its strict decoder.
+func vrschemaVerdict(kind Kind, data []byte) bool {
+	if err := vrschema.CheckRecordPayload(uint8(kind), data); err != nil {
+		return false
+	}
+	var err error
+	switch kind {
+	case KindBoundary:
+		_, err = vrschema.DecodeBoundary(data)
+	case KindOutputRejected:
+		_, err = vrschema.DecodeOutputRejected(data)
+	case KindHolderRetirement:
+		_, err = vrschema.DecodeHolderRetirement(data)
+	}
+	return err == nil
+}
+
+// The payload rules restated in records.go are vrschema's: every word of every kind set to each boundary value, alone and in pairs.
+func TestPayloadRulesAreVrschemas(t *testing.T) {
+	values := [][32]byte{{}, wordOf(1), wordOf(2), wordOf(3), wordOf(4), wordOf(7), wordOf(8), wordOf(0xffff), wordOf(0x1_0000), wordOf(^uint64(0)), id32(0xab)}
+	high := [32]byte{}
+	high[0] = 1
+	values = append(values, high)
+	n := 0
+	for kind, ws := range payloadWords {
+		base := make([]byte, 32*ws)
+		for i := 0; i < ws; i++ {
+			for _, a := range values {
+				for j := i; j < ws; j++ {
+					for _, b := range values {
+						d := append([]byte(nil), base...)
+						copy(d[32*i:], a[:])
+						copy(d[32*j:], b[:])
+						got := checkPayload(kind, d) == nil
+						require.Equal(t, vrschemaVerdict(kind, d), got, "kind %d words %d=%x %d=%x", kind, i, a, j, b)
+						n++
+					}
+				}
+			}
+		}
+		// and the projection's own encodings
+		switch kind {
+		case KindBoundary:
+			require.Equal(t, vrschema.Boundary{ResultID: id32(1), ChangesEpoch: 5, InstalledRootEpoch: 6, InstalledShardEpoch: 8, ActivationRound: 9,
+				Recovered: true, RejectedBitmap: 3}.Encode(), BoundaryPayload(id32(1), 5, 6, 8, 9, true, 3))
+		case KindOutputRejected:
+			require.Equal(t, vrschema.OutputRejected{ResultID: id32(1), Reason: 3, MemberID: 4}.Encode(), OutputRejectedPayload(id32(1), 3, 4, 0))
+		case KindHolderRetirement:
+			require.Equal(t, vrschema.HolderRetirement{Holder: 7, ID: 1, Generation: 2, RefDigest: id32(9)}.Encode(), HolderRetirementPayload(7, 1, 2, id32(9)))
+		}
+	}
+	require.Greater(t, n, 10_000)
+	require.EqualValues(t, vrschema.MaxHolders, MaxHolders)
+	require.Equal(t, []uint8{vrschema.RejExpired, vrschema.RejInvalidated, vrschema.RejInvalid}, []uint8{RejectExpired, RejectInvalidated, RejectInvalid})
+	for k, bits := range payloadWordBits {
+		require.Len(t, bits, payloadWords[k])
+	}
+}
+
+func wordOf(v uint64) (w [32]byte) {
+	copy(w[:], word(v))
+	return
 }
