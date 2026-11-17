@@ -229,6 +229,35 @@ func requiredRules(schedule []vrschema.Activation, e uint64) []vrschema.Activati
 // Evidence that is malformed or by another binding refuses; insufficient support is ErrSupportWait.
 func VerifyRuleSupport(in SupportInput) error {
 	rules := requiredRules(in.Schedule, in.SuccessorEpoch)
+	eff := vrschema.Effective(in.Schedule)
+	if len(in.Readiness) != len(in.J) {
+		return fmt.Errorf("%w: %d readiness for %d successors", ErrSupport, len(in.Readiness), len(in.J))
+	}
+	// Every commitment the certificate and the evidence carry is in scope (the root network, a rule of the committed schedule), whether
+	// or not a gate is due now, and J's commitments materialize into a valid bounded table: admission and the committed transition agree
+	// (review #1172, astra 2).
+	for i, r := range in.Readiness {
+		for j, c := range r.Commitments {
+			if err := commitmentInScope(c, in.Network, eff); err != nil {
+				return fmt.Errorf("readiness %d commitment %d: %w", i, j, err)
+			}
+		}
+	}
+	for i, c := range in.Evidence.Fresh {
+		if err := commitmentInScope(c, in.Network, eff); err != nil {
+			return fmt.Errorf("fresh commitment %d: %w", i, err)
+		}
+	}
+	for i, r := range in.Evidence.KReadiness {
+		for j, c := range r.Commitments {
+			if err := commitmentInScope(c, in.Network, eff); err != nil {
+				return fmt.Errorf("K readiness %d commitment %d: %w", i, j, err)
+			}
+		}
+	}
+	if _, err := MaterializeJ(in.Table, in.Readiness, in.J); err != nil {
+		return fmt.Errorf("%w: J's support does not materialize: %w", ErrSupport, err)
+	}
 	if len(rules) == 0 {
 		return nil
 	}
@@ -297,9 +326,6 @@ func VerifyRuleSupport(in SupportInput) error {
 		}
 		return false
 	}
-	if len(in.Readiness) != len(in.J) {
-		return fmt.Errorf("%w: %d readiness for %d successors", ErrSupport, len(in.Readiness), len(in.J))
-	}
 	for _, a := range rules {
 		// (a)
 		for i, m := range in.J {
@@ -329,16 +355,32 @@ func VerifyRuleSupport(in SupportInput) error {
 	return nil
 }
 
-// MaterializeJ is the table after a primary acknowledgement of J: J's entries come from J's own readiness (design section 7.3), and
-// bindings outside the new committee (and any pending K) are pruned.
+// MaterializeJ is the table after a primary acknowledgement of J: bindings outside the new committee (and any pending K) are pruned
+// first, then J's entries are added from J's own readiness (design section 7.3), and only the final table is held to the 16 x 64 bound,
+// so a full committee that replaces or rotates a member materializes (review #1172). A commitment of a binding outside keep never
+// enters the table.
 func MaterializeJ(t SupportTable, readiness []vrschema.Readiness, keep []evmassign.Identity) (SupportTable, error) {
 	var cs []vrschema.SupportCommitment
 	for _, r := range readiness {
-		cs = append(cs, r.Commitments...)
+		for _, c := range r.Commitments {
+			if m, ok := memberByID(keep, c.StakingID); ok && m.Generation == c.Generation && bytes.Equal(c.RootKeyHash, ethcrypto.Keccak256(m.RootKey)) {
+				cs = append(cs, c)
+			}
+		}
 	}
-	n, err := t.Add(cs...)
-	if err != nil {
-		return t, err
+	return t.Prune(keep).Add(cs...)
+}
+
+// commitmentInScope requires a commitment for the root network and for a rule of the committed schedule (latched entries included).
+func commitmentInScope(c vrschema.SupportCommitment, network uint64, eff map[vrschema.Word]vrschema.Activation) error {
+	if c.Network != network {
+		return fmt.Errorf("%w: a commitment for network %d", ErrSupport, c.Network)
 	}
-	return n.Prune(keep), nil
+	if len(c.RuleID) != 32 {
+		return fmt.Errorf("%w: rule id width", ErrSupport)
+	}
+	if _, ok := eff[vrschema.Word(c.RuleID)]; !ok {
+		return fmt.Errorf("%w: a commitment for rule %x, which the committed schedule does not hold", ErrSupport, c.RuleID)
+	}
+	return nil
 }

@@ -218,7 +218,7 @@ func NewConsensusManager(
 
 	cParams := optional.Params
 	minRoundLen := cParams.BlockRate / 2
-	if target := optional.TargetBlockInterval; target != 0 {
+	if target := optional.TargetBlockInterval; optional.TargetBlockIntervalSet {
 		if err := ValidateTargetBlockInterval(target, cParams.LocalTimeout); err != nil {
 			return nil, err
 		}

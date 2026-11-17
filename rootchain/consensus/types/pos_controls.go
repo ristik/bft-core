@@ -102,29 +102,41 @@ var (
 )
 
 // dataWidth is the exact ABI width of each op's record payload and uintMask the payload words that are uint64 (high bits zero).
-func dataShape(op uint64, registry bool) (width int, uintMask uint) {
+func dataShape(op uint64, registry bool) []int {
 	if registry {
+		// the frozen record word types (vrschema.RecordWordTypes): 0 is bytes32, otherwise the integer's bit width, 1 a bool
 		switch op {
 		case OpCloseLiability:
-			return 192, 0b000010
+			return []int{0, 64, 0, 0, 0, 0} // Closure (assignmentID, hRound, hRecordID, terminalRoot, exposureDigest, keyHistoryDigest)
 		case OpRetirement:
-			return 128, 0b0111 // HolderRetirement (holder, id, generation, refDigest)
+			return []int{8, 64, 64, 0} // HolderRetirement (holder uint8, id, generation, refDigest)
 		case OpRejectResult:
-			return 128, 0b1110 // OutputRejected (resultID, reason, memberId, readyBitmap)
-		case OpRuleSupport, OpHandoffView:
-			return 0, 0
+			return []int{0, 8, 64, 16} // OutputRejected (resultID, reason uint8, memberId, readyBitmap uint16)
 		}
-		return 0, 0
+		return nil // RuleSupport, HandoffView: no data
 	}
 	switch op {
 	case OpCloseLiability:
-		return 192, 0b000010 // (assignmentID, hRound, hRecordID, terminalRoot, exposureDigest, keyHistoryDigest)
+		return []int{0, 64, 0, 0, 0, 0} // (assignmentID, hRound, hRecordID, terminalRoot, exposureDigest, keyHistoryDigest)
 	case OpRetirement:
-		return 96, 0b011 // (id, generation, refDigest)
+		return []int{64, 64, 0} // (id, generation, refDigest)
 	case OpRejectResult:
-		return 32, 0 // (resultID)
+		return []int{0} // (resultID)
 	}
-	return 0, 0
+	return nil
+}
+
+// wordFits reports a big-endian word whose value fits bits (every higher byte zero, and the top byte's spare bits zero); a bool word
+// (bits 1) is exactly 0 or 1.
+func wordFits(w []byte, bits int) bool {
+	full := 32 - (bits+7)/8
+	if !bytes.Equal(w[:full], make([]byte, full)) {
+		return false
+	}
+	if r := bits % 8; r != 0 && w[full]>>r != 0 {
+		return false
+	}
+	return true
 }
 
 func (c PosControl) contextValue() ([]any, error) {
@@ -193,13 +205,13 @@ func (c PosControl) Validate() error {
 	if _, err := c.contextValue(); err != nil {
 		return err
 	}
-	width, mask := dataShape(c.Op, c.Registry)
-	if len(c.Data) != width {
-		return fmt.Errorf("%w: op %d payload is %d bytes, want %d", ErrPosControl, c.Op, len(c.Data), width)
+	words := dataShape(c.Op, c.Registry)
+	if len(c.Data) != 32*len(words) {
+		return fmt.Errorf("%w: op %d payload is %d bytes, want %d", ErrPosControl, c.Op, len(c.Data), 32*len(words))
 	}
-	for j := 0; j < width/32; j++ {
-		if mask&(1<<j) != 0 && !bytes.Equal(c.Data[32*j:32*j+24], make([]byte, 24)) {
-			return fmt.Errorf("%w: payload word %d exceeds uint64", ErrPosControl, j)
+	for j, bits := range words {
+		if bits != 0 && !wordFits(c.Data[32*j:32*j+32], bits) {
+			return fmt.Errorf("%w: payload word %d exceeds uint%d", ErrPosControl, j, bits)
 		}
 	}
 	if c.Op == OpCloseLiability && c.Close.ClosedEpoch == 0 {

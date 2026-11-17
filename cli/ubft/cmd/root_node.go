@@ -138,6 +138,10 @@ func rootNodeRunCmd(baseFlags *baseFlags) *cobra.Command {
 		Use:   "run",
 		Short: "Run a node",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// every configured target, the 450 ms default and an explicit 0 included, is checked at entry (VR design section 5.7)
+			if err := consensus.ValidateTargetBlockInterval(flags.TargetBlockInterval, consensus.NewConsensusParams().LocalTimeout); err != nil {
+				return fmt.Errorf("--target-block-interval: %w", err)
+			}
 			return rootNodeRun(cmd.Context(), flags)
 		},
 	}
@@ -216,8 +220,8 @@ func getBootStrapNodes(bootNodesStr []string) ([]peer.AddrInfo, error) {
 }
 
 func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
-	// the target block interval is checked at entry, before anything is built (VR design section 5.7); a zero value (a unit test that
-	// drives this function directly) keeps the genesis-derived BlockRate/2
+	// the command checks the flag at entry (an explicit 0 is refused there); a zero value here only comes from a unit test that drives
+	// this function directly without the command, and keeps the genesis-derived BlockRate/2
 	if flags.TargetBlockInterval != 0 {
 		if err := consensus.ValidateTargetBlockInterval(flags.TargetBlockInterval, consensus.NewConsensusParams().LocalTimeout); err != nil {
 			return err

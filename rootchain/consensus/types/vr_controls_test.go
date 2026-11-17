@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/vrschema"
+	basetypes "github.com/unicitynetwork/bft-go-base/types"
 )
 
 func unhex(t *testing.T, s string) []byte {
@@ -156,4 +157,69 @@ func (f *flexU64) UnmarshalJSON(b []byte) error {
 	v, err := strconv.ParseUint(n.String(), 10, 64)
 	*f = flexU64(v)
 	return err
+}
+
+// TestVRControlNarrowWordsMatchTheFrozenCodec (review #1172, sol 1): the payload words keep their frozen widths (HolderRetirement's
+// holder uint8, OutputRejected's reason uint8 and readyBitmap uint16). This codec and vrschema's accept and refuse the same items, both
+// through the encoders and on raw malformed items.
+func TestVRControlNarrowWordsMatchTheFrozenCodec(t *testing.T) {
+	word := func(v uint64) []byte { w := vrschema.U64(v); return w[:] }
+	cat := func(ws ...[]byte) []byte {
+		var out []byte
+		for _, w := range ws {
+			out = append(out, w...)
+		}
+		return out
+	}
+	h32 := make([]byte, 32)
+	h32[0] = 1
+	cases := []struct {
+		name string
+		op   uint64
+		data []byte
+		ok   bool
+	}{
+		{"holder 255", rctypes.OpRetirement, cat(word(255), word(1), word(2), h32), true},
+		{"holder 256", rctypes.OpRetirement, cat(word(256), word(1), word(2), h32), false},
+		{"id 2^64-1", rctypes.OpRetirement, cat(word(1), word(^uint64(0)), word(2), h32), true},
+		{"reason 255", rctypes.OpRejectResult, cat(h32, word(255), word(0), word(0)), true},
+		{"reason 256", rctypes.OpRejectResult, cat(h32, word(256), word(0), word(0)), false},
+		{"readyBitmap 65535", rctypes.OpRejectResult, cat(h32, word(1), word(0), word(65535)), true},
+		{"readyBitmap 65536", rctypes.OpRejectResult, cat(h32, word(1), word(0), word(65536)), false},
+		{"memberId over uint64", rctypes.OpRejectResult, cat(h32, word(3), append([]byte{1}, make([]byte, 31)...), word(0)), false},
+	}
+	var chain [32]byte
+	chain[31] = 3
+	wh := [32]byte{7}
+	for _, c := range cases {
+		ctx := []any{h32, h32}
+		x := vrBase(c.op)
+		x.ChainID, x.WitnessHash, x.Data = chain, wh, c.data
+		if c.op == rctypes.OpRetirement {
+			x.Retire = &rctypes.RetireContext{EVMBlockHash: [32]byte{1}, EVMStateRoot: [32]byte{1}}
+		} else {
+			x.Reject = &rctypes.RejectContext{PredecessorBodyID: [32]byte{1}, Attempt: 0, EVMBlockHash: [32]byte{1}, EVMStateRoot: [32]byte{1}}
+			ctx = []any{h32, uint64(0), h32, h32}
+		}
+		// the encoders
+		ours, errOurs := x.MarshalCBOR()
+		schema, errSchema := vrschema.EncodeVRControl(3, chain, vrschema.ValidatorRegistry, 5, 900, c.op, vrschema.ControlContext{EVMBlockHash: h32,
+			EVMStateRoot: h32, Predecessor: h32}, c.data, wh)
+		require.Equal(t, c.ok, errOurs == nil, "%s: this codec, %v", c.name, errOurs)
+		require.Equal(t, c.ok, errSchema == nil, "%s: vrschema, %v", c.name, errSchema)
+		if c.ok {
+			require.Equal(t, schema, ours, c.name)
+		}
+		// a raw item built without either encoder
+		raw, err := basetypes.Cbor.Marshal([]any{rctypes.VRControlTag, uint64(3), chain[:], vrschema.ValidatorRegistry[:], uint64(5), uint64(900), c.op, ctx, c.data, wh[:]})
+		require.NoError(t, err)
+		var back rctypes.PosControl
+		errDec := back.UnmarshalCBOR(raw)
+		_, _, _, errSchemaDec := vrschema.DecodeVRControl(raw)
+		require.Equal(t, c.ok, errDec == nil, "%s: this decoder, %v", c.name, errDec)
+		require.Equal(t, c.ok, errSchemaDec == nil, "%s: vrschema's decoder, %v", c.name, errSchemaDec)
+		if !c.ok {
+			require.ErrorIs(t, errDec, rctypes.ErrPosControl, c.name)
+		}
+	}
 }

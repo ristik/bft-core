@@ -42,6 +42,17 @@ type Deployment struct {
 	RegistryCode [32]byte
 }
 
+// AuthorizationWord is the Authorization field a proven output digest maps to: the word itself, or REGISTRY_NATIVE for a zero word. A
+// native repair output carries zero snapshot and policy digests (VT-02), and the recovery authorization (whose digest every recovery
+// reproduces) refuses zero fields, so a zero word is carried as the REGISTRY_NATIVE domain word. The mapping is total and fixed; the
+// true words stay bound by outputCommit.
+func AuthorizationWord(w vrschema.Word) vrschema.Word {
+	if w == (vrschema.Word{}) {
+		return vrschema.RegistryNative
+	}
+	return w
+}
+
 // ContractsDigest is the Authorization.Contracts a VR-mode candidate carries: keccak256(abi.encode(VR address, VR code hash)). The
 // schema leaves the field to the roots; it binds the recovery authorization to the one pinned VR generation.
 func (d Deployment) ContractsDigest() vrschema.Word {
@@ -167,7 +178,8 @@ func V5Of(c vrschema.CandidateV6) evmassign.Candidate {
 		Supersedes: c.Supersedes, Bindings: c.Bindings, Identities: c.Identities, Authorization: c.Authorization, ReplacedAssignment: c.ReplacedAssignment}
 }
 
-// VerifyRegistryOutput is registry-mode admission of a primary candidate (design section 5.2), every item in order. A recovery
+// VerifyRegistryOutput is registry-mode admission of a primary candidate (design section 5.2), every item, in order except that the
+// view certificate (9) is verified before the activation gates (7) read its readiness. A recovery
 // candidate re-installs K by DeriveRecovery and is not a registry output.
 func VerifyRegistryOutput(a Admission) (Verified, error) {
 	c, s, o := a.Candidate, a.State, a.State.Output
@@ -190,7 +202,8 @@ func VerifyRegistryOutput(a Admission) (Verified, error) {
 	}
 	// (3) the candidate's identities, K and registry changes recompute VR's digests; K is the acknowledged committee
 	auth := c.Authorization
-	if !bytes.Equal(auth.ResultID, r[:]) || !bytes.Equal(auth.SnapshotDigest, o.SnapshotDigest[:]) || !bytes.Equal(auth.Policies, o.PolicyDigest[:]) {
+	snap, pol := AuthorizationWord(o.SnapshotDigest), AuthorizationWord(o.PolicyDigest)
+	if !bytes.Equal(auth.ResultID, r[:]) || !bytes.Equal(auth.SnapshotDigest, snap[:]) || !bytes.Equal(auth.Policies, pol[:]) {
 		return out, fmt.Errorf("%w: the authorization names another result, snapshot or policy", ErrCommit)
 	}
 	if cd := a.Deployment.ContractsDigest(); !bytes.Equal(auth.Contracts, cd[:]) {
@@ -259,6 +272,15 @@ func VerifyRegistryOutput(a Admission) (Verified, error) {
 	if i, ok := vrschema.AckGate(c.RegistryChanges, verdicts, a.Acked, a.EVMAcked); !ok {
 		return out, fmt.Errorf("%w: entry %d (-1: the EVM shard)", ErrAckGate, i)
 	}
+	// (9) the certificate carries exactly this candidate's canonical bytes; it is verified before the rule-support gate reads its readiness
+	cb, err := c.Encode()
+	if err != nil {
+		return out, errors.Join(ErrCertificate, err)
+	}
+	a.Certificate.CandidateBytes = cb
+	if err := VerifyCertificate(a.Certificate); err != nil {
+		return out, errors.Join(ErrCertificate, err)
+	}
 	// (7)
 	effective := vrschema.Effective(a.Fold.Schedule)
 	if err := vrschema.PrepareTimeGate(a.Fold.SuccessorRootEpoch, a.PrepareUCTime, effective); err != nil {
@@ -273,15 +295,6 @@ func VerifyRegistryOutput(a Admission) (Verified, error) {
 	// (8)
 	if s.Status.Health == vrschema.HealthInconsistent {
 		return out, ErrInconsistent
-	}
-	// (9) the certificate carries exactly this candidate's canonical bytes
-	cb, err := c.Encode()
-	if err != nil {
-		return out, errors.Join(ErrCertificate, err)
-	}
-	a.Certificate.CandidateBytes = cb
-	if err := VerifyCertificate(a.Certificate); err != nil {
-		return out, errors.Join(ErrCertificate, err)
 	}
 	return Verified{V5: v5, Successor: c.Assignment, Verdicts: verdicts}, nil
 }

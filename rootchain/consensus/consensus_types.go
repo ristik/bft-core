@@ -58,8 +58,10 @@ type (
 		EpochSwitch EpochSwitch
 		// TargetBlockInterval is this node's local, non-consensus target round length (VR design section 5.7, --target-block-interval).
 		// It feeds only the pacemaker's minRoundLen: a round that would otherwise be faster waits for it, a slower round gets nothing
-		// added. Zero keeps the genesis-derived BlockRate/2. Validity, voting, timeouts and replay never read it.
-		TargetBlockInterval time.Duration
+		// added. Unset (no WithTargetBlockInterval) keeps the genesis-derived BlockRate/2; a set value, zero included, is validated.
+		// Validity, voting, timeouts and replay never read it.
+		TargetBlockInterval    time.Duration
+		TargetBlockIntervalSet bool
 	}
 
 	Option func(c *Optional)
@@ -92,7 +94,7 @@ func ValidateTargetBlockInterval(target, localTimeout time.Duration) error {
 
 // WithTargetBlockInterval sets this node's local target round length (see Optional.TargetBlockInterval).
 func WithTargetBlockInterval(target time.Duration) Option {
-	return func(c *Optional) { c.TargetBlockInterval = target }
+	return func(c *Optional) { c.TargetBlockInterval, c.TargetBlockIntervalSet = target, true }
 }
 
 func WithConsensusParams(params Parameters) Option {

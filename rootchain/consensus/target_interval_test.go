@@ -117,3 +117,15 @@ func (c *committedRecorder) WriteBlock(b *storage.ExecutedBlock, root bool) erro
 	}
 	return c.PersistentStore.WriteBlock(b, root)
 }
+
+// An explicitly set zero target is refused like any other invalid value; only an unset option keeps BlockRate/2 (review #1172, sol 3).
+func TestExplicitZeroTargetBlockIntervalIsRefused(t *testing.T) {
+	net := testnetwork.NewRootMockNetwork()
+	root := testutils.NewTestNode(t)
+	observe := testobservability.Default(t)
+	store, err := tbstore.NewTrustBaseStore(memorydb.New(), observe.Logger())
+	require.NoError(t, err)
+	cm, err := NewConsensusManager(root.PeerConf.ID, store, nil, net, root.Signer, nil, observe, WithTargetBlockInterval(0))
+	require.Nil(t, cm)
+	require.ErrorIs(t, err, ErrTargetBlockInterval)
+}

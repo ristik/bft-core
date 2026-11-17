@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/vrschema"
 )
 
@@ -85,14 +86,48 @@ func TestAdmissionRefusesOnePerItem(t *testing.T) {
 	}
 }
 
-// TestNativeOutputsAreExemptFromLimits: CommitteeLimits judge module outputs only; |S| <= 16 holds for every output.
+// TestNativeOutputsAreExemptFromLimits: CommitteeLimits judge module outputs only; |S| <= 16 holds for every output. The native
+// output carries the real zero snapshot and policy digests VR writes for it (review #1172, astra 1): its authorization maps them to
+// REGISTRY_NATIVE, so it passes both item 3 and the recovery authorization's nonzero rule in item 5, continuity still applied.
 func TestNativeOutputsAreExemptFromLimits(t *testing.T) {
 	w := newWorld(t)
+	w.snap, w.pol, w.native = vrschema.Word{}, vrschema.Word{}, true
+	w.build()
 	w.state.Limits = vrschema.CommitteeLimits{NMin: 5, NTarget: 5, NMax: 7}
-	w.state.Output.Native, w.state.Output.ModuleTag = true, vrschema.RegistryNative
-	w.commit()
-	_, err := VerifyRegistryOutput(w.admission())
+	a := w.admission()
+	_, err := VerifyRegistryOutput(a)
 	require.NoError(t, err)
+	// the recovery path: the authorization the native J publishes is the one a recovery reproduces
+	_, err = w.cand.Authorization.Digest()
+	require.NoError(t, err)
+	installed, err := evmassign.Activate(w.succ, 40)
+	require.NoError(t, err)
+	_, _, _, _, err = evmassign.DeriveRecovery(evmassign.Head{Candidate: V5Of(w.cand), Successor: w.succ}, installed)
+	require.NoError(t, err)
+
+	// the same zero words on a module output are still judged by the limits
+	w.native = false
+	w.build()
+	w.state.Limits = vrschema.CommitteeLimits{NMin: 5, NTarget: 5, NMax: 7}
+	_, err = VerifyRegistryOutput(w.admission())
+	require.ErrorIs(t, err, ErrLimits)
+
+	// continuity still applies to a native output
+	w.native = true
+	w.build()
+	a = w.admission()
+	a.Lifecycle.Policy.MaxM, a.Lifecycle.Policy.MaxDistNum = 0, 0
+	_, err = VerifyRegistryOutput(a)
+	require.ErrorIs(t, err, ErrH3)
+
+	// a candidate that carries the raw zero words is refused at item 3 (and could never pass item 5)
+	w.build()
+	a = w.admission()
+	auth := *a.Candidate.Authorization
+	auth.SnapshotDigest, auth.Policies = make([]byte, 32), make([]byte, 32)
+	a.Candidate.Authorization = &auth
+	_, err = VerifyRegistryOutput(a)
+	require.ErrorIs(t, err, ErrCommit)
 }
 
 func TestLimitsSatisfied(t *testing.T) {

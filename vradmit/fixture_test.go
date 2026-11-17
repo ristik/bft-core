@@ -68,6 +68,9 @@ type world struct {
 	q3       q3format.BodyV3
 	intent   [32]byte
 	tb       []byte
+	// the output's snapshot and policy digests and its native flag (a native repair output: zero digests, REGISTRY_NATIVE)
+	snap, pol vrschema.Word
+	native    bool
 }
 
 func stakingID(id uint64) []byte { w := vrschema.U64(id); return w[:] }
@@ -95,6 +98,7 @@ func newWorld(t *testing.T) *world {
 	w.dep = Deployment{RootNetwork: fxNetwork, NetworkWord: vrschema.Keccak([]byte("net")), ChainID: vrschema.U64(3), Registry: vrschema.ValidatorRegistry,
 		RegistryCode: vrschema.Keccak([]byte("vr-code"))}
 	w.r = vrschema.Keccak([]byte("result R"))
+	w.snap, w.pol = vrschema.Keccak([]byte("snapshot")), vrschema.Keccak([]byte("policy"))
 	for i := uint64(1); i <= 5; i++ {
 		w.members[i] = member{id: i, root: "r" + string(rune('0'+i)), evm: string(rune('a' + i - 1)), rk: mkKey(t, byte(i)), ek: mkKey(t, byte(20+i))}
 	}
@@ -128,10 +132,11 @@ func (w *world) build() {
 	t := w.t
 	exposure, err := evmassign.ExposureCommit(w.k)
 	require.NoError(t, err)
-	snap, pol := vrschema.Keccak([]byte("snapshot")), vrschema.Keccak([]byte("policy"))
+	snap, pol := w.snap, w.pol
+	as, ap := AuthorizationWord(snap), AuthorizationWord(pol)
 	cd := w.dep.ContractsDigest()
-	auth := &evmassign.Authorization{Network: fxNetwork, Chain: 1, Contracts: cd[:], ResultID: w.r[:], SnapshotDigest: snap[:],
-		BaseRootBodyID: w.body[:], BaseAssignmentHash: w.baseHash[:], K: w.k, ExposureDigest: exposure[:], Policies: pol[:]}
+	auth := &evmassign.Authorization{Network: fxNetwork, Chain: 1, Contracts: cd[:], ResultID: w.r[:], SnapshotDigest: as[:],
+		BaseRootBodyID: w.body[:], BaseAssignmentHash: w.baseHash[:], K: w.k, ExposureDigest: exposure[:], Policies: ap[:]}
 	jd, err := evmassign.IdentitiesDigest(w.j)
 	require.NoError(t, err)
 	ctx := evmassign.PoPContext{Network: fxNetwork, Predecessor: w.body, Identities: jd}
@@ -165,6 +170,9 @@ func (w *world) build() {
 		Limits: vrschema.CommitteeLimits{NMin: 4, NTarget: 4, NMax: 7}, Status: vrschema.Status{KnownRootEpoch: 1},
 		Output: vrschema.OutputRecord{State: vrschema.OutPublished, Attempt: 7, ReservedProgress: 100, ExpiresAtProgress: 100 + vrschema.Lifetime,
 			Predecessor: vrschema.GenesisResult, SourceModule: [20]byte{0xa0, 19: 1}, ModuleTag: vrschema.PoaModuleTag, SnapshotDigest: snap, PolicyDigest: pol}}
+	if w.native {
+		w.state.Output.Native, w.state.Output.ModuleTag, w.state.Output.SourceModule = true, vrschema.RegistryNative, [20]byte{}
+	}
 	w.commit()
 	members := evmroot.WeightSet{}
 	for _, i := range w.j {

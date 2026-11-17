@@ -30,14 +30,13 @@ func AdmissionFailsAtP(s OutputState, d Deployment, acknowledged, ackCommitteeDi
 // VerifyReject is the RejectResult v2 due table (design section 5.6) over the proven state: the reason the data names must be the one
 // the table gives (Expired for a Reserved or Published R at progress >= expiresAtProgress, counted from reservation and never reset;
 // Invalidated immediately; Invalid for a Published R with a deterministic admission failure); memberId is zero (the failures judged
-// here name no member) and readyBitmap is carried only by an expiry. The control-state rules (quiet state, unresolved R, the root's next
+// here name no member) and readyBitmap is carried only by an expiry. A network word other than the deployment's is not a refusal here:
+// it is one of the proven admission failures, so it makes a Published R due as Invalid (and a Reserved or Published R past its
+// expiry due as Expired); the witness itself is pinned by the certified root, VR's address and code hash (review #1172, astra 4). The control-state rules (quiet state, unresolved R, the root's next
 // attempt) are the executor's.
 func VerifyReject(s RejectState, data vrschema.OutputRejected, d Deployment, acknowledged, ackCommitteeDigest vrschema.Word) error {
 	if s.Output.ResultID != data.ResultID || data.ResultID == (vrschema.Word{}) {
 		return fmt.Errorf("%w: the witness is of another result", ErrReject)
-	}
-	if s.Output.Network != d.NetworkWord {
-		return fmt.Errorf("%w: VR network word", ErrReject)
 	}
 	o := s.Output.Output
 	fails := o.State == vrschema.OutPublished && AdmissionFailsAtP(s.Output, d, acknowledged, ackCommitteeDigest)
