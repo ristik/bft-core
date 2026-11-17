@@ -488,9 +488,9 @@ func (p *posStep) reject(c rctypes.PosControl, block *rctypes.BlockData, svc *Po
 		UnackedParent: bytes.Clone(ctl.UnackedParent)}, nil // a RejectResult is no acknowledgement of a root-only step (#604)
 }
 
-// abort projects the close of an Election result by a committed D4 Abort. Only the abort of a primary candidate whose Freeze retained it
-// closes a session: the abort of a recovery attempt only advances that attempt, and an abort before any candidate was retained has no
-// result to name (the open result then ends by RejectResult).
+// abort projects the close of an Election result by a committed D4 Abort from a retained candidate: the candidate's primary result, if any
+// (primaryResultOf), closed once (closeAborted). The executor does not call it: whether an Abort closes a result is decided by the
+// authenticated control state (ControlState.PrimaryResult, recorded when the Freeze was admitted), never by what this root retained.
 func (p *posStep) abort(candidates candidateSource, r evmroot.OrderedHandoffRecord, round, timestamp uint64) error {
 	if !p.on || candidates == nil {
 		return nil
@@ -499,20 +499,44 @@ func (p *posStep) abort(candidates candidateSource, r evmroot.OrderedHandoffReco
 	if err != nil {
 		return errors.Join(ErrPosSource, err)
 	}
+	result, err := primaryResultOf(preimage)
+	if err != nil {
+		return err
+	}
+	return p.closeAborted(result, round, timestamp)
+}
+
+// primaryResultOf is the result a Freeze retains a session for: the result of its candidate preimage when that is a primary, none for a
+// recovery or a root-only Freeze (no preimage).
+func primaryResultOf(preimage []byte) ([]byte, error) {
 	if len(preimage) == 0 {
-		return nil
+		return nil, nil
 	}
 	c, err := evmassign.DecodeCandidate(preimage)
 	if err != nil {
-		return errors.Join(ErrPosSource, err)
+		return nil, errors.Join(ErrPosSource, err)
 	}
 	if c.Kind != evmassign.KindPrimary {
+		return nil, nil
+	}
+	r := c.ResultID()
+	return r[:], nil
+}
+
+// closeAborted projects SessionClosed(result) of a committed Abort whose Freeze retained the primary result (none: nothing to close). A
+// result the log already resolved projects nothing (custody would refuse a repeat and block the log).
+func (p *posStep) closeAborted(result []byte, round, timestamp uint64) error {
+	if !p.on || len(result) == 0 {
 		return nil
 	}
-	if p.state.IsResolved(c.ResultID()) {
-		return nil // already closed or acknowledged: a repeat projects nothing (custody would refuse it and block the log)
+	if len(result) != 32 {
+		return fmt.Errorf("%w: a primary result of %d bytes", ErrPosSource, len(result))
 	}
-	next, rec, err := p.state.SessionClosed(c.ResultID(), round, timestamp)
+	id := [32]byte(result)
+	if p.state.IsResolved(id) {
+		return nil
+	}
+	next, rec, err := p.state.SessionClosed(id, round, timestamp)
 	if err != nil {
 		return errors.Join(ErrPosSource, err)
 	}

@@ -386,6 +386,12 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 					if err := pos.refuseResolved(companion); err != nil {
 						return nil, err
 					}
+					// the primary result the Freeze retains enters the authenticated endorsed state: a later Abort closes it from there
+					if fc, err := ParseFreezeCompanion(companion); err == nil && pos.on {
+						if control.PrimaryResult, err = primaryResultOf(fc.Preimage); err != nil {
+							return nil, err
+						}
+					}
 				}
 				if control.Phase == "committed" && nextShardState.Control.Phase == "endorsed" {
 					committed, err := decodeOrderedRecord(newBlock.Payload.HandoffRecords[0])
@@ -420,7 +426,8 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 							return nil, err
 						}
 					} else if nextShardState.Control.Phase == "endorsed" {
-						if err := pos.abort(candidates, aborted, newBlock.Round, newBlock.Timestamp); err != nil {
+						// P85: the primary result the endorsed state recorded at the Freeze, never a retained candidate (#1177 review r2)
+						if err := pos.closeAborted(nextShardState.Control.PrimaryResult, newBlock.Round, newBlock.Timestamp); err != nil {
 							return nil, err
 						}
 					}

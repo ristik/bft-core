@@ -44,6 +44,7 @@ Bundle.Proof.Control.Phase hashed
 Bundle.Proof.Control.Pos hashed
 Bundle.Proof.Control.PredecessorBodyID hashed
 Bundle.Proof.Control.PreviousDigest hashed
+Bundle.Proof.Control.PrimaryResult hashed
 Bundle.Proof.Control.RecordBytes hashed
 Bundle.Proof.Control.UnackedParent hashed
 Bundle.Proof.Control.VR hashed
@@ -204,6 +205,7 @@ Bundle.Snapshot.Control.Phase hashed
 Bundle.Snapshot.Control.Pos hashed
 Bundle.Snapshot.Control.PredecessorBodyID hashed
 Bundle.Snapshot.Control.PreviousDigest hashed
+Bundle.Snapshot.Control.PrimaryResult hashed
 Bundle.Snapshot.Control.RecordBytes hashed
 Bundle.Snapshot.Control.UnackedParent hashed
 Bundle.Snapshot.Control.VR hashed
