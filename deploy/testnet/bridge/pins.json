@@ -1,7 +1,7 @@
 {
   "comment": "The bridge release's own inputs to the testnet package (briefs/tnb-without-host.md). build-bridge-image.py checks every checkout against these commits before it builds; deploy/testnet/pins.json stays the node image's. dnb-tool is built from the node images' bft pin (deploy/testnet/pins.json, #1075). Native bridge v2 (NB2-09, #1105): contracts at unicity-pos-contracts main with src/nb2 (#81, #82), the plug-ins at native-bridge-plugins with the nb2 wallet plug-in (#76), the vectors digest 9b3962dc and the reference wallet (wallet/, NB2-11 #1107), whose core the lane driver imports.",
   "contracts": "884c48296086982abfc5b0c1d0f58780f752e650",
-  "native-bridge-plugins": "ec7a3c5d6781b33cdb0c5d63b389f206f21cc3c7",
+  "native-bridge-plugins": "a26d7048258bb04bbfa94df15a92f74176dd7182",
   "node": "node:22.23.4-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d",
   "go": "golang:1.25.14-bookworm@sha256:3b4a11519ad929d1e1d261a12cff056f0c85b735253d7d861346b9c6f8b36437",
   "foundry": {

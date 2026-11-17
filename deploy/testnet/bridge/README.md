@@ -14,6 +14,7 @@ public gateway (spec section 12.7).
 | `nb2/release_nb2.py` | the release manifest `GENERATION/bridge/nb2/public/nb2-release.json` (below) |
 | `nb2/driver.ts` | the live driver: the TypeScript wallet plug-in (native-bridge-plugins `packages/native-bridge-plugin/src/nb2`, NB2-07) through the public gateway only. It runs in the bridge tools image with this directory mounted read-only at `tests/live/nb2lane/` of the image's plug-in checkout |
 | `nb2/rehearse_nb2.py` | the lane stages (below) |
+| `nb2/lane_open.ts` | how every driver command opens its wallet: no installation check unless asked, and no wallet lock, since a `docker kill`ed command's lock would block every later command on that wallet (`lane_open.test.ts`) |
 
 The wallet is the reference command-line wallet of native-bridge-plugins (`wallet/nb2-wallet.ts` on `wallet/core.ts`, bft-core#1107), and the wallet
 integration guide is native-bridge-plugins

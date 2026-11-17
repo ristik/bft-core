@@ -54,6 +54,7 @@ import { u256 } from '../../../packages/native-bridge-plugin/src/nb2/cbor.js';
 import { BoundaryNotFound, findBoundary, ownShape, type Probe, type Verdict } from './boundary_search.js';
 import { marginals, type TokenShape } from './boundary_shape.js';
 import { readLedger, type Answer } from './ledger_check.js';
+import { LANE_OPEN } from './lane_open.js';
 import {
   GatewayAggregator, Wallet as ReferenceWallet, burn as walletBurn, mint as walletMint, pinsOf, planDeposit, redeem as walletRedeem, retry as walletRetry,
   sendDeposit, split as walletSplit, transfer as walletTransfer, type OpenOptions, type TokenEntry,
@@ -103,7 +104,8 @@ function laneKey(name: string): Uint8Array {
 
 /**
  * A lane wallet: the reference wallet's directory, journal, keys and steps in WORK/wallets/NAME, with the lane's connection (lane.json) and the
- * gateway RPC counted for the ambiguous-broadcast check. Opened without the installation check unless asked (gamma-check runs it).
+ * gateway RPC counted for the ambiguous-broadcast check. Opened as LANE_OPEN says: without the installation check unless asked (gamma-check
+ * runs it), and without the wallet lock (a killed container's lock would block every later command on the wallet).
  */
 class Wallet extends ReferenceWallet {
   public readonly name: string;
@@ -112,7 +114,7 @@ class Wallet extends ReferenceWallet {
     this.name = name;
   }
   public override open(opts: OpenOptions = {}): Promise<this> {
-    return super.open({ check: false, wrapRpc: (r) => new CountingRpc(r), ...opts });
+    return super.open({ ...LANE_OPEN, wrapRpc: (r) => new CountingRpc(r), ...opts });
   }
 }
 

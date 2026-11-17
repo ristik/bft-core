@@ -81,11 +81,11 @@ jobs:
         run: python3 deploy/testnet/build-images.py --bft-source pinned-bft --ureth-source pinned-ureth --aggregator-go-source pinned-aggregator-go
       - name: Build the bridge tools image (dnb-tool from the pinned bft, the node images' pin, contracts and plug-ins at bridge/pins.json)
         run: python3 deploy/testnet/bridge/build-bridge-image.py --bft-source pinned-bft --contracts-source pinned-contracts --nbp-source pinned-nbp
-      - name: The boundary search's unit tests (deploy/testnet/bridge/nb2/boundary_*.test.ts, the shape steps against the pinned gas model), in the bridge tools image as the driver runs
+      - name: The lane driver's unit tests (deploy/testnet/bridge/nb2/*.test.ts, the boundary search's shape steps against the pinned gas model, the ledger check, the lane's wallet open without the lock), in the bridge tools image as the driver runs
         run: |
           img=$(python3 -c "import sys; sys.path[:0] = ['deploy/testnet/bridge', 'deploy/testnet']; import deploy_bridge; print(deploy_bridge.image())")
           docker run --rm --read-only --network none --user 10001:10001 --tmpfs /tmp -e HOME=/tmp/home -v "$PWD/deploy/testnet/bridge/nb2:/opt/bridge/native-bridge-plugins/tests/live/nb2lane:ro" \
-            -w /opt/bridge/native-bridge-plugins "$img" npx --no-install tsx --test tests/live/nb2lane/boundary_search.test.ts tests/live/nb2lane/boundary_shape.test.ts tests/live/nb2lane/ledger_check.test.ts
+            -w /opt/bridge/native-bridge-plugins "$img" npx --no-install tsx --test tests/live/nb2lane/boundary_search.test.ts tests/live/nb2lane/boundary_shape.test.ts tests/live/nb2lane/ledger_check.test.ts tests/live/nb2lane/lane_open.test.ts
       - run: go build -o /tmp/tn-keygen ./deploy/testnet/keygen
       - run: go build -C pinned-bft -o /tmp/tn-b1genesis ./scripts/b1genesis
       - name: The Go reference verifier and wallet-evidence tool (nb2ref), from this checkout
