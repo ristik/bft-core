@@ -133,20 +133,10 @@ func DerivedChangeShardsForTest(candidates interface{ HandoffCandidate([]byte) (
 	return derivedChangeShards(candidates, record)
 }
 
-// DeriveActivatedConfigsForTest is deriveActivatedConfigs over a retained body of either version, with the configurations installed at
-// the ordering round (nil: a caller that has none).
-func DeriveActivatedConfigsForTest(record evmroot.OrderedHandoffRecord, rawBody, preimage []byte, installed map[types.PartitionShardID]*types.PartitionDescriptionRecord) ([]*types.PartitionDescriptionRecord, error) {
-	body, err := decodeRetainedBody(rawBody)
-	if err != nil {
-		return nil, err
-	}
-	confs, _, _, err := deriveActivatedConfigs(record, body, preimage, nil, installed)
-	return confs, err
-}
-
-// RetainVRFreezeForTest retains what an executed Freeze v5 block leaves, exactly as the block store does when it adds the block.
-func RetainVRFreezeForTest(x *BlockStore, executed *ExecutedBlock) error {
-	return x.retainVRFreeze(executed.BlockData, executed.vrFrozen)
+// RetainVRFreezeForTest retains what the executed Freeze v5 block admitted into the store, exactly as BlockStore.Add does on the
+// admitting root.
+func RetainVRFreezeForTest(s *BlockStore, block *rctypes.BlockData, executed *ExecutedBlock) error {
+	return s.retainVRFreeze(block, executed.vrFrozen)
 }
 
 // VRQueryForTest is the intent query the executor derives over a block as the parent of the next one: its control state, backoff, epoch,

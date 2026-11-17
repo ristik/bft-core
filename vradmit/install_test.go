@@ -180,6 +180,11 @@ func TestInstallRefusals(t *testing.T) {
 		{"an addition of the EVM partition id", []Change{add(ixPDR(t, 8, 9, 0, 2))}, installed, ErrInstall},
 		{"an EVM-typed addition", []Change{add(ixPDR(t, 11, evmassign.EVMPartitionTypeID, 0, 2))}, installed, ErrInstall},
 		{"an addition past epoch 0", []Change{add(ixPDR(t, 11, 9, 1, 2))}, installed, ErrInstall},
+		{"an addition of a split shard (FD-30)", []Change{func() Change {
+			p := ixPDR(t, 11, 9, 0, 2)
+			p.ShardID, _ = types.ShardID{}.Split()
+			return add(p)
+		}()}, installed, ErrInstall},
 		{"a configuration that already has an activation round", []Change{func() Change {
 			c := add(ixPDR(t, 11, 9, 0, 2))
 			c.Successor.EpochStart = 7

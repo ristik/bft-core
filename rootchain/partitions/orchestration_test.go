@@ -459,6 +459,9 @@ func TestDerivedFirstConfigurationOfANewPartition(t *testing.T) {
 		later := added(10, 7)
 		later.Epoch = 1
 		require.ErrorIs(t, o.InstallDerivedShardConfigs([]*types.PartitionDescriptionRecord{later}, provenance), ErrDerivedConflict, "a new partition starts at epoch 0")
+		half := added(10, 7)
+		half.ShardID, _ = types.ShardID{}.Split()
+		require.ErrorIs(t, o.InstallDerivedShardConfigs([]*types.PartitionDescriptionRecord{half}, provenance), ErrDerivedConflict, "a new partition is one unsplit shard (FD-30)")
 		confs, err := o.ShardConfigs(100)
 		require.NoError(t, err)
 		require.Len(t, confs, 2, "nothing was written")

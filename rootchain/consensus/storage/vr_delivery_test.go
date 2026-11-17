@@ -36,7 +36,7 @@ func TestVRDeliveryCarriesTheCandidateV6ToARecoveringRoot(t *testing.T) {
 	prep := f.must(g, f.block(g, 11, 1_010, [][]byte{f.record("prepare", 0, 11).Bytes()}))
 	fz := f.must(prep, f.block(prep, 12, 1_020, [][]byte{f.record("freeze", 0, 12).Bytes(), f.freezeV5(0)}))
 	_, leader := boltStore(t)
-	require.NoError(t, storage.RetainVRFreezeForTest(leader, fz))
+	require.NoError(t, storage.RetainVRFreezeForTest(leader, fz.BlockData, fz))
 	served, err := leader.HandoffCommittedPreimage(id)
 	require.NoError(t, err)
 	require.Equal(t, retained.v6[string(id)], served, "the source serves the candidate v6")
