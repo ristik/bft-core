@@ -544,6 +544,11 @@ class NB2Rehearsal(Rehearsal):
             raise Failure(f'the driver failed: boundary big g {est} (every probe: evidence nb2/boundary-g.json)')
         b = self.outfile('boundary-g')
         self.say(f'  boundary: {json.dumps(b["tries"], default=str)}')
+        # what the first window runs measure (the claim's footing): each window build, its residuals (the gap of each adjacent two built together
+        # beyond the lower one's own one-transfer step) and the gas drift a build over every token
+        for x in b.get('windows', []):
+            self.say(f'  window {x["lengths"]}: {x["verdicts"]} {x["outcome"]}{" (" + x["reason"] + ")" if x.get("reason") else ""}; residuals {x["residuals"]}')
+        self.say(f'  drift: {json.dumps(b.get("drift"))}')
         c = b['confirmed']
         lim = int(self.release()['pins']['userGasLimit'])
         step = {'pass': 'up', 'fail': 'down'}   # the pass's forward step, the refusal's backward one (sol r8: they differ where the excess clips)

@@ -501,6 +501,54 @@ async function chain(w: Wallet, from: string, to: string, n: number, rounds: boo
   return { transfers: decodeToken(token).transfers.length, certificates: ucs.size };
 }
 
+/**
+ * N transfers of each FROM, kept as its TO, certified together: GROUPS rounds, and each round's group of every chain submitted at once and
+ * proven before the next round's, so the chains share their rounds (the same certificates, the same aggregator state). For the boundary
+ * stage's window builds; chain() is the single form.
+ */
+async function chainTogether(w: Wallet, specs: { from: string; to: string; n: number }[], groups: number): Promise<{ transfers: number; certificates: number }[]> {
+  const agg = new LaneAggregator(lane.agg);
+  const plans: { to: string; token: Uint8Array; owner: number; pending: { tx: Uint8Array; cd: Uint8Array }[] }[] = [];
+  for (const s of specs) {
+    const token = w.token(s.from);
+    let owner = w.entry(s.from).owner;
+    const pending: { tx: Uint8Array; cd: Uint8Array }[] = [];
+    let virt = token;
+    for (let k = 0; k < s.n; k++) {
+      const next = (owner + 1) % 4;
+      const req = await transferRequest(virt, w.owner(owner), { recipient: signaturePredicate(w.ownerPub(next)), mask: freshMask(), data: null, deadline: null });
+      pending.push(req);
+      virt = appendTransfer(virt, req.tx, placeholderProof(decodeToken(token)));
+      owner = next;
+    }
+    plans.push({ to: s.to, token, owner, pending });
+  }
+  const g = Math.min(groups, ...plans.map((p) => p.pending.length));
+  const slices = plans.map((p) => Array.from({ length: g }, (_, j) => p.pending.slice(Math.round((p.pending.length * j) / g), Math.round((p.pending.length * (j + 1)) / g))));
+  for (let j = 0; j < g; j++) {
+    const round = slices.flatMap((sl) => sl[j]);
+    for (let i = 0; i < round.length; i += 32) await Promise.all(round.slice(i, i + 32).map((p) => agg.submit(p.cd)));
+    for (let x = 0; x < plans.length; x++) for (const p of slices[x][j]) plans[x].token = appendTransfer(plans[x].token, p.tx, await agg.proof(p.cd));
+  }
+  const res: { transfers: number; certificates: number }[] = [];
+  for (const p of plans) {
+    const v = await w.bridge.verifyToken(p.token);
+    w.keep(p.to, p.token, p.owner, { amount: v.amount.toString() });
+    const d = decodeToken(p.token);
+    const ucs = new Set(d.proofs.map((q) => hx(HU(q.uc))));
+    out(`chain-${p.to}`, { transfers: d.transfers.length, distinctCertificates: ucs.size, bytes: p.token.length });
+    log(`  ${p.to}: ${d.transfers.length} transfers under ${ucs.size} certificates, ${p.token.length} bytes (built together with ${plans.length - 1} more)`);
+    res.push({ transfers: d.transfers.length, certificates: ucs.size });
+  }
+  return res;
+}
+
+/** The token's certificates as one condition: their count and a digest of the sorted set of their hashes. */
+function certificateSet(token: Uint8Array): string {
+  const hs = [...new Set(decodeToken(token).proofs.map((q) => hx(HU(q.uc))))].sort();
+  return `${hs.length} certificates ${toHex(sha256(new TextEncoder().encode(hs.join(',')))).slice(0, 16)}`;
+}
+
 let placeholder: Uint8Array | null = null;
 function placeholderProof(t: Token): Uint8Array {
   if (placeholder === null) placeholder = encodeProof(t.mintProof);
@@ -883,10 +931,10 @@ async function shapeOf(token: Uint8Array, lT: number): Promise<{ up: bigint | nu
 }
 
 const BOUNDARY_CERTIFICATES = 16;
-const BOUNDARY_PROBES = 20;
+const BOUNDARY_PROBES = 10; // single tokens of the coarse phase
+const BOUNDARY_BUILDS = 6; // window builds (N - 1 .. N + 2 together)
 async function boundary(w: Wallet, label: string, estimate: number): Promise<void> {
   const est = JSON.parse(readFileSync(join(WORK, 'out', `boundary-estimate-${label}e.json`), 'utf8'));
-  const certificates = new Map<string, number>();
   const judge = async (l: string, transfers: number): Promise<Probe> => {
     const t = w.token(l);
     const p = await predict(w, t);
@@ -900,7 +948,7 @@ async function boundary(w: Wallet, label: string, estimate: number): Promise<voi
     }
     if (real !== 'passes' && real !== 'CapacityPreflight') throw new Error(`the boundary probe ${l} was refused for another reason: ${real}`);
     const sh = await shapeOf(t, p.bytes);
-    const probe: Probe = { label: l, transfers, conditions: `${certificates.get(l)} certificates, need ${p.need}`, gas: p.gas, up: sh.up, down: sh.down, real: real as Verdict, detail: sh.detail };
+    const probe: Probe = { label: l, transfers, conditions: `${certificateSet(t)}, need ${p.need}`, gas: p.gas, up: sh.up, down: sh.down, real: real as Verdict, detail: sh.detail };
     log(`  ${l}: ${transfers} transfers, ${evidenceOf(t).length} evidence bytes (${sh.shape?.pairBytes} a transfer, ${sh.shape?.extraSignatures} extra signatures), ${probe.conditions}, `
       + `preflight gas ${p.gas} (one transfer more +${sh.up}, one fewer -${sh.down}): planReturn ${real}`);
     return probe;
@@ -909,21 +957,32 @@ async function boundary(w: Wallet, label: string, estimate: number): Promise<voi
     const l = `${label}${i}`;
     await deposit(w, l, 1n, undefined);
     const c = await chain(w, l, `${l}c`, k, false, BOUNDARY_CERTIFICATES);
-    certificates.set(`${l}c`, c.certificates);
     return judge(`${l}c`, c.transfers);
+  };
+  // a window: one deposit a length, every chain certified in the same rounds, then every token judged at once, in order
+  const build = async (lengths: number[], i: number): Promise<Probe[]> => {
+    const ls = lengths.map((_, x) => `${label}${i}${'abcdefgh'[x]}`);
+    for (const l of ls) await deposit(w, l, 1n, undefined);
+    const cs = await chainTogether(w, lengths.map((n, x) => ({ from: ls[x], to: `${ls[x]}c`, n })), BOUNDARY_CERTIFICATES);
+    const toks: Probe[] = [];
+    for (let x = 0; x < ls.length; x++) toks.push(await judge(`${ls[x]}c`, cs[x].transfers));
+    return toks;
   };
   const rejudge = async (p: Probe): Promise<Probe> => judge(p.label, p.transfers);
   let res;
   try {
-    res = await findBoundary(probe, rejudge, {
-      estimate, limit: pins.userGasLimit, start: { transfers: est.probeTransfers, gas: big(est.probeGas) }, maxProbes: BOUNDARY_PROBES, min: BOUNDARY_CERTIFICATES,
+    res = await findBoundary(probe, build, rejudge, {
+      estimate, limit: pins.userGasLimit, start: { transfers: est.probeTransfers, gas: big(est.probeGas) }, maxProbes: BOUNDARY_PROBES, maxPairs: BOUNDARY_BUILDS,
+      min: BOUNDARY_CERTIFICATES,
     });
   } catch (e) {
-    if (e instanceof BoundaryNotFound) out(`boundary-${label}`, { pass: null, fail: null, tries: e.tries, refused: e.refused, error: e.message });
+    if (e instanceof BoundaryNotFound) out(`boundary-${label}`, { pass: null, fail: null, tries: e.tries, windows: e.windows, drift: e.drift, error: e.message });
     throw e;
   }
-  out(`boundary-${label}`, { pass: res.pass, fail: res.fail, confirmed: res.confirmed, tries: res.tries, refused: res.refused, certificatesPerProbe: BOUNDARY_CERTIFICATES });
-  log(`  boundary: ${res.pass.transfers} transfers pass and ${res.fail.transfers} are refused, under ${res.pass.conditions}, confirmed back to back (${res.tries.length} probes)`);
+  out(`boundary-${label}`, { pass: res.pass, fail: res.fail, confirmed: res.confirmed, tries: res.tries, windows: res.windows, drift: res.drift, certificatesPerProbe: BOUNDARY_CERTIFICATES });
+  const last = res.windows[res.windows.length - 1];
+  log(`  boundary: ${res.pass.transfers} transfers pass and ${res.fail.transfers} are refused, built together (${last.labels.join(', ')}) under ${res.pass.conditions}, `
+    + `confirmed back to back (${res.tries.length} tokens, ${res.windows.length} window builds); residuals ${JSON.stringify(last.residuals)}; drift ${JSON.stringify(res.drift)}`);
 }
 
 /** The boundary estimate from a short live chain: the model's gas per further hop on this deployment's real certificates. */
@@ -1224,7 +1283,8 @@ main().catch((e) => {
   if (e instanceof BoundaryNotFound) {
     // one line a probe, the newest last (the lane's console keeps the last lines; every probe is in out/boundary-<label>.json)
     for (const t of e.tries) console.error(`  ${t.label}: ${t.transfers} transfers, ${t.conditions}, gas ${t.gas} (+${t.up}/-${t.down}): ${t.real}`);
-    for (const r of e.refused) console.error(`  refused ${r.pass}/${r.fail}: ${r.reason}`);
+    for (const x of e.windows) console.error(`  window ${x.lengths.join(',')}: ${x.verdicts.join(',')} ${x.outcome}${x.reason ? ` (${x.reason})` : ''}; residuals ${x.residuals.join(',')}`);
+    console.error(`  drift ${JSON.stringify(e.drift)}`);
     console.error(`BoundaryNotFound: ${e.message}`);
     process.exit(1);
   }

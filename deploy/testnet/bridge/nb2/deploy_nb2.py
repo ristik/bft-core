@@ -54,8 +54,11 @@ def cast(gen, *args):
 
 def create(gen, initcode, label):
     """One creation from the faucet keystore; its receipt."""
-    out = tools(gen, 'cast', 'send', '--rpc-url', ETH, '--keystore', '/gen/faucet-secrets/keystore.json', '--password-file', '/gen/faucet-secrets/password',
-                '--json', '--create', initcode, capture=True)
+    try:
+        out = tools(gen, 'cast', 'send', '--rpc-url', ETH, '--keystore', '/gen/faucet-secrets/keystore.json', '--password-file', '/gen/faucet-secrets/password',
+                    '--json', '--create', initcode, capture=True)
+    except subprocess.CalledProcessError as error:   # cast's own reason (its stderr), not the initcode the command line carries
+        raise SystemExit(f'the {label} creation failed: cast exited {error.returncode}: {(error.stderr or "").strip()[-2000:]}')
     receipt = json.loads(out)
     if receipt.get('status') not in ('0x1', 1, '1'):
         raise SystemExit(f'the {label} creation failed: {out[:400]}')

@@ -2278,6 +2278,18 @@ class NB2DriverKeys(unittest.TestCase):
                 with self.assertRaisesRegex(m.Failure,'boundary-g.json'): r.boundary()
             self.assertEqual(json.loads((Path(tmp)/'ev/nb2/boundary-g.json').read_text())['tries'],[{'label':'g0c'}])
             self.assertTrue((Path(tmp)/'ev/nb2/boundary-estimate-ge.json').is_file())
+    def test_a_failed_creation_reports_casts_own_reason(self):
+        # the intermittent production-vault creation on testnet-bridge-pos (run 43994509917) left only the initcode in the log
+        import importlib.util
+        spec=importlib.util.spec_from_file_location('deploy_nb2',Path(__file__).parent/'bridge/nb2/deploy_nb2.py')
+        sys.path.insert(0,str(Path(__file__).parent/'bridge'));self.addCleanup(sys.path.remove,str(Path(__file__).parent/'bridge'))
+        m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+        def tools(gen,*args,capture=False):
+            raise subprocess.CalledProcessError(1,['docker','run','cast','send','--create','0x'+'60'*4000],output='',stderr='Error: server returned an error response: error code -32000: nonce too low\n')
+        with patch.object(m,'tools',tools):
+            with self.assertRaises(SystemExit) as e: m.create(Path('/srv/g'),'0x6060','production vault')
+        self.assertIn('the production vault creation failed: cast exited 1: Error: server returned an error response: error code -32000: nonce too low',str(e.exception))
+        self.assertNotIn('6060606060',str(e.exception),'not the initcode')
     def test_no_key_is_given_to_a_command_line(self):
         src=(Path(__file__).parent/'bridge/nb2/rehearse_nb2.py').read_text()
         self.assertNotIn('--private-key',src);self.assertNotIn('self.key(',src)

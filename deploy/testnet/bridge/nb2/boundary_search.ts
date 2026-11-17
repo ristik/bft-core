@@ -1,23 +1,28 @@
 /**
  * The boundary stage's search (driver.ts boundary, NB2-09 bft-core#1105): the largest transfer history N whose return the wallet's preflight
- * admits, as an adjacent pair of live probes under the same conditions: N passes and N + 1 is refused (CapacityPreflight), with the same
- * number of distinct certificates and the same segment need (cObs - a + reserve), and the two verdicts given again back to back at the end.
- * A pass under 16 certificates beside a refusal under 17 does not locate the boundary: a certificate moves the preflight's gas by about one
- * transfer's worth, and so does a gap proof.
+ * admits, as an adjacent pair of live tokens under identical conditions: N passes and N + 1 is refused (CapacityPreflight).
  *
- * The conditions do not hold every input of the wallet's gas model: the evidence bytes beyond the measured shape and the seal signatures
- * beyond the measured 3 (the mint's, the deposit's EVM UC and every transfer's) differ from one fresh token to the next, by about a transfer's
- * gas. So a candidate pair stands only when its boundary holds under each token's own shape (shapeHolds): the pass token with one more
- * transfer of its own average shape is over the limit, and the refused token with one transfer fewer of its own shape is within it. A pair
- * whose verdicts an overhead difference could explain is refused (fail closed) and one side is built again.
+ * What the live tokens showed (run 43994509728 on d26caf77d, fifteen probes): every gas term but the evidence bytes is constant across fresh
+ * tokens, and those bytes grow with the aggregator (about 991 bytes, 135k gas, half a transfer's step, a probe), with about 0.6 step of
+ * residual noise between tokens built apart. A pass and a refusal built minutes apart are not comparable, and an early pass is a stale anchor
+ * (run 43985010186 kept probing 201 beside one until its budget ran out). So:
  *
- * The preflight's gas is not linear in the transfers on live tokens (the average per hop from the 16-transfer probe is about three times the
- * marginal one near the bound), so the steps come from the probes themselves: a secant step until the bound is bracketed, then interpolation
- * inside the bracket with a bisection whenever a step fails to halve it. Probes are grouped by their conditions; the pair must come from one
- * group. Each probe is a fresh deposit chained to its length (a token checked one transfer further has spent the one below), so the number of
- * probes is bounded and every one is reported.
+ *   coarse   single tokens bracket the bound, from the newest probes only (RECENT of them): an older probe never anchors the search;
+ *   window   N - 1 .. N + 2 (WIDTH lengths, N and N + 1 among them) are built together: the driver certifies all their chains in the same
+ *            aggregator rounds, so they share the build's drift and its own deviation from it (about 0.6 step, which a build of N and N + 1
+ *            alone hits only about half the time), and are judged at once, one after the other. The window's crossing, its last pass N and
+ *            first refusal N + 1, under identical conditions (the same set of certificates and the same segment need, `conditions`), whose
+ *            boundary holds under each token's own shape (shapeHolds, forward and backward steps), judged again back to back, is the result.
+ *            All passing moves the window up and all refused down, to where the fit over every token (gas by length and build, driftOf) puts
+ *            the crossing at the next build, past the window at least and at most MAX_PAIR_STEP; anything else (other conditions, a shape that
+ *            does not hold, a window that is not passes then refusals, a confirmation that does not agree) builds a window on that crossing
+ *            again. At most maxPairs builds, then BoundaryNotFound (fail closed), with every token and every build reported.
  *
- * Pure: the driver supplies the probes. No imports, so the unit tests run without a chain (boundary_search.test.ts).
+ * Every build records its residuals: for each adjacent two under one conditions, their gas difference beyond the model's one-transfer step of
+ * the lower one (b.gas - a.gas - a.up), the noise that remains between tokens built together; and the drift of the gas a build (driftOf, over
+ * every token).
+ *
+ * Pure: the driver supplies the builds. No imports, so the unit tests run without a chain (boundary_search.test.ts).
  */
 
 export type Verdict = 'passes' | 'CapacityPreflight';
@@ -25,7 +30,7 @@ export type Verdict = 'passes' | 'CapacityPreflight';
 export interface Probe {
   label: string;
   transfers: number;
-  conditions: string; // what besides the transfers moves the verdict: the distinct certificates and the segment need
+  conditions: string; // what besides the transfers moves the verdict: the token's set of certificates (their hashes) and the segment need
   gas: bigint | null; // the preflight's gas for the token (the lane's replay of planReturn's inputs, the same model and inputs)
   // the model's gas of one more transfer of this token's own average shape (its bytes and signatures beyond the measured ones), and the gas
   // one fewer saves: not the same where the excess bytes clip at zero (boundary_shape.ts marginals); rounded down, which makes both of
@@ -52,24 +57,51 @@ export interface SearchOptions {
   estimate: number; // the first length (boundary-estimate)
   limit: bigint; // userGasLimit
   start: { transfers: number; gas: bigint }; // the estimate's own probe (16 transfers)
-  maxProbes: number; // fresh tokens
-  maxConfirmations?: number; // back-to-back re-judgements of a candidate pair
+  maxProbes: number; // single tokens of the coarse phase
+  maxPairs?: number; // window builds (default 6)
+  width?: number; // the lengths a window builds together, N - 1 .. N + width - 2 (default 4; 2 is N and N + 1 alone)
+  recent?: number; // the newest single probes the coarse bracket is taken from (default 3)
+  close?: number; // the coarse phase ends at a bracket this narrow (default 2)
   min?: number;
   max?: number;
 }
 
-export interface RefusedPair { pass: string; fail: string; reason: string }
+export interface WindowBuild {
+  n: number;
+  lengths: number[];
+  labels: string[];
+  verdicts: ('pass' | 'refused')[];
+  conditions: string[];
+  outcome: 'pair' | 'all pass' | 'all refused' | 'inverted' | 'conditions differ' | 'shape' | 'not confirmed';
+  reason?: string;
+  pass?: string; // the crossing's two tokens, when the window has one
+  fail?: string;
+  // each adjacent two under one conditions: b.gas - a.gas - a.up, their gap beyond the lower token's own one-transfer step (the noise between
+  // tokens built together); null across conditions
+  residuals: (string | null)[];
+}
 
-export interface SearchResult { pass: Probe; fail: Probe; confirmed: { pass: Probe; fail: Probe }; tries: Probe[]; refused: RefusedPair[] }
+export interface Drift { intercept: number; perBuild: number; perTransfer: number; residualSd: number; samples: number }
+
+export interface SearchResult {
+  pass: Probe;
+  fail: Probe;
+  confirmed: { pass: Probe; fail: Probe };
+  tries: Probe[];
+  windows: WindowBuild[];
+  drift: Drift | null;
+}
 
 export class BoundaryNotFound extends Error {
-  public constructor(message: string, public readonly tries: Probe[], public readonly refused: RefusedPair[] = []) {
+  public constructor(message: string, public readonly tries: Probe[], public readonly windows: WindowBuild[] = [], public readonly drift: Drift | null = null) {
     super(message);
   }
 }
 
 const MARGIN = 2; // a bracketing step goes this many transfers past the predicted crossing
 const MAX_STEP = 64;
+const MAX_PAIR_STEP = 8; // the most transfers one pair build moves the next
+const DRIFT_SAMPLES = 6; // the drift is subtracted from a pair step once this many tokens measure it
 
 /** The per-transfer gas between two points, or null when it is not usable. */
 function slope(a: { transfers: number; gas: bigint | null }, b: { transfers: number; gas: bigint | null }): bigint | null {
@@ -80,138 +112,91 @@ function slope(a: { transfers: number; gas: bigint | null }, b: { transfers: num
 
 const ceilDiv = (x: bigint, y: bigint): bigint => (x + y - 1n) / y;
 
-interface Bracket { lo: Probe | null; hi: Probe | null }
-
-/** lo: the largest length that passes; hi: the smallest refused length above it (a refusal below a pass is noise, never a bound). */
-function bracketOf(ps: Iterable<Probe>): Bracket {
-  const all = [...ps];
-  let lo: Probe | null = null;
-  for (const p of all) if (p.real === 'passes' && (lo === null || p.transfers > lo.transfers)) lo = p;
-  let hi: Probe | null = null;
-  for (const p of all) if (p.real === 'CapacityPreflight' && (lo === null || p.transfers > lo.transfers) && (hi === null || p.transfers < hi.transfers)) hi = p;
-  return { lo, hi };
+/**
+ * The least-squares fit gas = a + perTransfer * transfers + perBuild * build over the tokens (BUILD: the order they were built in, a pair's two
+ * tokens sharing theirs). Null when the points cannot determine it.
+ */
+export function driftOf(points: { transfers: number; build: number; gas: bigint | null }[]): Drift | null {
+  const ps = points.filter((p) => p.gas !== null).map((p) => [1, p.transfers, p.build, Number(p.gas)]);
+  if (ps.length < 4) return null;
+  const A = [0, 1, 2].map((r) => [0, 1, 2].map((c) => ps.reduce((s, p) => s + p[r] * p[c], 0)));
+  const v = [0, 1, 2].map((r) => ps.reduce((s, p) => s + p[r] * p[3], 0));
+  const M = A.map((row, r) => [...row, v[r]]);
+  for (let c = 0; c < 3; c++) {
+    let piv = c;
+    for (let r = c + 1; r < 3; r++) if (Math.abs(M[r][c]) > Math.abs(M[piv][c])) piv = r;
+    [M[c], M[piv]] = [M[piv], M[c]];
+    if (Math.abs(M[c][c]) < 1e-9) return null;
+    for (let r = 0; r < 3; r++) {
+      if (r === c) continue;
+      const f = M[r][c] / M[c][c];
+      for (let k = c; k < 4; k++) M[r][k] -= f * M[c][k];
+    }
+  }
+  const [a, perTransfer, perBuild] = [0, 1, 2].map((r) => M[r][3] / M[r][r]);
+  const res = ps.map((p) => p[3] - (a + perTransfer * p[1] + perBuild * p[2]));
+  const residualSd = Math.sqrt(res.reduce((s, x) => s + x * x, 0) / res.length);
+  return { intercept: Math.round(a), perBuild: Math.round(perBuild), perTransfer: Math.round(perTransfer), residualSd: Math.round(residualSd), samples: ps.length };
 }
 
 /**
- * PROBE builds a fresh token of the given length and judges it; REJUDGE judges a token already built again, now (the pair's confirmation:
- * the pass and the refusal back to back, under one chain state).
+ * PROBE builds one fresh token of the given length and judges it; BUILD builds tokens of the given lengths together (in the same aggregator
+ * rounds) and judges them at once, in order; REJUDGE judges a token already built again, now (the confirmation: both, back to back).
  */
-export async function findBoundary(probe: (transfers: number, i: number) => Promise<Probe>, rejudge: (p: Probe) => Promise<Probe>, o: SearchOptions): Promise<SearchResult> {
+export async function findBoundary(
+  probe: (transfers: number, i: number) => Promise<Probe>,
+  build: (lengths: number[], i: number) => Promise<Probe[]>,
+  rejudge: (p: Probe) => Promise<Probe>,
+  o: SearchOptions,
+): Promise<SearchResult> {
   const min = o.min ?? 1;
   const max = o.max ?? 1024;
-  const maxConfirmations = o.maxConfirmations ?? 3;
+  const maxPairs = o.maxPairs ?? 6;
+  const width = o.width ?? 4;
+  const recent = o.recent ?? 3;
+  const close = o.close ?? 2;
   const tries: Probe[] = [];
-  const refused: RefusedPair[] = [];
-  const refuse = (pass: Probe, fail: Probe, reason: string): void => {
-    if (!refused.some((r) => r.pass === pass.label && r.fail === fail.label && r.reason === reason)) refused.push({ pass: pass.label, fail: fail.label, reason });
+  const builds: { transfers: number; build: number; gas: bigint | null }[] = [];
+  const windows: WindowBuild[] = [];
+  let built = 0;
+  const drift = (): Drift | null => driftOf(builds);
+  const fail = (why: string): never => {
+    throw new BoundaryNotFound(why, tries, windows, drift());
   };
-  const byLabel = new Map<string, Probe>(); // every token built, by its newest judgement: an older token stays usable (it is unspent)
-  const latest = new Map<string, Probe>(); // the newest verdict of each length under each conditions: a re-probe or re-judgement replaces it
-  const newest = new Map<number, Probe>(); // the newest verdict of each length, whatever its conditions: the global view
-  const record = (p: Probe): void => {
-    latest.set(`${p.conditions}\u0000${p.transfers}`, p);
-    newest.set(p.transfers, p);
-    byLabel.set(p.label, p);
-  };
-  const run = async (k: number): Promise<Probe> => {
-    if (tries.length >= o.maxProbes) throw new BoundaryNotFound(`no adjacent pass/refuse pair under the same conditions in ${o.maxProbes} probes`, tries, refused);
-    const p = await probe(k, tries.length);
-    if (p.transfers !== k) throw new BoundaryNotFound(`the probe of ${k} transfers holds ${p.transfers}`, tries, refused);
-    tries.push(p);
-    record(p);
-    return p;
-  };
-  const groups = (): Map<string, Bracket> => {
-    const by = new Map<string, Probe[]>();
-    for (const p of latest.values()) by.set(p.conditions, [...(by.get(p.conditions) ?? []), p]);
-    return new Map([...by].map(([c, ps]) => [c, bracketOf(ps)]));
-  };
-  // the global view steers until one group is bracketed
-  const global = (): Bracket => bracketOf(newest.values());
   const clamp = (k: number): number => Math.min(max, Math.max(min, k));
-  const widths = new Map<string, number>(); // a bracket's width when it was last stepped in: a step that did not halve it bisects next
-  const inside = (name: string, lo: Probe, hi: Probe): number => {
-    const w = hi.transfers - lo.transfers;
-    let next = lo.transfers + (w >> 1);
-    if (w * 2 <= (widths.get(name) ?? Infinity) && lo.gas !== null && hi.gas !== null && hi.gas > lo.gas && o.limit >= lo.gas) {
-      next = lo.transfers + Number(((o.limit - lo.gas) * BigInt(w)) / (hi.gas - lo.gas));
-    }
-    widths.set(name, w);
-    return Math.min(hi.transfers - 1, Math.max(lo.transfers + 1, next));
-  };
 
-  // a token whose own shape puts the boundary next to it: a pass that one more transfer of its shape would take over the limit, a refusal that
-  // one transfer fewer would bring within it (shapeHolds' two sides). A pair of them, adjacent and under one conditions, is the candidate.
-  const goodPass = (t: Probe): boolean => t.real === 'passes' && t.gas !== null && t.up !== null && t.gas <= o.limit && t.gas + t.up > o.limit;
-  const goodFail = (t: Probe): boolean => t.real === 'CapacityPreflight' && t.gas !== null && t.down !== null && t.gas > o.limit && t.gas - t.down <= o.limit;
-
+  // ---- coarse: single tokens, the bracket from the newest RECENT only --------------------------------------------------------------------
+  const singles: Probe[] = [];
   let k = clamp(o.estimate);
   let prev: { transfers: number; gas: bigint | null } = o.start;
-  let side = 0;
-  let confirmations = 0;
-  for (;;) {
-    const p = await run(k);
-    const all = [...byLabel.values()];
-    // the evidence: every adjacent pass/refusal under one conditions whose shapes do not hold the boundary
-    for (const lo of all) {
-      if (lo.real !== 'passes') continue;
-      for (const hi of all) if (hi.real === 'CapacityPreflight' && hi.transfers === lo.transfers + 1 && hi.conditions === lo.conditions) {
-        const why = shapeHolds(lo, hi, o.limit);
-        if (why !== null) refuse(lo, hi, why);
+  let bracketWidth = Infinity;
+  let n0: number | null = null;
+  while (n0 === null) {
+    if (singles.length >= o.maxProbes) fail(`no bracket of the bound in ${o.maxProbes} single probes`);
+    const p = await probe(k, built);
+    if (p.transfers !== k) fail(`the probe of ${k} transfers holds ${p.transfers}`);
+    tries.push(p);
+    singles.push(p);
+    builds.push({ transfers: p.transfers, build: built++, gas: p.gas });
+    const window = singles.slice(-recent);
+    let lo: Probe | null = null;
+    for (const t of window) if (t.real === 'passes' && (lo === null || t.transfers > lo.transfers)) lo = t;
+    let hi: Probe | null = null;
+    for (const t of window) if (t.real === 'CapacityPreflight' && lo !== null && t.transfers > lo.transfers && (hi === null || t.transfers < hi.transfers)) hi = t;
+    if (lo !== null && hi !== null) {
+      const w = hi.transfers - lo.transfers;
+      let next = lo.transfers + (w >> 1);
+      if (w * 2 <= bracketWidth && lo.gas !== null && hi.gas !== null && hi.gas > lo.gas && o.limit >= lo.gas) {
+        next = lo.transfers + Number(((o.limit - lo.gas) * BigInt(w)) / (hi.gas - lo.gas));
       }
-    }
-    // candidates, the newest first
-    let candidate: { lo: Probe; hi: Probe } | null = null;
-    for (const hi of [...all].reverse()) {
-      if (!goodFail(hi)) continue;
-      const lo = [...all].reverse().find((t) => goodPass(t) && t.transfers + 1 === hi.transfers && t.conditions === hi.conditions);
-      if (lo !== undefined && shapeHolds(lo, hi, o.limit) === null) { candidate = { lo, hi }; break; }
-    }
-    if (candidate !== null && confirmations < maxConfirmations) {
-      // both judged again, back to back; the pair stands only if both verdicts, both conditions and the shapes still hold
-      const { lo, hi } = candidate;
-      confirmations++;
-      const a = await rejudge(lo);
-      const b = await rejudge(hi);
-      const again = shapeHolds(a, b, o.limit);
-      if (a.real === 'passes' && b.real === 'CapacityPreflight' && a.conditions === lo.conditions && b.conditions === lo.conditions && again === null) {
-        return { pass: lo, fail: hi, confirmed: { pass: a, fail: b }, tries, refused };
+      bracketWidth = w;
+      if (w <= close) {
+        n0 = Math.min(hi.transfers - 1, Math.max(lo.transfers, next)); // the pair phase starts at the crossing the newest bracket predicts
+        break;
       }
-      if (again !== null) refuse(a, b, `judged again: ${again}`);
-      // superseded: the newer verdicts stand (under their own conditions when the chain moved)
-      latest.delete(`${lo.conditions}\u0000${lo.transfers}`);
-      latest.delete(`${hi.conditions}\u0000${hi.transfers}`);
-      record(a);
-      record(b);
-    }
-    // next to a good token of the newest probe's conditions: inside the gap between a good pass and a good refusal; else its neighbour and
-    // its own length in turn (a lucky light pass at N with every token of N + 1 heavy: a fresh token of N is a good refusal beside N - 1)
-    const mine = [...byLabel.values()].filter((t) => t.conditions === p.conditions);
-    const gp = mine.filter(goodPass).reduce<number | null>((m, t) => (m === null || t.transfers > m ? t.transfers : m), null);
-    const gf = mine.filter(goodFail).reduce<number | null>((m, t) => ((gp === null || t.transfers > gp) && (m === null || t.transfers < m) ? t.transfers : m), null);
-    if (gp !== null || gf !== null) {
-      if (gp !== null && gf !== null && gf > gp + 1) k = gp + ((gf - gp) >> 1);
-      else if (gp !== null) k = side++ % 2 === 0 ? gp + 1 : gp;
-      else k = side++ % 2 === 0 ? gf! - 1 : gf!;
-      k = clamp(k);
-      prev = p;
-      continue;
-    }
-    const gs = groups();
-    // the bracket of the newest probe's group (the conditions the next probe most likely gets: a rare count, or the need before the chain moved,
-    // is not chased), then the global bracket
-    const own = gs.get(p.conditions);
-    const best = own !== undefined && own.lo !== null && own.hi !== null && own.hi.transfers > own.lo.transfers + 1 ? { name: `group ${p.conditions}`, lo: own.lo, hi: own.hi } : null;
-    const g = global();
-    if (best !== null) {
-      k = inside(best.name, best.lo, best.hi);
-    } else if (g.lo !== null && g.hi !== null && g.hi.transfers > g.lo.transfers + 1) {
-      k = inside('all', g.lo, g.hi);
-    } else if (g.lo !== null && g.hi !== null) {
-      // adjacent only across two groups: the next probe, at either length, lands in one of them and brackets it
-      k = side++ % 2 === 0 ? g.hi.transfers : g.lo.transfers;
+      k = Math.min(hi.transfers - 1, Math.max(lo.transfers + 1, next));
     } else {
-      // one side only: a secant step across the bound, from the two newest points
+      // one side only among the newest: a secant step across the bound, from the two newest points
       const h = slope(prev, p) ?? slope(o.start, p);
       let step = MAX_STEP / 4;
       if (h !== null && p.gas !== null) {
@@ -219,9 +204,84 @@ export async function findBoundary(probe: (transfers: number, i: number) => Prom
         step = Math.min(MAX_STEP, Number(ceilDiv(off, h)) + MARGIN);
       }
       const target = clamp(p.real === 'passes' ? p.transfers + step : p.transfers - step);
-      if (target === p.transfers) throw new BoundaryNotFound(`the search left its range [${min}, ${max}] at ${p.transfers} transfers`, tries, refused);
+      if (target === p.transfers) fail(`the search left its range [${min}, ${max}] at ${p.transfers} transfers`);
       k = target;
     }
     prev = p;
   }
+
+  // ---- window: N - 1 .. N + WIDTH - 2 built together, judged at once ----------------------------------------------------------------------
+  let n = clamp(n0);
+  for (let j = 0; j < maxPairs; j++) {
+    const i = built++;
+    const lengths = Array.from({ length: width }, (_, x) => n - 1 + x).filter((k) => k >= min && k <= max);
+    const toks = await build(lengths, i);
+    if (toks.length !== lengths.length || toks.some((t, x) => t.transfers !== lengths[x])) {
+      fail(`the build of ${lengths.join(', ')} holds ${toks.map((t) => t.transfers).join(', ')}`);
+    }
+    tries.push(...toks);
+    for (const t of toks) builds.push({ transfers: t.transfers, build: i, gas: t.gas });
+    // the residual of every adjacent two under one conditions: their gap beyond the lower one's own one-transfer step
+    const residuals = toks.slice(1).map((b, x) => {
+      const a = toks[x];
+      return a.gas !== null && b.gas !== null && a.up !== null && a.conditions === b.conditions ? (b.gas - a.gas - a.up).toString() : null;
+    });
+    const record = (outcome: WindowBuild['outcome'], reason?: string, pass?: Probe, fail?: Probe): void => {
+      windows.push({ n, labels: toks.map((t) => t.label), lengths, verdicts: toks.map((t) => (t.real === 'passes' ? 'pass' : 'refused')), conditions: toks.map((t) => t.conditions),
+        outcome, reason, pass: pass?.label, fail: fail?.label, residuals });
+    };
+    // where the crossing is at the next build: from the fit over every token so far (the lengths, the builds' drift: one build's own noise
+    // averages out) once it has DRIFT_SAMPLES of them, else from this window's own gas; beyond the window the way the verdicts say
+    const target = (): number | null => {
+      const d = drift();
+      if (d !== null && d.samples >= DRIFT_SAMPLES && d.perTransfer > 0) return Math.floor((Number(o.limit) - d.intercept - d.perBuild * (i + 1)) / d.perTransfer);
+      const lo = toks[0];
+      const hi = toks[toks.length - 1];
+      if (lo.gas === null || hi.gas === null || hi.transfers === lo.transfers || hi.gas <= lo.gas) return null;
+      return lo.transfers + Number(((o.limit - lo.gas) * BigInt(hi.transfers - lo.transfers)) / (hi.gas - lo.gas));
+    };
+    const top = lengths[lengths.length - 1];
+    const bottom = lengths[0];
+    if (toks.every((t) => t.real === 'passes')) {
+      record('all pass');
+      const t = target();
+      n = clamp(Math.min(top + MAX_PAIR_STEP, Math.max(top, t ?? top))); // the next window starts at the top at least: the crossing is above it
+      continue;
+    }
+    if (toks.every((t) => t.real === 'CapacityPreflight')) {
+      record('all refused');
+      if (bottom === min) fail(`${min} transfers are refused: the search left its range`);
+      const t = target();
+      n = clamp(Math.max(bottom - MAX_PAIR_STEP, Math.min(bottom - 1, t ?? bottom - 1))); // the crossing is below the bottom
+      continue;
+    }
+    // one crossing, from passes to refusals; anything else is noise within the build
+    const m = toks.findIndex((t) => t.real !== 'passes');
+    if (m < 1 || toks.slice(m).some((t) => t.real === 'passes')) {
+      record('inverted');
+      continue;
+    }
+    const a = toks[m - 1];
+    const b = toks[m];
+    n = a.transfers; // the next window, if any, centred on this crossing
+    if (a.conditions !== b.conditions) {
+      record('conditions differ', `${a.conditions} / ${b.conditions}`, a, b);
+      continue;
+    }
+    const why = shapeHolds(a, b, o.limit);
+    if (why !== null) {
+      record('shape', why, a, b);
+      continue;
+    }
+    // judged again, back to back: both verdicts, both conditions and the shapes must stand
+    const ca = await rejudge(a);
+    const cb = await rejudge(b);
+    const again = shapeHolds(ca, cb, o.limit);
+    if (ca.real === 'passes' && cb.real === 'CapacityPreflight' && ca.conditions === a.conditions && cb.conditions === a.conditions && again === null) {
+      record('pair', undefined, a, b);
+      return { pass: a, fail: b, confirmed: { pass: ca, fail: cb }, tries, windows, drift: drift() };
+    }
+    record('not confirmed', again ?? `judged again: ${ca.real} / ${cb.real} under ${ca.conditions} / ${cb.conditions}`, a, b);
+  }
+  return fail(`no confirmed pair under identical conditions in ${maxPairs} builds`);
 }

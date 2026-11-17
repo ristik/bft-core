@@ -1,191 +1,247 @@
 /**
- * The boundary search (boundary_search.ts) against a model of the live preflight: gas piecewise linear in the transfers through the lane's
- * measured points (testnet-bridge runs on #1126), about 100k gas a distinct certificate and 150k a segment of need. Run in the bridge tools
- * image: npx --no-install tsx --test tests/live/nb2lane/boundary_search.test.ts
+ * The boundary search (boundary_search.ts) against a model of the live preflight as run 43994509728 measured it (d26caf77d): gas linear in the
+ * transfers at about 265k a transfer (the model's step on the lane's tokens), every other term constant but the evidence bytes, which drift up
+ * by about 135k gas a build and deviate from that by about 160k (0.6 step) between builds; tokens built together share the build's drift and
+ * deviation, and differ by a little noise of their own (assumed 30k here: the first live run measures it).
+ * Run in the bridge tools image: npx --no-install tsx --test tests/live/nb2lane/boundary_search.test.ts
  */
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { BoundaryNotFound, findBoundary, shapeHolds, type Probe, type SearchResult } from './boundary_search.js';
+import { BoundaryNotFound, driftOf, findBoundary, shapeHolds, type Probe, type SearchOptions, type SearchResult } from './boundary_search.js';
 
 const LIMIT = 60_000_000n;
-const START = { transfers: 16, gas: 10_826_319n };
-
-// gas without the certificates' and the need's share: the model's step per transfer on the lane's tokens, about 251k (190k a hop and 136 a byte
-// for ~1.5 KB a transfer beyond the measured 1,026; 16 transfers 10.8M and 255 transfers 71.0M measured), the bound near 204. The adjacent
-// probes' gas differs by less (76k to 196k at 204..207 in the failed run): their evidence bytes vary by about 700 bytes a token (noise below)
-const POINTS: [number, number][] = [[1, 6_946_000], [16, 10_711_000], [204, 57_899_000], [600, 157_295_000]];
-function baseGas(k: number): number {
-  for (let i = 1; i < POINTS.length; i++) {
-    const [k0, g0] = POINTS[i - 1];
-    const [k1, g1] = POINTS[i];
-    if (k <= k1) return g0 + ((g1 - g0) * (k - k0)) / (k1 - k0);
-  }
-  throw new Error('out of the model');
-}
+const STEP = 265_000;
+const START = { transfers: 16, gas: 10_839_647n };
+const AT0 = 204; // the bound at the first build without drift or noise: 204 passes, 205 is refused
+const gasAt = (k: number): number => Number(LIMIT) - 120_000 + (k - AT0) * STEP;
 
 function rng(seed: number): () => number {
   let s = seed >>> 0 || 1;
   return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 2 ** 32);
 }
+const gauss = (r: () => number): number => Math.sqrt(-2 * Math.log(r() + 1e-12)) * Math.cos(2 * Math.PI * r());
 
-interface World { certs: number; need: number; noise: number; shift: number }
-interface Opts { certs?: (k: number, r: () => number) => number; need?: (call: number) => number; noise?: number; shift?: number; overhead?: (k: number) => number }
-interface Model { built: number; judged: number; probe: (k: number, i: number) => Promise<Probe>; rejudge: (p: Probe) => Promise<Probe> }
+interface World {
+  drift?: number; // gas a build
+  build?: number; // the sd of a build's deviation from the drift (every token of the build)
+  together?: number; // the sd of a token's own noise within its build
+  straddle?: number; // the chance one token of a build ends under another certificate set
+}
+interface Model {
+  built: number;
+  probe: (k: number, i: number) => Promise<Probe>;
+  build: (lengths: number[], i: number) => Promise<Probe[]>;
+  rejudge: (p: Probe) => Promise<Probe>;
+}
 
-/** A token: its length and certificates are fixed when built; the need is the chain's at each judgement. */
-function model(seed: number, o: Opts = {}): Model {
+const mk = (label: string, transfers: number, gas: bigint, conditions: string): Probe =>
+  ({ label, transfers, conditions, gas, up: BigInt(STEP), down: BigInt(STEP), real: gas <= LIMIT ? 'passes' : 'CapacityPreflight' });
+
+function model(seed: number, w: World = {}): Model {
   const r = rng(seed);
-  // the driver's probes: 16 rounds of certification, one more when a group straddles an aggregator round
-  const certsOf = o.certs ?? ((_k, rr) => (rr() < 0.1 ? 17 : 16));
-  const tokens = new Map<string, { k: number; certs: number; noise: number }>();
-  const m: Model = {
-    built: 0,
-    judged: 0,
-    probe: async (k, i) => {
-      m.built++;
-      const label = `g${i}c`;
-      // noise and overhead: the token's unrecorded shape (its bytes and signatures beyond the measured ones), fixed when it is built
-      tokens.set(label, { k, certs: certsOf(k, r), noise: (r() - 0.5) * 2 * (o.noise ?? 0) + (o.overhead?.(k) ?? 0) });
-      return judge(label);
-    },
-    rejudge: async (p) => judge(p.label),
-  };
+  const tokens = new Map<string, { k: number; gas: number; conditions: string }>();
   const judge = (label: string): Probe => {
     const t = tokens.get(label)!;
-    const need = o.need?.(m.judged) ?? 3;
-    m.judged++;
-    const gas = BigInt(Math.round(baseGas(t.k) + (o.shift ?? 0) + 100_000 * t.certs + 150_000 * need + t.noise));
-    // one more and one fewer transfer of this token's own shape: the model's steps, rounded down (the driver's shapeOf)
-    const up = BigInt(Math.floor(baseGas(t.k + 1) - baseGas(t.k)));
-    const down = BigInt(Math.floor(baseGas(t.k) - baseGas(t.k - 1)));
-    return { label, transfers: t.k, conditions: `${t.certs} certificates, need ${need}`, gas, up, down, real: gas <= LIMIT ? 'passes' : 'CapacityPreflight' };
+    return mk(label, t.k, BigInt(Math.round(t.gas)), t.conditions);
+  };
+  const m: Model = {
+    built: 0,
+    probe: async (k, i) => {
+      m.built++;
+      tokens.set(`g${i}c`, { k, gas: gasAt(k) + (w.drift ?? 135_000) * i + gauss(r) * (w.build ?? 160_000), conditions: `single ${i}, need 64` });
+      return judge(`g${i}c`);
+    },
+    build: async (lengths, i) => {
+      m.built += lengths.length;
+      const base = (w.drift ?? 135_000) * i + gauss(r) * (w.build ?? 160_000); // the build's own deviation: every token of it
+      const odd = r() < (w.straddle ?? 0.1) ? Math.floor(r() * lengths.length) : -1;
+      return lengths.map((k, x) => {
+        const label = `g${i}${'abcdefgh'[x]}`;
+        tokens.set(label, { k, gas: gasAt(k) + base + gauss(r) * (w.together ?? 30_000), conditions: x === odd ? `set ${i}', need 64` : `set ${i}, need 64` });
+        return judge(label);
+      });
+    },
+    rejudge: async (p) => judge(p.label),
   };
   return m;
 }
 
-function assertPair(res: SearchResult, maxProbes: number): void {
+const opts = (estimate: number, extra: Partial<SearchOptions> = {}): SearchOptions => ({ estimate, limit: LIMIT, start: START, maxProbes: 10, min: 16, ...extra });
+
+/** sol's guarantees on a result: adjacent, identical conditions, built together, both shapes, confirmed back to back. */
+function assertPair(res: SearchResult): void {
   assert.equal(res.pass.real, 'passes');
   assert.equal(res.fail.real, 'CapacityPreflight');
   assert.equal(res.fail.transfers, res.pass.transfers + 1, 'adjacent');
-  assert.equal(res.fail.conditions, res.pass.conditions, 'under the same conditions');
-  assert.equal(res.confirmed.pass.label, res.pass.label);
-  assert.equal(res.confirmed.fail.label, res.fail.label);
-  assert.equal(res.confirmed.pass.real, 'passes', 'the pass, judged again');
-  assert.equal(res.confirmed.fail.real, 'CapacityPreflight', 'the refusal, judged again right after');
-  assert.equal(res.confirmed.pass.conditions, res.pass.conditions);
-  assert.equal(res.confirmed.fail.conditions, res.pass.conditions);
-  assert.equal(shapeHolds(res.pass, res.fail, LIMIT), null, 'the boundary holds under each token\'s own shape');
+  assert.equal(res.fail.conditions, res.pass.conditions, 'identical conditions');
+  assert.equal(shapeHolds(res.pass, res.fail, LIMIT), null, 'the bound holds under each token\'s own shape');
   assert.equal(shapeHolds(res.confirmed.pass, res.confirmed.fail, LIMIT), null);
-  assert.ok(res.tries.length <= maxProbes);
-  const built = new Set(res.tries.map((t) => t.label));
-  assert.ok(built.has(res.pass.label) && built.has(res.fail.label), 'the pair is two of the reported tokens');
+  assert.deepEqual([res.confirmed.pass.label, res.confirmed.fail.label], [res.pass.label, res.fail.label]);
+  assert.deepEqual([res.confirmed.pass.real, res.confirmed.fail.real], ['passes', 'CapacityPreflight'], 'judged again, back to back');
+  assert.deepEqual([res.confirmed.pass.conditions, res.confirmed.fail.conditions], [res.pass.conditions, res.pass.conditions]);
+  const last = res.windows[res.windows.length - 1];
+  assert.equal(last.outcome, 'pair');
+  assert.deepEqual([last.pass, last.fail], [res.pass.label, res.fail.label]);
+  assert.ok(last.labels.includes(res.pass.label) && last.labels.includes(res.fail.label), 'both tokens of the pair are of one build');
+  assert.ok(res.windows.length <= 6);
 }
 
-const opts = (estimate: number, maxProbes = 20) => ({ estimate, limit: LIMIT, start: START, maxProbes });
-
-test('the failed CI run (estimate 255, refusals at 207..204): the pair is found, which the old eight-probe walk did not', async () => {
-  const m = model(43916311, { noise: 95_000 });
-  const res = await findBoundary(m.probe, m.rejudge, opts(255));
-  assertPair(res, 20);
-  assert.ok(res.pass.transfers >= 195 && res.pass.transfers <= 206, String(res.pass.transfers));
-  assert.ok(res.tries.length <= 10, `${res.tries.length} probes`);
-});
-
-test('without noise under one set of conditions the pair is the exact boundary, from any estimate', async () => {
-  let n = 1;
-  while (baseGas(n + 1) + 1_600_000 + 450_000 <= Number(LIMIT)) n++;
-  for (const estimate of [17, 120, 190, n, n + 1, 230, 255, 320, 500]) {
-    const m = model(1, { certs: () => 16 });
-    const res = await findBoundary(m.probe, m.rejudge, opts(estimate));
-    assertPair(res, 20);
-    assert.equal(res.pass.transfers, n, `from ${estimate}`);
-  }
-});
-
-test('an estimate below the bound searches upwards', async () => {
-  const m = model(7);
-  const res = await findBoundary(m.probe, m.rejudge, opts(150));
-  assertPair(res, 20);
-  assert.equal(res.tries[0].real, 'passes');
-});
-
-test('an adjacent pair under different certificates is not taken: the search goes on until one count holds both', async () => {
-  // the first probes at N + 1 straddle a round (17 certificates): refused, beside a pass at N under 16
-  let n = 1;
-  while (baseGas(n + 1) + 1_600_000 + 450_000 <= Number(LIMIT)) n++;
-  const at = new Map<number, number[]>([[n + 1, [17, 17]]]);
-  const m = model(3, { certs: (k) => at.get(k)?.shift() ?? 16 });
-  const res = await findBoundary(m.probe, m.rejudge, opts(n + 1));
-  assertPair(res, 20);
-  assert.equal(res.pass.transfers, n);
-  assert.ok(res.tries.some((t) => t.transfers === n + 1 && t.conditions.startsWith('17')), 'the 17-certificate refusal was seen and not used');
-});
-
-test('a pair whose conditions move before the confirmation is judged again under the new ones', async () => {
-  // the need steps from 3 to 4 at the fifth judgement: the candidate found under need 3 does not confirm; the pair reported holds under one need
-  const m = model(5, { certs: () => 16, need: (call) => (call < 5 ? 3 : 4) });
-  const res = await findBoundary(m.probe, m.rejudge, opts(255));
-  assertPair(res, 20);
-  assert.ok(res.confirmed.pass.conditions.endsWith('need 4'));
-});
-
-test('many seeds with noise and straddled rounds: a confirmed adjacent pair under one shape, or BoundaryNotFound (fail closed), never another', async () => {
-  // the tokens' unrecorded shape varies by up to 95k gas (about 700 evidence bytes): now and then no pair holds under both shapes within
-  // the budget, and the search must say so rather than take one
+test('the drift and deviation run 43994509728 measured: a confirmed pair of one build within six builds, or BoundaryNotFound (fail closed)', async () => {
+  // 999 of 1,000 seeds end in a pair in the model, with 1.7 builds on average; the rest fail closed (a crossing refused for its shape or
+  // under two certificate sets, six times)
   let found = 0;
-  let total = 0;
-  for (let seed = 1; seed <= 500; seed++) {
-    const r = rng(seed * 7919);
-    const estimate = 140 + Math.floor(r() * 180);
-    const m = model(seed, { noise: 95_000, shift: (r() - 0.5) * 2_000_000 });
+  let builds = 0;
+  for (let seed = 1; seed <= 400; seed++) {
+    const m = model(seed);
     try {
-      const res = await findBoundary(m.probe, m.rejudge, opts(estimate));
-      assertPair(res, 20);
+      const res = await findBoundary(m.probe, m.build, m.rejudge, opts(255));
+      assertPair(res);
       found++;
-      total += res.tries.length;
+      builds += res.windows.length;
     } catch (e) {
       assert.ok(e instanceof BoundaryNotFound, String(e));
-      assert.equal(m.built, 20);
+      assert.equal(e.windows.length, 6);
     }
   }
-  assert.ok(found >= 495, `${found} of 500`);
-  assert.ok(total / found <= 8, `mean ${total / found}`);
+  assert.ok(found >= 398, `${found} of 400`);
+  assert.ok(builds / found <= 2, `mean builds ${builds / found}`);
 });
 
-test('certificates that follow the length (a jump at the bound) give no pair: BoundaryNotFound, never a pair across conditions', async () => {
-  let n = 1;
-  while (baseGas(n + 1) + 1_600_000 + 450_000 <= Number(LIMIT)) n++;
-  // every token of N or fewer transfers under 16 certificates, every longer one under 17 (the natural rounds' pattern at 204/205)
-  const m = model(9, { certs: (k) => (k <= n ? 16 : 17) });
-  await assert.rejects(findBoundary(m.probe, m.rejudge, opts(255)), BoundaryNotFound);
-  assert.equal(m.built, 20);
+test('a build of N and N + 1 alone (width 2) hits the crossing far less often under the same deviation: why the window is four wide', async () => {
+  let two = 0;
+  let four = 0;
+  for (let seed = 1; seed <= 300; seed++) {
+    for (const width of [2, 4]) {
+      const m = model(seed);
+      try {
+        assertPair(await findBoundary(m.probe, m.build, m.rejudge, opts(255, { width })));
+        if (width === 2) two++;
+        else four++;
+      } catch (e) {
+        assert.ok(e instanceof BoundaryNotFound, String(e));
+      }
+    }
+  }
+  assert.ok(four >= 298, `width 4: ${four} of 300`);
+  assert.ok(two <= four - 20, `width 2: ${two} of 300, width 4: ${four}`);
 });
 
-test('the probe budget is a bound: BoundaryNotFound carries every probe', async () => {
-  const m = model(11);
-  await assert.rejects(findBoundary(m.probe, m.rejudge, opts(255, 2)), (e: unknown) => {
+test('a stronger drift (1.5 steps a build) and twice the deviation still end in a pair, or fail closed', async () => {
+  let found = 0;
+  for (let seed = 1; seed <= 200; seed++) {
+    const m = model(seed, { drift: 400_000, build: 320_000 });
+    try {
+      assertPair(await findBoundary(m.probe, m.build, m.rejudge, opts(255)));
+      found++;
+    } catch (e) {
+      assert.ok(e instanceof BoundaryNotFound, String(e));
+    }
+  }
+  assert.ok(found >= 190, `${found} of 200`);
+});
+
+test('a stale light pass does not hold the search: the coarse bracket is the newest probes only', async () => {
+  // the first probe passes at 210 (a light token); every later token is 8 steps heavier: the bound is 196
+  const heavy = (k: number): bigint => BigInt(gasAt(k) + 8 * STEP);
+  const probe = async (k: number, i: number): Promise<Probe> => mk(`g${i}c`, k, i === 0 ? 59_900_000n : heavy(k), 'x');
+  const build = async (lengths: number[], i: number): Promise<Probe[]> => lengths.map((k, x) => mk(`g${i}${'abcd'[x]}`, k, heavy(k), `set ${i}`));
+  const res = await findBoundary(probe, build, async (p) => p, opts(210));
+  assertPair(res);
+  assert.equal(res.pass.transfers, AT0 - 8);
+  assert.ok(res.windows.length <= 3, `${res.windows.length} builds: ${res.windows.map((w) => w.n)}`);
+});
+
+test('the stepping: all pass moves up past the window, all refused down past it, anything else builds on its crossing again', async () => {
+  // the singles put the bound at 200 / 201; the scripted windows (n - 1 .. n + 2): all pass; all refused; inverted; other conditions at the
+  // crossing; a shape that does not hold; not confirmed (the refusal passes when judged again); the pair
+  const script = ['pass', 'refused', 'inverted', 'cond', 'shape', 'unconfirmed', 'pair'];
+  const seen: number[][] = [];
+  const flip = new Set<string>();
+  const single = async (k: number, i: number): Promise<Probe> => mk(`s${i}`, k, BigInt(gasAt(k) + 4 * STEP), 'x'); // 200 passes, 201 is refused
+  const build = async (lengths: number[], i: number): Promise<Probe[]> => {
+    seen.push(lengths);
+    const kind = script[seen.length - 1];
+    const lo = LIMIT - 100_000n;
+    const hi = LIMIT + 100_000n;
+    const t = (x: number, gas: bigint, cond = `set ${i}`): Probe => mk(`g${i}${'abcd'[x]}`, lengths[x], gas, cond);
+    switch (kind) {
+      case 'pass': return lengths.map((_, x) => t(x, lo - 1_000_000n + BigInt(x * STEP)));
+      case 'refused': return lengths.map((_, x) => t(x, hi + BigInt(x * STEP)));
+      case 'inverted': return [t(0, lo - 300_000n), t(1, hi), t(2, lo), t(3, hi + 300_000n)];
+      case 'cond': return [t(0, lo - 300_000n), t(1, lo), t(2, hi, `set ${i}'`), t(3, hi + 300_000n)];
+      case 'shape': return [t(0, lo - 600_000n), t(1, LIMIT - 400_000n), t(2, hi), t(3, hi + 300_000n)]; // 1 + its step stays within: 2's refusal is its overhead
+      case 'unconfirmed': flip.add(`g${i}c`); return [t(0, lo - 300_000n), t(1, lo), t(2, hi), t(3, hi + 300_000n)];
+      default: return [t(0, lo - 300_000n), t(1, lo), t(2, hi), t(3, hi + 300_000n)];
+    }
+  };
+  const rejudge = async (q: Probe): Promise<Probe> => (flip.has(q.label) ? { ...q, gas: LIMIT - 1n, real: 'passes' } : q);
+  const res = await findBoundary(single, build, rejudge, opts(200, { maxPairs: 7 }));
+  assert.deepEqual(res.windows.map((w) => w.outcome), ['all pass', 'all refused', 'inverted', 'conditions differ', 'shape', 'not confirmed', 'pair']);
+  assert.deepEqual(seen[0], [199, 200, 201, 202], 'the first window is centred on the coarse crossing');
+  assert.ok(seen[1][0] >= seen[0][3] - 1, `after all pass the next window starts at the old top's neighbour or above: ${seen[1]}`);
+  assert.ok(seen[2][3] <= seen[1][0] + 1, `after all refused the next window ends at the old bottom's neighbour or below: ${seen[2]}`);
+  for (let x = 3; x < seen.length; x++) assert.deepEqual(seen[x], seen[3], 'a window with a crossing that does not stand is built again on that crossing');
+  assertPair({ ...res, windows: res.windows.slice(-6) });
+});
+
+test('the cap: six builds that never give a pair end in BoundaryNotFound with every build reported (fail closed)', async () => {
+  const m = model(5);
+  // every token of every build under its own certificate set
+  const build = async (lengths: number[], i: number): Promise<Probe[]> => (await m.build(lengths, i)).map((t, x) => ({ ...t, conditions: `${t.conditions} #${x}` }));
+  await assert.rejects(findBoundary(m.probe, build, m.rejudge, opts(255)), (e: unknown) => {
     assert.ok(e instanceof BoundaryNotFound);
-    assert.equal(e.tries.length, 2);
+    assert.match(e.message, /in 6 builds/);
+    assert.equal(e.windows.length, 6);
+    assert.ok(e.windows.every((w) => w.outcome !== 'pair'));
+    assert.ok(e.windows.some((w) => w.outcome === 'conditions differ'));
     return true;
   });
-  assert.equal(m.built, 2);
 });
 
-test('a probe of another length than asked is refused', async () => {
-  const bad = async (k: number, i: number): Promise<Probe> => ({ label: `g${i}c`, transfers: k + 1, conditions: 'x', gas: 1n, up: 1n, down: 1n, real: 'passes' });
-  await assert.rejects(findBoundary(bad, async (p) => p, opts(200)), BoundaryNotFound);
+test('no bracket among the single probes: BoundaryNotFound, no build', async () => {
+  let builds = 0;
+  const probe = async (k: number, i: number): Promise<Probe> => ({ label: `g${i}c`, transfers: k, conditions: 'x', gas: null, up: null, down: null, real: 'CapacityPreflight' });
+  await assert.rejects(findBoundary(probe, async () => { builds++; return []; }, async (p) => p, opts(255, { maxProbes: 3 })), /no bracket/);
+  assert.equal(builds, 0);
 });
 
-// sol's review of #1126 (r7): the conditions held only the certificates and the need, so a confirmed 20/21 pair could stand although 21 was
-// refused for its own overhead, and passes under 20's
-const exactBound = (): number => {
-  let n = 1;
-  while (baseGas(n + 1) + 1_600_000 + 450_000 <= Number(LIMIT)) n++;
-  return n;
-};
+test('builds of another length than asked are refused', async () => {
+  const bad = async (k: number, i: number): Promise<Probe> => mk(`g${i}c`, k + 1, 1n, 'x');
+  await assert.rejects(findBoundary(bad, async () => [], async (p) => p, opts(200)), /holds/);
+  const m = model(3);
+  const wrong = async (lengths: number[], i: number): Promise<Probe[]> => (await m.build(lengths, i)).map((t, x) => (x === 1 ? { ...t, transfers: t.transfers + 1 } : t));
+  await assert.rejects(findBoundary(m.probe, wrong, m.rejudge, opts(255)), /the build of/);
+  const m2 = model(3);
+  const short = async (lengths: number[], i: number): Promise<Probe[]> => (await m2.build(lengths, i)).slice(1);
+  await assert.rejects(findBoundary(m2.probe, short, m2.rejudge, opts(255)), /the build of/);
+});
+
+test('every build records its residuals: the gap of each adjacent two beyond the lower one\'s own step, null across conditions', async () => {
+  const m = model(9, { together: 0, straddle: 0 });
+  const res = await findBoundary(m.probe, m.build, m.rejudge, opts(255));
+  for (const w of res.windows) {
+    assert.equal(w.residuals.length, w.lengths.length - 1);
+    for (const x of w.residuals) assert.ok(x !== null && Math.abs(Number(x)) <= 2, `built together without noise: residual ${x}`);
+  }
+  assert.ok(res.drift !== null && Math.abs(res.drift.perBuild - 135_000) < 120_000, JSON.stringify(res.drift));
+  // one token of a build under another certificate set: the residuals beside it are not recorded
+  const m2 = model(9, { together: 0 });
+  const build = async (lengths: number[], i: number): Promise<Probe[]> => (await m2.build(lengths, i)).map((t, x) => (x === 0 ? { ...t, conditions: 'other' } : t));
+  const res2 = await findBoundary(m2.probe, build, m2.rejudge, opts(255));
+  for (const w of res2.windows) assert.equal(w.residuals[0], null);
+});
+
+test('driftOf recovers the gas a build and a transfer of exact points', () => {
+  const pts = [];
+  for (let b = 0; b < 8; b++) for (const k of [190, 200, 210]) pts.push({ transfers: k, build: b, gas: BigInt(1_000_000 + 265_000 * k + 135_000 * b) });
+  assert.deepEqual(driftOf(pts), { intercept: 1_000_000, perBuild: 135_000, perTransfer: 265_000, residualSd: 0, samples: 24 });
+  assert.equal(driftOf(pts.slice(0, 3)), null, 'too few points');
+  assert.equal(driftOf([0, 1, 2, 3].map(() => ({ transfers: 1, build: 0, gas: 1n }))), null, 'not determined');
+});
+
 const probeOf = (label: string, transfers: number, gas: bigint, up: bigint | null, down: bigint | null = up): Probe =>
-  ({ label, transfers, conditions: '16 certificates, need 3', gas, up, down, real: gas <= LIMIT ? 'passes' : 'CapacityPreflight' });
+  ({ label, transfers, conditions: 'set, need 64', gas, up, down, real: gas <= LIMIT ? 'passes' : 'CapacityPreflight' });
 
 test('shapeHolds: the pair holds under each token\'s own shape, or it is refused', () => {
   assert.equal(shapeHolds(probeOf('p', 20, LIMIT - 50_000n, 100_000n), probeOf('f', 21, LIMIT + 50_000n, 100_000n), LIMIT), null);
@@ -193,11 +249,9 @@ test('shapeHolds: the pair holds under each token\'s own shape, or it is refused
   assert.match(shapeHolds(probeOf('p', 20, LIMIT - 150_000n, 100_000n), probeOf('f', 21, LIMIT + 50_000n, 100_000n), LIMIT)!, /p with one more transfer/);
   // 21 with one transfer fewer of its own shape is still over: its refusal is its overhead
   assert.match(shapeHolds(probeOf('p', 20, LIMIT - 50_000n, 100_000n), probeOf('f', 21, LIMIT + 150_000n, 100_000n), LIMIT)!, /f with one transfer fewer/);
-  // sol r8: the refusal's side takes the backward step. 1,100-byte pairs at zero excess: +200,064 forward, -190,000 back; a refusal at
-  // 60,195,000 is 60,005,000 with one transfer fewer, still over: refused, though its forward step would have taken it within
+  // sol r8: the refusal's side takes the backward step. 1,100-byte pairs at zero excess: +200,064 forward, -190,000 back
   assert.match(shapeHolds(probeOf('p', 20, LIMIT - 50_000n, 200_064n, 190_000n), probeOf('f', 21, 60_195_000n, 200_064n, 190_000n), LIMIT)!, /f with one transfer fewer of its own shape \(60195000 - 190000\)/);
   assert.equal(shapeHolds(probeOf('p', 20, LIMIT - 50_000n, 200_064n, 190_000n), probeOf('f', 21, 60_185_000n, 200_064n, 190_000n), LIMIT), null);
-  // and the pass's side the forward one
   assert.equal(shapeHolds(probeOf('p', 20, LIMIT - 195_000n, 200_064n, 190_000n), probeOf('f', 21, LIMIT + 5_000n, 200_064n, 190_000n), LIMIT), null);
   assert.notEqual(shapeHolds(probeOf('p', 20, LIMIT - 195_000n, 190_000n, 200_064n), probeOf('f', 21, LIMIT + 5_000n, 190_000n, 190_000n), LIMIT), null);
   // unknown inputs fail closed, and so does a pair whose model gas does not straddle the limit
@@ -205,26 +259,21 @@ test('shapeHolds: the pair holds under each token\'s own shape, or it is refused
   assert.notEqual(shapeHolds(probeOf('p', 20, LIMIT + 1n, 100_000n), probeOf('f', 21, LIMIT + 50_000n, 100_000n), LIMIT), null);
 });
 
-test('an adjacent pair whose refusal is the refused token\'s unrecorded overhead is not taken; a fresh token finds the real one', async () => {
-  const n = exactBound();
-  // the first token of n transfers carries 300k gas of overhead its conditions do not show (more evidence bytes and seal signatures): refused,
-  // beside n - 1 passing; under n - 1's shape n passes. The search refuses that pair, builds n again and ends at n / n + 1.
-  const once = new Map<number, number[]>([[n, [300_000]]]);
-  const m = model(13, { certs: () => 16, overhead: (k) => once.get(k)?.shift() ?? 0 });
-  const res = await findBoundary(m.probe, m.rejudge, opts(n));
-  assertPair(res, 20);
-  assert.equal(res.pass.transfers, n);
-  assert.equal(res.tries[0].transfers, n);
-  assert.equal(res.tries[0].real, 'CapacityPreflight', 'the overhead token is refused');
-  assert.ok(res.refused.some((r) => r.fail === res.tries[0].label && /with one more transfer/.test(r.reason)), JSON.stringify(res.refused));
-});
-
-test('an overhead every token of one length carries leaves no pair: BoundaryNotFound with the refused pairs, never the 20/21 kind', async () => {
-  const n = exactBound();
-  const m = model(17, { certs: () => 16, overhead: (k) => (k === n ? 300_000 : 0) });
-  await assert.rejects(findBoundary(m.probe, m.rejudge, opts(n)), (e: unknown) => {
-    assert.ok(e instanceof BoundaryNotFound);
-    assert.ok(e.refused.length > 0 && e.refused.every((r) => /overhead/.test(r.reason)), JSON.stringify(e.refused));
-    return true;
-  });
+test('sol r7: a crossing whose refusal is the refused token\'s own overhead is not taken; the next build\'s is', async () => {
+  // no drift or deviation: 204 passes and 205 is refused. The first build's 205 token carries 300k gas beyond its step that the conditions do
+  // not show: 205 with one transfer fewer of its own shape would still be over, so the crossing is refused and built again
+  let first = true;
+  const m = model(13, { build: 0, together: 0, drift: 0, straddle: 0 });
+  const build = async (lengths: number[], i: number): Promise<Probe[]> => {
+    const toks = await m.build(lengths, i);
+    if (first && lengths.includes(AT0 + 1)) {
+      first = false;
+      return toks.map((t) => (t.transfers === AT0 + 1 ? { ...t, gas: t.gas! + 300_000n } : t));
+    }
+    return toks;
+  };
+  const res = await findBoundary(m.probe, build, m.rejudge, opts(255));
+  assertPair(res);
+  assert.equal(res.pass.transfers, AT0);
+  assert.ok(res.windows.some((w) => w.outcome === 'shape' && /one transfer fewer/.test(w.reason!)), JSON.stringify(res.windows));
 });
