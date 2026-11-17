@@ -1,7 +1,9 @@
 /**
  * The native bridge v2 live driver of the package lanes (NB2-09, bft-core#1105). It drives the TypeScript wallet plug-in (NB2-07,
  * native-bridge-plugins `packages/native-bridge-plugin/src/nb2`) against a running generation through the public gateway only: the
- * chain, the aggregator (`/aggregator`) and the trust-base pages. rehearse_nb2.py runs one command per container, in the bridge tools
+ * chain, the aggregator (`/aggregator`) and the trust-base pages. Its wallets are the reference wallet's (native-bridge-plugins wallet/core.ts,
+ * bft-core#1107): the same directory, journal, keys and steps (deposit, mint, transfer, split, burn, redeem) that the command-line wallet runs;
+ * what this file adds is the lane's measurements, mutations and fault injection. rehearse_nb2.py runs one command per container, in the bridge tools
  * image, with this directory mounted at `tests/live/nb2lane/` of the image's plug-in checkout and GENERATION/bridge at /work. State
  * lives under /work/nb2 (each wallet's journal, tokens and trust history); every command writes what the lane checks to
  * /work/nb2/out/<name>.json. Keys come from the environment (NB2_KEY_<WALLET>, never in the evidence).
@@ -39,21 +41,23 @@ import { UnicityCertificate } from '@unicitylabs/state-transition-sdk/lib/api/bf
 
 import { concat, eq, toHex } from '../../../packages/native-bridge-plugin/src/bytes.js';
 import {
-  ASSET_UCT, AmbiguousBroadcast, HttpJsonRpc, LocalKeySigner, MEASURED, MEASURED_VERIFIER, NativeBridgeV2, Nb2Error, RpcError, SELECTOR, WalletError,
-  burnPairBound, buildParams, classifyRedeemError, construct, decodeConfig, decodeEvidence, decodeRevert, decodeToken, deriveBridgeKey, encodeReturnData,
+  ASSET_UCT, AmbiguousBroadcast, HttpJsonRpc, MEASURED, MEASURED_VERIFIER, Nb2Error, RpcError, SELECTOR, WalletError,
+  burnPairBound, buildParams, classifyRedeemError, construct, decodeConfig, decodeEvidence, decodeRevert, decodeToken, encodeReturnData,
   encodeToken, evidenceOf, gapProofLen, log2, maxProofs, otherBytes, redeemCalldata, redeemCalldataLength, redeemTxFraming, revertDataOf, signTx,
-  verdictAbi, verifyPart, type DeploymentPins, type JournalStore, type ReturnRecord,
+  verdictAbi, verifyPart, type ReturnRecord,
 } from '../../../packages/native-bridge-plugin/src/nb2/index.js';
-import { appendTransfer, headOf, transferRequest, localOwner, freshMask } from '../../../packages/native-bridge-plugin/src/nb2/tokenops.js';
+import { appendTransfer, headOf, transferRequest, freshMask } from '../../../packages/native-bridge-plugin/src/nb2/tokenops.js';
 import { signaturePredicate, encodeProof, type Token } from '../../../packages/native-bridge-plugin/src/nb2/token.js';
 import { HE, HU } from '../../../packages/native-bridge-plugin/src/nb2/crypto.js';
 import { decodeReceiptBacking } from '../../../packages/native-bridge-plugin/src/nb2/deposit.js';
 import { u256 } from '../../../packages/native-bridge-plugin/src/nb2/cbor.js';
-import { TrustInput } from '../../../packages/native-bridge-plugin/src/trust.js';
 import { BoundaryNotFound, findBoundary, ownShape, type Probe, type Verdict } from './boundary_search.js';
 import { marginals, type TokenShape } from './boundary_shape.js';
 import { readLedger, type Answer } from './ledger_check.js';
-import { refreshAll } from '../../../tester/trust.js';
+import {
+  GatewayAggregator, Wallet as ReferenceWallet, burn as walletBurn, mint as walletMint, pinsOf, planDeposit, redeem as walletRedeem, retry as walletRetry,
+  sendDeposit, split as walletSplit, transfer as walletTransfer, type OpenOptions, type TokenEntry,
+} from '../../../wallet/core.js';
 
 // ---- configuration ------------------------------------------------------------------------------------------------------------------
 
@@ -79,14 +83,6 @@ const unhex = (s: string): Uint8Array => Uint8Array.from(Buffer.from(s.replace(/
 const hx = (b: Uint8Array): string => `0x${toHex(b)}`;
 const big = (s: string | number | bigint): bigint => BigInt(s);
 
-function pinsOf(r: { pins: Record<string, unknown> }): DeploymentPins {
-  const p = r.pins as Record<string, string | boolean | number>;
-  return {
-    gamma: unhex(p.gamma as string), build: p.build as 'test' | 'production', vaultRuntimeCodeHash: unhex(p.vaultRuntimeCodeHash as string),
-    maxEncodedTxBytes: big(p.maxEncodedTxBytes as number), userGasLimit: big(p.userGasLimit as string), gasReserve: big(p.gasReserve as string),
-    returnReserveSegments: big(p.returnReserveSegments as number), deploymentBlock: big(p.deploymentBlock as number), stateReadOnly: p.stateReadOnly as boolean,
-  };
-}
 const pins = pinsOf(release);
 const cfg = decodeConfig(pins.gamma, buildParams(pins.build));
 
@@ -96,162 +92,27 @@ const out = (name: string, v: unknown): void => {
 };
 const log = (...a: unknown[]): void => console.log(...a.map((x) => (typeof x === 'bigint' ? x.toString() : x)));
 
-// ---- a durable journal: one JSON file per wallet, written by rename -------------------------------------------------------------------
+// ---- wallets: the reference wallet (native-bridge-plugins wallet/core.ts), one directory per lane wallet -------------------------------------
 
-class FileJournalStore implements JournalStore {
-  public constructor(private readonly file: string) {}
-  private load(): Record<string, string> {
-    return existsSync(this.file) ? JSON.parse(readFileSync(this.file, 'utf8')) : {};
-  }
-  public get(key: string): Promise<string | null> {
-    return Promise.resolve(this.load()[key] ?? null);
-  }
-  public putIf(key: string, expected: string | null, value: string): Promise<boolean> {
-    const m = this.load();
-    if ((m[key] ?? null) !== expected) return Promise.resolve(false);
-    m[key] = value;
-    writeFileSync(`${this.file}.tmp`, JSON.stringify(m));
-    renameSync(`${this.file}.tmp`, this.file);
-    return Promise.resolve(true);
-  }
-  public list(prefix: string): Promise<string[]> {
-    return Promise.resolve(Object.keys(this.load()).filter((k) => k.startsWith(prefix)).sort());
-  }
+/** The lane's key of wallet NAME: NB2_KEY_<NAME> (never in a command line or the evidence). */
+function laneKey(name: string): Uint8Array {
+  const k = process.env[`NB2_KEY_${name.toUpperCase()}`];
+  if (!k) throw new Error(`NB2_KEY_${name.toUpperCase()} is not set`);
+  return unhex(k);
 }
 
-// ---- wallets ----------------------------------------------------------------------------------------------------------------------------
-
-interface TokenEntry { file: string; owner: number; amount: string; intent?: string; returnId?: string; note?: string }
-
-class Wallet {
-  public readonly dir: string;
-  public readonly evmKey: Uint8Array;
-  public readonly signer: LocalKeySigner;
-  public bridge!: NativeBridgeV2;
-  public trust!: TrustInput;
-  public constructor(public readonly name: string) {
-    this.dir = join(WORK, 'wallets', name);
-    mkdirSync(join(this.dir, 'tokens'), { recursive: true });
-    const k = process.env[`NB2_KEY_${name.toUpperCase()}`];
-    if (!k) throw new Error(`NB2_KEY_${name.toUpperCase()} is not set`);
-    this.evmKey = unhex(k);
-    this.signer = new LocalKeySigner(this.evmKey);
+/**
+ * A lane wallet: the reference wallet's directory, journal, keys and steps in WORK/wallets/NAME, with the lane's connection (lane.json) and the
+ * gateway RPC counted for the ambiguous-broadcast check. Opened without the installation check unless asked (gamma-check runs it).
+ */
+class Wallet extends ReferenceWallet {
+  public readonly name: string;
+  public constructor(name: string) {
+    super(join(WORK, 'wallets', name), laneKey(name), { release: lane.release, trustBundle: lane.trustBundle, trustPin: lane.trustPin, rpc: lane.rpc, aggregator: lane.agg });
+    this.name = name;
   }
-  /** Unicity owner key i of this wallet (a test derivation from the EVM key; a real wallet derives from its seed). */
-  public ownerKey(i: number): Uint8Array {
-    return sha256(concat(new TextEncoder().encode(`nb2-lane-owner/${i}/`), this.evmKey));
-  }
-  public owner(i: number) {
-    return localOwner(this.ownerKey(i));
-  }
-  public ownerPub(i: number): Uint8Array {
-    return secp256k1.getPublicKey(this.ownerKey(i), true);
-  }
-  public get historyFile(): string {
-    return join(this.dir, 'trust-history.cbor');
-  }
-  public async open(check = false): Promise<Wallet> {
-    const pin = unhex(readFileSync(lane.trustPin, 'utf8').trim());
-    const shipped = await TrustInput.fromBundle(Uint8Array.from(readFileSync(lane.trustBundle)), pin);
-    this.trust = shipped;
-    if (existsSync(this.historyFile)) {
-      const held = await TrustInput.fromBundle(Uint8Array.from(readFileSync(this.historyFile)), pin);
-      for (const e of shipped.history.entries) await held.history.append(e);
-      this.trust = held;
-    }
-    const persist = (b: Uint8Array): void => {
-      writeFileSync(`${this.historyFile}.tmp`, b);
-      renameSync(`${this.historyFile}.tmp`, this.historyFile);
-    };
-    const source = new AggregatorClient(lane.agg);
-    const backupFile = join(this.dir, 'backup.json');
-    this.bridge = await NativeBridgeV2.open({
-      pins, trust: this.trust, rpc: new CountingRpc(new HttpJsonRpc(lane.rpc, { retries: 20, timeoutMs: 120_000 })), aggregator: new LaneAggregator(lane.agg),
-      journal: new FileJournalStore(join(this.dir, 'journal.json')), bridgeKey: deriveBridgeKey(sha256(concat(new TextEncoder().encode('nb2-lane-seed/'), this.evmKey))),
-      backup: async (intents) => writeFileSync(backupFile, JSON.stringify(intents)),
-      refreshTrust: async () => { await refreshAll(this.trust, source, 64, persist); },
-      receiptTimeoutMs: 180_000, pollMs: 1_000,
-    }, check);
-    return this;
-  }
-  private get index(): Record<string, TokenEntry> {
-    const f = join(this.dir, 'tokens.json');
-    return existsSync(f) ? JSON.parse(readFileSync(f, 'utf8')) : {};
-  }
-  public labels(): string[] {
-    return Object.keys(this.index).sort((a, b) => a.localeCompare(b, 'en', { numeric: true }));
-  }
-  public entry(label: string): TokenEntry {
-    const e = this.index[label];
-    if (!e) throw new Error(`wallet ${this.name} holds no token ${label}`);
-    return e;
-  }
-  public token(label: string): Uint8Array {
-    return Uint8Array.from(readFileSync(join(this.dir, 'tokens', this.entry(label).file)));
-  }
-  public keep(label: string, token: Uint8Array, owner: number, extra: Partial<TokenEntry> = {}): void {
-    writeFileSync(join(this.dir, 'tokens', `${label}.cbor`), token);
-    const idx = this.index;
-    idx[label] = { ...(idx[label] ?? {}), file: `${label}.cbor`, owner, amount: '0', ...extra };
-    writeFileSync(join(this.dir, 'tokens.json.tmp'), JSON.stringify(idx, null, 2));
-    renameSync(join(this.dir, 'tokens.json.tmp'), join(this.dir, 'tokens.json'));
-  }
-  public update(label: string, extra: Partial<TokenEntry>): void {
-    const idx = this.index;
-    idx[label] = { ...idx[label], ...extra };
-    writeFileSync(join(this.dir, 'tokens.json.tmp'), JSON.stringify(idx, null, 2));
-    renameSync(join(this.dir, 'tokens.json.tmp'), join(this.dir, 'tokens.json'));
-  }
-  public async returnRecord(label: string): Promise<ReturnRecord> {
-    const id = this.entry(label).returnId;
-    if (!id) throw new Error(`${label} has no planned return`);
-    const r = await this.bridge.journal.ret(id);
-    if (r === null) throw new Error(`${label}: return ${id} not journaled`);
-    return r;
-  }
-}
-
-/** The SDK aggregator through the gateway's /aggregator route, with a submit-then-poll that tolerates a busy route. */
-class LaneAggregator {
-  private readonly client: AggregatorClient;
-  public constructor(url: string) {
-    this.client = new AggregatorClient(url);
-  }
-  public async submit(request: Uint8Array): Promise<void> {
-    const cd = CertificationData.fromCBOR(request);
-    for (let attempt = 0; ; attempt++) {
-      try {
-        const r = await this.client.submitCertificationRequest(cd);
-        if (!r.isAccepted && !r.isAlreadySubmitted && !r.isStateIdQueued) throw new WalletError('Reverted', `aggregator: ${r.status}`);
-        return;
-      } catch (e) {
-        if (e instanceof WalletError || attempt >= 20) throw e;
-        await sleep(1000 * (attempt + 1));
-      }
-    }
-  }
-  public async proof(request: Uint8Array, timeoutMs = 300_000): Promise<Uint8Array> {
-    const cd = CertificationData.fromCBOR(request);
-    const sid = await StateId.fromCertificationData(cd);
-    const deadline = Date.now() + timeoutMs;
-    for (;;) {
-      try {
-        const resp = await this.client.getInclusionProof(sid, { waitMs: 2_000 });
-        const p = resp.inclusionProof;
-        if (p !== null) {
-          if (!eq(p.certificationData.toCBOR(), request)) throw new WalletError('ProviderFault', 'the aggregator certified another request for this state');
-          return p.toCBOR();
-        }
-      } catch (e) {
-        if (e instanceof WalletError) throw e;
-      }
-      if (Date.now() > deadline) throw new WalletError('Unconfirmed', 'no inclusion proof in time');
-      await sleep(1_000);
-    }
-  }
-  public async certify(request: Uint8Array): Promise<Uint8Array> {
-    await this.submit(request);
-    return this.proof(request);
+  public override open(opts: OpenOptions = {}): Promise<this> {
+    return super.open({ check: false, wrapRpc: (r) => new CountingRpc(r), ...opts });
   }
 }
 
@@ -289,18 +150,9 @@ const js = (v: unknown): string => JSON.stringify(v, (_k, x) => (typeof x === 'b
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
-async function retry<T>(what: string, f: () => Promise<T>, tries = 120, ms = 2_000): Promise<T> {
-  for (let i = 0; ; i++) {
-    try {
-      return await f();
-    } catch (e) {
-      const reason = e instanceof WalletError ? e.reason : e instanceof Nb2Error ? e.rule : '';
-      if (i >= tries || !['CompanionUnknown', 'Unconfirmed', 'NotPending', 'NoEntryForEpoch'].includes(reason)) throw e;
-      if (i % 10 === 0) log(`  ${what}: ${reason}, retrying`);
-      await sleep(ms);
-    }
-  }
-}
+/** The wallet's retry of a step that is not ready yet (CompanionUnknown and the like), told on the console. */
+const retrying = (what: string) => (reason: string): void => log(`  ${what}: ${reason}, retrying`);
+const retry = <T>(what: string, f: () => Promise<T>): Promise<T> => walletRetry(f, retrying(what));
 
 const rpc = new HttpJsonRpc(lane.rpc, { retries: 20, timeoutMs: 120_000 });
 const direct = new HttpJsonRpc(lane.direct, { retries: 5, timeoutMs: 120_000 });
@@ -348,7 +200,7 @@ const evidenceFile = (label: string): string => join(WORK, 'evidence', `${label}
 
 async function gammaCheck(): Promise<void> {
   const test = construct(pins.gamma, { address: cfg.vault, chainId: cfg.chainId, verifierCodeHash: cfg.verifierCodeHash }, buildParams(pins.build));
-  const w = await new Wallet('main').open(true); // the installation check: chain ID, config() == Γ, runtime code hash
+  const w = await new Wallet('main').open({ check: true }); // the installation check: chain ID, config() == Γ, runtime code hash
   const res: Record<string, unknown> = { domain: hx(w.bridge.domain), K: test.K, B: test.B, build: pins.build, vault: hx(test.vault), verifier: hx(test.verifier) };
   if (lane.production) {
     const g = unhex(lane.production.gamma);
@@ -421,44 +273,35 @@ function envelope(file: string): void {
 async function deposit(w: Wallet, label: string, units: bigint, mode: string | undefined): Promise<void> {
   if (mode === '--adopt') {
     const intent = big(w.entry(label).intent!);
-    const r = await w.bridge.submitDeposit(intent, w.signer); // no send of its own: the lane's legacy deposit is found by its rho
+    const r = await sendDeposit(w, label); // no send of its own: the lane's legacy deposit is found by its rho
     log(`  adopted deposit ${r.depositNumber} (tx ${hx(r.txHash)})`);
     return mintIntent(w, label, intent, r.txHash);
   }
-  const plan = await w.bridge.planDeposit(units * UNIT, w.ownerPub(0));
+  const plan = await planDeposit(w, label, units * UNIT);
   if (mode === '--plan-only') {
-    w.keep(label, new Uint8Array(), 0, { intent: plan.intent.toString(), amount: (units * UNIT).toString(), note: 'planned' });
     out(`deposit-plan-${label}`, { intent: plan.intent, calldata: hx(plan.calldata), value: units * UNIT, vault: hx(cfg.vault) });
     log(`  planned intent ${plan.intent}`);
     return;
   }
-  const r = await w.bridge.submitDeposit(plan, w.signer);
+  const r = await sendDeposit(w, label);
   log(`  deposit ${r.depositNumber} in block ${r.blockNumber} (tx ${hx(r.txHash)}, EIP-1559)`);
-  w.keep(label, new Uint8Array(), 0, { intent: plan.intent.toString(), amount: (units * UNIT).toString() });
   return mintIntent(w, label, plan.intent, r.txHash);
 }
 
 async function mintIntent(w: Wallet, label: string, intent: bigint, tx: Uint8Array): Promise<void> {
-  const p = await retry('the deposit proof', () => w.bridge.collectDepositProof(intent));
-  const token = await w.bridge.mint(intent);
-  const v = await w.bridge.verifyToken(token);
-  w.keep(label, token, 0, { intent: intent.toString(), amount: v.amount.toString() });
-  out(`deposit-${label}`, { intent, depositNumber: p.depositNumber, tx, amount: v.amount, tokenId: v.tokenId, reasonBytes: p.reason.length });
-  log(`  minted ${label}: ${v.amount} wei, J ${p.reason.length} bytes`);
+  const m = await walletMint(w, label, retrying('the deposit proof'));
+  out(`deposit-${label}`, { intent, depositNumber: m.depositNumber, tx, amount: m.amount, tokenId: m.tokenId, reasonBytes: m.reasonBytes });
+  log(`  minted ${label}: ${m.amount} wei, J ${m.reasonBytes} bytes`);
 }
 
 async function transfer(w: Wallet, from: string, to: string, owner: number): Promise<void> {
-  const e = w.entry(from);
-  const t = await w.bridge.transfer(w.token(from), w.owner(e.owner), w.ownerPub(owner));
-  w.keep(to, t, owner, { amount: e.amount });
+  await walletTransfer(w, from, to, owner);
   log(`  ${from} -> ${to} (owner ${owner})`);
 }
 
 async function split(w: Wallet, from: string, owner: number, outs: string[]): Promise<void> {
-  const e = w.entry(from);
   const parts = outs.map((s) => { const [l, a] = s.split('='); return { label: l, amount: big(a) * UNIT }; });
-  const res = await w.bridge.split(w.token(from), w.owner(e.owner), parts.map((p) => ({ ownerKey: w.ownerPub(owner), amount: p.amount })));
-  res.forEach((t, i) => w.keep(parts[i].label, t, owner, { amount: parts[i].amount.toString() }));
+  await walletSplit(w, from, owner, parts);
   log(`  split ${from} into ${outs.join(' + ')}`);
 }
 
@@ -468,7 +311,7 @@ async function split(w: Wallet, from: string, owner: number, outs: string[]): Pr
  * the next is submitted: GROUPS distinct certificates whatever the length (one more when a group straddles a round), for the boundary probes.
  */
 async function chain(w: Wallet, from: string, to: string, n: number, rounds: boolean, groups?: number): Promise<{ transfers: number; certificates: number }> {
-  const agg = new LaneAggregator(lane.agg);
+  const agg = new GatewayAggregator(lane.agg);
   let token = w.token(from);
   let owner = w.entry(from).owner;
   const pending: { tx: Uint8Array; cd: Uint8Array }[] = [];
@@ -591,13 +434,15 @@ async function burn(w: Wallet, label: string, recipient?: string): Promise<void>
       return;
     }
   }
-  const token = w.token(label);
-  const plan = await w.bridge.planReturn(token, recipientOf(w, recipient), w.signer.address);
-  w.update(label, { returnId: hx(plan.returnId) });
-  const b = await retry('the burn', () => w.bridge.burn(plan.returnId, w.owner(e.owner)));
+  const b = await walletBurn(w, label, recipientOf(w, recipient), retrying('the burn'));
   const ev = evidenceOf(b.burned);
   mkdirSync(join(WORK, 'evidence'), { recursive: true });
   writeFileSync(evidenceFile(label), ev);
+  const plan = b.plan;
+  if (plan === null) {
+    log(`  ${label}: an interrupted burn resumed (${ev.length} evidence bytes)`);
+    return;
+  }
   out(`burn-${label}`, { a: plan.a, cObs: plan.cObs, pNow: plan.pNow, pMax: plan.pMax, marginSegments: plan.marginSegments, preflightGas: plan.gasLimit, eta: b.eta, amount: plan.amount,
     recipient: hx(plan.recipient), evidenceBytes: ev.length, warnings: plan.warnings });
   log(`  burned ${label} at index a = ${plan.a} (c observed ${plan.cObs}), ${ev.length} evidence bytes`);
@@ -704,11 +549,7 @@ async function redeem(w: Wallet, label: string, mode?: string): Promise<void> {
     log(`  ${label}: redeem with gas ${low} -> status ${sent.receipt.status} (gas used ${sent.receipt.gasUsed}); vault unchanged: ${(res.lowGas as Record<string, unknown>).unchanged}`);
   }
   const t0 = Date.now();
-  let r = await w.bridge.submitRedeem(id, w.signer);
-  for (let i = 0; r.state === 'pending' && i < 60; i++) {
-    await sleep(3000);
-    r = await w.bridge.reconcile(id);
-  }
+  const r = await walletRedeem(w, label);
   res.result = r.state;
   if (r.state === 'paid') {
     const receipt = await waitReceipt(r.txHash);
