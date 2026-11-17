@@ -669,7 +669,8 @@ Exactly three accounts at P; the verdict refuses, in this order: a handoff in fl
   scope and is Malformed even when its scope is already claimed); Conflict when its scope was already claimed by an earlier
   well-formed change of the list **whatever that change's verdict** (defensive: a bindable list never has one); then the kind's rules — stale expected hash Conflict;
   Invalid for design §6, including the **protocol proof-configuration predicate** (below) and a kind 6 or 8 change whose target shard
-  is not in `FoldInput.Installed`, **also when an earlier Accepted AddPartition of the same list adds it** (FD-29); Ceiling; BadPoP; PastCutoff, Earlier,
+  is not in `FoldInput.Installed`, **also when an earlier Accepted AddPartition of the same list adds it** (FD-29), and an AddPartition
+  whose decoded ShardID has a nonzero bit length (FD-30); Ceiling; BadPoP; PastCutoff, Earlier,
   Latched. Only an Accepted change updates the tentative state (installed PDRs, partition count, effective schedule) and enters the
   Duplicate set, so a change refused by any check, the proof predicate included, consumes nothing. The shard acknowledgement gate is
   evaluated at Freeze, not in the fold: verdicts are identical at intent, readiness and Freeze.
@@ -784,6 +785,20 @@ Each is the reading most consistent with the approved chain; each is also in `br
   first frozen fold accepted such a change against the tentative addition, which the acknowledgement gate then refused at Freeze
   (the new shard has no acknowledgement fact), blocking every output; it is a correction of the v1 fold, not compatible behaviour
   for an already running generation. Put the final parameters and members in the AddPartition itself.
+- **FD-30 A new partition is one unsplit shard** (correction, astra VT-06d/e F1 ruling, 2026-11-17). Kind 7 adds one PDR, so one
+  shard, and the only valid one-shard scheme is the unsplit shard: an AddPartition whose decoded `ShardID` has a nonzero bit length
+  (any non-empty bitstring, `ShardID.Length() != 0`; the serialized byte string of the empty id is not empty) is **Invalid**, judged
+  with the other kind 7 rules: after Duplicate, Malformed and the scope Conflict, before Ceiling and the PoPs, and without changing the
+  tentative state or the partition count. A canonically encoded non-empty id is not Malformed. Kind 8 keeps the shard id it names
+  exactly, so an update of one shard of an installed split partition is unaffected. The first frozen fold accepted such an addition,
+  which every root then failed to execute at the first block of the epoch (the sharding scheme refuses a single non-empty shard). The
+  complete root-side PDR rules are: canonical decoding (else Malformed); `IsValid` (version 1, nonzero network, partition and type,
+  no custom type, `TypeIDLen` a whole number of bytes at most 32 with 0 allowed, `UnitIDLen` a whole number of bytes in [64, 512],
+  `ShardID.Length() < UnitIDLen`, `T2Timeout ≥ 800 ms`, valid members with unique node ids); for kind 7 also epoch 0, `EpochStart` 0, the
+  root network, a partition neither installed nor reserved, not the EVM type, the empty shard, 1..256 validators in strictly increasing
+  node id order with unique valid 33-byte keys and stake 1, the proof predicate, the ceiling and one VR-context PoP per validator in
+  validator order; for kind 8 the same network, partition, shard and type, the same `TypeIDLen` and `UnitIDLen`, the validator list
+  unchanged in order (node id, key, stake) and still nonempty with unique keys, epoch + 1, `EpochStart` 0 and the proof predicate.
 ---
 
 ## 17. What this does not freeze

@@ -134,12 +134,14 @@ func CommittedChanges(c vrschema.CandidateV6) ([]Change, error) {
 var ErrInstall = errors.New("vradmit: committed root-side change cannot be installed")
 
 // Install is what the committed root-side changes of one handoff install at its committed activation round (design sections 6.1 and
-// 6.2), checked against the configurations installed when they activate (the shard configurations of the ordering round): an
-// AddPartition names a partition with no installed shard and not added earlier in the list, which is neither an EVM nor a reserved
-// partition, and its configuration is at epoch 0; a kind 6 or 8 change replaces exactly the installed configuration of a non-EVM shard
-// (the expected hash, epoch + 1), never one the same list adds (FD-29: the fold gives it Invalid). Each change installs its carried
-// configuration with EpochStart = activation, in list order; a shard is touched at most once. Every installed configuration passes the
-// proof-support fence (FD-27); available is the local build's support.
+// 6.2), checked against the configurations installed when they activate (the shard configurations of the ordering round):
+//   - an AddPartition names a partition with no installed shard and not added earlier in the list, which is neither an EVM nor a
+//     reserved partition, and its configuration is the unsplit shard (FD-30) at epoch 0;
+//   - a kind 6 or 8 change replaces exactly the installed configuration of a non-EVM shard (the expected hash, epoch + 1), never one the
+//     same list adds (FD-29: the fold gives it Invalid).
+//
+// Each change installs its carried configuration with EpochStart = activation, in list order; a shard is touched at most once. Every
+// installed configuration passes the proof-support fence (FD-27); available is the local build's support.
 //
 // The fold judged every committed change against the same installed state at the Freeze, so a refusal here is corrupt or missing
 // history and stops the root (ErrInstall); it is never a verdict.
@@ -169,8 +171,8 @@ func Install(changes []Change, installed map[types.PartitionShardID]*types.Parti
 					return nil, fmt.Errorf("%w: AddPartition %d: partition %d is installed", ErrInstall, c.ID, key.PartitionID)
 				}
 			}
-			if added[key.PartitionID] || c.Successor.Epoch != 0 || c.Successor.PartitionTypeID == evmassign.EVMPartitionTypeID {
-				return nil, fmt.Errorf("%w: AddPartition %d is not a new non-EVM configuration at epoch 0", ErrInstall, c.ID)
+			if added[key.PartitionID] || c.Successor.Epoch != 0 || c.Successor.PartitionTypeID == evmassign.EVMPartitionTypeID || c.Successor.ShardID.Length() != 0 {
+				return nil, fmt.Errorf("%w: AddPartition %d is not a new non-EVM unsplit configuration at epoch 0", ErrInstall, c.ID)
 			}
 			for _, r := range reserved {
 				if r == key.PartitionID {

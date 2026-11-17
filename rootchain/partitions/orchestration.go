@@ -421,9 +421,9 @@ func installDerived(tx *bolt.Tx, derived *bolt.Bucket, conf *types.PartitionDesc
 		return ErrDerivedConflict
 	}
 	if last == nil {
-		// only a new partition starts without a predecessor, at epoch 0: never another shard of an existing partition, never the EVM
-		// partition
-		if conf.Epoch != 0 || !newPartition(tx, conf.PartitionID) || conf.PartitionTypeID == evmassign.EVMPartitionTypeID {
+		// only a new partition starts without a predecessor, as one unsplit shard at epoch 0 (FD-30): never another shard of an existing
+		// partition, never the EVM partition
+		if conf.Epoch != 0 || conf.ShardID.Length() != 0 || !newPartition(tx, conf.PartitionID) || conf.PartitionTypeID == evmassign.EVMPartitionTypeID {
 			return ErrDerivedConflict
 		}
 		if err := conf.IsValid(); err != nil {

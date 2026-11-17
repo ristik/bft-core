@@ -500,7 +500,7 @@ func reconcileAssignmentHistory(db any, trust *trustbase.TrustBaseStore, orchest
 		if err != nil {
 			return fmt.Errorf("epoch %d: %w", epoch, err)
 		}
-		confs, provenance, err := storage.DeriveActivatedConfigsAt(bundle.Proof.Record, bundle.Body, bundle.Candidate, installed)
+		confs, provenance, err := storage.DeriveActivatedConfigsAt(bundle.Proof.Record, bundle.Body.Encode(), bundle.Candidate, installed)
 		if err != nil {
 			return fmt.Errorf("epoch %d: %w", epoch, err)
 		}

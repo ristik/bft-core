@@ -86,6 +86,10 @@ func TestVRChangeToolingBuildsPayloadsTheRootsAccept(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []uint8{vrschema.VerdictAccepted}, verdicts)
 
+	split := *pdr
+	split.ShardID, _ = types.ShardID{}.Split()
+	_, err = runVRChange(t, "add-partition", "--network", "5", "--change-id", "12", "--pdr", writeJSONTest(t, dir, "split.json", &split), "--pop", strings.Join(pops, ","))
+	require.ErrorContains(t, err, "Invalid", "a new partition is one unsplit shard (FD-30)")
 	_, err = runVRChange(t, "add-partition", "--network", "5", "--change-id", "13", "--pdr", pdrFile, "--pop", strings.Join(pops, ","))
 	require.ErrorContains(t, err, "BadPoP", "proofs for another change id (a lost queue race)")
 	_, err = runVRChange(t, "add-partition", "--network", "5", "--change-id", "12", "--pdr", pdrFile, "--pop", pops[0])

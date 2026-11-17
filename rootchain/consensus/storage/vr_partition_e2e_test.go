@@ -77,21 +77,7 @@ func newVXPartitions(t *testing.T, mutate func(*types.PartitionDescriptionRecord
 		T2Timeout: 3 * time.Second, Epoch: 0, PartitionParams: map[string]string{"proof_type": "none"},
 		Validators: []*types.NodeInfo{vxNodeInfo(t, 41, "new-1"), vxNodeInfo(t, 42, "new-2")}}
 
-	addRaw, err := types.Cbor.Marshal(f.added)
-	require.NoError(t, err)
-	var pops []evmassign.PoP
-	for i, seed := range []byte{41, 42} {
-		v := f.added.Validators[i]
-		msg, err := vrschema.ChangePoPMessage(vxNetwork, vrschema.ValidatorRegistry, 5, 10, f.added.ShardID.Bytes(), addRaw, v.NodeID)
-		require.NoError(t, err)
-		sig, err := vxMkKey(t, seed).signer.SignBytes(msg)
-		require.NoError(t, err)
-		pops = append(pops, evmassign.PoP{NodeID: v.NodeID, Key: v.SigKey, Signature: sig})
-	}
-	popRaw, err := types.Cbor.Marshal(pops)
-	require.NoError(t, err)
-	add, err := vrschema.EncodeChange(vrschema.KindAddPartition, addRaw, popRaw)
-	require.NoError(t, err)
+	add := f.addPayload(t)
 	replaced := f.agg
 	if stale {
 		moved := *f.agg
@@ -112,6 +98,26 @@ func newVXPartitions(t *testing.T, mutate func(*types.PartitionDescriptionRecord
 	f.build()
 	f.orch = f.realOrchestration(t)
 	return f
+}
+
+// addPayload is the AddPartition of f.added (change id 5) with both validators' VR-context PoPs.
+func (f *vxPartitions) addPayload(t *testing.T) []byte {
+	addRaw, err := types.Cbor.Marshal(f.added)
+	require.NoError(t, err)
+	var pops []evmassign.PoP
+	for i, seed := range []byte{41, 42} {
+		v := f.added.Validators[i]
+		msg, err := vrschema.ChangePoPMessage(vxNetwork, vrschema.ValidatorRegistry, 5, uint32(f.added.PartitionID), f.added.ShardID.Bytes(), addRaw, v.NodeID)
+		require.NoError(t, err)
+		sig, err := vxMkKey(t, seed).signer.SignBytes(msg)
+		require.NoError(t, err)
+		pops = append(pops, evmassign.PoP{NodeID: v.NodeID, Key: v.SigKey, Signature: sig})
+	}
+	popRaw, err := types.Cbor.Marshal(pops)
+	require.NoError(t, err)
+	add, err := vrschema.EncodeChange(vrschema.KindAddPartition, addRaw, popRaw)
+	require.NoError(t, err)
+	return add
 }
 
 // realOrchestration holds the genesis configurations of the EVM and aggregator shards and the EVM shard's genesis identities.
@@ -241,13 +247,13 @@ func TestVRAddAndUpdatePartitionThroughTheExecutor(t *testing.T) {
 	at, err := f.orch.ShardConfigs(commit.OrderedRound)
 	require.NoError(t, err)
 	bid := string(commit.NextBodyID)
-	derived, err := storage.DeriveActivatedConfigsForTest(commit, retained.body[bid], retained.v6[bid], at)
+	derived, _, err := storage.DeriveActivatedConfigsAt(commit, retained.body[bid], retained.v6[bid], at)
 	require.NoError(t, err)
 	require.Len(t, derived, 3)
 	for i, k := range []types.PartitionShardID{vxShard, vxAdded, vxAgg} {
 		require.Equal(t, confHash(t, confs[k]), confHash(t, derived[i]), "the reconciled configuration of %v", k)
 	}
-	_, err = storage.DeriveActivatedConfigsForTest(commit, retained.body[bid], retained.v6[bid], nil)
+	_, _, err = storage.DeriveActivatedConfigsAt(commit, retained.body[bid], retained.v6[bid], nil)
 	require.ErrorIs(t, err, storage.ErrAssignmentHistory)
 
 	first, err := f.activate(t, checkpoint, commit, retained)
@@ -480,4 +486,172 @@ func TestVRRequestActivationsOfPartitionChanges(t *testing.T) {
 	require.ErrorIs(t, err, storage.ErrAssignmentHistory, "the anchor must be the committed addition")
 	_, err = storage.NewPartitionRequestAnchor(f.agg, entry, record, v6, crypto.SHA256, 1)
 	require.ErrorIs(t, err, storage.ErrAssignmentHistory, "partition 9 is not added")
+}
+
+// FD-30 through the real executor: an AddPartition of a one-bit shard is Rejected(Invalid) by every root, so the boundary installs nothing
+// for it and the first block of the epoch executes (before the correction every root halted there: a single non-empty shard is not a
+// sharding scheme). A candidate that claims Accepted for it is refused at the Freeze.
+func TestVRAnAdditionOfASplitShardIsRejectedInvalid(t *testing.T) {
+	half, _ := types.ShardID{}.Split()
+	split := func(verdict uint8) *vxPartitions {
+		f := newVXPartitions(t, nil, false)
+		f.added.ShardID = half
+		f.extraChanges[0].Payload, f.extraChanges[0].Verdict = f.addPayload(t), uint64(verdict)
+		f.build()
+		f.orch = f.realOrchestration(t)
+		return f
+	}
+	f := split(vrschema.VerdictInvalid)
+	checkpoint, commit, retained := f.committed(t)
+	require.EqualValues(t, 0b010, vradmitStaged(t, checkpoint), "the addition (the second bound change) is rejected")
+	require.NoError(t, storage.InstallCommittedForTest(retained, f.orch, checkpoint, commit))
+	confs, err := f.orch.ShardConfigs(commit.ActivationRound)
+	require.NoError(t, err)
+	for k := range confs {
+		require.NotEqual(t, vxAdded.PartitionID, k.PartitionID, "nothing of partition 10 is installed")
+	}
+	require.EqualValues(t, 1, confs[vxAgg].Epoch, "the other changes install as usual")
+	first, err := f.activate(t, checkpoint, commit, retained)
+	require.NoError(t, err, "the first block of the epoch executes")
+	require.Nil(t, first.ShardState.States[vxAdded])
+
+	g := split(vrschema.VerdictAccepted)
+	gen := g.genesis()
+	prep := g.must(gen, g.block(gen, 11, 1_010, [][]byte{g.record("prepare", 0, 11).Bytes()}))
+	_, err = g.exec(prep, g.block(prep, 12, 1_020, [][]byte{g.record("freeze", 0, 12).Bytes(), g.freezeV5(0)}))
+	require.ErrorIs(t, err, vradmit.ErrVerdicts)
+}
+
+// The new partition's first certificate: the first block of the epoch creates the added shard from the installed configuration (the empty
+// initial input record, technical round 1, epoch 0) and certifies it; the UC verifies under the successor root trust base and the
+// installed configuration hash, and under no other configuration.
+func TestVRTheNewPartitionsFirstCertificate(t *testing.T) {
+	f := newVXPartitions(t, nil, false)
+	checkpoint, record, retained := f.committed(t)
+	require.NoError(t, storage.InstallCommittedForTest(retained, f.orch, checkpoint, record))
+	first, err := f.activate(t, checkpoint, record, retained)
+	require.NoError(t, err)
+	seal := &types.UnicitySeal{Version: 1, NetworkID: vxNetwork, Epoch: 2, RootChainRoundNumber: first.GetRound(), Timestamp: types.GenesisTime + first.BlockData.Timestamp,
+		Hash: bytes.Clone(first.RootHash), PreviousHash: bytes.Repeat([]byte{1}, 32)}
+	var nodes []*types.NodeInfo
+	for _, m := range f.q3.Members {
+		nodes = append(nodes, &types.NodeInfo{NodeID: m.NodeID, SigKey: m.ConsensusKey, Stake: m.Weight})
+		for _, key := range f.members {
+			if key.root == m.NodeID {
+				require.NoError(t, seal.Sign(m.NodeID, key.rk.signer))
+			}
+		}
+	}
+	tb, err := types.NewTrustBase(vxNetwork, nodes, types.WithEpoch(2), types.WithEpochStart(record.ActivationRound))
+	require.NoError(t, err)
+	require.NoError(t, seal.Verify(tb))
+	certs, err := first.GenerateCertificates(&rctypes.QuorumCert{LedgerCommitInfo: seal, Signatures: seal.Signatures})
+	require.NoError(t, err)
+	installed, err := f.orch.ShardConfigs(record.ActivationRound)
+	require.NoError(t, err)
+	found := false
+	for _, cr := range certs {
+		if cr.Partition != vxAdded.PartitionID {
+			continue
+		}
+		found = true
+		require.NoError(t, cr.UC.Verify(tb, crypto.SHA256, cr.Partition, cr.Shard, confHash(t, installed[vxAdded])))
+		require.EqualValues(t, record.ActivationRound, cr.UC.UnicitySeal.RootChainRoundNumber)
+		require.EqualValues(t, 2, cr.UC.UnicitySeal.Epoch)
+		require.EqualValues(t, 0, cr.UC.InputRecord.RoundNumber)
+		require.EqualValues(t, 0, cr.Technical.Epoch)
+		require.EqualValues(t, 1, cr.Technical.Round)
+		require.Empty(t, cr.UC.InputRecord.Hash, "the first UC certifies the empty initial state")
+		require.Error(t, cr.UC.Verify(tb, crypto.SHA256, cr.Partition, cr.Shard, bytes.Repeat([]byte{7}, 32)), "another first configuration is not authenticated")
+	}
+	require.True(t, found, "the new partition is certified in the first block of the epoch")
+}
+
+// The public reconciliation derivation keeps "no configurations known" (nil) apart from a known empty set: an addition-only VR handoff
+// derives the EVM assignment and the new partition from the ordering round's configurations, and from a known empty set too (an addition
+// needs no installed predecessor), while nil is refused, never answered with the EVM assignment alone.
+func TestVRReconciliationOfAnAdditionOnlyHandoff(t *testing.T) {
+	f := newVXPartitions(t, nil, false)
+	f.extraChanges = f.extraChanges[:1] // the AddPartition alone
+	f.build()
+	f.orch = f.realOrchestration(t)
+	_, commit, retained := f.committed(t)
+	id := string(commit.NextBodyID)
+	at, err := f.orch.ShardConfigs(commit.OrderedRound)
+	require.NoError(t, err)
+	derived, _, err := storage.DeriveActivatedConfigsAt(commit, retained.body[id], retained.v6[id], at)
+	require.NoError(t, err)
+	require.Len(t, derived, 2)
+	require.EqualValues(t, vxEVM, derived[0].PartitionID)
+	require.EqualValues(t, vxAdded.PartitionID, derived[1].PartitionID)
+	require.EqualValues(t, commit.ActivationRound, derived[1].EpochStart)
+	empty, _, err := storage.DeriveActivatedConfigsAt(commit, retained.body[id], retained.v6[id], map[types.PartitionShardID]*types.PartitionDescriptionRecord{})
+	require.NoError(t, err, "a known empty set")
+	require.Equal(t, confHash(t, derived[1]), confHash(t, empty[1]))
+	_, _, err = storage.DeriveActivatedConfigsAt(commit, retained.body[id], retained.v6[id], nil)
+	require.ErrorIs(t, err, storage.ErrAssignmentHistory, "nil is no configurations known")
+}
+
+// The retained layout is the same however a root came to hold the handoff: the admitting root (the Freeze v5 retention) and a root that
+// got it by delivery (RetainHandoffArtifacts with the candidate v6) both hold the v5 view under the candidate key and the v6 bytes behind
+// the committed-preimage accessor, so the request history and the activation evidence read identical bytes on both and derive the same
+// activations (#1185 review F5).
+func TestVRDeliveredAndAdmittingRootsRetainTheSameLayout(t *testing.T) {
+	f := newVXPartitions(t, nil, false)
+	g := f.genesis()
+	prep := f.must(g, f.block(g, 11, 1_010, [][]byte{f.record("prepare", 0, 11).Bytes()}))
+	freezeBlock := f.block(prep, 12, 1_020, [][]byte{f.record("freeze", 0, 12).Bytes(), f.freezeV5(0)})
+	fz := f.must(prep, freezeBlock)
+	_, record, retained := f.committed(t)
+	id := record.NextBodyID
+
+	newStore := func(name string) (*storage.BlockStore, storage.BoltDB) {
+		db, err := storage.NewBoltStorage(filepath.Join(t.TempDir(), name), storage.WithNoSync())
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = db.Close() })
+		s, err := storage.New(crypto.SHA256, db, storage.NewMockOrchestrationForTest(func(uint64) (map[types.PartitionShardID]*types.PartitionDescriptionRecord, error) {
+			return map[types.PartitionShardID]*types.PartitionDescriptionRecord{}, nil
+		}, nil), logger.New(t), storage.ProfileHandoff)
+		require.NoError(t, err)
+		return s, db
+	}
+	admitting, _ := newStore("admitting.db")
+	require.NoError(t, storage.RetainVRFreezeForTest(admitting, freezeBlock, fz))
+	delivered, _ := newStore("delivered.db")
+	require.NoError(t, delivered.RetainHandoffArtifacts(id, retained.body[string(id)], retained.v6[string(id)]))
+
+	for _, read := range []struct {
+		name string
+		get  func(*storage.BlockStore) ([]byte, error)
+		want []byte
+	}{
+		{"HandoffCandidate is the v5 view", func(s *storage.BlockStore) ([]byte, error) { return s.HandoffCandidate(id) }, retained.v5[string(id)]},
+		{"HandoffVRCandidate is the v6 bytes", func(s *storage.BlockStore) ([]byte, error) { return s.HandoffVRCandidate(id) }, retained.v6[string(id)]},
+		{"HandoffCommittedPreimage is the v6 bytes", func(s *storage.BlockStore) ([]byte, error) { return s.HandoffCommittedPreimage(id) }, retained.v6[string(id)]},
+		{"HandoffBody is the derived body", func(s *storage.BlockStore) ([]byte, error) { return s.HandoffBody(id) }, retained.body[string(id)]},
+	} {
+		a, err := read.get(admitting)
+		require.NoError(t, err)
+		d, err := read.get(delivered)
+		require.NoError(t, err)
+		require.Equal(t, read.want, a, "admitting root: %s", read.name)
+		require.Equal(t, read.want, d, "delivered root: %s", read.name)
+	}
+
+	// the request history's constructors over each root's committed preimage derive the same activations
+	entry := vxEntry{f, record}
+	previous, err := storage.NewRequestAnchor(f.agg, crypto.SHA256, record.Epoch, record.PredecessorBodyID, 1)
+	require.NoError(t, err)
+	var hashes [][]byte
+	for _, s := range []*storage.BlockStore{admitting, delivered} {
+		pre, err := s.HandoffCommittedPreimage(id)
+		require.NoError(t, err)
+		evm, err := storage.ActivationFromVerifiedV3(entry, record, pre, crypto.SHA256, 1)
+		require.NoError(t, err)
+		agg, ok, err := storage.RegistryActivationFromVerifiedV3(previous, entry, record, pre, crypto.SHA256, 1)
+		require.NoError(t, err)
+		require.True(t, ok)
+		hashes = append(hashes, append(evm.PDRHash(), agg.PDRHash()...))
+	}
+	require.Equal(t, hashes[0], hashes[1])
 }
