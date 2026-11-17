@@ -437,6 +437,8 @@ func (x *ConsensusManager) resetVolatile() {
 	x.v3Planned.Store(nil)
 	x.q3Staged.Store(nil)
 	x.q3StagedEVM.Store(nil)
+	// the old epoch's leaders lose the proposal ingress priority; the successor's first round publishes its own
+	x.proposers.Store(nil)
 	// the residence rule restarts with the context: the successor re-learns its views, as a restart does
 	if x.deferred != nil && x.deferred.timer != nil {
 		x.deferred.timer.Stop()
