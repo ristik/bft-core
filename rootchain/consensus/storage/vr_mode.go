@@ -10,8 +10,8 @@ import (
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/internal/weightvalidation"
 	"github.com/unicitynetwork/bft-core/q3format"
-	"github.com/unicitynetwork/bft-core/rootrecords"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
+	"github.com/unicitynetwork/bft-core/rootrecords"
 	"github.com/unicitynetwork/bft-core/vradmit"
 	"github.com/unicitynetwork/bft-core/vrschema"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -218,10 +218,10 @@ func (v *vrStep) prepare(epoch, attempt, ucTime uint64) error {
 // no old-set endorsement: the incumbents' agreement is the block's own certificate over a Freeze every voter re-derives (section 5.3.5).
 type vrFreezeAuthority struct {
 	handoffAuthority
-	vr      *vrStep
-	svc     *VRServices
-	query   VRIntentQuery
-	parent  []byte // the frozen parent the Prepare bound
+	vr     *vrStep
+	svc    *VRServices
+	query  VRIntentQuery
+	parent []byte // the frozen parent the Prepare bound
 }
 
 // vrBodyLinker is the predecessor hash a successor body of the epoch carries (v1HandoffAuthority with V3 rules implements it).
