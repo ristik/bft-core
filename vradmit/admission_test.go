@@ -1,0 +1,116 @@
+package vradmit
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-core/vrschema"
+)
+
+func TestAdmissionAcceptsThePublishedOutput(t *testing.T) {
+	w := newWorld(t)
+	v, err := VerifyRegistryOutput(w.admission())
+	require.NoError(t, err)
+	require.Equal(t, []uint8{vrschema.VerdictAccepted}, v.Verdicts)
+	require.Equal(t, w.cand.Assignment, v.Successor)
+}
+
+// TestAdmissionRefusesOnePerItem is the VT-05a acceptance row "admission refusals, one per section 5.2 item": each case breaks exactly
+// one item of an otherwise valid admission and is refused with that item's error.
+func TestAdmissionRefusesOnePerItem(t *testing.T) {
+	cases := []struct {
+		name   string
+		item   error
+		break_ func(w *world, a *Admission)
+	}{
+		{"1 VR network word", ErrNetwork, func(w *world, a *Admission) { a.State.Network = vrschema.Keccak([]byte("other")) }},
+		{"1 root network", ErrNetwork, func(w *world, a *Admission) { a.Deployment.RootNetwork = 6 }},
+		{"2 R not the open output", ErrNotOpen, func(w *world, a *Admission) { a.State.OpenOutput = vrschema.Keccak([]byte("other")) }},
+		{"2 R not Published", ErrNotOpen, func(w *world, a *Admission) { a.State.Output.State = vrschema.OutReserved }},
+		{"2 predecessor is not the root's acknowledged result", ErrNotOpen, func(w *world, a *Admission) { a.Acknowledged = vrschema.Keccak([]byte("x")) }},
+		{"2 a pending pair", ErrNotOpen, func(w *world, a *Admission) { a.State.PendingPair = vrschema.Keccak([]byte("pair")) }},
+		{"3 a member's payee", ErrCommit, func(w *world, a *Admission) {
+			ids := append([]evmassignIdentity(nil), a.Candidate.Identities...)
+			ids[0].OperatorPayee = append([]byte{0x77}, ids[0].OperatorPayee[1:]...)
+			a.Candidate.Identities = ids
+		}},
+		{"3 a registry change not the bound one", ErrCommit, func(w *world, a *Admission) {
+			p, _ := vrschema.EncodeChange(vrschema.KindCommitteeLimits, uint64(4), uint64(4), uint64(7))
+			a.Candidate.RegistryChanges = []vrschema.RegistryChange{{ID: 4, Kind: uint64(vrschema.KindCommitteeLimits), Payload: p}}
+		}},
+		{"3 K is not the acknowledged committee", ErrCommit, func(w *world, a *Admission) { a.Lifecycle.Incumbent = w.j }},
+		{"3 the authorization names another snapshot", ErrCommit, func(w *world, a *Admission) {
+			auth := *a.Candidate.Authorization
+			auth.SnapshotDigest = make([]byte, 32)
+			a.Candidate.Authorization = &auth
+		}},
+		{"4 limits not reached and not closer", ErrLimits, func(w *world, a *Admission) {
+			a.State.Limits = vrschema.CommitteeLimits{NMin: 5, NTarget: 5, NMax: 7}
+		}},
+		{"5 a missing PoP", ErrH3, func(w *world, a *Admission) { a.Candidate.PoPs = a.Candidate.PoPs[1:] }},
+		{"5 continuity", ErrH3, func(w *world, a *Admission) { a.Lifecycle.Policy.MaxM = 0; a.Lifecycle.Policy.MaxDistNum = 0 }},
+		{"6 verdict", ErrVerdicts, func(w *world, a *Admission) {
+			a.Candidate.RegistryChanges = []vrschema.RegistryChange{a.Candidate.RegistryChanges[0]}
+			a.Candidate.RegistryChanges[0].Verdict = uint64(vrschema.VerdictConflict)
+		}},
+		{"6 EVM shard unacknowledged at the Freeze block", ErrAckGate, func(w *world, a *Admission) { a.EVMAcked = false }},
+		{"7 activation time gate", ErrActivation, func(w *world, a *Admission) {
+			a.Fold.Schedule = []vrschema.Activation{{RuleID: vrschema.RuleID("r"), RootEpoch: 3, NotBeforeUcTime: 5000, State: vrschema.ActActive, ChangeID: 1}}
+		}},
+		{"7 rule support", ErrActivation, func(w *world, a *Admission) {
+			a.Fold.Schedule = []vrschema.Activation{{RuleID: vrschema.RuleID("r"), RootEpoch: 3, State: vrschema.ActActive, ChangeID: 1}}
+		}},
+		{"8 Inconsistent", ErrInconsistent, func(w *world, a *Admission) { a.State.Status.Health = vrschema.HealthInconsistent }},
+		{"9 a readiness missing", ErrCertificate, func(w *world, a *Admission) {
+			a.Certificate.Certificate.Readiness = a.Certificate.Certificate.Readiness[1:]
+		}},
+		{"9 an assembly of an uncommitted view", ErrCertificate, func(w *world, a *Admission) {
+			a.Certificate.Certificate = w.certificate(1, nil)
+		}},
+		{"resolved", ErrResolved, func(w *world, a *Admission) { a.Resolved = true }},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			w := newWorld(t)
+			a := w.admission()
+			c.break_(w, &a)
+			_, err := VerifyRegistryOutput(a)
+			require.ErrorIs(t, err, c.item)
+			for _, other := range []error{ErrNetwork, ErrNotOpen, ErrCommit, ErrLimits, ErrH3, ErrVerdicts, ErrAckGate, ErrActivation, ErrInconsistent, ErrCertificate, ErrResolved} {
+				if other != c.item {
+					require.NotErrorIs(t, err, other, "exactly one item is refused")
+				}
+			}
+		})
+	}
+}
+
+// TestNativeOutputsAreExemptFromLimits: CommitteeLimits judge module outputs only; |S| <= 16 holds for every output.
+func TestNativeOutputsAreExemptFromLimits(t *testing.T) {
+	w := newWorld(t)
+	w.state.Limits = vrschema.CommitteeLimits{NMin: 5, NTarget: 5, NMax: 7}
+	w.state.Output.Native, w.state.Output.ModuleTag = true, vrschema.RegistryNative
+	w.commit()
+	_, err := VerifyRegistryOutput(w.admission())
+	require.NoError(t, err)
+}
+
+func TestLimitsSatisfied(t *testing.T) {
+	l := vrschema.CommitteeLimits{NMin: 5, NTarget: 6, NMax: 7}
+	require.True(t, LimitsSatisfied(l, 4, 5))
+	require.True(t, LimitsSatisfied(l, 3, 4), "strictly toward the range")
+	require.False(t, LimitsSatisfied(l, 4, 4))
+	require.False(t, LimitsSatisfied(l, 4, 3))
+	require.True(t, LimitsSatisfied(l, 9, 8))
+	require.False(t, LimitsSatisfied(l, 4, 9), "overshoot farther than before")
+}
+
+// TestServedBindingsAreHashVerified: captured-binding preimages from the unproven write-once view count only when they hash to the
+// proven membersDigest (FD-16).
+func TestServedBindingsAreHashVerified(t *testing.T) {
+	w := newWorld(t)
+	require.NoError(t, VerifyMembers(w.j, w.state.Output.MembersDigest))
+	bad := append([]evmassignIdentity(nil), w.j...)
+	bad[1].EVMNodeID = "z"
+	require.ErrorIs(t, VerifyMembers(bad, w.state.Output.MembersDigest), ErrCommit)
+}

@@ -236,3 +236,30 @@ func (p *Published) WitnessFor(t testing.TB, result [32]byte) ([]byte, error) {
 	t.Helper()
 	return evmstate.BuildPrimaryWitness(context.Background(), p.world, p.Pins, result)
 }
+
+// Contract is one account of a World: its address, code hash and storage words.
+type Contract struct {
+	Addr     [20]byte
+	CodeHash [32]byte
+	Storage  map[[32]byte][32]byte
+}
+
+// World is an in-memory EVM state over real tries: an evmstate.ProofSource with a state root.
+type World struct{ w *world }
+
+// NewWorld builds the state of the given contracts plus unrelated accounts (so the state trie has real branches).
+func NewWorld(t testing.TB, contracts ...Contract) *World {
+	cs := make([]contract, len(contracts))
+	for i, c := range contracts {
+		cs[i] = contract{addr: c.Addr, codeHash: c.CodeHash, storage: c.Storage}
+	}
+	return &World{w: newWorld(t, cs...)}
+}
+
+// Root is the state root.
+func (w *World) Root() [32]byte { return w.w.root }
+
+// Proof implements evmstate.ProofSource.
+func (w *World) Proof(ctx context.Context, addr [20]byte, slots [][32]byte) ([][]byte, []evmstate.SlotProof, error) {
+	return w.w.Proof(ctx, addr, slots)
+}
