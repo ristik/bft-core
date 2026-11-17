@@ -237,6 +237,17 @@ func VerifyRegistryOutput(a Admission) (Verified, error) {
 	if n < 1 || n > vrschema.MaxCommittee || (!o.Native && !LimitsSatisfied(s.Limits, len(auth.K), n)) {
 		return out, fmt.Errorf("%w: %d members under %+v from %d", ErrLimits, n, s.Limits, len(auth.K))
 	}
+	// (5) a supersession carries no root-side change (design section 6.3): the superseded H's changes are already installed and never
+	// replayed, and an Accepted one here would have to be installed after the Commit. The carried verdicts are checked against the fold
+	// in item 6, so judging them here refuses exactly what that admission would install.
+	if c.Supersedes != nil {
+		for _, rc := range c.RegistryChanges {
+			if rc.Verdict == uint64(vrschema.VerdictAccepted) && (uint8(rc.Kind) == vrschema.KindReplaceAggregator || uint8(rc.Kind) == vrschema.KindAddPartition ||
+				uint8(rc.Kind) == vrschema.KindUpdatePartition) {
+				return out, fmt.Errorf("%w: a supersession carries Accepted root-side change %d", ErrH3, rc.ID)
+			}
+		}
+	}
 	// (5) the H3/#85 checks, unchanged: coupling, identities, quantization, continuity O->J and J->K, span and supersession, the
 	// root-context PoP of every successor key (readiness of every member is item 9)
 	v5 := V5Of(c)

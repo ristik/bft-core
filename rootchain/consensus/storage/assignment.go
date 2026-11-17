@@ -370,13 +370,21 @@ func RequestContinuationFromVerifiedV3(previous *RequestActivation, entry Verifi
 		trHash: bytes.Clone(previous.trHash), version: previous.version, continuation: true, predecessorRootBody: bytes.Clone(previous.rootBody)}, nil
 }
 
-// DeriveActivatedConfigs is DeriveActivatedPDR plus the aggregator validator replacements the same candidate commits: it
-// returns the EVM configuration first, then one activated configuration per change (sorted as committed), all verified
-// against the record, body and preimage, with the shared provenance. The state-dependent half (each change replaces exactly the
-// installed configuration of an existing non-EVM shard) is checked by the callers that hold the installed configurations.
-func DeriveActivatedConfigs(record evmroot.OrderedHandoffRecord, body evmroot.TrustBaseBodyV2, preimage, frozenParent []byte) ([]*types.PartitionDescriptionRecord, []byte, []evmassign.DecodedChange, error) {
+// DeriveActivatedConfigsAt is DeriveActivatedPDR plus the configurations the same candidate installs with it: one per P85 aggregator
+// validator replacement (sorted as committed) and, for a VR handoff, one per shard its Accepted root-side changes touch, installed against
+// installed, the configurations in effect at the record's ordering round (the startup reconciliation of archived handoffs derives every
+// committed epoch again, so it passes the orchestration's configurations of each epoch's ordering round). The EVM configuration is first;
+// all are verified against the record, body and preimage, with the shared provenance. The state-dependent half of a P85 replacement (it
+// replaces exactly the installed configuration of an existing non-EVM shard) is checked by the callers that hold the shard states.
+func DeriveActivatedConfigsAt(record evmroot.OrderedHandoffRecord, body evmroot.TrustBaseBodyV2, preimage []byte,
+	installed map[types.PartitionShardID]*types.PartitionDescriptionRecord) ([]*types.PartitionDescriptionRecord, []byte, error) {
 	id := body.Identity()
-	return deriveActivatedConfigs(record, retainedBody{id: id[:], epoch: body.Epoch, earliest: body.EarliestActivation, changeRecordHash: body.ChangeRecordHash, mode: weightvalidation.ModeUnit}, preimage, nil, nil)
+	if installed == nil {
+		installed = map[types.PartitionShardID]*types.PartitionDescriptionRecord{}
+	}
+	confs, provenance, _, err := deriveActivatedConfigs(record, retainedBody{id: id[:], epoch: body.Epoch, earliest: body.EarliestActivation,
+		changeRecordHash: body.ChangeRecordHash, mode: weightvalidation.ModeUnit}, preimage, nil, installed)
+	return confs, provenance, err
 }
 
 // retainedBody is what the derivation needs of a retained successor body of either version: its identity, epoch, earliest activation and

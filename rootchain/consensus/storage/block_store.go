@@ -863,6 +863,23 @@ func (x *BlockStore) HandoffCandidate(id []byte) ([]byte, error) {
 	return archive.HandoffCandidate(id)
 }
 
+// HandoffVRCandidate returns the retained candidate v6 of a successor body (a VR handoff), or nil when none is retained. The block store
+// is the candidate source of its own executor, so the activation boundary reads a VR handoff's root-side changes from it.
+func (x *BlockStore) HandoffVRCandidate(id []byte) ([]byte, error) {
+	archive, ok := x.storage.(vrCandidateSource)
+	if !ok {
+		return nil, nil
+	}
+	return archive.HandoffVRCandidate(id)
+}
+
+// HandoffCommittedPreimage is the committed candidate of a successor body in the form its body binds: the candidate v6 of a VR handoff,
+// else the evmassign preimage, else nil (a root-only handoff). A reader that checks the candidate digest against the body takes this
+// (and ResolveCommittedCandidate for the digest); a reader that decodes the evmassign candidate takes HandoffCandidate, the v5 view.
+func (x *BlockStore) HandoffCommittedPreimage(id []byte) ([]byte, error) {
+	return retainedCommittedPreimage(x, id)
+}
+
 // CommittedHandoff is the committed root's committed handoff record and the root's round (BlockTree.CommittedHandoff); ok is false
 // outside the handoff profile.
 func (x *BlockStore) CommittedHandoff() (evmroot.OrderedHandoffRecord, uint64, bool) {

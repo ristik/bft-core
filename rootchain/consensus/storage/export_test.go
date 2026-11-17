@@ -126,3 +126,20 @@ func (a testArtifacts) HandoffVRCandidate(id []byte) ([]byte, error) {
 func ExpectedCommitTRForTest(candidates interface{ HandoffCandidate([]byte) ([]byte, error) }, record evmroot.OrderedHandoffRecord, si *ShardInfo) ([]byte, error) {
 	return expectedCommitSuccessorTR(candidates, record, si, crypto.SHA256)
 }
+
+// DerivedChangeShardsForTest names the existing shards the committed candidate of record replaces the configuration of, read from the
+// candidate source the executor is given.
+func DerivedChangeShardsForTest(candidates interface{ HandoffCandidate([]byte) ([]byte, error) }, record evmroot.OrderedHandoffRecord) (map[types.PartitionShardID]struct{}, error) {
+	return derivedChangeShards(candidates, record)
+}
+
+// DeriveActivatedConfigsForTest is deriveActivatedConfigs over a retained body of either version, with the configurations installed at
+// the ordering round (nil: a caller that has none).
+func DeriveActivatedConfigsForTest(record evmroot.OrderedHandoffRecord, rawBody, preimage []byte, installed map[types.PartitionShardID]*types.PartitionDescriptionRecord) ([]*types.PartitionDescriptionRecord, error) {
+	body, err := decodeRetainedBody(rawBody)
+	if err != nil {
+		return nil, err
+	}
+	confs, _, _, err := deriveActivatedConfigs(record, body, preimage, nil, installed)
+	return confs, err
+}

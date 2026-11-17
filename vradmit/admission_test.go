@@ -49,6 +49,15 @@ func TestAdmissionRefusesOnePerItem(t *testing.T) {
 			a.State.Limits = vrschema.CommitteeLimits{NMin: 5, NTarget: 5, NMax: 7}
 		}},
 		{"5 a missing PoP", ErrH3, func(w *world, a *Admission) { a.Candidate.PoPs = a.Candidate.PoPs[1:] }},
+		{"5 a supersession carrying an Accepted root-side change", ErrH3, func(w *world, a *Admission) {
+			add, _ := vrschema.EncodeChange(vrschema.KindAddPartition, []byte{1}, []byte{0x80})
+			a.Candidate.Supersedes = &evmassign.Supersession{}
+			a.Candidate.RegistryChanges = append(append([]vrschema.RegistryChange(nil), a.Candidate.RegistryChanges...),
+				vrschema.RegistryChange{ID: 5, Kind: uint64(vrschema.KindAddPartition), Payload: add})
+			w.cand = a.Candidate
+			w.commit()
+			a.State.Output = w.state.Output
+		}},
 		{"5 continuity", ErrH3, func(w *world, a *Admission) { a.Lifecycle.Policy.MaxM = 0; a.Lifecycle.Policy.MaxDistNum = 0 }},
 		{"6 verdict", ErrVerdicts, func(w *world, a *Admission) {
 			a.Candidate.RegistryChanges = []vrschema.RegistryChange{a.Candidate.RegistryChanges[0]}

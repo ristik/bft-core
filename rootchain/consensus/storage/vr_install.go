@@ -50,6 +50,17 @@ func resolveCommittedCandidate(preimage []byte) (committedCandidate, error) {
 	return committedCandidate{view: view, digest: sha256.Sum256(preimage), registry: registry, vr: true}, nil
 }
 
+// ResolveCommittedCandidate is the one rule for a committed candidate preimage of either generation (HandoffCommittedPreimage): view is
+// the evmassign encoding its readers decode (the v5 view of a candidate v6, else the preimage itself) and digest the SHA-256 the
+// successor body's change-record hash binds (of the v6 bytes on a VR handoff).
+func ResolveCommittedCandidate(preimage []byte) (view []byte, digest [32]byte, err error) {
+	cc, err := resolveCommittedCandidate(preimage)
+	if err != nil {
+		return nil, [32]byte{}, err
+	}
+	return cc.view, cc.digest, nil
+}
+
 // decodeCommittedCandidate is the evmassign candidate a committed preimage of either generation describes (its v5 view on a VR chain).
 func decodeCommittedCandidate(preimage []byte) (evmassign.Candidate, error) {
 	cc, err := resolveCommittedCandidate(preimage)
@@ -59,10 +70,13 @@ func decodeCommittedCandidate(preimage []byte) (evmassign.Candidate, error) {
 	return evmassign.DecodeCandidate(cc.view)
 }
 
-// vrCandidateSource retains the canonical candidate v6 of an admitted Freeze v5 by its successor body id (BoltDB, the frontier store).
+// vrCandidateSource retains the canonical candidate v6 of an admitted Freeze v5 by its successor body id (BoltDB, the frontier store,
+// and the block store, which is its own executor's candidate source).
 type vrCandidateSource interface {
 	HandoffVRCandidate(bodyID []byte) ([]byte, error)
 }
+
+var _ vrCandidateSource = (*BlockStore)(nil)
 
 // retainedCommittedPreimage is the committed candidate retained for a successor body: the candidate v6 when a Freeze v5 retained one (the
 // v5 view retained beside it must be exactly its view), else the evmassign preimage, else nil (a root-only handoff).

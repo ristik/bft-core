@@ -148,15 +148,42 @@ func (f *vxPartitions) committed(t *testing.T) (*storage.ExecutedBlock, evmroot.
 	return suffix, commit, retained
 }
 
-// activate executes the first block of the new epoch on the epoch anchor over the old checkpoint, as InstallEpochAnchor installs it.
+// rootStore is a root's block store holding the retained artifacts as a root that delivered them (RetainHandoffArtifacts) holds them: the
+// candidate source the production executor reads (the block store itself), not the test's map.
+func (f *vxPartitions) rootStore(t *testing.T, record evmroot.OrderedHandoffRecord, retained vxRetained) (*storage.BlockStore, storage.BoltDB) {
+	db, err := storage.NewBoltStorage(filepath.Join(t.TempDir(), "root.db"), storage.WithNoSync())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	store, err := storage.New(crypto.SHA256, db, storage.NewMockOrchestrationForTest(func(uint64) (map[types.PartitionShardID]*types.PartitionDescriptionRecord, error) {
+		return map[types.PartitionShardID]*types.PartitionDescriptionRecord{}, nil
+	}, nil), logger.New(t), storage.ProfileHandoff)
+	require.NoError(t, err)
+	id := record.NextBodyID
+	require.NoError(t, store.RetainHandoffArtifacts(id, retained.body[string(id)], retained.v6[string(id)]))
+	return store, db
+}
+
+// activate executes the first block of the new epoch on the epoch anchor over the old checkpoint, as InstallEpochAnchor installs it, with
+// the root's block store as the executor's candidate source (as in production).
 func (f *vxPartitions) activate(t *testing.T, checkpoint *storage.ExecutedBlock, record evmroot.OrderedHandoffRecord, retained vxRetained) (*storage.ExecutedBlock, error) {
+	store, _ := f.rootStore(t, record, retained)
+	shards, err := storage.DerivedChangeShardsForTest(store, record)
+	require.NoError(t, err)
+	if len(retained.v6) != 0 && f.acceptedUpdate() {
+		require.Contains(t, shards, vxAgg, "the block store serves the candidate v6: the boundary takes the VR branch and its strict check")
+	}
 	a := &rctypes.EpochAnchor{GenesisID: bytes.Repeat([]byte{0x6e}, 32), Epoch: 2, Slot: record.ActivationRound - 1, StateRoot: bytes.Clone(checkpoint.RootHash)}
 	anchorRoot := *checkpoint
 	anchorRoot.BlockData = &rctypes.BlockData{Version: rctypes.VersionHandoff, Epoch: 2, Round: a.Slot, Timestamp: checkpoint.BlockData.Timestamp,
 		Payload: &rctypes.Payload{Version: rctypes.VersionHandoff}, Anchor: a}
 	first := &rctypes.BlockData{Version: rctypes.VersionHandoff, Epoch: 2, Round: record.ActivationRound, Timestamp: 2_000,
 		Payload: &rctypes.Payload{Version: rctypes.VersionHandoff, PosControls: []rctypes.PosControl{f.closure(t, record)}}, Anchor: a}
-	return storage.ExtendForTest(&anchorRoot, first, f.orch, f.auth, retained, f.svc)
+	return storage.ExtendForTest(&anchorRoot, first, f.orch, f.auth, store, f.svc)
+}
+
+// acceptedUpdate reports whether the fixture's UpdatePartition is Accepted.
+func (f *vxPartitions) acceptedUpdate() bool {
+	return f.extraChanges[1].Verdict == uint64(vrschema.VerdictAccepted)
 }
 
 // closure is the CloseLiability of the old epoch the first block of the new one must carry (the closure duty is always on in VR mode),
@@ -209,6 +236,19 @@ func TestVRAddAndUpdatePartitionThroughTheExecutor(t *testing.T) {
 	require.NotContains(t, earlier, vxAdded, "absent before the activation round")
 	require.EqualValues(t, 0, earlier[vxAgg].Epoch, "the old configuration stays in effect before the activation round")
 	require.NoError(t, storage.InstallCommittedForTest(retained, f.orch, checkpoint, commit), "the install is idempotent (startup repair)")
+	// the startup reconciliation of an archived handoff derives the same configurations from the configurations of its ordering round,
+	// and a caller without them is refused, never given the EVM assignment alone
+	at, err := f.orch.ShardConfigs(commit.OrderedRound)
+	require.NoError(t, err)
+	bid := string(commit.NextBodyID)
+	derived, err := storage.DeriveActivatedConfigsForTest(commit, retained.body[bid], retained.v6[bid], at)
+	require.NoError(t, err)
+	require.Len(t, derived, 3)
+	for i, k := range []types.PartitionShardID{vxShard, vxAdded, vxAgg} {
+		require.Equal(t, confHash(t, confs[k]), confHash(t, derived[i]), "the reconciled configuration of %v", k)
+	}
+	_, err = storage.DeriveActivatedConfigsForTest(commit, retained.body[bid], retained.v6[bid], nil)
+	require.ErrorIs(t, err, storage.ErrAssignmentHistory)
 
 	first, err := f.activate(t, checkpoint, commit, retained)
 	require.NoError(t, err)
@@ -243,15 +283,8 @@ func TestVRAddAndUpdatePartitionThroughTheExecutor(t *testing.T) {
 
 	// recovery: a root that never ordered the Freeze retains the delivered body and candidate v6 (InstallVerifiedEpoch's path) as the
 	// Freeze would have, and installs the identical configurations from its own store
-	db, err := storage.NewBoltStorage(filepath.Join(t.TempDir(), "root.db"), storage.WithNoSync())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
-	store, err := storage.New(crypto.SHA256, db, storage.NewMockOrchestrationForTest(func(uint64) (map[types.PartitionShardID]*types.PartitionDescriptionRecord, error) {
-		return map[types.PartitionShardID]*types.PartitionDescriptionRecord{}, nil
-	}, nil), logger.New(t), storage.ProfileHandoff)
-	require.NoError(t, err)
+	_, db := f.rootStore(t, commit, retained)
 	id := commit.NextBodyID
-	require.NoError(t, store.RetainHandoffArtifacts(id, retained.body[string(id)], retained.v6[string(id)]))
 	v5, err := db.HandoffCandidate(id)
 	require.NoError(t, err)
 	require.Equal(t, retained.v5[string(id)], v5, "the v5 view under the candidate key")

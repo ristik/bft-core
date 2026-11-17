@@ -444,7 +444,7 @@ func TestDerivedFirstConfigurationOfANewPartition(t *testing.T) {
 		require.NoError(t, o.InstallDerivedShardConfigs(batch, provenance), "idempotent")
 		require.ErrorIs(t, o.InitGenesisShardConfigs(evm, added(12, 1)), ErrDerivedOnly, "the genesis set stays fixed")
 	})
-	t.Run("refused: an existing partition, a new shard of it, the EVM type, a reserved partition", func(t *testing.T) {
+	t.Run("refused: an existing partition, a new shard of it, the EVM type, a reserved partition, a later epoch", func(t *testing.T) {
 		o, _, _ := seeded(t)
 		again := added(9, 7)
 		require.ErrorIs(t, o.InstallDerivedShardConfigs([]*types.PartitionDescriptionRecord{again}, provenance), ErrDerivedConflict, "partition 9 exists")
@@ -456,6 +456,9 @@ func TestDerivedFirstConfigurationOfANewPartition(t *testing.T) {
 		require.ErrorIs(t, o.InstallDerivedShardConfigs([]*types.PartitionDescriptionRecord{evmTyped}, provenance), ErrDerivedConflict)
 		require.ErrorIs(t, o.InstallDerivedShardConfigs([]*types.PartitionDescriptionRecord{added(0xFFFFFFFE, 7)}, provenance), ErrDerivedConflict)
 		require.ErrorIs(t, o.InstallDerivedShardConfigs([]*types.PartitionDescriptionRecord{added(10, 0)}, provenance), ErrDerivedConflict, "no activation round")
+		later := added(10, 7)
+		later.Epoch = 1
+		require.ErrorIs(t, o.InstallDerivedShardConfigs([]*types.PartitionDescriptionRecord{later}, provenance), ErrDerivedConflict, "a new partition starts at epoch 0")
 		confs, err := o.ShardConfigs(100)
 		require.NoError(t, err)
 		require.Len(t, confs, 2, "nothing was written")

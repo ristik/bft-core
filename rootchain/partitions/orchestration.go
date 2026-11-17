@@ -357,8 +357,8 @@ func (o *Orchestration) InstallDerivedShardConfig(conf *types.PartitionDescripti
 // InstallDerivedShardConfigs installs every configuration one committed handoff derives (the EVM assignment, any aggregator
 // validator replacements and, on a validator-registry chain, the configurations of its AddPartition and UpdatePartition changes) in a
 // single transaction: a crash leaves all of them or none, never a partial batch. A configuration extends its shard's last one, except the
-// first configuration of a partition a committed AddPartition adds (VT-06d): a non-EVM, non-reserved partition with no stored shard,
-// starting at the activation round.
+// first configuration of a partition a committed AddPartition adds (VT-06d): an epoch-0 configuration of a non-EVM, non-reserved
+// partition with no stored shard, starting at the activation round.
 func (o *Orchestration) InstallDerivedShardConfigs(confs []*types.PartitionDescriptionRecord, provenance []byte) error {
 	if len(confs) == 0 {
 		return ErrDerivedConflict
@@ -421,8 +421,9 @@ func installDerived(tx *bolt.Tx, derived *bolt.Bucket, conf *types.PartitionDesc
 		return ErrDerivedConflict
 	}
 	if last == nil {
-		// only a new partition starts without a predecessor: never another shard of an existing partition, never the EVM partition
-		if !newPartition(tx, conf.PartitionID) || conf.PartitionTypeID == evmassign.EVMPartitionTypeID {
+		// only a new partition starts without a predecessor, at epoch 0: never another shard of an existing partition, never the EVM
+		// partition
+		if conf.Epoch != 0 || !newPartition(tx, conf.PartitionID) || conf.PartitionTypeID == evmassign.EVMPartitionTypeID {
 			return ErrDerivedConflict
 		}
 		if err := conf.IsValid(); err != nil {
