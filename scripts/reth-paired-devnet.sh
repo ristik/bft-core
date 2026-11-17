@@ -71,6 +71,19 @@ if [ "${M2_PROFILE2:-0}" = 1 ] && [ "$validators" -ne 4 ]; then
   echo "profile-2 handoff lane requires four validators" >&2
   exit 2
 fi
+# VR_LANE=1 (VT-14, scripts/lib/vr-lib.sh): a validator-registry generation. Its handoffs are VT-05b's, so every lane whose steps would be
+# skipped (or whose genesis path bypasses the VR plan and verify) is refused here, before setup wipes test-nodes; so are the restart and
+# restore probes the lane has not been run with.
+if [ "${VR_LANE:-0}" = 1 ]; then
+  [ "${Q3_B1:-0}" = 1 ] && [ "${M2_PROFILE2:-0}" = 1 ] || { echo "VR_LANE=1 requires Q3_B1=1 and M2_PROFILE2=1" >&2; exit 2; }
+  for vrConflict in P85_LANE P85_SHADOW Q4_LIVE_LANE H3_ASSIGNMENT_LANE Q3_WEIGHT_LANE H6_ABORT_LANE F8_MIXED_LANE ANYAGE_LANE UTB_LANE \
+    D2C_RESTART_PROBE H4_RESTORE_PROBE M2A_FINAL_RESTORE FAUCET_PROBE POST_M2A_SKIP_HANDOFF; do
+    [ "${!vrConflict:-0}" = 0 ] || { echo "VR_LANE=1 refuses $vrConflict=${!vrConflict}: its steps do not run on a VR generation" >&2; exit 2; }
+  done
+  [ -z "$postM2aMode" ] || { echo "VR_LANE=1 refuses POST_M2A_MODE=$postM2aMode: the manifest genesis path bypasses the VR plan and verify" >&2; exit 2; }
+  source scripts/lib/vr-lib.sh
+  vr_check_inputs || exit 2
+fi
 if [ "${M2A_FINAL_RESTORE:-0}" = 1 ] && { [ "${M2_PROFILE2:-0}" != 1 ] || [ "${SIGNING:-local}" != authority ] || [ "$validators" -ne 4 ]; }; then
   echo "M2a final restore requires M2_PROFILE2=1, SIGNING=authority and four validators" >&2
   exit 2
@@ -275,8 +288,6 @@ registry_layout_require || exit 1
 # VR_LANE=1 (VT-14, scripts/lib/vr-lib.sh): a validator-registry generation. The EVM shard configuration pins VR before the profile and the
 # genesis are derived from it; the roots start in VR mode from that pin.
 if [ "${VR_LANE:-0}" = 1 ]; then
-  [ "${Q3_B1:-0}" = 1 ] && [ "${M2_PROFILE2:-0}" = 1 ] && [ "${P85_LANE:-0}" != 1 ] || { echo "VR_LANE=1 requires Q3_B1=1 and M2_PROFILE2=1, and excludes P85_LANE" >&2; exit 2; }
-  source scripts/lib/vr-lib.sh
   vr_lane_conf || { echo "vr: pinning VR in the shard configuration failed" >&2; exit 1; }
 fi
 if [ "${Q3_B1:-0}" = 1 ]; then
@@ -353,7 +364,11 @@ build/ubft engine-api genesis --shard-conf "test-nodes/shard-conf-${partitionID}
 fi
 echo "finalized funded genesis sha256=$(shasum -a 256 "$chainSpec" | cut -d' ' -f1)"
 if [ "${P85_LANE:-0}" = 1 ]; then p85_assert_full_conf "$fullShardConf" || exit 1; fi
-if [ "${VR_LANE:-0}" = 1 ]; then vr_verify "$chainSpec" "$fullShardConf" || exit 1; fi
+if [ "${VR_LANE:-0}" = 1 ]; then
+  # the ureth vector verify certifies is the one every ureth launch evaluates: the same genesis spec, computed once
+  export URETH_GENESIS_SPEC=$chainSpec
+  vr_verify "$chainSpec" "$fullShardConf" || exit 1
+fi
 fi
 if [ "${SIGNING:-local}" = authority ]; then
   # The full configuration is the one the root chain will certify, so enroll against it rather
@@ -960,9 +975,9 @@ if [ "${VR_LANE:-0}" = 1 ]; then
   # apply in VR mode), so the profile-2 handoff steps are skipped
   vr_readback "http://127.0.0.1:$rethEthBase" || { fail "the VR views do not read back the genesis committee"; exit 1; }
   pass "VR reads back the genesis committee, the PoA module and GENESIS_RESULT through ureth"
-  POST_M2A_SKIP_HANDOFF=1
+  echo "  info: VR lane: the profile-2 operator handoffs do not apply to a VR generation (its handoffs are VT-05b's); skipped"
 fi
-if [ "${M2_PROFILE2:-0}" = 1 ] && [ "${POST_M2A_SKIP_HANDOFF:-0}" != 1 ]; then
+if [ "${M2_PROFILE2:-0}" = 1 ] && [ "${POST_M2A_SKIP_HANDOFF:-0}" != 1 ] && [ "${VR_LANE:-0}" != 1 ]; then
   echo "=== M2 profile-2: two certified root handoffs with paid execution ==="
   if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
     f8_slow_stop_resume_evm || { fail "EVM delay/stop/resume probe failed"; exit 1; }

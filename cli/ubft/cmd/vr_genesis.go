@@ -511,6 +511,9 @@ func vrCheckDevFunding(v vrVerifyInput, alloc map[common.Address]vrAllocAccount)
 		return fmt.Errorf("%w: %q is not the network word of development generation %q", ErrVRGenesis, v.input.Network, v.devGeneration)
 	}
 	if len(v.funded) == 0 {
+		if v.devGeneration != "" {
+			return fmt.Errorf("%w: --dev-generation names a development generation's premine, and none is listed (--funded-accounts)", ErrVRGenesis)
+		}
 		return nil
 	}
 	if v.devGeneration == "" {

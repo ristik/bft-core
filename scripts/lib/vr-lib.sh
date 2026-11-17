@@ -12,17 +12,22 @@
 #   vr_readback <rpc>       VR's views through ureth: the genesis committee, the PoA module, GENESIS_RESULT, Healthy
 #
 # Inputs (environment):
-#   VR_CONTRACTS            a unicity-pos-contracts checkout with script/vr-genesis.sh (forge and cast on PATH)
+#   VR_CONTRACTS            a PRIVATE unicity-pos-contracts checkout with script/vr-genesis.sh (forge and cast on PATH): forge writes into it
+#                           (script/genesis-out/, out/, cache/), so never point it at a checkout another lane or a staging network uses
 #   VR_MEASUREMENT          the recorded complete-path measurement the profile is pinned from (default deploy/testnet/vr-hook-measurement.json)
 #   VR_FRESH_MEASUREMENT    a fresh complete-path measurement (ureth tests/vr_hook.rs vr_hook_measurement) taken for this run; required
 #   VR_FORGE_HOME           optional HOME for forge (a host whose solc cache lives elsewhere)
 #   VR_GENERATION           the development generation's name (default paired-devnet): its network word is sha256("unicity.dev.vr." + name)
 #
-# The premine is dev-only: each identity owner and governor signer gets a generated key (test-nodes/vr/dev-keys.json, 0600) and 1000 UCT, so the
+# The premine is dev-only: each identity owner and governor signer gets a generated key (test-nodes/vr/dev-keys/keys.json, 0600, created with
+# O_EXCL by deploy/testnet/vr_dev_keys.py, the generator vr_genesis.py --dev-fund shares; never copy dev-keys/ into evidence) and 1000 UCT, so the
 # lane can send an owner's proposeBinding or a multisig execute; the devnet's own test sender stays funded. verify checks every one of them as
 # an expected premine of a dev generation.
 
 VR_DIR=${VR_DIR:-test-nodes/vr}
+case "$VR_DIR" in /* | *..*) echo "vr: VR_DIR must be a relative path inside the checkout, got $VR_DIR" >&2; return 2 2>/dev/null || exit 2 ;; esac
+# the fee collector exactly as the lane hands it to the shard nodes (reth-paired-devnet.sh EVM_ENGINE_FEE_COLLECTOR) and to ureth
+vr_fee_collector() { echo "${POST_M2A_FEE_COLLECTOR:-$URETH_PIN_FEE_COLLECTOR}"; }
 VR_MEASUREMENT=${VR_MEASUREMENT:-deploy/testnet/vr-hook-measurement.json}
 VR_GENERATION=${VR_GENERATION:-paired-devnet}
 VR_DEV_FUND_WEI=0x3635c9adc5dea00000   # 1000 UCT
@@ -50,7 +55,7 @@ p["validator_registry"], p["validator_registry_code_hash"] = m["registry"], m["r
 p.setdefault("continuity_max_distance", "1/2")
 json.dump(conf, open(sys.argv[1], "w"), indent=2)
 PY
-  echo "vr: the EVM shard configuration pins VR $(python3 -c "import json;print(json.load(open('$VR_MEASUREMENT'))['registryCodeHash'])")"
+  echo "vr: the EVM shard configuration pins VR $(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["registryCodeHash"])' "$VR_MEASUREMENT")"
 }
 
 vr_profile_args() { echo --vr-hook-measurement "$VR_MEASUREMENT"; }
@@ -61,27 +66,16 @@ vr_prepare_genesis() { # after the profile: dev keys, the plan, the contracts ge
   local i n=${validators:-4} items=() keys
   mkdir -p "$VR_DIR"
   for i in $(seq 1 "$n"); do
-    items+=("{\"rootNodeId\":\"$(build/ubft node-id --home "test-nodes/root$i" | tail -n1)\",\"evmNodeId\":\"$(build/ubft node-id --home "test-nodes/evm$i" | tail -n1)\"}")
+    local rid eid
+    rid=$(build/ubft node-id --home "test-nodes/root$i" | tail -n1) && [ -n "$rid" ] || vr_die "no node id for test-nodes/root$i" || return 1
+    eid=$(build/ubft node-id --home "test-nodes/evm$i" | tail -n1) && [ -n "$eid" ] || vr_die "no node id for test-nodes/evm$i" || return 1
+    items+=("{\"rootNodeId\":\"$rid\",\"evmNodeId\":\"$eid\"}")
   done
   printf '[%s]\n' "$(IFS=,; echo "${items[*]}")" >"$VR_DIR/genesis-bindings.json"
-  keys=$VR_DIR/dev-keys.json
-  python3 - "$keys" "$n" <<'PY' || return 1
-import json, os, subprocess, sys
-path, n = sys.argv[1], int(sys.argv[2])
-def new():
-    doc = json.loads(subprocess.check_output(["cast", "wallet", "new", "--json"], text=True))
-    w = (doc["data"] if isinstance(doc, dict) else doc)[0]
-    return {"address": w["address"].lower(), "privateKey": w["private_key"]}
-keys = {"owners": [new() for _ in range(n)], "signers": sorted((new() for _ in range(5)), key=lambda k: k["address"])}
-fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-os.write(fd, (json.dumps(keys, indent=1) + "\n").encode()); os.close(fd)
-d = os.path.dirname(path)
-json.dump([{"owner": k["address"], "payee": k["address"]} for k in keys["owners"]], open(os.path.join(d, "owners.json"), "w"), indent=1)
-open(os.path.join(d, "signers.txt"), "w").write(",".join(k["address"] for k in keys["signers"]) + "\n")
-PY
+  python3 deploy/testnet/vr_dev_keys.py "$VR_DIR/dev-keys" "$n" || vr_die "generating the dev keys failed" || return 1
   build/ubft vr-genesis plan --trust-base test-nodes/trust-base.json --shard-conf "test-nodes/shard-conf-${partitionID:-8}_0.json" \
-    --bindings "$VR_DIR/genesis-bindings.json" --owners "$VR_DIR/owners.json" --b1-profile test-nodes/b1-profile.json \
-    --network-word "$(vr_network_word)" --governor-signers "$(tr -d '\n' <"$VR_DIR/signers.txt")" --fee-collector "${EVM_ENGINE_FEE_COLLECTOR:-$URETH_PIN_FEE_COLLECTOR}" \
+    --bindings "$VR_DIR/genesis-bindings.json" --owners "$VR_DIR/dev-keys/owners.json" --b1-profile test-nodes/b1-profile.json \
+    --network-word "$(vr_network_word)" --governor-signers "$(tr -d '\n' <"$VR_DIR/dev-keys/signers.txt")" --fee-collector "$(vr_fee_collector)" \
     --out-input "$VR_DIR/input.json" --out-identities "$VR_DIR/genesis-identities.json" || return 1
   ( cd "$VR_CONTRACTS" && HOME=${VR_FORGE_HOME:-$HOME} script/vr-genesis.sh "$OLDPWD/$VR_DIR/input.json" "$OLDPWD/$VR_DIR/contracts" ) ||
     vr_die "the contracts genesis failed" || return 1
@@ -102,7 +96,7 @@ for k, v in json.load(open(f"{d}/contracts/alloc.json")).items():
     if k.lower().removeprefix("0x") in have:
         sys.exit(f"the genesis source already has {k}")
     g["alloc"][k] = v
-keys = json.load(open(f"{d}/dev-keys.json"))
+keys = json.load(open(f"{d}/dev-keys/keys.json"))
 for k in keys["owners"] + keys["signers"]:
     if k["address"].removeprefix("0x") in have:
         sys.exit(f"the genesis source already has {k['address']}")
@@ -122,7 +116,7 @@ vr_verify() { # <finalized genesis> <full shard conf>
   build/ubft vr-genesis verify --input "$VR_DIR/input.json" --deployment "$VR_DIR/contracts/deployment.json" --genesis "$1" --shard-conf "$2" \
     --trust-base test-nodes/trust-base.json --b1-profile test-nodes/b1-profile.json --genesis-identities "$VR_DIR/genesis-identities.json" \
     --vr-hook-measurement "$VR_FRESH_MEASUREMENT" --ureth-flags "$(URETH_GENESIS_SPEC=$1 vr_ureth_vector)" \
-    --fee-collector "${EVM_ENGINE_FEE_COLLECTOR:-$URETH_PIN_FEE_COLLECTOR}" --funded-accounts "$VR_DIR/funded-accounts.json" --dev-generation "$VR_GENERATION" \
+    --fee-collector "$(vr_fee_collector)" --funded-accounts "$VR_DIR/funded-accounts.json" --dev-generation "$VR_GENERATION" \
     --out-root-deployment "$VR_DIR/vr-deployment.json" || vr_die "vr-genesis verify refused the generation" || return 1
 }
 
@@ -133,7 +127,7 @@ vr_root_flags() { # <i> <ureth rpc>: the VR-mode roots: the genesis committee, t
 vr_readback() { # <ureth rpc>: VR's views at the latest block read back what the plan put there
   local rpc=$1 vr=0xff00000000000000000000000000000000000003 ids want raw module acked health
   ids=$(cast call --rpc-url "$rpc" "$vr" 'committeeIds()(uint64[])') || vr_die "committeeIds() failed" || return 1
-  want="[$(seq -s ', ' 1 "${validators:-4}")]"
+  want=$(python3 -c 'import sys;print("[" + ", ".join(str(i) for i in range(1, int(sys.argv[1]) + 1)) + "]")' "${validators:-4}")
   [ "$ids" = "$want" ] || vr_die "VR's committee is $ids, the plan's $want" || return 1
   raw=$(cast call --rpc-url "$rpc" "$vr" 'activeModule()') || vr_die "activeModule() failed" || return 1
   module=$(python3 -c "import sys;h=sys.argv[1][2:];w=[h[i:i+64] for i in range(0,len(h),64)];k=1 if int(w[0],16)==32 else 0;print('0x'+w[k][24:])" "$raw")

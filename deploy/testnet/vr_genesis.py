@@ -39,6 +39,7 @@ import subprocess
 import sys
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
 NETWORK_ID, PARTITION, CHAIN_ID = 3, 8, 3
 FEE_COLLECTOR = '0x00000000000000000000000000000000000000fe'   # generate.py FEE: the shard nodes' --engine-fee-collector
 CONTINUITY = '1/2'                                                # generate.py EVM_CONTINUITY_MAX_DISTANCE
@@ -67,19 +68,10 @@ def dev_network_word(generation):
     return '0x' + hashlib.sha256(('unicity.dev.vr.' + generation).encode()).hexdigest()
 
 
-def dev_keys(out, n):
-    """Fresh keys for n owners and the five governor signers (DEV only): written to out/dev-keys/keys.json (0600), never to the network files."""
-    d = out / 'dev-keys'
-    d.mkdir(mode=0o700)
-    def new():
-        doc = json.loads(run('cast', 'wallet', 'new', '--json'))
-        w = (doc['data'] if isinstance(doc, dict) else doc)[0]
-        return {'address': w['address'].lower(), 'privateKey': w['private_key']}
-    keys = {'owners': [new() for _ in range(n)], 'signers': sorted((new() for _ in range(5)), key=lambda k: k['address'])}
-    path = d / 'keys.json'
-    path.write_text(json.dumps(keys, indent=1) + '\n')
-    os.chmod(path, 0o600)
-    return keys
+def dev_keys(out, n, new_key=None):
+    """Fresh keys for n owners and the five governor signers (DEV only), in out/dev-keys/ (vr_dev_keys: keys.json 0600, O_EXCL)."""
+    import vr_dev_keys
+    return vr_dev_keys.write(out / 'dev-keys', n, **({'new_key': new_key} if new_key else {}))
 
 
 def network_word(generation):
@@ -199,9 +191,8 @@ def plan(a):
     owners_file, funded, word = (Path(a.owners).resolve() if a.owners else None), {}, a.network_word or network_word(generation)
     if a.dev_fund:
         keys = dev_keys(out, a.validators)
-        # ids follow ascending root node id (vr-genesis plan); the owners file is in id order, one generated key per identity, payee = owner
+        # ids follow ascending root node id (vr-genesis plan); owners.json is in id order, one generated key per identity, payee = owner
         owners_file = out / 'dev-keys/owners.json'
-        owners_file.write_text(json.dumps([{'owner': k['address'], 'payee': k['address']} for k in keys['owners']], indent=1) + '\n')
         signers = [k['address'] for k in keys['signers']]
         funded = {k['address']: hex(DEV_FUND_WEI) for k in keys['owners'] + keys['signers']}
         word = dev_network_word(generation)
