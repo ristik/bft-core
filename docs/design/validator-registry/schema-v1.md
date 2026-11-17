@@ -272,7 +272,8 @@ activation-time reasons that appear only in `changes[id].rejectReason`.
 | 20 | NotActive | EVM: ModuleAction names a module that is not active |
 | 21 | HolderCeiling | EVM: a ninth holder |
 
-A change Rejected by a Boundary bitmap stores its root verdict code.
+A change rejected by a Boundary bitmap stores `rejectReason = Conflict (1)` as the generic marker for root rejection. The exact fold
+verdict is read from the committed candidate's `RegistryChanges` entry. The EVM-side reasons (16 and up) keep their own meanings.
 
 ---
 
