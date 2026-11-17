@@ -1,6 +1,9 @@
 // Package rootrecords is the root-side projection that custody imports: an ordered, linked log of the control records custody reads
 // (session closure, acknowledgement, recovery acknowledgement, liability closure, retirement), each anchored at the canonical ordinary
-// progress p and the quorum-approved UC time of the moment it was ordered (docs/design/pos-architecture.md section 4).
+// progress p and the quorum-approved UC time of the moment it was ordered (docs/design/pos-architecture.md section 4). A validator-registry
+// generation adds three kinds (docs/design/validator-registry/schema-v1.md section 7): Boundary, the EVM transition that follows every
+// acknowledgement; OutputRejected, which precedes the SessionClosed of a rejected result; and HolderRetirement, the holder-scoped
+// retirement authorization.
 //
 // Nothing here reads a proof, a seal round or an arrival time: progress moves only on ordinary committed rounds of the current epoch,
 // a closure is keyed by (epoch, H record, H round) so no proof encoding can reset it, and UC time is the seal timestamp of verified
@@ -12,6 +15,7 @@ import (
 	"fmt"
 
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
+	"github.com/unicitynetwork/bft-core/vrschema"
 )
 
 // Kind is the custody record kind; the values are the contract enum's.
@@ -23,11 +27,17 @@ const (
 	KindAck
 	KindRecoveryAck
 	KindClosure
-	KindRetirement
+	KindRetirement // pre-VR generations only
+	// KindBoundary is the EVM transition of an acknowledged result: it immediately follows the result's Ack or RecoveryAck.
+	KindBoundary
+	// KindOutputRejected names why a result was rejected: it immediately precedes the result's SessionClosed.
+	KindOutputRejected
+	// KindHolderRetirement authorizes the retirement of one identity generation at one liability holder.
+	KindHolderRetirement
 )
 
 var (
-	// ErrKind reports a record kind outside the five custody reads.
+	// ErrKind reports a record kind outside the eight the log carries.
 	ErrKind = errors.New("rootrecords: unknown record kind")
 	// ErrPayload reports a record payload that is not exactly the kind's words.
 	ErrPayload = errors.New("rootrecords: malformed record payload")
@@ -43,8 +53,10 @@ var (
 	ErrMonotonic = errors.New("rootrecords: progress or UC time moved backwards")
 )
 
-// payloadWords is the exact word count of each kind's abi-encoded payload (P85Types.sol structs, all static).
-var payloadWords = map[Kind]int{KindSessionClosed: 1, KindAck: 4, KindRecoveryAck: 9, KindClosure: 6, KindRetirement: 3}
+// payloadWords is the exact word count of each kind's abi-encoded payload (P85Types.sol structs, all static; kinds 6 to 8 are the frozen
+// widths of validator-registry schema v1, section 7).
+var payloadWords = map[Kind]int{KindSessionClosed: 1, KindAck: 4, KindRecoveryAck: 9, KindClosure: 6, KindRetirement: 3,
+	KindBoundary: 7, KindOutputRejected: 4, KindHolderRetirement: 4}
 
 // Record is one projected control record, the contract's RootRecord.
 type Record struct {
@@ -99,6 +111,27 @@ func checkPayload(kind Kind, data []byte) error {
 	}
 	if len(data) != 32*n {
 		return fmt.Errorf("%w: kind %d carries %d bytes, want %d", ErrPayload, kind, len(data), 32*n)
+	}
+	// Every kind's narrow words are canonical (a uint64 word has zero high bytes: the SealRegistry reverts on anything else), and kinds 6
+	// to 8 are decoded strictly, exactly as vrschema freezes them, with their cross-field rules. The projection never builds anything else
+	// and an importer refuses anything else, so no consumer sees a payload it would decode otherwise.
+	err := vrschema.CheckRecordPayload(uint8(kind), data)
+	switch kind {
+	case KindBoundary:
+		if err == nil {
+			_, err = vrschema.DecodeBoundary(data)
+		}
+	case KindOutputRejected:
+		if err == nil {
+			_, err = vrschema.DecodeOutputRejected(data)
+		}
+	case KindHolderRetirement:
+		if err == nil {
+			_, err = vrschema.DecodeHolderRetirement(data)
+		}
+	}
+	if err != nil {
+		return fmt.Errorf("%w: kind %d: %w", ErrPayload, kind, err)
 	}
 	return nil
 }
