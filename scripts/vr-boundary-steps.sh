@@ -14,8 +14,8 @@ vrb_vr=0xff00000000000000000000000000000000000003
 
 vrb_root_rpcs() {
   local p
-  for p in $(pgrep -f 'ubft root-node run'); do
-    tr '\0' ' ' </proc/"$p"/cmdline | grep -o -- '--rpc-server-address [^ ]*' | awk '{print "http://"$2}'
+  for p in $(pgrep -f 'ubft root-node run --home test-nodes/root'); do   # this devnet's roots only (never another project's)
+    tr '\0' ' ' </proc/"$p"/cmdline 2>/dev/null | grep -o -- '--rpc-server-address [^ ]*' | awk '{print "http://"$2}'
   done | sort -u
 }
 
