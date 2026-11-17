@@ -130,3 +130,27 @@ func TestNullPoPsAndChainIDGrammar(t *testing.T) {
 		require.ErrorIs(t, ProofConfigValid(map[string]string{"proof_type": "light_client", "chain_id": bad}), ErrProofChainID, bad)
 	}
 }
+
+// VT-02 review: a fully funded failing onGovernance rejects the action and faults the module; BudgetShort changes nothing.
+func TestGovernanceStepOutcomeClasses(t *testing.T) {
+	m := NewVRModel(fxModule)
+	q := func() uint64 {
+		id, _ := m.Queue(KindModuleAction, 64)
+		m.Progress += DelayRounds
+		m.UCTime += DelaySeconds
+		return id
+	}
+	short := q()
+	require.ErrorIs(t, m.Execute(short, fxModule, StepBudgetShort), ErrBudgetShort)
+	require.Equal(t, ChQueued, m.Changes[short].State)
+	require.Equal(t, HealthHealthy, m.Health)
+	failed := q()
+	require.NoError(t, m.Execute(failed, fxModule, StepFault))
+	require.Equal(t, ChRejected, m.Changes[failed].State)
+	require.Equal(t, RejectActionFailed, m.Changes[failed].RejectReason)
+	require.Equal(t, HealthFaulted, m.Health)
+	other := q()
+	require.NoError(t, m.Execute(other, fxOther, StepOK))
+	require.Equal(t, RejectNotActive, m.Changes[other].RejectReason)
+	require.Equal(t, HealthFaulted, m.Health)
+}

@@ -1712,7 +1712,7 @@
    "name": "ModuleAction executes into the active module only",
    "op": "change.lifecycle",
    "input": {
-    "steps": 3
+    "steps": 5
    },
    "expect": {
     "trace": [
@@ -1720,7 +1720,8 @@
       "actor": "vr",
       "args": {
        "case": "active, succeeds",
-       "id": 1
+       "id": 1,
+       "step": 0
       },
       "effects": [
        "Queued(1)",
@@ -1751,12 +1752,46 @@
      {
       "actor": "vr",
       "args": {
-       "case": "active, onGovernance fails",
-       "id": 2
+       "case": "active, too little gas: BudgetShort, still Queued, health unchanged",
+       "id": 2,
+       "step": 2
       },
       "effects": [
        "Queued(2)",
-       "ModuleActionExecuted(2,Rejected)"
+       "BudgetShort(2)"
+      ],
+      "error": "BudgetShort",
+      "op": "execute",
+      "root": {
+       "control": {
+        "kind": 0,
+        "attempt": 0,
+        "orderedRound": 0
+       },
+       "records": 0
+      },
+      "state": {
+       "outputs": {},
+       "changes": {
+        "1": "Active released=0",
+        "2": "Queued released=0"
+       },
+       "openOutput": "",
+       "pendingPair": "",
+       "lastAcked": "GENESIS_RESULT",
+       "health": 0,
+       "cursor": 0
+      }
+     },
+     {
+      "actor": "vr",
+      "args": {
+       "case": "the same action retried with enough gas",
+       "id": 2,
+       "step": 0
+      },
+      "effects": [
+       "ModuleActionExecuted(2,Active)"
       ],
       "error": "",
       "op": "execute",
@@ -1772,7 +1807,7 @@
        "outputs": {},
        "changes": {
         "1": "Active released=0",
-        "2": "Rejected(ActionFailed) released=0"
+        "2": "Active released=0"
        },
        "openOutput": "",
        "pendingPair": "",
@@ -1784,11 +1819,13 @@
      {
       "actor": "vr",
       "args": {
-       "case": "not the active module",
-       "id": 3
+       "case": "active, fully funded onGovernance fails: ActionFailed and Faulted",
+       "id": 3,
+       "step": 1
       },
       "effects": [
        "Queued(3)",
+       "ModuleFault(onGovernance)",
        "ModuleActionExecuted(3,Rejected)"
       ],
       "error": "",
@@ -1805,13 +1842,49 @@
        "outputs": {},
        "changes": {
         "1": "Active released=0",
-        "2": "Rejected(ActionFailed) released=0",
-        "3": "Rejected(NotActive) released=0"
+        "2": "Active released=0",
+        "3": "Rejected(ActionFailed) released=0"
        },
        "openOutput": "",
        "pendingPair": "",
        "lastAcked": "GENESIS_RESULT",
-       "health": 0,
+       "health": 1,
+       "cursor": 0
+      }
+     },
+     {
+      "actor": "vr",
+      "args": {
+       "case": "not the active module: NotActive, no call, no fault",
+       "id": 4,
+       "step": 0
+      },
+      "effects": [
+       "Queued(4)",
+       "ModuleActionExecuted(4,Rejected)"
+      ],
+      "error": "",
+      "op": "execute",
+      "root": {
+       "control": {
+        "kind": 0,
+        "attempt": 0,
+        "orderedRound": 0
+       },
+       "records": 0
+      },
+      "state": {
+       "outputs": {},
+       "changes": {
+        "1": "Active released=0",
+        "2": "Active released=0",
+        "3": "Rejected(ActionFailed) released=0",
+        "4": "Rejected(NotActive) released=0"
+       },
+       "openOutput": "",
+       "pendingPair": "",
+       "lastAcked": "GENESIS_RESULT",
+       "health": 1,
        "cursor": 0
       }
      }

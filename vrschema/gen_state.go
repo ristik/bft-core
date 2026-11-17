@@ -82,7 +82,7 @@ func (s *script) schedule(kind uint8) uint64 {
 	id, _ := s.vr.Queue(kind, 96)
 	s.vr.Progress += DelayRounds
 	s.vr.UCTime += DelaySeconds
-	err := s.vr.Execute(id, fxModule, true)
+	err := s.vr.Execute(id, fxModule, StepOK)
 	s.step("vr", "queue+execute", map[string]any{"kind": kind, "id": id}, err, "")
 	return id
 }
@@ -311,7 +311,7 @@ func genChangeLifecycle(b *vb) {
 		s.step("vr", "queue", map[string]any{"kind": KindCommitteeLimits, "progress": 0, "ucTime": 0, "id": id}, err, "")
 		for _, pt := range [][2]uint64{{1999, 3600}, {2000, 3599}, {2000, 3600}} {
 			s.vr.Progress, s.vr.UCTime = pt[0], pt[1]
-			err := s.vr.Execute(id, fxModule, true)
+			err := s.vr.Execute(id, fxModule, StepOK)
 			want := "DelayNotElapsed"
 			if pt == [2]uint64{2000, 3600} {
 				want = ""
@@ -331,16 +331,28 @@ func genChangeLifecycle(b *vb) {
 	}
 	{
 		s := newScript(b, "ModuleAction executes into the active module only")
-		for _, c := range []struct {
-			target [20]byte
-			ok     bool
-			name   string
-		}{{fxModule, true, "active, succeeds"}, {fxModule, false, "active, onGovernance fails"}, {fxOther, true, "not the active module"}} {
+		execute := func(id uint64, target [20]byte, step StepOutcome, name, want string) {
+			s.step("vr", "execute", map[string]any{"id": id, "case": name, "step": step}, s.vr.Execute(id, target, step), want)
+		}
+		queue := func() uint64 {
 			id, _ := s.vr.Queue(KindModuleAction, 64)
 			s.vr.Progress += DelayRounds
 			s.vr.UCTime += DelaySeconds
-			s.step("vr", "execute", map[string]any{"id": id, "case": c.name}, s.vr.Execute(id, c.target, c.ok), "")
+			return id
 		}
+		execute(queue(), fxModule, StepOK, "active, succeeds", "")
+		short := queue()
+		execute(short, fxModule, StepBudgetShort, "active, too little gas: BudgetShort, still Queued, health unchanged", "BudgetShort")
+		if s.vr.Health != HealthHealthy || s.vr.Changes[short].State != ChQueued {
+			b.fail("BudgetShort changed health or state")
+		}
+		execute(short, fxModule, StepOK, "the same action retried with enough gas", "")
+		failed := queue()
+		execute(failed, fxModule, StepFault, "active, fully funded onGovernance fails: ActionFailed and Faulted", "")
+		if s.vr.Health != HealthFaulted || s.vr.Changes[failed].RejectReason != RejectActionFailed {
+			b.fail("a funded onGovernance failure must reject the action and fault the module")
+		}
+		execute(queue(), fxOther, StepOK, "not the active module: NotActive, no call, no fault", "")
 		s.done("change.lifecycle")
 	}
 	{
