@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -129,6 +130,39 @@ func TestAwaitFromRootPeers(t *testing.T) {
 		require.ErrorIs(t, err, context.DeadlineExceeded)
 		require.ErrorContains(t, err, "within 30ms")
 		require.Less(t, time.Since(start), time.Second)
+	})
+
+	t.Run("a wait that ends as the next sweep starts still reports every peer's last refusal", func(t *testing.T) {
+		// #1171: the backoff timer and the end of the wait are both due when the backoff select runs, so either case can be taken; on the
+		// timer case the next sweep sees the expired context before asking any peer, and that sweep's refusals are the expiry alone. A
+		// zero backoff makes both due on every attempt (on CI a loaded runner did it with the 2 ms backoff of the test above).
+		r := installRetry{wait: 50 * time.Millisecond} // the first sweep, at least, ends well within the wait on a loaded runner
+		for range 20 {
+			_, err := awaitFromRootPeers(context.Background(), r, peers, func(_ context.Context, id peer.ID) (string, error) {
+				return "", fmt.Errorf("%w at %s", unavailable, id.String())
+			}, nil, func(int, error) { time.Sleep(60 * time.Millisecond) }) // past the wait and the backoff
+			require.ErrorIs(t, err, context.DeadlineExceeded)
+			require.ErrorIs(t, err, unavailable)
+			for _, id := range []peer.ID{a, b} {
+				require.ErrorContains(t, err, "peer "+id.String()+": activation unavailable at "+id.String())
+			}
+		}
+	})
+
+	t.Run("a request the end of the wait overtakes keeps its peer's previous refusal", func(t *testing.T) {
+		r := installRetry{first: time.Millisecond, max: time.Millisecond, wait: 200 * time.Millisecond}
+		sweep := map[peer.ID]int{}
+		_, err := awaitFromRootPeers(context.Background(), r, peers, func(ctx context.Context, id peer.ID) (string, error) {
+			sweep[id]++
+			if id == b && sweep[id] > 1 {
+				<-ctx.Done() // peer b answers nothing on its second request
+				return "", ctx.Err()
+			}
+			return "", fmt.Errorf("%w (request %d)", unavailable, sweep[id])
+		}, nil, nil)
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+		require.ErrorContains(t, err, "peer "+a.String()+": activation unavailable (request 2)", "a's refusal of the last sweep")
+		require.ErrorContains(t, err, "peer "+b.String()+": activation unavailable (request 1)", "b's last refusal, not only the cut-off")
 	})
 
 	t.Run("a slow peer is cut off at the end of the wait", func(t *testing.T) {
