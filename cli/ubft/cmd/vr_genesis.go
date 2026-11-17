@@ -33,6 +33,8 @@ import (
 	"github.com/unicitynetwork/bft-core/b1state"
 	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/internal/weightcap"
+	"github.com/unicitynetwork/bft-core/registrygenesis"
+	"github.com/unicitynetwork/bft-core/registryproof"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/zkverifier"
@@ -343,27 +345,6 @@ type vrAllocSlots map[vrschema.Word]vrschema.Word
 
 func (s vrAllocSlots) Word(slot vrschema.Word) (vrschema.Word, error) { return s[slot], nil }
 
-func vrAllocAccounts(genesisPath string) (map[common.Address]vrAllocAccount, error) {
-	raw, err := os.ReadFile(genesisPath) // #nosec G304 -- operator supplied local file
-	if err != nil {
-		return nil, err
-	}
-	var g struct {
-		Alloc map[string]vrAllocAccount `json:"alloc"`
-	}
-	if err := json.Unmarshal(raw, &g); err != nil {
-		return nil, fmt.Errorf("%w: decoding the EVM genesis %q: %v", ErrVRGenesis, genesisPath, err)
-	}
-	out := map[common.Address]vrAllocAccount{}
-	for k, v := range g.Alloc {
-		if !common.IsHexAddress(k) {
-			return nil, fmt.Errorf("%w: alloc key %q", ErrVRGenesis, k)
-		}
-		out[common.HexToAddress(k)] = v
-	}
-	return out, nil
-}
-
 func vrSlots(a vrAllocAccount) (vrAllocSlots, error) {
 	out := vrAllocSlots{}
 	for k, v := range a.Storage {
@@ -375,6 +356,9 @@ func vrSlots(a vrAllocAccount) (vrAllocSlots, error) {
 		var kw, vw vrschema.Word
 		kb.FillBytes(kw[:])
 		vb.FillBytes(vw[:])
+		if _, dup := out[kw]; dup {
+			return nil, fmt.Errorf("%w: storage slot %x is given twice", ErrVRGenesis, kw)
+		}
 		out[kw] = vw
 	}
 	return out, nil
@@ -399,20 +383,96 @@ func inertCode(code []byte) bool {
 
 // vrVerifyInput is the finished set `verify` checks.
 type vrVerifyInput struct {
-	input        vrGenesisInput
-	deployment   vrDeploymentFile
-	alloc        map[common.Address]vrAllocAccount
-	full         *types.PartitionDescriptionRecord
-	tb           *types.RootTrustBaseV1
-	profile      b1state.Profile
-	profileFile  b1ProfileFile
-	identities   []evmassign.Identity
-	fresh        b1state.VRHookMeasurement
-	urethFlags   string // optional: the ureth command line to check
-	feeCollector string // optional: the shard nodes' --engine-fee-collector
+	input       vrGenesisInput
+	deployment  vrDeploymentFile
+	genesis     []byte // the finalized EVM genesis JSON, exactly as the nodes load it
+	full        *types.PartitionDescriptionRecord
+	tb          *types.RootTrustBaseV1
+	profile     b1state.Profile
+	profileFile b1ProfileFile
+	identities  []evmassign.Identity
+	fresh       b1state.VRHookMeasurement
+	// urethFlags is the paired ureth's argument vector and feeCollector the shard nodes' --engine-fee-collector. Both are required for a
+	// complete check; partial skips them and never certifies the generation (no root deployment is returned).
+	urethFlags   string
+	feeCollector string
+	partial      bool
 }
 
-// vrVerify cross-checks every artifact of the generation and returns the roots' deployment file.
+// vrGenesisFile is the finalized EVM genesis: its chain configuration, header fields and allocation.
+type vrGenesisFile struct {
+	Config struct {
+		ChainID      uint64  `json:"chainId"`
+		ShanghaiTime *uint64 `json:"shanghaiTime"`
+		CancunTime   *uint64 `json:"cancunTime"`
+	} `json:"config"`
+	GasLimit      string                    `json:"gasLimit"`
+	BaseFeePerGas string                    `json:"baseFeePerGas"`
+	Alloc         map[string]vrAllocAccount `json:"alloc"`
+}
+
+func vrParseGenesis(raw []byte) (vrGenesisFile, map[common.Address]vrAllocAccount, error) {
+	var g vrGenesisFile
+	if err := json.Unmarshal(raw, &g); err != nil {
+		return g, nil, fmt.Errorf("%w: decoding the EVM genesis: %v", ErrVRGenesis, err)
+	}
+	out := map[common.Address]vrAllocAccount{}
+	for k, v := range g.Alloc {
+		if !common.IsHexAddress(k) {
+			return g, nil, fmt.Errorf("%w: alloc key %q", ErrVRGenesis, k)
+		}
+		a := common.HexToAddress(k)
+		if _, dup := out[a]; dup {
+			return g, nil, fmt.Errorf("%w: alloc names %s twice", ErrVRGenesis, a)
+		}
+		out[a] = v
+	}
+	return g, out, nil
+}
+
+// vrGenesisCommitmentSlot is the SealRegistry's genesisCommitment word (the paired client's --unicity.genesis-commitment).
+var vrGenesisCommitmentSlot = vrschema.Keccak([]byte("unicity.seal-registry/genesisCommitment"))
+
+// urethArgs is a ureth argument vector parsed as the client's parser takes it: `--flag=value` and `--flag value` alike, a bare flag
+// with no value, and every flag at most once (the client refuses repeated --unicity options; a repeat here is a conflict, never a choice).
+type urethArgs map[string]string
+
+func parseUrethArgs(line string) (urethArgs, error) {
+	out := urethArgs{}
+	f := strings.Fields(line)
+	for i := 0; i < len(f); i++ {
+		tok := f[i]
+		if !strings.HasPrefix(tok, "--") || len(tok) == 2 {
+			return nil, fmt.Errorf("%w: ureth argument %q is not a flag", ErrVRGenesis, tok)
+		}
+		name, value, hasValue := strings.Cut(tok, "=")
+		if !hasValue && i+1 < len(f) && !strings.HasPrefix(f[i+1], "--") {
+			value, i = f[i+1], i+1
+		}
+		if _, dup := out[name]; dup {
+			return nil, fmt.Errorf("%w: ureth argument %s is given more than once", ErrVRGenesis, name)
+		}
+		out[name] = value
+	}
+	return out, nil
+}
+
+// uint is the effective numeric value of a flag: its value, or the client's default when absent.
+func (a urethArgs) uint(flag string, def uint64) (uint64, error) {
+	v, ok := a[flag]
+	if !ok {
+		return def, nil
+	}
+	n, okN := new(big.Int).SetString(v, 10)
+	if !okN || !n.IsUint64() {
+		return 0, fmt.Errorf("%w: ureth %s=%q is not a number", ErrVRGenesis, flag, v)
+	}
+	return n.Uint64(), nil
+}
+
+// vrVerify cross-checks every artifact of the generation against the plan and the finalized genesis, and returns the roots' deployment
+// file. Nothing a report says about the allocation is trusted: the allocated code and storage are compared with what the plan and the
+// reviewed code determine.
 func vrVerify(v vrVerifyInput) (vrRootDeployment, error) {
 	var out vrRootDeployment
 	fail := func(format string, a ...any) (vrRootDeployment, error) {
@@ -422,57 +482,92 @@ func vrVerify(v vrVerifyInput) (vrRootDeployment, error) {
 	if in.Format != vrInputFormat || d.Format != vrDeploymentFormat {
 		return fail("unknown input or deployment format")
 	}
+	if !v.partial && (v.urethFlags == "" || v.feeCollector == "") {
+		return fail("a complete check needs the ureth arguments and the shard nodes' fee collector")
+	}
 
-	// 1. the alloc holds exactly the deployment's seven accounts at their genesis addresses, with the recorded code
+	// 1. the finalized EVM genesis: the B1 rules (SealRegistry predeploy code and state, chain id, the full PDR's seal_registry_genesis
+	// and the execution identity), then the header and chain configuration against the profile and the plan
+	h, err := bindB1Profile(v.profile, v.tb, v.full)
+	if err != nil {
+		return out, errors.Join(ErrVRGenesis, err)
+	}
+	origin, err := registrygenesis.B1Origin(v.full, v.profile, h, v.genesis, nil, registrygenesis.DefaultGenesisJSONLimits())
+	if err != nil {
+		return fail("the finalized EVM genesis is not the generation's: %v", err)
+	}
+	if snap, err := registryproof.Verify(origin.ProofContext(), origin.BlockHash(), origin.Evidence()); err != nil || !snap.Valid() || !snap.Genesis() ||
+		snap.StateRoot() != origin.StateRoot() {
+		return fail("the bootstrap snapshot of the finalized genesis does not verify: %v", err)
+	}
+	g, alloc, err := vrParseGenesis(v.genesis)
+	if err != nil {
+		return out, err
+	}
+	gasLimit, ok1 := bigWord(g.GasLimit)
+	if !ok1 || vrschema.U64(v.profile.MaxGas) != gasLimit {
+		return fail("the genesis gasLimit %s is not the profile's MaxGas %d", g.GasLimit, v.profile.MaxGas)
+	}
+	if g.Config.ChainID != in.ChainID || g.Config.ShanghaiTime == nil || *g.Config.ShanghaiTime != 0 || g.Config.CancunTime == nil || *g.Config.CancunTime != 0 {
+		return fail("the genesis chain configuration (chain %d, Shanghai and Cancun at 0) is not the plan's chain %d", g.Config.ChainID, in.ChainID)
+	}
+	sealAcct, ok := alloc[common.Address(vrschema.SealRegistry)]
+	if !ok {
+		return fail("the genesis has no SealRegistry")
+	}
+	sealStorage, err := storageOf(sealAcct)
+	if err != nil {
+		return out, err
+	}
+	commitment := sealStorage[vrGenesisCommitmentSlot]
+	if commitment == (vrschema.Word{}) {
+		return fail("the SealRegistry's genesisCommitment is not set")
+	}
+
+	// 2. code: the core and the module are the measured code (and the core the PDR's); the facets are the ones the pinned core embeds;
+	// the composer and the multisig are the reviewed runtimes
+	if v.profileFile.VRHookMeasurement == nil {
+		return fail("the B1 profile carries no VR hook measurement")
+	}
+	codes, hashes := map[string][]byte{}, map[string][32]byte{}
 	accounts := d.accounts()
-	hashes := map[string][32]byte{}
 	for _, a := range vrGenesisAccounts {
-		rec := accounts[a.role]
-		addr, err := vrAddress(a.role, rec[0])
-		if err != nil {
-			return out, err
-		}
-		if addr != vrGenesisAddress(a.low) {
-			return fail("%s is at %s, not its genesis address %s", a.role, addr, vrGenesisAddress(a.low))
-		}
-		acct, ok := v.alloc[addr]
+		acct, ok := alloc[vrGenesisAddress(a.low)]
 		if !ok {
-			return fail("the EVM genesis has no %s account at %s", a.role, addr)
+			return fail("the EVM genesis has no %s account at %s", a.role, vrGenesisAddress(a.low))
 		}
 		code, err := hex.DecodeString(strings.TrimPrefix(acct.Code, "0x"))
 		if err != nil || len(code) == 0 {
 			return fail("%s has no code in the EVM genesis", a.role)
 		}
-		want, err := vrHex(a.role+" code hash", strings.ToLower(rec[1]), 32)
+		if b, ok := bigWord(cmpOr(acct.Balance, "0x0")); !ok || b != (vrschema.Word{}) {
+			return fail("%s holds a balance", a.role)
+		}
+		codes[a.role], hashes[a.role] = code, [32]byte(ethcrypto.Keccak256(code))
+		rec := accounts[a.role]
+		addr, err := vrAddress(a.role, rec[0])
 		if err != nil {
 			return out, err
 		}
-		if got := ethcrypto.Keccak256(code); !bytes.Equal(got, want) {
-			return fail("%s code in the EVM genesis hashes to %x, the deployment records %x", a.role, got, want)
+		hh := hashes[a.role]
+		if addr != vrGenesisAddress(a.low) || !strings.EqualFold(rec[1], lowerHex(hh[:])) {
+			return fail("the deployment report's %s is not the allocated account", a.role)
 		}
-		hashes[a.role] = [32]byte(want)
-		if a.role == "composer" {
-			slots, err := vrSlots(acct)
-			if err != nil {
-				return out, err
-			}
-			for _, w := range slots {
-				if w != (vrschema.Word{}) {
-					return fail("the composer engine has storage: it is not the stateless engine")
-				}
-			}
-			if !inertCode(code) {
-				return fail("the composer engine can call, create, delegate, self-destruct or write storage: it may be a proxy")
-			}
-		}
-	}
-
-	// 2. the measurement the profile was pinned from, and a fresh one, are of exactly this code, and still cover the pins
-	if v.profileFile.VRHookMeasurement == nil {
-		return fail("the B1 profile carries no VR hook measurement")
 	}
 	if err := b1state.CheckVRHookGasFresh(v.profile, hashes["registry"], hashes["module"], *v.profileFile.VRHookMeasurement, v.fresh); err != nil {
 		return out, errors.Join(ErrVRGenesis, err)
+	}
+	for _, facet := range []string{"governanceFacet", "repairFacet", "recordsFacet"} {
+		if !embeds(codes["registry"], hashes[facet]) {
+			return fail("the allocated %s (%x) is not the facet the pinned VR core delegates to", facet, hashes[facet])
+		}
+	}
+	composerHash, governorHash := hashes["composer"], hashes["governor"]
+	if lowerHex(composerHash[:]) != vrReviewedComposerCodeHash || !inertCode(codes["composer"]) {
+		return fail("the composer engine is not the reviewed PoaComposerEngine runtime %s", vrReviewedComposerCodeHash)
+	}
+	if lowerHex(governorHash[:]) != vrReviewedGovernorCodeHash {
+		return fail("the governor is not the reviewed FoundationMultisig runtime %s", vrReviewedGovernorCodeHash)
 	}
 
 	// 3. the EVM PDR pins VR, and the roots derive VR mode with the genesis committee from it
@@ -483,11 +578,11 @@ func vrVerify(v vrVerifyInput) (vrRootDeployment, error) {
 	if code != hashes["registry"] || registry != vrschema.ValidatorRegistry {
 		return fail("the EVM PDR pins VR code %x, the alloc carries %x", code, hashes["registry"])
 	}
-	if !evmassign.CouplingRequired(v.full) || len(v.full.Validators) != in.IdentityCount {
+	if !evmassign.CouplingRequired(v.full) || len(v.full.Validators) != in.IdentityCount || len(in.Identities) != in.IdentityCount {
 		return fail("the coupled EVM shard has %d validators for %d genesis identities", len(v.full.Validators), in.IdentityCount)
 	}
 
-	// 4. the profile and the input agree on the chain, the gas envelope and the hooks
+	// 4. the profile and the plan agree on the chain, the gas envelope and the hooks
 	chainID, ok := zkverifier.ParseChainIDFromParams(v.full.PartitionParams)
 	if !ok || chainID != in.ChainID || in.ChainID != d.ChainID || v.profile.ExecutionChainID != in.ChainID {
 		return fail("the chain id differs between the shard configuration, the input, the deployment and the profile")
@@ -495,69 +590,18 @@ func vrVerify(v vrVerifyInput) (vrRootDeployment, error) {
 	if v.profile.MaxGas != in.MaxGas || v.profile.SystemGas != in.SystemGas {
 		return fail("VR's fee configuration (maxGas %d, systemGas %d) is not the profile's (%d, %d)", in.MaxGas, in.SystemGas, v.profile.MaxGas, v.profile.SystemGas)
 	}
-	if in.Limits.MaxBatch < v.profile.HRecords {
-		return fail("VR's maxBatch %d is below the profile's H %d", in.Limits.MaxBatch, v.profile.HRecords)
+	if in.Limits.MaxBatch < v.profile.HRecords || in.Limits.MaxBatch > b1state.HookMaxRecords {
+		return fail("VR's maxBatch %d does not admit the profile's H %d", in.Limits.MaxBatch, v.profile.HRecords)
 	}
-	if v.profile.Network != uint16(v.tb.NetworkID) || uint64(v.full.NetworkID) != uint64(v.tb.NetworkID) {
-		return fail("the profile, the shard configuration and the trust base name different networks")
+	if in.KnownRootEpoch != v.tb.Epoch || v.profile.Network != uint16(v.tb.NetworkID) || uint64(v.full.NetworkID) != uint64(v.tb.NetworkID) {
+		return fail("the root epoch or network differs between the plan, the trust base, the profile and the shard configuration")
 	}
-
-	// 5. VR's storage is the plan's: network word, limits, status, module, governor, counters, fees
-	vrAcct := v.alloc[common.Address(vrschema.ValidatorRegistry)]
-	slots, err := vrSlots(vrAcct)
-	if err != nil {
-		return out, err
-	}
-	r := vrstate.Reader{W: slots}
-	network, err := vrHex("network", in.Network, 32)
-	if err != nil {
-		return out, err
-	}
-	if w, _ := r.Scalar(vrschema.SlotNetwork); !bytes.Equal(w[:], network) || !strings.EqualFold(d.NetworkWord, in.Network) {
-		return fail("VR's network word is not the plan's")
-	}
-	if w, _ := r.Scalar(vrschema.SlotLastAcked); w != vrschema.GenesisResult {
-		return fail("VR's lastAcked is not GENESIS_RESULT")
-	}
-	for _, k := range []uint64{vrschema.SlotOpenOutput, vrschema.SlotPendingPair} {
-		if w, _ := r.Scalar(k); w != (vrschema.Word{}) {
-			return fail("VR starts with an open output or a pending pair")
-		}
-	}
-	limits, err := r.CommitteeLimits()
-	if err != nil || limits.NMin != in.Limits.NMin || limits.NTarget != in.Limits.NTarget || limits.NMax != in.Limits.NMax {
-		return fail("VR's committee limits are not the plan's")
-	}
-	status, err := r.Status()
-	if err != nil || status.Health != 0 || status.KnownRootEpoch != in.KnownRootEpoch || status.RecordCursor != 0 || in.KnownRootEpoch != v.tb.Epoch {
-		return fail("VR's status (health, knownRootEpoch, cursor) is not the genesis one")
-	}
-	word := func(k uint64) vrschema.Word { w, _ := r.Scalar(k); return w }
-	if a := word(vrschema.SlotActiveModule); !bytes.Equal(a[12:], vrGenesisAddress(7).Bytes()) || word(vrschema.SlotActiveModuleHash) != hashes["module"] {
-		return fail("VR's active module is not the PoA module with its recorded code hash")
-	}
-	if a := word(vrschema.SlotGovernor); !bytes.Equal(a[12:], vrGenesisAddress(9).Bytes()) {
-		return fail("VR's governor is not the FoundationMultisig")
-	}
-	if c := word(vrschema.SlotCounters); c == (vrschema.Word{}) || d.IdentityCount != uint64(in.IdentityCount) || d.Members != uint64(len(v.identities)) {
-		return fail("VR's identity count is not the plan's")
-	}
-	collector, err := vrAddress("fee collector", in.Fees.FeeCollector)
-	if err != nil {
-		return out, err
-	}
-	for _, k := range []uint64{vrschema.SlotFeesPrevCollect, vrschema.SlotFeesCurCollect} {
-		if a := word(k); !bytes.Equal(a[12:], collector.Bytes()) {
-			return fail("VR's fee collector is not the plan's")
-		}
-	}
-	if v.feeCollector != "" {
-		if c, err := vrAddress("--fee-collector", v.feeCollector); err != nil || c != collector {
-			return fail("the shard nodes' fee collector %s is not VR's %s", v.feeCollector, collector)
-		}
+	policy, err := storage.ContinuityPolicy(v.full)
+	if err != nil || policy.MaxM != in.Continuity.MaxM || policy.MaxDistNum != in.Continuity.DistNum || policy.MaxDistDen != in.Continuity.DistDen {
+		return fail("VR's continuity budget is not the EVM PDR's")
 	}
 
-	// 6. the roots' genesis identities are VR's genesis committee, StakingID = the VR id word, and the coupled genesis
+	// 5. the roots' genesis identities are the plan's identities, StakingID = the VR id word, and the coupled genesis
 	if len(v.identities) != in.IdentityCount {
 		return fail("%d root genesis identities for %d VR identities", len(v.identities), in.IdentityCount)
 	}
@@ -568,79 +612,90 @@ func vrVerify(v vrVerifyInput) (vrRootDeployment, error) {
 		}
 		p := in.Identities[i]
 		if p.ID != uint64(i+1) || p.RootNodeID != id.RootNodeID || p.EVMNodeID != id.EVMNodeID || !strings.EqualFold(p.RootKey, lowerHex(id.RootKey)) ||
-			!strings.EqualFold(p.EVMKey, lowerHex(id.EVMKey)) || !strings.EqualFold(p.Payee, lowerHex(id.OperatorPayee)) || p.RawWeight != id.RawWeight {
+			!strings.EqualFold(p.EVMKey, lowerHex(id.EVMKey)) || !strings.EqualFold(p.Payee, lowerHex(id.OperatorPayee)) || p.RawWeight != id.RawWeight ||
+			p.RawWeight == 0 {
 			return fail("genesis identity %d differs from VR identity %d", i, i+1)
 		}
-	}
-	digest, err := vradmit.MembersDigestOf(v.identities)
-	if err != nil {
-		return out, errors.Join(ErrVRGenesis, err)
-	}
-	committee, err := vrHex("committeeDigest", strings.ToLower(d.CommitteeDigest), 32)
-	if err != nil {
-		return out, err
-	}
-	if !bytes.Equal(digest[:], committee) {
-		return fail("the roots' genesis identities are not VR's genesis committee (membersDigest %x, VR %x)", digest, committee)
 	}
 	if err := checkGenesisIdentities(v.identities, v.tb, v.full); err != nil {
 		return out, errors.Join(ErrVRGenesis, err)
 	}
 
-	// 7. the ureth command line pins the paired client to this profile
-	if v.urethFlags != "" {
-		hash, err := v.profile.Hash()
+	// 6. the allocated storage is exactly the plan's: VR, the module, the multisig; the facets and the composer hold none
+	wantVR, wantPoA, wantMultisig, committee, err := vrExpectedState(in, v.identities, hashes["module"])
+	if err != nil {
+		return out, err
+	}
+	if !strings.EqualFold(d.CommitteeDigest, lowerHex(committee[:])) || d.Members != uint64(len(v.identities)) || d.IdentityCount != uint64(in.IdentityCount) ||
+		!strings.EqualFold(d.NetworkWord, in.Network) {
+		return fail("the deployment report's committee, counts or network word are not the plan's")
+	}
+	want := map[string]vrStorage{"registry": wantVR, "module": wantPoA, "governor": wantMultisig}
+	var diffs []string
+	for _, a := range vrGenesisAccounts {
+		got, err := storageOf(alloc[vrGenesisAddress(a.low)])
 		if err != nil {
-			return out, errors.Join(ErrVRGenesis, err)
+			return out, err
 		}
-		for _, f := range strings.Fields(urethFlags(v.profile, hash)) {
-			if !containsField(v.urethFlags, f) {
-				return fail("the ureth flags lack %s", f)
-			}
+		exp := want[a.role]
+		if exp == nil {
+			exp = vrStorage{}
 		}
-		for flag, want := range map[string]uint64{"--unicity.base-fee-floor": in.Fees.BaseFeeFloor, "--unicity.base-fee-change-denominator": in.Fees.ChangeDenominator} {
-			got := urethDefault(v.urethFlags, flag)
-			if got != want {
-				return fail("ureth's %s is %d, VR's genesis fee is %d", flag, got, want)
-			}
+		diffs = append(diffs, diffStorage(a.role, exp, got)...)
+	}
+	if len(diffs) != 0 {
+		if len(diffs) > 8 {
+			diffs = append(diffs[:8], fmt.Sprintf("... %d more", len(diffs)-8))
 		}
+		return fail("the allocated storage is not the plan's:\n  %s", strings.Join(diffs, "\n  "))
 	}
 
 	sealCode, err := vrHex("SealRegistry code hash", b1registry.CodeHashHex, 32)
 	if err != nil {
 		return out, err
 	}
-	if !bytes.Equal(v.profile.RuntimeHash[:], sealCode) {
-		return fail("the profile pins another SealRegistry runtime")
+	if v.partial {
+		return out, nil
 	}
+
+	// 7. the runtime inputs: the shard nodes' fee collector is VR's, and the ureth argument vector pins the profile, the genesis
+	// commitment and VR's fees
+	if c, err := vrAddress("--fee-collector", v.feeCollector); err != nil || !strings.EqualFold(lowerHex(c[:]), in.Fees.FeeCollector) {
+		return fail("the shard nodes' fee collector %s is not VR's %s", v.feeCollector, in.Fees.FeeCollector)
+	}
+	args, err := parseUrethArgs(v.urethFlags)
+	if err != nil {
+		return out, err
+	}
+	hash, err := v.profile.Hash()
+	if err != nil {
+		return out, errors.Join(ErrVRGenesis, err)
+	}
+	pinned, err := parseUrethArgs(urethFlags(v.profile, hash) + " --unicity.genesis-commitment=" + lowerHex(commitment[:]))
+	if err != nil {
+		return out, err
+	}
+	for flag, value := range pinned {
+		if got, ok := args[flag]; !ok || !strings.EqualFold(got, value) {
+			return fail("ureth %s is %q, the generation pins %q", flag, got, value)
+		}
+	}
+	for flag, want := range map[string]uint64{"--unicity.base-fee-floor": in.Fees.BaseFeeFloor, "--unicity.base-fee-change-denominator": in.Fees.ChangeDenominator,
+		"--unicity.elasticity": 2} {
+		def := map[string]uint64{"--unicity.base-fee-floor": 1_000_000, "--unicity.base-fee-change-denominator": 8, "--unicity.elasticity": 2}[flag]
+		got, err := args.uint(flag, def)
+		if err != nil {
+			return out, err
+		}
+		if got != want {
+			return fail("ureth's effective %s is %d, VR's genesis has %d", flag, got, want)
+		}
+	}
+
 	vrCode := hashes["registry"]
 	return vrRootDeployment{Format: vrRootDeployFormat, RootNetwork: uint64(v.tb.NetworkID), NetworkWord: strings.ToLower(in.Network), ChainID: in.ChainID,
 		Registry: lowerHex(vrschema.ValidatorRegistry[:]), RegistryCodeHash: lowerHex(vrCode[:]), SealRegistry: lowerHex(vrschema.SealRegistry[:]),
 		SealRegistryCode: lowerHex(sealCode)}, nil
-}
-
-func containsField(line, field string) bool {
-	for _, f := range strings.Fields(line) {
-		if f == field {
-			return true
-		}
-	}
-	return false
-}
-
-// urethDefault is the value of a --flag=N in the ureth command line, or ureth's default (block.rs PROFILE: floor 1,000,000, denominator 8).
-func urethDefault(line, flag string) uint64 {
-	defaults := map[string]uint64{"--unicity.base-fee-floor": 1_000_000, "--unicity.base-fee-change-denominator": 8}
-	for _, f := range strings.Fields(line) {
-		if v, ok := strings.CutPrefix(f, flag+"="); ok {
-			n, ok := new(big.Int).SetString(v, 10)
-			if !ok || !n.IsUint64() {
-				return 0
-			}
-			return n.Uint64()
-		}
-	}
-	return defaults[flag]
 }
 
 // loadVRRootDeployment reads the roots' --vr-deployment and binds it to the genesis EVM PDR the root runs with.
@@ -768,11 +823,18 @@ func newVRGenesisPlanCmd() *cobra.Command {
 
 func newVRGenesisVerifyCmd() *cobra.Command {
 	var inputFile, deploymentFile, genesisFile, shardConfFile, trustBaseFile, profileFile, idsFile, freshFile, urethLine, feeCollector, out string
+	var partial bool
 	cmd := &cobra.Command{Use: "verify", Short: "Refuse any mismatch between the artifacts of a VR generation, and write the roots' --vr-deployment",
-		Long: "Checks the finished generation: the EVM genesis carries exactly the seven VR accounts at their genesis addresses with the recorded\n" +
-			"code (the composer engine stateless and no proxy); the profile's measurement and a fresh one are of that code and cover the pins;\n" +
-			"the EVM PDR pins VR's address and code hash; VR's storage is the plan's (network word, limits, status, module, governor, fees);\n" +
-			"the roots' genesis identities are VR's genesis committee (membersDigest) and the coupled genesis; the ureth flags pin the profile.",
+		Long: "Checks the finished generation against the plan, never a report's description of it:\n" +
+			"  - the finalized EVM genesis by the B1 rules (SealRegistry code and state, chain id, seal_registry_genesis), its gasLimit = MaxGas\n" +
+			"    and its chain configuration;\n" +
+			"  - the code: VR and the module are the measured code (VR the PDR's), the facets the ones VR embeds, the composer and the multisig\n" +
+			"    the reviewed runtimes; the profile's measurement and the fresh one cover the pins;\n" +
+			"  - the storage of VR, the module and the multisig, slot for slot against the state the plan determines;\n" +
+			"  - the roots' genesis identities, the coupled genesis, the PDR pins;\n" +
+			"  - the ureth argument vector (both flag forms, no repeats) against the profile, the genesis commitment and VR's fees, and the\n" +
+			"    shard nodes' fee collector against VR's.\n" +
+			"--partial skips the two runtime inputs; it certifies nothing and writes no root deployment.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			var v vrVerifyInput
 			var err error
@@ -782,7 +844,7 @@ func newVRGenesisVerifyCmd() *cobra.Command {
 			if err = vrStrictJSON(deploymentFile, &v.deployment); err != nil {
 				return err
 			}
-			if v.alloc, err = vrAllocAccounts(genesisFile); err != nil {
+			if v.genesis, err = os.ReadFile(genesisFile); err != nil { // #nosec G304 -- operator supplied local file
 				return err
 			}
 			if v.full, err = readShardConf(shardConfFile); err != nil {
@@ -800,10 +862,17 @@ func newVRGenesisVerifyCmd() *cobra.Command {
 			if v.fresh, err = readVRHookMeasurement(freshFile); err != nil {
 				return err
 			}
-			v.urethFlags, v.feeCollector = urethLine, feeCollector
+			v.urethFlags, v.feeCollector, v.partial = urethLine, feeCollector, partial
+			if partial && out != "" {
+				return fmt.Errorf("%w: a partial check certifies nothing: no --out-root-deployment", ErrVRGenesis)
+			}
 			dep, err := vrVerify(v)
 			if err != nil {
 				return err
+			}
+			if partial {
+				fmt.Fprintln(cmd.OutOrStdout(), "PARTIAL: the generation's files agree, but the ureth arguments and the fee collector were not checked; the generation is not certified")
+				return nil
 			}
 			if out != "" {
 				if err := writeJSONFile(out, dep); err != nil {
@@ -824,8 +893,9 @@ func newVRGenesisVerifyCmd() *cobra.Command {
 	f.StringVar(&profileFile, "b1-profile", "", "the B1 profile")
 	f.StringVar(&idsFile, "genesis-identities", "", "the roots' genesis identities `plan` wrote")
 	f.StringVar(&freshFile, "vr-hook-measurement", "", "a fresh complete-path VR hook measurement (ureth tests/vr_hook.rs vr_hook_measurement)")
-	f.StringVar(&urethLine, "ureth-flags", "", "optional: the paired ureth's --unicity.* command line to check against the profile and VR's fees")
-	f.StringVar(&feeCollector, "fee-collector", "", "optional: the shard nodes' --engine-fee-collector, checked against VR's")
+	f.StringVar(&urethLine, "ureth-flags", "", "the paired ureth's argument vector (its --unicity.* and --txpool.* flags), checked against the profile, the genesis commitment and VR's fees")
+	f.StringVar(&feeCollector, "fee-collector", "", "the shard nodes' --engine-fee-collector, checked against VR's")
+	f.BoolVar(&partial, "partial", false, "check the files only, without --ureth-flags and --fee-collector: certifies nothing, writes no root deployment")
 	f.StringVar(&out, "out-root-deployment", "", "write the roots' --vr-deployment here once everything agrees")
 	for _, n := range []string{"input", "deployment", "genesis", "shard-conf", "trust-base", "b1-profile", "genesis-identities", "vr-hook-measurement"} {
 		_ = cmd.MarkFlagRequired(n)

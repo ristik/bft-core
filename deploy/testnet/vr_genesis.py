@@ -13,15 +13,17 @@ One command produces every artifact of the generation and refuses any mismatch b
   vr-deployment.json the roots' --vr-deployment, written by `ubft vr-genesis verify` only when everything agrees
   ureth-flags.txt   the paired ureth's --unicity.* flags (the profile's, plus the genesis commitment)
 
-The measurement is ureth's (crates/unicity/execution/tests/vr_hook.rs vr_hook_measurement, at the genesis addresses); its VR and module code
-hashes are what the PDR pins before anything is deployed, and `verify` holds the deployed alloc to them. A fresh measurement passed with
---fresh-measurement is checked against the pins too (raise M_H, never keep stale pins).
+The recorded measurement (--measurement) is ureth's complete-path measurement the profile is pinned from; its VR and module code hashes are
+what the PDR pins before anything is deployed. The fresh measurement is a generation step: with --ureth the plan runs the paired ureth's
+measurement (crates/unicity/execution/tests/vr_hook.rs vr_hook_measurement) itself, and `verify` holds it to the final allocation (VR and
+module code, H, caps, ceilings) and to the pins; a requirement above them refuses the generation (raise M_H, never keep stale pins). An
+externally taken fresh measurement may be passed with --fresh-measurement instead; the recorded file is never taken for it.
 
 This builds a development generation's files only: it starts nothing, and it never touches a running network. A later staging regeneration
 uses the same steps (deploy/testnet/generate.py --vr is the follow-up that wires them into the Compose package).
 
-    deploy/testnet/vr_genesis.py --ubft build/ubft --contracts ../unicity-pos-contracts \\
-        --measurement vr-hook-measurement.json --validators 4 --out /tmp/vr-gen
+    deploy/testnet/vr_genesis.py --ubft build/ubft --contracts ../unicity-pos-contracts --ureth ../ureth \\
+        --measurement deploy/testnet/vr-hook-measurement.json --validators 4 --out /tmp/vr-gen
 """
 import argparse
 import hashlib
@@ -94,6 +96,24 @@ def genesis_commitment(genesis):
     return '0x' + word.lower().removeprefix('0x').rjust(64, '0')
 
 
+def fresh_measurement(a, out):
+    """The paired ureth's complete-path measurement, run now (cargo test of the ignored vr_hook_measurement), or an explicit external one."""
+    if a.fresh_measurement:
+        fresh = Path(a.fresh_measurement).resolve()
+        if fresh == Path(a.measurement).resolve():
+            raise VRGenesisError('--fresh-measurement is the recorded measurement: a fresh measurement must be taken anew')
+        shutil.copy2(fresh, out / 'vr-hook-measurement-fresh.json')
+        return out / 'vr-hook-measurement-fresh.json'
+    target = out / 'vr-hook-measurement-fresh.json'
+    env = dict(os.environ, VR_HOOK_MEASUREMENT=str(target))
+    log = run('cargo', 'test', '-p', 'reth-unicity-execution', '--features', 'test-utils', '--test', 'vr_hook', '--', '--ignored', '--exact',
+              'vr_hook_measurement', '--nocapture', cwd=Path(a.ureth).resolve(), env=env)
+    (out / 'vr-hook-measurement-fresh.log').write_text(log)
+    if not target.is_file():
+        raise VRGenesisError('the ureth measurement wrote no measurement file')
+    return target
+
+
 def plan(a):
     out = Path(a.out).resolve()
     if out.exists():
@@ -148,13 +168,14 @@ def plan(a):
               '--alloc-source', home / 'funded.json', '--out', out / 'genesis.json', '--full-shard-conf', out / 'full-shard-conf.json',
               '--identities-out', out / 'b1-identities.json'))
     genesis = json.loads((out / 'genesis.json').read_text())
+    fresh = fresh_measurement(a, out)
     ureth = flags[0] + f' --unicity.genesis-commitment={genesis_commitment(genesis)}'
     (out / 'ureth-flags.txt').write_text(ureth + '\n')
     shutil.copy2(trust, out / 'trust-base.json')
 
     verified = run(ubft, 'vr-genesis', 'verify', '--input', out / 'vr/input.json', '--deployment', out / 'vr/deployment.json', '--genesis', out / 'genesis.json',
                    '--shard-conf', out / 'full-shard-conf.json', '--trust-base', trust, '--b1-profile', out / 'b1-profile.json',
-                   '--genesis-identities', out / 'genesis-identities.json', '--vr-hook-measurement', Path(a.fresh_measurement or measurement_path).resolve(),
+                   '--genesis-identities', out / 'genesis-identities.json', '--vr-hook-measurement', fresh,
                    '--ureth-flags', ureth, '--fee-collector', FEE_COLLECTOR, '--out-root-deployment', out / 'vr-deployment.json')
     print(verified.strip())
     summary = {'generation': generation, 'validators': a.validators, 'chainId': a.chain_id, 'networkId': NETWORK_ID,
@@ -169,7 +190,8 @@ def main():
     p.add_argument('--ubft', default=str(HERE.parents[1] / 'build/ubft'))
     p.add_argument('--contracts', required=True, help='a unicity-pos-contracts checkout with script/vr-genesis.sh (forge, cast and python3 on PATH)')
     p.add_argument('--measurement', required=True, help='the complete-path VR hook measurement the profile is pinned from')
-    p.add_argument('--fresh-measurement', help='a fresh measurement to hold the pins to at genesis (default: the recorded one)')
+    p.add_argument('--ureth', help='a ureth checkout at the pin (cargo on PATH): the plan runs its complete-path measurement as the fresh one')
+    p.add_argument('--fresh-measurement', help='instead of --ureth: an externally taken fresh measurement (never the recorded file)')
     p.add_argument('--validators', type=int, default=4)
     p.add_argument('--chain-id', type=int, default=CHAIN_ID)
     p.add_argument('--generation', help='the generation name (default: the output directory name)')
@@ -181,6 +203,8 @@ def main():
     a = p.parse_args()
     if not 1 <= a.validators <= 16:
         p.error('--validators must be 1..16')
+    if bool(a.ureth) == bool(a.fresh_measurement):
+        p.error('the fresh measurement is a generation step: pass --ureth (run it now) or --fresh-measurement (an external one), exactly one')
     try:
         summary = plan(a)
     except VRGenesisError as e:
