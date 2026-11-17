@@ -33,9 +33,13 @@ func TestTheFirstCertificateOfAnIntentWins(t *testing.T) {
 	require.Equal(t, [32]byte{2}, v.current().intent)
 }
 
-type recordingReader struct{ out map[[32]byte]*vrhandoff.Output }
+type recordingReader struct {
+	out map[[32]byte]*vrhandoff.Output
+}
 
-func (r recordingReader) OpenOutput(_ context.Context, _, root [32]byte) (*vrhandoff.Output, error) { return r.out[root], nil }
+func (r recordingReader) OpenOutput(_ context.Context, _, root [32]byte) (*vrhandoff.Output, error) {
+	return r.out[root], nil
+}
 
 // The commit observer's worker: committed blocks reach the observer oldest first with their parent links, so the first committed block at
 // which R is published becomes its source.
