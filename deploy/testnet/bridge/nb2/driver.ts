@@ -1196,6 +1196,13 @@ async function main(): Promise<void> {
 }
 
 main().catch((e) => {
+  if (e instanceof BoundaryNotFound) {
+    // one line a probe, the newest last (the lane's console keeps the last lines; every probe is in out/boundary-<label>.json)
+    for (const t of e.tries) console.error(`  ${t.label}: ${t.transfers} transfers, ${t.conditions}, gas ${t.gas} (+${t.up}/-${t.down}): ${t.real}`);
+    for (const r of e.refused) console.error(`  refused ${r.pass}/${r.fail}: ${r.reason}`);
+    console.error(`BoundaryNotFound: ${e.message}`);
+    process.exit(1);
+  }
   console.error(e instanceof Nb2Error ? `Nb2Error ${e.rule}: ${e.message}` : e instanceof WalletError ? `WalletError ${e.reason}: ${e.message}` : e);
   process.exit(1);
 });

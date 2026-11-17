@@ -2264,6 +2264,20 @@ class NB2DriverKeys(unittest.TestCase):
         src=(Path(__file__).parent/'bridge/nb2/rehearse_nb2.py').read_text()
         deploy=src[src.index('    def deploy(self):'):src.index('    def ',src.index('    def deploy(self):')+10)]
         self.assertLess(deploy.index('self.make_keys()'),deploy.index("self.driver('gamma-check')"),'deploy makes the keys before its driver commands open a wallet')
+    def test_a_failed_boundary_search_keeps_every_probe_in_the_evidence(self):
+        # the console keeps the driver's last lines only: run 43985010186 lost all but two of its twenty probes
+        m=self.module()
+        with tempfile.TemporaryDirectory() as tmp:
+            gen=self.generation(tmp);r=m.NB2Rehearsal(gen,Path(tmp)/'ev','/bin/false')
+            def driver(rr,*args,check=True):
+                out=rr.nb2/'out';out.mkdir(parents=True,exist_ok=True)
+                if args[0]=='boundary-estimate': (out/'boundary-estimate-ge.json').write_text(json.dumps({'estimate':255}));return 0,''
+                (out/'boundary-g.json').write_text(json.dumps({'pass':None,'fail':None,'tries':[{'label':'g0c'}],'error':'no pair'}))
+                self.assertFalse(check,'the boundary search runs unchecked, so its file is kept first');return 1,'BoundaryNotFound'
+            with patch.object(m.NB2Rehearsal,'driver',driver):
+                with self.assertRaisesRegex(m.Failure,'boundary-g.json'): r.boundary()
+            self.assertEqual(json.loads((Path(tmp)/'ev/nb2/boundary-g.json').read_text())['tries'],[{'label':'g0c'}])
+            self.assertTrue((Path(tmp)/'ev/nb2/boundary-estimate-ge.json').is_file())
     def test_no_key_is_given_to_a_command_line(self):
         src=(Path(__file__).parent/'bridge/nb2/rehearse_nb2.py').read_text()
         self.assertNotIn('--private-key',src);self.assertNotIn('self.key(',src)

@@ -537,7 +537,11 @@ class NB2Rehearsal(Rehearsal):
     def boundary(self):
         self.driver('boundary-estimate', 'big', 'ge')
         est = self.outfile('boundary-estimate-ge')['estimate']
-        self.driver('boundary', 'big', 'g', str(est))
+        code, _ = self.driver('boundary', 'big', 'g', str(est), check=False)
+        # every probe, the pairs refused and the reason reach the evidence whatever the search found (the console keeps the driver's last lines only)
+        self.keep('boundary-estimate-ge', 'boundary-g')
+        if code != 0:
+            raise Failure(f'the driver failed: boundary big g {est} (every probe: evidence nb2/boundary-g.json)')
         b = self.outfile('boundary-g')
         self.say(f'  boundary: {json.dumps(b["tries"], default=str)}')
         c = b['confirmed']
