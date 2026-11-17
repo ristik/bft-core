@@ -45,12 +45,15 @@ keys while a run lasts (`rehearse_nb2.py` deletes it at the end unless `--keep-k
 | `profile` | the semantic profile hash (in Γ), the vectors digest, the B1 profile's sha256 | the image's plug-in checkout; `network/b1-profile.json` |
 | `trust` | the bundle's file and its genesis EntryID (Γ.rootGenesis32); where newer entries come from | `dnb-tool trust-bundle` |
 | `limits` | `maxEncodedTxBytes` (L_max) 512 KiB, the wallets' limit; the path's own limits: each pool's `--txpool.max-tx-input-bytes` (4 MiB) and `--txpool.max-tx-gas` (the ordinary capacity), the gateway's largest carried transaction; `userGasLimit` and the block gas limit, the gateway's bodies, log window and answer cap, retention, how transactions and blocks travel | `release_nb2.py` `L_MAX`; `compose.yaml` (the B1 profile's ureth flags, `ubft engine-api b1-profile`), `network/b1-profile.json` (`ordinaryCapacity`, `maxGas`), `gateway.py`. The manifest refuses a validator that is not a full proof source, a pool below L_max or without the profile's gas cap, or a gateway bound below 2 L_max + 64 KiB |
-| `envelope` | the operating envelope: per split depth, the largest transfer history whose return passes the pre-burn preflight at `returnReserveSegments` (the burn counted at the decoder bounds, about 4.5M gas), the historical proofs that fit beside it by bytes and by gas, and for the reference part the return delay at 1, 10 and 100 payments a second | `driver.ts envelope`: the plug-in's measured gas model (`MeasuredGasModel`) over the pins |
+| `envelope` | the operating envelope: per split depth, the largest transfer history whose return passes the pre-burn preflight at `returnReserveSegments` (the burn counted at the decoder bounds, about 3.0M gas), the historical proofs that fit beside it by bytes and by gas, and for the reference part the return delay at 1, 10 and 100 payments a second | `driver.ts envelope`: the plug-in's gas bound (`MeasuredGasModel`, bound-nb2-1179, native-bridge-plugins `docs/nb2-gas-model.md`) on parts built from the lane's template (`nb2/envelope_template.cbor`, `nb2/envelope_shape.ts`) over the pins |
 
 The pools admit more than L_max (4 MiB, set by the B1 profile for the protocol 6/7 envelope), so L_max binds in the wallet's preflight, not in a
-pool. Gas binds before bytes on this deployment: at `userGasLimit` 60M the largest admitted history is about 280 transfers (about 290 KB of evidence),
-well below L_max. The `boundary` stage locates that bound on live tokens within two transfers and executes every token it builds as the preflight
-judged it (fresh tokens' gas varies by about one transfer's step between builds, so an exact adjacent pair is not observable live).
+pool. Gas binds first on this deployment, just before bytes: at `userGasLimit` 60M the largest admitted unsplit history is about 280 to 290 transfers in
+16 certificate groups (282 admitted and 284 refused in the bft-core#1179 dev-server run, about 450 KB of evidence; a consolidated one of 300
+transfers passes), and L_max binds at about 310. The `boundary` stage locates
+the bound on live tokens within two transfers and executes every token it builds as the preflight judged it (a refusal is sound over
+`userGasLimit` by its own gas or over L_max by bytes; fresh tokens' gas varies by about one transfer's step between builds, so an exact adjacent pair
+is not observable live).
 
 ### The rehearsal stages
 
