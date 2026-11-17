@@ -141,7 +141,7 @@ type (
 		posQueue             posSubmissions                   // submitted Retirement and RejectResult controls waiting for a leader
 		witnesses            WitnessFetcher                   // nil: control witnesses are only what the store already holds
 		q3                   Q3Authority                      // the verified Q3 history, nil when the binary does not know it
-		vr                   *vrHandoff                       // the VR handoff root side (EnableVRHandoff); nil on a chain that is not in VR mode
+		vr                   *vrHandoff                       // the VR handoff root side (EnableVRHandoff); nil off VR mode. Kept across an in-process switch: its sources and outputs are of committed history, and a held certificate of the old epoch never matches the new one
 		v3Planned            atomic.Pointer[V3Candidate]      // the last candidate PlanV3Candidate derived: the exact body the members declared readiness for
 		q3Staged             atomic.Pointer[Q3Staged]         // the V3 candidate this validator last derived for its operator
 		q3StagedEVM          atomic.Pointer[stagedEVMMembers] // the EVM validators of the successor assignment of the candidate last staged here
