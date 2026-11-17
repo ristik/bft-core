@@ -268,7 +268,7 @@ activation-time reasons that appear only in `changes[id].rejectReason`.
 | 16 | CodeMismatch | EVM: SetModule/SetGovernor code hash at activation |
 | 17 | HolderMismatch | EVM |
 | 18 | AdoptionNotReady | EVM |
-| 19 | ActionFailed | EVM: ModuleAction `onGovernance` failed |
+| 19 | ActionFailed | EVM: a fully funded ModuleAction `onGovernance` step failed (the module is also Faulted, §14) |
 | 20 | NotActive | EVM: ModuleAction names a module that is not active |
 | 21 | HolderCeiling | EVM: a ninth holder |
 
@@ -658,7 +658,10 @@ Exactly three accounts at P; the verdict refuses, in this order: a handoff in fl
 - **RejectResult due** (`reject.due`): Reserved/Published at `progress ≥ expiresAtProgress` → Expired; Invalidated → immediately;
   Published with a deterministic admission failure → Invalid; otherwise never.
 - **Change lifecycle** (`change.lifecycle`): both delays (2,000 progress and 3,600 s, captured at queue); cancel only Queued/Scheduled;
-  ModuleAction executes into the active module only; the 33rd pending change is refused.
+  ModuleAction executes into the active module only, through a contained `onGovernance` step with the design §3.3.1 outcome classes:
+  success makes it Active; a fully funded failure (revert, cap exhaustion, malformed or oversized return) rejects it (ActionFailed)
+  **and faults the module** (Faulted, never over Inconsistent); too little gas reverts `BudgetShort` with the change still Queued and
+  health unchanged; a module that is not active rejects it (NotActive) with no call and no fault. The 33rd pending change is refused.
 - **Fold** (`fold.verdicts`, `fold.ackGate`, `fold.proofConfig`) over a full `FoldInput` with real PDRs and signed VR-context PoPs.
   For each change, in this order: Duplicate (same kind and payload hash as an earlier **Accepted** change); Malformed (the payload, or
   an embedded PDR or PoP list, not canonical; every embedded encoding is checked before the scope, so a Malformed change claims no
