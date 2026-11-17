@@ -2385,28 +2385,38 @@ class NB2DriverKeys(unittest.TestCase):
                 sound=json.loads((Path(tmp)/'ev/nb2/boundary-soundness.json').read_text())
                 self.assertEqual((sound[0]['ledgerNotBefore'],sound[0]['status']),(1006,'sound' if fresh else 'contradicted'))
     def test_a_driver_command_over_its_timeout_is_killed_and_reported(self):
-        # sol r13: a stalled command (a ledger read whose transport never completes) cannot hold the stage: the container is killed, the
-        # command reports 124, and the soundness file is still written
+        # sol r13: a stalled command (a ledger read whose transport never completes) cannot hold the stage: its container is killed and the
+        # command reports 124. sol r14: the kill is bounded too, and whether it took is recorded: confirmed, failed (rc), or timeout
         m=self.module()
+        for name,kill,cleanup in (('confirmed',lambda cmd,kw: subprocess.CompletedProcess(cmd,0,'',''),'confirmed'),
+                                  ('a failed kill',lambda cmd,kw: subprocess.CompletedProcess(cmd,1,'','Error response from daemon: cannot kill container'),'failed (rc 1: Error response from daemon: cannot kill container)'),
+                                  ('a stalled daemon',lambda cmd,kw: (_ for _ in ()).throw(subprocess.TimeoutExpired(cmd,kw['timeout'])),'timeout (docker kill over 30 s)')):
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
+                gen=self.generation(tmp);r=m.NB2Rehearsal(gen,Path(tmp)/'ev','/bin/false')
+                ran=[]
+                def run(cmd,*a,kill=kill,**kw):
+                    ran.append((cmd,kw.get('timeout')))
+                    if cmd[:2]==['docker','kill']: return kill(cmd,kw)
+                    raise subprocess.TimeoutExpired(cmd,kw['timeout'],output=b'polling the aggregator',stderr=b'')
+                with patch.object(m.subprocess,'run',run), patch.object(m.os,'getuid',lambda: 1000), \
+                        patch.object(m.release_nb2,'driver_cmd',lambda gen,*args,env_file=None,extra=(): ['docker','run',*extra,'img',*args]):
+                    code,text=r.driver('ledger','big','g0c','1006',check=False,timeout=240)
+                    with self.assertRaisesRegex(m.Failure,'the driver failed'): r.driver('ledger','big','g0c','1006',timeout=240)   # checked: the stage stops
+                self.assertEqual(code,124);self.assertIn('polling the aggregator',text);self.assertIn(f'cleanup: {cleanup}]',text)
+                container=ran[0][0][ran[0][0].index('--name')+1]
+                self.assertEqual(ran[0][1],240);self.assertEqual(ran[1],(['docker','kill',container],30),'the kill runs under its own timeout')
+                self.assertEqual(r.timeouts[0],{'command':['ledger','big','g0c','1006'],'container':container,'timeout':240,'cleanup':cleanup})
+        # in the stage: the probe's entry keeps the timed-out command and its cleanup, the probe is contradicted, the rest is not executed
         with tempfile.TemporaryDirectory() as tmp:
-            gen=self.generation(tmp);r=m.NB2Rehearsal(gen,Path(tmp)/'ev','/bin/false')
-            ran=[]
-            def run(cmd,*a,**kw):
-                ran.append((cmd,kw.get('timeout')))
-                if cmd[:2]==['docker','kill']: return subprocess.CompletedProcess(cmd,0,'','')
-                raise subprocess.TimeoutExpired(cmd,kw['timeout'],output=b'polling the aggregator',stderr=b'')
-            with patch.object(m.subprocess,'run',run), patch.object(m.os,'getuid',lambda: 1000), patch.object(m.release_nb2,'driver_cmd',lambda gen,*args,env_file=None,extra=(): ['docker','run',*extra,'img',*args]):
-                code,text=r.driver('ledger','big','g0c','1006',check=False,timeout=240)
-            self.assertEqual(code,124);self.assertIn('[killed: over its 240 s]',text);self.assertIn('polling the aggregator',text)
-            name=ran[0][0][ran[0][0].index('--name')+1]
-            self.assertEqual(ran[0][1],240);self.assertEqual(ran[1][0],['docker','kill',name])
-        with tempfile.TemporaryDirectory() as tmp:
-            t=self.tries();m,r,driver,_=self.boundary_run(tmp,t,{'admitted':t[2],'refused':t[3],'spread':2,'margin':2,'window':['g1c','g2c','g3c']},
-                                                           ledger={'g0c':None},exits={('ledger','g0c'):124})
+            t=self.tries()
+            m,r,driver,_=self.boundary_run(tmp,t,{'admitted':t[2],'refused':t[3],'spread':2,'margin':2,'window':['g1c','g2c','g3c']},
+                                           ledger={'g0c':None},exits={('ledger','g0c'):124},
+                                           hooks={'ledger':lambda args: r.timeouts.append({'command':list(args),'container':'nb2-driver-x','timeout':240,'cleanup':'timeout (docker kill over 30 s)'})})
             with patch.object(m.NB2Rehearsal,'driver',driver):
                 with self.assertRaisesRegex(m.Failure,'g0c .* refused'): r.boundary()
             sound=json.loads((Path(tmp)/'ev/nb2/boundary-soundness.json').read_text())
             self.assertEqual((sound[0]['status'],sound[0]['ledgerExit'],sound[0]['ledger']),('contradicted',124,None))
+            self.assertEqual(sound[0]['timeouts'][0]['cleanup'],'timeout (docker kill over 30 s)')
             self.assertEqual([x['status'] for x in sound[1:]],['not executed']*3)
     def test_a_spread_over_the_margin_fails_the_location(self):
         with tempfile.TemporaryDirectory() as tmp:

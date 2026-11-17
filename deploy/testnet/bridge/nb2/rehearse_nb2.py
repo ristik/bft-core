@@ -60,6 +60,7 @@ import release_nb2   # noqa: E402
 WALLETS = ('main', 'rot', 'big', 'size', 'gascap')
 STEP_TIMEOUT = 900     # seconds: one burn, redemption or preflight of a boundary probe
 LEDGER_TIMEOUT = 240   # seconds: the ledger read (its own deadline is 120 s, driver.ts LEDGER_DEADLINE_MS)
+KILL_TIMEOUT = 30      # seconds: docker kill of a command over its timeout
 FUNDS = {'main': 20 * 10 ** 18, 'rot': 20 * 10 ** 18, 'big': 20 * 10 ** 18, 'size': 5 * 10 ** 18, 'gascap': 5 * 10 ** 18}
 
 
@@ -77,6 +78,7 @@ def gateway_size_refusal(status, text):
 class NB2Rehearsal(Rehearsal):
     def __init__(self, *args, **kwargs):
         self._addresses = {}
+        self.timeouts = []   # every driver command killed over its timeout, and whether its container was confirmed gone
         super().__init__(*args, **kwargs)
 
     @property
@@ -113,9 +115,17 @@ class NB2Rehearsal(Rehearsal):
             out = subprocess.run(cmd, text=True, capture_output=True, timeout=timeout)
             code, text = out.returncode, (out.stdout + out.stderr).strip()
         except subprocess.TimeoutExpired as expired:
-            subprocess.run(['docker', 'kill', name], capture_output=True)
+            # the kill is bounded too (sol r14): a stalled daemon or a failed kill is recorded, never waited on, and the command is 124 either way
+            try:
+                kill = subprocess.run(['docker', 'kill', name], capture_output=True, text=True, timeout=KILL_TIMEOUT)
+                cleanup = 'confirmed' if kill.returncode == 0 else f'failed (rc {kill.returncode}: {(kill.stderr or "").strip()[-200:]})'
+            except subprocess.TimeoutExpired:
+                cleanup = f'timeout (docker kill over {KILL_TIMEOUT} s)'
+            except OSError as error:
+                cleanup = f'failed ({error})'
+            self.timeouts.append({'command': list(args), 'container': name, 'timeout': timeout, 'cleanup': cleanup})
             part = lambda b: b.decode(errors='replace') if isinstance(b, bytes) else (b or '')   # noqa: E731
-            code, text = 124, (part(expired.stdout) + part(expired.stderr)).strip() + f'\n[killed: over its {timeout} s]'
+            code, text = 124, (part(expired.stdout) + part(expired.stderr)).strip() + f'\n[over its {timeout} s; container {name}; cleanup: {cleanup}]'
         self.say(f'  $ driver {" ".join(args)} ({time.monotonic() - t0:.0f} s)\n    ' + '\n    '.join(text.splitlines()[-20:]))
         if check and code != 0:
             raise Failure(f'the driver failed: {" ".join(args)}')
@@ -601,7 +611,7 @@ class NB2Rehearsal(Rehearsal):
                     ok = (burned == 0 and redeemed == 0 and burn is not None and o is not None and o.get('result') == 'paid' and int(t['gas']) <= lim
                           and int(burn['preflightGas']) <= lim and int(paid.get('gasLimit', lim + 1)) <= lim and int(paid.get('gasUsed', lim + 1)) <= lim)
                     s.update(status='sound' if ok else 'contradicted', burnExit=burned, redeemExit=redeemed, result=(o or {}).get('result'),
-                             gasLimit=paid.get('gasLimit'), gasUsed=paid.get('gasUsed'))
+                             gasLimit=paid.get('gasLimit'), gasUsed=paid.get('gasUsed'), timeouts=[x for x in self.timeouts if label in x['command']])
                     save()
                     self.expect(ok, f'{label} ({t["transfers"]} transfers) admitted by the preflight (gas {t["gas"]}) is burned and paid within userGasLimit {lim}: '
                                     f'redeem gas limit {paid.get("gasLimit")}, used {paid.get("gasUsed")}', json.dumps({'burn': burn, 'redeem': o}, default=str))
@@ -618,6 +628,7 @@ class NB2Rehearsal(Rehearsal):
                     ok = (judged == 0 and p is not None and not p.get('ok', True) and p.get('rule') == 'CapacityPreflight' and t['gas'] is not None and int(t['gas']) > lim
                           and looked == 0 and ledger is not None and ledger.get('verdict') == 'unspent')
                     s.update(status='sound' if ok else 'contradicted', preflightExit=judged, ledgerExit=looked, rule=(p or {}).get('rule'), detail=(p or {}).get('detail'),
+                             timeouts=[x for x in self.timeouts if label in x['command']],
                              ledger=(ledger or {}).get('verdict'), ledgerSnapshot=(ledger or {}).get('snapshot'), ledgerReason=(ledger or {}).get('reason'))
                     save()
                     self.expect(ok, f'{label} ({t["transfers"]} transfers) refused by the preflight is over userGasLimit {lim} by its own gas ({t["gas"]}), refused again '
