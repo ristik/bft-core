@@ -24,34 +24,45 @@ func fetchFromRootPeers[B any](ctx context.Context, peers []peer.AddrInfo, reque
 	if len(peers) == 0 {
 		return zero, errNoInstallPeers
 	}
-	var errs []error
-	for _, root := range peers {
+	refusals := make([]error, len(peers))
+	b, ok, _, ended := sweepRootPeers(ctx, peers, request, accept, refusals)
+	if ok {
+		return b, nil
+	}
+	return zero, errors.Join(append(refusals, ended)...)
+}
+
+// sweepRootPeers is one pass of fetchFromRootPeers over peers. It reports the first answer that authenticates (ok); otherwise refusals[i]
+// holds peer i's refusal, with its id, for every peer it asked; cut is the peer whose request or answer the end of ctx overtook (its entry
+// says so), -1 for none; ended is the context's error when the pass stopped because ctx ended before the next peer was asked.
+func sweepRootPeers[B any](ctx context.Context, peers []peer.AddrInfo, request func(context.Context, peer.ID) (B, error), accept func(B) error,
+	refusals []error) (b B, ok bool, cut int, ended error) {
+	for i, root := range peers {
 		if err := ctx.Err(); err != nil {
-			errs = append(errs, err)
-			break
+			return b, false, -1, err
 		}
 		b, err := request(ctx, root.ID)
 		// an answer that arrives as the budget ends is not authenticated, and one whose authentication outlasts it is not chosen: the
 		// caller installs under its own, longer context, so a late answer would make the install outlast the budget (astra on #1081)
 		if cerr := ctx.Err(); cerr != nil {
-			errs = append(errs, fmt.Errorf("peer %s: %w", root.ID, errors.Join(cerr, err)))
-			break
+			refusals[i] = fmt.Errorf("peer %s: %w", root.ID, errors.Join(cerr, err))
+			return b, false, i, nil
 		}
 		if err == nil && accept != nil {
 			if aerr := accept(b); aerr != nil {
 				err = fmt.Errorf("%w: %w", errInvalidPeerBundle, aerr)
 			}
 			if cerr := ctx.Err(); cerr != nil {
-				errs = append(errs, fmt.Errorf("peer %s: authenticated after the wait ended: %w", root.ID, errors.Join(cerr, err)))
-				break
+				refusals[i] = fmt.Errorf("peer %s: authenticated after the wait ended: %w", root.ID, errors.Join(cerr, err))
+				return b, false, i, nil
 			}
 		}
 		if err == nil {
-			return b, nil
+			return b, true, -1, nil
 		}
-		errs = append(errs, fmt.Errorf("peer %s: %w", root.ID, err))
+		refusals[i] = fmt.Errorf("peer %s: %w", root.ID, err)
 	}
-	return zero, errors.Join(errs...)
+	return b, false, -1, nil
 }
 
 // Waiting for a root peer to serve the activation (#1080). A root started with --install-handoff-epoch that does not hold the committed
@@ -82,32 +93,46 @@ func defaultInstallRetry(wait time.Duration) installRetry {
 // waiting (optional) is told of every refusal it waits after. Without peers it does not wait: none can come.
 func awaitFromRootPeers[B any](ctx context.Context, r installRetry, peers []peer.AddrInfo, request func(context.Context, peer.ID) (B, error), accept func(B) error,
 	waiting func(attempt int, err error)) (B, error) {
-	if r.wait <= 0 {
+	if r.wait <= 0 || len(peers) == 0 {
 		return fetchFromRootPeers(ctx, peers, request, accept)
 	}
 	ctx, cancel := context.WithTimeout(ctx, r.wait)
 	defer cancel()
+	var zero B
+	// last holds every peer's latest refusal over all sweeps: a wait that ends at the start of a sweep, or part way through one, still
+	// reports why each peer refused when it was last asked (#1171), not only the expiry. A request the end of the wait overtook is no
+	// refusal of its peer: it is reported along with that peer's previous one.
+	last := make([]error, len(peers))
+	ended := func(attempt int) (B, error) {
+		return zero, fmt.Errorf("after %d attempts within %s: %w", attempt, r.wait, errors.Join(append([]error{ctx.Err()}, last...)...))
+	}
 	delay := r.first
 	for attempt := 1; ; attempt++ {
-		b, err := fetchFromRootPeers(ctx, peers, request, accept)
-		if errors.Is(err, errNoInstallPeers) {
-			return b, err
+		refusals := make([]error, len(peers))
+		b, ok, cut, _ := sweepRootPeers(ctx, peers, request, accept, refusals)
+		for i, err := range refusals {
+			switch {
+			case err == nil:
+			case i == cut:
+				last[i] = errors.Join(err, last[i])
+			default:
+				last[i] = err
+			}
 		}
-		if cerr := ctx.Err(); cerr != nil {
-			var zero B
-			return zero, fmt.Errorf("after %d attempts within %s: %w", attempt, r.wait, errors.Join(cerr, err))
+		if ctx.Err() != nil {
+			return ended(attempt)
 		}
-		if err == nil {
+		if ok {
 			return b, nil
 		}
 		if waiting != nil {
-			waiting(attempt, err)
+			waiting(attempt, errors.Join(refusals...))
 		}
 		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return b, fmt.Errorf("after %d attempts within %s: %w", attempt, r.wait, errors.Join(ctx.Err(), err))
+			return ended(attempt)
 		case <-timer.C:
 		}
 		delay = min(2*delay, r.max)

@@ -59,6 +59,7 @@ func (a *UnicityBFTApp) AddSubcommands() {
 	a.baseCmd.AddCommand(newEngineAPICmd(a.baseConfig))
 	a.baseCmd.AddCommand(newSigningAuthorityCmd(a.baseConfig))
 	a.baseCmd.AddCommand(newVRChangeCmd())
+	a.baseCmd.AddCommand(newValidatorCmd(a.baseConfig))
 }
 
 func newBaseCmd(obsF Factory) (*cobra.Command, *baseFlags) {
