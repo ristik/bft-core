@@ -634,6 +634,32 @@ func (x *BlockStore) committedVR(derive bool) (VROpening, bool, error) {
 	return o, true, err
 }
 
+// VRQueryAt is the intent query over an executed block as the parent of the next one (its control state, backoff, epoch and round, the EVM
+// state it certifies, and the root facts with the store's authority link): what a leader checks a planned Prepare's intent against.
+func (x *BlockStore) VRQueryAt(b *ExecutedBlock) (VRIntentQuery, bool, error) {
+	if x.profile != ProfileHandoff || b == nil || b.ShardState.Control == nil || len(b.ShardState.Control.VR) == 0 {
+		return VRIntentQuery{}, false, nil
+	}
+	s, err := vradmit.DecodeRootState(b.ShardState.Control.VR)
+	if err != nil {
+		return VRIntentQuery{}, false, err
+	}
+	x.lock.RLock()
+	svc, auth := x.pos, x.handoffAuth
+	x.lock.RUnlock()
+	confs, err := x.orchestration.ShardConfigs(b.GetRound())
+	if err != nil {
+		return VRIntentQuery{}, true, err
+	}
+	latestRoot, latestBlock, latestOK := certifiedEVM(b.ShardState, confs)
+	q := VRIntentQuery{Control: b.ShardState.Control, Backoff: s.Backoff, Epoch: b.BlockData.Epoch, Round: b.GetRound(), LatestEVMRoot: latestRoot,
+		LatestEVMBlock: latestBlock, LatestEVMOK: latestOK}
+	if svc != nil && svc.Registry != nil {
+		q.Root = vrRootFacts(b.ShardState, confs, x.orchestration, svc.Registry, b.ShardState.Control.Network, b.BlockData.Epoch, auth)
+	}
+	return q, true, nil
+}
+
 // CommittedVRQuery is the intent query over the committed root block (its control state, backoff, epoch and round, the EVM state it
 // certifies, and the root facts with the successor link of the store's authority): what the operator and the protocol service derive
 // the current intent over. ok is false on a chain that is not in VR mode.

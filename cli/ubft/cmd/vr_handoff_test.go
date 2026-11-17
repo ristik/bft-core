@@ -58,6 +58,12 @@ func (o *fixtureOperator) SubmitVRCertificate(c vrschema.ViewCertificate) error 
 	return nil
 }
 
+func (o *fixtureOperator) OfferVRMessage(vrschedule.Message) error { return nil }
+
+func (o *fixtureOperator) VRStage(uint64) (vrschedule.StageSet, [32]byte, error) {
+	return vrschedule.StageSet{}, o.d.Digest, nil
+}
+
 // The operator endpoints and the development harness end to end: the harness reads the intent, signs every successor's PoP, the view's
 // assembly and every readiness over the body the root derives, and every root admits the certificate it delivers.
 func TestTheVRHandoffEndpointsAndTheHarness(t *testing.T) {

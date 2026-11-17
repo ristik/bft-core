@@ -1996,6 +1996,7 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 		x.orderRejection(ctx, block, parentRound)
 		x.orderSubmittedControl(ctx, block)
 		x.orderRetirements(ctx, block, parentRound)
+		x.orderHandoffView(ctx, block)
 	}
 	proposalMsg := &abdrc.ProposalMsg{
 		Block:       block,
@@ -2140,6 +2141,7 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 	blockStore.SetPosServices(x.blockStore.PosServices())
 	if x.vr != nil {
 		blockStore.SetCommitObserver(x.vr.onCommit)
+		blockStore.SetExecutionObserver(x.vr.onExecuted)
 	}
 	blockStore.SetLeaderInputs(x.blockStore.LeaderInputs())
 	if x.utbPrevious != nil {
@@ -2732,6 +2734,7 @@ func (x *ConsensusManager) validateRecoveryState(rsp *abdrc.StateMsg) error {
 			bs.SetPosServices(x.blockStore.PosServices())
 			if x.vr != nil {
 				bs.SetCommitObserver(x.vr.onCommit)
+				bs.SetExecutionObserver(x.vr.onExecuted)
 			}
 			bs.SetLeaderInputs(x.blockStore.LeaderInputs())
 			if x.utbPrevious != nil {

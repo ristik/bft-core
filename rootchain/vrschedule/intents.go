@@ -34,6 +34,9 @@ type Intents struct {
 	Config  func() (q3format.ProtocolConfig, error)
 	Sources *Sources
 	Outputs *Outputs
+	// Fetch reads VR's open output at a certified EVM block the cache does not hold (a HandoffView judged over an executed, uncommitted
+	// parent): verified against the state root, then cached. Nil leaves an uncached state unavailable.
+	Fetch func(blockHash, stateRoot [32]byte) (*vrhandoff.Output, error)
 }
 
 func (p *Intents) Intent(q storage.VRIntentQuery) (storage.VRIntent, bool, error) {
@@ -88,6 +91,13 @@ func (p *Intents) Derive(q storage.VRIntentQuery) (Derived, bool, error) {
 			return none, false, nil
 		}
 		o, ok := p.Outputs.At(q.LatestEVMRoot)
+		if !ok && p.Fetch != nil && len(q.LatestEVMBlock) == 32 {
+			fetched, err := p.Fetch([32]byte(q.LatestEVMBlock), q.LatestEVMRoot)
+			if err == nil {
+				p.Outputs.Put(q.LatestEVMRoot, fetched)
+				o, ok = fetched, true
+			}
+		}
 		if !ok {
 			return none, false, fmt.Errorf("%w: VR at the certified EVM state %x", ErrUnavailable, q.LatestEVMRoot[:8])
 		}

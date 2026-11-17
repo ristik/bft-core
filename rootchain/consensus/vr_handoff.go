@@ -10,57 +10,67 @@ import (
 	"sync"
 	"time"
 
+	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/q3format"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootchain/vrschedule"
+	"github.com/unicitynetwork/bft-core/vradmit"
 	"github.com/unicitynetwork/bft-core/vrhandoff"
 	"github.com/unicitynetwork/bft-core/vrschema"
+	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
-// The root side of the validator-registry (VR) handoff, first stage (VT-05b PR A, ristik/bft-core#1159): the roots observe VR's outputs at
-// the EVM blocks their committed chain certifies (stage 0), derive the intent the executor judges against (vrschedule.Intents), and a
-// leader orders the Prepare, the Freeze v5 and the H for a complete verified view certificate it holds. In this stage the certificate is
-// delivered by an operator path (SubmitVRCertificate); the staged protocol that assembles it among the roots and the successors is PR B.
+// The root side of the validator-registry (VR) handoff protocol (VT-05b, ristik/bft-core#1159; design section 5.3). The roots observe
+// VR's outputs at the EVM blocks their committed chain certifies (stage 0) and derive the intent the executor judges against
+// (vrschedule.Intents). Every root runs the staged protocol over the committed state (vrschedule.Service behind its verification queue
+// and the /unicity/vr-handoff/1.0.0 peer protocol): it keeps the successors' sticky possession proofs, assembles as its committed view's
+// assembler, verifies the successors' readiness and retains the first complete certificate (I-RET). A leader then orders, in this order of
+// priority, the Prepare of a complete verified certificate whose gates hold, the Freeze v5 and H; and otherwise, once the view's replay
+// floor and its own residence wait are met, the next HandoffView.
 
 // ErrVRHandoff reports a VR handoff operation this root refuses.
 var ErrVRHandoff = errors.New("VR handoff")
 
 // VRHandoffConfig wires the VR handoff root side: the intent provider (with its sources and output cache), the VR reader the observer
-// fetches through, the designated EVM shard, and the Freeze v5 witness builder at the frozen parent.
+// fetches through, the designated EVM shard, the Freeze v5 witness builder at the frozen parent, this root's root key (its assemblies),
+// the peer protocol's opener, and the verification cap.
 type VRHandoffConfig struct {
 	Intents *vrschedule.Intents
 	Reader  vrschedule.Reader
 	EVM     types.PartitionShardID
 	// Witness builds the Freeze v5 witness over VR at a certified EVM block (the frozen parent P) for result.
 	Witness func(ctx context.Context, blockHash, stateRoot [32]byte, result vrschema.Word) ([]byte, error)
+	Signer  abcrypto.Signer
+	Opener  vrschedule.Opener // nil: the protocol's messages are not sent (a test, or a single root)
+	PiMax   time.Duration
 	Log     *slog.Logger
-}
-
-// vrHeld is the complete verified certificate this root holds for one intent (the I-RET slot): the first one it verified, kept until the
-// intent dies.
-type vrHeld struct {
-	epoch, attempt uint64
-	predecessor    []byte
-	intent         [32]byte
-	cert           vrschema.ViewCertificate
-	body           q3format.BodyV3
-	result         vrschema.Word
-	witness        []byte // the Freeze witness at witnessAt
-	witnessAt      [32]byte
 }
 
 type vrHandoff struct {
 	cfg      VRHandoffConfig
 	observer *vrschedule.Observer
-	queue    chan []vrschedule.CertifiedEVM
-	mu       sync.Mutex
-	held     *vrHeld
+	svc      *vrschedule.Service
+	queue    *vrschedule.Queue
+	commits  chan []vrschedule.CertifiedEVM
+	peers    func() []peer.ID
+	update   func() (vrschedule.Committed, error)
+	restored bool
+	prefetch chan vrschedule.CertifiedEVM
+	wmu      sync.Mutex
+	witness  struct {
+		at      [32]byte
+		intent  [32]byte
+		payload []byte
+	}
+	fetching bool
 }
 
 // EnableVRHandoff installs the VR handoff root side on a VR-mode manager: the intent provider into the executor's VR services, the commit
-// observer, and its worker (stopped with ctx). It must be called before the manager starts.
+// observer, the protocol service with its verification queue, and their workers (stopped with ctx). It must be called before the manager
+// starts.
 func (x *ConsensusManager) EnableVRHandoff(ctx context.Context, cfg VRHandoffConfig) error {
 	svc := x.blockStore.PosServices()
 	if svc == nil || svc.Registry == nil || cfg.Intents == nil || cfg.Reader == nil || cfg.Witness == nil {
@@ -77,14 +87,114 @@ func (x *ConsensusManager) EnableVRHandoff(ctx context.Context, cfg VRHandoffCon
 	}
 	cfg.Intents.Config = x.q3.ProtocolConfig
 	svc.Registry.Intents = cfg.Intents
-	x.vr = &vrHandoff{cfg: cfg, queue: make(chan []vrschedule.CertifiedEVM, 1024),
+	v := &vrHandoff{cfg: cfg, commits: make(chan []vrschedule.CertifiedEVM, 1024), prefetch: make(chan vrschedule.CertifiedEVM, 64),
 		observer: &vrschedule.Observer{Reader: cfg.Reader, Sources: cfg.Intents.Sources, Outputs: cfg.Intents.Outputs, Log: cfg.Log}}
-	x.blockStore.SetCommitObserver(x.vr.onCommit)
-	go x.vr.run(ctx)
+	v.svc = vrschedule.NewService(vrschedule.ServiceConfig{Self: x.id.String(), Signer: cfg.Signer, Log: cfg.Log, Send: func(m vrschedule.Message) { v.send(ctx, m) }})
+	v.queue = vrschedule.NewQueue(v.svc, cfg.PiMax)
+	v.queue.Delivered = func(o vrschedule.Outcome, _ []vrschedule.Message, err error) {
+		if err != nil && o != vrschedule.Duplicate {
+			cfg.Log.Debug("VR handoff: a message is not retained", "outcome", o.String(), "error", err)
+		}
+	}
+	v.peers = func() []peer.ID { return x.vrPeers(v) }
+	v.update = x.vrCommitted
+	// a HandoffView is judged over its parent, normally executed but not yet committed: VR's output there is prefetched when the parent is
+	// executed, and read on demand (bounded) when the judgment comes first
+	reader := cfg.Reader
+	cfg.Intents.Fetch = func(blockHash, stateRoot [32]byte) (*vrhandoff.Output, error) {
+		c, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+		return reader.OpenOutput(c, blockHash, stateRoot)
+	}
+	x.vr = v
+	x.blockStore.SetCommitObserver(v.onCommit)
+	x.blockStore.SetExecutionObserver(v.onExecuted)
+	go v.run(ctx)
+	go v.prefetchRun(ctx)
+	go v.queue.Run(ctx)
 	return nil
 }
 
-// onCommit hands the certified EVM blocks of the committed blocks, oldest first, to the observer's worker (never blocking consensus).
+// onExecuted queues VR's output at an executed block's certified EVM state for prefetching (never blocking consensus).
+func (v *vrHandoff) onExecuted(b *storage.ExecutedBlock) {
+	if b == nil || b.BlockData == nil {
+		return
+	}
+	si := b.ShardState.States[v.cfg.EVM]
+	if si == nil || si.IR == nil || len(si.IR.BlockHash) != 32 || len(si.IR.Hash) != 32 {
+		return
+	}
+	if _, ok := v.cfg.Intents.Outputs.At([32]byte(si.IR.Hash)); ok {
+		return
+	}
+	select {
+	case v.prefetch <- vrschedule.CertifiedEVM{BlockHash: [32]byte(si.IR.BlockHash), StateRoot: [32]byte(si.IR.Hash)}:
+	default:
+	}
+}
+
+func (v *vrHandoff) prefetchRun(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case c := <-v.prefetch:
+			if _, ok := v.cfg.Intents.Outputs.At(c.StateRoot); ok {
+				continue
+			}
+			rc, cancel := context.WithTimeout(ctx, 5*time.Second)
+			out, err := v.cfg.Reader.OpenOutput(rc, c.BlockHash, c.StateRoot)
+			cancel()
+			if err == nil {
+				v.cfg.Intents.Outputs.Put(c.StateRoot, out)
+			}
+		}
+	}
+}
+
+// VRService is the protocol service, for the peer protocol's server.
+func (x *ConsensusManager) VRService() (*vrschedule.Service, *vrschedule.Queue) {
+	if x.vr == nil {
+		return nil, nil
+	}
+	return x.vr.svc, x.vr.queue
+}
+
+// vrPeers are the peers this root's messages go to: the incumbents and the current intent's successor and K roots, without itself.
+func (x *ConsensusManager) vrPeers(v *vrHandoff) []peer.ID {
+	seen := map[string]bool{x.id.String(): true}
+	var out []peer.ID
+	add := func(id string) {
+		if seen[id] {
+			return
+		}
+		seen[id] = true
+		if p, err := peer.Decode(id); err == nil {
+			out = append(out, p)
+		}
+	}
+	for _, n := range x.trustBase.Load().RootNodes {
+		add(n.NodeID)
+	}
+	for id := range v.svc.Members() {
+		add(id)
+	}
+	return out
+}
+
+func (v *vrHandoff) send(ctx context.Context, m vrschedule.Message) {
+	if v.cfg.Opener == nil {
+		return
+	}
+	peers := v.peers()
+	go func() {
+		if err := vrschedule.Push(ctx, v.cfg.Opener, peers, m); err != nil {
+			v.cfg.Log.Debug("VR handoff: a message did not reach every peer", "error", err)
+		}
+	}()
+}
+
+// onCommit hands the certified EVM blocks of the committed blocks, oldest first, to the worker (never blocking consensus).
 func (v *vrHandoff) onCommit(blocks []*storage.ExecutedBlock) {
 	var out []vrschedule.CertifiedEVM
 	for _, b := range blocks {
@@ -98,49 +208,126 @@ func (v *vrHandoff) onCommit(blocks []*storage.ExecutedBlock) {
 		out = append(out, vrschedule.CertifiedEVM{RootRound: b.GetRound(), ParentRound: b.BlockData.GetParentRound(), RootUCTime: b.BlockData.Timestamp, BlockHash: [32]byte(si.IR.BlockHash),
 			StateRoot: [32]byte(si.IR.Hash), BlockNumber: si.IR.RoundNumber})
 	}
-	if len(out) == 0 {
-		return
-	}
 	select {
-	case v.queue <- out:
+	case v.commits <- out:
 	default:
-		v.cfg.Log.Warn("VR handoff: the source observer is behind; a committed EVM certification was not observed")
+		v.cfg.Log.Warn("VR handoff: the observer is behind; a commit was not observed")
 	}
 }
 
+// run observes each commit's certified EVM blocks (stage 0), then updates the protocol over the committed state; after its first update a
+// (re)started root rebuilds its view state from its peers (GetStage).
 func (v *vrHandoff) run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case cs := <-v.queue:
+		case cs := <-v.commits:
 			for _, c := range cs {
-				for try := 0; ; try++ {
-					err := v.observer.Observe(ctx, c)
-					if err == nil {
-						break
-					}
-					if try >= 20 || ctx.Err() != nil {
-						v.cfg.Log.Warn("VR handoff: observing a certified EVM block failed", "evmBlock", c.BlockNumber, "rootRound", c.RootRound, "error", err)
-						break
-					}
-					select {
-					case <-ctx.Done():
-						return
-					case <-time.After(500 * time.Millisecond):
-					}
-				}
+				v.observe(ctx, c)
+			}
+			v.refresh(ctx)
+		}
+	}
+}
+
+func (v *vrHandoff) observe(ctx context.Context, c vrschedule.CertifiedEVM) {
+	for try := 0; ; try++ {
+		err := v.observer.Observe(ctx, c)
+		if err == nil {
+			return
+		}
+		if try >= 20 || ctx.Err() != nil {
+			v.cfg.Log.Warn("VR handoff: observing a certified EVM block failed", "evmBlock", c.BlockNumber, "rootRound", c.RootRound, "error", err)
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+}
+
+func (v *vrHandoff) refresh(ctx context.Context) {
+	c, err := v.update()
+	if err != nil {
+		v.cfg.Log.Debug("VR handoff: the committed intent is not derivable here yet", "error", err)
+		return
+	}
+	v.svc.Update(c)
+	if c.Prepared && c.FrozenParent != ([32]byte{}) {
+		if p, ok := v.svc.Prepared(); ok {
+			v.fetchWitness(ctx, c.FrozenParent, c.FrozenRoot, p)
+		}
+	}
+	if intent, view, _, ok := v.svc.Current(); ok && !v.restored && v.cfg.Opener != nil {
+		v.restored = true
+		from := uint64(0)
+		if view >= vrschedule.RetainedViews {
+			from = view - vrschedule.RetainedViews + 1
+		}
+		for _, p := range v.peers() {
+			set, err := vrschedule.GetStage(ctx, v.cfg.Opener, p, intent, from)
+			if err != nil {
+				continue
+			}
+			for _, m := range set.Offers() {
+				v.queue.Submit(p.String(), m)
 			}
 		}
 	}
 }
 
+// vrCommitted is what the protocol learns from the committed root block: the derived intent, its committed view, a committed Prepare of its
+// attempt, the incumbents, K, the committed support table and schedule.
+func (x *ConsensusManager) vrCommitted() (vrschedule.Committed, error) {
+	var c vrschedule.Committed
+	q, on, err := x.blockStore.CommittedVRQuery()
+	if err != nil || !on {
+		return c, errors.Join(ErrVRHandoff, errors.New("no committed VR state"), err)
+	}
+	s, err := vradmit.DecodeRootState(q.Control.VR)
+	if err != nil {
+		return c, err
+	}
+	d, ok, err := x.vr.cfg.Intents.Derive(q)
+	if err != nil {
+		return c, err
+	}
+	c.Derived, c.Derivable = d, ok
+	if !ok {
+		return c, nil
+	}
+	if bytes.Equal(s.Backoff.Intent, d.Digest[:]) {
+		c.CommittedView = s.Backoff.LastView
+	}
+	c.Prepared = s.Backoff.Prepared
+	if c.Prepared && len(q.Control.FrozenParent) == 32 && q.LatestEVMOK && bytes.Equal(q.LatestEVMBlock, q.Control.FrozenParent) {
+		c.FrozenParent, c.FrozenRoot = [32]byte(q.Control.FrozenParent), q.LatestEVMRoot
+	}
+	c.Incumbents = map[string][]byte{}
+	for _, n := range x.trustBase.Load().RootNodes {
+		c.Incumbents[n.NodeID] = bytes.Clone(n.SigKey)
+	}
+	if q.Root != nil {
+		facts, err := q.Root()
+		if err != nil {
+			return c, err
+		}
+		c.K, c.Schedule = facts.Lifecycle.Incumbent, facts.Fold.Schedule
+	}
+	c.Table = s.Support
+	return c, nil
+}
+
 // VRIntentView is the intent this root derives over its committed state, for the operator: the intent, its digest, the root epoch it
-// succeeds, the incumbents (the assembler order's input) and the assembler of view 0.
+// succeeds, the incumbents in assembler order and the assembler of the committed current view.
 type VRIntentView struct {
 	Intent     vrhandoff.Intent
 	Digest     [32]byte
 	RootEpoch  uint64
+	View       uint64
 	Incumbents []string
 	Assembler  string
 }
@@ -161,10 +348,8 @@ func (x *ConsensusManager) vrDerived() (vrschedule.Derived, map[string][]byte, e
 		return d, nil, fmt.Errorf("%w: no intent is derivable over the committed state", ErrVRHandoff)
 	}
 	keys := map[string][]byte{}
-	if tb := x.trustBase.Load(); tb != nil {
-		for _, n := range tb.RootNodes {
-			keys[n.NodeID] = bytes.Clone(n.SigKey)
-		}
+	for _, n := range x.trustBase.Load().RootNodes {
+		keys[n.NodeID] = bytes.Clone(n.SigKey)
 	}
 	return d, keys, nil
 }
@@ -184,7 +369,7 @@ func (x *ConsensusManager) VRIntent() (VRIntentView, error) {
 		view = s.Backoff.LastView
 	}
 	order := vrhandoff.AssemblerOrder(d.Digest, ids)
-	return VRIntentView{Intent: d.Intent, Digest: d.Digest, RootEpoch: d.RootEpoch, Incumbents: order, Assembler: vrschema.Assembler(order, view)}, nil
+	return VRIntentView{Intent: d.Intent, Digest: d.Digest, RootEpoch: d.RootEpoch, View: view, Incumbents: order, Assembler: vrschema.Assembler(order, view)}, nil
 }
 
 // VRBody is the successor body and the successor trust base an assembled candidate of the current intent determines (what each member's
@@ -205,96 +390,245 @@ func (x *ConsensusManager) VRBody(candidate []byte) (q3format.BodyV3, []byte, er
 	return body, tb, errors.Join(err)
 }
 
-// SubmitVRCertificate admits a complete view certificate of the current intent into the I-RET slot once it verifies in full, exactly as
-// Freeze validity will judge it (design section 5.3.5): the assembly is the intent's candidate with valid PoPs, signed by its view's
-// assembler, the view is committed, and every successor's readiness is valid over the derived body and trust base. The first complete
-// certificate of an intent is kept; a later one is refused.
-func (x *ConsensusManager) SubmitVRCertificate(c vrschema.ViewCertificate) error {
-	d, keys, err := x.vrDerived()
-	if err != nil {
-		return err
+// OfferVRMessage submits one protocol message as a member (or the operator on its behalf) would send it: verified in the queue like any
+// peer's.
+func (x *ConsensusManager) OfferVRMessage(m vrschedule.Message) error {
+	if x.vr == nil {
+		return fmt.Errorf("%w: not enabled", ErrVRHandoff)
 	}
-	committedView := uint64(0)
-	if s, ok, _ := x.blockStore.CommittedVRState(); ok && bytes.Equal(s.Backoff.Intent, d.Digest[:]) {
-		committedView = s.Backoff.LastView
+	if !x.vr.queue.Submit("operator", m) {
+		return fmt.Errorf("%w: the verification queue is full", ErrVRHandoff)
 	}
-	p, err := vrschedule.VerifyPlan(d, keys, committedView, c)
-	if err != nil {
-		return errors.Join(ErrVRHandoff, err)
-	}
-	if !x.vr.hold(p) {
-		return nil // I-RET keeps the first complete certificate of the intent
-	}
-	x.log.Info("VR handoff: a complete verified certificate is held", "intent", fmt.Sprintf("%x", d.Digest[:8]), "view", c.Assembly.Slot,
-		"rootEpoch", d.RootEpoch, "attempt", d.Intent.Attempt)
 	return nil
 }
 
-// hold keeps a verified plan in the I-RET slot unless a certificate of the same intent and epoch is held already (the first one wins); it
-// reports whether the plan was taken.
-func (v *vrHandoff) hold(p vrschedule.PreparePlan) bool {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	if h := v.held; h != nil && h.intent == p.Intent && h.epoch == p.Epoch {
-		return false
+// VRStage is this root's retained stage set of the current intent from a view on.
+func (x *ConsensusManager) VRStage(fromView uint64) (vrschedule.StageSet, [32]byte, error) {
+	if x.vr == nil {
+		return vrschedule.StageSet{}, [32]byte{}, fmt.Errorf("%w: not enabled", ErrVRHandoff)
 	}
-	v.held = &vrHeld{epoch: p.Epoch, attempt: p.Attempt, predecessor: p.Predecessor, intent: p.Intent, cert: p.Certificate, body: p.Body, result: p.Result}
-	return true
+	intent, _, _, ok := x.vr.svc.Current()
+	if !ok {
+		return vrschedule.StageSet{}, intent, fmt.Errorf("%w: no current intent", ErrVRHandoff)
+	}
+	set, _ := x.vr.svc.Stage(intent, fromView)
+	return set, intent, nil
 }
 
-func (v *vrHandoff) current() *vrHeld {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	return v.held
+// SubmitVRCertificate offers a complete view certificate's assembly and readiness to the protocol (an operator path): each is verified
+// as any peer's; the first complete certificate of the intent is retained.
+func (x *ConsensusManager) SubmitVRCertificate(c vrschema.ViewCertificate) error {
+	if x.vr == nil {
+		return fmt.Errorf("%w: not enabled", ErrVRHandoff)
+	}
+	a := c.Assembly
+	if o, _, err := x.vr.svc.Offer("operator", vrschedule.Message{Assembly: &a}); o != vrschedule.Retained && o != vrschedule.Duplicate {
+		return errors.Join(fmt.Errorf("%w: the assembly is %s", ErrVRHandoff, o.String()), err)
+	}
+	for i := range c.Readiness {
+		r := c.Readiness[i]
+		if o, _, err := x.vr.svc.Offer("operator", vrschedule.Message{Readiness: &r}); o != vrschedule.Retained && o != vrschedule.Duplicate {
+			return errors.Join(fmt.Errorf("%w: readiness %d is %s", ErrVRHandoff, i, o.String()), err)
+		}
+	}
+	if _, _, complete, _ := x.vr.svc.Current(); !complete {
+		return fmt.Errorf("%w: the certificate does not complete the view", ErrVRHandoff)
+	}
+	return nil
 }
 
-// plan is the held certificate as the record builders take it.
-func (h *vrHeld) plan() vrschedule.PreparePlan {
-	return vrschedule.PreparePlan{Intent: h.intent, Epoch: h.epoch, Attempt: h.attempt, Predecessor: h.predecessor, Result: h.result, Body: h.body,
-		Certificate: h.cert}
-}
-
-// vrRecordsForRound is the leader's handoff record of a VR chain for the round: the Prepare of the held certificate's attempt at a quiet
+// vrRecordsForRound is the leader's handoff record of a VR chain for the round: the Prepare of the planned certificate's attempt at a quiet
 // control state whose stored attempt is that one (a due rejection first), then its Freeze v5 once the Prepare bound the frozen parent,
-// then H. A certificate of another epoch, attempt or predecessor orders nothing (its intent died).
+// then H. A plan of another epoch, attempt or predecessor orders nothing (its intent died).
 func (x *ConsensusManager) vrRecordsForRound(round uint64, parent *storage.ExecutedBlock, parentQC *rctypes.QuorumCert) ([][]byte, error) {
-	h := x.vr.current()
-	if h == nil {
+	control := parent.ShardState.Control
+	switch control.Phase {
+	case "prepared", "endorsed":
+		return x.vrFreezeOrCommit(round, parent, control)
+	}
+	h, ok := x.vr.svc.Plan()
+	if !ok || h.Epoch != control.Epoch || !bytes.Equal(h.Predecessor, control.PredecessorBodyID) {
 		return nil, nil
 	}
-	step, err := vrschedule.LeaderRecords(h.plan(), parent, round, x.vr.cfg.EVM, func(p, root [32]byte) ([]byte, error) { return x.vr.witnessAt(p, root, h) },
-		x.params.HashAlgorithm)
+	lapsed := storage.PrepareLapsed(control, round)
+	if lapsed && !storage.PrepareMayFollowLapse(control, round) {
+		return nil, nil
+	}
+	if control.Phase != "idle" && control.Phase != "aborted" && !lapsed {
+		return nil, nil
+	}
+	attempt, err := plannedAttempt(control, round)
+	if err != nil || attempt != h.Attempt {
+		return nil, nil
+	}
+	// the attempt must be the stored backoff identity: a Prepare in the block whose end opens its attempt is refused
+	s, err := vradmit.DecodeRootState(control.VR)
+	if err != nil || s.Backoff.Epoch != control.Epoch || s.Backoff.Attempt != attempt || s.Backoff.Prepared {
+		return nil, nil
+	}
+	// the activation time gate (design 7.1): the Prepare's UC time is at least T of every effective schedule with E <= e_J + 1
+	if q, on, qerr := x.blockStore.CommittedVRQuery(); qerr == nil && on && q.Root != nil {
+		if facts, ferr := q.Root(); ferr == nil {
+			if vrschema.PrepareTimeGate(control.Epoch+1, uint64(types.NewTimestamp()), vrschema.Effective(facts.Fold.Schedule)) != nil {
+				return nil, nil
+			}
+		}
+	}
+	// the planned certificate's intent must still be the one derivable at this parent (it may have died for a reason the epoch, attempt
+	// and predecessor do not show: R no longer open, another fold or schedule)
+	if q, on, qerr := x.blockStore.VRQueryAt(parent); qerr != nil || !on {
+		return nil, nil
+	} else if d, ok, derr := x.vr.cfg.Intents.Derive(q); derr != nil || !ok || d.Digest != h.Intent {
+		return nil, nil
+	}
+	if x.preferRejection(context.Background(), parentQC.GetRound(), round, parentQC) {
+		return nil, nil
+	}
+	raw, err := vrschedule.PrepareRecord(h, control, round)
 	if err != nil {
-		x.log.Warn("VR handoff: no handoff record ordered", "round", round, "attempt", h.attempt, "error", err)
-		return nil, nil
+		return nil, ErrHandoffApproval
 	}
-	if step.Kind == "" {
-		x.log.Debug("VR handoff: no handoff record ordered", "round", round, "reason", step.Reason)
-		return nil, nil
-	}
-	if step.Kind == "prepare" && x.preferRejection(context.Background(), parentQC.GetRound(), round, parentQC) {
-		return nil, nil
-	}
-	x.log.Info("VR handoff: ordering the "+step.Kind, "round", round, "attempt", h.attempt, "view", h.cert.Assembly.Slot)
-	return step.Records, nil
+	x.log.Info("VR handoff: ordering the Prepare", "round", round, "attempt", attempt, "view", h.Certificate.Assembly.Slot)
+	return [][]byte{raw}, nil
 }
 
-func (v *vrHandoff) witnessAt(p, root [32]byte, h *vrHeld) ([]byte, error) {
-	v.mu.Lock()
-	if h.witness != nil && h.witnessAt == p {
-		w := h.witness
-		v.mu.Unlock()
-		return w, nil
+// vrFreezeOrCommit orders the Freeze v5 of the prepared attempt's certificate (I-RET, checked again against the derivable intent) and
+// then H.
+func (x *ConsensusManager) vrFreezeOrCommit(round uint64, parent *storage.ExecutedBlock, control *evmroot.ControlState) ([][]byte, error) {
+	previous, err := storage.DecodeOrderedHandoffRecord(control.RecordBytes)
+	if err != nil {
+		return nil, nil
 	}
-	v.mu.Unlock()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	w, err := v.cfg.Witness(ctx, p, root, h.result)
+	h, ok := x.vr.svc.Prepared()
+	if !ok || h.Attempt != previous.Attempt || h.Epoch != control.Epoch {
+		return nil, nil
+	}
+	bodyID := h.Body.Identity()
+	if !bytes.Equal(previous.NextBodyID, bodyID[:]) {
+		return nil, nil
+	}
+	if control.Phase == "prepared" {
+		if storage.PrepareLapsed(control, round) || len(control.FrozenParent) != 32 {
+			return nil, nil
+		}
+		si := parent.ShardState.States[x.vr.cfg.EVM]
+		if si == nil || si.IR == nil || !bytes.Equal(si.IR.BlockHash, control.FrozenParent) || len(si.IR.Hash) != 32 {
+			return nil, nil
+		}
+		witness, err := x.vr.witnessAt([32]byte(control.FrozenParent), [32]byte(si.IR.Hash), h)
+		if err != nil {
+			x.log.Warn("VR handoff: the Freeze witness at the frozen parent is unavailable; Freeze not ordered", "attempt", h.Attempt, "error", err)
+			return nil, nil
+		}
+		records, err := vrschedule.FreezeRecord(h, control, round, witness)
+		if err != nil {
+			return nil, nil
+		}
+		x.log.Info("VR handoff: ordering the Freeze v5", "round", round, "attempt", h.Attempt, "view", h.Certificate.Assembly.Slot)
+		return records, nil
+	}
+	key, err := x.blockStore.CertifiedEVMShardAt(parent.GetRound(), control.FrozenParent)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrHandoffApproval, err)
+	}
+	raw, err := vrschedule.CommitRecord(h, control, round, parent.ShardState.States[key], x.params.HashAlgorithm)
 	if err != nil {
 		return nil, err
 	}
-	v.mu.Lock()
-	h.witness, h.witnessAt = w, p
-	v.mu.Unlock()
-	return w, nil
+	x.log.Info("VR handoff: ordering H", "round", round, "attempt", h.Attempt)
+	return [][]byte{raw}, nil
+}
+
+// witnessAt is the Freeze witness at the frozen parent, from the cache only: the proposal path never waits on the execution client. A miss
+// starts the fetch in the background (normally it is already done: refresh fetches it once the Prepare commits).
+func (v *vrHandoff) witnessAt(p, root [32]byte, h vrschedule.PreparePlan) ([]byte, error) {
+	v.wmu.Lock()
+	if v.witness.payload != nil && v.witness.at == p && v.witness.intent == h.Intent {
+		w := v.witness.payload
+		v.wmu.Unlock()
+		return w, nil
+	}
+	v.wmu.Unlock()
+	go v.fetchWitness(context.Background(), p, root, h)
+	return nil, errors.New("the Freeze witness is being fetched")
+}
+
+// fetchWitness reads the Freeze witness at the frozen parent once (concurrent calls do not repeat it) and caches it.
+func (v *vrHandoff) fetchWitness(ctx context.Context, p, root [32]byte, h vrschedule.PreparePlan) {
+	v.wmu.Lock()
+	if v.fetching || (v.witness.payload != nil && v.witness.at == p && v.witness.intent == h.Intent) {
+		v.wmu.Unlock()
+		return
+	}
+	v.fetching = true
+	v.wmu.Unlock()
+	defer func() {
+		v.wmu.Lock()
+		v.fetching = false
+		v.wmu.Unlock()
+	}()
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	w, err := v.cfg.Witness(ctx, p, root, h.Result)
+	if err != nil {
+		v.cfg.Log.Warn("VR handoff: the Freeze witness at the frozen parent is unavailable", "error", err)
+		return
+	}
+	v.wmu.Lock()
+	v.witness.at, v.witness.intent, v.witness.payload = p, h.Intent, w
+	v.wmu.Unlock()
+}
+
+// orderHandoffView adds the next HandoffView to a proposal that orders no handoff record (proposer priority: a Prepare is preferred), once
+// the leader's own residence wait for the committed opening has passed and the trial execution over the parent (the replay rule) admits
+// it. The voters apply the same residence rule before voting.
+func (x *ConsensusManager) orderHandoffView(ctx context.Context, block *rctypes.BlockData) {
+	x.orderHandoffViewWith(ctx, block, func(b *rctypes.BlockData) error { return x.blockStore.TrialExecute(b, x.irReqVerifier) })
+}
+
+func (x *ConsensusManager) orderHandoffViewWith(ctx context.Context, block *rctypes.BlockData, trialExecute func(*rctypes.BlockData) error) {
+	if x.vr == nil || block == nil || block.Payload == nil || len(block.Payload.HandoffRecords) != 0 || len(block.Payload.PosControls) >= rctypes.MaxPosControls {
+		return
+	}
+	if _, ok := x.vr.svc.Plan(); ok {
+		return // a complete verified certificate: the Prepare comes first, never another view
+	}
+	o, on, err := x.blockStore.CommittedVROpening()
+	if err != nil || !on {
+		return
+	}
+	b := o.State.Backoff
+	if b.Prepared || b.Settled {
+		return
+	}
+	var intent [32]byte
+	switch {
+	case b.LastView != 0:
+		copy(intent[:], b.Intent)
+	case o.IntentOK:
+		intent = o.Intent.Digest
+	default:
+		return
+	}
+	view := b.LastView + 1
+	now := x.residenceNow()
+	if x.residence == nil {
+		x.residence = newVRResidence(now)
+	}
+	if wait, held, ok := x.residence.wait(o, intent, view, now); !ok || !held || wait != 0 {
+		return
+	}
+	d := x.vr.cfg.Intents.Deployment
+	c := rctypes.PosControl{Registry: true, Network: d.RootNetwork, ChainID: d.ChainID, Custody: d.Registry, OrderingEpoch: block.Epoch, OrderingRound: block.Round,
+		Op: rctypes.OpHandoffView, View: &rctypes.ViewContext{IntentDigest: intent, View: view}}
+	trial := *block
+	payload := *block.Payload
+	payload.PosControls = append(append([]rctypes.PosControl(nil), payload.PosControls...), c)
+	trial.Payload = &payload
+	if err := trialExecute(&trial); err != nil {
+		x.log.DebugContext(ctx, "VR handoff: the next view is not due at this parent", "view", view, "error", err)
+		return
+	}
+	block.Payload = trial.Payload
+	x.log.InfoContext(ctx, "VR handoff: proposing HandoffView", "intent", fmt.Sprintf("%x", intent[:8]), "view", view)
 }
