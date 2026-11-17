@@ -46,7 +46,8 @@ var q4LookupSites = []q4Site{
 	{Func: "leaderAfter", Arg: "round + 1", Source: "local"},                               // reached only after the math.MaxUint64 refusal
 	{Func: "timeoutUnknownLeader", Arg: "round", Source: "local"},                          // round := x.pacemaker.GetCurrentRound() on the line above
 	{Func: "processNewRoundEvent", Arg: "round", Source: "local"},                          // round := x.pacemaker.GetCurrentRound() on the line above
-	{Func: "processNewRoundEvent", Arg: "round", Source: "local"},                          // leaderAfter: the next leader, published for the proposal ingress (#1113)
+	{Func: "refreshProposers", Arg: "round", Source: "local"},                              // round := x.pacemaker.GetCurrentRound(): the proposal ingress priority (#1113)
+	{Func: "refreshProposers", Arg: "round", Source: "local"},                              // leaderAfter: likewise, the next round's leader
 	{Func: "voteAfterRecovery", Arg: "x.pacemaker.GetCurrentRound() + 1", Source: "local"}, // the next leader after the vote: the pacemaker's own round
 	{Func: "onVoteMsg", Arg: "vote.VoteInfo.RoundNumber", Source: "message",
 		Prerequisite: "a vote for a round ahead of the pacemaker is buffered and returns before the lookup; a stale one is refused; the author is verified under its epoch first",

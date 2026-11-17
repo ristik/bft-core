@@ -32,7 +32,8 @@ const (
 // builds the proposal, and refused before its payload is read when larger. Its bytes in flight and queued are reserved before they are read
 // (IngressBudget): one peer at most one maximal frame, every peer together at most RootProposalIngressBytes, of which
 // RootProposalIngressProtected is kept for the leaders of the current and the next round (RootConsensusGate.EligibleProposer), so the
-// other admitted roots cannot fill it against them. Only roots of the installed committee and of its staged successor are admitted.
+// other admitted roots cannot fill it against them. Only roots of the installed committee, of its staged successor and of the stored
+// committees of the adjacent epochs are admitted (RootConsensusGate.KnownRoot).
 const (
 	RootProposalIngressPerPeer   = abdrc.MaxProposalFrame
 	RootProposalIngressProtected = 2 * abdrc.MaxProposalFrame

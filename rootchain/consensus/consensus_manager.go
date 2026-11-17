@@ -147,7 +147,7 @@ type (
 		q3StagedEVM          atomic.Pointer[stagedEVMMembers] // the EVM validators of the successor assignment of the candidate last staged here
 		// admitted and proposers answer the root consensus network's gate on received proposals (#1113, proposal_ingress.go)
 		admitted       atomic.Pointer[admittedRoots]
-		proposers      atomic.Pointer[[2]peer.ID]
+		proposers      atomic.Pointer[proposerSet]
 		epochAnchor    *drctypes.EpochAnchor
 		primaryWitness atomic.Pointer[PrimaryWitnessSource] // the execution client's side of a primary candidate's EVM proof
 		primaryCache   primaryCache
@@ -741,6 +741,7 @@ func (x *ConsensusManager) loop(ctx context.Context) error {
 		}
 		// a root that does not hold the commit itself asks a root peer for the activation (#1086, PR 2)
 		x.checkAcquire(ctx, time.Now())
+		x.refreshProposers()
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -1805,15 +1806,25 @@ func (x *ConsensusManager) recoveryRunStart(round uint64) bool {
 	return ok && r.RecoveryRunStart(round)
 }
 
+// refreshProposers publishes, for the proposal ingress priority (#1113, EligibleProposer), the leaders of the pacemaker's round and of the
+// round after it, on every root and whenever the round moved since the last publication (a QC, a TC, a recovery, a new context): the loop
+// calls it before each event. resetVolatile clears it, so a new epoch's selector is asked afresh.
+func (x *ConsensusManager) refreshProposers() {
+	round := x.pacemaker.GetCurrentRound()
+	if p := x.proposers.Load(); p != nil && p.round == round {
+		return
+	}
+	l, err := x.leaderSelector.GetLeaderForRound(round)
+	next, nextErr := x.leaderAfter(round)
+	x.proposers.Store(&proposerSet{round: round, ids: [2]peer.ID{leaderIf(err == nil, l), leaderIf(nextErr == nil, next)}})
+}
+
 func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 	ctx, span := x.tracer.Start(ctx, "ConsensusManager.processNewRoundEvent")
 	defer span.End()
 	round := x.pacemaker.GetCurrentRound()
 
 	l, err := x.leaderSelector.GetLeaderForRound(round)
-	// the leaders of this round and the next have the protected share of the proposal ingress budget (#1113)
-	next, nextErr := x.leaderAfter(round)
-	x.publishProposers(leaderIf(err == nil, l), leaderIf(nextErr == nil, next))
 	if err != nil {
 		if !errors.Is(err, drctypes.ErrHistoryUnavailable) {
 			x.log.WarnContext(ctx, "could not determine leader for new round, awaiting proposal", "round", round, logger.Error(err))
@@ -1975,23 +1986,28 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 		Qc:        parentQC,
 		Anchor:    parentAnchor,
 	}
-	if profile == storage.ProfileHandoff && !oldSuffix && parentQC != nil && len(payload.PosControls) < drctypes.MaxPosControls {
-		x.orderRejection(ctx, block, parentRound)
-		x.orderSubmittedControl(ctx, block)
-		x.orderRetirements(ctx, block, parentRound)
-	}
 	proposalMsg := &abdrc.ProposalMsg{
 		Block:       block,
 		LastRoundTc: x.pacemaker.LastRoundTC(),
 	}
 	// every root refuses a proposal frame over abdrc.MaxProposalFrame before reading it (#1113): the change requests that do not fit are
-	// left for a later proposal
-	dropped, err := fitProposal(proposalMsg, abdrc.MaxProposalFrame-proposalSignatureRoom)
+	// left out, before the controls are ordered, since a control is placed only if the block it joins executes (a request in the block can
+	// change what a control finds), so the requests the controls were judged with are the ones the block carries
+	dropped, err := fitProposal(proposalMsg, abdrc.MaxProposalFrame-proposalSignatureRoom-proposalControlRoom)
 	for _, r := range dropped {
 		x.log.WarnContext(ctx, "change request left out of the proposal: the proposal frame limit", logger.Shard(r.Partition, r.Shard))
 	}
 	if err != nil {
 		x.log.WarnContext(ctx, "cannot propose within the proposal frame limit", logger.Error(err))
+		return
+	}
+	if profile == storage.ProfileHandoff && !oldSuffix && parentQC != nil && len(payload.PosControls) < drctypes.MaxPosControls {
+		x.orderRejection(ctx, block, parentRound)
+		x.orderSubmittedControl(ctx, block)
+		x.orderRetirements(ctx, block, parentRound)
+	}
+	if size, err := encodedSize(proposalMsg); err != nil || size > abdrc.MaxProposalFrame-proposalSignatureRoom {
+		x.log.WarnContext(ctx, "cannot propose within the proposal frame limit: the ordered controls do not fit", "size", size, logger.Error(err))
 		return
 	}
 	// safety makes simple sanity checks and signs if everything is ok

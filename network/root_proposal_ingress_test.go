@@ -142,10 +142,12 @@ func TestRootProposalOversizedFrameRefusedBeforeAllocation(t *testing.T) {
 	require.NoError(t, err)
 	_, err = s.Write(binary.AppendUvarint(nil, abdrc.MaxProposalFrame+1))
 	require.NoError(t, err)
-	// the receiver resets the stream on the declared length: a read sees the reset, not the read deadline
-	_ = s.SetReadDeadline(time.Now().Add(5 * time.Second))
+	// the receiver resets the stream on the declared length: a read sees the reset, well before its own deadline
+	start := time.Now()
+	_ = s.SetReadDeadline(time.Now().Add(10 * time.Second))
 	_, err = s.Read(make([]byte, 1))
 	require.Error(t, err)
+	require.Less(t, time.Since(start), 5*time.Second, "the stream was reset, not left to the read deadline: %v", err)
 	runtime.ReadMemStats(&after)
 	require.Less(t, after.TotalAlloc-before.TotalAlloc, uint64(32<<20), "nothing near the declared 128 MiB was allocated (the rest is the process: libp2p, the race detector)")
 	expectNone(t, received, 300*time.Millisecond, "an oversized frame was delivered")
@@ -199,7 +201,7 @@ func TestRootProposalBudgetUnderConcurrentLargeFrames(t *testing.T) {
 	require.NoError(t, leader.Send(t.Context(), p, f.recv.ID()))
 	expectProposal(t, received, 11)
 
-	// two leaders stalling a maximal frame each fill the protected share: the budget is never exceeded
+	// three leaders stall a maximal frame each: two fit the protected share, the third is refused, and the budget is never exceeded
 	for range 3 {
 		l, _ := f.sender(t, true, true)
 		stall(t, l, f.recv.ID(), abdrc.MaxProposalFrame)

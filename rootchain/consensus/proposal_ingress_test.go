@@ -103,10 +103,33 @@ func TestKnownRootAndEligibleProposer(t *testing.T) {
 	require.False(t, x.KnownRoot(a))
 
 	require.False(t, x.EligibleProposer(a), "nothing published")
-	x.proposers.Store(&[2]peer.ID{a, b})
+	x.proposers.Store(&proposerSet{round: 7, ids: [2]peer.ID{a, b}})
 	require.True(t, x.EligibleProposer(a))
 	require.True(t, x.EligibleProposer(b))
 	require.False(t, x.EligibleProposer(c))
-	x.proposers.Store(&[2]peer.ID{c, ""})
+	x.proposers.Store(&proposerSet{round: 8, ids: [2]peer.ID{c, ""}})
 	require.False(t, x.EligibleProposer(""), "an unknown leader is no one")
+}
+
+// The room fitProposal leaves for the controls ordered after it holds the largest control set a block can carry: MaxPosControls
+// RuleSupport controls of MaxRuleSupportCommitments commitments each, the widest control shape.
+func TestProposalControlRoom(t *testing.T) {
+	commitments := make([]drctypes.SupportCommitment, drctypes.MaxRuleSupportCommitments)
+	for i := range commitments {
+		id := make([]byte, 32)
+		id[0], id[1] = byte(i>>8), byte(i)
+		commitments[i] = drctypes.SupportCommitment{Network: 1<<64 - 1, StakingID: id, Generation: 1<<64 - 1, RootKeyHash: make([]byte, 32),
+			RuleID: make([]byte, 32), ReleaseDigest: make([]byte, 32), Sig: make([]byte, 65)}
+	}
+	controls := make([]drctypes.PosControl, drctypes.MaxPosControls)
+	for i := range controls {
+		controls[i] = drctypes.PosControl{Network: 1<<64 - 1, OrderingEpoch: 1<<64 - 1, OrderingRound: 1<<64 - 1, Op: drctypes.OpRuleSupport,
+			Registry: true, Support: commitments}
+	}
+	empty, err := encodedSize(&drctypes.Payload{Version: drctypes.VersionHandoff})
+	require.NoError(t, err)
+	full, err := encodedSize(&drctypes.Payload{Version: drctypes.VersionHandoff, PosControls: controls})
+	require.NoError(t, err)
+	require.Greater(t, full-empty, uint64(drctypes.MaxPosControls*drctypes.MaxRuleSupportCommitments*65), "the commitments were encoded")
+	require.Less(t, full-empty, uint64(proposalControlRoom))
 }
