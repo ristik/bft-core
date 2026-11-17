@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-core/vrschema"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -212,7 +213,59 @@ func buildImportVectors(t *testing.T) []importScenario {
 	require.NoError(t, err)
 	rimp, err := rp.ImportBatch(0)
 	require.NoError(t, err)
-	return []importScenario{mixed, {Name: "backlog-40", Blocks: []importBlock{blockOf(t, 1, b1), blockOf(t, 2, b2)}}, {Name: "recovery-ack", Blocks: []importBlock{blockOf(t, 1, rimp)}}}
+	return []importScenario{mixed, {Name: "backlog-40", Blocks: []importBlock{blockOf(t, 1, b1), blockOf(t, 2, b2)}}, {Name: "recovery-ack", Blocks: []importBlock{blockOf(t, 1, rimp)}},
+		{Name: "registry-kinds", Blocks: []importBlock{blockOf(t, 1, registryKindsImport(t))}}}
+}
+
+// registryKindsImport is a validator-registry log projected by State (design section 4.3): a primary acknowledged (Ack + Boundary), the
+// closure of the epoch it ended, a rejected result (OutputRejected + SessionClosed), a second handoff acknowledged (Ack + Boundary; the
+// pointer switch to a native output), the closure of the epoch that ended, and a HolderRetirement: every kind 6 to 8 between the P85
+// kinds, imported in one block.
+func registryKindsImport(t *testing.T) Import {
+	t.Helper()
+	var recs []Record
+	var closed []uint64
+	keep := func(s State, rs []Record, err error) State {
+		t.Helper()
+		require.NoError(t, err)
+		for range rs {
+			closed = append(closed, 0)
+		}
+		recs = append(recs, rs...)
+		return s
+	}
+	closure := func(s State, epoch, round, ts uint64, tag string) State {
+		t.Helper()
+		h, ok := s.HRoundAwaiting(epoch)
+		require.True(t, ok)
+		l := func(s string) []byte { w := label(s + tag); return w[:] }
+		data := concat(l("assignment/"), word(h), l("record/H/"), l("terminal-root/"), l("exposure/"), l("key-history/"))
+		next, r, err := s.Close(epoch, data, round, ts)
+		require.NoError(t, err)
+		recs, closed = append(recs, r), append(closed, epoch)
+		return next
+	}
+	s := NewState(1, 1)
+	s = mustCommit(t, s, 100, 2, 101, true)
+	s = mustBlock(t, s, 2, 101)
+	s = keep(s.AckBoundary(110, 1_000, label("result/J"), label("assignment/J"), 2, 0b01))
+	s = closure(s, 1, 111, 1_001, "G")
+	s = keep(s.RejectOutput(label("result/J2"), vrschema.RejExpired, 0, 0b0101, 120, 1_010))
+	s = mustCommit(t, s, 150, 3, 151, true)
+	s = mustBlock(t, s, 3, 151)
+	s = keep(s.AckBoundary(160, 1_020, label("result/native"), label("assignment/native"), 3, 0))
+	s = closure(s, 2, 170, 1_030, "J")
+	next, r, err := s.HolderRetire(0, 7, 1, label("ref-digest"), 0, 180, 1_040)
+	require.NoError(t, err)
+	recs, closed = append(recs, *r), append(closed, 0)
+	require.NoError(t, Verify(recs))
+	require.Equal(t, []Kind{KindAck, KindBoundary, KindClosure, KindOutputRejected, KindSessionClosed, KindAck, KindBoundary, KindClosure,
+		KindHolderRetirement}, kinds(recs))
+	imp := Import{Progress: next.LastProgress, UCTime: next.LastTime, TargetCount: next.Count, TargetTip: next.Tip}
+	for i, rec := range recs {
+		imp.Entries = append(imp.Entries, ImportEntry{Record: rec, ClosedEpoch: closed[i]})
+	}
+	return imp
 }
 
 func TestImportVectorsAreTheProjection(t *testing.T) {
