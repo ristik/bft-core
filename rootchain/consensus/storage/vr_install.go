@@ -2,12 +2,14 @@ package storage
 
 import (
 	"bytes"
+	"crypto"
 	"crypto/sha256"
 	"errors"
 	"fmt"
 
 	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/evmroot"
+	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/zkverifier"
 	"github.com/unicitynetwork/bft-core/vradmit"
@@ -156,4 +158,93 @@ func vrDerivedShards(cc committedCandidate, out map[types.PartitionShardID]struc
 			out[ch.Key()] = struct{}{}
 		}
 	}
+}
+
+// registryChangeOf is the Accepted root-side change of a committed preimage that touches the given shard: a kind 6 or 8 change of the
+// shard, or an AddPartition of its partition. ok is false when there is none (always on a P85 preimage).
+func registryChangeOf(preimage []byte, partition types.PartitionID, shard types.ShardID) (vradmit.Change, bool, error) {
+	cc, err := resolveCommittedCandidate(preimage)
+	if err != nil {
+		return vradmit.Change{}, false, err
+	}
+	key := types.PartitionShardID{PartitionID: partition, ShardID: shard.Key()}
+	for _, ch := range cc.registry {
+		if ch.Key() == key || (ch.Kind == vrschema.KindAddPartition && ch.Successor.PartitionID == partition) {
+			return ch, true, nil
+		}
+	}
+	return vradmit.Change{}, false, nil
+}
+
+// RegistryActivationFromVerifiedV3 is the request activation of a non-EVM shard whose configuration a VR handoff's Accepted kind 6 or 8
+// change replaces (design section 6): the committed candidate v6 is authenticated exactly as for the EVM assignment
+// (ActivationFromVerifiedV3: record, body, change-record hash, the root committee and coupling), the change must replace exactly the
+// configuration previous authorises (expected hash, epoch + 1), and the successor is in force from the committed activation round under
+// the activation's root identity, with unit weights. H commits no successor technical record for it: the record is derived from the
+// verified parent (derivedTR), as at the boundary. ok is false when the candidate does not change this shard (a continuation applies);
+// an AddPartition of the shard's own partition is an error (the partition exists).
+func RegistryActivationFromVerifiedV3(previous *RequestActivation, entry VerifiedActivation, record evmroot.OrderedHandoffRecord, preimage []byte,
+	hashAlg crypto.Hash, version uint64) (*RequestActivation, bool, error) {
+	if previous == nil || previous.pdr == nil || entry == nil || version == 0 {
+		return nil, false, fmt.Errorf("%w: incomplete activation", ErrAssignmentHistory)
+	}
+	ch, ok, err := registryChangeOf(preimage, previous.pdr.PartitionID, previous.pdr.ShardID)
+	if err != nil || !ok {
+		return nil, false, err
+	}
+	if _, err := ActivationFromVerifiedV3(entry, record, preimage, hashAlg, version); err != nil {
+		return nil, false, err
+	}
+	if ch.Kind == vrschema.KindAddPartition {
+		return nil, false, fmt.Errorf("%w: epoch %d adds partition %d, which this history already holds", ErrAssignmentHistory, entry.Epoch(), ch.Successor.PartitionID)
+	}
+	h, err := evmassign.PDRHash(previous.pdr)
+	if err != nil {
+		return nil, false, errors.Join(ErrAssignmentHistory, err)
+	}
+	if h != ch.Expected || previous.pdr.Epoch == ^uint64(0) || ch.Successor.Epoch != previous.pdr.Epoch+1 || record.ActivationRound <= previous.start {
+		return nil, false, fmt.Errorf("%w: epoch %d: VR change %d does not replace the configuration in force", ErrAssignmentHistory, entry.Epoch(), ch.ID)
+	}
+	activated, err := evmassign.Activate(ch.Successor, record.ActivationRound)
+	if err != nil {
+		return nil, false, errors.Join(ErrAssignmentHistory, err)
+	}
+	body := entry.BodyID()
+	act, err := newRequestActivation(activated, hashAlg, quorumweight.PolicyUnit, nil, entry.Epoch(), body[:], record.ActivationRound, nil, version)
+	if err != nil {
+		return nil, false, err
+	}
+	act.derivedTR = true
+	return act, true, nil
+}
+
+// NewPartitionRequestAnchor is the trusted anchor of a partition a VR handoff's Accepted AddPartition added: the committed candidate v6 is
+// authenticated as for the EVM assignment, and pdr (the configuration the anchor source holds) must be exactly the committed addition
+// activated at the activation round. The anchor is in force from that handoff's root identity; a partition has no history before it.
+func NewPartitionRequestAnchor(pdr *types.PartitionDescriptionRecord, entry VerifiedActivation, record evmroot.OrderedHandoffRecord, preimage []byte,
+	hashAlg crypto.Hash, version uint64) (*RequestActivation, error) {
+	if pdr == nil || entry == nil {
+		return nil, fmt.Errorf("%w: incomplete anchor", ErrAssignmentHistory)
+	}
+	ch, ok, err := registryChangeOf(preimage, pdr.PartitionID, pdr.ShardID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok || ch.Kind != vrschema.KindAddPartition {
+		return nil, fmt.Errorf("%w: epoch %d does not add partition %d", ErrAssignmentHistory, entry.Epoch(), pdr.PartitionID)
+	}
+	if _, err := ActivationFromVerifiedV3(entry, record, preimage, hashAlg, version); err != nil {
+		return nil, err
+	}
+	activated, err := evmassign.Activate(ch.Successor, record.ActivationRound)
+	if err != nil {
+		return nil, errors.Join(ErrAssignmentHistory, err)
+	}
+	want, err1 := activated.Hash(hashAlg)
+	got, err2 := pdr.Hash(hashAlg)
+	if err := errors.Join(err1, err2); err != nil || !bytes.Equal(want, got) {
+		return nil, errors.Join(fmt.Errorf("%w: the anchor is not the configuration epoch %d added", ErrAssignmentHistory, entry.Epoch()), err)
+	}
+	body := entry.BodyID()
+	return newRequestActivation(activated, hashAlg, quorumweight.PolicyUnit, nil, entry.Epoch(), body[:], 0, nil, version)
 }

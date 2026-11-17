@@ -116,7 +116,8 @@ func sameValidators(a, b []*types.NodeInfo) bool {
 //     already claimed by an earlier decoded change of this list, whatever that change's verdict; a well-formed list never has one,
 //     because binding selection defers a second change of a scope, so this rule is defensive;
 //  4. the kind's rules: Conflict (stale expected hash, a partition added earlier in the list), Invalid (design section 6, including
-//     the protocol proof-configuration predicate ProofConfigValid), Ceiling, BadPoP, PastCutoff, Earlier, Latched.
+//     the protocol proof-configuration predicate ProofConfigValid, and a kind 6 or 8 change of a shard that is not installed, even one
+//     an earlier Accepted AddPartition of the list adds: FD-29), Ceiling, BadPoP, PastCutoff, Earlier, Latched.
 //
 // Only an Accepted change updates the tentative state (installed PDRs, the partition count, the effective schedule) and enters the
 // Duplicate set. EVM-side and membership kinds are Accepted. The shard acknowledgement gate is not a fold input (AckGate). Local proof
@@ -237,7 +238,9 @@ func foldShard(in FoldInput, id uint64, k uint8, v []any, tentative map[ShardKey
 		}
 	}
 	cur := tentative[key]
-	if cur == nil || cur.PartitionTypeID == evmassign.EVMPartitionTypeID {
+	// the target is an installed shard: one that exists only through an earlier Accepted AddPartition of this list is Invalid (FD-29), so
+	// a kind 6 or 8 change never needs an acknowledgement fact that does not exist yet, and an addition is always an epoch-0 creation
+	if cur == nil || in.Installed[key] == nil || cur.PartitionTypeID == evmassign.EVMPartitionTypeID {
 		return VerdictInvalid
 	}
 	h, err := evmassign.PDRHash(cur)

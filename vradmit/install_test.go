@@ -204,9 +204,9 @@ func TestInstallRefusals(t *testing.T) {
 	require.Empty(t, confs)
 }
 
-// A change of a partition added earlier in the same list is judged by the fold against the tentative addition and composes onto it at
-// install: the partition starts with the final configuration (one configuration per shard per handoff).
-func TestAnUpdateOfAPartitionAddedInTheSameListComposes(t *testing.T) {
+// FD-29: a change of a partition added earlier in the same list is Invalid in the fold, so only the addition is committed as Accepted;
+// a committed list that claims otherwise is corrupt history and the install refuses it.
+func TestAChangeOfAPartitionAddedInTheSameListIsInvalid(t *testing.T) {
 	added := ixPDR(t, 10, 10, 0, 2)
 	succ := ixPDR(t, 10, 10, 1, 2)
 	succ.T2Timeout = 9 * time.Second
@@ -215,14 +215,18 @@ func TestAnUpdateOfAPartitionAddedInTheSameListComposes(t *testing.T) {
 	installed := ixInstalled(ixPDR(t, 8, evmassign.EVMPartitionTypeID, 3, 7))
 	verdicts, err := vrschema.FoldVerdicts(ixFold(installed), rc)
 	require.NoError(t, err)
-	require.Equal(t, []uint8{0, 0}, verdicts, "the fold accepts the update against the tentative addition")
+	require.Equal(t, []uint8{vrschema.VerdictAccepted, vrschema.VerdictInvalid}, verdicts)
 	changes, err := AcceptedChanges(rc, verdicts)
 	require.NoError(t, err)
 	confs, err := Install(changes, installed, ixReserved, 200, allSupported)
 	require.NoError(t, err)
 	require.Len(t, confs, 1)
-	require.EqualValues(t, 1, confs[0].Epoch)
-	require.Equal(t, 9*time.Second, confs[0].T2Timeout)
+	require.EqualValues(t, 0, confs[0].Epoch, "the addition installs its epoch-0 configuration")
+
+	forged, err := AcceptedChanges(rc, []uint8{vrschema.VerdictAccepted, vrschema.VerdictAccepted})
+	require.NoError(t, err)
+	_, err = Install(forged, installed, ixReserved, 200, allSupported)
+	require.ErrorIs(t, err, ErrInstall, "never composed onto the addition")
 
 	_, err = AcceptedChanges(rc, verdicts[:1])
 	require.ErrorIs(t, err, ErrInstall, "one verdict per change")

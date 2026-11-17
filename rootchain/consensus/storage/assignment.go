@@ -124,7 +124,11 @@ func successorTechnicalRecordWith(si *ShardInfo, pdr *types.PartitionDescription
 // candidateActivatedPDR decodes a verified preimage and applies the committed
 // activation round.
 func candidateActivatedPDR(preimage []byte, activation uint64) (evmassign.Candidate, *types.PartitionDescriptionRecord, error) {
-	c, pdr, err := evmassign.ActivatedFromPreimage(preimage, activation)
+	view, _, err := ResolveCommittedCandidate(preimage) // a candidate v6 is read through its v5 view
+	if err != nil {
+		return evmassign.Candidate{}, nil, err
+	}
+	c, pdr, err := evmassign.ActivatedFromPreimage(view, activation)
 	if err != nil {
 		return c, nil, errors.Join(ErrAssignmentHistory, err)
 	}
@@ -355,6 +359,12 @@ func RequestContinuationFromVerifiedV3(previous *RequestActivation, entry Verifi
 			if succ.PartitionID == previous.pdr.PartitionID && succ.ShardID.Equal(previous.pdr.ShardID) {
 				return nil, fmt.Errorf("%w: epoch %d replaces the validators of this shard", ErrAssignmentHistory, entry.Epoch())
 			}
+		}
+		// a VR handoff's Accepted root-side changes are the other half of the candidate: none may touch this shard or its partition
+		if ch, ok, err := registryChangeOf(preimage, previous.pdr.PartitionID, previous.pdr.ShardID); err != nil {
+			return nil, err
+		} else if ok {
+			return nil, fmt.Errorf("%w: epoch %d changes the configuration of this shard (VR change %d of kind %d)", ErrAssignmentHistory, entry.Epoch(), ch.ID, ch.Kind)
 		}
 	}
 	own, err := clonePDR(previous.pdr)

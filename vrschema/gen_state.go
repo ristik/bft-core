@@ -500,6 +500,14 @@ func genFold(b *vb) {
 		{"sp1 without vkey_path is invalid", nil, []RegistryChange{addP(2, 9, 2, map[string]string{"proof_type": "sp1", "chain_id": "3"})}, []string{"Invalid"}},
 		{"protocol-valid sp1 is accepted whatever the local build supports", nil,
 			[]RegistryChange{addP(2, 9, 2, map[string]string{"proof_type": "sp1", "vkey_path": "/keys/sp1.vk", "chain_id": "3"})}, []string{"Accepted"}},
+		{"an update of a partition added earlier in the list is invalid (FD-29)", nil,
+			[]RegistryChange{add(2, 9, 3, 2), update(3, 9, fxPDR(9, 3, 0, 20, 2), nil)}, []string{"Accepted", "Invalid"}},
+		{"a replace of a partition added earlier in the list is invalid (FD-29)", nil,
+			[]RegistryChange{add(2, 9, 3, 2), func() RegistryChange {
+				succ := fxPDR(9, 3, 1, 30, 2)
+				return RegistryChange{ID: 3, Kind: uint64(KindReplaceAggregator), Payload: mustChange(KindReplaceAggregator, uint64(9), succ.ShardID.Bytes(),
+					pdrHash(fxPDR(9, 3, 0, 20, 2)), mustCBOR(succ), fxChangePoPs(3, succ, 30))}
+			}()}, []string{"Accepted", "Invalid"}},
 		{"update to an unknown proof type is invalid and leaves the shard installed", nil,
 			[]RegistryChange{update(2, 7, agg, func(p *types.PartitionDescriptionRecord) {
 				p.PartitionParams = map[string]string{"proof_type": "zk_magic"}

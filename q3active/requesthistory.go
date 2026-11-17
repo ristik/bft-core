@@ -25,6 +25,21 @@ type CandidateSource interface {
 	HandoffCandidate(bodyID []byte) ([]byte, error)
 }
 
+// CommittedCandidateSource is the capability of a CandidateSource that serves the committed candidate in the form the successor body
+// binds: the candidate v6 of a VR handoff (storage.BlockStore.HandoffCommittedPreimage), whose v5 view HandoffCandidate holds. A source
+// without it serves the evmassign preimage only, so a VR epoch fails closed (the v5 view is not what the body binds).
+type CommittedCandidateSource interface {
+	HandoffCommittedPreimage(bodyID []byte) ([]byte, error)
+}
+
+// committedPreimage is the committed candidate of a body, as its body binds it.
+func committedPreimage(src CandidateSource, bodyID []byte) ([]byte, error) {
+	if c, ok := src.(CommittedCandidateSource); ok {
+		return c.HandoffCommittedPreimage(bodyID)
+	}
+	return src.HandoffCandidate(bodyID)
+}
+
 // AnchorSource is the trusted configuration a shard started with, before any committed assignment (the genesis shard config).
 type AnchorSource func(partition types.PartitionID, shard types.ShardID) (*types.PartitionDescriptionRecord, error)
 
@@ -131,11 +146,11 @@ func (h *RequestHistory) RequestChain(partition types.PartitionID, shard types.S
 		delete(h.chains, key)
 	}
 	if sc == nil {
-		genesis, chain, err := h.anchor(hist, partition, shard)
+		claims, chain, err := h.anchor(hist, partition, shard)
 		if err != nil {
 			return nil, err
 		}
-		sc = &shardChain{hist: hist, claims: []q3format.Claim{genesis.Claim()}, chain: chain}
+		sc = &shardChain{hist: hist, claims: claims, chain: chain}
 		h.chains[key] = sc
 	}
 	sc.hist = hist
@@ -182,29 +197,80 @@ func extends(hist *q3format.History, claims []q3format.Claim) bool {
 	return true
 }
 
-// anchor is the validated one-entry chain of the shard's trusted anchor under the history's genesis epoch.
-func (h *RequestHistory) anchor(hist *q3format.History, partition types.PartitionID, shard types.ShardID) (q3format.Entry, *storage.RequestChain, error) {
+// anchor is the validated one-entry chain of the shard's trusted anchor and the claims of the epochs it covers: the genesis epoch's, or,
+// for a partition a VR handoff added (VT-06d), every epoch up to that handoff's, whose committed AddPartition the anchor must be.
+func (h *RequestHistory) anchor(hist *q3format.History, partition types.PartitionID, shard types.ShardID) ([]q3format.Claim, *storage.RequestChain, error) {
 	genesis, err := hist.ForEpoch(1)
 	if err != nil {
-		return genesis, nil, errors.Join(ErrRequestHistory, err)
+		return nil, nil, errors.Join(ErrRequestHistory, err)
 	}
 	pdr, err := h.cfg.Anchor(partition, shard)
 	if err != nil || pdr == nil {
-		return genesis, nil, errors.Join(ErrRequestHistory, err)
+		return nil, nil, errors.Join(ErrRequestHistory, err)
 	}
 	if pdr.PartitionID != partition || !pdr.ShardID.Equal(shard) {
-		return genesis, nil, fmt.Errorf("%w: the anchor is of shard %s-%s, not %s-%s", ErrRequestHistory, pdr.PartitionID, pdr.ShardID, partition, shard)
+		return nil, nil, fmt.Errorf("%w: the anchor is of shard %s-%s, not %s-%s", ErrRequestHistory, pdr.PartitionID, pdr.ShardID, partition, shard)
 	}
-	genesisID := genesis.BodyID()
-	anchor, err := storage.NewRequestAnchor(pdr, h.cfg.HashAlg, genesis.Epoch(), genesisID[:], h.cfg.Version)
+	claims := []q3format.Claim{genesis.Claim()}
+	anchor, added, err := h.addedAnchor(hist, pdr, &claims)
 	if err != nil {
-		return genesis, nil, err
+		return nil, nil, err
+	}
+	if !added {
+		genesisID := genesis.BodyID()
+		if anchor, err = storage.NewRequestAnchor(pdr, h.cfg.HashAlg, genesis.Epoch(), genesisID[:], h.cfg.Version); err != nil {
+			return nil, nil, err
+		}
 	}
 	chain, err := storage.NewRequestChain(h.cfg.Network, anchor)
 	if err != nil {
-		return genesis, nil, errors.Join(ErrRequestHistory, err)
+		return nil, nil, errors.Join(ErrRequestHistory, err)
 	}
-	return genesis, chain, nil
+	return claims, chain, nil
+}
+
+// addedAnchor finds the activation that added the anchor's partition: the epoch that starts at the anchor's first round, whose committed
+// candidate's Accepted AddPartition is exactly that configuration (storage.NewPartitionRequestAnchor). A genesis configuration starts
+// before every activation, so it finds none. The claims of the epochs up to that activation are appended.
+func (h *RequestHistory) addedAnchor(hist *q3format.History, pdr *types.PartitionDescriptionRecord, claims *[]q3format.Claim) (*storage.RequestActivation, bool, error) {
+	tip := hist.Tip().Epoch()
+	for epoch := uint64(2); epoch <= tip; epoch++ {
+		e, err := hist.ForEpoch(epoch)
+		if err != nil {
+			return nil, false, errors.Join(ErrRequestHistory, err)
+		}
+		if e.Start() > pdr.EpochStart {
+			return nil, false, nil
+		}
+		if e.Start() != pdr.EpochStart || e.RootOnly() {
+			continue
+		}
+		if err := h.rt.Admit(epoch); err != nil {
+			return nil, false, errors.Join(ErrRequestHistory, err)
+		}
+		v, _, ok := e.Handoff()
+		bodyID := e.BodyID()
+		if !ok {
+			return nil, false, fmt.Errorf("%w: epoch %d is not an activation", ErrRequestHistory, epoch)
+		}
+		preimage, err := committedPreimage(h.cfg.Candidates, bodyID[:])
+		if err != nil || len(preimage) == 0 {
+			return nil, false, errors.Join(fmt.Errorf("%w: epoch %d committed an assignment whose candidate is not retained", ErrRequestHistory, epoch), err)
+		}
+		anchor, err := storage.NewPartitionRequestAnchor(pdr, e, v.Record, preimage, h.cfg.HashAlg, h.cfg.Version)
+		if err != nil {
+			return nil, false, errors.Join(ErrRequestHistory, err)
+		}
+		for i := uint64(2); i <= epoch; i++ {
+			c, err := hist.ForEpoch(i)
+			if err != nil {
+				return nil, false, errors.Join(ErrRequestHistory, err)
+			}
+			*claims = append(*claims, c.Claim())
+		}
+		return anchor, true, nil
+	}
+	return nil, false, nil
 }
 
 // derive is the entry of the shard's chain for one activated epoch, following the chain derived so far.
@@ -230,14 +296,18 @@ func (h *RequestHistory) derive(hist *q3format.History, last *storage.RequestAct
 		}
 		return e, cont, nil
 	}
-	preimage, err := h.cfg.Candidates.HandoffCandidate(bodyID[:])
+	preimage, err := committedPreimage(h.cfg.Candidates, bodyID[:])
 	if err != nil {
 		return e, nil, errors.Join(ErrRequestHistory, err)
 	}
 	if len(preimage) == 0 {
 		return e, nil, fmt.Errorf("%w: epoch %d committed an assignment whose candidate is not retained", ErrRequestHistory, epoch)
 	}
-	c, err := evmassign.DecodeCandidate(preimage)
+	view, _, err := storage.ResolveCommittedCandidate(preimage) // the v5 view of a candidate v6; the bound bytes stay the preimage
+	if err != nil {
+		return e, nil, errors.Join(ErrRequestHistory, err)
+	}
+	c, err := evmassign.DecodeCandidate(view)
 	if err != nil {
 		return e, nil, errors.Join(ErrRequestHistory, err)
 	}
@@ -258,6 +328,15 @@ func (h *RequestHistory) derive(hist *q3format.History, last *storage.RequestAct
 		}
 	}
 	if evm.PartitionID != partition || !evm.ShardID.Equal(shard) {
+		// a VR handoff's Accepted kind 6 or 8 change of this shard is its real activation
+		if act, ok, err := storage.RegistryActivationFromVerifiedV3(last, e, v.Record, preimage, h.cfg.HashAlg, h.cfg.Version); err != nil {
+			return e, nil, errors.Join(ErrRequestHistory, err)
+		} else if ok {
+			if !bytes.Equal(v.Record.PredecessorBodyID, last.RootBody()) {
+				return e, nil, fmt.Errorf("%w: epoch %d does not follow the previous root interval", ErrRequestHistory, epoch)
+			}
+			return e, act, nil
+		}
 		// the assignment of the designated EVM shard is not this shard's: its history continues under this root interval
 		cont, err := storage.RequestContinuationFromVerifiedV3(last, e, preimage, h.cfg.HashAlg, h.cfg.Version)
 		if err != nil {

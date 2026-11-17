@@ -3,7 +3,6 @@ package vradmit
 import (
 	"errors"
 	"fmt"
-	"slices"
 
 	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/vrschema"
@@ -135,12 +134,11 @@ func CommittedChanges(c vrschema.CandidateV6) ([]Change, error) {
 var ErrInstall = errors.New("vradmit: committed root-side change cannot be installed")
 
 // Install is what the committed root-side changes of one handoff install at its committed activation round (design sections 6.1 and
-// 6.2), checked against the configurations installed when they activate (the shard configurations of the ordering round). It replays the
-// fold's tentative state in list order: an AddPartition names a partition with no shard in the tentative state, which is neither an EVM
-// nor a reserved partition, and its configuration is at epoch 0; a kind 6 or 8 change replaces exactly the tentative configuration of a
-// non-EVM shard (the expected hash, epoch + 1). Each touched shard then installs its final tentative configuration with EpochStart =
-// activation, in the order the list first touches it: one configuration per shard per handoff, so a change of a partition the same
-// list adds composes onto the addition (the fold judged it against that tentative state). Every installed configuration passes the
+// 6.2), checked against the configurations installed when they activate (the shard configurations of the ordering round): an
+// AddPartition names a partition with no installed shard and not added earlier in the list, which is neither an EVM nor a reserved
+// partition, and its configuration is at epoch 0; a kind 6 or 8 change replaces exactly the installed configuration of a non-EVM shard
+// (the expected hash, epoch + 1), never one the same list adds (FD-29: the fold gives it Invalid). Each change installs its carried
+// configuration with EpochStart = activation, in list order; a shard is touched at most once. Every installed configuration passes the
 // proof-support fence (FD-27); available is the local build's support.
 //
 // The fold judged every committed change against the same installed state at the Freeze, so a refusal here is corrupt or missing
@@ -153,33 +151,35 @@ func Install(changes []Change, installed map[types.PartitionShardID]*types.Parti
 	if activation == 0 {
 		return nil, fmt.Errorf("%w: no activation round", ErrInstall)
 	}
-	tentative := make(map[types.PartitionShardID]*types.PartitionDescriptionRecord, len(installed))
-	for k, v := range installed {
-		tentative[k] = v
-	}
-	var order []types.PartitionShardID
+	added := map[types.PartitionID]bool{}
+	touched := map[types.PartitionShardID]bool{}
+	out := make([]*types.PartitionDescriptionRecord, 0, len(changes))
 	for _, c := range changes {
 		if c.Successor == nil || c.Successor.EpochStart != 0 {
 			return nil, fmt.Errorf("%w: change %d is not a successor configuration awaiting its activation round", ErrInstall, c.ID)
 		}
 		key := c.Key()
+		if touched[key] {
+			return nil, fmt.Errorf("%w: change %d: a second change of shard %v", ErrInstall, c.ID, c.Shard)
+		}
 		switch c.Kind {
 		case vrschema.KindAddPartition:
-			for k := range tentative {
+			for k := range installed {
 				if k.PartitionID == key.PartitionID {
 					return nil, fmt.Errorf("%w: AddPartition %d: partition %d is installed", ErrInstall, c.ID, key.PartitionID)
 				}
 			}
-			if c.Successor.Epoch != 0 || c.Successor.PartitionTypeID == evmassign.EVMPartitionTypeID {
-				return nil, fmt.Errorf("%w: AddPartition %d is not a non-EVM configuration at epoch 0", ErrInstall, c.ID)
+			if added[key.PartitionID] || c.Successor.Epoch != 0 || c.Successor.PartitionTypeID == evmassign.EVMPartitionTypeID {
+				return nil, fmt.Errorf("%w: AddPartition %d is not a new non-EVM configuration at epoch 0", ErrInstall, c.ID)
 			}
 			for _, r := range reserved {
 				if r == key.PartitionID {
 					return nil, fmt.Errorf("%w: AddPartition %d: partition %d is reserved", ErrInstall, c.ID, r)
 				}
 			}
+			added[key.PartitionID] = true
 		case vrschema.KindReplaceAggregator, vrschema.KindUpdatePartition:
-			cur := tentative[key]
+			cur := installed[key]
 			if cur == nil || cur.PartitionTypeID == evmassign.EVMPartitionTypeID {
 				return nil, fmt.Errorf("%w: change %d: no installed non-EVM configuration of shard %v", ErrInstall, c.ID, c.Shard)
 			}
@@ -196,17 +196,11 @@ func Install(changes []Change, installed map[types.PartitionShardID]*types.Parti
 		if err := InstallFence(c.Successor, available); err != nil {
 			return nil, err
 		}
-		if !slices.Contains(order, key) {
-			order = append(order, key)
-		}
-		tentative[key] = c.Successor
-	}
-	out := make([]*types.PartitionDescriptionRecord, 0, len(order))
-	for _, key := range order {
-		a, err := evmassign.Activate(tentative[key], activation)
+		a, err := evmassign.Activate(c.Successor, activation)
 		if err != nil {
 			return nil, errors.Join(ErrInstall, err)
 		}
+		touched[key] = true
 		out = append(out, a)
 	}
 	return out, nil

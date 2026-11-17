@@ -668,7 +668,8 @@ Exactly three accounts at P; the verdict refuses, in this order: a handoff in fl
   an embedded PDR or PoP list, not canonical; every embedded encoding is checked before the scope, so a Malformed change claims no
   scope and is Malformed even when its scope is already claimed); Conflict when its scope was already claimed by an earlier
   well-formed change of the list **whatever that change's verdict** (defensive: a bindable list never has one); then the kind's rules — stale expected hash Conflict;
-  Invalid for design §6, including the **protocol proof-configuration predicate** (below); Ceiling; BadPoP; PastCutoff, Earlier,
+  Invalid for design §6, including the **protocol proof-configuration predicate** (below) and a kind 6 or 8 change whose target shard
+  is not in `FoldInput.Installed`, **also when an earlier Accepted AddPartition of the same list adds it** (FD-29); Ceiling; BadPoP; PastCutoff, Earlier,
   Latched. Only an Accepted change updates the tentative state (installed PDRs, partition count, effective schedule) and enters the
   Duplicate set, so a change refused by any check, the proof predicate included, consumes nothing. The shard acknowledgement gate is
   evaluated at Freeze, not in the fold: verdicts are identical at intent, readiness and Freeze.
@@ -776,6 +777,13 @@ Each is the reading most consistent with the approved chain; each is also in `br
 - **FD-28 `chain_id` spelling.** The design names the parameter, not its grammar; `strconv.ParseUint` alone accepts leading zeros.
   The proof predicate accepts only the canonical decimal spelling, so one value has one accepted text. Every existing PDR and fixture
   (`3`, `1337`, `31337`, the 2^64−1 vector) already uses it.
+- **FD-29 No change of a partition added in the same list** (correction, astra VT-06d/e review, 2026-11-17). A kind 6 or 8 change
+  targets an installed shard: one absent from `FoldInput.Installed` is Invalid, including a shard present in the tentative state only
+  because an earlier Accepted AddPartition of the same list adds it. The AddPartition stays Accepted and installs its epoch-0
+  configuration; the later change is Rejected by its bitmap bit. Binding selection may still bind both (their scopes differ). The
+  first frozen fold accepted such a change against the tentative addition, which the acknowledgement gate then refused at Freeze
+  (the new shard has no acknowledgement fact), blocking every output; it is a correction of the v1 fold, not compatible behaviour
+  for an already running generation. Put the final parameters and members in the AddPartition itself.
 ---
 
 ## 17. What this does not freeze

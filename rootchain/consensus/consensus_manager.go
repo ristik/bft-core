@@ -1076,6 +1076,12 @@ func (x *ConsensusManager) HandoffCandidate(bodyID []byte) ([]byte, error) {
 	return x.blockStore.HandoffCandidate(bodyID)
 }
 
+// HandoffCommittedPreimage is the committed candidate of a successor body in the form the body binds (the candidate v6 of a VR handoff):
+// what a request history that checks the candidate against the body reads.
+func (x *ConsensusManager) HandoffCommittedPreimage(bodyID []byte) ([]byte, error) {
+	return x.blockStore.HandoffCommittedPreimage(bodyID)
+}
+
 // SetViewResolver selects the view-aware branch of the leader's buffer, timeouts and proposal payload. Production selects it only through
 // SelectRequestHistory (a Q3 deployment); otherwise the legacy dispatch stays.
 func (x *ConsensusManager) SetViewResolver(r ViewResolver) {

@@ -29,6 +29,7 @@ import (
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
 	"github.com/unicitynetwork/bft-core/rootchain/testutils"
 	"github.com/unicitynetwork/bft-core/utb"
+	"github.com/unicitynetwork/bft-core/vrschema"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/types/hex"
@@ -99,6 +100,11 @@ type Options struct {
 	// NoJoiner keeps every old member in the successor and adds none: a re-weighting of the same committee (bft-core#1086: the default
 	// in-process switch, which a successor with a joiner does not take).
 	NoJoiner bool
+	// Registry makes a coupled handoff a validator-registry one (VT-06d/e): the committed candidate is the candidate v6 of the same
+	// fields with these RegistryChanges (verdicts as given) and a VR result id, and its digest is what the body binds. It is called with
+	// the fixture's extra shard configurations, so a change can name them. The link then carries no preimage (the history's readiness
+	// check decodes the evmassign candidate only); the bundle carries the v6 bytes.
+	Registry func(extra []*types.PartitionDescriptionRecord) []vrschema.RegistryChange
 }
 
 // ExtraShard is a shard besides the EVM shard. A zero T2Timeout takes the EVM shard's.
@@ -108,6 +114,8 @@ type ExtraShard struct {
 	Validators int
 	T2Timeout  time.Duration
 	Params     map[string]string
+	// TypeID is the shard's partition type; zero keeps 8.
+	TypeID types.PartitionTypeID
 }
 
 // Fixture is one activation and everything that authenticates it.
@@ -296,6 +304,28 @@ func New(t *testing.T, o Options) *Fixture {
 		shardConf = o.Installed
 	}
 	f.ShardConf = shardConf
+	f.ExtraSigners = make(map[string]abcrypto.Signer)
+	if f.ShardNodes == nil {
+		f.ShardNodes = make(map[string]*testutils.TestNode)
+	}
+	for _, e := range o.ExtraShards {
+		nodes, infos := testutils.CreateTestNodes(t, e.Validators)
+		for _, n := range nodes {
+			f.ExtraSigners[n.PeerConf.ID.String()] = n.Signer
+			f.ShardNodes[n.PeerConf.ID.String()] = n
+		}
+		t2 := e.T2Timeout
+		if t2 == 0 {
+			t2 = shardConf.T2Timeout
+		}
+		typeID := e.TypeID
+		if typeID == 0 {
+			typeID = 8
+		}
+		conf := &types.PartitionDescriptionRecord{Version: 1, NetworkID: Network, PartitionID: e.Partition, ShardID: e.Shard,
+			PartitionTypeID: typeID, TypeIDLen: 8, UnitIDLen: 256, T2Timeout: t2, Validators: infos, Epoch: 0, EpochStart: 1, PartitionParams: e.Params}
+		f.ExtraConfs = append(f.ExtraConfs, conf)
+	}
 	if o.Assignment {
 		operator = f.assignment(t, o, oldID)
 	}
@@ -335,23 +365,7 @@ func New(t *testing.T, o Options) *Fixture {
 		RecordBytes: record.Bytes(), PreviousDigest: bytes.Repeat([]byte{4}, 32), FrozenParent: bytes.Clone(o.Frozen), Pos: bytes.Clone(o.SourceState)}
 	key := types.PartitionShardID{PartitionID: PartitionID, ShardID: types.ShardID{}.Key()}
 	states := storage.ShardStates{States: map[types.PartitionShardID]*storage.ShardInfo{key: state}, Changed: storage.ShardSet{key: {}}, Control: &control}
-	f.ExtraSigners = make(map[string]abcrypto.Signer)
-	if f.ShardNodes == nil {
-		f.ShardNodes = make(map[string]*testutils.TestNode)
-	}
-	for _, e := range o.ExtraShards {
-		nodes, infos := testutils.CreateTestNodes(t, e.Validators)
-		for _, n := range nodes {
-			f.ExtraSigners[n.PeerConf.ID.String()] = n.Signer
-			f.ShardNodes[n.PeerConf.ID.String()] = n
-		}
-		t2 := e.T2Timeout
-		if t2 == 0 {
-			t2 = shardConf.T2Timeout
-		}
-		conf := &types.PartitionDescriptionRecord{Version: 1, NetworkID: Network, PartitionID: e.Partition, ShardID: e.Shard,
-			PartitionTypeID: 8, TypeIDLen: 8, UnitIDLen: 256, T2Timeout: t2, Validators: infos, Epoch: 0, EpochStart: 1, PartitionParams: e.Params}
-		f.ExtraConfs = append(f.ExtraConfs, conf)
+	for _, conf := range f.ExtraConfs {
 		extra, err := storage.NewShardInfo(conf, crypto.SHA256)
 		require.NoError(t, err)
 		extraKey := types.PartitionShardID{PartitionID: conf.PartitionID, ShardID: conf.ShardID.Key()}
@@ -439,6 +453,9 @@ func New(t *testing.T, o Options) *Fixture {
 	}
 	sort.Slice(f.Receipts, func(a, b int) bool { return f.Receipts[a].NodeID < f.Receipts[b].NodeID }) // the envelope orders them by node id
 	f.Link = q3format.Link{Body: body, Evidence: f.Evidence, Preimage: bytes.Clone(f.Candidate), Proof: f.ProofBytes, Receipts: f.Receipts}
+	if o.Registry != nil {
+		f.Link.Preimage = nil // a primary's link needs no preimage; the history's readiness check decodes the evmassign candidate only
+	}
 	threshold := oldTB.QuorumThreshold
 	var signed uint64
 	for _, n := range f.OldNodes[:o.SignedBy] {
@@ -586,6 +603,16 @@ func (f *Fixture) assignment(t *testing.T, o Options, oldID []byte) [32]byte {
 		OldShardEpoch: f.ShardConf.Epoch, OldActiveHash: old[:], Assignment: raw, PoPs: pops, Bindings: bindings, Identities: f.Identities, Authorization: f.Authorization}
 	if o.MutateCandidate != nil {
 		o.MutateCandidate(&c)
+	}
+	if o.Registry != nil {
+		result := sha256.Sum256([]byte("q3fixture VR result"))
+		v6 := vrschema.CandidateV6{Version: vrschema.CandidateV6Version, Kind: c.Kind, Network: c.Network, Predecessor: c.Predecessor, Attempt: c.Attempt,
+			RootMembers: c.RootMembers, OldShardEpoch: c.OldShardEpoch, OldActiveHash: c.OldActiveHash, Assignment: c.Assignment, PoPs: c.PoPs,
+			Supersedes: c.Supersedes, Bindings: c.Bindings, Identities: c.Identities, Authorization: c.Authorization, ReplacedAssignment: c.ReplacedAssignment,
+			SourceRef: result[:], RegistryChanges: o.Registry(f.ExtraConfs)}
+		f.Candidate, err = v6.Encode()
+		require.NoError(t, err)
+		return sha256.Sum256(f.Candidate)
 	}
 	f.Candidate, err = c.Encode()
 	require.NoError(t, err)

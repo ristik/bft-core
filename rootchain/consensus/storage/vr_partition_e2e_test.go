@@ -370,3 +370,114 @@ func TestVRPartitionInstallRefusesInconsistentHistory(t *testing.T) {
 	require.NoError(t, err)
 	require.NotContains(t, confs, vxAdded, "nothing of the handoff is installed")
 }
+
+// FD-29 through the real executor: an UpdatePartition of the partition the same output adds is Rejected(Invalid) by every root, the
+// Freeze is admitted (the acknowledgement gate covers Accepted changes only), and the epoch switch installs the addition alone, at epoch 0.
+func TestVRAChangeOfAPartitionAddedInTheSameOutputIsRejectedInvalid(t *testing.T) {
+	f := newVXPartitions(t, nil, false)
+	succ, err := evmassign.NewSuccessor(f.added, f.added.Validators)
+	require.NoError(t, err)
+	succ.T2Timeout = 9 * time.Second
+	expected, err := evmassign.PDRHash(f.added)
+	require.NoError(t, err)
+	raw, err := types.Cbor.Marshal(succ)
+	require.NoError(t, err)
+	update, err := vrschema.EncodeChange(vrschema.KindUpdatePartition, uint64(f.added.PartitionID), f.added.ShardID.Bytes(), expected, raw)
+	require.NoError(t, err)
+	f.extraChanges[1] = vrschema.RegistryChange{ID: 6, Kind: uint64(vrschema.KindUpdatePartition), Payload: update, Verdict: uint64(vrschema.VerdictInvalid)}
+	f.build()
+	f.orch = f.realOrchestration(t)
+	checkpoint, commit, retained := f.committed(t)
+	require.EqualValues(t, 0b100, vradmitStaged(t, checkpoint), "the third bound change (the update of the added partition) is rejected")
+	require.NoError(t, storage.InstallCommittedForTest(retained, f.orch, checkpoint, commit))
+	confs, err := f.orch.ShardConfigs(commit.ActivationRound)
+	require.NoError(t, err)
+	require.EqualValues(t, 0, confs[vxAdded].Epoch, "the addition activates at epoch 0")
+	require.Equal(t, 3*time.Second, confs[vxAdded].T2Timeout, "with its own parameters: the rejected update composes nothing")
+	require.EqualValues(t, 0, confs[vxAgg].Epoch)
+	first, err := f.activate(t, checkpoint, commit, retained)
+	require.NoError(t, err)
+	require.EqualValues(t, 0, first.ShardState.States[vxAdded].TR.Epoch)
+
+	// a candidate that claims Accepted for it is not what the fold gives: the Freeze is refused
+	g := newVXPartitions(t, nil, false)
+	g.extraChanges[1] = vrschema.RegistryChange{ID: 6, Kind: uint64(vrschema.KindUpdatePartition), Payload: update}
+	g.build()
+	g.orch = g.realOrchestration(t)
+	gen := g.genesis()
+	prep := g.must(gen, g.block(gen, 11, 1_010, [][]byte{g.record("prepare", 0, 11).Bytes()}))
+	_, err = g.exec(prep, g.block(prep, 12, 1_020, [][]byte{g.record("freeze", 0, 12).Bytes(), g.freezeV5(0)}))
+	require.ErrorIs(t, err, vradmit.ErrVerdicts)
+}
+
+// vxEntry is the verified history's entry of the fixture's committed handoff (the trusted activation interface), over the body and record
+// the real Freeze and Commit produced.
+type vxEntry struct {
+	f      *vxPartitions
+	record evmroot.OrderedHandoffRecord
+}
+
+func (e vxEntry) Handoff() (evmroot.VerifiedHandoff, evmroot.EpochGenesis, bool) {
+	return evmroot.VerifiedHandoff{Record: e.record}, evmroot.EpochGenesis{}, true
+}
+func (e vxEntry) Epoch() uint64              { return e.record.Epoch + 1 }
+func (e vxEntry) Start() uint64              { return e.record.ActivationRound }
+func (e vxEntry) EarliestActivation() uint64 { return e.f.q3.EarliestActivation }
+func (e vxEntry) BodyID() [32]byte           { return e.f.q3.Identity() }
+func (e vxEntry) RootOnly() bool             { return false }
+func (e vxEntry) ActivationCommitID() [32]byte {
+	var id [32]byte
+	copy(id[:], e.record.ID())
+	return id
+}
+func (e vxEntry) Projection() *types.RootTrustBaseV1 {
+	p := &types.RootTrustBaseV1{ChangeRecordHash: e.f.q3.ChangeRecordHash}
+	for _, m := range e.f.q3.Members {
+		p.RootNodes = append(p.RootNodes, &types.NodeInfo{NodeID: m.NodeID, SigKey: m.ConsensusKey, Stake: m.Weight})
+	}
+	return p
+}
+
+// The request constructors read a VR handoff's Accepted root-side changes: the updated shard gets its real activation (never an
+// "unchanged" continuation with the old configuration), the new partition its anchor at the adding handoff, and only the v6 bytes the
+// body binds authenticate (the v5 view does not).
+func TestVRRequestActivationsOfPartitionChanges(t *testing.T) {
+	f := newVXPartitions(t, nil, false)
+	_, record, retained := f.committed(t)
+	entry := vxEntry{f, record}
+	id := string(record.NextBodyID)
+	v6, v5 := retained.v6[id], retained.v5[id]
+	_, err := storage.ActivationFromVerifiedV3(entry, record, v6, crypto.SHA256, 1)
+	require.NoError(t, err, "the bound candidate v6 activates")
+	_, err = storage.ActivationFromVerifiedV3(entry, record, v5, crypto.SHA256, 1)
+	require.ErrorIs(t, err, storage.ErrAssignmentHistory, "the v5 view is not what the body binds")
+
+	previous, err := storage.NewRequestAnchor(f.agg, crypto.SHA256, record.Epoch, record.PredecessorBodyID, 1)
+	require.NoError(t, err)
+	_, err = storage.RequestContinuationFromVerifiedV3(previous, entry, v6, crypto.SHA256, 1)
+	require.ErrorIs(t, err, storage.ErrAssignmentHistory, "an Accepted UpdatePartition never proves the shard unchanged")
+	act, ok, err := storage.RegistryActivationFromVerifiedV3(previous, entry, record, v6, crypto.SHA256, 1)
+	require.NoError(t, err)
+	require.True(t, ok)
+	activated, err := evmassign.Activate(f.aggNext, record.ActivationRound)
+	require.NoError(t, err)
+	require.Equal(t, confHash(t, activated), act.PDRHash())
+
+	stale, err := storage.NewRequestAnchor(f.current, crypto.SHA256, record.Epoch, record.PredecessorBodyID, 1)
+	require.NoError(t, err)
+	_, ok, err = storage.RegistryActivationFromVerifiedV3(stale, entry, record, v6, crypto.SHA256, 1)
+	require.NoError(t, err)
+	require.False(t, ok, "a shard the candidate does not change has no registry activation")
+
+	addedConf, err := evmassign.Activate(f.added, record.ActivationRound)
+	require.NoError(t, err)
+	anchor, err := storage.NewPartitionRequestAnchor(addedConf, entry, record, v6, crypto.SHA256, 1)
+	require.NoError(t, err)
+	require.Equal(t, confHash(t, addedConf), anchor.PDRHash())
+	other := *addedConf
+	other.T2Timeout += time.Second
+	_, err = storage.NewPartitionRequestAnchor(&other, entry, record, v6, crypto.SHA256, 1)
+	require.ErrorIs(t, err, storage.ErrAssignmentHistory, "the anchor must be the committed addition")
+	_, err = storage.NewPartitionRequestAnchor(f.agg, entry, record, v6, crypto.SHA256, 1)
+	require.ErrorIs(t, err, storage.ErrAssignmentHistory, "partition 9 is not added")
+}
