@@ -140,6 +140,7 @@ async function chunked(w: Wallet, sdk: SdkToken, client: AggregatorClient, conte
   const order: number[][] = [];
   for (let end = sids.length; end > 0; end -= CH) order.push([...Array(Math.min(CH, end)).keys()].map((i) => end - Math.min(CH, end) + i));
   let requests = 0;
+  let laterCertificates = 0;
   const replaced: InclusionProof[] = new Array(outer.length);
   let target = null as UnicityCertificate | null;
   let targetBytes = null as Uint8Array | null;
@@ -155,7 +156,12 @@ async function chunked(w: Wallet, sdk: SdkToken, client: AggregatorClient, conte
         target = p.unicityCertificate;
         targetBytes = ucb;
       } else if (toHex(ucb) !== toHex(targetBytes!)) {
-        throw new Error(`chunked: outer proof ${idx[k]} came under another certificate (round ${p.unicityCertificate.unicitySeal.rootChainRoundNumber})`);
+        // the exact root may be served under a later certificate of the same root (a round without new states): the path is the same
+        // root's, so the one target certificate is used, as ProofConsolidator does for its exact-root peers (checkExactRoot)
+        if (toHex(p.unicityCertificate.inputRecord.nullableHash!) !== toHex(target.inputRecord.nullableHash!)) {
+          throw new Error(`chunked: outer proof ${idx[k]} came under another root (round ${p.unicityCertificate.unicitySeal.rootChainRoundNumber})`);
+        }
+        laterCertificates++;
       }
       const orig = outer[idx[k]];
       if (p.referenceTime !== orig.referenceTime) throw new Error(`chunked: outer proof ${idx[k]}: another reference time`);
@@ -167,7 +173,7 @@ async function chunked(w: Wallet, sdk: SdkToken, client: AggregatorClient, conte
   const rebuilt = await SdkToken.fromCBOR(bytes);
   const v = await rebuilt.verify(context);
   if (v.status !== VerificationStatus.OK) throw new Error(`chunked: the rebuilt token does not verify: ${v.toString().slice(0, 400)}`);
-  return { token: bytes, how: 'chunked', ms: ms(t0), requests, summary: { outerProofs: outer.length, masterRound: target!.unicitySeal.rootChainRoundNumber.toString(), chunks: order.length } };
+  return { token: bytes, how: 'chunked', ms: ms(t0), requests, summary: { outerProofs: outer.length, sameRootLaterCertificates: laterCertificates, masterRound: target!.unicitySeal.rootChainRoundNumber.toString(), chunks: order.length } };
 }
 
 // ---- anatomy: where the bytes and the gas go ------------------------------------------------------------------------------------------
