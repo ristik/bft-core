@@ -56,8 +56,8 @@ test('shapeHolds over the bound: a pass with its next step over the limit and a 
   const g = G(l)(part)!;
   const { up, down } = marginals(part, G(l));
   const probe = (label: string, real: Probe['real'], gas: bigint): Probe => ({ label, transfers: 200, conditions: 'c', gas, up, down, real });
-  // the limit just above the token's own bound: it passes, and one more is over
-  assert.equal(shapeHolds(probe('p', 'passes', g), probe('f', 'CapacityPreflight', g + up!), g), null);
+  // the limit at the token's own bound: it passes, one more is over, and a refusal one step above it is within the limit one fewer
+  assert.equal(shapeHolds(probe('p', 'passes', g), probe('f', 'CapacityPreflight', g + down!), g), null);
 });
 
 test("the envelope's parts: their lineage, certificates and split edges as the bound counts them, monotone in the history", () => {

@@ -1,7 +1,7 @@
 /**
  * The boundary stage's counterfactuals (driver.ts shapeOf, boundary_search.ts shapeHolds): the token with one more transfer of its own shape
  * and the token with one fewer, as tokens the plug-in's gas bound (MeasuredGasModel, bound-nb2-1179) prices like any other. One more repeats
- * the part's last transfer pair (its transaction and inclusion proof: the same UC, path and keys, so no new claim); one fewer drops it. The
+ * the part's last transfer pair to a fresh key from a fresh state (the same UC and path, so no new claim); one fewer drops it. The
  * bound counts what the verifier counts (proofs, bytes, items, siblings, distinct claims, keys, memory), so each step is the model's own
  * answer on that token, not an average (bft-core#1179 replaced the per-hop arithmetic of the measured-nb2-05 schedule).
  *
@@ -9,16 +9,27 @@
  */
 import type { Token } from '../../../packages/native-bridge-plugin/src/nb2/token.js';
 
-/** PART with its last transfer pair repeated; null when it has no transfer of its own. */
+/** BYTES with its last two bytes xored with the counter N: a distinct digest or key of the same size (the bound hashes it, never verifies it). */
+export function varied(bytes: Uint8Array, n: number): Uint8Array {
+  const b = Uint8Array.from(bytes);
+  b[b.length - 1] ^= n & 0xff;
+  b[b.length - 2] ^= (n >> 8) & 0xff;
+  return b;
+}
+
+/**
+ * PART with one more transfer of its own shape: its last pair repeated, from its last owner to a fresh key and with a fresh source state,
+ * so the bound replays a new state ID and a key decompression as a real next transfer has them (the same UC: no new claim). Null when it
+ * has no transfer of its own.
+ */
 export function withOneMore(part: Token): Token | null {
   const n = part.transfers.length;
   if (n === 0) return null;
-  return {
-    ...part,
-    transfers: [...part.transfers, part.transfers[n - 1]],
-    proofs: [...part.proofs, part.proofs[n - 1]],
-    transfersRaw: [...part.transfersRaw, part.transfersRaw[n - 1]],
-  };
+  const tx = part.transfers[n - 1];
+  const pr = part.proofs[n - 1];
+  const next = { ...tx, recipient: { ...tx.recipient, params: varied(tx.recipient.params, n + 1) } };
+  const proof = { ...pr, cd: { ...pr.cd, source: tx.recipient, sourceHash: varied(pr.cd.sourceHash, n + 1) } };
+  return { ...part, transfers: [...part.transfers, next], proofs: [...part.proofs, proof], transfersRaw: [...part.transfersRaw, part.transfersRaw[n - 1]] };
 }
 
 /** PART without its last transfer pair; null when it has no transfer of its own to remove. */

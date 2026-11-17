@@ -628,16 +628,20 @@ class NB2Rehearsal(Rehearsal):
                     looked, _ = self.driver('ledger', 'big', label, str(not_before), check=False, timeout=LEDGER_TIMEOUT)
                     self.keep(f'ledger-{label}')
                     p, ledger = read(f'preflight-{label}'), read(f'ledger-{label}')
-                    # over the limit by the preflight's own gas, or by bytes (L_max with the reserve: the preflight never prices its gas then)
-                    over = (t.get('detail') or {}).get('over')
-                    beyond = (t['gas'] is not None and int(t['gas']) > lim) or over == 'bytes'
+                    # over the limit by the preflight's own gas, or by bytes: L_max with the reserve, shown by the recorded numbers (the proofs
+                    # needed above those that fit, or not even the evidence fits). A null bound (the gas cannot be bounded) is not sound here.
+                    d = t.get('detail') or {}
+                    over = d.get('over')
+                    by_bytes = over == 'bytes' and d.get('need') is not None and d.get('pMax') is not None and (
+                        d.get('baseFits') == 'false' or int(d['need']) > int(d['pMax']))
+                    beyond = (over == 'gas' and t['gas'] is not None and int(t['gas']) > lim) or by_bytes
                     ok = (judged == 0 and p is not None and not p.get('ok', True) and p.get('rule') == 'CapacityPreflight' and beyond
                           and looked == 0 and ledger is not None and ledger.get('verdict') == 'unspent')
                     s.update(status='sound' if ok else 'contradicted', preflightExit=judged, ledgerExit=looked, rule=(p or {}).get('rule'), detail=(p or {}).get('detail'), over=over,
                              timeouts=[x for x in self.timeouts if label in x['command']],
                              ledger=(ledger or {}).get('verdict'), ledgerSnapshot=(ledger or {}).get('snapshot'), ledgerReason=(ledger or {}).get('reason'))
                     save()
-                    self.expect(ok, f'{label} ({t["transfers"]} transfers) refused by the preflight is over ' + (f'L_max by bytes (gas {t["gas"]})' if over == 'bytes' else f'userGasLimit {lim} by its own gas ({t["gas"]})') + ', refused again '
+                    self.expect(ok, f'{label} ({t["transfers"]} transfers) refused by the preflight is over ' + (f'L_max by bytes ({d.get("need")} proofs needed, {d.get("pMax")} fit; gas {t["gas"]})' if over == 'bytes' else f'userGasLimit {lim} by its own gas ({t["gas"]})') + ', refused again '
                                     f'(CapacityPreflight), and its state is unspent by the ledger after the refusal (a verified non-inclusion proof)',
                                 json.dumps({'preflight': p, 'ledger': {k: v for k, v in (ledger or {}).items() if k != 'proof'}}, default=str))
         finally:
