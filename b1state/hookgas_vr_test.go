@@ -1,0 +1,169 @@
+package b1state
+
+import (
+	"encoding/json"
+	"math"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+)
+
+var (
+	testVR       = [20]byte{0xff, 19: 0x03}
+	testVRCode   = [32]byte{0x51}
+	testPoACode  = [32]byte{0x52}
+	reviewedH32  = VRHookMeasurement{Invariant: VRSingleLiveOutput, H: 32, Registry: testVR, RegistryCodeHash: testVRCode, ModuleCodeHash: testPoACode, Caps: VRCaps, Ceilings: VRLimits, Records: 52_262_738, Boundary: 17_977_590, Elect: 7_981_443, Source: "test"}
+	reviewedMixd = []VRCombined{{"mixed-first", 32, 0}, {"mixed-middle", 32, 0}, {"mixed-last", 32, 0}}
+)
+
+// astra's three combined fixtures (urethhook r2): a 16-member, 64 KiB switching output, its Ack and 30 ordinary records, the switch at
+// the start, middle or end, every callback at its maximum advertised cap. All three reproduced their full-budget state within the
+// records-only reservation R32 + B = 70,240,328; their figures here are that reservation (the r2 probe established "succeeds at", not the
+// exact threshold), so they must sit at or below M_H. They are permanent acceptance cases of the VR batch check.
+func reviewed() VRHookMeasurement {
+	m := reviewedH32
+	m.Combined = append([]VRCombined(nil), reviewedMixd...)
+	for i := range m.Combined {
+		m.Combined[i].Reservation = 70_240_328
+	}
+	return m
+}
+
+func vrProfile(h uint32, perRecord, elect uint64) Profile {
+	return Profile{RecordsCustody: testVR, ElectionContract: testVR, HRecords: h, HookRecordGas: perRecord, ElectGas: elect}
+}
+
+// The reviewed H = 32 pins (astra urethhook r2): M32 = 70,240,328, the allowance ceil(5 M32/4) = 87,800,410, encoded as 2,743,763 per
+// record (87,800,416), ElectGas 9,976,804, and a total hook envelope of 97,927,220.
+func TestTheVRBatchRuleGivesTheReviewedPins(t *testing.T) {
+	m := reviewed()
+	mh, err := m.BatchRequirement()
+	require.NoError(t, err)
+	require.EqualValues(t, 70_240_328, mh)
+	allowance, per, err := VRRecordsAllowance(m)
+	require.NoError(t, err)
+	require.EqualValues(t, 87_800_410, allowance)
+	require.EqualValues(t, 2_743_763, per)
+	elect, err := PinElectGas(m.Elect)
+	require.NoError(t, err)
+	require.EqualValues(t, 9_976_804, elect)
+	p := vrProfile(32, per, elect)
+	require.NoError(t, CheckVRHookGas(p, testVRCode, testPoACode, m))
+	env, err := p.HookEnvelopeGas()
+	require.NoError(t, err)
+	require.EqualValues(t, 97_927_220, env)
+
+	require.ErrorIs(t, CheckVRHookGas(vrProfile(32, per-1, elect), testVRCode, testPoACode, m), ErrVRHookGas, "32 x 2,743,762 = 87,800,384 < 87,800,410")
+	require.ErrorIs(t, CheckVRHookGas(vrProfile(32, per, elect-1), testVRCode, testPoACode, m), ErrVRHookGas)
+	require.ErrorIs(t, CheckVRHookGas(vrProfile(16, per, elect), testVRCode, testPoACode, m), ErrVRHookGas, "never lower H while keeping the rate")
+	require.ErrorIs(t, CheckVRHookGas(vrProfile(32, 17_977_590*5/4+1, elect), testVRCode, testPoACode, func() VRHookMeasurement { m := m; m.H = 31; return m }()), ErrVRHookMeasurement, "the combined fixtures are H-record calls")
+}
+
+// The P85 rule would reject the reviewed rate: it prices each record at the worst single record (a switching Boundary of 17,977,590,
+// pinned 22,471,988). Its semantics are kept for P85 and simply not applied to a VR profile.
+func TestTheP85RuleIsUnchangedAndWouldRefuseTheVREncoding(t *testing.T) {
+	p := Profile{RecordsCustody: testVR, HRecords: 32, HookRecordGas: 2_743_763}
+	caps := ElectCaps{VMax: 16, LMax: 1, NMax: 16}
+	require.ErrorIs(t, CheckHookRecordGas(p, caps, HookMeasurement{V: 16, L: 1, C: 16, Gas: 17_977_590, Kind: "boundary"}), ErrHookGas)
+}
+
+// A combined fixture that needs more than R_H + B raises M_H (the genesis rule: rerun the complete path, raise M_H if exceeded).
+func TestACombinedFixtureAboveRPlusBRaisesTheRequirement(t *testing.T) {
+	m := reviewed()
+	m.Combined[1].Reservation = 70_240_329
+	mh, err := m.BatchRequirement()
+	require.NoError(t, err)
+	require.EqualValues(t, 70_240_329, mh)
+	allowance, per, err := VRRecordsAllowance(m)
+	require.NoError(t, err)
+	require.EqualValues(t, 87_800_412, allowance)
+	require.EqualValues(t, 2_743_763, per, "87,800,416 still covers it")
+	m.Combined[2].Reservation = 70_240_335 // ceil(5*70,240,335/4) = 87,800,419 > 87,800,416
+	require.ErrorIs(t, CheckVRHookGas(vrProfile(32, 2_743_763, 9_976_804), testVRCode, testPoACode, m), ErrVRHookGas)
+	_, per, err = VRRecordsAllowance(m)
+	require.NoError(t, err)
+	require.EqualValues(t, 2_743_764, per)
+	require.NoError(t, CheckVRHookGas(vrProfile(32, per, 9_976_804), testVRCode, testPoACode, m))
+}
+
+// The measurement binds the deployment: the registry the hooks call, its code, the module, VR's caps, the schema ceilings, the
+// invariant and the three combined fixtures.
+func TestTheVRMeasurementIsBoundToTheDeployment(t *testing.T) {
+	p := vrProfile(32, 2_743_763, 9_976_804)
+	require.NoError(t, CheckVRHookGas(p, testVRCode, testPoACode, reviewed()))
+	require.ErrorIs(t, CheckVRHookGas(p, [32]byte{0x99}, testPoACode, reviewed()), ErrVRHookGas, "other VR code")
+	require.ErrorIs(t, CheckVRHookGas(p, testVRCode, [32]byte{0x99}, reviewed()), ErrVRHookGas, "another module")
+	other := p
+	other.ElectionContract = [20]byte{0xee}
+	require.ErrorIs(t, CheckVRHookGas(other, testVRCode, testPoACode, reviewed()), ErrVRHookGas, "election not on VR")
+	other = p
+	other.ElectionContract, other.ElectGas = [20]byte{}, 0
+	require.ErrorIs(t, CheckVRHookGas(other, testVRCode, testPoACode, reviewed()), ErrVRHookGas, "no election hook")
+	for name, edit := range map[string]func(*VRHookMeasurement){
+		"invariant":        func(m *VRHookMeasurement) { m.Invariant = "multi-output" },
+		"H zero":           func(m *VRHookMeasurement) { m.H = 0 },
+		"H above 32":       func(m *VRHookMeasurement) { m.H = 33 },
+		"caps":             func(m *VRHookMeasurement) { m.Caps.Record = 900_000 },
+		"ceilings":         func(m *VRHookMeasurement) { m.Ceilings.BoundPayload = 16 * 1024 },
+		"no records":       func(m *VRHookMeasurement) { m.Records = 0 },
+		"no boundary":      func(m *VRHookMeasurement) { m.Boundary = 0 },
+		"no election":      func(m *VRHookMeasurement) { m.Elect = 0 },
+		"no registry":      func(m *VRHookMeasurement) { m.Registry = [20]byte{} },
+		"two combined":     func(m *VRHookMeasurement) { m.Combined = m.Combined[:2] },
+		"renamed combined": func(m *VRHookMeasurement) { m.Combined[0].Name = "mixed-start" },
+		"reordered":        func(m *VRHookMeasurement) { m.Combined[0], m.Combined[2] = m.Combined[2], m.Combined[0] },
+		"short combined":   func(m *VRHookMeasurement) { m.Combined[1].Records = 31 },
+		"zero combined":    func(m *VRHookMeasurement) { m.Combined[1].Reservation = 0 },
+	} {
+		m := reviewed()
+		edit(&m)
+		require.ErrorIs(t, CheckVRHookGas(p, testVRCode, testPoACode, m), ErrVRHookMeasurement, name)
+	}
+}
+
+func TestTheVRCheckRefusesOverflow(t *testing.T) {
+	m := reviewed()
+	m.Boundary = math.MaxUint64
+	_, err := m.BatchRequirement()
+	require.ErrorIs(t, err, ErrOverflow)
+	m = reviewed()
+	m.Records, m.Boundary = math.MaxUint64-1, 1
+	_, _, err = VRRecordsAllowance(m)
+	require.ErrorIs(t, err, ErrOverflow, "ceil(5 M/4) overflows")
+	require.ErrorIs(t, CheckVRHookGas(vrProfile(32, math.MaxUint64/16, 9_976_804), testVRCode, testPoACode, reviewed()), ErrOverflow, "H x rate overflows")
+}
+
+// The genesis re-check: a fresh measurement that needs more than the pins is refused, whatever was recorded.
+func TestTheFreshVRMeasurementIsHeldToTheSameRule(t *testing.T) {
+	p := vrProfile(32, 2_743_763, 9_976_804)
+	rec := reviewed()
+	require.NoError(t, CheckVRHookGasFresh(p, testVRCode, testPoACode, rec, rec))
+	fresh := reviewed()
+	fresh.Records += 6 // M = 70,240,334: ceil(5M/4) = 87,800,418 > 87,800,416
+	require.ErrorIs(t, CheckVRHookGasFresh(p, testVRCode, testPoACode, rec, fresh), ErrVRHookGas, "the contracts grew past the margin")
+	fresh = reviewed()
+	fresh.Elect = 7_981_444
+	require.ErrorIs(t, CheckVRHookGasFresh(p, testVRCode, testPoACode, rec, fresh), ErrVRHookGas)
+	fresh = reviewed()
+	fresh.RegistryCodeHash = [32]byte{0x77}
+	require.ErrorIs(t, CheckVRHookGasFresh(p, testVRCode, testPoACode, rec, fresh), ErrVRHookGas, "a fresh measurement of other code proves nothing")
+}
+
+func TestTheVRMeasurementJSONIsStrict(t *testing.T) {
+	m := reviewed()
+	b, err := json.Marshal(m)
+	require.NoError(t, err)
+	var back VRHookMeasurement
+	require.NoError(t, json.Unmarshal(b, &back))
+	require.Equal(t, m, back)
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(b, &raw))
+	require.Equal(t, "0xff00000000000000000000000000000000000003", raw["registry"])
+	raw["extra"] = 1
+	b2, _ := json.Marshal(raw)
+	require.ErrorIs(t, json.Unmarshal(b2, &back), ErrVRHookMeasurement)
+	delete(raw, "extra")
+	raw["registry"] = "0xFF00000000000000000000000000000000000003"
+	b2, _ = json.Marshal(raw)
+	require.ErrorIs(t, json.Unmarshal(b2, &back), ErrVRHookMeasurement)
+}
