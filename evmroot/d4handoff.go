@@ -114,11 +114,23 @@ type ControlState struct {
 	// binding the same stalled parent again: two such steps could never be folded into one acknowledgement. It survives the epoch change into the
 	// successor's idle state and is empty otherwise (and then absent from the digest).
 	UnackedParent []byte `cbor:",omitempty"`
+	// VR is the canonical encoding of the root's validator-registry mode control state (vradmit.RootState: the handoff backoff, the open
+	// time of the bound intent's latest view, the rule-support table and the acknowledged result), committed by this state's digest. Empty
+	// on a pre-VR (P85) chain, whose encoding is then unchanged; a VR-mode chain carries it from genesis (VT-05a, design section 5.5.1).
+	VR []byte `cbor:",omitempty"`
+	// PrimaryResult is the Election result of the primary candidate an endorsed Freeze retained, on a P85 chain: set in the endorsed state
+	// only, so that whether a later Abort closes a session is a fact of this authenticated state, never of what a root retained (a root
+	// recovered past the Freeze holds no candidate). Empty otherwise, and then absent from the digest.
+	PrimaryResult []byte `cbor:",omitempty"`
 }
 
 func (s ControlState) Bytes() []byte {
 	fields := cArray{cText("UNICITY_ROOT_HANDOFF_STATE"), cUint(1), cUint(s.Network), cUint(s.Epoch), cBytes(s.PredecessorBodyID), cUint(s.Attempt), cText(s.Phase), cUint(s.OrderedRound), cBytes(s.RecordBytes), cBytes(s.PreviousDigest)}
 	switch {
+	case len(s.PrimaryResult) != 0:
+		fields = append(fields, cBytes(s.FrozenParent), cBytes(s.Pos), cBytes(s.UnackedParent), cBytes(s.VR), cBytes(s.PrimaryResult)) // positional
+	case len(s.VR) != 0:
+		fields = append(fields, cBytes(s.FrozenParent), cBytes(s.Pos), cBytes(s.UnackedParent), cBytes(s.VR)) // positional, as below
 	case len(s.UnackedParent) != 0:
 		fields = append(fields, cBytes(s.FrozenParent), cBytes(s.Pos), cBytes(s.UnackedParent)) // positional: the earlier slots stay even when empty
 	case len(s.Pos) != 0:

@@ -64,6 +64,9 @@ func validateControl(c *evmroot.ControlState) error {
 	if c == nil || c.Network == 0 || c.Epoch == 0 || len(c.PredecessorBodyID) != 32 {
 		return ErrControlCheckpoint
 	}
+	if len(c.PrimaryResult) != 0 && c.Phase != "endorsed" && c.Phase != "frozen" {
+		return ErrControlCheckpoint // only an endorsed Freeze records its primary result
+	}
 	if c.Phase == "idle" {
 		if c.Attempt != 0 || c.OrderedRound != 0 || len(c.RecordBytes) != 0 || len(c.PreviousDigest) != 0 || len(c.FrozenParent) != 0 {
 			return ErrControlCheckpoint
@@ -90,7 +93,7 @@ func validateControl(c *evmroot.ControlState) error {
 			return ErrControlCheckpoint
 		}
 	case "frozen", "endorsed":
-		if r.Kind != "freeze" || len(c.FrozenParent) != 32 {
+		if r.Kind != "freeze" || len(c.FrozenParent) != 32 || (len(c.PrimaryResult) != 0 && (len(c.PrimaryResult) != 32 || len(c.VR) != 0)) {
 			return ErrControlCheckpoint
 		}
 	case "committed":

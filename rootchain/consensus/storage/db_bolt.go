@@ -41,6 +41,9 @@ var (
 	// successor body it authorizes; it is committed-history input for the
 	// derived EVM configuration, never a local schedule.
 	keyHandoffCandidate = []byte("handoff/candidate/")
+	// keyHandoffVRCandidate retains the canonical candidate v6 bytes of an admitted Freeze v5 (VR mode), whose v5 view is retained under
+	// keyHandoffCandidate for the install, lifecycle and acknowledgement paths.
+	keyHandoffVRCandidate = []byte("handoff/vrcandidate/")
 	// keyHandoffReceipts retains the verified readiness receipts of a V3 successor body's members, by body identity: the evidence the
 	// activation's proof envelope needs beside the body and the candidate.
 	keyHandoffReceipts = []byte("handoff/receipts/")
@@ -936,4 +939,40 @@ func (db BoltDB) SetNetworkProfile(profile uint64) error {
 		}
 		return writeUint64(b, keyNetworkProf, profile)
 	})
+}
+
+// StoreHandoffVRCandidate retains the canonical candidate v6 of an admitted Freeze v5 by its successor body id. Rewriting different bytes
+// under the same body id is refused.
+func (db BoltDB) StoreHandoffVRCandidate(id, candidate []byte) error {
+	if len(id) != 32 || len(candidate) == 0 || len(candidate) > 1<<20 {
+		return ErrHandoffRecord
+	}
+	return db.db.Update(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(bucketMetadata)
+		if b == nil {
+			return ErrHandoffRecord
+		}
+		key := handoffMetadataKey(keyHandoffVRCandidate, id)
+		if existing := b.Get(key); existing != nil && !bytes.Equal(existing, candidate) {
+			return ErrHandoffRecord
+		}
+		return b.Put(key, candidate)
+	})
+}
+
+// HandoffVRCandidate is the retained candidate v6 of a successor body, nil when none is retained.
+func (db BoltDB) HandoffVRCandidate(id []byte) ([]byte, error) {
+	if len(id) != 32 {
+		return nil, ErrHandoffRecord
+	}
+	var data []byte
+	err := db.db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket(bucketMetadata)
+		if b == nil {
+			return ErrHandoffRecord
+		}
+		data = bytes.Clone(b.Get(handoffMetadataKey(keyHandoffVRCandidate, id)))
+		return nil
+	})
+	return data, err
 }
