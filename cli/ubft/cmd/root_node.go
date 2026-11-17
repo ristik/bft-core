@@ -485,7 +485,7 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		defer stopWitnesses()
 	}
 	// VT-05b: the VR handoff root side of a VR-mode root (observer, intent, the staged protocol, the leader path)
-	vrHandoffOn, err := enableVRHandoffInVRMode(ctx, cm, shardConfs, flags.PosEVMRPC, flags.PathWithDefault("", ""), signer, host, log)
+	vrHandoffOn, err := enableVRHandoffInVRMode(ctx, cm, shardConfs, flags.PosEVMRPC, flags.PathWithDefault("", ""), signer, host)
 	if err != nil {
 		return err
 	}
@@ -498,6 +498,9 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 			return fetchErr
 		}
 		cm.SetRecordFetcher(fetcher)
+	}
+	if err = checkVRHandoffWired(cm.VRServices(), vrHandoffOn); err != nil {
+		return err
 	}
 	if err = host.BootstrapConnect(ctx, log); err != nil {
 		return err

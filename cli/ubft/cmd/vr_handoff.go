@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -21,6 +20,7 @@ import (
 	"github.com/unicitynetwork/bft-core/network"
 	"github.com/unicitynetwork/bft-core/q3format"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	"github.com/unicitynetwork/bft-core/rootchain/vrschedule"
 	"github.com/unicitynetwork/bft-core/rootchain/vrstate"
 	"github.com/unicitynetwork/bft-core/vradmit"
@@ -95,27 +95,45 @@ func enableVRHandoff(ctx context.Context, cm *consensus.ConsensusManager, dep vr
 }
 
 // enableVRHandoffInVRMode wires the VR handoff root side on a VR-mode root, one whose VR services (the generation's deployment and the
-// state authority over the pinned VR) are installed, that reads VR through rpcURL: it is the root side of every VR generation's handoff,
-// replacing the P85 operator script (handoff_drive.py) there. A root outside VR mode is unchanged; a VR-mode root without an execution
-// client follows the chain but takes no part in the protocol. It reports whether the root side is on.
+// state authority over the pinned VR) are installed: it is the root side of every VR generation's handoff, replacing the P85 operator
+// script (handoff_drive.py) there. A root outside VR mode is unchanged. It must run after the VR services are installed (enableVRServices);
+// checkVRHandoffWired, before the root starts, refuses a VR-mode root whose root side is off. It reports whether the root side is on.
 func enableVRHandoffInVRMode(ctx context.Context, cm *consensus.ConsensusManager, shardConfs []*types.PartitionDescriptionRecord, rpcURL, home string,
-	signer abcrypto.Signer, host *network.Peer, log *slog.Logger) (bool, error) {
-	reg := cm.VRServices()
-	if reg == nil {
-		return false, nil
+	signer abcrypto.Signer, host *network.Peer) (bool, error) {
+	dep, pins, on, err := vrHandoffWiring(cm.VRServices(), rpcURL)
+	if err != nil || !on {
+		return false, err
 	}
-	if rpcURL == "" {
-		log.Warn("VR handoff: a VR-mode root without --pos-evm-rpc takes no part in the handoff protocol")
-		return false, nil
-	}
-	a, ok := reg.State.(vrstate.Authority)
-	if !ok {
-		return false, fmt.Errorf("%w: the VR state authority carries no pins", ErrVRHandoffCmd)
-	}
-	if err := enableVRHandoff(ctx, cm, reg.Deployment, a.Pins, shardConfs, rpcURL, home, signer, host); err != nil {
+	if err := enableVRHandoff(ctx, cm, dep, pins, shardConfs, rpcURL, home, signer, host); err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+// vrHandoffWiring is what the installed VR services and --pos-evm-rpc decide: off outside VR mode; in VR mode the generation's deployment
+// and pins, and an execution client is required. A VR-mode root cannot execute a HandoffView or a Freeze v5 without the intent it derives
+// through that client (review #1188 r2 N1), so it is refused at startup rather than stall at the first handoff.
+func vrHandoffWiring(reg *storage.VRServices, rpcURL string) (vradmit.Deployment, vrstate.Pins, bool, error) {
+	if reg == nil {
+		return vradmit.Deployment{}, vrstate.Pins{}, false, nil
+	}
+	if rpcURL == "" {
+		return vradmit.Deployment{}, vrstate.Pins{}, false, fmt.Errorf("%w: a VR-mode root derives the handoff intent through its execution client: --pos-evm-rpc is required", ErrVRHandoffCmd)
+	}
+	a, ok := reg.State.(vrstate.Authority)
+	if !ok {
+		return vradmit.Deployment{}, vrstate.Pins{}, false, fmt.Errorf("%w: the VR state authority carries no pins", ErrVRHandoffCmd)
+	}
+	return reg.Deployment, a.Pins, true, nil
+}
+
+// checkVRHandoffWired refuses a VR-mode root whose handoff root side is off: its VR services were installed after the root side was wired
+// (root-node run installs them first; review #1188 r2 N2).
+func checkVRHandoffWired(reg *storage.VRServices, on bool) error {
+	if reg != nil && !on {
+		return fmt.Errorf("%w: the VR services were installed after the VR handoff root side was wired", ErrVRHandoffCmd)
+	}
+	return nil
 }
 
 type vrHandoffOperator interface {

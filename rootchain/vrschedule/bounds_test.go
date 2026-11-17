@@ -290,7 +290,63 @@ func TestAReadinessMustCarryTheRequiredSupport(t *testing.T) {
 		}
 	}
 	_, _, complete, _ := s.Current()
-	require.False(t, complete, "the other members lack the support: no certificate is held")
+	require.False(t, complete, "the other members' bare readiness were refused: the view is not complete")
+}
+
+// The certificate stage re-checks the support (I-RET admission): a complete set of readiness each retained under the basis of its own
+// time, which lacks the support required now, never enters I-RET. The committed schedule cannot change under a live intent (an Update
+// that changes it restarts the intent's state, below), so the test sets it inside the service.
+func TestTheCertificateStageRechecksTheSupport(t *testing.T) {
+	w := newWorld(t)
+	s, a := w.held(w.committed(0))
+	rs := w.readiness(a)
+	last := w.J[len(w.J)-1]
+	for _, m := range w.J[:len(w.J)-1] {
+		r := rs[m.RootNodeID]
+		o, _, err := s.Offer(m.RootNodeID, Message{Readiness: &r})
+		require.NoError(t, err)
+		require.Equal(t, Retained, o)
+	}
+	rule, release := vrschema.Word{0x51}, vrschema.Word{0x52}
+	s.mu.Lock()
+	s.sch = []vrschema.Activation{{RuleID: rule, ReleaseDigest: release, RootEpoch: w.RC.RootEpoch, State: vrschema.ActActive, ChangeID: 1}}
+	s.mu.Unlock()
+	body, err := vrhandoff.DeriveBody(w.in, w.RC.RootEpoch, sha256.Sum256(a.Candidate), w.BC)
+	require.NoError(t, err)
+	signer := w.ByStaking(last.StakingID).RK.Signer
+	cm, err := vrhandoff.SignCommitment(w.in.Network, last, rule, release, signer)
+	require.NoError(t, err)
+	covered, err := vrhandoff.SignReadiness(w.in, a, body, last.RootNodeID, w.trustBase(), []vrhandoff.SupportCommitment{cm}, signer)
+	require.NoError(t, err)
+	o, _, err := s.Offer(last.RootNodeID, Message{Readiness: &covered})
+	require.NoError(t, err)
+	require.Equal(t, Retained, o, "the last member's readiness carries the support")
+	_, _, complete, _ := s.Current()
+	require.False(t, complete, "the complete set lacks the support required now: not held in I-RET")
+	_, ok := s.Plan()
+	require.False(t, ok)
+}
+
+// A change of the committed schedule or support table under a live intent restarts the intent's protocol state: no verdict of another
+// basis survives (review #1188 r2).
+func TestAScheduleChangeRestartsTheIntent(t *testing.T) {
+	w := newWorld(t)
+	s := w.service("x")
+	s.Update(w.committed(0))
+	offerAll(t, s, w.messages(0))
+	_, _, complete, _ := s.Current()
+	require.True(t, complete)
+	c := w.committed(0)
+	c.Schedule = []vrschema.Activation{{RuleID: vrschema.Word{0x51}, ReleaseDigest: vrschema.Word{0x52}, RootEpoch: w.RC.RootEpoch, State: vrschema.ActActive, ChangeID: 1}}
+	s.Update(c)
+	intent, _, complete, ok := s.Current()
+	require.True(t, ok)
+	require.Equal(t, w.d, intent, "the same intent")
+	require.False(t, complete, "its certificate, admitted under the old schedule, is gone")
+	set, _ := s.Stage(w.d, 0)
+	require.Empty(t, set.PoPs, "its state restarted")
+	o, _, _ := s.Offer("peer", w.messages(0)[0])
+	require.Equal(t, Retained, o, "the intent is current again, not dead")
 }
 
 // B11: when the served sender's queue empties, the next sender is served next, not skipped.
@@ -342,4 +398,29 @@ func TestDeriveFetchesOnDemandAndDeriveCachedNever(t *testing.T) {
 	require.NoError(t, err, "now cached")
 	_, _, _ = p.Derive(q)
 	require.Equal(t, 1, fetches, "cached: not fetched again")
+}
+
+// At the bound, among equally long queues the sender the service seated last is displaced first.
+func TestDisplacementPrefersASenderSeatedLast(t *testing.T) {
+	w := newWorld(t)
+	s := w.service("x")
+	s.Update(w.committed(0))
+	bad := w.PoPs(w.in)[0]
+	bad.PoP.Signature = append([]byte(nil), bad.PoP.Signature...)
+	bad.PoP.Signature[3] ^= 1
+	o, _, _ := s.Offer("zz-byz", Message{PoP: &bad})
+	require.Equal(t, Refused, o)
+	require.True(t, s.lastSeats()["zz-byz"])
+	q := NewQueue(s, 0)
+	q.bound = func() int { return 4 }
+	p := w.PoPs(w.in)[1]
+	for i := 0; i < 2; i++ {
+		require.True(t, q.Submit("aa-honest", Message{PoP: &p}))
+		require.True(t, q.Submit("zz-byz", Message{PoP: &p}))
+	}
+	require.True(t, q.Submit("mm-new", Message{PoP: &p}))
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	require.Len(t, q.per["aa-honest"], 2, "the honest sender keeps its messages")
+	require.Len(t, q.per["zz-byz"], 1)
 }

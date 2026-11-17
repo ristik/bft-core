@@ -92,12 +92,18 @@ func (q *Queue) Submit(sender string, m Message) bool {
 	return true
 }
 
-// displaceFor makes room for sender at the bound by dropping the newest message of the longest queue (the smallest sender id among equals),
-// when that queue holds at least two more than sender's: false when sender already holds a fair share.
+// displaceFor makes room for sender at the bound by dropping the newest message of the longest queue, when that queue holds at least two
+// more than sender's: false when sender already holds a fair share. Among equally long queues a sender the service seated last goes first,
+// then the smallest sender id.
 func (q *Queue) displaceFor(sender string) bool {
+	last := q.svc.lastSeats()
 	long := ""
 	for s, l := range q.per {
-		if long == "" || len(l) > len(q.per[long]) || (len(l) == len(q.per[long]) && s < long) {
+		if long == "" || len(l) > len(q.per[long]) {
+			long = s
+			continue
+		}
+		if len(l) == len(q.per[long]) && (last[s] && !last[long] || last[s] == last[long] && s < long) {
 			long = s
 		}
 	}

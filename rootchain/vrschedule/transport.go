@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 	"time"
 
 	libp2pnetwork "github.com/libp2p/go-libp2p/core/network"
@@ -24,6 +25,9 @@ const (
 	MaxStageBytes    = 8 << 20
 	StreamDeadline   = 10 * time.Second
 	MaxQueuedPerPeer = BufferPerPeer
+	// StageInterval is the least time between two GetStage answers to one peer (a stage set is up to about 1 MiB: no amplification by an
+	// admitted peer asking in a loop).
+	StageInterval = 2 * time.Second
 )
 
 const (
@@ -119,16 +123,40 @@ func readFrame(r io.Reader, max int) ([]byte, error) {
 	return b, err
 }
 
-// Server admits the peers the service names (Members) into its verification queue and answers GetStage.
+// Server admits the peers the service names (Members) into its verification queue and answers GetStage, at most once per StageInterval
+// per peer.
 type Server struct {
 	svc   *Service
 	queue *Queue
 	// allowed adds the peers the caller always admits (the installed root committee); nil admits only the service's members.
 	allowed func(peer.ID) bool
+	now     func() time.Time
+
+	mu     sync.Mutex
+	served map[peer.ID]time.Time
 }
 
 func NewServer(svc *Service, queue *Queue, allowed func(peer.ID) bool) *Server {
-	return &Server{svc: svc, queue: queue, allowed: allowed}
+	return &Server{svc: svc, queue: queue, allowed: allowed, now: time.Now, served: map[peer.ID]time.Time{}}
+}
+
+// stageDue records a GetStage answer to from: false when it had one less than StageInterval ago.
+func (s *Server) stageDue(from peer.ID) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now()
+	if t, ok := s.served[from]; ok && now.Sub(t) < StageInterval {
+		return false
+	}
+	if len(s.served) > 256 {
+		for p, t := range s.served {
+			if now.Sub(t) >= StageInterval {
+				delete(s.served, p)
+			}
+		}
+	}
+	s.served[from] = now
+	return true
 }
 
 func (s *Server) admitted(from peer.ID) bool {
@@ -170,7 +198,7 @@ func (s *Server) Serve(from peer.ID, st Stream) {
 		}
 		_ = s.queue.Submit(from.String(), m) // over the queue's bounds the message is dropped
 	case kindGetStage:
-		if len(w.Intent) != 32 {
+		if len(w.Intent) != 32 || !s.stageDue(from) {
 			_ = st.Reset()
 			return
 		}

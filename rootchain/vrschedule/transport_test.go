@@ -59,3 +59,17 @@ func TestThePVPremise(t *testing.T) {
 	require.True(t, PVAdequate(10, 1, 300, 80), "10 + 1 + 300 < 320")
 	require.False(t, PVAdequate(10, 1, 300, 20), "at T = 20 the premise fails")
 }
+
+// GetStage is answered at most once per StageInterval per peer.
+func TestGetStageIsThrottledPerPeer(t *testing.T) {
+	w := newWorld(t)
+	svc := w.service("x")
+	s := NewServer(svc, NewQueue(svc, 0), nil)
+	now := time.Unix(1000, 0)
+	s.now = func() time.Time { return now }
+	require.True(t, s.stageDue("a"))
+	require.False(t, s.stageDue("a"), "again within the interval")
+	require.True(t, s.stageDue("b"), "another peer")
+	now = now.Add(StageInterval)
+	require.True(t, s.stageDue("a"))
+}

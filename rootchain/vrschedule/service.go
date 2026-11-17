@@ -9,6 +9,7 @@ import (
 	"sort"
 	"sync"
 
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/q3format"
 	"github.com/unicitynetwork/bft-core/vradmit"
@@ -168,6 +169,7 @@ type intentState struct {
 	views      map[uint64]*viewState
 	iret       *PreparePlan
 	assembled  map[uint64]bool
+	basis      [32]byte // the committed schedule and support table the intent's verdicts were judged under
 }
 
 type bufItem struct {
@@ -273,6 +275,15 @@ func (s *Service) updateLocked(c Committed) followUp {
 		s.cur = nil
 		return followUp{}
 	}
+	basis := supportBasis(c.Schedule, c.Table)
+	if s.cur != nil && s.cur.digest == c.Derived.Digest && s.cur.basis != basis {
+		// a readiness's support verdict and I-RET's gate (a) rest on the committed schedule and support table, which the intent digest does
+		// not cover: they are fixed for an intent's life (they change at epoch installs, which kill the intent). Should they change anyway,
+		// the intent's protocol state restarts rather than keep verdicts of another basis (review #1188 r2).
+		s.log().Warn("VR handoff: the committed schedule or support table changed under the intent; its protocol state restarts",
+			"intent", fmt.Sprintf("%x", s.cur.digest[:8]))
+		s.cur = nil
+	}
 	if s.cur == nil || s.cur.digest != c.Derived.Digest {
 		if s.cur != nil {
 			s.markDead(s.cur.digest)
@@ -283,6 +294,7 @@ func (s *Service) updateLocked(c Committed) followUp {
 			s.cur = nil
 			return followUp{}
 		}
+		st.basis = basis
 		s.cur = st
 		s.lastSeat = map[string]bool{}
 		for i, d := range s.dead {
@@ -323,6 +335,15 @@ func (s *Service) pruneBuffered() {
 			delete(s.buffered, sender)
 		}
 	}
+}
+
+// supportBasis is the digest of the committed schedule and support table.
+func supportBasis(sch []vrschema.Activation, tab vradmit.SupportTable) [32]byte {
+	b, err := types.Cbor.Marshal([]any{sch, tab.Entries})
+	if err != nil {
+		return [32]byte{0xff} // never equal to a real basis's digest twice in a row by accident: the state restarts
+	}
+	return sha256.Sum256(b)
 }
 
 func newIntentState(c Committed) (*intentState, error) {
@@ -373,7 +394,7 @@ type Job struct {
 	Verify  func() error
 	sender  string
 	msg     Message
-	digest  [32]byte
+	st      *intentState     // the intent state it was prepared against: a revived intent of the same digest is another state
 	body    *q3format.BodyV3 // an assembly's derived body
 	// conflict: the job verifies a second, different message of a signer that already has one retained in the view (equivocation
 	// evidence if it verifies)
@@ -409,7 +430,7 @@ func (s *Service) prepareLocked(sender string, m Message) Job {
 		j.Outcome = s.buffer(sender, m)
 		return j
 	}
-	j.digest = st.digest
+	j.st = st
 	if v, ok := m.view(); ok {
 		if v > st.view+BufferAhead || v+RetainedViews <= st.view {
 			j.Outcome = Dropped
@@ -552,7 +573,7 @@ func (s *Service) apply(j Job, verr error) (Outcome, error, followUp) {
 
 func (s *Service) applyLocked(j Job, verr error) (Outcome, error) {
 	st := s.cur
-	if st == nil || st.digest != j.digest {
+	if st == nil || st != j.st {
 		return Dropped, nil
 	}
 	m := j.msg
@@ -814,10 +835,10 @@ func (s *Service) runAssembly(t *assemblyTask) (Message, followUp, bool) {
 }
 
 type certTask struct {
-	digest [32]byte
-	view   uint64
-	in     vradmit.CertificateInput
-	plan   PreparePlan
+	st   *intentState
+	view uint64
+	in   vradmit.CertificateInput
+	plan PreparePlan
 }
 
 // completeLocked is a complete set of a retained view to check as a certificate while no certificate is held: every successor's readiness
@@ -858,7 +879,7 @@ func (s *Service) completeLocked() *certTask {
 		if err != nil {
 			continue
 		}
-		return &certTask{digest: st.digest, view: view,
+		return &certTask{st: st, view: view,
 			in: vradmit.CertificateInput{Certificate: cert, IntentDigest: st.digest, CommittedView: st.view, Incumbents: st.incumbents,
 				CandidateBytes: vs.assembly.Candidate, Successors: st.successors, Body: vs.body, Attempt: st.d.Intent.Attempt, TrustBaseBytes: st.trustBase},
 			plan: PreparePlan{Intent: st.digest, Epoch: st.d.RootEpoch, Attempt: st.d.Intent.Attempt, Predecessor: bytes.Clone(st.d.Intent.PredecessorBodyID),
@@ -877,7 +898,7 @@ func (s *Service) runCertificate(t *certTask) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st := s.cur
-	if st == nil || st.digest != t.digest || st.iret != nil {
+	if st == nil || st != t.st || st.iret != nil {
 		return
 	}
 	plan := t.plan
@@ -933,7 +954,9 @@ func (s *Service) Prepared() (PreparePlan, bool) {
 	return p, true
 }
 
-// supportEvidence references every committed table entry of a K member's exact binding for a rule of the committed schedule.
+// supportEvidence references every committed table entry of a K member's exact binding for a rule of the committed schedule. Committed
+// entries were verified when they were committed: they are matched by binding (staking id, generation, root key hash), not verified again
+// on the consensus loop (review #1188 r2 N3); admission resolves and checks every reference.
 func supportEvidence(sch []vrschema.Activation, tab vradmit.SupportTable, k []evmassign.Identity) vrschema.RuleSupportEvidence {
 	ev := vrschema.RuleSupportEvidence{}
 	rules := map[vrschema.Word]bool{}
@@ -945,7 +968,7 @@ func supportEvidence(sch []vrschema.Activation, tab vradmit.SupportTable, k []ev
 			continue
 		}
 		for _, m := range k {
-			if bytes.Equal(m.StakingID, c.StakingID) && vradmit.VerifyCommitment(c, m) == nil {
+			if bytes.Equal(m.StakingID, c.StakingID) && c.Generation == m.Generation && bytes.Equal(c.RootKeyHash, ethcrypto.Keccak256(m.RootKey)) {
 				d, err := c.Digest()
 				if err == nil {
 					ev.Refs = append(ev.Refs, d[:])

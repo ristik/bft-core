@@ -14,6 +14,8 @@ import (
 	"github.com/unicitynetwork/bft-core/rootchain/consensus"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	"github.com/unicitynetwork/bft-core/rootchain/vrschedule"
+	"github.com/unicitynetwork/bft-core/rootchain/vrstate"
+	"github.com/unicitynetwork/bft-core/vradmit"
 	"github.com/unicitynetwork/bft-core/vrhandoff"
 	"github.com/unicitynetwork/bft-core/vrschema"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
@@ -157,4 +159,39 @@ func TestTheVRHandoffDriveProtocolMode(t *testing.T) {
 		require.True(t, ok, "root %d holds a complete verified certificate", i)
 		require.Equal(t, d, p.Intent)
 	}
+}
+
+type pinlessAuthority struct{ storage.VRStateAuthority }
+
+// The VR handoff wiring of root-node run (review #1188 r2 N1, N2): a root outside VR mode is unchanged; a VR-mode root needs --pos-evm-rpc
+// (it cannot execute a HandoffView or a Freeze v5 without the intent it derives through it) and gets the generation's deployment and pins;
+// a root whose VR services are installed after the root side was wired (the wrong order against enableVRServices) is refused at startup.
+func TestTheVRHandoffWiringInRootNodeRun(t *testing.T) {
+	dep, pins, on, err := vrHandoffWiring(nil, "http://127.0.0.1:8545")
+	require.NoError(t, err)
+	require.False(t, on, "no VR services: not a VR-mode root, nothing is wired")
+	require.Zero(t, dep)
+	require.Zero(t, pins)
+	require.NoError(t, checkVRHandoffWired(nil, false))
+
+	want := vrstate.Pins{Registry: [20]byte{1}, RegistryCode: [32]byte{2}}
+	reg := &storage.VRServices{Deployment: vradmit.Deployment{RootNetwork: 3, ChainID: vrschema.U64(7)}, State: vrstate.Authority{Pins: want}}
+	_, _, on, err = vrHandoffWiring(reg, "")
+	require.ErrorIs(t, err, ErrVRHandoffCmd, "a VR-mode root without an execution client fails at startup")
+	require.False(t, on)
+
+	dep, pins, on, err = vrHandoffWiring(reg, "http://127.0.0.1:8545")
+	require.NoError(t, err)
+	require.True(t, on)
+	require.Equal(t, reg.Deployment, dep)
+	require.Equal(t, want, pins)
+	require.NoError(t, checkVRHandoffWired(reg, true))
+
+	_, _, _, err = vrHandoffWiring(&storage.VRServices{State: pinlessAuthority{}}, "http://127.0.0.1:8545")
+	require.ErrorIs(t, err, ErrVRHandoffCmd)
+
+	// the wrong order: the root side was wired while no VR services were installed (it did nothing), then they were
+	_, _, on, err = vrHandoffWiring(nil, "http://127.0.0.1:8545")
+	require.NoError(t, err)
+	require.ErrorIs(t, checkVRHandoffWired(reg, on), ErrVRHandoffCmd, "a VR-mode root whose root side is off does not start")
 }

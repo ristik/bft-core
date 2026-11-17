@@ -1,10 +1,13 @@
 package consensus
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/sha256"
+	"encoding/binary"
 	"errors"
+	"io"
 	"log/slog"
 	"net"
 	"sync"
@@ -363,4 +366,81 @@ func TestVRStagePullRebuildsARestartedRoot(t *testing.T) {
 		_, _, complete, _ := lagging.Current()
 		return complete
 	}, 5*time.Second, 5*time.Millisecond, "the second peer's set completes the view")
+}
+
+// wireStageSet is the stage set's wire form (vrschedule's GetStage answer).
+type wireStageSet struct {
+	_          struct{} `cbor:",toarray"`
+	PoPs       []vrhandoff.PoPOffer
+	Assemblies []vrhandoff.Assembly
+	Readiness  []vrhandoff.Readiness
+}
+
+// cannedStream answers any request with one fixed frame.
+type cannedStream struct {
+	r io.Reader
+}
+
+func (s *cannedStream) Read(p []byte) (int, error)  { return s.r.Read(p) }
+func (s *cannedStream) Write(p []byte) (int, error) { return len(p), nil }
+func (*cannedStream) SetDeadline(time.Time) error   { return nil }
+func (*cannedStream) CloseWrite() error             { return nil }
+func (*cannedStream) Close() error                  { return nil }
+func (*cannedStream) Reset() error                  { return nil }
+
+type cannedOpener map[peer.ID][]byte
+
+func (o cannedOpener) CreateStream(_ context.Context, to peer.ID, _ string) (vrschedule.Stream, error) {
+	frame, ok := o[to]
+	if !ok {
+		return nil, errors.New("unreachable")
+	}
+	return &cannedStream{r: bytes.NewReader(frame)}, nil
+}
+
+func stageFrame(t *testing.T, set wireStageSet) []byte {
+	b, err := types.Cbor.Marshal(set)
+	require.NoError(t, err)
+	var p [4]byte
+	binary.BigEndian.PutUint32(p[:], uint32(len(b)))
+	return append(p[:], b...)
+}
+
+// A Byzantine peer's pulled stage set (review #1188 r2): a set that opens with a refused message is abandoned there, nothing after it is
+// judged; a set of 10,000 copies of valid proofs costs nothing beyond duplicates; an honest peer's set then completes the view.
+func TestVRAByzantinePulledSet(t *testing.T) {
+	w := newVRWorld(t)
+	pops := w.PoPs(w.in)
+	bad := pops[0]
+	bad.PoP.Signature = append([]byte(nil), bad.PoP.Signature...)
+	bad.PoP.Signature[3] ^= 1
+	var dup []vrhandoff.PoPOffer
+	for i := 0; i < 10_000; i++ {
+		dup = append(dup, pops[i%len(pops)])
+	}
+	holder := w.planned()
+	honest, _ := holder.Stage(w.d, 0)
+	byzA, byzB, good := peer.ID("byz-a"), peer.ID("byz-b"), peer.ID("honest")
+	opener := cannedOpener{
+		byzA: stageFrame(t, wireStageSet{PoPs: append([]vrhandoff.PoPOffer{bad}, pops[1:]...)}),
+		byzB: stageFrame(t, wireStageSet{PoPs: dup}),
+		good: stageFrame(t, wireStageSet{PoPs: honest.PoPs, Assemblies: honest.Assemblies, Readiness: honest.Readiness}),
+	}
+	s := vrschedule.NewService(vrschedule.ServiceConfig{Self: "y"})
+	s.Update(w.committed(0))
+	v := &vrHandoff{svc: s, cfg: VRHandoffConfig{Opener: opener, Log: slog.New(slog.DiscardHandler)}}
+
+	require.True(t, v.pullFrom(context.Background(), []peer.ID{byzA}, w.d, 0))
+	set, _ := s.Stage(w.d, 0)
+	require.Empty(t, set.PoPs, "abandoned at the refused first message: nothing after it was judged")
+
+	start := time.Now()
+	require.True(t, v.pullFrom(context.Background(), []peer.ID{byzB}, w.d, 0))
+	set, _ = s.Stage(w.d, 0)
+	require.Len(t, set.PoPs, len(pops), "each proof once; the copies are duplicates")
+	t.Logf("10,000 pulled copies judged in %s", time.Since(start))
+
+	require.True(t, v.pullFrom(context.Background(), []peer.ID{good}, w.d, 0))
+	_, _, complete, _ := s.Current()
+	require.True(t, complete, "the honest peer's set completes the view")
 }

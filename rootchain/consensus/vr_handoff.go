@@ -8,7 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -315,6 +317,7 @@ func (v *vrHandoff) pull(ctx context.Context) {
 	v.pulling, v.lastPull = true, now
 	restoring := !v.restored
 	peers := v.peers()
+	slices.Sort(peers) // a stable order: the periodic pull goes round the peers
 	if !restoring && len(peers) > 0 {
 		peers = []peer.ID{peers[v.pullNext%len(peers)]}
 		v.pullNext++
@@ -335,24 +338,40 @@ func (v *vrHandoff) pull(ctx context.Context) {
 	}()
 }
 
-// pullFrom asks the peers for their stage sets of intent and offers each set's messages in order (proofs, assemblies, readiness) as that
-// peer's; a set is abandoned at its first refused message. It reports whether any peer answered.
+// PullFanOut is how many peers a restore pull asks at once.
+const PullFanOut = 4
+
+// pullFrom asks the peers, PullFanOut at a time, for their stage sets of intent until a complete certificate is held, and offers each set's
+// messages in order (proofs, assemblies, readiness) as that peer's; a set is abandoned at its first refused message. A peer that stalls
+// holds one slot for at most the stream deadline. It reports whether any peer answered. The verifications of a pulled set run here, outside
+// the verification queue; the per-sender allowances bound them.
 func (v *vrHandoff) pullFrom(ctx context.Context, peers []peer.ID, intent [32]byte, from uint64) bool {
-	answered := false
+	var answered atomic.Bool
+	sem := make(chan struct{}, PullFanOut)
+	var wg sync.WaitGroup
 	for _, p := range peers {
-		set, err := vrschedule.GetStage(ctx, v.cfg.Opener, p, intent, from)
-		if err != nil {
-			continue
+		if _, _, complete, _ := v.svc.Current(); complete {
+			break
 		}
-		answered = true
-		for _, m := range set.Offers() {
-			if o, _, _ := v.svc.Offer(p.String(), m); o == vrschedule.Refused {
-				v.cfg.Log.Debug("VR handoff: a peer's stage set holds a refused message", "peer", p.String())
-				break
+		sem <- struct{}{}
+		wg.Add(1)
+		go func(p peer.ID) {
+			defer func() { <-sem; wg.Done() }()
+			set, err := vrschedule.GetStage(ctx, v.cfg.Opener, p, intent, from)
+			if err != nil {
+				return
 			}
-		}
+			answered.Store(true)
+			for _, m := range set.Offers() {
+				if o, _, _ := v.svc.Offer(p.String(), m); o == vrschedule.Refused {
+					v.cfg.Log.Debug("VR handoff: a peer's stage set holds a refused message", "peer", p.String())
+					return
+				}
+			}
+		}(p)
 	}
-	return answered
+	wg.Wait()
+	return answered.Load()
 }
 
 // vrCommitted is what the protocol learns from the committed root block: the derived intent, its committed view, a committed Prepare of its
