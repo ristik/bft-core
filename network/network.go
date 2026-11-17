@@ -97,6 +97,8 @@ type LibP2PNetwork struct {
 	// limits the log of streams rejected by a ReceiveProtocolDescription.AdmitPeer callback
 	rejectLog rateLimitedLog
 
+	// rootGate, on a root consensus network, admits and prioritizes received proposals (SetRootConsensusGate, #1113)
+	rootGate *rootGate
 	// framesHook, when set (tests), observes the per dispatch certification frames cache
 	framesHook func(*certificationFrames)
 
@@ -548,20 +550,20 @@ func (n *LibP2PNetwork) streamHandlerForProtocol(protocolID string, ctor func() 
 				return
 			}
 			msg := ctor()
-			var reserved int64
+			var charge ingressCharge
 			var frame uint64
 			switch {
 			case ingress != nil:
 				var length uint64
 				if length, err = readFrameLength(reader, maxFrame); err == nil {
 					frame = length
-					reserved = int64(length) /* #nosec G115 bounded by maxFrame */
-					if !ingress.reserve(remote, reserved) {
+					var ok bool
+					if charge, ok = ingress.reserve(remote, int64(length)); !ok { /* #nosec G115 bounded by maxFrame */
 						n.log.Warn(fmt.Sprintf("refusing a %d byte %q frame from %s: ingress budget exhausted", length, protocolID, remote))
 						return
 					}
 					if err = readFramePayload(reader, msg, length); err != nil {
-						ingress.release(remote, reserved)
+						ingress.release(charge)
 					}
 				}
 			case maxFrame > 0:
@@ -582,13 +584,13 @@ func (n *LibP2PNetwork) streamHandlerForProtocol(protocolID string, ctor func() 
 			// revoked meanwhile, and a frame written after the revocation must not be delivered
 			if revalidate != nil && !revalidate(remote) {
 				if ingress != nil {
-					ingress.release(remote, reserved)
+					ingress.release(charge)
 				}
 				n.logRejectedPeer(protocolID, remote)
 				return
 			}
 			if ingress != nil {
-				ingress.queue(msg, remote, reserved) // before it is visible to the consumer, so Delivered always finds it
+				ingress.queue(msg, charge) // before it is visible to the consumer, so Delivered always finds it
 			}
 			n.recordOrigin(msg, MessageOrigin{Peer: remote, Size: frame}) // likewise before the consumer can take the message
 			if err = n.receivedMsg(s.Conn().RemotePeer(), protocolID, msg); err != nil {
