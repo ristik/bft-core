@@ -1807,17 +1807,18 @@ func (x *ConsensusManager) recoveryRunStart(round uint64) bool {
 }
 
 // refreshProposers publishes, for the proposal ingress priority (#1113, EligibleProposer), the leaders of the pacemaker's round and of the
-// round after it, on every root: the loop calls it before each event. The publication is kept only while the round is the same and both
-// leaders are known; a leader the selector could not name yet (its committed history unavailable) is asked again, and a recovery or an
-// epoch switch (resetVolatile) clears the publication, since either can change what the selector answers for the same round.
+// round after it, on every root: the loop calls it before each event. The publication is kept only while the round and the trust base
+// store are the same and both leaders are known: a leader the selector could not name yet (its committed history unavailable) is asked
+// again, a trust base stored meanwhile (the legacy selector reads the store by round) asks both again, and a recovery or an epoch switch
+// (resetVolatile) clears the publication, since either can change what the selector answers for the same round.
 func (x *ConsensusManager) refreshProposers() {
-	round := x.pacemaker.GetCurrentRound()
-	if p := x.proposers.Load(); p != nil && p.round == round && p.ids[0] != "" && p.ids[1] != "" {
+	round, gen := x.pacemaker.GetCurrentRound(), x.trustBaseStore.VerifyGeneration() // the generation before the lookups that depend on it
+	if p := x.proposers.Load(); p != nil && p.round == round && p.storeGen == gen && p.ids[0] != "" && p.ids[1] != "" {
 		return
 	}
 	l, err := x.leaderSelector.GetLeaderForRound(round)
 	next, nextErr := x.leaderAfter(round)
-	x.proposers.Store(&proposerSet{round: round, ids: [2]peer.ID{leaderIf(err == nil, l), leaderIf(nextErr == nil, next)}})
+	x.proposers.Store(&proposerSet{round: round, storeGen: gen, ids: [2]peer.ID{leaderIf(err == nil, l), leaderIf(nextErr == nil, next)}})
 }
 
 func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {

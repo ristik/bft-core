@@ -79,8 +79,9 @@ func (x *ConsensusManager) admittedFor(tb *types.RootTrustBaseV1, staged *staged
 
 // proposerSet is what EligibleProposer answers from: the leaders of a round and of the round after it ("" for one not known).
 type proposerSet struct {
-	round uint64
-	ids   [2]peer.ID
+	round    uint64
+	storeGen uint64 // the trust base store's generation the leaders were asked at: the legacy selector reads the store by round
+	ids      [2]peer.ID
 }
 
 // EligibleProposer reports whether id is the leader of the current or of the next round, as last published by the loop
