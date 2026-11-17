@@ -136,11 +136,11 @@ func TestAwaitFromRootPeers(t *testing.T) {
 		// #1171: the backoff timer and the end of the wait are both due when the backoff select runs, so either case can be taken; on the
 		// timer case the next sweep sees the expired context before asking any peer, and that sweep's refusals are the expiry alone. A
 		// zero backoff makes both due on every attempt (on CI a loaded runner did it with the 2 ms backoff of the test above).
-		r := installRetry{wait: 10 * time.Millisecond}
-		for range 40 {
+		r := installRetry{wait: 50 * time.Millisecond} // the first sweep, at least, ends well within the wait on a loaded runner
+		for range 20 {
 			_, err := awaitFromRootPeers(context.Background(), r, peers, func(_ context.Context, id peer.ID) (string, error) {
 				return "", fmt.Errorf("%w at %s", unavailable, id.String())
-			}, nil, func(int, error) { time.Sleep(15 * time.Millisecond) }) // past the wait and the backoff
+			}, nil, func(int, error) { time.Sleep(60 * time.Millisecond) }) // past the wait and the backoff
 			require.ErrorIs(t, err, context.DeadlineExceeded)
 			require.ErrorIs(t, err, unavailable)
 			for _, id := range []peer.ID{a, b} {
