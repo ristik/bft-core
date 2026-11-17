@@ -14,6 +14,7 @@
 #   VR_CONTRACTS            a unicity-pos-contracts checkout with script/vr-genesis.sh (forge and cast on PATH)
 #   VR_MEASUREMENT          the recorded complete-path measurement the profile is pinned from (default deploy/testnet/vr-hook-measurement.json)
 #   VR_FRESH_MEASUREMENT    a fresh complete-path measurement (ureth tests/vr_hook.rs vr_hook_measurement) taken for this run; required
+#   VR_FORGE_HOME           optional HOME for forge (a host whose solc cache lives elsewhere)
 #   VR_GENERATION           the development generation's name (default paired-devnet): its network word is sha256("unicity.dev.vr." + name)
 #
 # The premine is dev-only: each identity owner and governor signer gets a generated key (test-nodes/vr/dev-keys.json, 0600) and 1000 UCT, so the
@@ -81,7 +82,8 @@ PY
     --bindings "$VR_DIR/genesis-bindings.json" --owners "$VR_DIR/owners.json" --b1-profile test-nodes/b1-profile.json \
     --network-word "$(vr_network_word)" --governor-signers "$(tr -d '\n' <"$VR_DIR/signers.txt")" --fee-collector "${EVM_ENGINE_FEE_COLLECTOR:-$URETH_PIN_FEE_COLLECTOR}" \
     --out-input "$VR_DIR/input.json" --out-identities "$VR_DIR/genesis-identities.json" || return 1
-  ( cd "$VR_CONTRACTS" && script/vr-genesis.sh "$OLDPWD/$VR_DIR/input.json" "$OLDPWD/$VR_DIR/contracts" ) || vr_die "the contracts genesis failed" || return 1
+  ( cd "$VR_CONTRACTS" && HOME=${VR_FORGE_HOME:-$HOME} script/vr-genesis.sh "$OLDPWD/$VR_DIR/input.json" "$OLDPWD/$VR_DIR/contracts" ) ||
+    vr_die "the contracts genesis failed" || return 1
 }
 
 vr_merge_alloc() { # <genesis source>: the VR accounts and the dev premine; every balance-only account of the source is part of the premine list
