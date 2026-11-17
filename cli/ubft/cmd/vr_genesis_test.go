@@ -360,8 +360,13 @@ func TestAPartialVRCheckCertifiesNothing(t *testing.T) {
 	v := vrFixtureInput(t)
 	v.urethFlags, v.feeCollector, v.partial = "", "", true
 	dep, err := vrVerify(v)
-	require.NoError(t, err)
+	require.ErrorIs(t, err, ErrVRGenesisPartial, "files that agree still exit as PARTIAL, never as success")
 	require.Equal(t, vrRootDeployment{}, dep, "no root deployment from a partial check")
+	v = vrFixtureInput(t)
+	v.partial = true
+	_, err = vrVerify(v)
+	require.ErrorIs(t, err, ErrVRGenesis, "a partial check refuses runtime inputs it would ignore")
+	require.NotErrorIs(t, err, ErrVRGenesisPartial)
 	v = vrFixtureInput(t)
 	v.urethFlags, v.feeCollector, v.partial = "", "", true
 	setSlot(t, &v, vrGenesisAddress(3), vrschema.VRSlot(26), "0x00")
@@ -373,6 +378,10 @@ func TestUrethArgumentsParseBothFormsAndRefuseRepeats(t *testing.T) {
 	a, err := parseUrethArgs("--unicity.base-fee-floor 7 --unicity.max-gas=5 --unicity.no-proof-source --txpool.max-tx-gas 9")
 	require.NoError(t, err)
 	require.Equal(t, urethArgs{"--unicity.base-fee-floor": "7", "--unicity.max-gas": "5", "--unicity.no-proof-source": "", "--txpool.max-tx-gas": "9"}, a)
+	for _, bad := range []string{"--unicity.no-proof-source 2000000", "--unicity.no-proof-source=true", "-vvv", "--datadir /x", "--unicity.max-gas"} {
+		_, err = parseUrethArgs(bad)
+		require.ErrorIs(t, err, ErrVRGenesis, bad)
+	}
 	_, err = parseUrethArgs("--unicity.max-gas=5 --unicity.max-gas 5")
 	require.ErrorIs(t, err, ErrVRGenesis)
 	_, err = parseUrethArgs("--unicity.max-gas=5 stray")

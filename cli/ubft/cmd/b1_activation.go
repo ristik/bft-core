@@ -783,6 +783,25 @@ func newB1Identities(p b1state.Profile, evmGenesisHash common.Hash, words map[co
 	return append(enc, '\n'), nil
 }
 
+// checkB1FinalizedGenesis is the finalized-genesis rule of a B1 deployment over the genesis bytes themselves: registrygenesis.B1Origin
+// (the SealRegistry predeploy code and state, the chain id, the full PDR's seal_registry_genesis, the execution identity) and the
+// bootstrap snapshot of block 0. The VR genesis plan's verify uses it, so that the generator stays reachable only from the genesis and
+// B1 activation roles.
+func checkB1FinalizedGenesis(full *types.PartitionDescriptionRecord, p b1state.Profile, h *q3format.History, finalized []byte) error {
+	origin, err := registrygenesis.B1Origin(full, p, h, finalized, nil, registrygenesis.DefaultGenesisJSONLimits())
+	if err != nil {
+		return err
+	}
+	snap, err := registryproof.Verify(origin.ProofContext(), origin.BlockHash(), origin.Evidence())
+	if err != nil {
+		return err
+	}
+	if !snap.Valid() || !snap.Genesis() || snap.Number() != 0 || snap.StateRoot() != origin.StateRoot() {
+		return errors.New("the bootstrap snapshot is not block 0 of the finalized genesis")
+	}
+	return nil
+}
+
 // loadB1GenesisOrigin validates the finalized genesis of a B1 deployment against the full shard configuration, the profile and the trust
 // base's own history, and returns the origin and the block-0 snapshot the first derivation takes as its parent.
 func loadB1GenesisOrigin(full *types.PartitionDescriptionRecord, p b1state.Profile, h *q3format.History, genesisPath, expectedIdentity string) (registrygenesis.GenesisOrigin, registryproof.Snapshot, error) {

@@ -26,6 +26,7 @@ uses the same steps (deploy/testnet/generate.py --vr is the follow-up that wires
         --measurement deploy/testnet/vr-hook-measurement.json --validators 4 --out /tmp/vr-gen
 """
 import argparse
+import datetime
 import hashlib
 import json
 import os
@@ -33,6 +34,7 @@ from pathlib import Path
 import re
 import secrets
 import shutil
+import socket
 import subprocess
 import sys
 
@@ -96,6 +98,15 @@ def genesis_commitment(genesis):
     return '0x' + word.lower().removeprefix('0x').rjust(64, '0')
 
 
+def git_commit(path):
+    """The checkout's commit, or a note that the tree carries no git metadata (a copied tree)."""
+    done = subprocess.run(['git', '-C', str(path), 'rev-parse', 'HEAD'], text=True, capture_output=True)
+    if done.returncode != 0:
+        return 'unknown: no git metadata at ' + str(Path(path).resolve())
+    dirty = subprocess.run(['git', '-C', str(path), 'status', '--porcelain'], text=True, capture_output=True).stdout.strip()
+    return done.stdout.strip() + (' (modified)' if dirty else '')
+
+
 def fresh_measurement(a, out):
     """The paired ureth's complete-path measurement, run now (cargo test of the ignored vr_hook_measurement), or an explicit external one."""
     if a.fresh_measurement:
@@ -103,15 +114,20 @@ def fresh_measurement(a, out):
         if fresh == Path(a.measurement).resolve():
             raise VRGenesisError('--fresh-measurement is the recorded measurement: a fresh measurement must be taken anew')
         shutil.copy2(fresh, out / 'vr-hook-measurement-fresh.json')
-        return out / 'vr-hook-measurement-fresh.json'
+        return out / 'vr-hook-measurement-fresh.json', {'mode': 'external (operator-supplied; its provenance is the operator\'s)', 'path': str(fresh),
+                                                        'host': socket.gethostname(),
+                                                        'receivedUtc': datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds')}
     target = out / 'vr-hook-measurement-fresh.json'
     env = dict(os.environ, VR_HOOK_MEASUREMENT=str(target))
-    log = run('cargo', 'test', '-p', 'reth-unicity-execution', '--features', 'test-utils', '--test', 'vr_hook', '--', '--ignored', '--exact',
-              'vr_hook_measurement', '--nocapture', cwd=Path(a.ureth).resolve(), env=env)
+    command = ['cargo', 'test', '-p', 'reth-unicity-execution', '--features', 'test-utils', '--test', 'vr_hook', '--', '--ignored', '--exact',
+               'vr_hook_measurement', '--nocapture']
+    started = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds')
+    log = run(*command, cwd=Path(a.ureth).resolve(), env=env)
     (out / 'vr-hook-measurement-fresh.log').write_text(log)
     if not target.is_file():
         raise VRGenesisError('the ureth measurement wrote no measurement file')
-    return target
+    return target, {'mode': 'ran', 'command': ' '.join(command), 'cwd': str(Path(a.ureth).resolve()), 'urethCommit': git_commit(a.ureth),
+                    'host': socket.gethostname(), 'startedUtc': started, 'log': str(out / 'vr-hook-measurement-fresh.log')}
 
 
 def plan(a):
@@ -168,8 +184,9 @@ def plan(a):
               '--alloc-source', home / 'funded.json', '--out', out / 'genesis.json', '--full-shard-conf', out / 'full-shard-conf.json',
               '--identities-out', out / 'b1-identities.json'))
     genesis = json.loads((out / 'genesis.json').read_text())
-    fresh = fresh_measurement(a, out)
-    ureth = flags[0] + f' --unicity.genesis-commitment={genesis_commitment(genesis)}'
+    fresh, provenance = fresh_measurement(a, out)
+    provenance['sha256'] = hashlib.sha256(fresh.read_bytes()).hexdigest()
+    ureth = flags[0] + f' --unicity.genesis-commitment={genesis_commitment(genesis)} --unicity.fee-collector={FEE_COLLECTOR}'
     (out / 'ureth-flags.txt').write_text(ureth + '\n')
     shutil.copy2(trust, out / 'trust-base.json')
 
@@ -180,7 +197,7 @@ def plan(a):
     print(verified.strip())
     summary = {'generation': generation, 'validators': a.validators, 'chainId': a.chain_id, 'networkId': NETWORK_ID,
                'deployment': json.loads((out / 'vr/deployment.json').read_text()), 'profile': {k: profile[k] for k in ('hRecords', 'hookRecordGas', 'electGas', 'systemGas', 'maxGas')},
-               'ureth': ureth, 'roots': roots, 'evms': evms}
+               'ureth': ureth, 'roots': roots, 'evms': evms, 'freshMeasurement': provenance}
     (out / 'vr-genesis-summary.json').write_text(json.dumps(summary, indent=1) + '\n')
     return summary
 
