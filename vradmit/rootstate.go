@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/vrschema"
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/types/hex"
@@ -187,4 +188,30 @@ func ResidenceEligible(seenMillis, nowMillis uint64, level uint8, view uint64, n
 		return false
 	}
 	return nowMillis-seenMillis >= wait
+}
+
+// ControlOf is the backoff's view of a committed root control state (evmroot.ControlState): idle, aborted at k, prepared at k with its
+// ordered round, or a handoff running past its Freeze (endorsed, committed, frozen), whose next attempt is undefined.
+func ControlOf(c *evmroot.ControlState) vrschema.ControlState {
+	if c == nil {
+		return vrschema.ControlState{Kind: vrschema.CtlFrozen}
+	}
+	switch c.Phase {
+	case "idle":
+		return vrschema.ControlState{Kind: vrschema.CtlIdle}
+	case "aborted":
+		return vrschema.ControlState{Kind: vrschema.CtlAborted, Attempt: c.Attempt}
+	case "prepared":
+		return vrschema.ControlState{Kind: vrschema.CtlPrepared, Attempt: c.Attempt, OrderedRound: c.OrderedRound}
+	}
+	return vrschema.ControlState{Kind: vrschema.CtlFrozen, Attempt: c.Attempt, OrderedRound: c.OrderedRound}
+}
+
+// PlannedAttempt is VR-mode planning aligned with the cooldown predicate (design section 5.5.2, "plannedAttempt alignment"): the
+// attempt identity, the intent's attemptOpenRound and control validation all read PlannableAttempt, so between a Prepare's lapse
+// (round > OrderedRound + 24) and the end of its cooldown (round > OrderedRound + 48) no next attempt exists. ok is false where it is
+// undefined; k = 2^64 - 1 is ErrHandoffApproval. The legacy (pre-VR) planner keeps its lapse rule, which stages the next plan during
+// the cooldown.
+func PlannedAttempt(c *evmroot.ControlState, round uint64) (uint64, bool, error) {
+	return vrschema.PlannableAttempt(ControlOf(c), round)
 }

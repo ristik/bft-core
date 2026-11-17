@@ -318,17 +318,14 @@ func (x *ConsensusManager) handoffPredecessor() ([]byte, error) {
 }
 
 // plannedAttempt is the attempt number the next handoff uses, given the control state at a block round: 0 on a fresh chain, the
-// next number after an abort or after a Prepare that is dead after its cooldown (round > OrderedRound + 48). Any other phase has a
-// handoff in progress. Planning is aligned with the cooldown predicate a fresh Prepare (PrepareMayFollowLapse) and a RejectResult already
-// require (VR design section 5.5.2, PlannableAttempt): between the lapse and the end of the cooldown no next attempt is plannable, so a
-// plan can never name an attempt that no Prepare may yet open.
+// next number after an abort or after a Prepare whose freeze lapsed. Any other phase has a handoff in progress.
 func plannedAttempt(control *evmroot.ControlState, round uint64) (uint64, error) {
 	switch {
 	case control == nil:
 		return 0, ErrHandoffApproval
 	case control.Phase == "idle":
 		return 0, nil
-	case control.Phase == "aborted" || storage.PrepareDeadAfterCooldown(control, round):
+	case control.Phase == "aborted" || storage.PrepareLapsed(control, round):
 		if control.Attempt == ^uint64(0) {
 			return 0, ErrHandoffApproval
 		}

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/vrschema"
 )
 
@@ -203,4 +204,33 @@ func TestResidenceRule(t *testing.T) {
 	require.True(t, ResidenceEligible(1000, 1000+20002, 1, 0, 4))
 	require.False(t, ResidenceEligible(5000, 4000, 1, 0, 4), "a clock before seen is never eligible")
 	require.False(t, ResidenceEligible(0, ^uint64(0), 9, 1<<40, 1), "a never timeout is never met")
+}
+
+// TestPlannedAttemptAlignment is the VT-05a row "plannedAttempt alignment": p+24 and p+25 (lapsed, cooling down) plan nothing, p+48
+// nothing, p+49 the next attempt, exactly where a fresh Prepare (PrepareMayFollowLapse) and a RejectResult become admissible.
+func TestPlannedAttemptAlignment(t *testing.T) {
+	const p = 100
+	prepared := &evmroot.ControlState{Phase: "prepared", Attempt: 3, OrderedRound: p}
+	for _, c := range []struct {
+		round uint64
+		ok    bool
+	}{{p + 24, false}, {p + 25, false}, {p + 48, false}, {p + 49, true}} {
+		k, ok, err := PlannedAttempt(prepared, c.round)
+		require.NoError(t, err)
+		require.Equal(t, c.ok, ok, "round p+%d", c.round-p)
+		if ok {
+			require.EqualValues(t, 4, k)
+		}
+	}
+	k, ok, err := PlannedAttempt(&evmroot.ControlState{Phase: "idle"}, 1)
+	require.True(t, ok && err == nil && k == 0)
+	k, ok, _ = PlannedAttempt(&evmroot.ControlState{Phase: "aborted", Attempt: 7}, 1)
+	require.True(t, ok && k == 8)
+	_, ok, err = PlannedAttempt(&evmroot.ControlState{Phase: "aborted", Attempt: ^uint64(0)}, 1)
+	require.False(t, ok)
+	require.ErrorIs(t, err, vrschema.ErrHandoffApproval, "attempt exhaustion is checked, never a wrap")
+	_, ok, _ = PlannedAttempt(&evmroot.ControlState{Phase: "committed", Attempt: 1}, 1)
+	require.False(t, ok, "a running handoff plans nothing")
+	_, ok, _ = PlannedAttempt(&evmroot.ControlState{Phase: "prepared", OrderedRound: ^uint64(0) - 10}, ^uint64(0))
+	require.False(t, ok, "the cooldown comparison never overflows")
 }
