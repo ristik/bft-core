@@ -14,7 +14,7 @@ func Test_Followup_BareQCRecoveryTargetsTheCertifiedBlock(t *testing.T) {
 	cm := f.cm
 	require.EqualValues(t, 4, f.qc4.GetRound())
 	require.EqualValues(t, 2, f.qc4.GetParentRound()) // round 3 timed out: the QC extends round 2
-	before := cm.blockStore.GetHighQc().GetRound()
+	before := cm.blockStore().GetHighQc().GetRound()
 
 	// the bare QC: the node holds no block for round 4, so the QC is not accepted and recovery is requested
 	err := cm.processQC(f.ctx, clone(t, f.qc4))
@@ -28,13 +28,13 @@ func Test_Followup_BareQCRecoveryTargetsTheCertifiedBlock(t *testing.T) {
 	short.Pending = short.Pending[:len(short.Pending)-1]
 	err = cm.onStateResponse(f.ctx, short)
 	require.ErrorContains(t, err, "not suitable for recovery")
-	require.EqualValues(t, before, cm.blockStore.GetHighQc().GetRound(), "nothing was installed")
+	require.EqualValues(t, before, cm.blockStore().GetHighQc().GetRound(), "nothing was installed")
 	require.True(t, cm.recovery.InRecovery(), "the node waits for a response which carries the certified block")
 
 	// the full response completes the recovery, the trigger QC included
 	require.NoError(t, cm.onStateResponse(f.ctx, f.state))
 	require.False(t, cm.recovery.InRecovery())
-	_, err = cm.blockStore.Block(4)
+	_, err = cm.blockStore().Block(4)
 	require.NoError(t, err)
-	require.GreaterOrEqual(t, cm.blockStore.GetHighQc().GetRound(), uint64(4))
+	require.GreaterOrEqual(t, cm.blockStore().GetHighQc().GetRound(), uint64(4))
 }

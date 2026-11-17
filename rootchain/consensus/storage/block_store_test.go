@@ -395,6 +395,56 @@ func Test_BlockStore_IsChangeInProgress(t *testing.T) {
 	}
 }
 
+// IsChangeInProgress may be asked while a QC commits: Commit merges the change sets of the committed path into the committing block's
+// set in place, and the walk reads those sets under the tree lock (#1191, run under -race).
+func Test_BlockStore_IsChangeInProgressDuringCommit(t *testing.T) {
+	shardConf := newShardConf(t)
+	partition, shard := shardConf.PartitionID, shardConf.ShardID
+	bs := initBlockStoreFromGenesis(t, shardConf)
+	ir := &types.InputRecord{Version: 1, RoundNumber: 3, Hash: []byte{3}, BlockHash: []byte{1}, SummaryValue: []byte{2}}
+	irVer := mockIRVerifier2(func(_, _ uint64, _ *rctypes.IRChangeReq) (*types.InputRecord, error) { return ir, nil })
+	change := &rctypes.Payload{Requests: []*rctypes.IRChangeReq{{Partition: partition, Shard: shard, CertReason: rctypes.T2Timeout}}}
+
+	// B1 (root)--> B2--> B3 (changes the shard)--> B4; the QC of B4 commits B3
+	rh2, err := bs.Add(&rctypes.BlockData{Round: 2, Payload: &rctypes.Payload{}, Qc: bs.GetHighQc()}, irVer)
+	require.NoError(t, err)
+	qc2 := qcFor(2, 1, rh2, 0)
+	_, err = bs.ProcessQc(qc2)
+	require.NoError(t, err)
+	rh3, err := bs.Add(&rctypes.BlockData{Round: 3, Payload: change, Qc: qc2}, irVer)
+	require.NoError(t, err)
+	qc3 := qcFor(3, 2, rh3, 0)
+	_, err = bs.ProcessQc(qc3)
+	require.NoError(t, err)
+	rh4, err := bs.Add(&rctypes.BlockData{Round: 4, Payload: &rctypes.Payload{}, Qc: qc3}, irVer)
+	require.NoError(t, err)
+	require.Equal(t, ir, bs.IsChangeInProgress(4, partition, shard))
+
+	started, stop, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		bs.IsChangeInProgress(4, partition, shard)
+		close(started)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				bs.IsChangeInProgress(4, partition, shard)
+			}
+		}
+	}()
+	<-started // the reader walks the branch while the QC commits
+	qc4 := qcFor(4, 3, rh4, 3)
+	qc4.LedgerCommitInfo.Hash = rh3
+	crs, err := bs.ProcessQc(qc4)
+	close(stop)
+	<-done
+	require.NoError(t, err)
+	require.Len(t, crs, 1)
+	require.Nil(t, bs.IsChangeInProgress(4, partition, shard), "committed")
+}
+
 func TestHandleQcError(t *testing.T) {
 	bStore := initBlockStoreFromGenesis(t, nil)
 	ucs, err := bStore.ProcessQc(nil)

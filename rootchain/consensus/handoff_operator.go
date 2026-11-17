@@ -149,7 +149,7 @@ func (x *ConsensusManager) abortTooLateAfterActivation(target abdrc.HandoffAbort
 		return abdrc.HandoffAbortStatus{}, none, false
 	}
 	status := abdrc.HandoffAbortStatus{Target: target, State: "too_late", RecordID: fmt.Sprintf("0x%x", v.Record.ID()), OrderedRound: v.OrderRound}
-	if state, err := x.blockStore.GetState(); err == nil && state != nil && state.CommittedHead != nil && state.CommittedHead.Block != nil {
+	if state, err := x.blockStore().GetState(); err == nil && state != nil && state.CommittedHead != nil && state.CommittedHead.Block != nil {
 		if blockID, err := state.CommittedHead.Block.Hash(crypto.SHA256); err == nil {
 			status.CommittedRootID = fmt.Sprintf("0x%x", blockID)
 			status.CommittedRootRound = state.CommittedHead.Block.GetRound()
@@ -163,7 +163,7 @@ func (x *ConsensusManager) handoffAbortStatusAtHead(target abdrc.HandoffAbortTar
 	if _, err := handoffAbortKeyFor(target); err != nil {
 		return status, evmroot.OrderedHandoffRecord{}, err
 	}
-	state, err := x.blockStore.GetState()
+	state, err := x.blockStore().GetState()
 	if err != nil || state == nil || state.CommittedHead == nil || state.CommittedHead.Control == nil || state.CommittedHead.Block == nil {
 		return status, evmroot.OrderedHandoffRecord{}, ErrHandoffAbortTarget
 	}
@@ -371,7 +371,7 @@ func (x *ConsensusManager) PlanHandoff(next *types.RootTrustBaseV1, proposal *ev
 }
 
 func (x *ConsensusManager) opPlanHandoff(next *types.RootTrustBaseV1, proposal *evmassign.Proposal) (abdrc.HandoffApprovalMsg, error) {
-	state, err := x.blockStore.GetState()
+	state, err := x.blockStore().GetState()
 	if err != nil {
 		return abdrc.HandoffApprovalMsg{}, ErrHandoffApproval
 	}
@@ -391,7 +391,7 @@ func (x *ConsensusManager) AcceptHandoffIntent(plan abdrc.HandoffApprovalMsg) er
 }
 
 func (x *ConsensusManager) opAcceptHandoffIntent(plan abdrc.HandoffApprovalMsg) error {
-	state, err := x.blockStore.GetState()
+	state, err := x.blockStore().GetState()
 	if err != nil {
 		return fmt.Errorf("%w: no committed state", ErrHandoffApproval)
 	}
@@ -965,7 +965,7 @@ func (x *ConsensusManager) EndorseHandoff(ctx context.Context, plan abdrc.Handof
 }
 
 func (x *ConsensusManager) opEndorseHandoff(ctx context.Context, plan abdrc.HandoffApprovalMsg) error {
-	state, err := x.blockStore.GetState()
+	state, err := x.blockStore().GetState()
 	if err != nil {
 		return ErrHandoffApproval
 	}
@@ -1117,7 +1117,7 @@ func (x *ConsensusManager) verifyEndorsedAssignmentInstalled(plan abdrc.HandoffA
 // boundPrepare is the frozen parent and activation round of the Prepare of the given attempt in this validator's committed state,
 // when that Prepare is committed here.
 func (x *ConsensusManager) boundPrepare(attempt uint64) ([]byte, uint64, bool) {
-	state, err := x.blockStore.GetState()
+	state, err := x.blockStore().GetState()
 	if err != nil || state == nil || state.CommittedHead == nil || state.CommittedHead.Control == nil {
 		return nil, 0, false
 	}
@@ -1226,7 +1226,7 @@ func (x *ConsensusManager) handoffRecordsForRound(round uint64, parentQC *rctype
 	if parentQC == nil {
 		return nil, nil
 	}
-	parent, err := x.blockStore.Block(parentQC.GetRound())
+	parent, err := x.blockStore().Block(parentQC.GetRound())
 	if err != nil || parent == nil || parent.ShardState.Control == nil {
 		return nil, nil
 	}
@@ -1353,7 +1353,7 @@ func (x *ConsensusManager) handoffRecordsForRound(round uint64, parentQC *rctype
 			return nil, ErrHandoffApproval
 		}
 		record.ActivationRound = activation
-		key, err := x.blockStore.CertifiedEVMShardAt(parent.GetRound(), control.FrozenParent)
+		key, err := x.blockStore().CertifiedEVMShardAt(parent.GetRound(), control.FrozenParent)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %w", ErrHandoffApproval, err)
 		}
@@ -1406,7 +1406,7 @@ func (x *ConsensusManager) frozenParentLoss(parent *storage.ExecutedBlock, plann
 		return "the endorsed frozen parent differs from the plan"
 	case !parentHasFrozenShard(parent, frozen):
 		return "the shard's certified IR in the parent block is no longer the frozen parent (a newer EVM block was certified)"
-	case !x.blockStore.CommittedFrozenParent(frozen):
+	case !x.blockStore().CommittedFrozenParent(frozen):
 		return "the frozen parent is not in the committed state"
 	}
 	return ""
@@ -1513,7 +1513,7 @@ func acknowledgedShardConfig(orchestration Orchestration, shard abdrc.ShardInfo)
 // EVMAssignmentContext reports the possession-proof context for the next handoff. A successor key holder signs
 // evmassign.PoPMessage for exactly this network, predecessor and attempt; a stale or different context is refused later.
 func (x *ConsensusManager) EVMAssignmentContext() (EVMAssignmentContext, error) {
-	state, err := x.blockStore.GetState()
+	state, err := x.blockStore().GetState()
 	if err != nil || state == nil || state.CommittedHead == nil || state.CommittedHead.Block == nil || state.CommittedHead.Control == nil {
 		return EVMAssignmentContext{}, ErrHandoffApproval
 	}

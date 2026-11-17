@@ -104,7 +104,7 @@ func (x *ConsensusManager) checkVerifiedEpoch(entry q3format.Entry, proof handof
 		return checkedQ3Epoch{}, err
 	}
 	if len(candidate) != 0 {
-		if err := x.blockStore.ValidateCommittedAssignment(head, v.Record, entry.BodyEncoding(), candidate,
+		if err := x.blockStore().ValidateCommittedAssignment(head, v.Record, entry.BodyEncoding(), candidate,
 			func(epoch uint64) (storage.VerifiedActivation, bool) {
 				if x.q3 == nil {
 					return nil, false
@@ -142,7 +142,7 @@ func (x *ConsensusManager) InstallVerifiedEpoch(entry q3format.Entry, proof hand
 	projected := entry.Projection()
 	projected.PreviousEntryHash = oldID
 	signing := votesig.Config{Scheme: cfg.SigningScheme, Network: cfg.Network, Genesis: cfg.Genesis, UTB: cfg.UTB()}
-	safetyStore, ok := x.blockStore.GetDB().(epochAnchorSafetyStore)
+	safetyStore, ok := x.blockStore().GetDB().(epochAnchorSafetyStore)
 	if !ok {
 		return nil, errors.New("durable epoch anchor safety store unavailable")
 	}
@@ -160,26 +160,26 @@ func (x *ConsensusManager) InstallVerifiedEpoch(entry q3format.Entry, proof hand
 	}
 	if len(candidate) != 0 { // retained before the anchor, which derives the activated configuration from the retained pair
 		bodyID := entry.BodyID()
-		if err := x.blockStore.RetainHandoffArtifacts(bodyID[:], entry.BodyEncoding(), candidate); err != nil {
+		if err := x.blockStore().RetainHandoffArtifacts(bodyID[:], entry.BodyEncoding(), candidate); err != nil {
 			return nil, fmt.Errorf("retain handoff candidate: %w", err)
 		}
 	}
-	a, err := x.blockStore.InstallEpochAnchor(head, v, g)
+	a, err := x.blockStore().InstallEpochAnchor(head, v, g)
 	if err != nil {
 		return nil, err
 	}
 	// the activated epoch is the old committee of any further handoff: its authority is the verified entry's, never a V2 body's
 	if x.q3 != nil {
 		bodyID := entry.BodyID()
-		if err := x.blockStore.ConfigureHandoffV3Authority(newTrust, bodyID[:], x.q3.FreezeRules()); err != nil {
+		if err := x.blockStore().ConfigureHandoffV3Authority(newTrust, bodyID[:], x.q3.FreezeRules()); err != nil {
 			return nil, fmt.Errorf("handoff authority of the activated epoch: %w", err)
 		}
 	}
-	reqVerifier, err := NewIRChangeReqVerifier(x.params, x.blockStore)
+	reqVerifier, err := NewIRChangeReqVerifier(x.params, x.blockStore())
 	if err != nil {
 		return nil, fmt.Errorf("successor request verifier: %w", err)
 	}
-	t2Timeouts, err := NewLucBasedT2TimeoutGenerator(x.params, x.blockStore)
+	t2Timeouts, err := NewLucBasedT2TimeoutGenerator(x.params, x.blockStore())
 	if err != nil {
 		return nil, fmt.Errorf("successor T2 timeout generator: %w", err)
 	}
@@ -188,7 +188,7 @@ func (x *ConsensusManager) InstallVerifiedEpoch(entry q3format.Entry, proof hand
 	selector, err := newEpochLeader(x.trustBaseStore, g.Epoch, g.Start, newTrust.RootNodes,
 		func() (Leader, error) { return newBootstrapLeader(x.leaderSelector, g.Start, newTrust.RootNodes) },
 		func() (Leader, error) {
-			return reputationLeader(x.params.NetworkProfileVersion, a, newTrust, x.trustBaseStore, func() leaderHeads { return x.blockStore })
+			return reputationLeader(x.params.NetworkProfileVersion, a, newTrust, x.trustBaseStore, func() leaderHeads { return x.blockStore() })
 		})
 	if err != nil {
 		return nil, err
@@ -223,7 +223,7 @@ func (x *ConsensusManager) HoldsVerifiedEpoch(entry q3format.Entry) error {
 	if !sameCommittee(have, entry.Projection()) {
 		return fmt.Errorf("%w: the stored trust base of epoch %d is not the verified one", ErrNotVerifiedEpoch, entry.Epoch())
 	}
-	safetyStore, ok := x.blockStore.GetDB().(epochAnchorSafetyStore)
+	safetyStore, ok := x.blockStore().GetDB().(epochAnchorSafetyStore)
 	if !ok {
 		return errors.New("durable epoch anchor safety store unavailable")
 	}

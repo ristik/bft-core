@@ -44,7 +44,7 @@ func TestRecoveryRefusedBeforeAnyWriteDoesNotLatchTheFrontierFault(t *testing.T)
 	// The control checkpoint names another network than the root's. Verification does not compare it (it holds the network only to be non-zero);
 	// NewRootBlock does, when the root builds the head, before the first write.
 	root := latchProbe(t, c)
-	before := root.blockStore.RootAnchor()
+	before := root.blockStore().RootAnchor()
 	bad := *state
 	head := *state.CommittedHead
 	control := *head.Control
@@ -55,7 +55,7 @@ func TestRecoveryRefusedBeforeAnyWriteDoesNotLatchTheFrontierFault(t *testing.T)
 	require.ErrorIs(t, err, storage.ErrNetworkProfile, "premise: the refusal is NewRootBlock's")
 	require.ErrorIs(t, err, storage.ErrRefusedBeforeWrite)
 	require.False(t, root.frontier.faulted.Load(), "a refusal before the first write does not latch")
-	require.Equal(t, before, root.blockStore.RootAnchor(), "and the root's anchor is unchanged")
+	require.Equal(t, before, root.blockStore().RootAnchor(), "and the root's anchor is unchanged")
 }
 
 // failPendingWrites is a store that writes the head of a recovery and fails the next block it is asked to write: the failure comes after the first
@@ -97,11 +97,11 @@ func TestRecoveryOfAStateTheStagingRefusesWritesAndLatchesNothing(t *testing.T) 
 	bad.Pending[0] = &first
 
 	root := latchProbe(t, c)
-	before := root.blockStore.RootAnchor()
+	before := root.blockStore().RootAnchor()
 	err := recoverTo(t, root, &bad)
 	require.Error(t, err)
 	require.False(t, root.frontier.faulted.Load(), "nothing was written: nothing to latch")
-	require.Equal(t, before, root.blockStore.RootAnchor())
+	require.Equal(t, before, root.blockStore().RootAnchor())
 }
 
 // A failure after the first write still latches: the store may hold part of the state.
@@ -112,10 +112,12 @@ func TestRecoveryFailingAfterTheFirstWriteStillLatchesTheFrontierFault(t *testin
 
 	root := latchProbe(t, c)
 	// the store of the running root, wrapped so that the pending blocks cannot be written
-	faulty := failPendingWrites{root.blockStore.GetDB()}
+	faulty := failPendingWrites{root.blockStore().GetDB()}
 	var err error
-	root.blockStore, err = storage.NewFromCheckpoint(crypto.SHA256, firstReplica(c.replicas).oldHead, faulty, root.orchestration, root.log, storage.ProfileHandoff)
+	var newStore *storage.BlockStore
+	newStore, err = storage.NewFromCheckpoint(crypto.SHA256, firstReplica(c.replicas).oldHead, faulty, root.orchestration, root.log, storage.ProfileHandoff)
 	require.NoError(t, err)
+	root.storeRef.Store(newStore)
 	err = recoverTo(t, root, state)
 	require.Error(t, err)
 	require.False(t, errors.Is(err, storage.ErrRefusedBeforeWrite), "premise: the failure is after the first write: %v", err)
@@ -132,12 +134,12 @@ func TestRecoveryRefusesAnEmptySealAsTheHeadsCommitQc(t *testing.T) {
 	require.True(t, commitsNothing(empty), "premise: the head block's own QC commits nothing")
 
 	root := latchProbe(t, c)
-	before := root.blockStore.RootAnchor()
+	before := root.blockStore().RootAnchor()
 	err := recoverTo(t, root, stateWithHeadCommitQc(state, empty))
 	require.ErrorIs(t, err, abdrc.ErrRecoveryEpoch)
 	require.False(t, root.frontier.faulted.Load(), "refused at verification, before recovery touches anything")
 	require.True(t, root.recovery.InRecovery(), "a refused state leaves the root in recovery")
-	require.Equal(t, before, root.blockStore.RootAnchor())
+	require.Equal(t, before, root.blockStore().RootAnchor())
 }
 
 // A recovery whose state ends at the genesis leaves the genesis QC as the high QC (parent round 0, round 1, current round 2): in #841 a root formed
@@ -149,7 +151,7 @@ func TestRecoveryToTheGenesisDoesNotLatchTheFrontierFault(t *testing.T) {
 	cms, _ := createConsensusManagers(t, 2, nil)
 	cm, peer := cms[0], cms[1]
 	cm.frontier = &frontierSampler{}
-	state, err := peer.blockStore.GetState()
+	state, err := peer.blockStore().GetState()
 	require.NoError(t, err)
 	require.Empty(t, state.Pending, "premise: the peer is at its genesis")
 	genesisQC := state.CommittedHead.Qc
@@ -160,7 +162,7 @@ func TestRecoveryToTheGenesisDoesNotLatchTheFrontierFault(t *testing.T) {
 
 	require.NoError(t, cm.onStateResponse(context.Background(), state))
 	require.False(t, cm.recovery.InRecovery())
-	require.Equal(t, genesisQC.GetRound(), cm.blockStore.GetHighQc().GetRound(), "premise: the genesis QC is the high QC")
+	require.Equal(t, genesisQC.GetRound(), cm.blockStore().GetHighQc().GetRound(), "premise: the genesis QC is the high QC")
 	require.EqualValues(t, rctypes.GenesisRootRound+1, cm.pacemaker.GetCurrentRound())
 	require.False(t, cm.frontier.faulted.Load(), "a recovery to the genesis does not latch the frontier fault")
 }

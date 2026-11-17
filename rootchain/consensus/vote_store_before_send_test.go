@@ -88,7 +88,7 @@ func TestAVoteThatCannotBeStoredIsNotSent_Scheme2(t *testing.T) {
 	sent := r.net.SentMessages(network.ProtocolRootTimeout)
 	require.Len(t, sent, len(c.replicas), "stored, then sent: one copy to each root of the committee")
 	require.Equal(t, before+1, writes.Load())
-	stored, err := r.manager.blockStore.ReadLastVote()
+	stored, err := r.manager.blockStore().ReadLastVote()
 	require.NoError(t, err)
 	require.Equal(t, timeoutMessageID(sent[0].Message.(*abdrc.TimeoutMsg)), timeoutMessageID(stored.(*abdrc.TimeoutMsg)), "what was sent is what is stored")
 }
@@ -101,7 +101,7 @@ func TestAVoteThatCannotBeStoredIsNotSent_Legacy(t *testing.T) {
 		cm, _, _ := initConsensusManagerOver(t, mockNet, func(db storage.BoltDB) PersistentStore {
 			return voteFailStore{BoltDB: db, fail: fail, writes: writes}
 		})
-		cm.pacemaker.Reset(context.Background(), cm.blockStore.GetHighQc().GetRound(), nil, nil)
+		cm.pacemaker.Reset(context.Background(), cm.blockStore().GetHighQc().GetRound(), nil, nil)
 		t.Cleanup(cm.pacemaker.Stop)
 		return cm, mockNet, fail, writes
 	}
@@ -131,7 +131,7 @@ func TestAVoteThatCannotBeStoredIsNotSent_Legacy(t *testing.T) {
 		require.ErrorIs(t, cm.onProposalMsg(ctx, proposal), errVoteStore)
 		require.Zero(t, sentVotes(mockNet))
 		require.Nil(t, cm.pacemaker.GetVoted())
-		stored, err := cm.blockStore.ReadLastVote()
+		stored, err := cm.blockStore().ReadLastVote()
 		require.NoError(t, err)
 		require.Nil(t, stored)
 	})
@@ -150,7 +150,7 @@ func TestAVoteThatCannotBeStoredIsNotSent_Legacy(t *testing.T) {
 		sent := mockNet.SentMessages(network.ProtocolRootTimeout)
 		require.Len(t, sent, 1)
 		require.EqualValues(t, 1, writes.Load())
-		stored, err := cm.blockStore.ReadLastVote()
+		stored, err := cm.blockStore().ReadLastVote()
 		require.NoError(t, err)
 		require.Equal(t, timeoutMessageID(sent[0].Message.(*abdrc.TimeoutMsg)), timeoutMessageID(stored.(*abdrc.TimeoutMsg)))
 		// the remembered vote is resent without another store, as before

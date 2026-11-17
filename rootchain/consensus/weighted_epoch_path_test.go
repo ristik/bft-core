@@ -283,8 +283,10 @@ func newSecondHandoff(t *testing.T, source *anchorReplica, signers map[string]ab
 	require.NoError(t, err)
 	t.Cleanup(func() { require.NoError(t, db.Close()) })
 	require.NoError(t, db.StoreHandoffBody(bodyID[:], body.Encode()))
-	root.blockStore, err = storage.NewFromCheckpoint(crypto.SHA256, head, db, source.manager.orchestration, obs.Logger(), storage.ProfileHandoff)
+	var newStore *storage.BlockStore
+	newStore, err = storage.NewFromCheckpoint(crypto.SHA256, head, db, source.manager.orchestration, obs.Logger(), storage.ProfileHandoff)
 	require.NoError(t, err)
+	root.storeRef.Store(newStore)
 	return secondHandoff{root: root, proof: proof, head: head, body: body, signers: signers}
 }
 
