@@ -706,13 +706,20 @@ class NB2Rehearsal(Rehearsal):
             self.expect('the preflight passes' in t and 'nothing is burned' in t, 'plan-return: the capacity preflight passes and burns nothing')
             t = w('burn', 'back')
             self.expect('burned back' in t, 'burn: the preflight again on fresh state, then the burn')
-            t = w('redeem', 'back')
-            self.expect('paid 0.04 UCT' in t, 'redeem: the witness built from the chain, sent and paid')
-            t = w('redeem', 'back')
-            self.expect('paid 0.04 UCT' in t, 'redeem again: the paid return answers paid without a send')
+            first = w('redeem', 'back')
+            self.expect('paid 0.04 UCT' in first and '; 1 redeem transaction sent' in first, 'redeem: the witness built from the chain, sent once and paid')
+            lag = 'answers QuorumNotMet' in first
+            self.say(f'  the seal registry lag (#1125): {"waited out" if lag else "not seen"}')
+            again = w('redeem', 'back')
+            tx = lambda text: next((x.split('(tx ')[1].split(')')[0] for x in text.splitlines() if x.startswith('paid ')), None)   # noqa: E731
+            self.expect('paid 0.04 UCT' in again and '; 1 redeem transaction sent' in again and tx(again) == tx(first) is not None,
+                        'redeem again: the paid return answers paid with the same transaction, and nothing more was sent')
             t = w('status')
             self.expect('back: return' in t and ': paid' in t, 'status: the return is paid', t)
-            w('tokens')
+            t = w('tokens')
+            self.expect(t.splitlines() == ['keep: 0.06 UCT'], 'tokens: only the unspent part is held (the split parent and the burned part are spent)', t)
+            (self.evidence / 'nb2').mkdir(parents=True, exist_ok=True)
+            (self.evidence / 'nb2/walkthrough-lag.json').write_text(json.dumps({'registryLagSeen': lag}) + '\n')
         finally:
             (self.evidence / 'nb2').mkdir(parents=True, exist_ok=True)
             (self.evidence / 'nb2/walkthrough.txt').write_text('\n'.join(self.transcript))

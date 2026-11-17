@@ -549,7 +549,8 @@ async function redeem(w: Wallet, label: string, mode?: string): Promise<void> {
     log(`  ${label}: redeem with gas ${low} -> status ${sent.receipt.status} (gas used ${sent.receipt.gasUsed}); vault unchanged: ${(res.lowGas as Record<string, unknown>).unchanged}`);
   }
   const t0 = Date.now();
-  const r = await walletRedeem(w, label);
+  // the wallet waits out the verifier's QuorumNotMet right after a burn (the seal registry's import lag, #1125); the wait is recorded
+  const r = await walletRedeem(w, label, 60, 3_000, (why) => log(`  ${label}: ${why}; waiting`), (ms) => { res.registryLagSeconds = ms / 1000; });
   res.result = r.state;
   if (r.state === 'paid') {
     const receipt = await waitReceipt(r.txHash);
