@@ -241,7 +241,7 @@ func (m *VRModel) release(r Word, o *ModelOutput, resolution uint8, bitmap uint1
 		case resolution == ResClosed:
 			c.State, c.BoundTo = ChScheduled, Word{}
 		case bitmap&(1<<uint(i)) != 0:
-			c.State, c.RejectReason = ChRejected, VerdictConflict // the committed verdict; the reason byte is the verdict code
+			c.State, c.RejectReason = ChRejected, VerdictConflict // the Boundary carries only the bitmap: Conflict is the generic root-rejection marker (schema 3.3)
 		default:
 			c.State = ChActive
 		}
