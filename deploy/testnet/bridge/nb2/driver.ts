@@ -721,7 +721,9 @@ async function rotate(w: Wallet, n: number, mode: string | undefined): Promise<v
 // ---- the capacity boundary ----------------------------------------------------------------------------------------------------------------
 
 /** The wallet's section 12.5 pre-burn preflight of `token`, replayed outside the plug-in (the same functions and inputs as planReturn). */
-async function predict(w: Wallet, token: Uint8Array): Promise<{ ok: boolean; gas: bigint | null; need: bigint; bytes: number; detail: string; over?: 'bytes' | 'gas' }> {
+async function predict(w: Wallet, token: Uint8Array): Promise<{
+  ok: boolean; gas: bigint | null; need: bigint; bytes: number; detail: string; over?: 'bytes' | 'gas' | 'unbounded'; pMax: bigint; baseFits: boolean;
+}> {
   const { capacityPreflight, burnIndex, lineageOf } = await import('../../../packages/native-bridge-plugin/src/nb2/index.js');
   const sr = await w.bridge.newestSealReceipt();
   const { a } = burnIndex(cfg, w.bridge.domain, sr?.receipt ?? null);
@@ -731,17 +733,18 @@ async function predict(w: Wallet, token: Uint8Array): Promise<{ ok: boolean; gas
   const lT = BigInt(evidenceOf(token).length + burnPairBound(R.length));
   const lO = BigInt(otherBytes(Number(lT)));
   const lineage = lineageOf(decodeToken(token));
-  let gas: bigint | null = null;
-  const gasAt = (p: bigint): bigint | null => (gas = w.bridge.gas.redeemGasLimit({ evidenceBytes: Number(lT), lineage, pendingTransactions: 1, proofs: p, K: cfg.K }));
+  const need = cObs - a + pins.returnReserveSegments;
+  // the byte check on its own (section 12.5's L_max with the reserve): which limit refuses is read from it, never inferred from a null gas
+  const mp = maxProofs(pins.maxEncodedTxBytes, lT, lO, cfg.K);
+  const bytesFit = mp.baseFits && need <= mp.pMax;
+  const gas = w.bridge.gas.redeemGasLimit({ evidenceBytes: Number(lT), lineage, pendingTransactions: 1, proofs: need, K: cfg.K });
+  const base = { gas, need, bytes: Number(lT), pMax: mp.pMax, baseFits: mp.baseFits };
   try {
-    const r = capacityPreflight({ lMax: pins.maxEncodedTxBytes, lT, lO, K: cfg.K, a, cObs, reserve: pins.returnReserveSegments, gasAt, userGasLimit: pins.userGasLimit });
-    return { ok: true, gas: r.gas, need: r.need, bytes: Number(lT), detail: 'fits' };
+    const r = capacityPreflight({ lMax: pins.maxEncodedTxBytes, lT, lO, K: cfg.K, a, cObs, reserve: pins.returnReserveSegments, gasAt: () => gas, userGasLimit: pins.userGasLimit });
+    return { ...base, ok: true, gas: r.gas, detail: 'fits' };
   } catch (e) {
-    // a refusal by bytes never reaches the gas: the bound is recorded anyway, and which limit refused
-    const need = cObs - a + pins.returnReserveSegments;
-    const over = gas === null ? 'bytes' : 'gas';
-    if (gas === null) gasAt(need);
-    return { ok: false, gas, need, bytes: Number(lT), detail: String((e as Error).message), over };
+    const over = !bytesFit ? 'bytes' : gas === null ? 'unbounded' : 'gas';
+    return { ...base, ok: false, detail: String((e as Error).message), over };
   }
 }
 
@@ -797,7 +800,7 @@ async function boundary(w: Wallet, label: string, estimate: number): Promise<voi
     if (real !== 'passes' && real !== 'CapacityPreflight') throw new Error(`the boundary probe ${l} was refused for another reason: ${real}`);
     const sh = await shapeOf(w, t, p.bytes, p.need);
     const probe: Probe = { label: l, transfers, conditions: `${certificateSet(t)}, need ${p.need}`, gas: p.gas, up: sh.up, down: sh.down, real: real as Verdict,
-      detail: { ...sh.detail, ...(p.over ? { over: p.over } : {}) } };
+      detail: { ...sh.detail, ...(p.over ? { over: p.over } : {}), need: p.need.toString(), pMax: p.pMax.toString(), baseFits: String(p.baseFits) } };
     log(`  ${l}: ${transfers} transfers, ${evidenceOf(t).length} evidence bytes, ${probe.conditions}, `
       + `preflight gas ${p.gas} (one transfer more +${sh.up}, one fewer -${sh.down}): planReturn ${real}`);
     return probe;

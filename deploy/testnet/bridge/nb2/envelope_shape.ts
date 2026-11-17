@@ -9,11 +9,12 @@
  *                      one hash byte varied: same size and shape, a distinct claim)
  *
  * Nothing here is a valid token: the bound does not verify, it counts (proofs, bytes, items, siblings, claims, keys, memory), and these parts
- * have the template's counts in every place. Pure, so the unit tests run without a chain (envelope_shape.test.ts).
+ * have the template's counts in every place, each step with its own state ID and the template's few owner keys. Pure, so the unit tests run without a chain (envelope_shape.test.ts).
  */
 import { encodeMint, encodeToken, type InclusionProof, type Token } from '../../../packages/native-bridge-plugin/src/nb2/token.js';
 import { encodeSplitJustification } from '../../../packages/native-bridge-plugin/src/nb2/split.js';
 import { decodeEvidence } from '../../../packages/native-bridge-plugin/src/nb2/verify.js';
+import { varied } from './boundary_shape.js';
 
 export interface Template {
   root: Token; // the template's root with no transfer
@@ -49,7 +50,11 @@ function certificate(tp: Template, g: number): Uint8Array {
 /** H transfers on TOKEN, in G consecutive certificate groups. */
 function chained(tp: Template, token: Token, h: number, groups: number): Token {
   const ucs = Array.from({ length: Math.max(1, groups) }, (_, g) => certificate(tp, g));
-  const proofs = Array.from({ length: h }, (_, i) => ({ ...tp.pair.proof, uc: ucs[Math.floor((i * ucs.length) / Math.max(1, h))] }));
+  // each step from its own state (a distinct state ID, as a real chain of transfers has); the owners' keys stay the template's (the lane's few)
+  const at = token.transfers.length;
+  const proofs = Array.from({ length: h }, (_, i) => ({
+    ...tp.pair.proof, cd: { ...tp.pair.proof.cd, sourceHash: varied(tp.pair.proof.cd.sourceHash, at + i + 1) }, uc: ucs[Math.floor((i * ucs.length) / Math.max(1, h))],
+  }));
   return { ...token, transfers: [...token.transfers, ...Array(h).fill(tp.pair.tx)], proofs: [...token.proofs, ...proofs], transfersRaw: [...token.transfersRaw, ...Array(h).fill(tp.pair.raw)] };
 }
 
