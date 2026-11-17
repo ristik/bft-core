@@ -462,7 +462,8 @@ func (x *BlockStore) authenticateSupersessionChain(chain evmassign.Chain, key ba
 			return ErrAssignmentHistory
 		}
 		id := entry.BodyID()
-		preimage, err := x.HandoffCandidate(id[:])
+		// the activation checks the digest the body binds (a VR step's candidate v6); the chain index and its links read the v5 view
+		preimage, err := retainedCommittedPreimage(x.storage, id[:])
 		if err != nil {
 			return errors.Join(ErrAssignmentHistory, err)
 		}
@@ -470,11 +471,15 @@ func (x *BlockStore) authenticateSupersessionChain(chain evmassign.Chain, key ba
 		if err != nil {
 			return err
 		}
-		c, err := evmassign.DecodeCandidate(preimage)
+		cc, err := resolveCommittedCandidate(preimage)
 		if err != nil {
 			return err
 		}
-		digest := sha256.Sum256(preimage)
+		c, err := evmassign.DecodeCandidate(cc.view)
+		if err != nil {
+			return err
+		}
+		digest := sha256.Sum256(cc.view)
 		if act.pdr.PartitionID != key.PartitionID || act.pdr.ShardID.Key() != key.ShardID ||
 			act.pdr.Epoch != step.ShardEpoch || !bytes.Equal(act.confHash, step.ConfHash) ||
 			!bytes.Equal(digest[:], step.CandidateDigest) || c.OldShardEpoch != chain.BaseShardEpoch+uint64(i) ||

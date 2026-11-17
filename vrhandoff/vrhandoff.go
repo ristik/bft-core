@@ -338,7 +338,9 @@ func verifyOnePoP(ctx evmassign.PoPContext, succ *types.PartitionDescriptionReco
 }
 
 // AssemblerOrder lists the incumbents ascending by SHA-256(intentDigest || nodeID); the assembler of view v is order[v mod n].
-func AssemblerOrder(intent [32]byte, incumbents []string) []string { return vrschema.AssemblerOrder(intent, incumbents) }
+func AssemblerOrder(intent [32]byte, incumbents []string) []string {
+	return vrschema.AssemblerOrder(intent, incumbents)
+}
 
 // Assembler is the assembler of view v.
 func Assembler(intent [32]byte, incumbents []string, view uint64) string {

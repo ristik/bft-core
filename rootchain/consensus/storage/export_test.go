@@ -143,3 +143,8 @@ func DeriveActivatedConfigsForTest(record evmroot.OrderedHandoffRecord, rawBody,
 	confs, _, _, err := deriveActivatedConfigs(record, body, preimage, nil, installed)
 	return confs, err
 }
+
+// RetainVRFreezeForTest retains what an executed Freeze v5 block leaves, exactly as the block store does when it adds the block.
+func RetainVRFreezeForTest(x *BlockStore, executed *ExecutedBlock) error {
+	return x.retainVRFreeze(executed.BlockData, executed.vrFrozen)
+}
