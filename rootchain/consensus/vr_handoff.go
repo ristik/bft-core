@@ -447,7 +447,7 @@ func (x *ConsensusManager) vrRecordsForRound(round uint64, parent *storage.Execu
 		return x.vrFreezeOrCommit(round, parent, control)
 	}
 	h, ok := x.vr.svc.Plan()
-	if !ok || h.Epoch != control.Epoch || !bytes.Equal(h.Predecessor, control.PredecessorBodyID) {
+	if !ok || h.Epoch != control.Epoch {
 		return nil, nil
 	}
 	lapsed := storage.PrepareLapsed(control, round)
