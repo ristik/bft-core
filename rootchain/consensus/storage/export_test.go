@@ -139,11 +139,6 @@ func RetainVRFreezeForTest(s *BlockStore, block *rctypes.BlockData, executed *Ex
 	return s.retainVRFreeze(block, executed.vrFrozen)
 }
 
-// RetainVRFreezeForTest retains what an executed Freeze v5 block leaves, exactly as the block store does when it adds the block.
-func RetainVRFreezeForTest(x *BlockStore, executed *ExecutedBlock) error {
-	return x.retainVRFreeze(executed.BlockData, executed.vrFrozen)
-}
-
 // VRQueryForTest is the intent query the executor derives over a block as the parent of the next one: its control state, backoff, epoch,
 // certified EVM state and root facts (with the authority's successor link).
 func VRQueryForTest(b *ExecutedBlock, orch Orchestration, svc *PosServices, a *TestVRAuthority) (VRIntentQuery, error) {
