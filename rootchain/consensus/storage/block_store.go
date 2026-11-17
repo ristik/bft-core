@@ -992,9 +992,33 @@ func (x *BlockStore) ReadLastVote() (any, error) {
 }
 
 func NewGenesisBlock(networkID types.NetworkID, hashAlgo crypto.Hash, networkProfile ...uint64) (*ExecutedBlock, error) {
+	return newGenesisBlock(networkID, hashAlgo, nil, networkProfile...)
+}
+
+// NewGenesisBlockOf is the genesis block of the deployment the orchestration describes: a handoff-profile genesis whose coupled EVM shard
+// configuration pins the ValidatorRegistry starts in VR mode (its control state carries the genesis VR root state, GenesisVR); any other
+// genesis is NewGenesisBlock's. Every root derives the same block from the same genesis configurations.
+func NewGenesisBlockOf(orchestration Orchestration, hashAlgo crypto.Hash, networkProfile ...uint64) (*ExecutedBlock, error) {
 	profile, err := profileVersion(networkProfile)
 	if err != nil {
 		return nil, err
+	}
+	var vr []byte
+	if profile == ProfileHandoff {
+		if vr, err = GenesisVR(orchestration); err != nil {
+			return nil, err
+		}
+	}
+	return newGenesisBlock(orchestration.NetworkID(), hashAlgo, vr, networkProfile...)
+}
+
+func newGenesisBlock(networkID types.NetworkID, hashAlgo crypto.Hash, vr []byte, networkProfile ...uint64) (*ExecutedBlock, error) {
+	profile, err := profileVersion(networkProfile)
+	if err != nil {
+		return nil, err
+	}
+	if vr != nil && profile != ProfileHandoff {
+		return nil, fmt.Errorf("%w: a validator-registry genesis needs the handoff profile", ErrNetworkProfile)
 	}
 	genesisBlock := &rctypes.BlockData{
 		Version:   1,
@@ -1024,6 +1048,7 @@ func NewGenesisBlock(networkID types.NetworkID, hashAlgo crypto.Hash, networkPro
 	if profile == ProfileHandoff {
 		state = ShardStates{States: map[types.PartitionShardID]*ShardInfo{}, Changed: ShardSet{}}
 		state.Control = initialControl(networkID)
+		state.Control.VR = vr
 		ut, _, err := state.UnicityTree(hashAlgo)
 		if err != nil {
 			return nil, err
