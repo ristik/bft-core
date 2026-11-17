@@ -4,7 +4,7 @@
 The genesis committee is fixed at generation (the genesis names its identities, trust base and shard configuration). A joiner is an entity that is not in
 it: its keys, directories and Compose services exist beside the generation and are started only when the stage that joins it runs. This file makes them:
 
-  prepare   the entity's root and execution (shard node) keys, its signing authority's operator credential, its private directories (ureth, archive, jwt)
+  prepare   the entity's root and execution (shard node) keys, its signing authority's operator credential, its private directories (ureth, ureth-key, archive, jwt)
             and compose.joiner.json, an override with the entity's six services (pod, metrics relay, root, authority, ureth, shard node). The services are the
             LAST genesis entity's, renamed, with the joiner's own node ids and every genesis root and shard node as bootnodes; they are exactly what
             generate.topology would write for that entity in a generation of one more validator (the test compares them).
@@ -22,6 +22,8 @@ import re
 import secrets
 import subprocess
 from pathlib import Path
+
+import ureth_key
 
 PARTS = ('pod', 'metrics', 'root', 'authority', 'ureth', 'shard')
 SERVICE = re.compile(r'(?<![\w-])(pod|metrics|root|authority|ureth|shard)(\d+)(?![\w])')
@@ -117,6 +119,7 @@ def _prepare(generation, ubft, index):
     for kind in ('ureth', 'archive', 'jwt'):
         (val / kind).mkdir()
     (val / 'jwt' / 'jwt.hex').write_text(secrets.token_hex(32) + '\n')
+    ureth_key.create(val / ureth_key.DIR)   # the execution client's devp2p node key, made once (bft-core#1148)
     node = {kind: subprocess.run([str(ubft), 'node-id', '--home', str(val / kind)], check=True, capture_output=True, text=True).stdout.strip().splitlines()[-1]
             for kind in ('root', 'evm')}
     services = joiner_services(compose, index, node['root'], node['evm'])

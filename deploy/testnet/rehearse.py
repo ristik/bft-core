@@ -14,6 +14,7 @@ import datetime
 import hashlib
 import http.client
 import json
+import math
 import os
 import re
 import shutil
@@ -60,7 +61,7 @@ CAPTURE_MAX_LINES = 6000          # per service and window; the rest is counted,
 SECRET_LINE = re.compile(r'(?i)(secret|priv(ate)?[ _-]?key|mnemonic|passphrase|password|credential|\.cred\b|keystore|authorization|bearer|api[ _-]?key|\btoken\b|\bseed\b|ciphertext)')
 WITHHELD_LINE = '[line withheld: it matches a secret pattern]'
 SECRET_FILE = re.compile(r'(?i)(^password$|identity\.json$|secret|\.cred(\.|$)|\.key$|^keys?\.json$|^keystore\.json$|^priv|^jwt)')
-SECRET_DIRS = ('faucet-secrets', 'pos-owner-keys', 'auth', 'jwt')   # every file in these is a secret (auth and jwt are what the root and shard services mount besides their own state)
+SECRET_DIRS = ('faucet-secrets', 'pos-owner-keys', 'auth', 'jwt', 'ureth-key')   # every file in these is a secret (auth and jwt are what the root and shard services mount besides their own state; ureth-key, ureth's node key)
 
 
 class SecretScanError(Exception):
@@ -207,6 +208,10 @@ class Rehearsal:
         self.manifest = json.loads((self.gen / 'manifest.json').read_text())
         self.n = self.manifest['validators']
         self.chain_id, self.genesis = self.manifest['chain_id'], self.manifest['genesis_hash'].lower()
+
+    def block_interval_s(self):
+        """The generation's EVM block interval in seconds (generate.py --block-interval-ms, bft-core#1167); 0 for a fast package or one from before it."""
+        return ((self.manifest.get('evm_block') or {}).get('interval_ms') or 0) / 1000
 
     # --- recording -------------------------------------------------------------------------------------------------------------
     def scrub(self, text, patterns=False):
@@ -1646,11 +1651,11 @@ class Rehearsal:
         self.expect(not again, 'with the current credential the shard node is not fenced', f'{len(again)} fenced lines')
 
     def observe(self):
-        """The observation sampler (observe.py) as a smoke: four samples five seconds apart on the running generation. It must exit 0 (no alert), write four samples
+        """The observation sampler (observe.py) as a smoke: four samples five seconds apart (two block intervals on a paced package) on the running generation. It must exit 0 (no alert), write four samples
         with a certified head from every root, and see the certified round move between the first and the last sample. The faucet guard is not sampled: its /healthz
         needs the signer, which a rehearsal does not start. The 24-hour interval is the host's."""
         out = self.evidence / 'observe'
-        run = subprocess.run([sys.executable, str(Path(__file__).resolve().parent / 'observe.py'), str(self.gen), '--out', str(out), '--samples', '4', '--interval', '5', '--no-faucet'],
+        run = subprocess.run([sys.executable, str(Path(__file__).resolve().parent / 'observe.py'), str(self.gen), '--out', str(out), '--samples', '4', '--interval', str(max(5, math.ceil(2 * self.block_interval_s()))), '--no-faucet'],
                              text=True, capture_output=True)
         self.say(f'  observe.py: exit {run.returncode}: {(run.stdout + run.stderr).strip()[-400:]}')
         self.expect(run.returncode == 0, 'the sampler raised no alert on the healthy package', (run.stdout + run.stderr).strip()[-400:])
@@ -1871,7 +1876,9 @@ class Rehearsal:
         a = self.reset_args
         out = subprocess.run([sys.executable, str(Path(__file__).with_name('reset.py')), '--old', str(old), '--lose-all-assets', '--', '--out', str(new),
                               '--validators', str(self.n), '--chain-id', str(self.chain_id), '--ubft', a['ubft'], '--b1genesis', a['b1genesis'], '--keygen', a['keygen'],
-                              '--captcha-sitekey', a['captcha_sitekey'], '--captcha-secret-file', a['captcha_secret_file']], check=True, text=True, capture_output=True).stdout
+                              '--captcha-sitekey', a['captcha_sitekey'], '--captcha-secret-file', a['captcha_secret_file'],
+                              # the new network keeps the old one's block interval (bft-core#1167): a generation from before it has none, the cadence it ran at
+                              '--block-interval-ms', str(round(self.block_interval_s() * 1000))], check=True, text=True, capture_output=True).stdout
         self.say('  ' + out.strip().splitlines()[-1])
         self.expect(not old.exists(), 'the old generation directory is gone')
         retired = old.with_suffix('.retired-manifest.json')

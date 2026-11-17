@@ -69,6 +69,10 @@ type Round struct {
 	// see AwaitTimeoutForT2.
 	awaitTimeout time.Duration
 
+	// pacer is the best-effort block interval (pacing.go, bft-core#1167): it only delays this node's
+	// build or extends its wait, and is never part of what a block must satisfy. Guarded by mu.
+	pacer blockPacer
+
 	mu      sync.Mutex
 	pending *pendingSubmission // what we last submitted, awaiting certification
 
@@ -1765,7 +1769,14 @@ func (r *Round) produceBlock(ctx context.Context, head BlockRef, exp Expectation
 		// (ErrHandoffFrozen, rootchain/consensus/storage/block_executor.go) and the successor builds on the agreed certified
 		// parent. Safety is the root freeze, not the builder. This is the project's simple-design choice and is
 		// owner-overridable (docs/design/h3-evm-assignment.md treats builder cancellation as optional responsiveness work).
+		if err := r.paceLeader(ctx, held, exp.Round); err != nil {
+			return Block{}, params, err
+		}
+		if r.leaseLost() {
+			return Block{}, params, ErrFollower
+		}
 		buildStart := time.Now()
+		r.pacer.mark(buildStart)
 		id, err := r.buildFinal(ctx, params, held, ticket)
 		if err != nil {
 			return Block{}, params, fmt.Errorf("build: %w", err)
@@ -1814,6 +1825,10 @@ func (r *Round) produceBlock(ctx context.Context, head BlockRef, exp Expectation
 	budget := r.awaitTimeout
 	if r.awaitGaveUp.answers(held, exp) && budget > redeliveryPoll {
 		budget = redeliveryPoll // the same authorization again: the block may have arrived since, but there is nothing new to wait for
+	} else {
+		// A paced leader builds up to the block interval after its previous block, so the wait is extended by what remains of it
+		// here (pacing.go). The budget for a leader that is silent is unchanged on top of that.
+		budget += r.pacer.remaining(time.Now())
 	}
 	awaitCtx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
@@ -1843,9 +1858,13 @@ func (r *Round) produceBlock(ctx context.Context, head BlockRef, exp Expectation
 		lateBlock, lateErr := r.disseminator.Await(pollCtx, exp.Round) // a block that landed in the same instant is still taken
 		pollCancel()
 		if lateErr == nil {
+			r.pacer.mark(time.Now())
 			return lateBlock, params, nil
 		}
 		err = errAwaitSuperseded
+	}
+	if err == nil {
+		r.pacer.mark(time.Now())
 	}
 	if err != nil {
 		if r.awaitGaveUp == nil || !r.awaitGaveUp.answers(held, exp) {

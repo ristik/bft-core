@@ -9,6 +9,13 @@ on:
     # opt in). Tooling with unit tests (handoff_drive, remote_joiner, ...) is covered by testnet-package. Removing the label does not stop a run in progress:
     # cancel it by hand. Adding an unrelated label neither starts nor cancels a run (a run that does not rehearse takes a concurrency group of its own).
     types: [opened, labeled, synchronize, reopened]
+  push:
+    # integration/enshrined-evm: a change of what the images are built from runs the image build alone (no profile), so that pull requests into it
+    # restore that build (scripts/ci/rehearsal-bundle.py key names the same inputs)
+    branches: [integration/enshrined-evm]
+    paths: ['deploy/testnet/pins.json', 'deploy/testnet/build-images.py', 'deploy/testnet/imagetag.py', 'deploy/testnet/Dockerfile.*', 'deploy/testnet/faucet/**',
+            'deploy/testnet/gateway.py', 'deploy/testnet/metrics_relay.py', 'deploy/testnet/.dockerignore', 'deploy/testnet/*.dockerignore',
+            'scripts/ci/rehearsal-bundle.py', '.github/workflows/testnet-rehearsal.yml', 'go.mod']
   workflow_dispatch:
     inputs:
       stages:
@@ -66,35 +73,70 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: The cache key of this build (pins.json, the Dockerfiles and their inputs, the build scripts, the toolchains, the runner image)
+        id: key
+        run: python3 scripts/ci/rehearsal-bundle.py key | tee -a "$GITHUB_OUTPUT"
+      # Pull requests restore the bundle a run built from exactly these inputs (exact key, no restore-keys); a PR's own cache writes stay in its own
+      # scope. Trusted events (push, dispatch) never restore: they build with build-images.py and save.
+      - name: Restore the build of these pins (pull requests only)
+        id: cache
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/rehearsal-build-cache
+          key: ${{ steps.key.outputs.key }}
+      - name: Load the restored build (verified against pins.json and images.json; refused on any mismatch, never rebuilt over)
+        if: ${{ steps.cache.outputs.cache-hit == 'true' }}
+        run: |
+          python3 scripts/ci/rehearsal-bundle.py unpack "$RUNNER_TEMP/rehearsal-build-cache/bundle.tar.zst" \
+            ubft=pinned-bft/build/ubft keygen=/tmp/tn-keygen b1genesis=/tmp/tn-b1genesis h4pin=/tmp/tn-h4pin
+          echo "- images and pinned tools restored from cache \`${{ steps.key.outputs.key }}\`" >>"$GITHUB_STEP_SUMMARY"
       - uses: actions/checkout@v4
+        if: ${{ steps.cache.outputs.cache-hit != 'true' }}
         with:
           ref: ${{ steps.pins.outputs.bft }}
           path: pinned-bft
       - uses: actions/checkout@v4
+        if: ${{ steps.cache.outputs.cache-hit != 'true' }}
         with:
           repository: ristik/ureth
           ref: ${{ steps.pins.outputs.ureth }}
           path: pinned-ureth
       - uses: actions/checkout@v4
+        if: ${{ steps.cache.outputs.cache-hit != 'true' }}
         with:
           repository: ristik/aggregator-go
           ref: ${{ steps.pins.outputs.aggregator_go }}
           path: pinned-aggregator-go
-      - run: sudo apt-get update && sudo apt-get install -y clang libclang-dev libssl-dev pkg-config protobuf-compiler
+      - if: ${{ steps.cache.outputs.cache-hit != 'true' }}
+        run: sudo apt-get update && sudo apt-get install -y clang libclang-dev libssl-dev pkg-config protobuf-compiler
       - uses: Swatinem/rust-cache@v2
+        if: ${{ steps.cache.outputs.cache-hit != 'true' }}
         with:
           cache-on-failure: true
           workspaces: |
             pinned-ureth
       - name: Build the images from the pinned sources (build-images.py builds each binary and checks the source pin and a clean tree)
+        if: ${{ steps.cache.outputs.cache-hit != 'true' }}
         run: python3 deploy/testnet/build-images.py --bft-source pinned-bft --ureth-source pinned-ureth --aggregator-go-source pinned-aggregator-go
       - run: go build -o /tmp/tn-keygen ./deploy/testnet/keygen
-      - run: go build -C pinned-bft -o /tmp/tn-b1genesis ./scripts/b1genesis
-      - run: go build -C pinned-bft -o /tmp/tn-h4pin ./scripts/h4-restore-pin   # the PoS join restores the joiner's shard node from a survivor's archive
+      - if: ${{ steps.cache.outputs.cache-hit != 'true' }}
+        run: go build -C pinned-bft -o /tmp/tn-b1genesis ./scripts/b1genesis
+      - if: ${{ steps.cache.outputs.cache-hit != 'true' }}
+        run: go build -C pinned-bft -o /tmp/tn-h4pin ./scripts/h4-restore-pin   # the PoS join restores the joiner's shard node from a survivor's archive
       - name: Pack the images and tools for the profile jobs
         run: |
           python3 scripts/ci/rehearsal-bundle.py pack "$RUNNER_TEMP/rehearsal-bundle.tar.zst" \
             ubft=pinned-bft/build/ubft keygen=/tmp/tn-keygen b1genesis=/tmp/tn-b1genesis h4pin=/tmp/tn-h4pin
+      - name: Keep the bundle for the cache
+        if: ${{ steps.cache.outputs.cache-hit != 'true' }}
+        run: mkdir -p "$RUNNER_TEMP/rehearsal-build-cache" && cp "$RUNNER_TEMP/rehearsal-bundle.tar.zst" "$RUNNER_TEMP/rehearsal-build-cache/bundle.tar.zst"
+      - name: Save the build of these pins
+        if: ${{ steps.cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/rehearsal-build-cache
+          key: ${{ steps.key.outputs.key }}
       - uses: actions/upload-artifact@v4
         with:
           name: testnet-rehearsal-bundle
@@ -106,7 +148,7 @@ jobs:
   rehearse-poa:
     name: Rehearse PoA
     needs: images
-    if: ${{ (github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'rehearse') && (github.event.action != 'labeled' || github.event.label.name == 'rehearse'))) && inputs.pos_stages == '' && inputs.join_stages == '' }}
+    if: ${{ github.event_name != 'push' && (github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'rehearse') && (github.event.action != 'labeled' || github.event.label.name == 'rehearse'))) && inputs.pos_stages == '' && inputs.join_stages == '' }}
     # ubuntu-22.04 as the build job: the same runtime as before the split (one profile per runner, after the same image build).
     runs-on: ubuntu-22.04
     timeout-minutes: 240
@@ -144,7 +186,7 @@ jobs:
           umask 077
           echo rehearsal-not-a-real-secret > /tmp/captcha-secret
           sudo -E env "PATH=$PATH" python3 deploy/testnet/generate.py --out /srv/tn-rehearsal-1 --validators 4 --chain-id 31337 \
-            --ubft pinned-bft/build/ubft --b1genesis /tmp/tn-b1genesis --keygen /tmp/tn-keygen \
+            --ubft pinned-bft/build/ubft --b1genesis /tmp/tn-b1genesis --keygen /tmp/tn-keygen --block-interval-ms 0 \
             --captcha-sitekey rehearsal-sitekey --captcha-secret-file /tmp/captcha-secret
       - name: Rehearse
         if: ${{ inputs.pos_stages == '' && inputs.join_stages == '' }}
@@ -177,7 +219,7 @@ jobs:
   rehearse-pos:
     name: Rehearse PoS
     needs: images
-    if: ${{ (github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'rehearse') && (github.event.action != 'labeled' || github.event.label.name == 'rehearse'))) && inputs.stages == '' && inputs.join_stages == '' }}
+    if: ${{ github.event_name != 'push' && (github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'rehearse') && (github.event.action != 'labeled' || github.event.label.name == 'rehearse'))) && inputs.stages == '' && inputs.join_stages == '' }}
     # ubuntu-22.04 as the build job: the same runtime as before the split (one profile per runner, after the same image build).
     runs-on: ubuntu-22.04
     timeout-minutes: 240
@@ -228,7 +270,7 @@ jobs:
           done
           umask 077
           sudo -E env "PATH=$PATH" python3 deploy/testnet/generate.py --out /srv/tn-rehearsal-pos --validators 4 --chain-id 31337 \
-            --ubft pinned-bft/build/ubft --b1genesis /tmp/tn-b1genesis --keygen /tmp/tn-keygen \
+            --ubft pinned-bft/build/ubft --b1genesis /tmp/tn-b1genesis --keygen /tmp/tn-keygen --block-interval-ms 0 \
             --captcha-sitekey rehearsal-sitekey --captcha-secret-file /tmp/captcha-secret \
             --pos --pos-contracts pinned-contracts
       - name: PoS profile, rehearse (first start, the 5a smoke, owner keys, the reward pool, the election, the handoff proposal)
@@ -261,7 +303,7 @@ jobs:
   rehearse-join:
     name: Rehearse PoS join
     needs: images
-    if: ${{ (github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'rehearse') && (github.event.action != 'labeled' || github.event.label.name == 'rehearse'))) && inputs.stages == '' && inputs.pos_stages == '' }}
+    if: ${{ github.event_name != 'push' && (github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'rehearse') && (github.event.action != 'labeled' || github.event.label.name == 'rehearse'))) && inputs.stages == '' && inputs.pos_stages == '' }}
     # ubuntu-22.04 as the build job: the same runtime as before the split (one profile per runner, after the same image build).
     runs-on: ubuntu-22.04
     timeout-minutes: 240
@@ -310,7 +352,7 @@ jobs:
           if sudo test -f /srv/tn-rehearsal-pos/compose.yaml; then sudo docker compose -f /srv/tn-rehearsal-pos/compose.yaml down; fi
           umask 077
           sudo -E env "PATH=$PATH" python3 deploy/testnet/generate.py --out /srv/tn-rehearsal-join --validators 4 --chain-id 31337 \
-            --ubft pinned-bft/build/ubft --b1genesis /tmp/tn-b1genesis --keygen /tmp/tn-keygen \
+            --ubft pinned-bft/build/ubft --b1genesis /tmp/tn-b1genesis --keygen /tmp/tn-keygen --block-interval-ms 0 \
             --captcha-sitekey rehearsal-sitekey --captcha-secret-file /tmp/captcha-secret \
             --pos --pos-contracts pinned-contracts
       - name: PoS join profile, rehearse (a fifth entity joins - register, bond, delegate, election with five, handoff to five, it signs, restarts)
@@ -345,7 +387,7 @@ jobs:
   # The check the merge tooling reads: passes only when the build and every profile this run selected passed (all three on a PR).
   rehearse:
     needs: [images, rehearse-poa, rehearse-pos, rehearse-join]
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'rehearse') && (github.event.action != 'labeled' || github.event.label.name == 'rehearse'))) }}
+    if: ${{ !cancelled() && github.event_name != 'push' && (github.event_name != 'pull_request' || (contains(github.event.pull_request.labels.*.name, 'rehearse') && (github.event.action != 'labeled' || github.event.label.name == 'rehearse'))) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
