@@ -22,6 +22,17 @@
 
 export type Verdict = 'passes' | 'CapacityPreflight';
 
+/**
+ * Which limit refused a probe, read from the preflight's own checks (never inferred from a missing gas figure): the bytes when the proofs
+ * needed do not fit L_max (or not even the evidence does), else the gas when the bound is over userGasLimit, else 'unbounded' (the model
+ * gave no bound: not a measured capacity, and the boundary stage does not count it as one).
+ */
+export function refusalOf(r: { baseFits: boolean; need: bigint; pMax: bigint; gas: bigint | null; limit: bigint }): 'bytes' | 'gas' | 'unbounded' {
+  if (!r.baseFits || r.need > r.pMax) return 'bytes';
+  if (r.gas === null) return 'unbounded';
+  return r.gas > r.limit ? 'gas' : 'unbounded';
+}
+
 export interface Probe {
   label: string;
   transfers: number;

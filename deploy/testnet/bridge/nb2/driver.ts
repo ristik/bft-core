@@ -51,7 +51,7 @@ import { signaturePredicate, encodeProof, type Token } from '../../../packages/n
 import { HE, HU } from '../../../packages/native-bridge-plugin/src/nb2/crypto.js';
 import { decodeReceiptBacking } from '../../../packages/native-bridge-plugin/src/nb2/deposit.js';
 import { u256 } from '../../../packages/native-bridge-plugin/src/nb2/cbor.js';
-import { BoundaryNotFound, findBoundary, ownShape, type Probe, type Verdict } from './boundary_search.js';
+import { BoundaryNotFound, findBoundary, ownShape, refusalOf, type Probe, type Verdict } from './boundary_search.js';
 import { marginals } from './boundary_shape.js';
 import { history, template } from './envelope_shape.js';
 import { readLedger, type Answer } from './ledger_check.js';
@@ -285,9 +285,12 @@ function envelope(file: string): void {
   const bare = history(tp, 0, 0, 1);
   const env = {
     model: `native-bridge-plugins MeasuredGasModel (${model.name}) on parts built from envelope_template.cbor`,
-    assumptions: `an estimate, not an admission rule: the lane's token shape (its template's mint, transfer and ${tp.pair.proof.uc.length}-byte UC in every place, `
-      + `${ENVELOPE_CERTIFICATES} certificates, the whole history upstream of the splits). Tokens with more certificates, larger proofs or more signatures `
-      + 'reach userGasLimit sooner; the wallet preflight (section 12.5) on the actual token is what admits a burn.',
+    assumptions: 'a template estimate, not a capacity and not an admission rule. Every part is built from the lane\'s two-transfer template: '
+      + `its mint, its transfer and its ${tp.pair.proof.uc.length}-byte UC in every place, the template's ${tp.pair.proof.siblings.length} RSMT siblings a proof and its `
+      + `one-log deposit receipt, ${ENVELOPE_CERTIFICATES} certificates (the template UC with one hash byte varied), the template's few owner keys repeated `
+      + '(so no key cache misses beyond them), a distinct state ID a step, and the whole history above the splits. Longer paths (a grown aggregator '
+      + 'tree), more certificates, more signatures, distinct owner keys or a longer receipt all reach userGasLimit sooner. The wallet preflight '
+      + '(section 12.5) on the actual token is what admits a burn.',
     K, gapProofBytes: Number(gp), maxEncodedTxBytes: pins.maxEncodedTxBytes, userGasLimit: pins.userGasLimit, gasReserve: pins.gasReserve, returnReserveSegments: reserve,
     preBurnBurnBound: { bytes: burnPairBound(rLen), gas: (gasOf(bare, 0n, true) ?? 0n) - (gasOf(bare, 0n, false) ?? 0n) },
     largestToken: shapes,
@@ -736,14 +739,13 @@ async function predict(w: Wallet, token: Uint8Array): Promise<{
   const need = cObs - a + pins.returnReserveSegments;
   // the byte check on its own (section 12.5's L_max with the reserve): which limit refuses is read from it, never inferred from a null gas
   const mp = maxProofs(pins.maxEncodedTxBytes, lT, lO, cfg.K);
-  const bytesFit = mp.baseFits && need <= mp.pMax;
   const gas = w.bridge.gas.redeemGasLimit({ evidenceBytes: Number(lT), lineage, pendingTransactions: 1, proofs: need, K: cfg.K });
   const base = { gas, need, bytes: Number(lT), pMax: mp.pMax, baseFits: mp.baseFits };
   try {
     const r = capacityPreflight({ lMax: pins.maxEncodedTxBytes, lT, lO, K: cfg.K, a, cObs, reserve: pins.returnReserveSegments, gasAt: () => gas, userGasLimit: pins.userGasLimit });
     return { ...base, ok: true, gas: r.gas, detail: 'fits' };
   } catch (e) {
-    const over = !bytesFit ? 'bytes' : gas === null ? 'unbounded' : 'gas';
+    const over = refusalOf({ baseFits: mp.baseFits, need, pMax: mp.pMax, gas, limit: pins.userGasLimit });
     return { ...base, ok: false, detail: String((e as Error).message), over };
   }
 }

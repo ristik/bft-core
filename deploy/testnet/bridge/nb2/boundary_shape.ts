@@ -5,6 +5,9 @@
  * bound counts what the verifier counts (proofs, bytes, items, siblings, distinct claims, keys, memory), so each step is the model's own
  * answer on that token, not an average (bft-core#1179 replaced the per-hop arithmetic of the measured-nb2-05 schedule).
  *
+ * These are diagnostics, not valid transitions: the repeated pair is not signed or certified for its new state, and nothing here stands in
+ * for the preflight on an actual token or for a worst-case table occupancy. They are recorded beside each probe and never gate.
+ *
  * Pure: only the plug-in's token type, so the unit tests run without a chain (boundary_shape.test.ts).
  */
 import type { Token } from '../../../packages/native-bridge-plugin/src/nb2/token.js';
