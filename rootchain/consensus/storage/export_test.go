@@ -93,10 +93,3 @@ func VRFreezeForTest(base *TestVRAuthority, svc *VRServices, r evmroot.OrderedHa
 	a := &vrFreezeAuthority{handoffAuthority: base, vr: &v, svc: svc}
 	return a.VerifyFreeze(r, companion)
 }
-
-// VRAbortedForTest applies a committed Abort to the VR root state with the given pending handoffs.
-func VRAbortedForTest(s vradmit.RootState, pending []rootrecords.PendingH) vradmit.RootState {
-	v := vrStep{on: true, state: s}
-	v.aborted(pending)
-	return v.state
-}

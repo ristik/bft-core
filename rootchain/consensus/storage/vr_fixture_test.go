@@ -420,3 +420,10 @@ func posState(t *testing.T, b *storage.ExecutedBlock) rootrecords.State {
 	require.NoError(t, err)
 	return s
 }
+
+// v5Bytes is the v5 view of the fixture's candidate, as the store retains it.
+func (f *vxFixture) v5Bytes() []byte {
+	raw, err := vradmit.V5Of(f.cand).Encode()
+	require.NoError(f.t, err)
+	return raw
+}

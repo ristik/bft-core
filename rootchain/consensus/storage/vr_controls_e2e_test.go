@@ -252,15 +252,3 @@ func TestVRAcknowledgementProjectsTheBoundary(t *testing.T) {
 	_, _, _, err = storage.AckVRForTest(st, other, f.candidates, 101, 3_000, 5)
 	require.ErrorIs(t, err, storage.ErrPosSource)
 }
-
-// An Abort clears the staged Boundary of a primary its Freeze admitted only before that primary's H: an Abort of its recovery, with the
-// primary committed and pending, keeps it, so the acknowledgement still projects the primary's Boundary.
-func TestVRAbortClearsOnlyAnUncommittedStagedPrimary(t *testing.T) {
-	staged := vradmit.GenesisRootState(1, 4)
-	staged.StagedBody, staged.StagedResult = [32]byte{0xb1}, vrschema.Keccak([]byte("R"))
-	kept := storage.VRAbortedForTest(staged, []rootrecords.PendingH{{BodyID: [32]byte{0xb1}}})
-	require.Equal(t, staged.StagedBody, kept.StagedBody, "the primary is committed: the abort was of its recovery")
-	cleared := storage.VRAbortedForTest(staged, nil)
-	require.Zero(t, cleared.StagedBody)
-	require.Zero(t, cleared.StagedResult)
-}

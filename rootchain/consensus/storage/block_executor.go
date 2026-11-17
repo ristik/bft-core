@@ -409,12 +409,21 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 				}
 			}
 			if control.Phase == "aborted" {
-				// an Abort of a retained primary closes its Election result at this block's progress and committed time
+				// An Abort of an attempt whose Freeze retained a primary closes its result at this block's progress and committed time. The
+				// decision is the branch's: only an Abort of an endorsed attempt (its Freeze is an ancestor) can close anything. A Freeze
+				// this root executed and retained on another branch, which never got a certificate, must not change what the same Abort
+				// does here (#1177 review, astra 1).
 				if aborted, derr := decodeOrderedRecord(newBlock.Payload.HandoffRecords[0]); derr == nil && aborted.Kind == "abort" {
-					if err := pos.abort(candidates, aborted, newBlock.Round, newBlock.Timestamp); err != nil {
-						return nil, err
+					if vr.on {
+						// VR: from the staged primary alone; a pre-Freeze Abort and a recovery Abort never close R
+						if err := pos.abortVR(&vr, aborted, newBlock.Round, newBlock.Timestamp); err != nil {
+							return nil, err
+						}
+					} else if nextShardState.Control.Phase == "endorsed" {
+						if err := pos.abort(candidates, aborted, newBlock.Round, newBlock.Timestamp); err != nil {
+							return nil, err
+						}
 					}
-					vr.aborted(pos.state.Pending)
 				}
 			}
 			nextShardState.Control = control

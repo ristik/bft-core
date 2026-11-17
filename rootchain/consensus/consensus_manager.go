@@ -692,6 +692,7 @@ func (x *ConsensusManager) startContext(ctx context.Context) error {
 		x.log.WarnContext(ctx, "Failed to select leader when starting consensus manager", logger.Error(err))
 	}
 	x.log.InfoContext(ctx, fmt.Sprintf("CM starting, leader is %s", leader))
+	x.observeVR() // a (re)started context learns its committed opening at its start, never earlier than a restart
 	return nil
 }
 
@@ -1616,6 +1617,7 @@ func (x *ConsensusManager) processQC(ctx context.Context, qc *drctypes.QuorumCer
 	}
 	x.forgetOrderedRetirements()
 	x.forgetResolvedRejections()
+	x.observeVR() // the residence rule's clock starts when this root first holds a committed opening
 	if shouldSendCertificateBatch(x.params.NetworkProfileVersion, certs) {
 		select {
 		case <-ctx.Done():
@@ -2170,6 +2172,7 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 	x.blockStore = blockStore
 	x.irReqVerifier = reqVerifier
 	x.t2Timeouts = t2TimeoutGen
+	x.observeVR() // a recovered root re-learns its committed opening now
 	// nothing derived from the request history before the recovery is served after it without being derived again
 	if inv, ok := reqVerifier.RequestHistory().(interface{ Invalidate() }); ok {
 		inv.Invalidate()

@@ -11,7 +11,6 @@ import (
 	"github.com/unicitynetwork/bft-core/internal/weightvalidation"
 	"github.com/unicitynetwork/bft-core/q3format"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
-	"github.com/unicitynetwork/bft-core/rootrecords"
 	"github.com/unicitynetwork/bft-core/vradmit"
 	"github.com/unicitynetwork/bft-core/vrschema"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -73,7 +72,10 @@ type VRIntentQuery struct {
 // VRIntent is the derivable intent of the stored attempt: its digest, the committed UC time of its anchor block (openTime(0)), and, for a
 // Freeze, the successor body derived from it and the signing bytes of the successor trust base the readiness signs.
 type VRIntent struct {
-	Digest       [32]byte
+	Digest [32]byte
+	// AnchorRound is the intent's anchor round, max(source.certRootRound, attemptOpenRound): view 0 opens at that block, and a root holds
+	// the opening once that block is committed. AnchorUCTime is its committed UC time.
+	AnchorRound  uint64
 	AnchorUCTime uint64
 	Body         q3format.BodyV3
 	TrustBase    []byte
@@ -407,20 +409,31 @@ func (x *ExecutedBlock) admitV5(v *vrStep, pos *posStep, svc *VRServices, r evmr
 	return nil
 }
 
-// aborted clears a staged Boundary whose attempt a committed Abort ended before its H (the abort projects the result's SessionClosed). A
-// primary already committed and pending its acknowledgement stays staged: an Abort there is of its recovery, which never closes it.
-func (v *vrStep) aborted(pending []rootrecords.PendingH) {
-	if !v.on || v.state.StagedBody == ([32]byte{}) {
-		return
+// abortVR projects a committed Abort on a VR chain from the branch's own state (design section 4.3 item 4, S2a): the Abort of the attempt
+// whose Freeze v5 staged a primary, before its H, closes that primary's result once (SessionClosed) and clears the staging. A pre-Freeze
+// Abort finds nothing staged, and a recovery Abort names another body than the staged primary (which stays staged for its
+// acknowledgement), so neither closes R. Nothing retained locally is consulted.
+func (p *posStep) abortVR(v *vrStep, r evmroot.OrderedHandoffRecord, round, timestamp uint64) error {
+	s := v.state
+	if s.StagedBody == ([32]byte{}) || !bytes.Equal(s.StagedBody[:], r.NextBodyID) {
+		return nil
 	}
-	for _, h := range pending {
-		if h.BodyID == v.state.StagedBody {
-			return
+	for _, h := range p.state.Pending {
+		if h.BodyID == s.StagedBody {
+			return nil // committed (an Abort after H is refused before this point)
 		}
 	}
-	next := v.state
-	next.StagedBody, next.StagedResult, next.StagedBitmap, next.StagedSupport = [32]byte{}, vrschema.Word{}, 0, vradmit.SupportTable{}
-	v.set(next)
+	if !p.state.IsResolved(s.StagedResult) {
+		next, rec, err := p.state.SessionClosed(s.StagedResult, round, timestamp)
+		if err != nil {
+			return errors.Join(ErrPosSource, err)
+		}
+		p.set(next)
+		p.records = append(p.records, rec)
+	}
+	s.StagedBody, s.StagedResult, s.StagedBitmap, s.StagedSupport = [32]byte{}, vrschema.Word{}, 0, vradmit.SupportTable{}
+	v.set(s)
+	return nil
 }
 
 // ackVR projects the acknowledgement of the pending handoffs of a VR generation: Ack or RecoveryAck immediately followed by the result's
@@ -530,15 +543,52 @@ func (x *BlockStore) retainVRFreeze(block *rctypes.BlockData, f *vrRetention) er
 
 // CommittedVRState is the VR root state of the committed root block; ok is false on a chain that is not in VR mode.
 func (x *BlockStore) CommittedVRState() (vradmit.RootState, bool, error) {
+	o, ok, err := x.committedVR(false)
+	return o.State, ok, err
+}
+
+// VROpening is what the committed root block says about the opening of the current view: the committed VR root state, the committed
+// round, and, while no view of the attempt is committed, the intent derivable over the committed state (its anchor round says whether the
+// opening of view 0 is itself committed). It is read from the committed root only, never from a speculatively executed block.
+type VROpening struct {
+	State          vradmit.RootState
+	CommittedRound uint64
+	Intent         VRIntent
+	IntentOK       bool
+}
+
+// CommittedVROpening is the VROpening of the committed root block; ok is false on a chain that is not in VR mode.
+func (x *BlockStore) CommittedVROpening() (VROpening, bool, error) {
+	return x.committedVR(true)
+}
+
+func (x *BlockStore) committedVR(derive bool) (VROpening, bool, error) {
 	if x.profile != ProfileHandoff {
-		return vradmit.RootState{}, false, nil
+		return VROpening{}, false, nil
 	}
 	root := x.tree().Root()
 	if root == nil || root.ShardState.Control == nil || len(root.ShardState.Control.VR) == 0 {
-		return vradmit.RootState{}, false, nil
+		return VROpening{}, false, nil
 	}
 	s, err := vradmit.DecodeRootState(root.ShardState.Control.VR)
-	return s, err == nil, err
+	if err != nil {
+		return VROpening{}, false, err
+	}
+	o := VROpening{State: s, CommittedRound: root.GetRound()}
+	x.lock.RLock()
+	svc := x.pos
+	x.lock.RUnlock()
+	if !derive || s.Backoff.LastView != 0 || svc == nil || svc.Registry == nil || svc.Registry.Intents == nil {
+		return o, true, nil
+	}
+	confs, err := x.orchestration.ShardConfigs(root.GetRound())
+	if err != nil {
+		return o, true, err
+	}
+	latestRoot, latestBlock, latestOK := certifiedEVM(root.ShardState, confs)
+	o.Intent, o.IntentOK, err = svc.Registry.Intents.Intent(VRIntentQuery{Control: root.ShardState.Control, Backoff: s.Backoff, Epoch: root.BlockData.Epoch,
+		Round: root.GetRound(), LatestEVMRoot: latestRoot, LatestEVMBlock: latestBlock, LatestEVMOK: latestOK})
+	return o, true, err
 }
 
 // HandoffViewOf is the HandoffView a block carries, if any (at most one, by the payload rule).
