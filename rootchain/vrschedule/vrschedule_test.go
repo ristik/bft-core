@@ -8,7 +8,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -41,7 +43,7 @@ func published(r vrschema.Word) *vrhandoff.Output {
 }
 
 func cert(round uint64, block, root byte) CertifiedEVM {
-	return CertifiedEVM{RootRound: round, RootUCTime: 1000 + round, BlockHash: [32]byte{block}, StateRoot: [32]byte{root}, BlockNumber: uint64(block)}
+	return CertifiedEVM{RootRound: round, ParentRound: round - 1, RootUCTime: 1000 + round, BlockHash: [32]byte{block}, StateRoot: [32]byte{root}, BlockNumber: uint64(block)}
 }
 
 // Stage 0: the first certified block at which R is the open Published output, recorded only after the block before it was observed
@@ -61,7 +63,7 @@ func TestTheObserverRecordsTheFirstPublishedBlock(t *testing.T) {
 	require.NoError(t, o.Observe(ctx, cert(11, 1, 1)))
 	require.Equal(t, 1, reader.calls, "a block already observed is skipped")
 	require.NoError(t, o.Observe(ctx, cert(12, 2, 2)))
-	require.NoError(t, o.Observe(ctx, cert(14, 3, 3)))
+	require.NoError(t, o.Observe(ctx, cert(13, 3, 3)))
 	s, ok := sources.Get(r)
 	require.True(t, ok)
 	require.EqualValues(t, 12, s.CertRootRound, "the first certified block at which R is published")
@@ -80,8 +82,8 @@ func TestTheObserverRecordsTheFirstPublishedBlock(t *testing.T) {
 	fresh, err := NewSources("")
 	require.NoError(t, err)
 	late := &Observer{Reader: reader, Sources: fresh, Outputs: NewOutputs()}
-	require.NoError(t, late.Observe(ctx, cert(14, 3, 3)))
-	require.NoError(t, late.Observe(ctx, cert(15, 4, 3)))
+	require.NoError(t, late.Observe(ctx, cert(13, 3, 3)))
+	require.NoError(t, late.Observe(ctx, cert(14, 4, 3)))
 	_, ok = fresh.Get(r)
 	require.False(t, ok, "never a guessed source")
 
@@ -154,4 +156,74 @@ func TestServedPreimagesThroughTheViewABI(t *testing.T) {
 	mw, err := vradmit.MemberOf(got)
 	require.NoError(t, err)
 	require.Equal(t, vrschema.Word(m.RootNodeWord), mw.RootNodeWord, "the words recompute from the served preimages")
+}
+
+type flakyReader struct {
+	at   map[[32]byte]*vrhandoff.Output
+	fail map[[32]byte]bool
+}
+
+func (f *flakyReader) OpenOutput(_ context.Context, _, root [32]byte) (*vrhandoff.Output, error) {
+	if f.fail[root] {
+		return nil, errors.New("rpc down")
+	}
+	return f.at[root], nil
+}
+
+// A gap never yields a wrong source (#1185 review F1, the reviewer's probe): a failed read of the first published block, a skipped
+// committed block (a dropped batch, a recovery jump) or an observation after a reset leaves R without a source, so the intent is
+// unavailable here rather than derived over a later block.
+func TestAGapNeverRecordsALaterSource(t *testing.T) {
+	r := vrschema.Word{0x52}
+	ctx := context.Background()
+	sources, err := NewSources("")
+	require.NoError(t, err)
+	reader := &flakyReader{at: map[[32]byte]*vrhandoff.Output{{2}: published(r), {3}: published(r)}, fail: map[[32]byte]bool{{2}: true}}
+	o := &Observer{Reader: reader, Sources: sources, Outputs: NewOutputs()}
+	require.NoError(t, o.Observe(ctx, cert(10, 1, 1))) // R not published
+	require.Error(t, o.Observe(ctx, cert(11, 2, 2)))   // the first published block: the read fails (the worker gives up)
+	require.NoError(t, o.Observe(ctx, cert(12, 3, 3))) // a later block
+	_, ok := sources.Get(r)
+	require.False(t, ok, "the failed read broke the run")
+
+	skip, err := NewSources("")
+	require.NoError(t, err)
+	o = &Observer{Reader: &fakeReader{at: map[[32]byte]*vrhandoff.Output{{3}: published(r)}}, Sources: skip, Outputs: NewOutputs()}
+	require.NoError(t, o.Observe(ctx, cert(10, 1, 1)))
+	require.NoError(t, o.Observe(ctx, cert(12, 3, 3)), "round 11 was never observed (a dropped batch, a recovery jump)")
+	_, ok = skip.Get(r)
+	require.False(t, ok)
+
+	reset, err := NewSources("")
+	require.NoError(t, err)
+	o = &Observer{Reader: &fakeReader{at: map[[32]byte]*vrhandoff.Output{{2}: published(r)}}, Sources: reset, Outputs: NewOutputs()}
+	require.NoError(t, o.Observe(ctx, cert(10, 1, 1)))
+	o.Reset()
+	require.NoError(t, o.Observe(ctx, cert(11, 2, 2)))
+	_, ok = reset.Get(r)
+	require.False(t, ok, "after a reset the next observation only primes")
+
+	// the same sequence without a gap records the first published block
+	ok2, err := NewSources("")
+	require.NoError(t, err)
+	o = &Observer{Reader: &fakeReader{at: map[[32]byte]*vrhandoff.Output{{2}: published(r), {3}: published(r)}}, Sources: ok2, Outputs: NewOutputs()}
+	for i, c := range []CertifiedEVM{cert(10, 1, 1), cert(11, 2, 2), cert(12, 3, 3)} {
+		require.NoError(t, o.Observe(ctx, c), i)
+	}
+	s, ok := ok2.Get(r)
+	require.True(t, ok)
+	require.EqualValues(t, 11, s.CertRootRound)
+}
+
+// A source of root round 0 is refused (the anchor is never a default zero), on record and on load.
+func TestSourcesRefuseRoundZero(t *testing.T) {
+	s, err := NewSources(filepath.Join(t.TempDir(), "s.json"))
+	require.NoError(t, err)
+	_, err = s.Record(SourceEntry{Source: vrhandoff.Source{ResultID: make([]byte, 32), EVMBlockHash: make([]byte, 32), OutputCommit: make([]byte, 32)}})
+	require.Error(t, err)
+	path := filepath.Join(t.TempDir(), "bad.json")
+	require.NoError(t, os.WriteFile(path, []byte(`[{"resultId":"0x`+strings.Repeat("11", 32)+`","evmBlockHash":"0x`+strings.Repeat("22", 32)+
+		`","evmBlockNumber":1,"certRootRound":0,"outputCommit":"0x`+strings.Repeat("33", 32)+`","certUcTime":5}]`), 0o600))
+	_, err = NewSources(path)
+	require.Error(t, err)
 }

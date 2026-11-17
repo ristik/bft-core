@@ -117,7 +117,7 @@ func NewIntent(rc RootContext, src Source, o Output) (Intent, [32]byte, error) {
 		return Intent{}, none, err
 	}
 	r := o.State.ResultID
-	if !bytes.Equal(src.ResultID, r[:]) || !bytes.Equal(src.OutputCommit, o.State.Output.OutputCommit[:]) || len(src.EVMBlockHash) != 32 {
+	if !bytes.Equal(src.ResultID, r[:]) || !bytes.Equal(src.OutputCommit, o.State.Output.OutputCommit[:]) || len(src.EVMBlockHash) != 32 || src.CertRootRound == 0 {
 		return Intent{}, none, fmt.Errorf("%w: the source is not R's published output", ErrIntent)
 	}
 	raw, err := c.Encode()

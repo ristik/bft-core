@@ -196,3 +196,33 @@ func TestVRHandoffWithTheDerivedIntent(t *testing.T) {
 	_, err = f.exec(prep, f.block(prep, 13, 962, [][]byte{f.rec("freeze", 13).Bytes(), f.fzRaw}))
 	require.ErrorIs(t, err, storage.ErrVRUnavailable)
 }
+
+// An attempt opened after the source's certifying block anchors the intent at that opening (anchorRound = max(certRootRound,
+// attemptOpenRound)): a pre-Freeze Abort at round 12 opens attempt 1 at the end of its block, the derived intent's anchor is round 12 and
+// openTime(0) its UC time, and HandoffView(1)'s replay floor counts from there.
+func TestVRIntentAnchorsAtAnAttemptOpenedAfterItsSource(t *testing.T) {
+	f := newVXReal(t)
+	g := f.g
+	f.certificate(0)
+	prep := f.must(g, f.block(g, 11, 1_010, [][]byte{f.rec("prepare", 11).Bytes()}))
+	abort := f.rec("abort", 12)
+	ab := f.must(prep, f.block(prep, 12, 1_020, [][]byte{abort.Bytes()}))
+	s := rootState(t, ab)
+	require.EqualValues(t, 1, s.Backoff.Attempt)
+	require.EqualValues(t, 12, s.AttemptOpenRound)
+	require.EqualValues(t, 1_020, s.AttemptOpenUCTime)
+	q, err := storage.VRQueryForTest(ab, f.orch, f.svc, f.auth)
+	require.NoError(t, err)
+	d, ok, err := f.p.Derive(q)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.EqualValues(t, 12, d.AnchorRound, "the attempt opened after the source's certifying round 5")
+	require.EqualValues(t, 1_020, d.AnchorUCTime)
+	require.EqualValues(t, 1, d.Intent.Attempt)
+	require.NotEqual(t, f.d, d.Digest, "a new attempt is a new intent")
+	view := f.view(13, 1)
+	view.View.IntentDigest = d.Digest
+	_, err = f.exec(ab, f.block(ab, 13, 1_029, nil, view))
+	require.ErrorIs(t, err, storage.ErrVRControlRefused, "T(0, 0) = 10 s from openTime(0) = 1020")
+	f.must(ab, f.block(ab, 13, 1_030, nil, view))
+}

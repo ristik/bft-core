@@ -36,7 +36,10 @@ type sourceFile struct {
 const maxSources = 8
 
 // Sources is the committed source of every result this root observed being published, first observation wins; persisted to a file so a
-// restarted root keeps what it learned (a source the root never observed stays unavailable).
+// restarted root keeps what it learned (a source the root never observed stays unavailable). The file is trusted as this root's own record:
+// an entry cannot be re-validated on load (that needs the EVM state of every certified block before it). Since the observer only records
+// from an unbroken run, a wrong entry needs a tampered or foreign file; removing the file (or the entry) makes the result unavailable here,
+// never wrong.
 type Sources struct {
 	mu    sync.RWMutex
 	path  string
@@ -62,7 +65,7 @@ func NewSources(path string) (*Sources, error) {
 		return nil, fmt.Errorf("vrschedule: %s: %w", path, err)
 	}
 	for _, f := range fs {
-		if len(f.ResultID) != 32 || len(f.EVMBlockHash) != 32 || len(f.OutputCommit) != 32 {
+		if len(f.ResultID) != 32 || len(f.EVMBlockHash) != 32 || len(f.OutputCommit) != 32 || f.CertRootRound == 0 {
 			return nil, fmt.Errorf("vrschedule: %s: a malformed source", path)
 		}
 		r := vrschema.Word(f.ResultID)
@@ -83,8 +86,8 @@ func (s *Sources) Get(r vrschema.Word) (SourceEntry, bool) {
 
 // Record keeps the first source of R; a later observation never replaces it.
 func (s *Sources) Record(e SourceEntry) (bool, error) {
-	if len(e.ResultID) != 32 {
-		return false, errors.New("vrschedule: a source without a result id")
+	if len(e.ResultID) != 32 || e.CertRootRound == 0 {
+		return false, errors.New("vrschedule: a source without a result id or a certifying round")
 	}
 	r := vrschema.Word(e.ResultID)
 	s.mu.Lock()
@@ -115,14 +118,43 @@ func (s *Sources) persist() error {
 	if err != nil {
 		return err
 	}
-	tmp := s.path + ".tmp"
-	if err := os.MkdirAll(filepath.Dir(s.path), 0o750); err != nil {
+	return writeDurable(s.path, raw)
+}
+
+// writeDurable replaces path with data atomically and durably: the data is synced in a temporary file, renamed over path, and the directory
+// is synced, so a crash leaves the old file or the new one, never a torn one.
+func writeDurable(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return err
 	}
-	if err := os.WriteFile(tmp, raw, 0o600); err != nil {
+	tmp := path + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600) // #nosec G304 -- the root's own state file
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, s.path)
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := errors.Join(f.Sync(), f.Close()); err != nil {
+		return err
+	}
+	if err := syncDir(dir); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	return syncDir(dir)
+}
+
+func syncDir(dir string) error {
+	d, err := os.Open(dir) // #nosec G304 -- the root's own home
+	if err != nil {
+		return err
+	}
+	return errors.Join(d.Sync(), d.Close())
 }
 
 // maxOutputs bounds the cached outputs by certified state root.
@@ -158,11 +190,12 @@ func (o *Outputs) Put(root [32]byte, v *vrhandoff.Output) {
 	}
 }
 
-// CertifiedEVM is the designated EVM shard's certified block in one committed root block.
+// CertifiedEVM is the designated EVM shard's certified block in one committed root block (RootRound, its parent ParentRound, its UC
+// time RootUCTime).
 type CertifiedEVM struct {
-	RootRound, RootUCTime uint64
-	BlockHash, StateRoot  [32]byte
-	BlockNumber           uint64
+	RootRound, ParentRound, RootUCTime uint64
+	BlockHash, StateRoot               [32]byte
+	BlockNumber                        uint64
 }
 
 // Reader reads VR at one certified EVM block: the output state proven against its state root and the served preimages of the open
@@ -171,47 +204,53 @@ type Reader interface {
 	OpenOutput(ctx context.Context, blockHash, stateRoot [32]byte) (*vrhandoff.Output, error)
 }
 
-// Observer is stage 0: for every committed root block, in commit order, the designated EVM shard's certified block is read once (a
-// block it already observed is skipped) and VR's open output there is cached. A result's committed source is the first certified block
-// at which it is the open Published output, so it is recorded only when this process also observed the certified block before it, where
-// R was not: a root that starts while R is already published never guesses its source (it keeps a persisted one, or has none and the
-// intent stays unavailable to it).
+// Observer is stage 0: for every committed root block, in commit order, the designated EVM shard's certified block is read and VR's open
+// output there is cached. A result's committed source is the first certified block at which it is the open Published output, so it is
+// recorded only from an unbroken run of observations: each observed committed block must be the child of the previously observed one
+// (ParentRound), and the block before the recording one must have been observed without R. Any gap (a read the worker gave up on, a batch
+// the queue dropped, a recovery that jumped to a peer's head, a restart, an epoch boundary) breaks the run, so a first publication that
+// fell into a gap leaves R without a source here (unavailable), never with a later, wrong one.
 type Observer struct {
 	Reader  Reader
 	Sources *Sources
 	Outputs *Outputs
 	Log     *slog.Logger
 
-	mu     sync.Mutex
-	last   [32]byte
-	primed bool
-	prev   vrschema.Word // the open Published output at the last observed block, zero when none
+	mu        sync.Mutex
+	primed    bool
+	lastRound uint64        // the round of the last committed block observed in the current run
+	prev      vrschema.Word // the open Published output at the last observed block, zero when none
 }
 
-// Observe reads one committed root block's certified EVM block.
+// Reset breaks the run: the next observation only primes.
+func (o *Observer) Reset() {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.primed, o.prev = false, vrschema.Word{}
+}
+
+// Observe reads one committed root block's certified EVM block. A failed read breaks the run.
 func (o *Observer) Observe(ctx context.Context, c CertifiedEVM) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	if bytes.Equal(o.last[:], c.BlockHash[:]) {
-		return nil
-	}
+	continuous := o.primed && c.RootRound > 0 && c.ParentRound == o.lastRound
 	out, cached := o.Outputs.At(c.StateRoot)
 	if !cached {
 		var err error
 		if out, err = o.Reader.OpenOutput(ctx, c.BlockHash, c.StateRoot); err != nil {
+			o.primed, o.prev = false, vrschema.Word{}
 			return err
 		}
 		o.Outputs.Put(c.StateRoot, out)
 	}
-	o.last = c.BlockHash
-	primed, prev := o.primed, o.prev
-	o.primed, o.prev = true, vrschema.Word{}
+	prev := o.prev
+	o.primed, o.lastRound, o.prev = true, c.RootRound, vrschema.Word{}
 	if out == nil {
 		return nil
 	}
 	r := out.State.ResultID
 	o.prev = r
-	if !primed || prev == r {
+	if !continuous || prev == r {
 		return nil
 	}
 	recorded, err := o.Sources.Record(SourceEntry{Source: vrhandoff.Source{ResultID: bytes.Clone(r[:]), EVMBlockHash: bytes.Clone(c.BlockHash[:]),

@@ -10,7 +10,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/q3format"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
@@ -97,7 +96,7 @@ func (v *vrHandoff) onCommit(blocks []*storage.ExecutedBlock) {
 		if si == nil || si.IR == nil || len(si.IR.BlockHash) != 32 || len(si.IR.Hash) != 32 {
 			continue
 		}
-		out = append(out, vrschedule.CertifiedEVM{RootRound: b.GetRound(), RootUCTime: b.BlockData.Timestamp, BlockHash: [32]byte(si.IR.BlockHash),
+		out = append(out, vrschedule.CertifiedEVM{RootRound: b.GetRound(), ParentRound: b.BlockData.GetParentRound(), RootUCTime: b.BlockData.Timestamp, BlockHash: [32]byte(si.IR.BlockHash),
 			StateRoot: [32]byte(si.IR.Hash), BlockNumber: si.IR.RoundNumber})
 	}
 	if len(out) == 0 {
@@ -216,24 +215,12 @@ func (x *ConsensusManager) SubmitVRCertificate(c vrschema.ViewCertificate) error
 	if err != nil {
 		return err
 	}
-	cand, err := vrhandoff.VerifyAssembly(d.Intent, c.Assembly)
-	if err != nil {
-		return errors.Join(ErrVRHandoff, err)
-	}
-	body, err := vrhandoff.DeriveBody(d.Intent, d.RootEpoch, sha256.Sum256(c.Assembly.Candidate), d.Body)
-	if err != nil {
-		return errors.Join(ErrVRHandoff, err)
-	}
-	_, tb, err := vrhandoff.TrustBase(d.Intent, d.RootEpoch)
-	if err != nil {
-		return errors.Join(ErrVRHandoff, err)
-	}
 	committedView := uint64(0)
 	if s, ok, _ := x.blockStore.CommittedVRState(); ok && bytes.Equal(s.Backoff.Intent, d.Digest[:]) {
 		committedView = s.Backoff.LastView
 	}
-	if err := vradmit.VerifyCertificate(vradmit.CertificateInput{Certificate: c, IntentDigest: d.Digest, CommittedView: committedView, Incumbents: keys,
-		CandidateBytes: c.Assembly.Candidate, Successors: cand.Identities, Body: body, Attempt: d.Intent.Attempt, TrustBaseBytes: tb}); err != nil {
+	p, err := vrschedule.VerifyPlan(d, keys, committedView, c)
+	if err != nil {
 		return errors.Join(ErrVRHandoff, err)
 	}
 	x.vr.mu.Lock()
@@ -241,8 +228,7 @@ func (x *ConsensusManager) SubmitVRCertificate(c vrschema.ViewCertificate) error
 	if h := x.vr.held; h != nil && h.intent == d.Digest && h.epoch == d.RootEpoch {
 		return nil // I-RET keeps the first complete certificate of the intent
 	}
-	x.vr.held = &vrHeld{epoch: d.RootEpoch, attempt: d.Intent.Attempt, predecessor: bytes.Clone(d.Intent.PredecessorBodyID), intent: d.Digest, cert: c, body: body,
-		result: vrschema.Word(cand.SourceRef)}
+	x.vr.held = &vrHeld{epoch: p.Epoch, attempt: p.Attempt, predecessor: p.Predecessor, intent: p.Intent, cert: c, body: p.Body, result: p.Result}
 	x.log.Info("VR handoff: a complete verified certificate is held", "intent", fmt.Sprintf("%x", d.Digest[:8]), "view", c.Assembly.Slot,
 		"rootEpoch", d.RootEpoch, "attempt", d.Intent.Attempt)
 	return nil
@@ -252,6 +238,12 @@ func (v *vrHandoff) current() *vrHeld {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	return v.held
+}
+
+// plan is the held certificate as the record builders take it.
+func (h *vrHeld) plan() vrschedule.PreparePlan {
+	return vrschedule.PreparePlan{Intent: h.intent, Epoch: h.epoch, Attempt: h.attempt, Predecessor: h.predecessor, Result: h.result, Body: h.body,
+		Certificate: h.cert}
 }
 
 // vrRecordsForRound is the leader's handoff record of a VR chain for the round: the Prepare of the held certificate's attempt at a quiet
@@ -267,7 +259,6 @@ func (x *ConsensusManager) vrRecordsForRound(round uint64, parent *storage.Execu
 	if lapsed && !storage.PrepareMayFollowLapse(control, round) {
 		return nil, nil
 	}
-	bodyID := h.body.Identity()
 	switch {
 	case control.Phase == "idle" || control.Phase == "aborted" || lapsed:
 		attempt, err := plannedAttempt(control, round)
@@ -281,21 +272,15 @@ func (x *ConsensusManager) vrRecordsForRound(round uint64, parent *storage.Execu
 		if x.preferRejection(context.Background(), parentQC.GetRound(), round, parentQC) {
 			return nil, nil
 		}
-		if round > ^uint64(0)-storage.PrepareActivationFloorRounds {
+		raw, err := vrschedule.PrepareRecord(h.plan(), control, round)
+		if err != nil {
 			return nil, ErrHandoffApproval
 		}
-		r := evmroot.OrderedHandoffRecord{Network: control.Network, Epoch: control.Epoch, Attempt: attempt, OrderedRound: round,
-			ActivationRound: max(h.body.EarliestActivation, round+storage.PrepareActivationFloorRounds), PredecessorBodyID: bytes.Clone(control.PredecessorBodyID),
-			NextBodyID: bodyID[:], Kind: "prepare", FrozenID: make([]byte, 32), SuccessorTRHash: make([]byte, 32)}
-		x.log.Info("VR handoff: ordering the Prepare", "round", round, "attempt", attempt, "activation", r.ActivationRound)
-		return [][]byte{r.Bytes()}, nil
+		x.log.Info("VR handoff: ordering the Prepare", "round", round, "attempt", attempt)
+		return [][]byte{raw}, nil
 	case control.Phase == "prepared":
-		previous, err := storage.DecodeOrderedHandoffRecord(control.RecordBytes)
-		if err != nil || previous.Attempt != h.attempt || !bytes.Equal(previous.NextBodyID, bodyID[:]) || len(control.FrozenParent) != 32 {
-			return nil, nil
-		}
 		si := parent.ShardState.States[x.vr.cfg.EVM]
-		if si == nil || si.IR == nil || !bytes.Equal(si.IR.BlockHash, control.FrozenParent) || len(si.IR.Hash) != 32 {
+		if si == nil || si.IR == nil || len(control.FrozenParent) != 32 || !bytes.Equal(si.IR.BlockHash, control.FrozenParent) || len(si.IR.Hash) != 32 {
 			return nil, nil
 		}
 		witness, err := x.vr.witnessAt([32]byte(control.FrozenParent), [32]byte(si.IR.Hash), h)
@@ -303,37 +288,23 @@ func (x *ConsensusManager) vrRecordsForRound(round uint64, parent *storage.Execu
 			x.log.Warn("VR handoff: the Freeze witness at the frozen parent is unavailable; Freeze not ordered", "attempt", h.attempt, "error", err)
 			return nil, nil
 		}
-		cd := sha256.Sum256(h.cert.Assembly.Candidate)
-		r := previous
-		r.Kind, r.OrderedRound, r.SuccessorTRHash = "freeze", round, make([]byte, 32)
-		r.FrozenID = evmroot.D4FrozenID(bodyID[:], h.body.StateSummary, control.FrozenParent, cd[:], h.attempt, control.PredecessorBodyID)
-		companion, err := vrschema.FreezeV5{Candidate: h.cert.Assembly.Candidate, Certificate: h.cert, Witness: witness}.Encode()
+		records, err := vrschedule.FreezeRecord(h.plan(), control, round, witness)
 		if err != nil {
-			return nil, err
-		}
-		x.log.Info("VR handoff: ordering the Freeze v5", "round", round, "attempt", h.attempt, "view", h.cert.Assembly.Slot)
-		return [][]byte{r.Bytes(), companion}, nil
-	case control.Phase == "endorsed":
-		previous, err := storage.DecodeOrderedHandoffRecord(control.RecordBytes)
-		if err != nil || previous.Attempt != h.attempt || !bytes.Equal(previous.NextBodyID, bodyID[:]) {
 			return nil, nil
 		}
-		activation, ok := storage.CommitActivationRound(previous.ActivationRound, round)
-		if !ok {
-			return nil, ErrHandoffApproval
-		}
+		x.log.Info("VR handoff: ordering the Freeze v5", "round", round, "attempt", h.attempt, "view", h.cert.Assembly.Slot)
+		return records, nil
+	case control.Phase == "endorsed":
 		key, err := x.blockStore.CertifiedEVMShardAt(parent.GetRound(), control.FrozenParent)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %w", ErrHandoffApproval, err)
 		}
-		tr, err := storage.AssignmentSuccessorTRHash(parent.ShardState.States[key], h.cert.Assembly.Candidate, activation, x.params.HashAlgorithm)
+		raw, err := vrschedule.CommitRecord(h.plan(), control, round, parent.ShardState.States[key], x.params.HashAlgorithm)
 		if err != nil {
-			return nil, err
+			return nil, nil
 		}
-		r := previous
-		r.Kind, r.OrderedRound, r.ActivationRound, r.SuccessorTRHash = "commit", round, activation, tr
-		x.log.Info("VR handoff: ordering H", "round", round, "attempt", h.attempt, "activation", activation)
-		return [][]byte{r.Bytes()}, nil
+		x.log.Info("VR handoff: ordering H", "round", round, "attempt", h.attempt)
+		return [][]byte{raw}, nil
 	}
 	return nil, nil
 }
