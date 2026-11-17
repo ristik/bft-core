@@ -473,6 +473,9 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 	if err != nil {
 		return fmt.Errorf("failed initiate distributed consensus manager: %w", err)
 	}
+	// received proposals are admitted from, and prioritized for, the roots the manager names (#1113); the manager sets this itself on an
+	// unwrapped network, a wrapped one (q4shim) is set here
+	libp2pNet.SetRootConsensusGate(cm)
 	if flags.PosDeploymentFile != "" {
 		if !flags.HandoffProfile {
 			return fmt.Errorf("%w: --pos-deployment needs --profile-3", ErrPosDeployment)
