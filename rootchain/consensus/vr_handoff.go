@@ -111,6 +111,9 @@ type vrHandoff struct {
 	reject  func(ctx context.Context, parentRound, round uint64, qc *rctypes.QuorumCert) bool
 }
 
+// vrOperator is the sender identity of the loopback operator endpoints.
+const vrOperator = "operator"
+
 // PullInterval is how often a root whose current intent holds no complete certificate pulls a peer's stage set.
 const PullInterval = 5 * time.Second
 
@@ -153,6 +156,18 @@ func (x *ConsensusManager) EnableVRHandoff(ctx context.Context, cfg VRHandoffCon
 			return err
 		}
 		v.member = m
+	}
+	// a service round serves only the senders admitted now: the installed committee, the current intent's members and the local operator
+	v.queue.Admitted = func(sender string) bool {
+		if sender == vrOperator {
+			return true
+		}
+		for _, n := range x.trustBase.Load().RootNodes {
+			if n.NodeID == sender {
+				return true
+			}
+		}
+		return v.svc.Members()[sender]
 	}
 	v.peers = func() []peer.ID { return x.vrPeers(v) }
 	v.stageIntent = x.stageVRIntentMembers
@@ -567,7 +582,7 @@ func (x *ConsensusManager) OfferVRMessage(m vrschedule.Message) error {
 	if x.vr == nil {
 		return fmt.Errorf("%w: not enabled", ErrVRHandoff)
 	}
-	if !x.vr.queue.Submit("operator", m) {
+	if !x.vr.queue.Submit(vrOperator, m) {
 		return fmt.Errorf("%w: the verification queue is full", ErrVRHandoff)
 	}
 	return nil
@@ -593,12 +608,12 @@ func (x *ConsensusManager) SubmitVRCertificate(c vrschema.ViewCertificate) error
 		return fmt.Errorf("%w: not enabled", ErrVRHandoff)
 	}
 	a := c.Assembly
-	if o, _, err := x.vr.svc.Offer("operator", vrschedule.Message{Assembly: &a}); o != vrschedule.Retained && o != vrschedule.Duplicate {
+	if o, _, err := x.vr.svc.Offer(vrOperator, vrschedule.Message{Assembly: &a}); o != vrschedule.Retained && o != vrschedule.Duplicate {
 		return errors.Join(fmt.Errorf("%w: the assembly is %s", ErrVRHandoff, o.String()), err)
 	}
 	for i := range c.Readiness {
 		r := c.Readiness[i]
-		if o, _, err := x.vr.svc.Offer("operator", vrschedule.Message{Readiness: &r}); o != vrschedule.Retained && o != vrschedule.Duplicate {
+		if o, _, err := x.vr.svc.Offer(vrOperator, vrschedule.Message{Readiness: &r}); o != vrschedule.Retained && o != vrschedule.Duplicate {
 			return errors.Join(fmt.Errorf("%w: readiness %d is %s", ErrVRHandoff, i, o.String()), err)
 		}
 	}
