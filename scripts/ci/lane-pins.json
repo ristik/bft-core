@@ -55,7 +55,7 @@
     },
     "aggregator-go": {
       "repository": "https://github.com/ristik/aggregator-go.git",
-      "commit": "a09feead66b4b3f0dff57af74ab7932d67f2aa00",
+      "commit": "837995463a5ac045a6f53f8eee817bb4073a1b13",
       "branch": "integration/enshrined-evm"
     },
     "contracts": {
