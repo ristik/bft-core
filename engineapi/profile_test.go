@@ -169,8 +169,8 @@ func TestCheckExecutionProfile_ReadsThePlainConnection(t *testing.T) {
 	})
 }
 
-// A fresh-B1 deployment's client adds exactly the four Unicity native precompiles (CERT_BATCH_V2, the RSMT membership check, the B2 kernel, the bridge
-// composition) to the pinned Cancun set; the plain check still refuses them.
+// A fresh-B1 deployment's client adds exactly the three Unicity native precompiles (CERT_BATCH_V2, the RSMT membership check, the B2 kernel) to the
+// pinned Cancun set; the plain check still refuses them.
 func TestCheckProfile_UnicityPrecompilesOfAB1Deployment(t *testing.T) {
 	withNative := func(mutate func(p map[string]any)) json.RawMessage {
 		m := loadConfig(t, "eth_config_cancun_at_genesis.json")
@@ -195,9 +195,10 @@ func TestCheckProfile_UnicityPrecompilesOfAB1Deployment(t *testing.T) {
 		_, err := checkProfileWith(withNative(func(p map[string]any) { delete(p, "unicity-b2-sdk3") }), 31337, unicityNativePrecompiles)
 		require.ErrorContains(t, err, "missing unicity-b2-sdk3")
 	})
-	t.Run("a B1 deployment refuses a client without the bridge composition", func(t *testing.T) {
-		_, err := checkProfileWith(withNative(func(p map[string]any) { delete(p, "unicity-bridge-compose-v2") }), 31337, unicityNativePrecompiles)
-		require.ErrorContains(t, err, "missing unicity-bridge-compose-v2")
+	t.Run("a B1 deployment refuses a client that still registers the removed bridge composition", func(t *testing.T) {
+		// ureth#97 removed BRIDGE_COMPOSE_V2 (0x0105); a client from before it is the wrong pin.
+		_, err := checkProfileWith(withNative(func(p map[string]any) { p["unicity-bridge-compose-v2"] = "0x0000000000000000000000000000000000000105" }), 31337, unicityNativePrecompiles)
+		require.ErrorContains(t, err, "unexpected unicity-bridge-compose-v2")
 	})
 	t.Run("a B1 deployment refuses a moved verifier", func(t *testing.T) {
 		_, err := checkProfileWith(withNative(func(p map[string]any) { p["unicity-b1-cert-batch-v2"] = "0x0000000000000000000000000000000000000200" }), 31337, unicityNativePrecompiles)

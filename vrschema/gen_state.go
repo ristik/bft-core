@@ -3,7 +3,9 @@ package vrschema
 import (
 	"fmt"
 	"sort"
+	"time"
 
+	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -428,7 +430,7 @@ func genFold(b *vb) {
 	}
 	update := func(id uint64, part uint32, cur *types.PartitionDescriptionRecord, f func(*types.PartitionDescriptionRecord)) RegistryChange {
 		succ := fxPDR(part, uint32(cur.PartitionTypeID), cur.Epoch+1, 0, 0)
-		succ.Validators = cur.Validators
+		succ.Validators, succ.ShardID = cur.Validators, cur.ShardID
 		succ.T2Timeout = cur.T2Timeout + 500_000_000
 		if f != nil {
 			f(succ)
@@ -449,6 +451,50 @@ func genFold(b *vb) {
 		return RegistryChange{ID: id, Kind: uint64(KindAddPartition), Payload: mustChange(KindAddPartition, mustCBOR(p), fxChangePoPs(popID, p, 20))}
 	}
 	risc0 := map[string]string{"proof_type": "risc0"}
+	// addWith is an AddPartition of a two-validator configuration of part (keys base 20) edited by f, its PoPs signed over the edited bytes
+	addWith := func(id uint64, part uint32, f func(*types.PartitionDescriptionRecord)) RegistryChange {
+		p := fxPDR(part, 3, 0, 20, 2)
+		if f != nil {
+			f(p)
+		}
+		return RegistryChange{ID: id, Kind: uint64(KindAddPartition), Payload: mustChange(KindAddPartition, mustCBOR(p), fxChangePoPs(id, p, 20))}
+	}
+	s0, s1 := types.ShardID{}.Split()
+	s00, _ := s0.Split()
+	s000, _ := s00.Split()
+	shard := func(id types.ShardID) func(*types.PartitionDescriptionRecord) {
+		return func(p *types.PartitionDescriptionRecord) { p.ShardID = id }
+	}
+	// split is partition 12 installed as the two one-bit shards of a valid split scheme
+	split0, split1 := fxPDR(12, 3, 1, 70, 2), fxPDR(12, 3, 1, 72, 2)
+	split0.ShardID, split1.ShardID = s0, s1
+	withSplit := func(in FoldInput) FoldInput {
+		inst := map[ShardKey]*types.PartitionDescriptionRecord{keyOf(split0): split0, keyOf(split1): split1}
+		for k, v := range in.Installed {
+			inst[k] = v
+		}
+		in.Installed = inst
+		return in
+	}
+	popsFor := func(id uint64, part uint32, n int) RegistryChange { // a two-validator addition with proofs of the first n keys
+		p := fxPDR(part, 3, 0, 20, 2)
+		keys := fxPDR(part, 3, 0, 20, 3).Validators // the configuration's two validators and a third key
+		var ps []evmassign.PoP
+		raw := mustCBOR(p)
+		for i := 0; i < n; i++ {
+			v := keys[i]
+			msg, err := ChangePoPMessage(fxRootNetwork, ValidatorRegistry, id, part, p.ShardID.Bytes(), raw, v.NodeID)
+			if err != nil {
+				panic(err)
+			}
+			sig, err := signerOf(genKey(120 + i)).SignBytes(msg)
+			if err != nil {
+				panic(err)
+			}
+			ps = append(ps, evmassign.PoP{NodeID: v.NodeID, Key: v.SigKey, Signature: sig})
+		}
+		return RegistryChange{ID: id, Kind: uint64(KindAddPartition), Payload: mustChange(KindAddPartition, raw, mustCBOR(ps))}
+	}
 	badUpdate := func(id uint64) RegistryChange {
 		return RegistryChange{ID: id, Kind: uint64(KindUpdatePartition), Payload: mustChange(KindUpdatePartition, uint64(7), agg.ShardID.Bytes(), pdrHash(agg), []byte{0x80})}
 	}
@@ -500,6 +546,57 @@ func genFold(b *vb) {
 		{"sp1 without vkey_path is invalid", nil, []RegistryChange{addP(2, 9, 2, map[string]string{"proof_type": "sp1", "chain_id": "3"})}, []string{"Invalid"}},
 		{"protocol-valid sp1 is accepted whatever the local build supports", nil,
 			[]RegistryChange{addP(2, 9, 2, map[string]string{"proof_type": "sp1", "vkey_path": "/keys/sp1.vk", "chain_id": "3"})}, []string{"Accepted"}},
+		{"an update of a partition added earlier in the list is invalid (FD-29)", nil,
+			[]RegistryChange{add(2, 9, 3, 2), update(3, 9, fxPDR(9, 3, 0, 20, 2), nil)}, []string{"Accepted", "Invalid"}},
+		{"a replace of a partition added earlier in the list is invalid (FD-29)", nil,
+			[]RegistryChange{add(2, 9, 3, 2), func() RegistryChange {
+				succ := fxPDR(9, 3, 1, 30, 2)
+				return RegistryChange{ID: 3, Kind: uint64(KindReplaceAggregator), Payload: mustChange(KindReplaceAggregator, uint64(9), succ.ShardID.Bytes(),
+					pdrHash(fxPDR(9, 3, 0, 20, 2)), mustCBOR(succ), fxChangePoPs(3, succ, 30))}
+			}()}, []string{"Accepted", "Invalid"}},
+		{"an addition with a one-bit shard id is invalid, either bit (FD-30)", nil,
+			[]RegistryChange{addWith(2, 9, shard(s0)), addWith(3, 10, shard(s1))}, []string{"Invalid", "Invalid"}},
+		{"an addition with a three-bit shard id is invalid (FD-30)", nil, []RegistryChange{addWith(2, 9, shard(s000))}, []string{"Invalid"}},
+		{"an addition with the empty shard id is accepted (FD-30)", nil, []RegistryChange{addWith(2, 9, shard(types.ShardID{}))}, []string{"Accepted"}},
+		{"an update of one shard of a split partition keeps its shard id", withSplit,
+			[]RegistryChange{update(2, 12, split0, nil)}, []string{"Accepted"}},
+		{"an update of a split partition's shard naming the other shard's configuration conflicts", withSplit,
+			[]RegistryChange{update(2, 12, split1, func(p *types.PartitionDescriptionRecord) { p.ShardID = s0 })}, []string{"Conflict"}},
+		{"a rejected addition consumes no partition slot", func(in FoldInput) FoldInput { in.PartitionCeiling = 4; return in },
+			[]RegistryChange{addWith(2, 9, shard(s0)), addWith(3, 10, nil)}, []string{"Invalid", "Accepted"}},
+		{"a rejected addition installs nothing: an update of its partition is invalid", nil,
+			[]RegistryChange{addWith(2, 9, shard(s0)), update(3, 9, func() *types.PartitionDescriptionRecord { p := fxPDR(9, 3, 0, 20, 2); p.ShardID = s0; return p }(), nil)},
+			[]string{"Invalid", "Invalid"}},
+		{"an addition with fewer proofs than validators is BadPoP", nil, []RegistryChange{popsFor(2, 9, 1)}, []string{"BadPoP"}},
+		{"an addition with more proofs than validators is BadPoP", nil, []RegistryChange{popsFor(2, 9, 3)}, []string{"BadPoP"}},
+		{"an addition with the validators' proofs is accepted", nil, []RegistryChange{popsFor(2, 9, 2)}, []string{"Accepted"}},
+		{"an addition with no validators is invalid", nil, []RegistryChange{func() RegistryChange {
+			p := fxPDR(9, 3, 0, 20, 2)
+			p.Validators = []*types.NodeInfo{}
+			return RegistryChange{ID: 2, Kind: uint64(KindAddPartition), Payload: mustChange(KindAddPartition, mustCBOR(p), []byte{0x80})}
+		}()}, []string{"Invalid"}},
+		{"an addition with a signing key shared by two validators is invalid", nil,
+			[]RegistryChange{addWith(2, 9, func(p *types.PartitionDescriptionRecord) { p.Validators[1].SigKey = p.Validators[0].SigKey })}, []string{"Invalid"}},
+		{"an addition with a validator of stake 2 is invalid", nil,
+			[]RegistryChange{addWith(2, 9, func(p *types.PartitionDescriptionRecord) { p.Validators[0].Stake = 2 })}, []string{"Invalid"}},
+		{"T2 at 799 ms is invalid, at 800 ms accepted", nil, []RegistryChange{
+			addWith(2, 9, func(p *types.PartitionDescriptionRecord) { p.T2Timeout = 799 * time.Millisecond }),
+			addWith(3, 10, func(p *types.PartitionDescriptionRecord) { p.T2Timeout = 800 * time.Millisecond })}, []string{"Invalid", "Accepted"}},
+		{"unit id length 56 and 520 are invalid, 64 and 512 accepted", nil, []RegistryChange{
+			addWith(2, 9, func(p *types.PartitionDescriptionRecord) { p.UnitIDLen = 56 }),
+			addWith(3, 10, func(p *types.PartitionDescriptionRecord) { p.UnitIDLen = 64 }),
+			addWith(4, 11, func(p *types.PartitionDescriptionRecord) { p.UnitIDLen = 512 }),
+			addWith(5, 12, func(p *types.PartitionDescriptionRecord) { p.UnitIDLen = 520 })}, []string{"Invalid", "Accepted", "Accepted", "Invalid"}},
+		{"type id length 0 and 32 are accepted, 36 and 40 invalid", nil, []RegistryChange{
+			addWith(2, 9, func(p *types.PartitionDescriptionRecord) { p.TypeIDLen = 0 }),
+			addWith(3, 10, func(p *types.PartitionDescriptionRecord) { p.TypeIDLen = 32 }),
+			addWith(4, 11, func(p *types.PartitionDescriptionRecord) { p.TypeIDLen = 36 }),
+			addWith(5, 12, func(p *types.PartitionDescriptionRecord) { p.TypeIDLen = 40 })}, []string{"Accepted", "Accepted", "Invalid", "Invalid"}},
+		{"version 2 does not decode (Malformed); type 0, another network and epoch 1 are invalid", nil, []RegistryChange{
+			addWith(2, 9, func(p *types.PartitionDescriptionRecord) { p.Version = 2 }),
+			addWith(3, 10, func(p *types.PartitionDescriptionRecord) { p.PartitionTypeID = 0 }),
+			addWith(4, 11, func(p *types.PartitionDescriptionRecord) { p.NetworkID++ }),
+			addWith(5, 12, func(p *types.PartitionDescriptionRecord) { p.Epoch = 1 })}, []string{"Malformed", "Invalid", "Invalid", "Invalid"}},
 		{"update to an unknown proof type is invalid and leaves the shard installed", nil,
 			[]RegistryChange{update(2, 7, agg, func(p *types.PartitionDescriptionRecord) {
 				p.PartitionParams = map[string]string{"proof_type": "zk_magic"}
@@ -546,7 +643,12 @@ func foldJSON(in FoldInput, rc []RegistryChange) map[string]any {
 	for k := range in.Installed {
 		keys = append(keys, k)
 	}
-	sort.Slice(keys, func(i, j int) bool { return keys[i].Partition < keys[j].Partition })
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].Partition != keys[j].Partition {
+			return keys[i].Partition < keys[j].Partition
+		}
+		return keys[i].Shard < keys[j].Shard
+	})
 	var inst []any
 	for _, k := range keys {
 		inst = append(inst, map[string]any{"partition": k.Partition, "shard": Hexb([]byte(k.Shard)), "pdr": Hexb(mustCBOR(in.Installed[k])), "pdrHash": Hexw(pdrHash(in.Installed[k]))})

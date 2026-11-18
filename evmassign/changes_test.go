@@ -62,7 +62,7 @@ func TestValidateChangesRefusals(t *testing.T) {
 	a := newAggregatorFixture(t)
 	good := a.change(t)
 	t.Run("reserved and unknown kinds are unsupported", func(t *testing.T) {
-		for _, kind := range []uint64{ChangeAddPartition, ChangeSplitShard, 0, 99} {
+		for _, kind := range []uint64{ChangeAddPartition, ChangeUpdatePartition, 0, 99} {
 			_, err := ValidateChanges([]Change{{Kind: kind, Payload: good.Payload}}, nil, a.ctx, testControlPartition)
 			require.ErrorIs(t, err, ErrUnsupportedChange, "kind %d", kind)
 		}

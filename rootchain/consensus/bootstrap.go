@@ -495,7 +495,12 @@ func reconcileAssignmentHistory(db any, trust *trustbase.TrustBaseStore, orchest
 		if _, err := verifyHandoffBundle(trust, bundle, old, first.Partition, first.Shard, first.ShardConfHash); err != nil {
 			return fmt.Errorf("%w: epoch %d: %w", storage.ErrAssignmentHistory, epoch, err)
 		}
-		confs, provenance, _, err := storage.DeriveActivatedConfigs(bundle.Proof.Record, bundle.Body, bundle.Candidate, bundle.Proof.Control.FrozenParent)
+		// a VR handoff's root-side changes install against the configurations in effect at its ordering round
+		installed, err := orchestration.ShardConfigs(bundle.Proof.Record.OrderedRound)
+		if err != nil {
+			return fmt.Errorf("epoch %d: %w", epoch, err)
+		}
+		confs, provenance, err := storage.DeriveActivatedConfigsAt(bundle.Proof.Record, bundle.Body.Encode(), bundle.Candidate, installed)
 		if err != nil {
 			return fmt.Errorf("epoch %d: %w", epoch, err)
 		}

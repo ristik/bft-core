@@ -1,10 +1,8 @@
 # The bridge on the testnet package
 
-**Native bridge v2 (NB2, #1096) is the bridge the lanes deploy and test** (NB2-09, #1105): `nb2/`, below. Spec:
-`docs/design/native-bridge-v2.md`. The protocol 6/7 files further down (TN-B #429/#438: `deploy_bridge.py`'s BridgeVault, the lock-proof
-endpoint, the tester, `rehearse_bridge.py`'s stages, `bridge_pos.py`, `bridge_load.py`) are no longer run by any lane; NB2-10 (#1106) removes
-them. The lock-proof service is not part of the v2 package: a v2 wallet fetches every piece of evidence from the ordinary node RPC behind the
-public gateway (spec section 12.7).
+**Native bridge v2 (NB2, #1096) is the bridge of the testnet package** (NB2-09, #1105): `nb2/`, below. Spec:
+`docs/design/native-bridge-v2.md`. The protocol 6/7 bridge was removed (NB2-10, #1106, #1139; "Shared files" below). There is no lock-proof
+service: a v2 wallet fetches every piece of evidence from the ordinary node RPC behind the public gateway (spec section 12.7).
 
 ## Native bridge v2 (`nb2/`)
 
@@ -47,7 +45,7 @@ keys while a run lasts (`rehearse_nb2.py` deletes it at the end unless `--keep-k
 | `limits` | `maxEncodedTxBytes` (L_max) 512 KiB, the wallets' limit; the path's own limits: each pool's `--txpool.max-tx-input-bytes` (4 MiB) and `--txpool.max-tx-gas` (the ordinary capacity), the gateway's largest carried transaction; `userGasLimit` and the block gas limit, the gateway's bodies, log window and answer cap, retention, how transactions and blocks travel | `release_nb2.py` `L_MAX`; `compose.yaml` (the B1 profile's ureth flags, `ubft engine-api b1-profile`), `network/b1-profile.json` (`ordinaryCapacity`, `maxGas`), `gateway.py`. The manifest refuses a validator that is not a full proof source, a pool below L_max or without the profile's gas cap, or a gateway bound below 2 L_max + 64 KiB |
 | `envelope` | the operating envelope: per split depth, the largest transfer history whose return passes the pre-burn preflight at `returnReserveSegments` (the burn counted at the decoder bounds, about 4.5M gas), the historical proofs that fit beside it by bytes and by gas, and for the reference part the return delay at 1, 10 and 100 payments a second | `driver.ts envelope`: the plug-in's measured gas model (`MeasuredGasModel`) over the pins |
 
-The pools admit more than L_max (4 MiB, set by the B1 profile for the protocol 6/7 envelope), so L_max binds in the wallet's preflight, not in a
+The pools admit more than L_max (4 MiB, the B1 profile's explicit `--txpool.max-tx-input-bytes`, #1124), so L_max binds in the wallet's preflight, not in a
 pool. Gas binds before bytes on this deployment: at `userGasLimit` 60M the largest admitted history is about 280 transfers (about 290 KB of evidence),
 well below L_max. The `boundary` stage locates that bound on live tokens within two transfers and executes every token it builds as the preflight
 judged it (fresh tokens' gas varies by about one transfer's step between builds, so an exact adjacent pair is not observable live).
@@ -73,66 +71,17 @@ expectations and outputs are in the script's docstring; the outputs (`out/*.json
 | `walkthrough` | the wallet guide's walk-through with the reference command-line wallet (native-bridge-plugins `wallet/nb2-wallet.ts`) in the tools image, its key `NB2_KEY_WALK` from the driver keys: `init` (the installation check), `address`, `deposit coin 0.1`, `mint coin`, `split coin keep=0.06 back=0.04`, `status`, `plan-return back`, `burn back`, `redeem back` twice (the second answers paid with the same transaction, one send), `status`, `tokens` (only the unspent part); the transcript is `nb2/walkthrough.txt`. Whether `redeem` waited out the seal registry's lag (#1125) is recorded (`nb2/walkthrough-lag.json`; the driver's redeems record it as `registryLagSeconds`) |
 | `custody` | from the vault's events: each deposit number once, each redemption paid once, Q = deposits − payouts = `state().outstanding`, balance ≥ Q, segments sealed once each in order, and Go reads the whole segment history |
 | `pos-deposit`, `pos-return` | PoS lane: a deposit, mint and transfer in epoch 1; after the epoch change a transfer, a split, the burn, the three verdicts under the wallet's extended trust history, and the redeem |
+| `pos-sdk-clients` | PoS lane, after the second handoff (`--ubft`): the public JS, Rust and Java SDKs (cold, warm, restart; typed negatives with controls) against the roots' served trust-base history (`sdk_clients.py`) |
 
-## Protocol 6/7 (not run by the lanes; removed by NB2-10, #1106)
-
-### Files
+## Shared files
 
 | file | what it does |
 |---|---|
 | `pins.json` | the bridge release's inputs: contracts and native-bridge-plugins commits, plus the Node, Go and Foundry images or releases by digest or sha256 |
-| `Dockerfile.tools`, `build-bridge-image.py` | `tnops-bridge:<bft12>-<id12>` (an immutable tag per pin and image, #1092; every consumer runs the image by the ID in `artifacts/bridge-images.json`, and `:verified` is only a human alias): forge/cast, the built contracts, the plug-in driver, and dnb-tool built from the node images' bft pin (`--bft-source`, deploy/testnet/pins.json; `overlay.py` refuses an image recorded for another pin, #1075). The build refuses a source that is not at its pin or not clean, and records the image ID in `../artifacts/bridge-images.json`. |
-| `deploy_bridge.py` | an operator action on a running generation: the deployment document (`dnb-tool deployment`), then `BridgeDeploy.s.sol` signed with the generation's faucet keystore. The script refuses a vault whose genesis identities differ from the chain's. It also reads the vault's CFG and writes the trust bundle, the PDR, the driver configuration and the release manifest. Everything goes under `GENERATION/bridge/`. |
-| `release.py` | the bridge release manifest, `GENERATION/bridge/public/bridge-release.json` (below) |
-| `overlay.py` | `GENERATION/compose.bridge.yaml`, the Compose overlay with the bridge's services |
-| `RECOVERY.md` | the operator's bridge recovery runbook: roles, what depends on what, the checks after any procedure, and each failure's procedure |
-| `rehearse_bridge.py` | the bridge stages of the runner rehearsal (`.github/workflows/testnet-bridge.yml`) |
-| `bridge_load.py` | sustained bridge load for the host's measured envelope: parallel testers looping the round trip, sampling this generation's containers and disk (its docstring) |
+| `Dockerfile.tools`, `build-bridge-image.py` | `tnops-bridge:<bft12>-<id12>` (an immutable tag per pin and image, #1092; every consumer runs the image by the ID in `artifacts/bridge-images.json`, and `:verified` is only a human alias): forge/cast, the built contracts, the plug-in checkout with the wallet, and dnb-tool built from the node images' bft pin (`--bft-source`, deploy/testnet/pins.json; `deploy_bridge.image` refuses an image recorded for another pin, #1075). The build refuses a source that is not at its pin or not clean, and records the image ID in `../artifacts/bridge-images.json`. |
+| `deploy_bridge.py` | the tools image and how a generation runs it (`image`, `record_image`, `validators_network`, `tools`), shared by `nb2/deploy_nb2.py`, `nb2/release_nb2.py` and `sdk_clients.py`. It deploys nothing itself |
+| `sdk_clients.py` | the PoS lane's `pos-sdk-clients` stage of `nb2/rehearse_nb2.py`: the public JS, Rust and Java SDKs' trust-base sessions against the roots' served history |
 
-### Operator steps
-
-```
-python3 deploy/testnet/bridge/build-bridge-image.py --bft-source <bft at deploy/testnet/pins.json> --contracts-source <contracts at pin> --nbp-source <native-bridge-plugins at pin>
-# generation up as in ../README.md, then:
-sudo python3 deploy/testnet/bridge/deploy_bridge.py /srv/<generation> --agg-conf <aggregator shard conf(s)> --agg-url <aggregator URL(s)>
-sudo python3 deploy/testnet/bridge/overlay.py /srv/<generation>
-cd /srv/<generation> && sudo docker compose -f compose.yaml -f compose.bridge.yaml up -d lockproof
-```
-
-### The lock-proof endpoint
-
-A tester who locks on the EVM needs the lock's proof to mint. `dnb-tool lockproof-serve` builds that proof from the block's certificate in one validator's
-archive and from that validator's `eth_getProof`. It serves the same bytes as `dnb-tool lockproof`.
-
-```
-GET /v1/lockproof?block=0x<block hash>&nonce=<lock nonce>   200 application/cbor | 400 malformed | 404 not (yet) available | 429 limited or busy | 502
-GET /healthz
-```
-
-- **Stateless and read-only.** The archive is mounted read-only, and the only upstream call is one `eth_getProof`. A lookup costs the same whatever
-  the archive's size: a record's directory is named by its Context and block hash, so the endpoint keeps only the archive's few Contexts and an 8-byte key
-  per directory it has read. Those are a locator and never evidence. It learns new Contexts (a new epoch) by reading only directories it has not seen,
-  at most once per 10 s and shared by concurrent requests. The one full read happens at start. Replacing the endpoint means starting it again on the same
-  archive or on another validator's (`overlay.py --archive-of N`). The rehearsal checks that the replacement serves byte-identical proofs.
-- **Rate limited.** Each client (an IPv6 client is its /64) gets 2 requests per second, with 20 per second in total, spent only by admitted requests, and 4 builds at a time. The host's nginx publishes it like the RPC gateway: 127.0.0.1:8090 inside,
-  and the client named by `X-Forwarded-For` only when the request comes from the trusted proxy 172.30.89.1.
-- **Fetch soon after locking.** The proof needs `eth_getProof` at the lock's block, and ureth serves that only within its proof window, which is
-  `--rpc.eth-proof-window 64` blocks in `generate.py`. Past the window the endpoint answers 404. A fetched proof verifies forever (any-age), so the tester flow is:
-  lock, fetch the proof, keep it.
-- No prover and no service state, per owner §36 and the orchestrator's 2026-10-22 decision.
-
-### The bridge tester
-
-The protocol 7 tester (its CLI and its page) is removed: the native bridge v2 reference wallet replaces it (`nb2/`, above). `deploy_bridge.py`
-still writes `GENERATION/bridge/public/`, the one directory to publish for testers. It holds `tester-config.json` and the four public
-files that config names: the trust-base bundle, its genesis entry id, the EVM shard's PDR and the deployment document. Publish nothing else from
-`GENERATION/bridge`: it also holds the driver's key (`driver.env`) and the rehearsal's wallets. The config names the endpoints a tester reaches. Set them with
-`--tester-eth-url`, `--tester-redeem-eth-url`, `--tester-agg-url` and `--tester-lockproof-url`. The defaults are the package's public gateway as the
-internal network names it (`http://rpc:8545` and its `/aggregator` route; no `redeemEthUrl`, since the gateway takes redemptions) and the lock-proof endpoint's
-internal name; on a host, pass their public names. A host nginx `location /bridge/ { alias /srv/<generation>/bridge/public/; }` on the faucet's or the RPC's hostname serves it.
-
-The public routes (orchestrator decision 2026-10-24): the gateway serves the aggregator on `POST /aggregator` (the state-transition SDK's JSON-RPC methods
-only, 64 KiB bodies, its own limit of 10 requests a second per address and 50 overall, no authentication) and its trust-base pages on
-`GET /api/v1/trustbases`, and takes redemptions as ordinary `eth_sendRawTransaction` bodies. The host nginx routes the three paths (`../nginx.conf.example`).
-Still needed before external testers run the whole round trip on a host: the lock-proof endpoint's public name (a host nginx location in front of
-`127.0.0.1:8090`), and the host's DNS and TLS.
+The protocol 6/7 bridge (TN-B #429/#438: BridgeVault and TokenVerifier, the lock-proof endpoint and its Compose overlay, the bridge tester, its
+release manifest, recovery runbook, rehearsal stages, PoS stages and load driver) was removed by NB2-10 (#1106, #1139). A generation that still
+runs it (`compose.bridge.yaml`) is retired with its pins; it is not migrated.
