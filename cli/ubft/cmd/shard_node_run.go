@@ -369,6 +369,8 @@ type shardNodeRunFlags struct {
 	RPCServerAddress string // exposes /api/v1/metrics and /api/v1/health when set
 	// OperatorAllowedSources lists the addresses and CIDR prefixes whose requests the operator endpoints answer (default loopback only)
 	OperatorAllowedSources string
+	// OperatorAllowedHosts are the host names, besides IP literals and localhost, the operator endpoints accept in a request's Host header
+	OperatorAllowedHosts string
 
 	shardNodeSigningFlags
 }
@@ -499,6 +501,7 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 	cmd.Flags().StringVar(&flags.RPCServerAddress, "rpc-server-address", "",
 		`address for the metrics/health HTTP server, in the form "host:port". Not started if empty.`)
 	cmd.Flags().StringVar(&flags.OperatorAllowedSources, "operator-allowed-sources", defaultOperatorSources, operatorSourcesUsage)
+	cmd.Flags().StringVar(&flags.OperatorAllowedHosts, "operator-allowed-hosts", "", operatorHostsUsage)
 	flags.addSigningAuthorityFlags(cmd)
 
 	return cmd
@@ -510,6 +513,9 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		operatorLog = operatorLogger(flags.observe)
 	}
 	if err := configureOperatorSources(operatorLog, flags.OperatorAllowedSources); err != nil {
+		return err
+	}
+	if err := configureOperatorHosts(flags.OperatorAllowedHosts); err != nil {
 		return err
 	}
 	if flags.baseFlags != nil { // (a unit test drives this function with none)

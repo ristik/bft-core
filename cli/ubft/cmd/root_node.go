@@ -103,6 +103,8 @@ type (
 		RPCServerAddress    string // address on which http server is exposed with metrics endpoint
 		// OperatorAllowedSources lists the addresses and CIDR prefixes whose requests the operator endpoints answer (default loopback only)
 		OperatorAllowedSources string
+		// OperatorAllowedHosts are the host names, besides IP literals and localhost, the operator endpoints accept in a request's Host header
+		OperatorAllowedHosts string
 	}
 )
 
@@ -157,6 +159,7 @@ func rootNodeRunCmd(baseFlags *baseFlags) *cobra.Command {
 		`Specifies the TCP address for the RPC server to listen on, in the form "host:port". RPC server isn't initialised if address is empty.`)
 
 	cmd.Flags().StringVar(&flags.OperatorAllowedSources, "operator-allowed-sources", defaultOperatorSources, operatorSourcesUsage)
+	cmd.Flags().StringVar(&flags.OperatorAllowedHosts, "operator-allowed-hosts", "", operatorHostsUsage)
 
 	cmd.Flags().StringVar(&flags.RootDBFile, "root-db", "",
 		fmt.Sprintf("path to the root database (default: %s)", filepath.Join("$UBFT_HOME", rootDBFileName)))
@@ -235,6 +238,9 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		operatorLog = operatorLogger(flags.observe)
 	}
 	if err := configureOperatorSources(operatorLog, flags.OperatorAllowedSources); err != nil {
+		return err
+	}
+	if err := configureOperatorHosts(flags.OperatorAllowedHosts); err != nil {
 		return err
 	}
 	if flags.baseFlags != nil {

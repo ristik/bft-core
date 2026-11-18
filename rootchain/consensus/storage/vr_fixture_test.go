@@ -87,6 +87,7 @@ type vxFixture struct {
 	// extra VR and SealRegistry words, and a holder account, for the retirement fixture
 	vrExtra, sealExtra map[[32]byte][32]byte
 	holder             *evmstatetest.Contract
+	zeroGenesisPred    bool
 
 	// extraChanges are bound after the CommitteeLimits change; extraShards are non-EVM shards installed and acknowledged next to the EVM
 	// shard (the live partition configuration tests, VT-06d/e).
@@ -378,7 +379,11 @@ func (f *vxFixture) genesis() *storage.ExecutedBlock {
 		PreviousHash: bytes.Repeat([]byte{0x33}, 32), SummaryValue: []byte{}, Timestamp: 900}
 	vr, err := vradmit.GenesisRootState(1, 4).Encode()
 	require.NoError(t, err)
-	ctl := &evmroot.ControlState{Network: vxNetwork, Epoch: 1, PredecessorBodyID: f.body[:], Phase: "idle", Pos: rootrecords.NewState(1, 1).Bytes(), VR: vr}
+	pred := f.body[:]
+	if f.zeroGenesisPred {
+		pred = make([]byte, 32) // the genesis epoch's control state: its predecessor is the authority's V1 anchor, not carried here
+	}
+	ctl := &evmroot.ControlState{Network: vxNetwork, Epoch: 1, PredecessorBodyID: pred, Phase: "idle", Pos: rootrecords.NewState(1, 1).Bytes(), VR: vr}
 	state := storage.ShardStates{States: map[types.PartitionShardID]*storage.ShardInfo{vxShard: si}, Changed: storage.ShardSet{}, Control: ctl}
 	for _, p := range f.extraShards {
 		x, err := storage.NewShardInfo(p, crypto.SHA256)

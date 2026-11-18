@@ -562,7 +562,7 @@ func VerifyChain(s *Supersession, c Chain) error {
 // Hash is the shard configuration hash the root certifies afterwards. It is
 // the one derivation shared by the root and by shard nodes following handoffs.
 func ActivatedFromPreimage(preimage []byte, activation uint64) (Candidate, *types.PartitionDescriptionRecord, error) {
-	c, err := DecodeCandidate(preimage)
+	c, err := DecodeCommittedCandidate(preimage)
 	if err != nil {
 		return c, nil, err
 	}

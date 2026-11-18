@@ -36,6 +36,11 @@ type RootState struct {
 	// StagedSupport are the staged primary's own readiness commitments (by J's exact bindings), which enter the support table at its
 	// primary Boundary (MaterializeJ); a recovered Boundary drops them.
 	StagedSupport SupportTable
+	// AttemptOpenRound and AttemptOpenUCTime are the round and committed UC time of the block whose end opened the stored attempt identity
+	// (the Open step, design section 5.5.2): the intent's attemptOpenRound, of which its anchor is max(source.certRootRound,
+	// attemptOpenRound), and openTime(0) when the anchor is that block (VT-05b). Zero for the genesis attempt, which no block opened.
+	AttemptOpenRound  uint64
+	AttemptOpenUCTime uint64
 }
 
 type rootStateWire struct {
@@ -51,6 +56,8 @@ type rootStateWire struct {
 	StagedResult  hex.Bytes
 	StagedBitmap  uint64
 	StagedSupport hex.Bytes
+	AttemptOpen   uint64
+	AttemptOpenUC uint64
 }
 
 const rootStateDomain = "UNICITY_VR_ROOT_STATE"
@@ -82,7 +89,7 @@ func (s RootState) Encode() ([]byte, error) {
 	}
 	return types.Cbor.Marshal(rootStateWire{Domain: rootStateDomain, Version: 1, Backoff: b, OpenUCTime: s.OpenUCTime, Support: t, StagedSupport: st,
 		Acknowledged: s.Acknowledged[:], PrepareUCTime: s.PrepareUCTime, StagedBody: s.StagedBody[:], StagedResult: s.StagedResult[:],
-		StagedBitmap: uint64(s.StagedBitmap)})
+		StagedBitmap: uint64(s.StagedBitmap), AttemptOpen: s.AttemptOpenRound, AttemptOpenUC: s.AttemptOpenUCTime})
 }
 
 // Digest is SHA-256 of Encode.
@@ -124,7 +131,8 @@ func DecodeRootState(raw []byte) (RootState, error) {
 		return RootState{}, fmt.Errorf("%w: field widths", ErrRootState)
 	}
 	s := RootState{Backoff: bw.State, OpenUCTime: w.OpenUCTime, Support: t, Acknowledged: vrschema.Word(w.Acknowledged), PrepareUCTime: w.PrepareUCTime,
-		StagedBody: [32]byte(w.StagedBody), StagedResult: vrschema.Word(w.StagedResult), StagedBitmap: uint16(w.StagedBitmap), StagedSupport: staged}
+		StagedBody: [32]byte(w.StagedBody), StagedResult: vrschema.Word(w.StagedResult), StagedBitmap: uint16(w.StagedBitmap), StagedSupport: staged,
+		AttemptOpenRound: w.AttemptOpen, AttemptOpenUCTime: w.AttemptOpenUC}
 	again, err := s.Encode()
 	if err != nil || !bytes.Equal(again, raw) {
 		return RootState{}, fmt.Errorf("%w: not canonical", ErrRootState)
@@ -210,6 +218,19 @@ func (s RootState) EndBlock(epoch, round uint64, after vrschema.ControlState, co
 	}
 	s.Backoff = b
 	return s, nil
+}
+
+// EndBlockAt is EndBlock for the block at round with committed UC time ucTime: an Open step that changes the attempt identity records
+// that block as the attempt's opening.
+func (s RootState) EndBlockAt(epoch, round, ucTime uint64, after vrschema.ControlState, committee uint32) (RootState, error) {
+	n, err := s.EndBlock(epoch, round, after, committee)
+	if err != nil {
+		return n, err
+	}
+	if n.Backoff.Epoch != s.Backoff.Epoch || n.Backoff.Attempt != s.Backoff.Attempt {
+		n.AttemptOpenRound, n.AttemptOpenUCTime = round, ucTime
+	}
+	return n, nil
 }
 
 // ResidenceWaitMillis is the live-vote residence wait of view v at level L: ceil(T(L, v) * 1000 * (1 + rho)) ms; never is false.

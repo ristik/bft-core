@@ -105,6 +105,9 @@ type Options struct {
 	// the fixture's extra shard configurations, so a change can name them. The link then carries no preimage (the history's readiness
 	// check decodes the evmassign candidate only); the bundle carries the v6 bytes.
 	Registry func(extra []*types.PartitionDescriptionRecord) []vrschema.RegistryChange
+	// V6 commits the coupled primary as a validator-registry candidate v6 (vrschema), the bytes a VR chain's body binds: the same fields,
+	// a SourceRef and no registry changes. Its digest, not its v5 view's, is the one every reader must hash (VT-05b, #1159).
+	V6 bool
 }
 
 // ExtraShard is a shard besides the EVM shard. A zero T2Timeout takes the EVM shard's.
@@ -611,6 +614,18 @@ func (f *Fixture) assignment(t *testing.T, o Options, oldID []byte) [32]byte {
 			Supersedes: c.Supersedes, Bindings: c.Bindings, Identities: c.Identities, Authorization: c.Authorization, ReplacedAssignment: c.ReplacedAssignment,
 			SourceRef: result[:], RegistryChanges: o.Registry(f.ExtraConfs)}
 		f.Candidate, err = v6.Encode()
+		require.NoError(t, err)
+		return sha256.Sum256(f.Candidate)
+	}
+	if o.V6 {
+		ref := bytes.Repeat([]byte{0x6e}, 32)
+		if c.Authorization != nil && len(c.Authorization.ResultID) == 32 {
+			ref = bytes.Clone(c.Authorization.ResultID)
+		}
+		f.Candidate, err = vrschema.CandidateV6{Version: vrschema.CandidateV6Version, Kind: c.Kind, Network: c.Network, Predecessor: c.Predecessor,
+			Attempt: c.Attempt, RootMembers: c.RootMembers, OldShardEpoch: c.OldShardEpoch, OldActiveHash: c.OldActiveHash, Assignment: c.Assignment,
+			PoPs: c.PoPs, Supersedes: c.Supersedes, Bindings: c.Bindings, Identities: c.Identities, Authorization: c.Authorization,
+			ReplacedAssignment: c.ReplacedAssignment, SourceRef: ref}.Encode()
 		require.NoError(t, err)
 		return sha256.Sum256(f.Candidate)
 	}
