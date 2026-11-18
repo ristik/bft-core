@@ -6,7 +6,7 @@
 set -euo pipefail
 out=${1:?usage: build-ureth.sh OUT_DIR [WORK_DIR]}; work=${2:-${RUNNER_TEMP:-/tmp}/ureth-build}
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-pins=$here/lane-pins.json
+pins=$("$here/lane-product.sh" manifest)   # the product's dependency set (LANE_PRODUCT=pinned: the frozen product's own ureth, bft-core#1139)
 repo=$(jq -r .components.ureth.repository "$pins"); commit=$(jq -r .components.ureth.commit "$pins"); rust=$(jq -r .toolchains.rust "$pins")
 mapfile -t cargoargs < <(jq -r '.components.ureth.cargoArgs[]' "$pins")
 [[ $commit =~ ^[0-9a-f]{40}$ ]] || { echo "build-ureth: the pinned commit is not 40 hex: $commit" >&2; exit 2; }
@@ -31,6 +31,11 @@ printf '%s\n' "$commit" >"$out/commit.txt"
 printf 'cargo +%s %s --target-dir <work>/target\nCARGO_INCREMENTAL=0\nprofile.release from the workspace Cargo.toml at the pin (opt-level 3, thin LTO, strip symbols)\n' "$rust" "${cargoargs[*]}" >"$out/build-command.txt"
 sha256sum "$src/Cargo.lock" | cut -d' ' -f1 >"$out/cargo-lock.sha256"
 git -C "$src" status --short >"$out/git-status.txt"
+# every native precompile the manifest declares for this ureth (lane-product.sh compat pairs the product with it) is a precompile id of this source
+while read -r name; do
+  grep -rqF --include='*.rs' "PrecompileId::Custom(\"$name\"" "$src/crates" || { echo "build-ureth: the manifest declares $name, which ureth $commit does not define" >&2; exit 1; }
+done < <(jq -r '.components.ureth.nativePrecompiles // {} | keys[]' "$pins")
+jq -c '.components.ureth.nativePrecompiles // {}' "$pins" >"$out/native-precompiles.json"
 printf 'start %s\nend %s\nelapsed_s %d\n' "$t0" "$t1" $((SECONDS - s0)) >"$out/build-times.txt"
 printf 'repository %s\nrun_id %s\nrun_attempt %s\nworkflow_sha %s\nrunner_os %s\nrunner_arch %s\nimage %s\n' "${GITHUB_REPOSITORY:-local}" "${GITHUB_RUN_ID:-local}" "${GITHUB_RUN_ATTEMPT:-0}" "${GITHUB_SHA:-local}" "${RUNNER_OS:-$(uname -s)}" "${RUNNER_ARCH:-$(uname -m)}" "${ImageVersion:-unknown}" >"$out/run-identity.txt"
 "$out/unicity-reth" --version >"$out/version.txt" 2>&1 || true

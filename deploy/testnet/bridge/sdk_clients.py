@@ -12,7 +12,7 @@ in the validators network, and are compared with the roots' served history.
                      offered to a session holding the genesis only, nothing fetched), entry 2 with its signatures reduced below floor(2W/3)+1 of the genesis' weights, and a session
                      of another network id than the entries'; each is the SDK's typed error, recorded by name, and each has a control that accepts the unmodified input.
                    What this does and does not show: the SDKs verify the trust-base entry objects (the epoch chain). They are not bridge verifiers: the plug-in and contracts judge
-                   the lock/return envelope (bridge_pos.py). The three SDKs do not expose one bridge-verifier API and none is claimed.
+                   the deposit/return evidence (nb2/rehearse_nb2.py). The three SDKs do not expose one bridge-verifier API and none is claimed.
 
 The clients are built by `build_sdk_clients` (docker build, from the pinned commits); the stage builds an image that is missing.
 """
@@ -23,7 +23,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from rehearse import Failure   # noqa: E402  (rehearse_bridge.py puts the package directory on sys.path first)
+from rehearse import Failure   # noqa: E402  (nb2/rehearse_nb2.py puts the package directory on sys.path first)
 from deploy_bridge import validators_network   # noqa: E402
 
 CLIENTS = Path(__file__).resolve().parents[1] / 'sdk-clients'
@@ -38,7 +38,7 @@ RUN_TIMEOUT = 600
 
 
 class SdkClients:
-    """Mixed into BridgeRehearsal: self is the rehearsal (expect, say, gen, evidence, manifest, ubft, utb_history)."""
+    """Mixed into NB2Rehearsal (nb2/rehearse_nb2.py): self is the rehearsal (expect, say, gen, evidence, manifest, ubft, utb_history)."""
 
     def sdk_pins(self):
         return json.loads((CLIENTS / 'pins.json').read_text())
@@ -96,17 +96,14 @@ class SdkClients:
         utb = self.manifest.get('utb')
         self.expect(bool(self.manifest.get('pos')) and bool(utb), 'the generation is a PoS generation with the signed trust-base history (--pos --utb)')
         self.expect(bool(self.ubft), 'the pinned ubft verifies the roots\' served history offline (--ubft): the clients are compared with it')
-        public = self.gen / 'bridge' / 'public'
-        if not (public / 'tester-config.json').exists():   # the native bridge v2 lanes (NB2-09): the trust bundle is published under bridge/nb2/public
-            public = self.gen / 'bridge' / 'nb2' / 'public'
+        public = self.gen / 'bridge' / 'nb2' / 'public'   # the native bridge v2 deploy (NB2-09) publishes the trust bundle and its pin here
         self.sdk_pin = utb['genesis_id'].lower().removeprefix('0x')
         shipped = (public / 'trust-base.genesis.entryid').read_text().strip().lower().removeprefix('0x')
         self.expect(shipped == self.sdk_pin, 'the operator\'s shipped genesis pin is the generation\'s UTB genesis EntryID', self.sdk_pin[:16])
         # the shipped genesis bundle holds the epoch-1 entry alone; its EntryID is the pin (the clients check it themselves, from the SDK's decoded entry)
         _, genesis_entries = utbcbor.history((public / 'trust-base.bundle.cbor').read_bytes())
         self.expect(len(genesis_entries) == 1 and utbcbor.entry_id(genesis_entries[0]).hex() == self.sdk_pin, 'the shipped trust-base bundle is the genesis entry alone, of the pinned EntryID')
-        self.sdk_agg_url = (json.loads((public / 'tester-config.json').read_text())['aggUrl'] if (public / 'tester-config.json').exists()
-                            else json.loads((public.parent / 'lane.json').read_text())['agg'])
+        self.sdk_agg_url = json.loads((public.parent / 'lane.json').read_text())['agg']
         out = self.evidence / 'pos-bridge' / 'sdk-clients'
         out.mkdir(parents=True, exist_ok=True)
         images = self.build_sdk_clients()

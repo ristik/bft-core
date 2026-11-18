@@ -103,6 +103,8 @@ jobs:
           case "$lane" in combined|overbound|abort|t6|ureth-targeted|all-live|x4-shadow|x4-rewards|x4-exit|nightly|build-only|pr|warm|none) ;; *) echo "bad lane $lane" >&2; exit 1 ;; esac
           case "$inject" in none|after-builds|in-lane) ;; *) echo "bad inject_failure $inject" >&2; exit 1 ;; esac
           case "$product" in checkout|pinned) ;; *) echo "bad product $product" >&2; exit 1 ;; esac
+          # each product runs with its own dependency set; both must agree with their ureth on the native precompiles, on every run (bft-core#1139)
+          scripts/ci/lane-product.sh compat all | tee -a "$GITHUB_STEP_SUMMARY"
           lanes='[]'; t6=false; targeted=false
           case "$lane" in
             combined|overbound|abort) lanes="[\"$lane\"]" ;;
@@ -114,6 +116,8 @@ jobs:
           esac
           case "$lane" in ureth-targeted|nightly|warm) targeted=true ;; esac
           case "$lane" in nightly|all-live) selftests=true ;; esac
+          # T6 and the targeted ureth tests build the commit under test and the components' ureth, never the frozen product's set
+          if [ "$product" = pinned ] && { [ "$t6" = true ] || [ "$targeted" = true ]; }; then echo "product=pinned runs the live lanes only (not t6 or ureth-targeted): lane $lane" >&2; exit 1; fi
           if [ "$lane" = pr ]; then
             if [ "$PR_DRAFT" = true ]; then
               note="draft pull request: live lanes are not run until it is ready for review"
@@ -149,6 +153,8 @@ jobs:
     if: ${{ needs.plan.outputs.need_ureth == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 240
+    env:
+      LANE_PRODUCT: ${{ needs.plan.outputs.product }}   # the dependency set every manifest reader takes (scripts/ci/lane-product.sh, bft-core#1139)
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -211,6 +217,8 @@ jobs:
     if: ${{ needs.plan.outputs.need_lane_builds == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    env:
+      LANE_PRODUCT: ${{ needs.plan.outputs.product }}   # the dependency set every manifest reader takes (scripts/ci/lane-product.sh, bft-core#1139)
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -266,6 +274,8 @@ jobs:
     if: ${{ needs.plan.outputs.need_lane_builds == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    env:
+      LANE_PRODUCT: ${{ needs.plan.outputs.product }}   # the dependency set every manifest reader takes (scripts/ci/lane-product.sh, bft-core#1139)
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -310,6 +320,8 @@ jobs:
     name: run-lane (${{ matrix.kind }})
     runs-on: ubuntu-24.04
     timeout-minutes: ${{ matrix.kind == 'x4shadow' && 170 || matrix.kind == 'x4rewards' && 90 || matrix.kind == 'x4exit' && 340 || matrix.kind == 'combined' && 90 || 60 }}
+    env:
+      LANE_PRODUCT: ${{ needs.plan.outputs.product }}   # the dependency set every manifest reader takes (scripts/ci/lane-product.sh, bft-core#1139)
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -374,6 +386,8 @@ jobs:
     if: ${{ needs.plan.outputs.t6 == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
+    env:
+      LANE_PRODUCT: ${{ needs.plan.outputs.product }}   # the dependency set every manifest reader takes (scripts/ci/lane-product.sh, bft-core#1139)
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -426,6 +440,8 @@ jobs:
     if: ${{ needs.plan.outputs.targeted == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 150
+    env:
+      LANE_PRODUCT: ${{ needs.plan.outputs.product }}   # the dependency set every manifest reader takes (scripts/ci/lane-product.sh, bft-core#1139)
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -495,13 +511,15 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.plan.outputs.sha }}
-      - name: Chain-free self-tests of the CI scripts (classifier, gate, pins, publisher)
+          fetch-depth: 0   # lane-product.sh selftest reads the pinned product's engineapi/profile.go from history
+      - name: Chain-free self-tests of the CI scripts (classifier, gate, pins, publisher, product selector)
         run: |
           set -euo pipefail
           for c in jq rsync zstd; do command -v "$c" >/dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq "$c"; }; done
           python3 scripts/ci/classify.py selftest
           scripts/ci/gate.sh selftest
           scripts/ci/check-pins.sh selftest
+          scripts/ci/lane-product.sh selftest
           scripts/ci/install-foundry-selftest.sh
           scripts/ci/install-foundry-selftest.sh
           scripts/ci/publish-selftest.sh

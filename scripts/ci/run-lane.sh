@@ -12,7 +12,7 @@ mkdir -p "$work" "$out"; work=$(cd "$work" && pwd); out=$(cd "$out" && pwd)
 source scripts/lib/portable.sh
 log() { printf '%s run-lane: %s\n' "$(date -u +%FT%TZ)" "$*" | tee -a "$out/run-lane.log"; }
 die() { log "HARNESS FAILURE: $*"; rc=1; finalize; exit 1; }
-pins=scripts/ci/lane-pins.json
+pins=$(scripts/ci/lane-product.sh manifest) || { echo "run-lane: no manifest for LANE_PRODUCT=${LANE_PRODUCT:-checkout}" >&2; exit 1; }
 inject=${CI_INJECT_FAILURE:-none}; deadline=${LANE_DEADLINE_MIN:-75}
 # CI_LANE_KIND: x4rewards (the shadow chain with a small reward allocation: the PoS campaign's reward steps, X4_REWARDS=1), x4shadow (P85_SHADOW=1 scripts/p85-lane.sh with the declared 90-minute campaign, scripts/shadow/campaign.json), combined (utb-lane.sh), overbound (P85_MODE=overbound scripts/p85-lane.sh) or abort (scripts/h6/abort-rehearsal-lane.sh); each from its own fresh genesis
 kind=${CI_LANE_KIND:-combined}
@@ -68,6 +68,9 @@ fi
 ( cd "$art/tools" && p_sha256 -c sha256.txt >/dev/null ) || die "the tools artifact does not match its sha256.txt"
 # the product the binaries were built from (build-tools.sh): the commit under test, or in a pinned run (product=pinned) exactly the bft-core pin of the manifest
 product=$(tr -d '[:space:]' <"$art/tools/product-commit.txt" 2>/dev/null) || die "the tools artifact has no product-commit.txt"
+# the dependency set this job read (LANE_PRODUCT) must be the product's: the frozen product never runs with the checkout's ureth, nor the reverse (bft-core#1139)
+if [ "$product" != "$head" ]; then [ "${LANE_PRODUCT:-checkout}" = pinned ] || die "the binaries are the pinned product $product, but this job read the checkout's dependency set (LANE_PRODUCT=${LANE_PRODUCT:-checkout})"
+elif [ "${LANE_PRODUCT:-checkout}" != checkout ]; then die "the binaries are the commit under test, but this job read the pinned product's dependency set"; fi
 if [ "$product" != "$head" ]; then
   scripts/ci/check-pins.sh component bft-core "$product" | tee -a "$out/run-lane.log" | grep -q '^ok' || die "the product commit $product is neither the commit under test nor the bft-core pin"
   export LANE_PRODUCT_COMMIT=$product; log "pinned product run: binaries built from bft-core $product, harness $head"

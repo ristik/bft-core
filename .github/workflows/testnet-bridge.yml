@@ -1,6 +1,6 @@
 name: testnet-bridge
 # The bridge on the container package: the package built and brought up as testnet-rehearsal does it, then the native bridge v2 stages
-# (deploy/testnet/bridge/nb2/rehearse_nb2.py, NB2-09 bft-core#1105; they replaced the protocol 6/7 stages of rehearse_bridge.py). Evidence of the PACKAGE only, never of the host. No third-party service is contacted (the faucet signer is not
+# (deploy/testnet/bridge/nb2/rehearse_nb2.py, NB2-09 bft-core#1105; they replaced the protocol 6/7 stages, removed by #1139). Evidence of the PACKAGE only, never of the host. No third-party service is contacted (the faucet signer is not
 # started). Long: it builds ureth from source. A workflow_dispatch only exists once this file is on the default branch, so it also runs on a push of a
 # tnb-rehearsal/** branch.
 on:
