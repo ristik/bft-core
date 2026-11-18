@@ -44,20 +44,44 @@ type RegistrationPolicy struct {
 // WithRegistrationPolicy enables SignRegistration under the policy.
 func WithRegistrationPolicy(p RegistrationPolicy) Option {
 	return func(a *Authority) error {
-		if len(p.Authorized) == 0 {
-			return fmt.Errorf("the registration policy authorizes nothing")
+		// An empty list is a valid start: the deployment is pinned and nothing is authorized yet (ReloadRegistrationAuthorizations).
+		auth, err := copyAuthorizations(p.Authorized)
+		if err != nil {
+			return err
 		}
-		cp := RegistrationPolicy{Deployment: p.Deployment}
-		for _, x := range p.Authorized {
-			if x.Domain != vrschema.RegisterDomainText && x.Domain != vrschema.BindingDomainText {
-				return fmt.Errorf("%w: policy entry domain %q", ErrRegistrationDomain, x.Domain)
-			}
-			x.RootKey = bytes.Clone(x.RootKey)
-			cp.Authorized = append(cp.Authorized, x)
-		}
-		a.registration = &cp
+		a.registration = &RegistrationPolicy{Deployment: p.Deployment, Authorized: auth}
 		return nil
 	}
+}
+
+func copyAuthorizations(in []RegistrationAuthorization) ([]RegistrationAuthorization, error) {
+	var out []RegistrationAuthorization
+	for _, x := range in {
+		if x.Domain != vrschema.RegisterDomainText && x.Domain != vrschema.BindingDomainText {
+			return nil, fmt.Errorf("%w: policy entry domain %q", ErrRegistrationDomain, x.Domain)
+		}
+		x.RootKey = bytes.Clone(x.RootKey)
+		out = append(out, x)
+	}
+	return out, nil
+}
+
+// ReloadRegistrationAuthorizations replaces the list of authorized registrations of a running authority (the operator's refresh: the
+// identity id is allocated by VR only at registration, and a later payee or root key is unknown at startup). It changes nothing else: the
+// deployment pin, the signing key and the signing record stay as they are, and an authority started without a policy refuses it. Operator
+// channel only.
+func (a *Authority) ReloadRegistrationAuthorizations(list []RegistrationAuthorization) error {
+	auth, err := copyAuthorizations(list)
+	if err != nil {
+		return err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.registration == nil {
+		return fmt.Errorf("%w: this authority was started without a registration policy (no deployment pin)", ErrRegistrationUnauthorized)
+	}
+	a.registration = &RegistrationPolicy{Deployment: a.registration.Deployment, Authorized: auth}
+	return nil
 }
 
 // RegistrationRequest asks for the possession signature this authority's key owes a registration (domain unicity.vr.register, ID 0) or a

@@ -546,6 +546,27 @@ func (s *Server) operatorOp(ctx context.Context, operation op, payload []byte) (
 		s.log.Info("signed a registration", slog.String("domain", wire.Domain), slog.Uint64("id", wire.ID), slog.Uint64("nonce", wire.Nonce),
 			slog.String("owner", fmt.Sprintf("%x", wire.Owner)), slog.String("rootNode", wire.RootNodeID))
 		return sig, nil
+	case opReloadRegistrationPolicy:
+		var wire registrationPolicyPayload
+		if err := types.Cbor.Unmarshal(payload, &wire); err != nil {
+			return nil, fmt.Errorf("%w: registration policy: %v", errMalformed, err)
+		}
+		var list []signingauthority.RegistrationAuthorization
+		for _, x := range wire.Authorized {
+			if len(x.Owner) != 20 || len(x.Payee) != 20 {
+				return nil, fmt.Errorf("%w: the owner and the payee are 20-byte addresses", errMalformed)
+			}
+			a := signingauthority.RegistrationAuthorization{Domain: x.Domain, ID: x.ID, RootNodeID: x.RootNodeID, RootKey: x.RootKey}
+			copy(a.Owner[:], x.Owner)
+			copy(a.Payee[:], x.Payee)
+			list = append(list, a)
+		}
+		if err := s.authority.ReloadRegistrationAuthorizations(list); err != nil {
+			s.log.Warn("refusing a registration policy reload", slog.String("err", err.Error()))
+			return nil, err
+		}
+		s.log.Info("registration policy reloaded", slog.Int("authorized", len(list)))
+		return nil, nil
 	case opCompleteEnrollment:
 		var conf types.PartitionDescriptionRecord
 		if err := types.Cbor.Unmarshal(payload, &conf); err != nil {

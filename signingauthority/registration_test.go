@@ -122,6 +122,37 @@ func TestRegistrationNeedsAPolicy(t *testing.T) {
 	f := newRegFixture(t, false)
 	_, err := f.a.SignRegistration(f.req)
 	require.ErrorIs(t, err, ErrRegistrationUnauthorized)
-	_, err = New(newFixture(t, 1).enroll, trustStub{}, WithRegistrationPolicy(RegistrationPolicy{}))
-	require.Error(t, err)
+	require.ErrorIs(t, f.a.ReloadRegistrationAuthorizations(nil), ErrRegistrationUnauthorized, "no pin to keep: no reload")
+}
+
+// The operator refreshes the authorizations of the running authority: a pin-only start signs nothing, a reload authorizes a registration,
+// a later one a rotation for the assigned id, and the key, the pin and the signing record are the same throughout.
+func TestRegistrationPolicyReloadKeepsKeyPinAndRecord(t *testing.T) {
+	f := newRegFixture(t, true)
+	reg, bind := f.policy.Authorized[0], f.policy.Authorized[1]
+	require.NoError(t, f.a.ReloadRegistrationAuthorizations(nil))
+	_, err := f.a.SignRegistration(f.req)
+	require.ErrorIs(t, err, ErrRegistrationUnauthorized)
+
+	before := f.a.Status()
+	require.NoError(t, f.a.ReloadRegistrationAuthorizations([]RegistrationAuthorization{reg}))
+	_, err = f.a.SignRegistration(f.req)
+	require.NoError(t, err)
+	rot := f.req
+	rot.Domain, rot.ID = vrschema.BindingDomainText, 7
+	_, err = f.a.SignRegistration(rot)
+	require.ErrorIs(t, err, ErrRegistrationUnauthorized, "no rotation is authorized yet")
+
+	require.NoError(t, f.a.ReloadRegistrationAuthorizations([]RegistrationAuthorization{reg, bind}))
+	sig, err := f.a.SignRegistration(rot)
+	require.NoError(t, err)
+	d := vrschema.RegistrationDigest(true, f.depl.Network, f.depl.ChainID, f.depl.Registry, rot.Owner, 7, rot.Registration)
+	got, err := ethcrypto.SigToPub(d[:], append(append([]byte(nil), sig[:64]...), sig[64]-27))
+	require.NoError(t, err)
+	require.Equal(t, f.pub, ethcrypto.CompressPubkey(got), "the same key, under the pin from startup")
+	pub, err := f.a.SigningPublicKey()
+	require.NoError(t, err)
+	require.Equal(t, f.pub, pub)
+	require.Equal(t, before, f.a.Status(), "a possession-style signature touches no signing record")
+	require.ErrorIs(t, f.a.ReloadRegistrationAuthorizations([]RegistrationAuthorization{{Domain: "x"}}), ErrRegistrationDomain)
 }

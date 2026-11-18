@@ -64,3 +64,25 @@ func TestRegistrationSigningIsOperatorOnly(t *testing.T) {
 	require.Empty(t, answer.Payload)
 	_ = req
 }
+
+// The operator reloads the authorizations over its channel: afterwards a registration the start did not authorize is signed, with the same
+// key; the client channel does not serve the reload.
+func TestTheOperatorReloadsTheRegistrationPolicyOverTheWire(t *testing.T) {
+	f, req, _ := registrationFixture(t)
+	ctx := context.Background()
+	require.NoError(t, f.operator.ReloadRegistrationPolicy(ctx, nil))
+	_, err := f.operator.SignRegistration(ctx, req)
+	require.ErrorIs(t, err, signingauthority.ErrRegistrationUnauthorized)
+	entry := signingauthority.RegistrationAuthorization{Domain: vrschema.RegisterDomainText, Owner: req.Owner, RootNodeID: req.Registration.RootNodeID,
+		RootKey: req.Registration.RootKey, Payee: req.Registration.Payee}
+	require.NoError(t, f.operator.ReloadRegistrationPolicy(ctx, []signingauthority.RegistrationAuthorization{entry}))
+	_, err = f.operator.SignRegistration(ctx, req)
+	require.NoError(t, err)
+	_, key, err := f.operator.Enrollment(ctx)
+	require.NoError(t, err)
+	require.Equal(t, req.Registration.EVMKey, key)
+	client := f.admit(t)
+	answer, err := rawCall(t, f.clientDir, wireRequest{Version: protocolVersion, Op: uint64(opReloadRegistrationPolicy), Credential: client.ex.credential})
+	require.NoError(t, err)
+	require.Equal(t, errWrongEndpoint.Error(), answer.Refusal)
+}
