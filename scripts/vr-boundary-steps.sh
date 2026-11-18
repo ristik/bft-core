@@ -49,6 +49,7 @@ vrb_root_epoch2() { local r n=0; for r in $(vrb_root_rpcs); do curl -sf -X POST 
 # before the Prepare: it resumes from its persisted state, signs nothing again, and the handoff still completes.
 vrb_restart_member() {
   local node=1 before after boot
+  declare -F m2_start_root >/dev/null || source scripts/lib/m2-handoff-lib.sh || { vrb_log "FAIL: the root restart library"; return 1; }
   before=$(grep -c 'VR handoff member: readiness' "test-nodes/root$node/debug.log")
   vrb_log "restarting root$node mid-protocol"
   boot=$(m2_root_addr 2)
