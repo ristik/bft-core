@@ -32,7 +32,7 @@ func TestAuthenticatedSupersessionInstallsEveryMissedEpoch(t *testing.T) {
 	c := certifiedchain.New(t, 5, 0)
 	{
 		t.Run("permanent", func(t *testing.T) {
-			p := b1state.Profile{Network: 5, RootGenesisID: first.Genesis, ExecutionChainID: 1337, RuntimeHash: [32]byte(common.HexToHash(b1registry.CodeHashHex)), CompilerHash: b1registry.CompilerHash(), MaxEpochsPerUpdate: b1state.MinEpochsPerUpdate, DeltaEV: 1, DeltaHold: 2, RestGas: b1registry.MinRestGas(b1state.MinEpochsPerUpdate), CompanionBytes: 1 << 20, OtherCompanionBytes: 65536, OrdinaryCapacity: 7000000, GenesisUCTime: 1000}
+			p := b1state.Profile{ExecutionRevision: b1state.CurrentExecutionRevision, Network: 5, RootGenesisID: first.Genesis, ExecutionChainID: 1337, RuntimeHash: [32]byte(common.HexToHash(b1registry.CodeHashHex)), CompilerHash: b1registry.CompilerHash(), MaxEpochsPerUpdate: b1state.MinEpochsPerUpdate, DeltaEV: 1, DeltaHold: 2, RestGas: b1registry.MinRestGas(b1state.MinEpochsPerUpdate), CompanionBytes: 1 << 20, OtherCompanionBytes: 65536, OrdinaryCapacity: 7000000, GenesisUCTime: 1000}
 			p.SystemGas, _ = p.RequiredSystemGas()
 			p.MaxGas = p.SystemGas + p.OrdinaryCapacity
 			g, err := registrygenesis.GenerateB1(certifiedchain.Config(5), p, rt.History(), registrygenesis.EVMParams{GasLimit: p.MaxGas})

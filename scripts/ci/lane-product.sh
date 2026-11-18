@@ -40,10 +40,15 @@ manifest() {
   printf '%s\n' "$out"
 }
 
-# the unicityNativePrecompiles map of a profile.go on stdin, as sorted "name address" lines
+# the native set of a product's source on stdin, as sorted "name address" lines. Two forms: the unicityNativePrecompiles map of a pre-#1199
+# engineapi/profile.go (the frozen product), and the revision table of b1state/execrev.go (ExecutionRevisionNatives: {"name", [20]byte{18: 0x01, 19: 0x00}},
+# from #1199 on, where engineapi derives its check from that one table)
 profile_set() {
   awk '/^var unicityNativePrecompiles = map\[string\]string\{/ {on=1; next} on && /^\}/ {exit} on && match($0, /"[^"]+":[ \t]*"0x[0-9a-fA-F]+"/) {
-         s = substr($0, RSTART, RLENGTH); gsub(/[" \t]/, "", s); split(s, kv, ":"); print kv[1], tolower(kv[2]) }' | LC_ALL=C sort
+         s = substr($0, RSTART, RLENGTH); gsub(/[" \t]/, "", s); split(s, kv, ":"); print kv[1], tolower(kv[2]) }
+       /^\t\t\{"[^"]+", \[20\]byte\{18: 0x[0-9a-fA-F][0-9a-fA-F], 19: 0x[0-9a-fA-F][0-9a-fA-F]\}\}/ {
+         l = $0; match(l, /"[^"]+"/); n = substr(l, RSTART + 1, RLENGTH - 2); match(l, /18: 0x[0-9a-fA-F]+/); a = substr(l, RSTART + 6, 2); match(l, /19: 0x[0-9a-fA-F]+/); b = substr(l, RSTART + 6, 2)
+         printf "%s 0x%036d%s%s\n", n, 0, tolower(a), tolower(b) }' | LC_ALL=C sort
 }
 declared_set() { jq -r '.components.ureth.nativePrecompiles // {} | to_entries[] | "\(.key) \(.value | ascii_downcase)"' "$1" | LC_ALL=C sort; }
 
@@ -65,7 +70,8 @@ compat_one() { # PRODUCT
   m=$t/m.json; p=$t/profile.go
   effective "$1" "$m" || { rm -rf "$t"; return 1; }
   if [ "$1" = checkout ]; then
-    cp "$repo/engineapi/profile.go" "$p" 2>/dev/null || { say "FAIL  checkout: no engineapi/profile.go in $repo"; rm -rf "$t"; return 1; }
+    # from #1199 the checkout's set is b1state/execrev.go's table; before it, engineapi/profile.go's map
+    if [ -f "$repo/b1state/execrev.go" ]; then cp "$repo/b1state/execrev.go" "$p"; else cp "$repo/engineapi/profile.go" "$p" 2>/dev/null || { say "FAIL  checkout: no engineapi/profile.go in $repo"; rm -rf "$t"; return 1; }; fi
   else
     local c; c=$(jq -er '.components["bft-core"].commit' "$m") || { say "FAIL  pinned: no bft-core commit"; rm -rf "$t"; return 1; }
     git -C "$repo" show "$c:engineapi/profile.go" >"$p" 2>/dev/null || { say "FAIL  pinned: bft-core $c is not in this clone's history (fetch it, or a full clone)"; rm -rf "$t"; return 1; }
@@ -87,8 +93,9 @@ case "${1:-}" in
   compat-dir)
     d=${2:?DIR}; t=$(mktemp -d); trap 'rm -rf "$t"' EXIT
     effective "${LANE_PRODUCT:-checkout}" "$t/m.json" || exit 1
-    [ -f "$d/engineapi/profile.go" ] || { say "FAIL  $d has no engineapi/profile.go"; exit 1; }
-    agree "${LANE_PRODUCT:-checkout} product at $(git -C "$d" rev-parse --short HEAD 2>/dev/null || echo "$d")" "$d/engineapi/profile.go" "$t/m.json" ;;
+    src=$d/engineapi/profile.go; [ -f "$d/b1state/execrev.go" ] && src=$d/b1state/execrev.go
+    [ -f "$src" ] || { say "FAIL  $d has no engineapi/profile.go or b1state/execrev.go"; exit 1; }
+    agree "${LANE_PRODUCT:-checkout} product at $(git -C "$d" rev-parse --short HEAD 2>/dev/null || echo "$d")" "$src" "$t/m.json" ;;
   selftest)
     unset LANE_PRODUCT LANE_PINS_DIR   # each case names its product; a pinned job's environment must not leak into them
     t=$(mktemp -d); trap 'rm -rf "$t"' EXIT

@@ -144,6 +144,7 @@ func readProfile(path string, p *b1state.Profile) error {
 		Network             uint16          `json:"network"`
 		RootGenesisID       common.Hash     `json:"rootGenesisId"`
 		ExecutionChainID    uint64          `json:"executionChainId"`
+		ExecutionRevision   uint64          `json:"executionRevision"`
 		RuntimeHash         common.Hash     `json:"runtimeHash"`
 		CompilerHash        common.Hash     `json:"compilerHash"`
 		MaxEpochsPerUpdate  uint64          `json:"maxEpochsPerUpdate"`
@@ -168,7 +169,7 @@ func readProfile(path string, p *b1state.Profile) error {
 	if err := json.Unmarshal(b, &f); err != nil {
 		return fmt.Errorf("the profile %s is in neither JSON form: %w", path, err)
 	}
-	*p = b1state.Profile{Network: f.Network, RootGenesisID: f.RootGenesisID, ExecutionChainID: f.ExecutionChainID,
+	*p = b1state.Profile{Network: f.Network, RootGenesisID: f.RootGenesisID, ExecutionChainID: f.ExecutionChainID, ExecutionRevision: f.ExecutionRevision,
 		RuntimeHash: f.RuntimeHash, CompilerHash: f.CompilerHash, MaxEpochsPerUpdate: f.MaxEpochsPerUpdate, DeltaEV: f.DeltaEV, DeltaHold: f.DeltaHold,
 		SystemGas: f.SystemGas, ForcedGas: f.ForcedGas, MaxGas: f.MaxGas, OrdinaryCapacity: f.OrdinaryCapacity, RestGas: f.RestGas,
 		CompanionBytes: f.CompanionBytes, OtherCompanionBytes: f.OtherCompanionBytes, GenesisUCTime: f.GenesisUCTime,

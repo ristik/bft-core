@@ -36,7 +36,7 @@ func TestRegistryWriterMatchesReader(t *testing.T) {
 	for _, w := range pre.Epochs {
 		entries = append(entries, entryOf(t, w))
 	}
-	p := b1state.Profile{Network: pre.Network, RootGenesisID: entries[0].BodyID, ExecutionChainID: 2, RuntimeHash: [32]byte{3}, CompilerHash: [32]byte{4},
+	p := b1state.Profile{ExecutionRevision: b1state.CurrentExecutionRevision, Network: pre.Network, RootGenesisID: entries[0].BodyID, ExecutionChainID: 2, RuntimeHash: [32]byte{3}, CompilerHash: [32]byte{4},
 		MaxEpochsPerUpdate: 2, DeltaEV: 1, DeltaHold: 2, RestGas: 100, CompanionBytes: 1000000, OtherCompanionBytes: 1024, OrdinaryCapacity: 7000000, GenesisUCTime: 1000}
 	p.SystemGas, _ = p.RequiredSystemGas()
 	p.MaxGas = p.SystemGas + p.OrdinaryCapacity
