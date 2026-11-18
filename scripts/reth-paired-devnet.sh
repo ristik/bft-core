@@ -841,7 +841,7 @@ if [ "${F8_MIXED_LANE:-0}" = 1 ]; then f8_prepare; fi
 if [ "${H3_ASSIGNMENT_LANE:-0}" = 1 ] || [ "${P85_LANE:-0}" = 1 ]; then   # the P85 joiner restores from a retained validator's archive (as the H3 joiner)
   export EVM_ARCHIVE_ROOT=test-nodes/h3-archives
   mkdir -p "$EVM_ARCHIVE_ROOT"
-elif [ "${VR_LANE:-0}" = 1 ] && [ "${VR_ARCHIVE:-0}" = 1 ]; then   # a long VR run (the joiner's): the journal is pruned by the archive replicas, and a joiner restores from an archive
+elif [ "${VR_LANE:-0}" = 1 ] && [ "${VR_ARCHIVE:-0}" = 1 ]; then   # a long VR run (the joiner's): the journal is pruned by the archive replicas, and a joiner pages the gap in from the archive
   export EVM_ARCHIVE_ROOT=test-nodes/vr-archives
   mkdir -p "$EVM_ARCHIVE_ROOT"
 elif [ "${H4_RESTORE_PROBE:-0}" = 1 ] || [ "${M2A_FINAL_RESTORE:-0}" = 1 ]; then
