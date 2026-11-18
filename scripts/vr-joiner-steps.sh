@@ -109,4 +109,14 @@ vrj_dev_follow() {
   export UBFT_VR_DEV_STAGE_EXTRA_ROOTS=$rid UBFT_VR_DEV_STAGE_EXTRA_EVM=$eid
   for n in 1 2 3 4; do vrb_restart_root "$n" "with the development staging hook" || return 1; sleep 3; done
   vrj_log "PASS: the incumbents run with the joiner staged (development hook)"
+  vrb_wait 900 "the joiner's execution client caught up with the chain (it is driven by its shard node, which syncs from the incumbents)" vrj_reth_synced || return 1
+}
+
+vrj_eth_number() { curl -s -X POST -H 'Content-Type: application/json' --data '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' "http://127.0.0.1:$1" | python3 -c "import json,sys;print(int(json.load(sys.stdin)['result'],16))"; }
+vrj_reth_synced() {
+  local a b
+  a=$(vrj_eth_number $((rethEthBase + vrj_id - 1))) || return 1
+  b=$(vrj_eth_number "$rethEthBase") || return 1
+  vrb_log "joiner reth $a, reth1 $b"
+  [ "$a" -gt 0 ] && [ $((b - a)) -le 3 ]
 }
