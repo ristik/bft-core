@@ -120,6 +120,9 @@ vr_verify() { # <finalized genesis> <full shard conf>
     --out-root-deployment "$VR_DIR/vr-deployment.json" || vr_die "vr-genesis verify refused the generation" || return 1
 }
 
+# the name m2_start_root calls a restarted VR root's flags through (scripts/lib/m2-handoff-lib.sh)
+export VR_ROOT_FLAGS_FN=vr_root_flags
+
 vr_root_flags() { # <i> <ureth rpc>: the VR-mode roots: the genesis committee, the VR deployment, and the execution client VT-05b's root side reads
   echo --genesis-identities "$VR_DIR/genesis-identities.json" --vr-deployment "$VR_DIR/vr-deployment.json" --pos-evm-rpc "$2"
 }

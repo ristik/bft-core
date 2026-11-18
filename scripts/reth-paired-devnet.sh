@@ -81,7 +81,7 @@ if [ "${VR_LANE:-0}" = 1 ]; then
     [ "${!vrConflict:-0}" = 0 ] || { echo "VR_LANE=1 refuses $vrConflict=${!vrConflict}: its steps do not run on a VR generation" >&2; exit 2; }
   done
   [ -z "$postM2aMode" ] || { echo "VR_LANE=1 refuses POST_M2A_MODE=$postM2aMode: the manifest genesis path bypasses the VR plan and verify" >&2; exit 2; }
-  source scripts/lib/vr-lib.sh
+  source scripts/lib/vr-lib.sh || exit 2
   vr_check_inputs || exit 2
 fi
 if [ "${M2A_FINAL_RESTORE:-0}" = 1 ] && { [ "${M2_PROFILE2:-0}" != 1 ] || [ "${SIGNING:-local}" != authority ] || [ "$validators" -ne 4 ]; }; then
