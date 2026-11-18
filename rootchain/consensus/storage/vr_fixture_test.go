@@ -91,7 +91,9 @@ type vxFixture struct {
 	// extraChanges are bound after the CommitteeLimits change; extraShards are non-EVM shards installed and acknowledged next to the EVM
 	// shard (the live partition configuration tests, VT-06d/e).
 	extraChanges []vrschema.RegistryChange
-	extraShards  []*types.PartitionDescriptionRecord
+	// limits, when set, are the committee limits in force in the VR state proven at the frozen parent
+	limits      *vrschema.CommitteeLimits
+	extraShards []*types.PartitionDescriptionRecord
 
 	auth       *storage.TestVRAuthority
 	intents    *vxIntents
@@ -223,6 +225,9 @@ func (f *vxFixture) build() {
 		Limits: vrschema.CommitteeLimits{NMin: 4, NTarget: 4, NMax: 7}, Status: vrschema.Status{KnownRootEpoch: 1},
 		Output: vrschema.OutputRecord{State: vrschema.OutPublished, Attempt: 7, ReservedProgress: 100, ExpiresAtProgress: 100 + vrschema.Lifetime,
 			Predecessor: vrschema.GenesisResult, SourceModule: [20]byte{0xa0, 19: 1}, ModuleTag: vrschema.PoaModuleTag, SnapshotDigest: snap, PolicyDigest: pol}}
+	if f.limits != nil {
+		f.state.Limits = *f.limits
+	}
 	o := &f.state.Output
 	o.MembersDigest, err = vradmit.MembersDigestOf(f.cand.Identities)
 	require.NoError(t, err)

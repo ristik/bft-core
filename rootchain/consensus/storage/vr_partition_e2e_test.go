@@ -189,7 +189,7 @@ func (f *vxPartitions) activate(t *testing.T, checkpoint *storage.ExecutedBlock,
 
 // acceptedUpdate reports whether the fixture's UpdatePartition is Accepted.
 func (f *vxPartitions) acceptedUpdate() bool {
-	return f.extraChanges[1].Verdict == uint64(vrschema.VerdictAccepted)
+	return f.extraChanges[len(f.extraChanges)-1].Verdict == uint64(vrschema.VerdictAccepted)
 }
 
 // closure is the CloseLiability of the old epoch the first block of the new one must carry (the closure duty is always on in VR mode),
