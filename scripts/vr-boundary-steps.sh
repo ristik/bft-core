@@ -215,6 +215,7 @@ else
   for i in $(seq 1 "${validators:-4}"); do tail -n 1000 "test-nodes/evm$i/debug.log" >"$VR_EVIDENCE/evm$i-tail.log" 2>/dev/null; done
   if [ "${VR_JOINER:-0}" = 1 ]; then
     grep -v 'IR change request\|CertificationResp' test-nodes/root5/debug.log | tail -n 4000 >"$VR_EVIDENCE/root5-tail.log" 2>/dev/null
+    curl -s -H 'Content-Type: application/json' "http://127.0.0.1:$(m2_rpc_port 5)/api/v1/vr/member" >"$VR_EVIDENCE/root5-vr-member-status.json" 2>/dev/null
     tail -n 1500 test-nodes/evm5/debug.log >"$VR_EVIDENCE/evm5-tail.log" 2>/dev/null; tail -n 300 test-nodes/reth5/reth.log >"$VR_EVIDENCE/reth5-tail.log" 2>/dev/null
   fi
 fi
