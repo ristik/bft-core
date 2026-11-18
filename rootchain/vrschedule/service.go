@@ -1242,6 +1242,15 @@ func (s *Service) kReadinessLocked(st *intentState) []vrschema.Readiness {
 			consider(id, r)
 		}
 	}
+	// the held certificate's readiness (members shared by K and J) is a fallback once its view has aged out of the retained window: its signed
+	// support must not disappear from the plan while a late K-only response is awaited
+	if st.iret != nil {
+		for _, r := range st.iret.Certificate.Readiness {
+			if m, kOnly, ok := s.readinessBy(st, r); ok && !kOnly {
+				consider(m.RootNodeID, r)
+			}
+		}
+	}
 	var out []vrschema.Readiness
 	for _, r := range best {
 		out = append(out, r)

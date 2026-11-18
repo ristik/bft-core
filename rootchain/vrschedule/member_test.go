@@ -951,3 +951,57 @@ func (b *blockingSigner) SignBytes(msg []byte) ([]byte, error) {
 	}
 	return b.Signer.SignBytes(msg)
 }
+
+// The held certificate's readiness stays K evidence after its view has aged out of the retained window: a K-only member's late support still
+// makes the plan, with the staying members' support taken from the certificate.
+func TestTheHeldCertificateKeepsItsKSupportAfterItsViewAgedOut(t *testing.T) {
+	w := newWorld(t)
+	w.K[3].Weight, w.K[3].RawWeight = 3, 3
+	rule := vrschema.Activation{RuleID: vrschema.RuleID("rule-a"), ReleaseDigest: vrschema.Word{0xaa}, RootEpoch: 2, State: vrschema.ActActive, ChangeID: 1}
+	s := w.swarm(t, []vrschema.Activation{rule})
+	leaver := w.Members[4].Root
+	all := s.members
+	s.members = map[string]*Member{}
+	for id, m := range all {
+		if id != leaver {
+			s.members[id] = m
+		}
+	}
+	s.update(0)
+	s.run(t) // the certificate of view 0 is complete everywhere; the leaver has said nothing
+	for v := uint64(1); v <= uint64(RetainedViews)+1; v++ {
+		for _, svc := range s.svcs {
+			c := w.committed(v)
+			c.Schedule = []vrschema.Activation{rule}
+			svc.Update(c) // the committed view advances; nobody signs the later views
+		}
+	}
+	s.bus = nil
+	for id, svc := range s.svcs {
+		_, view, complete, _ := svc.Current()
+		require.GreaterOrEqual(t, view, uint64(RetainedViews), "%s", id)
+		require.True(t, complete, "%s keeps its certificate", id)
+		set, _ := svc.Stage(w.d, 0)
+		require.Empty(t, set.Readiness, "%s: view 0 has aged out of the retained window", id)
+	}
+	// the leaver now signs support for the current view's assembly (the assembler assembled it when its view committed)
+	s.members = map[string]*Member{leaver: all[leaver]}
+	for from, a := range s.svcs { // the current view's assembly (made by its assembler) reaches every root
+		set, _ := a.Stage(w.d, 0)
+		for to, b := range s.svcs {
+			if to == from {
+				continue
+			}
+			for _, m := range set.Offers() {
+				_, _, _ = b.Offer("peer", m)
+			}
+		}
+	}
+	s.run(t)
+	for id, svc := range s.svcs {
+		set, _ := svc.Stage(w.d, 0)
+		_ = set
+		_, ok := svc.Plan()
+		require.True(t, ok, "%s: the plan holds the certificate's support and the leaver's late support", id)
+	}
+}
