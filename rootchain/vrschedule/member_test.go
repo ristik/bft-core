@@ -1,13 +1,17 @@
 package vrschedule
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/internal/testutils/vrhandofffix"
@@ -821,4 +825,129 @@ func bytesOf(b byte) []byte {
 		out[i] = b
 	}
 	return out
+}
+
+// ExchangeOpen: open while no certificate is held and while the plan waits for K support; closed once the plan is ready; after a committed
+// Prepare closed for a root that holds the certificate and open only for one that needs it (recovery).
+func TestTheExchangeStaysOpenOnlyWhileSomethingIsMissing(t *testing.T) {
+	w := newWorld(t)
+	w.K[3].Weight, w.K[3].RawWeight = 3, 3
+	rule := vrschema.Activation{RuleID: vrschema.RuleID("rule-a"), ReleaseDigest: vrschema.Word{0xaa}, RootEpoch: 2, State: vrschema.ActActive, ChangeID: 1}
+	s := w.swarm(t, []vrschema.Activation{rule})
+	leaver := w.Members[4].Root
+	late := s.members[leaver]
+	delete(s.members, leaver)
+	root := w.Members[1].Root
+	require.False(t, s.svcs[root].ExchangeOpen(), "no intent")
+	s.update(0)
+	require.True(t, s.svcs[root].ExchangeOpen(), "no certificate yet")
+	s.run(t)
+	require.True(t, s.svcs[root].ExchangeOpen(), "the certificate is held but the plan waits for K support")
+	s.members[leaver] = late
+	s.bus = nil
+	s.run(t)
+	require.False(t, s.svcs[root].ExchangeOpen(), "the plan is ready")
+
+	c := w.committed(0)
+	c.Schedule = []vrschema.Activation{rule}
+	c.Prepared = true
+	s.svcs[root].Update(c)
+	require.False(t, s.svcs[root].ExchangeOpen(), "prepared and the certificate is held: no pulls")
+
+	fresh := NewService(ServiceConfig{Self: w.Members[2].Root})
+	fresh.Update(c)
+	require.True(t, fresh.ExchangeOpen(), "prepared without the certificate: it still recovers")
+}
+
+// The support evidence per K member is the newest readiness that covers every rule the gate needs now, so an older one (signed before a rule
+// was scheduled) never hides a newer one.
+func TestAnOlderKReadinessNeverHidesANewerOne(t *testing.T) {
+	w := newWorld(t)
+	w.K[3].Weight, w.K[3].RawWeight = 3, 3 // the leaver carries 3 of 6: the staying members alone do not make the K quorum
+	a := vrschema.Activation{RuleID: vrschema.RuleID("rule-a"), ReleaseDigest: vrschema.Word{0xaa}, RootEpoch: 2, State: vrschema.ActActive, ChangeID: 1}
+	b := vrschema.Activation{RuleID: vrschema.RuleID("rule-b"), ReleaseDigest: vrschema.Word{0xbb}, RootEpoch: 2, State: vrschema.ActActive, ChangeID: 2}
+	s := w.swarm(t, []vrschema.Activation{a})
+	s.update(0)
+	s.run(t)
+	s.sch = []vrschema.Activation{a, b} // a second rule is scheduled under the same intent; the next view commits
+	s.update(1)
+	s.run(t)
+	leaver := w.Members[4]
+	for id, svc := range s.svcs {
+		p, ok := svc.Plan()
+		require.True(t, ok, "%s: the plan holds the K support of both rules", id)
+		var found bool
+		for _, r := range p.RuleSupport.KReadiness {
+			if bytes.Equal(r.Commitments[0].StakingID, vrhandofffix.StakingID(4)) {
+				found = true
+				require.Len(t, r.Commitments, 2, "the leaver's evidence covers both rules (its newer readiness)")
+			}
+		}
+		require.True(t, found)
+	}
+	_ = leaver
+}
+
+// The signing step is serialized with the committed-state transition: while the member signs over a state, a committed update waits, so no
+// signing call of the old state happens after the update and the signature is recorded only for a state that still held.
+func TestSigningIsSerializedWithTheCommittedStateTransition(t *testing.T) {
+	w := newWorld(t)
+	self := w.Members[5]
+	inSign := make(chan struct{})
+	release := make(chan struct{})
+	signer := &blockingSigner{Signer: self.RK.Signer, inSign: inSign, release: release}
+	path := filepath.Join(t.TempDir(), "m.json")
+	svc := NewService(ServiceConfig{Self: self.Root, Signer: self.RK.Signer})
+	m, err := NewMember(svc, MemberConfig{Self: self.Root, RootSigner: signer, EVMSigner: self.EK.Signer, Path: path})
+	require.NoError(t, err)
+	svc.Update(w.committed(0))
+	pops := w.PoPs(w.in)
+	for i := range pops {
+		_, _, _ = svc.Offer("peer", Message{PoP: &pops[i]})
+	}
+	a := w.Assembly(w.in, w.d, 0, pops)
+	_, _, _ = svc.Offer("peer", Message{Assembly: &a})
+	signer.arm()
+	stepped := make(chan error, 1)
+	go func() { stepped <- m.Step() }()
+	<-inSign // the member is inside the signing call, over view 0
+	updated := make(chan struct{})
+	go func() { svc.Update(w.committed(1)); close(updated) }()
+	select {
+	case <-updated:
+		t.Fatal("the committed update did not wait for the signing step")
+	case <-time.After(300 * time.Millisecond):
+	}
+	close(release)
+	require.NoError(t, <-stepped)
+	<-updated
+	f := readFile(t, path)
+	require.Len(t, f.Intents[0].Views, 1, "the signature over the state that held is recorded")
+	require.EqualValues(t, 0, f.Intents[0].Views[0].View)
+	// after the update, nothing is signed for view 0 any more
+	signer.disarm()
+	require.NoError(t, m.Step())
+	require.Len(t, readFile(t, path).Intents[0].Views, 1)
+}
+
+type blockingSigner struct {
+	abcrypto.Signer
+	mu      sync.Mutex
+	armed   bool
+	inSign  chan struct{}
+	release chan struct{}
+}
+
+func (b *blockingSigner) arm()    { b.mu.Lock(); b.armed = true; b.mu.Unlock() }
+func (b *blockingSigner) disarm() { b.mu.Lock(); b.armed = false; b.mu.Unlock() }
+func (b *blockingSigner) SignBytes(msg []byte) ([]byte, error) {
+	b.mu.Lock()
+	armed := b.armed
+	b.armed = false
+	b.mu.Unlock()
+	if armed {
+		close(b.inSign)
+		<-b.release
+	}
+	return b.Signer.SignBytes(msg)
 }

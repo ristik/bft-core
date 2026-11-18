@@ -109,10 +109,12 @@ type vrHandoff struct {
 	// stageMu serializes every write of the staged successor with the refresh worker's view of the active intent: a staging write (the intent's
 	// members, a verified candidate, a prepared certificate's) is made only for the intent that is active under this lock, so a callback that
 	// outlives its intent can neither restore a cleared set nor replace another intent's
-	stageMu      sync.Mutex
-	activeIntent [32]byte
-	haveActive   bool
-	kick         chan struct{}
+	stageMu sync.Mutex
+	// installCandidate writes a verified candidate's staging (nil: the manager's own); replaced in tests
+	installCandidate func(vrschedule.Staged) error
+	activeIntent     [32]byte
+	haveActive       bool
+	kick             chan struct{}
 
 	// the stage pull (GetStage): a (re)started root rebuilds its view state from its peers until one answers; while the current intent
 	// holds no complete certificate it pulls again from one peer at a time every PullInterval, the re-send path for messages its queue or
@@ -436,7 +438,7 @@ func (v *vrHandoff) refresh(ctx context.Context) {
 // until one answers, then while the current intent holds no complete certificate from one peer at a time every PullInterval.
 func (v *vrHandoff) pull(ctx context.Context) {
 	intent, view, complete, ok := v.svc.Current()
-	complete = complete && v.planReady() // the exchange is open while the plan still waits for K support
+	complete = !v.svc.ExchangeOpen() // open while no certificate is held, or while the plan still waits for K support; a prepared root pulls only to recover the certificate
 	if !ok || v.cfg.Opener == nil {
 		return
 	}
@@ -483,7 +485,7 @@ func (v *vrHandoff) pullFrom(ctx context.Context, peers []peer.ID, intent [32]by
 	sem := make(chan struct{}, PullFanOut)
 	var wg sync.WaitGroup
 	for _, p := range peers {
-		if _, _, complete, _ := v.svc.Current(); complete && v.planReady() {
+		if !v.svc.ExchangeOpen() {
 			break
 		}
 		sem <- struct{}{}
@@ -835,6 +837,20 @@ func (x *ConsensusManager) stageVRCandidate(s vrschedule.Staged) error {
 	if !v.haveActive || v.activeIntent != s.Intent {
 		return fmt.Errorf("%w: the intent this candidate belongs to is no longer the active one", ErrVRHandoff)
 	}
+	install := v.installCandidate
+	if install == nil {
+		install = x.installVRCandidate
+	}
+	if err := install(s); err != nil {
+		return err
+	}
+	// this write is owned like the intent-level one: it is recorded so that the intent's end clears it, whichever writer installed the set
+	v.intentStaged, v.stagedFor = true, s.Intent
+	return nil
+}
+
+// installVRCandidate writes the staged members and candidate digest of a verified candidate (under the operator barrier).
+func (x *ConsensusManager) installVRCandidate(s vrschedule.Staged) error {
 	return x.operator(func() error {
 		if x.q3 == nil {
 			return fmt.Errorf("%w: no Q3 history to stage into", ErrVRHandoff)
@@ -913,6 +929,7 @@ func (x *ConsensusManager) stageVRIntentMembers(epoch uint64, ids []evmassign.Id
 	return x.operator(func() error {
 		if epoch == 0 {
 			x.q3StagedEVM.Store(nil)
+			x.q3Staged.Store(nil)
 			return nil
 		}
 		if old := x.trustBase.Load(); old == nil || epoch != old.Epoch+1 {
@@ -922,12 +939,6 @@ func (x *ConsensusManager) stageVRIntentMembers(epoch uint64, ids []evmassign.Id
 		x.storeStagedEVM(epoch, evmassign.Candidate{Identities: ids}, roots)
 		return nil
 	})
-}
-
-// planReady is whether the Prepare plan holds what its gates need (a complete certificate and the K support).
-func (v *vrHandoff) planReady() bool {
-	_, ok := v.svc.Plan()
-	return ok
 }
 
 // SourceRetry is how often a root asks for a source it still lacks.

@@ -155,3 +155,29 @@ func TestThePairedShardNodeHoldsTheActiveIntentsSuccessor(t *testing.T) {
 	v.stagedMembers(vrschedule.Committed{}) // the intent dies
 	require.Eventually(t, func() bool { return len(last()) == 0 }, 12*time.Second, 50*time.Millisecond, "an intent that died clears the shard node's staged set")
 }
+
+// A set the candidate's installation wrote is owned like the intent-level one: when the intent-level install was refused and only the
+// candidate's succeeded, the intent's end still clears it.
+func TestACandidateInstalledSetIsClearedWithItsIntent(t *testing.T) {
+	var cleared int
+	v := &vrHandoff{}
+	v.stageIntent = func(epoch uint64, _ []evmassign.Identity, _ []evmroot.Member) error {
+		if epoch == 0 {
+			cleared++
+			return nil
+		}
+		return errors.New("refused")
+	}
+	var installed int
+	v.installCandidate = func(vrschedule.Staged) error { installed++; return nil }
+	x := &ConsensusManager{vr: v}
+	d := [32]byte{9}
+	v.stagedMembers(derivedFor(t, d)) // the intent-level installation is refused: nothing is recorded
+	require.False(t, v.intentStaged)
+	require.NoError(t, x.stageVRCandidate(vrschedule.Staged{Intent: d}))
+	require.Equal(t, 1, installed)
+	require.True(t, v.intentStaged, "the candidate's write is recorded")
+	v.stagedMembers(vrschedule.Committed{}) // the intent dies
+	require.Equal(t, 1, cleared, "the set the candidate wrote is cleared")
+	require.False(t, v.intentStaged)
+}

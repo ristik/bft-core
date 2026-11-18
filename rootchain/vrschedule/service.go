@@ -1176,37 +1176,58 @@ func encodeAssembly(a vrhandoff.Assembly) ([]byte, error) {
 // by its readiness in the retained certificate (a J readiness is a K readiness of the same intent, signed by the same root key); a K member
 // that is not is represented by the readiness it sent for support only, from the earliest retained view that holds one.
 func (s *Service) kReadinessLocked(st *intentState) []vrschema.Readiness {
-	byRoot := map[string]vrschema.Readiness{}
-	if st.iret != nil {
-		for _, r := range st.iret.Certificate.Readiness {
-			if m, kOnly, ok := s.readinessBy(st, r); ok && !kOnly {
-				byRoot[m.RootNodeID] = r
+	required := vradmit.RequiredRules(s.sch, st.d.RootEpoch+1)
+	covers := func(r vrschema.Readiness) bool {
+		for _, a := range required {
+			found := false
+			for _, c := range r.Commitments {
+				if bytes.Equal(c.RuleID, a.RuleID[:]) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return false
 			}
 		}
-	}
-	views := make([]uint64, 0, len(st.views))
-	for v := range st.views {
-		views = append(views, v)
-	}
-	sort.Slice(views, func(i, j int) bool { return views[i] < views[j] })
-	for _, v := range views {
-		for id, r := range st.views[v].kready {
-			// the earliest entry of a member that is still usable under the committed schedule: an obsolete first one does not hide a later one
-			if _, have := byRoot[id]; !have && len(r.Commitments) > 0 && vradmit.CommitmentsInScope(s.sch, st.d.Intent.Network, r.Commitments) == nil {
-				byRoot[id] = r
-			}
-		}
+		return true
 	}
 	inK := map[string]bool{}
 	for _, m := range s.k {
 		inK[m.RootNodeID] = true
 	}
-	var out []vrschema.Readiness
-	for id, r := range byRoot {
-		// a commitment of a rule the committed schedule no longer holds (the basis changed under the intent) would invalidate the Freeze
-		if inK[id] && len(r.Commitments) > 0 && vradmit.CommitmentsInScope(s.sch, st.d.Intent.Network, r.Commitments) == nil {
-			out = append(out, r)
+	views := make([]uint64, 0, len(st.views))
+	for v := range st.views {
+		views = append(views, v)
+	}
+	sort.Slice(views, func(i, j int) bool { return views[i] > views[j] }) // newest first
+	// per K member: the newest retained readiness (a successor's or a support-only one) that is in scope and covers every rule the gate needs
+	// now; failing that, the newest in scope (the plan's check then names what is missing). An older readiness never hides a newer one that
+	// covers more.
+	best := map[string]vrschema.Readiness{}
+	bestCovers := map[string]bool{}
+	consider := func(id string, r vrschema.Readiness) {
+		if !inK[id] || len(r.Commitments) == 0 || vradmit.CommitmentsInScope(s.sch, st.d.Intent.Network, r.Commitments) != nil {
+			return
 		}
+		cov := covers(r)
+		if _, have := best[id]; have && (bestCovers[id] || !cov) {
+			return
+		}
+		best[id], bestCovers[id] = r, cov
+	}
+	for _, v := range views {
+		vs := st.views[v]
+		for id, r := range vs.readiness {
+			consider(id, r)
+		}
+		for id, r := range vs.kready {
+			consider(id, r)
+		}
+	}
+	var out []vrschema.Readiness
+	for _, r := range best {
+		out = append(out, r)
 	}
 	sort.Slice(out, func(i, j int) bool {
 		return bytes.Compare(out[i].Commitments[0].StakingID, out[j].Commitments[0].StakingID) < 0
