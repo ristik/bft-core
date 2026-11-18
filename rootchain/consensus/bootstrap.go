@@ -343,7 +343,7 @@ func (x *ConsensusManager) HandoffBundle(_ context.Context, epoch uint64) (*hand
 	if err != nil {
 		return nil, err
 	}
-	candidate, err := x.blockStore().HandoffCandidate(record.NextBodyID)
+	candidate, err := x.blockStore().HandoffCommittedPreimage(record.NextBodyID)
 	if err != nil {
 		return nil, err
 	}

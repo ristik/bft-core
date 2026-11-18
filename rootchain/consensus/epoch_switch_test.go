@@ -723,7 +723,7 @@ func TestInProcessSwitchAccountsForEveryManagerField(t *testing.T) {
 		"trustBaseStore", "safety", "storeRef", "orchestration", "viewResolver", "frontier", "recoveryProfile2", "utbPrevious", "utbStore", "evidence",
 		"utbConfig", "recoveryHistory", "stageRecovery", "proposalRequestCheck", "posPrefetching", "witnesses", "q3", "primaryWitness",
 		"approvalSink", "judgeHook", "handoffMu", "switcher", "ctxMu", "ctxGen", "switchCtx", "workerRunning", "future", "switchDeclined", "origins", "acq",
-		"switchPublished", "log", "tracer", "deferredReady", "admitted",
+		"switchPublished", "log", "tracer", "deferredReady", "admitted", "vr",
 		"leaderCnt", "execMsgCnt", "execMsgDur", "voteCnt", "proposedCR", "qcSize", "qcVoters", "susVotes", "recoveryReq", "frontierFault", "addBlockDur"}
 	reset := []string{"pacemaker", "voteBuffer", "recovery", "irReqBuffer", "retained", "leaderCheckedRound", "switchCheckedRound", "posQueue",
 		"primaryCache", "v3Planned", "q3Staged", "q3StagedEVM", "residence", "deferred", "proposers"}

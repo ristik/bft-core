@@ -1971,7 +1971,8 @@ class NB2Release(unittest.TestCase):
         self.assertEqual(r['limits']['poolMaxTxInputBytes']['value'],4194304);self.assertEqual(r['limits']['poolMaxTxGas']['value'],60000000)
         self.assertIn('ureth1, ureth2, ureth3, ureth4',r['limits']['poolMaxTxInputBytes']['source'])
         self.assertEqual(r['pins'],{'gamma':'0x93tt','build':'test','vaultRuntimeCodeHash':'0x'+'a1'*32,'maxEncodedTxBytes':524288,'userGasLimit':'60000000',
-                                    'gasReserve':'500000','returnReserveSegments':64,'deploymentBlock':12,'stateReadOnly':False})
+                                    'gasReserve':'500000','returnReserveSegments':64,'deploymentBlock':12,'stateReadOnly':False,
+                                    'nativeGasSchedule':self.module().NATIVE_GAS_SCHEDULE})
         self.assertEqual(r['deployment']['production']['K'],64);self.assertEqual(r['deployment']['firstBlock'],11)
         self.assertEqual(r['limits']['blockGasLimit']['value'],329547540)
         self.assertGreaterEqual(r['limits']['gatewayMaxRawTxBodyBytes']['value'],2*524288+(64<<10))   # section 12.7
@@ -2222,8 +2223,12 @@ class NB2DriverKeys(unittest.TestCase):
             if args[0]=='preflight': (out/f'preflight-{l}.json').write_text(json.dumps((preflight or {}).get(l,{'ok':False,'rule':'CapacityPreflight','detail':'over'})))
             return (exits or {}).get((args[0],l),0),''
         return m,r,driver,asked
-    def probe(self,label,k,gas,real):
-        return {'label':label,'transfers':k,'conditions':'30 certificates ab, need 64','gas':str(gas),'up':'265000','down':'265000','real':real,'shape':{}}
+    def probe(self,label,k,gas,real,detail=None):
+        # a refused probe records why (boundary_search.ts refusalOf): over by its own gas unless the test says otherwise
+        if detail is None and real=='CapacityPreflight': detail={'over':'gas'}
+        p={'label':label,'transfers':k,'conditions':'30 certificates ab, need 64','gas':None if gas is None else str(gas),'up':'265000','down':'265000','real':real,'shape':{}}
+        if detail is not None: p['detail']=detail
+        return p
     def tries(self):
         L=self.LIM
         return [self.probe('g0c',255,L+11_000_000,'CapacityPreflight'),self.probe('g1c',208,L+260_000,'CapacityPreflight'),
@@ -2268,6 +2273,27 @@ class NB2DriverKeys(unittest.TestCase):
             m,r,driver,_=self.boundary_run(tmp,t,{'admitted':t[2],'refused':t[3],'spread':2,'margin':2,'window':['g1c','g2c','g3c']})
             with patch.object(m.NB2Rehearsal,'driver',driver):
                 with self.assertRaisesRegex(m.Failure,'g1c .* refused'): r.boundary()
+    def test_a_refusal_is_sound_only_by_its_recorded_gas_or_a_genuine_byte_overflow(self):
+        # sol's round 2 on #1186: the Python oracle, not only the driver's refusalOf(); g1c is the probe under test
+        L=self.LIM
+        cases={
+            'an unbounded gas (null), the bytes fitting':(self.probe('g1c',208,None,'CapacityPreflight',{'over':'unbounded','need':'64','pMax':'70','baseFits':'true'}),False),
+            'a byte refusal without its counts':(self.probe('g1c',208,None,'CapacityPreflight',{'over':'bytes'}),False),
+            'a byte refusal whose counts fit':(self.probe('g1c',208,L-1,'CapacityPreflight',{'over':'bytes','need':'64','pMax':'70','baseFits':'true'}),False),
+            'a gas refusal without its gas':(self.probe('g1c',208,None,'CapacityPreflight',{'over':'gas'}),False),
+            'a genuine byte overflow (more proofs needed than fit)':(self.probe('g1c',208,L-1,'CapacityPreflight',{'over':'bytes','need':'64','pMax':'63','baseFits':'true'}),True),
+            'a genuine byte overflow (not even the evidence fits)':(self.probe('g1c',208,None,'CapacityPreflight',{'over':'bytes','need':'64','pMax':'0','baseFits':'false'}),True),
+        }
+        for name,(probe,sound) in cases.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
+                t=self.tries();t[1]=probe
+                m,r,driver,_=self.boundary_run(tmp,t,{'admitted':t[2],'refused':t[3],'spread':2,'margin':2,'window':['g1c','g2c','g3c']})
+                with patch.object(m.NB2Rehearsal,'driver',driver):
+                    if sound: r.boundary()
+                    else:
+                        with self.assertRaisesRegex(m.Failure,'g1c .* refused'): r.boundary()
+                verdicts={x['label']:x['status'] for x in json.loads((Path(tmp)/'ev/nb2/boundary-soundness.json').read_text())}
+                self.assertEqual(verdicts['g1c'],'sound' if sound else 'contradicted')
     def test_a_contradicted_probe_leaves_its_evidence_and_the_soundness_file_so_far(self):
         # sol r12: the admitted g2c is not paid: the stage fails, with g2c's burn and redeem outputs and the soundness file kept, g0c and g1c
         # sound, g2c contradicted, g3c not executed

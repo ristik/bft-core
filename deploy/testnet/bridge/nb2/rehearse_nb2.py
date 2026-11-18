@@ -29,7 +29,7 @@ PoS sequence's first invocation (deploy,fund,pos-deposit) keeps them, and its la
                 and 3, canonical encoding) judged by all three; fault injection of 0x0100, 0x0102 and the helper's code (eth_call state overrides)
   gas           real transaction gas of the returns (long, nested, claims), with the measured refusals
   boundary      the capacity bound on live tokens: every token the stage builds executed as the preflight judged it (each admitted one burned and
-                paid within userGasLimit, each refused one over it by the preflight's own gas, refused again (CapacityPreflight, the documented
+                paid within userGasLimit, each refused one over it by the preflight's own gas or over L_max by bytes, refused again (CapacityPreflight, the documented
                 limit, not recovery) and unspent by the ledger after the refusal: a verified non-inclusion proof), and the bound located within 2 transfers (among the newest three probes the highest admitted and
                 the lowest refused lengths at most 2 apart: fresh tokens' gas varies by about a transfer's step, so an exact adjacent pair is not
                 observable live; the owner's default, briefs/owner-questions.md)
@@ -632,13 +632,20 @@ class NB2Rehearsal(SdkClients, Rehearsal):
                     looked, _ = self.driver('ledger', 'big', label, str(not_before), check=False, timeout=LEDGER_TIMEOUT)
                     self.keep(f'ledger-{label}')
                     p, ledger = read(f'preflight-{label}'), read(f'ledger-{label}')
-                    ok = (judged == 0 and p is not None and not p.get('ok', True) and p.get('rule') == 'CapacityPreflight' and t['gas'] is not None and int(t['gas']) > lim
+                    # over the limit by the preflight's own gas, or by bytes: L_max with the reserve, shown by the recorded numbers (the proofs
+                    # needed above those that fit, or not even the evidence fits). A null bound (the gas cannot be bounded) is not sound here.
+                    d = t.get('detail') or {}
+                    over = d.get('over')
+                    by_bytes = over == 'bytes' and d.get('need') is not None and d.get('pMax') is not None and (
+                        d.get('baseFits') == 'false' or int(d['need']) > int(d['pMax']))
+                    beyond = (over == 'gas' and t['gas'] is not None and int(t['gas']) > lim) or by_bytes
+                    ok = (judged == 0 and p is not None and not p.get('ok', True) and p.get('rule') == 'CapacityPreflight' and beyond
                           and looked == 0 and ledger is not None and ledger.get('verdict') == 'unspent')
-                    s.update(status='sound' if ok else 'contradicted', preflightExit=judged, ledgerExit=looked, rule=(p or {}).get('rule'), detail=(p or {}).get('detail'),
+                    s.update(status='sound' if ok else 'contradicted', preflightExit=judged, ledgerExit=looked, rule=(p or {}).get('rule'), detail=(p or {}).get('detail'), over=over,
                              timeouts=[x for x in self.timeouts if label in x['command']],
                              ledger=(ledger or {}).get('verdict'), ledgerSnapshot=(ledger or {}).get('snapshot'), ledgerReason=(ledger or {}).get('reason'))
                     save()
-                    self.expect(ok, f'{label} ({t["transfers"]} transfers) refused by the preflight is over userGasLimit {lim} by its own gas ({t["gas"]}), refused again '
+                    self.expect(ok, f'{label} ({t["transfers"]} transfers) refused by the preflight is over ' + (f'L_max by bytes ({d.get("need")} proofs needed, {d.get("pMax")} fit; gas {t["gas"]})' if over == 'bytes' else f'userGasLimit {lim} by its own gas ({t["gas"]})') + ', refused again '
                                     f'(CapacityPreflight), and its state is unspent by the ledger after the refusal (a verified non-inclusion proof)',
                                 json.dumps({'preflight': p, 'ledger': {k: v for k, v in (ledger or {}).items() if k != 'proof'}}, default=str))
         finally:

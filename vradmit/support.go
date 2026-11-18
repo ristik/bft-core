@@ -318,26 +318,12 @@ func VerifyRuleSupport(in SupportInput) error {
 	if len(rules) == 0 {
 		return nil
 	}
-	covers := func(cs []vrschema.SupportCommitment, m evmassign.Identity, rule vrschema.Word) bool {
-		kh := ethcrypto.Keccak256(m.RootKey)
-		for _, c := range cs {
-			if bytes.Equal(c.StakingID, m.StakingID) && c.Generation == m.Generation && bytes.Equal(c.RootKeyHash, kh) &&
-				bytes.Equal(c.RuleID, rule[:]) && c.Network == in.Network {
-				return true
-			}
-		}
-		return false
-	}
 	for _, a := range rules {
 		// (a)
 		for i, m := range in.J {
-			if covers(in.Readiness[i].Commitments, m, a.RuleID) {
-				continue
+			if err := successorCovers(a, in.Network, in.Table, m, in.Readiness[i].Commitments); err != nil {
+				return err
 			}
-			if a.State == vrschema.ActLatched && covers(in.Table.Entries, m, a.RuleID) {
-				continue
-			}
-			return fmt.Errorf("%w: successor %x lacks support for rule %x", ErrSupportWait, m.StakingID, a.RuleID)
 		}
 		// (b)
 		if a.State == vrschema.ActLatched {
@@ -346,12 +332,52 @@ func VerifyRuleSupport(in SupportInput) error {
 		var have, total uint64
 		for _, m := range in.K {
 			total += m.Weight
-			if covers(pool, m, a.RuleID) {
+			if covers(pool, m, a.RuleID, in.Network) {
 				have += m.Weight
 			}
 		}
 		if total == 0 || !(3*have > 2*total) {
 			return fmt.Errorf("%w: K support %d of %d for rule %x", ErrSupportWait, have, total, a.RuleID)
+		}
+	}
+	return nil
+}
+
+func covers(cs []vrschema.SupportCommitment, m evmassign.Identity, rule vrschema.Word, network uint64) bool {
+	kh := ethcrypto.Keccak256(m.RootKey)
+	for _, c := range cs {
+		if bytes.Equal(c.StakingID, m.StakingID) && c.Generation == m.Generation && bytes.Equal(c.RootKeyHash, kh) &&
+			bytes.Equal(c.RuleID, rule[:]) && c.Network == network {
+			return true
+		}
+	}
+	return false
+}
+
+// successorCovers is gate (a) for one rule and one successor: fresh support in its readiness, or for a latched rule its committed table
+// entry.
+func successorCovers(a vrschema.Activation, network uint64, table SupportTable, m evmassign.Identity, cs []vrschema.SupportCommitment) error {
+	if covers(cs, m, a.RuleID, network) || (a.State == vrschema.ActLatched && covers(table.Entries, m, a.RuleID, network)) {
+		return nil
+	}
+	return fmt.Errorf("%w: successor %x lacks support for rule %x", ErrSupportWait, m.StakingID, a.RuleID)
+}
+
+// VerifySuccessorSupport is what one successor's readiness must carry for the support gate (VerifyRuleSupport) to hold for it, judged on
+// the readiness alone (design 5.3.3, last bullet): every commitment is for the root network and a rule of the committed schedule, and
+// gate (a) holds for every effective rule with E <= e_J + 1. A root refuses a readiness that fails it, so a member may send a covering
+// replacement, and no certificate that could never pass the gate is retained (review #1188 B7).
+func VerifySuccessorSupport(schedule []vrschema.Activation, successorEpoch, network uint64, table SupportTable, m evmassign.Identity,
+	cs []vrschema.SupportCommitment) error {
+	eff := vrschema.Effective(schedule)
+	for i, c := range cs {
+		if err := commitmentInScope(c, network, eff); err != nil {
+			return fmt.Errorf("commitment %d: %w", i, err)
+		}
+	}
+	for _, a := range requiredRules(schedule, successorEpoch) {
+		if err := successorCovers(a, network, table, m, cs); err != nil {
+			return err
 		}
 	}
 	return nil

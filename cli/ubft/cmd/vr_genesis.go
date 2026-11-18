@@ -1224,9 +1224,9 @@ func newVRGenesisVerifyCmd() *cobra.Command {
 }
 
 // enableVRServices installs the VR-mode collaborators of the control executor (design sections 5.2 and 5.6): the generation's deployment,
-// the witness verifier over the pinned VR and SealRegistry, and the closure duty in the VR domain. The intent derivation (VT-05b) and the
-// committed schedule (VT-07a) are not wired yet: without them the executor refuses every HandoffView and Freeze v5 and every RuleSupport
-// (fail closed), so such a root follows a VR chain but cannot itself admit a primary handoff.
+// the witness verifier over the pinned VR and SealRegistry, and the closure duty in the VR domain. The intent derivation and the handoff
+// protocol (VT-05b) are wired after it by enableVRHandoffInVRMode, which needs --pos-evm-rpc. The committed schedule (VT-07a) is not wired
+// yet: without it the executor refuses every RuleSupport (fail closed).
 func enableVRServices(cm *consensus.ConsensusManager, orchestration *partitions.Orchestration, trustBases posclosure.TrustBases, tb *types.RootTrustBaseV1,
 	shardConfs []*types.PartitionDescriptionRecord, path string) error {
 	dep, pins, err := loadVRRootDeployment(path, uint64(tb.NetworkID), shardConfs)

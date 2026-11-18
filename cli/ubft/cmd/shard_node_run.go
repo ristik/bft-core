@@ -369,6 +369,8 @@ type shardNodeRunFlags struct {
 	RPCServerAddress string // exposes /api/v1/metrics and /api/v1/health when set
 	// OperatorAllowedSources lists the addresses and CIDR prefixes whose requests the operator endpoints answer (default loopback only)
 	OperatorAllowedSources string
+	// OperatorAllowedHosts are the host names, besides IP literals and localhost, the operator endpoints accept in a request's Host header
+	OperatorAllowedHosts string
 
 	shardNodeSigningFlags
 }
@@ -499,6 +501,7 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 	cmd.Flags().StringVar(&flags.RPCServerAddress, "rpc-server-address", "",
 		`address for the metrics/health HTTP server, in the form "host:port". Not started if empty.`)
 	cmd.Flags().StringVar(&flags.OperatorAllowedSources, "operator-allowed-sources", defaultOperatorSources, operatorSourcesUsage)
+	cmd.Flags().StringVar(&flags.OperatorAllowedHosts, "operator-allowed-hosts", "", operatorHostsUsage)
 	flags.addSigningAuthorityFlags(cmd)
 
 	return cmd
@@ -510,6 +513,9 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		operatorLog = operatorLogger(flags.observe)
 	}
 	if err := configureOperatorSources(operatorLog, flags.OperatorAllowedSources); err != nil {
+		return err
+	}
+	if err := configureOperatorHosts(flags.OperatorAllowedHosts); err != nil {
 		return err
 	}
 	if flags.baseFlags != nil { // (a unit test drives this function with none)
@@ -2178,7 +2184,16 @@ func buildExecutor(ctx context.Context, flags *shardNodeRunFlags, shardConf *typ
 		// adapter does not call. eth_config (EIP-7910) is the standard read for it. Last, so that a
 		// mispairing or a wrong genesis is reported as that rather than as a profile difference.
 		if flags.B1Profile != "" {
-			adapter.ExpectUnicityPrecompiles()
+			// The native set the execution client must implement is the one the profile's execution revision commits (bft-core#1199), not a
+			// constant of this binary: a profile of another generation, or without a revision, is refused here and by readB1Profile before
+			// the node can vote, and a client of another generation is refused as having an unexpected or missing precompile.
+			b1p, err := readB1Profile(flags.B1Profile)
+			if err != nil {
+				return nil, fmt.Errorf("engine-api executor cannot read the b1 profile for its execution revision: %w", err)
+			}
+			if err := adapter.ExpectUnicityPrecompiles(b1p.ExecutionRevision); err != nil {
+				return nil, fmt.Errorf("engine-api executor refuses the b1 profile's execution revision: %w", err)
+			}
 		}
 		if _, err := adapter.CheckExecutionProfile(ctx, wantChainID); err != nil {
 			return nil, fmt.Errorf("engine-api executor failed its startup execution-profile check "+
