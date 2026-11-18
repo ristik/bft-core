@@ -26,7 +26,7 @@ type rootQ3API struct {
 	Trust  func(epoch uint64) (*types.RootTrustBaseV1, error)
 	// ShardConfig is the shard configuration this root's derived index holds for a shard epoch of the (whole-partition) shard of a partition: the file an
 	// authority is advanced into (`signing-authority advance-epoch --shard-conf`). Nil: the endpoint refuses.
-	ShardConfig func(partition types.PartitionID, epoch uint64) (*types.PartitionDescriptionRecord, error)
+	ShardConfig func(partition types.PartitionID, shard types.ShardID, epoch uint64) (*types.PartitionDescriptionRecord, error)
 }
 
 func (a rootQ3API) register(mux *http.ServeMux) {
@@ -66,7 +66,13 @@ func (a rootQ3API) register(mux *http.ServeMux) {
 		if a.ShardConfig == nil {
 			return nil, errors.New("this root serves no shard configurations")
 		}
-		pdr, err := a.ShardConfig(types.PartitionID(in.Partition), in.Epoch)
+		var shard types.ShardID
+		if in.Shard != "" {
+			if err := shard.UnmarshalText([]byte(in.Shard)); err != nil {
+				return nil, fmt.Errorf("shard: %w", err)
+			}
+		}
+		pdr, err := a.ShardConfig(types.PartitionID(in.Partition), shard, in.Epoch)
 		if err != nil || pdr == nil {
 			return nil, fmt.Errorf("no configuration for partition %d shard epoch %d: %v", in.Partition, in.Epoch, err)
 		}
@@ -76,6 +82,7 @@ func (a rootQ3API) register(mux *http.ServeMux) {
 
 type q3ShardConfRequest struct {
 	Partition uint32 `json:"partition"`
+	Shard     string `json:"shard,omitempty"` // the ShardID in hex text form; empty: the unsplit shard
 	Epoch     uint64 `json:"epoch"`
 }
 

@@ -658,6 +658,7 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		mux.HandleFunc("PUT /api/v1/trustbases", trustBasesPutHandler(flags.HandoffProfile, trustBaseStore.Store))
 		mux.HandleFunc("GET /api/v1/trustbases", getTrustBaseHandler(trustBaseStore, obs))
 		mux.HandleFunc("GET /api/v1/roundInfo", getRoundInfoHandler(cm.GetState, obs))
+		mux.HandleFunc("GET /api/v1/shardConf", getShardConfHandler(orchestration.ShardConfigByEpoch))
 		if committee != nil {
 			mux.HandleFunc("POST /api/v1/committee", q3Endpoint(func(context.Context, json.RawMessage) (any, error) { return committee.status(), nil }))
 		}
@@ -671,8 +672,8 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 				mux.HandleFunc("POST /api/v1/handoff/q3-stage", rootQ3StageHandler(cm))
 				rootQ3API{Status: cm.Q3Status, Rt: q3rt, Bundle: q3BundleProvider{cm: cm, rt: q3rt}.Q3Bundle, State: cm.GetState,
 					Trust: func(epoch uint64) (*types.RootTrustBaseV1, error) { return trustBaseStore.GetByEpoch(epoch) },
-					ShardConfig: func(partition types.PartitionID, epoch uint64) (*types.PartitionDescriptionRecord, error) {
-						return orchestration.ShardConfigByEpoch(partition, types.ShardID{}, epoch)
+					ShardConfig: func(partition types.PartitionID, shard types.ShardID, epoch uint64) (*types.PartitionDescriptionRecord, error) {
+						return orchestration.ShardConfigByEpoch(partition, shard, epoch)
 					}}.register(mux)
 			}
 			if flags.PosDeploymentFile != "" || flags.VRDeploymentFile != "" {
@@ -910,6 +911,39 @@ type (
 		PartitionShards []shardInfo `json:"partitionShards"`
 	}
 )
+
+// getShardConfHandler serves GET /api/v1/shardConf?partition=P&shard=HEX&epoch=E: the configuration of one shard epoch (shard is the ShardID in
+// the hex text form, empty for an unsplit partition). Configurations are public, immutable once stored and bound by the hash the root seal
+// commits to in every certificate, so a reader (a shard's aggregator following a validator-registry kind 6 or 8 change) checks the answer
+// against that hash and trusts nothing else about the server. Unlike the operator endpoint POST /api/v1/q3/shard-conf it is not limited to the
+// local host.
+func getShardConfHandler(lookup func(types.PartitionID, types.ShardID, uint64) (*types.PartitionDescriptionRecord, error)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		partition, err1 := strconv.ParseUint(q.Get("partition"), 10, 32)
+		epoch, err2 := strconv.ParseUint(q.Get("epoch"), 10, 64)
+		var shard types.ShardID
+		var err3 error
+		if s := q.Get("shard"); s != "" {
+			err3 = shard.UnmarshalText([]byte(s))
+		}
+		if err := errors.Join(err1, err2, err3); err != nil {
+			http.Error(w, "partition, epoch and (optionally) shard are required", http.StatusBadRequest)
+			return
+		}
+		pdr, err := lookup(types.PartitionID(partition), shard, epoch)
+		if err != nil {
+			http.Error(w, "failed to read the configuration", http.StatusInternalServerError)
+			return
+		}
+		if pdr == nil {
+			http.Error(w, "no such configuration", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(pdr)
+	}
+}
 
 func getRoundInfoHandler(getState func() (*abdrc.StateMsg, error), obs Observability) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {

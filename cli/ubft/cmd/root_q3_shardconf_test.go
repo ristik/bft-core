@@ -27,9 +27,7 @@ func TestShardConfEndpointAndCommandReturnTheConfigurationTheRootHoldsForAShardE
 	pdr := &types.PartitionDescriptionRecord{Version: 1, NetworkID: 5, PartitionID: 8, PartitionTypeID: 99, ShardID: types.ShardID{}, UnitIDLen: 256, TypeIDLen: 32,
 		T2Timeout: 2500 * time.Millisecond, Epoch: 0, EpochStart: 1, Validators: []*types.NodeInfo{node.NodeInfo(t)}}
 	require.NoError(t, o.AddShardConfig(pdr))
-	api := rootQ3API{ShardConfig: func(p types.PartitionID, epoch uint64) (*types.PartitionDescriptionRecord, error) {
-		return o.ShardConfigByEpoch(p, types.ShardID{}, epoch)
-	}}
+	api := rootQ3API{ShardConfig: o.ShardConfigByEpoch}
 	want, err := o.ShardConfigByEpoch(8, types.ShardID{}, 0)
 	require.NoError(t, err)
 	wantJSON, err := json.Marshal(want)
@@ -72,4 +70,50 @@ func TestShardConfEndpointAndCommandReturnTheConfigurationTheRootHoldsForAShardE
 		require.Equal(t, os.FileMode(0o600), info.Mode().Perm())
 		require.Error(t, run("9"))
 	})
+}
+
+// A shard's aggregator follows a kind 6 or 8 change by reading the successor configuration of its own shard: the endpoint is shard-aware (the
+// split shards of a partition hold separate histories) and public (GET, not limited to the root's host), and answers only what is stored.
+func TestShardConfReadEndpointIsShardAwareAndPublic(t *testing.T) {
+	o, err := partitions.NewOrchestration(5, filepath.Join(t.TempDir(), "orchestration.db"), logger.New(t))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = o.Close() })
+	node := testutils.NewTestNode(t)
+	left, right := types.ShardID{}.Split()
+	mk := func(shard types.ShardID, epoch uint64, timeout time.Duration) *types.PartitionDescriptionRecord {
+		start := uint64(1)
+		if epoch > 0 {
+			start = 100 * epoch
+		}
+		return &types.PartitionDescriptionRecord{Version: 1, NetworkID: 5, PartitionID: 8, PartitionTypeID: 99, ShardID: shard, UnitIDLen: 256, TypeIDLen: 32,
+			T2Timeout: timeout, Epoch: epoch, EpochStart: start, Validators: []*types.NodeInfo{node.NodeInfo(t)}}
+	}
+	for _, p := range []*types.PartitionDescriptionRecord{mk(left, 0, 2*time.Second), mk(right, 0, 3*time.Second), mk(left, 1, 4*time.Second)} {
+		require.NoError(t, o.AddShardConfig(p))
+	}
+	h := getShardConfHandler(o.ShardConfigByEpoch)
+	get := func(query string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/shardConf?"+query, nil)
+		req.RemoteAddr = "203.0.113.9:4000" // not the local host
+		rec := httptest.NewRecorder()
+		h(rec, req)
+		return rec
+	}
+	leftText, _ := left.MarshalText()
+	rightText, _ := right.MarshalText()
+	var got types.PartitionDescriptionRecord
+	rec := get("partition=8&epoch=1&shard=" + string(leftText))
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.EqualValues(t, 1, got.Epoch)
+	require.True(t, got.ShardID.Equal(left))
+	require.Equal(t, 4*time.Second, got.T2Timeout)
+	rec = get("partition=8&epoch=0&shard=" + string(rightText))
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.True(t, got.ShardID.Equal(right))
+	require.Equal(t, http.StatusNotFound, get("partition=8&epoch=1&shard="+string(rightText)).Code, "the sibling has no epoch 1")
+	require.Equal(t, http.StatusNotFound, get("partition=8&epoch=0").Code, "the unsplit shard is not this partition's")
+	require.Equal(t, http.StatusBadRequest, get("partition=8&shard="+string(leftText)).Code)
+	require.Equal(t, http.StatusBadRequest, get("partition=8&epoch=0&shard=zz").Code)
 }
