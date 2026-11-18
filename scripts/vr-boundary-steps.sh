@@ -78,11 +78,12 @@ f=json.load(open('test-nodes/root$1/vr-member.json'))
 print(f['intents'][-1]['views'][0]['readiness'])"; }
 # vrb_stage_has <root n> <hex>: the root's retained stage set holds exactly this readiness encoding
 vrb_stage_has() {
-  curl -sf "$(vrb_rpc_of "$1")/api/v1/vr/stage?from=0" | python3 -c "
+  curl -sf "$(vrb_rpc_of "$1")/api/v1/vr/stage?from=0" >"$VR_EVIDENCE/stage-root$1.json" || return 1
+  python3 -c "
 import json,sys
 want=sys.argv[1].lower().removeprefix('0x')
-d=json.load(sys.stdin)
-sys.exit(0 if any(r.lower().removeprefix('0x')==want for r in (d.get('readiness') or [])) else 1)" "$2"
+d=json.load(open(sys.argv[2]))
+sys.exit(0 if any(r.lower().removeprefix('0x')==want for r in (d.get('readiness') or [])) else 1)" "$2" "$VR_EVIDENCE/stage-root$1.json"
 }
 vrb_rpc_of() { echo "http://127.0.0.1:$(m2_rpc_port "$1")"; }
 vrb_file_same() { cmp -s "$1" "test-nodes/root$2/vr-member.json"; }
