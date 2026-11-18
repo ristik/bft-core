@@ -54,7 +54,7 @@ vrb_restart_member() {
   boot=$(m2_root_addr 2)
   stop_pidfile "test-nodes/root$node/pid" 'ubft root-node' || { vrb_log "FAIL: stopping root$node"; return 1; }
   cp "test-nodes/root$node/vr-member.json" "$VR_EVIDENCE/root$node-vr-member-before-restart.json" 2>/dev/null || true
-  m2_start_root "$node" "" "$boot" || { vrb_log "FAIL: restarting root$node"; return 1; }
+  m2_start_root "$node" 1 "$boot" || { vrb_log "FAIL: restarting root$node"; return 1; }
   sleep 10
   after=$(grep -c 'VR handoff member: readiness' "test-nodes/root$node/debug.log")
   [ "$before" = "$after" ] || { vrb_log "FAIL: root$node signed a view again after its restart"; return 1; }
