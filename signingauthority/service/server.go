@@ -21,8 +21,8 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
-// Endpoint says which side of the boundary a listener serves. There is no endpoint that serves
-// both, and no operation that both endpoints serve.
+// Endpoint says which side of the boundary a listener serves. The client and operator endpoints share no operation. The possession-proof
+// endpoint serves one operation, opSignHandoffPoP, which the operator endpoint serves too, under its own credential; it serves nothing else.
 type Endpoint int
 
 const (
@@ -87,7 +87,7 @@ func DefaultConfig() Config {
 }
 
 /*
-Server answers for one authority, on two endpoints.
+Server answers for one authority, on its client and operator endpoints and, when a member credential is configured, a possession-proof endpoint.
 
 It holds the session. A client is admitted by a credential the server issued when the operator
 replaced the session, and the server maps that credential to the session it is holding; the client

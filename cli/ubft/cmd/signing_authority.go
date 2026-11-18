@@ -111,7 +111,7 @@ key exists: the authority starts pending and admits no client until complete-enr
 	cmd.Flags().StringVar(&flags.OperatorSocket, "operator-socket", "", "Unix socket for the operator commands; its directory is restricted to the owner")
 	cmd.Flags().StringVar(&flags.OperatorCredential, "operator-credential", "", "path to the operator credential (see `signing-authority credential`)")
 	cmd.Flags().StringVar(&flags.PoPSocket, "pop-socket", "", "Unix socket of the automated root member (`root-node run --vr-evm-authority-socket`): it serves the handoff possession proof and nothing else; with --pop-credential")
-	cmd.Flags().StringVar(&flags.PoPCredential, "pop-credential", "", "path to the member's credential (see `signing-authority credential`); a credential of its own, not the operator's")
+	cmd.Flags().StringVar(&flags.PoPCredential, "pop-credential", "", "path to the member's credential (see `signing-authority credential`); a credential of its own, not the operator's. The root process must run as the authority's uid to reach the socket (its directory is 0700), so keep the operator credential file unreadable by the root process: the member credential is then the only thing it can use")
 	cmd.Flags().StringVar(&flags.AuthorityID, "authority-id", "", "operator-assigned name for this authority lifetime, for diagnostics")
 	cmd.Flags().StringVar(&flags.NodeID, "node-id", "", "the shard validator this authority signs for (`ubft node-id` on the shard node's key configuration)")
 	cmd.Flags().Uint16Var(&flags.NetworkID, "network-id", 0, "network identifier")
