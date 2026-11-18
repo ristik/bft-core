@@ -191,13 +191,17 @@ func TestTheStagingStampSurvivesARestartAndABackwardClock(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "vr-shard-stamp")
 	mk := func() *vrHandoff {
 		v := &vrHandoff{cfg: VRHandoffConfig{ShardStampPath: path, Log: slog.New(slog.DiscardHandler)}, shardKick: make(chan struct{}, 1)}
-		v.shardStamp = readStamp(path)
+		n, err := readStamp(path)
+		require.NoError(t, err)
+		v.shardStamp = n
 		return v
 	}
 	v := mk()
 	v.setShardStaged(1, []string{"a"})
 	first := v.shardStamp
-	require.Zero(t, readStamp(path), "not persisted by the change itself: the delivery worker persists before it sends")
+	n, err := readStamp(path)
+	require.NoError(t, err)
+	require.Zero(t, n, "not persisted by the change itself: the delivery worker persists before it sends")
 	require.NoError(t, writeStamp(path, first))
 
 	// the previous run issued a stamp far ahead of this clock (the clock then went backward)
@@ -237,5 +241,37 @@ func TestAGenerationIsPersistedBeforeItIsSent(t *testing.T) {
 	mu.Lock()
 	require.Equal(t, v.shardStamp, sent[0])
 	mu.Unlock()
-	require.Equal(t, v.shardStamp, readStamp(path))
+	n, err := readStamp(path)
+	require.NoError(t, err)
+	require.Equal(t, v.shardStamp, n)
+}
+
+// An unreadable or corrupt counter is not a fresh install: staging delivery does not start (nothing is written over it, the wall clock is no
+// substitute); a missing file is a fresh install and starts from zero.
+func TestACorruptStampCounterStopsTheStagingDelivery(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "vr-shard-stamp")
+	cfg := VRHandoffConfig{ShardStampPath: path, Log: slog.New(slog.DiscardHandler)}
+
+	n, ok := initShardStaging(cfg)
+	require.True(t, ok, "a missing file is a fresh install")
+	require.Zero(t, n)
+
+	require.NoError(t, os.WriteFile(path, []byte("not a number\n"), 0o600))
+	_, ok = initShardStaging(cfg)
+	require.False(t, ok, "a corrupt counter: delivery does not start")
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, "not a number\n", string(got), "and the file is left as it is")
+
+	require.NoError(t, os.Remove(path))
+	require.NoError(t, os.Mkdir(path, 0o700)) // present but unreadable as a file
+	_, ok = initShardStaging(cfg)
+	require.False(t, ok, "an unreadable counter: delivery does not start")
+
+	require.NoError(t, os.Remove(path))
+	require.NoError(t, writeStamp(path, 42))
+	n, ok = initShardStaging(cfg)
+	require.True(t, ok)
+	require.EqualValues(t, 42, n)
 }

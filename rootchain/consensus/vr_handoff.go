@@ -248,13 +248,12 @@ func (x *ConsensusManager) EnableVRHandoff(ctx context.Context, cfg VRHandoffCon
 	go v.prefetchRun(ctx)
 	go v.queue.Run(ctx)
 	if cfg.ShardStaged != nil {
-		v.shardKick = make(chan struct{}, 1)
-		if cfg.ShardStampPath != "" {
-			v.shardStamp = readStamp(cfg.ShardStampPath) // continue above every stamp an earlier run issued
-			v.shardPersisted = v.shardStamp
+		if stamp, ok := initShardStaging(cfg); ok {
+			v.shardKick = make(chan struct{}, 1)
+			v.shardStamp, v.shardPersisted = stamp, stamp // continue above every stamp an earlier run issued
+			v.setShardStaged(0, nil)                      // reconcile at start: the desired state is nothing staged until an intent derives
+			go v.shardStagedRun(ctx)
 		}
-		v.setShardStaged(0, nil) // reconcile at start: the desired state is nothing staged until an intent derives
-		go v.shardStagedRun(ctx)
 	}
 	if v.member != nil {
 		go v.memberRun(ctx)
@@ -1169,17 +1168,37 @@ func (v *vrHandoff) shardStagedRun(ctx context.Context) {
 	}
 }
 
-// readStamp is the persisted generation counter (zero when absent or unreadable: the next stamp is then the wall clock's).
-func readStamp(path string) uint64 {
+// readStamp is the persisted generation counter. A missing file is a fresh install (zero, no error); a file that exists but cannot be read or
+// does not hold a counter is an error: the counter's history is unknown, so the wall clock is no substitute (after a backward clock jump it
+// would issue stamps the shard rejects forever).
+func readStamp(path string) (uint64, error) {
 	raw, err := os.ReadFile(path) // #nosec G304 -- the node's own state file
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
 	if err != nil {
-		return 0
+		return 0, err
 	}
 	n, err := strconv.ParseUint(strings.TrimSpace(string(raw)), 10, 64)
 	if err != nil {
-		return 0
+		return 0, fmt.Errorf("the staging generation counter %s is corrupt: %w", path, err)
 	}
-	return n
+	return n, nil
+}
+
+// initShardStaging is the staging delivery's start: it reads the persisted counter and reports whether delivery may run. With an unreadable or
+// corrupt counter delivery does not start (a loud error): the counter is written only after a successful read, and staging is left to the shard
+// node's own cleanup (the next installed assignment clears its staged set).
+func initShardStaging(cfg VRHandoffConfig) (stamp uint64, ok bool) {
+	if cfg.ShardStampPath == "" {
+		return 0, true
+	}
+	n, err := readStamp(cfg.ShardStampPath)
+	if err != nil {
+		cfg.Log.Error("VR handoff: the staging generation counter is unreadable or corrupt; the staged successor is NOT told to the paired shard node until an operator repairs or removes the file", "path", cfg.ShardStampPath, "error", err)
+		return 0, false
+	}
+	return n, true
 }
 
 // writeStamp persists the counter atomically (write, sync, rename).
