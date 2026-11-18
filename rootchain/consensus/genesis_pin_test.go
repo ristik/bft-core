@@ -33,7 +33,7 @@ func TestConsensusManagerPinsTheLocalGenesisQC(t *testing.T) {
 		cm, _, _ := initConsensusManager(t, testnetwork.NewRootMockNetwork())
 		tb, err := cm.trustBaseStore.GetByEpoch(rctypes.GenesisRootEpoch)
 		require.NoError(t, err)
-		held := cm.blockStore.GetHighQc()
+		held := cm.blockStore().GetHighQc()
 		pinOf(t, cm, held) // this fixture's genesis block carries a shard, so its QC is not the one the software builds for an empty store
 		require.NotEqual(t, built(t, cm).VoteInfo.CurrentRootHash, held.VoteInfo.CurrentRootHash, "premise")
 		require.EqualValues(t, rctypes.GenesisRootRound, held.GetRound(), "premise: a fresh store holds the genesis QC")
@@ -53,7 +53,7 @@ func TestConsensusManagerPinsTheLocalGenesisQC(t *testing.T) {
 	// A store that has moved past round 1 no longer holds the genesis block: the pin is the one the software builds.
 	t.Run("handoff profile, a store past round 1", func(t *testing.T) {
 		cm := restartedRoot(t, firstReplica(newAnchorCluster(t).replicas))
-		_, err := cm.blockStore.Block(rctypes.GenesisRootRound)
+		_, err := cm.blockStore().Block(rctypes.GenesisRootRound)
 		require.Error(t, err, "premise: the genesis block is gone")
 		pinOf(t, cm, built(t, cm))
 	})
@@ -86,11 +86,11 @@ func TestRecoveryRefusesAFabricatedRoundOneQCInTheState(t *testing.T) {
 			bad.Pending[0] = &first
 			mutate(&bad)
 			root := genesisProbe(t, c)
-			before := root.blockStore.RootAnchor()
+			before := root.blockStore().RootAnchor()
 			err := recoverTo(t, root, &bad)
 			require.ErrorIs(t, err, rctypes.ErrNotGenesisQC)
 			require.False(t, root.frontier.faulted.Load(), "refused at verification, before any write")
-			require.Equal(t, before, root.blockStore.RootAnchor())
+			require.Equal(t, before, root.blockStore().RootAnchor())
 		})
 	}
 }
@@ -111,7 +111,7 @@ func TestManagerRecoveryVerifiesTheGenesisHeadWithItsPin(t *testing.T) {
 	genesisState := func(t *testing.T) (*ConsensusManager, *abdrc.StateMsg) {
 		t.Helper()
 		cm, _, _ := initConsensusManager(t, testnetwork.NewRootMockNetwork())
-		state, err := cm.blockStore.GetState()
+		state, err := cm.blockStore().GetState()
 		require.NoError(t, err)
 		require.EqualValues(t, rctypes.GenesisRootRound, state.CommittedHead.Block.Round, "premise: the head is the genesis block")
 		require.EqualValues(t, rctypes.GenesisRootRound, state.CommittedHead.Qc.GetRound(), "premise: its QC is the genesis QC")

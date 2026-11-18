@@ -3,6 +3,7 @@ package abdrc
 import (
 	gocrypto "crypto"
 	"crypto/sha256"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -299,4 +300,31 @@ func TestTimeoutMsg_WireDigest(t *testing.T) {
 		_, ok = decoded.TakeWireDigest()
 		require.False(t, ok, "taken once")
 	}
+}
+
+// A message without a digest is shared by reference: the network loops a node's own vote back as the object the node keeps and
+// sends again, and the consensus test network hands one object to every receiver. TakeWireDigest does not write to it, so receivers
+// taking the digest while another goroutine encodes the message do not race (#1191, run under -race).
+func TestTimeoutMsg_TakeWireDigestOfASharedMessage(t *testing.T) {
+	shared := NewTimeoutMsg(types.NewTimeout(3, 1, nil), "author", nil)
+	shared.Signature = []byte{1, 2, 3}
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			for range 100 {
+				_, ok := shared.TakeWireDigest()
+				require.False(t, ok)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			for range 100 {
+				_, err := basetypes.Cbor.Marshal(shared)
+				require.NoError(t, err)
+			}
+		}()
+	}
+	wg.Wait()
 }

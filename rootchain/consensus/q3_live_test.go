@@ -222,7 +222,7 @@ func (c *q3Live) restart(i int) {
 
 func (c *q3Live) committedRound(i int) uint64 {
 	m := c.replicas[i].manager
-	state, err := m.blockStore.GetState()
+	state, err := m.blockStore().GetState()
 	if err != nil {
 		return 0
 	}
@@ -230,7 +230,7 @@ func (c *q3Live) committedRound(i int) uint64 {
 }
 
 func (c *q3Live) highQCRound(i int) uint64 {
-	return c.replicas[i].manager.blockStore.GetHighQc().GetRound()
+	return c.replicas[i].manager.blockStore().GetHighQc().GetRound()
 }
 
 // activate installs the activation in every node and restarts every node, so that the managers are built over the installed epoch
@@ -272,7 +272,7 @@ func TestLiveWeightedEpochHeavyValidatorRestartRebroadcastsItsRecordedTimeout(t 
 	}, 60*time.Second, 50*time.Millisecond, "the four validators commit live in the activated epoch")
 
 	t.Run("the weighted policy and scheme 2 are in force", func(t *testing.T) {
-		qc := heavy.manager.blockStore.GetHighQc()
+		qc := heavy.manager.blockStore().GetHighQc()
 		require.EqualValues(t, 2, qc.VoteInfo.Epoch)
 		require.EqualValues(t, votesig.SchemeDomainBound, qc.Scheme)
 		require.NoError(t, qc.VerifyWith(heavy.trust))
@@ -319,7 +319,7 @@ func TestLiveWeightedEpochHeavyValidatorRestartRebroadcastsItsRecordedTimeout(t 
 	t.Run("the TC is scheme 2, verified under the epoch's weights, and carries the heavy validator's recorded signature", func(t *testing.T) {
 		var tc *rctypes.TimeoutCert
 		require.Eventually(t, func() bool {
-			got, err := c.replicas[2].manager.blockStore.GetLastTC()
+			got, err := c.replicas[2].manager.blockStore().GetLastTC()
 			if err == nil && got != nil && got.Timeout.Round == key.round {
 				tc = got
 			}

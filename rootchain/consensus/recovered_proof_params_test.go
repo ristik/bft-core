@@ -37,7 +37,7 @@ func TestRecoveredRootRefusesABrokenEnvelope(t *testing.T) {
 	n := c.nodes[c.idx("H")]
 	m := n.r.manager
 
-	sm, err := m.blockStore.GetState()
+	sm, err := m.blockStore().GetState()
 	require.NoError(t, err)
 	raw, err := types.Cbor.Marshal(sm)
 	require.NoError(t, err)
@@ -51,7 +51,7 @@ func TestRecoveredRootRefusesABrokenEnvelope(t *testing.T) {
 	require.NoError(t, err)
 
 	// no request history: the dispatch of a root without an activation, on both stores
-	activated, err := NewIRChangeReqVerifier(m.params, m.blockStore)
+	activated, err := NewIRChangeReqVerifier(m.params, m.blockStore())
 	require.NoError(t, err)
 	afterRecovery, err := newRecoveryVerifier(m.params, recovered, activated)
 	require.NoError(t, err)
@@ -75,7 +75,7 @@ func TestRecoveredRootRefusesABrokenEnvelope(t *testing.T) {
 		pdr, err := view.PDR()
 		require.NoError(t, err)
 		require.Equal(t, "aggregator_rsmt_v1", pdr.GetPartitionParams()["proof_type"], "the configuration of shard %s", s)
-		held := assert.Equal(t, pdr.GetPartitionParams(), m.blockStore.ShardInfo(s.partition, s.shard).PartitionParams, "activated store: the proof configuration of shard %s", s)
+		held := assert.Equal(t, pdr.GetPartitionParams(), m.blockStore().ShardInfo(s.partition, s.shard).PartitionParams, "activated store: the proof configuration of shard %s", s)
 		held = assert.Equal(t, pdr.GetPartitionParams(), recovered.ShardInfo(s.partition, s.shard).PartitionParams, "recovered store: the proof configuration of shard %s", s) && held
 		require.True(t, held)
 		for _, v := range []struct {

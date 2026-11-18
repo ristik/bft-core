@@ -17,6 +17,7 @@ package cmd
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -489,6 +490,55 @@ type vrVerifyInput struct {
 	// funded are the balance-only accounts the plan funds (no code, storage or nonce), with their exact balances: the only accounts the
 	// genesis may hold besides the SealRegistry and the seven VR accounts.
 	funded map[common.Address]vrschema.Word
+	// devGeneration names a development generation (its network word is vrDevNetworkWord(devGeneration)); funded accounts are accepted
+	// only for one, and then every owner and governor signer the plan generated keys for must be among them.
+	devGeneration string
+}
+
+// vrDevNetworkWord is the network word of a development generation: sha256("unicity.dev.vr." + name). A generation with any other word
+// takes no dev funding.
+func vrDevNetworkWord(name string) string {
+	h := sha256.Sum256([]byte("unicity.dev.vr." + name))
+	return lowerHex(h[:])
+}
+
+// vrCheckDevFunding is the premine rule (VT-14 follow-up): balance-only accounts are an expected premine of a development generation,
+// never a hole. They are refused unless the generation is a dev one; each listed account must be allocated (the exact balance, no code,
+// storage or nonce, checked with the alloc); and every identity owner and governor signer must be funded, so the keys the plan generated
+// can send the transactions an election needs (proposeBinding, a multisig execute).
+func vrCheckDevFunding(v vrVerifyInput, alloc map[common.Address]vrAllocAccount) error {
+	if v.devGeneration != "" && !strings.EqualFold(v.input.Network, vrDevNetworkWord(v.devGeneration)) {
+		return fmt.Errorf("%w: %q is not the network word of development generation %q", ErrVRGenesis, v.input.Network, v.devGeneration)
+	}
+	if len(v.funded) == 0 {
+		if v.devGeneration != "" {
+			return fmt.Errorf("%w: --dev-generation names a development generation's premine, and none is listed (--funded-accounts)", ErrVRGenesis)
+		}
+		return nil
+	}
+	if v.devGeneration == "" {
+		return fmt.Errorf("%w: funded accounts are a development generation's premine only (--dev-generation)", ErrVRGenesis)
+	}
+	for a := range v.funded {
+		if _, ok := alloc[a]; !ok {
+			return fmt.Errorf("%w: the planned premine of %s is not allocated", ErrVRGenesis, a)
+		}
+	}
+	var need []string
+	for _, p := range v.input.Identities {
+		need = append(need, p.Owner)
+	}
+	need = append(need, v.input.GovernorSigners...)
+	for _, s := range need {
+		a, err := vrAddress("funded owner or signer", s)
+		if err != nil {
+			return err
+		}
+		if _, ok := v.funded[a]; !ok {
+			return fmt.Errorf("%w: dev funding does not fund %s, an owner or governor signer of the plan", ErrVRGenesis, a)
+		}
+	}
+	return nil
 }
 
 func vrGenesisRole(a common.Address) string {
@@ -744,6 +794,9 @@ func vrVerify(v vrVerifyInput) (vrRootDeployment, error) {
 		if _, ok := alloc[a]; !ok {
 			return fail("the planned funded account %s is not allocated", a)
 		}
+	}
+	if err := vrCheckDevFunding(v, alloc); err != nil {
+		return out, err
 	}
 	if g.Config.ChainID != in.ChainID || g.Config.ShanghaiTime == nil || *g.Config.ShanghaiTime != 0 || g.Config.CancunTime == nil || *g.Config.CancunTime != 0 {
 		return fail("the genesis chain configuration (chain %d, Shanghai and Cancun at 0) is not the plan's chain %d", g.Config.ChainID, in.ChainID)
@@ -1073,7 +1126,7 @@ func newVRGenesisPlanCmd() *cobra.Command {
 func newVRGenesisVerifyCmd() *cobra.Command {
 	var inputFile, deploymentFile, genesisFile, shardConfFile, trustBaseFile, profileFile, idsFile, freshFile, urethLine, feeCollector, out string
 	var partial bool
-	var fundedFile string
+	var fundedFile, devGeneration string
 	cmd := &cobra.Command{Use: "verify", Short: "Refuse any mismatch between the artifacts of a VR generation, and write the roots' --vr-deployment",
 		Long: "Checks the finished generation against the plan, never a report's description of it:\n" +
 			"  - the finalized EVM genesis by the B1 rules (SealRegistry code and state, chain id, seal_registry_genesis), its gasLimit = MaxGas\n" +
@@ -1134,6 +1187,7 @@ func newVRGenesisVerifyCmd() *cobra.Command {
 					v.funded[a] = w
 				}
 			}
+			v.devGeneration = devGeneration
 			dep, err := vrVerify(v)
 			if err != nil {
 				return err
@@ -1159,7 +1213,8 @@ func newVRGenesisVerifyCmd() *cobra.Command {
 	f.StringVar(&freshFile, "vr-hook-measurement", "", "a fresh complete-path VR hook measurement (ureth tests/vr_hook.rs vr_hook_measurement)")
 	f.StringVar(&urethLine, "ureth-flags", "", "the paired ureth's argument vector (its --unicity.* and --txpool.* flags), checked against the profile, the genesis commitment and VR's fees")
 	f.StringVar(&feeCollector, "fee-collector", "", "the shard nodes' --engine-fee-collector, checked against VR's")
-	f.StringVar(&fundedFile, "funded-accounts", "", "optional JSON {address: balance hex} of the balance-only accounts the generation funds (a faucet); the genesis may allocate nothing else besides the SealRegistry and the seven VR accounts")
+	f.StringVar(&fundedFile, "funded-accounts", "", "a development generation's premine: JSON {address: balance hex} of the balance-only accounts it funds, every owner and governor signer among them; the genesis may allocate nothing else besides the SealRegistry and the seven VR accounts (needs --dev-generation)")
+	f.StringVar(&devGeneration, "dev-generation", "", "the development generation's name: its network word must be sha256(\"unicity.dev.vr.\" + name); dev funding is refused for any other generation")
 	f.BoolVar(&partial, "partial", false, "check the files only, without --ureth-flags and --fee-collector (refused with them): exits non-zero with PARTIAL even when the files agree, certifies nothing, writes no root deployment")
 	f.StringVar(&out, "out-root-deployment", "", "write the roots' --vr-deployment here once everything agrees")
 	for _, n := range []string{"input", "deployment", "genesis", "shard-conf", "trust-base", "b1-profile", "genesis-identities", "vr-hook-measurement"} {

@@ -74,7 +74,7 @@ func TestTauOfAnUnknownLeaderRound(t *testing.T) {
 	c.warm(3, c.all()...)
 	drop.Store(true)
 	head := func() uint64 {
-		round, _, _ := c.nodes[0].r.manager.blockStore.LeaderHead()
+		round, _, _ := c.nodes[0].r.manager.blockStore().LeaderHead()
 		return round
 	}
 	lag := uint64(4*len(c.nodes) + 4)

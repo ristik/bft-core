@@ -97,7 +97,7 @@ func TestTheRecoveryVerifierExecutesAWeightedProofTheLegacyDispatchRefuses(t *te
 	// The first successor block (7) switches the shard to the activated assignment and recertifies it; block 8 carries no request, and its
 	// QC, carried by block 9, commits block 7. A node applies that commit before it executes block 9, so the shard's proof, in block 9, is
 	// built on the recertification of root epoch 2 (#1036).
-	anchorBlock, err := r.manager.blockStore.Block(anchor.Slot)
+	anchorBlock, err := r.manager.blockStore().Block(anchor.Slot)
 	require.NoError(t, err)
 	switching, err := anchorBlock.Extend(&rctypes.BlockData{Version: 3, Epoch: 2, Round: 7, Anchor: anchor, Payload: &rctypes.Payload{Version: 3}},
 		r.manager.irReqVerifier, r.orchestration, crypto.SHA256, r.manager.log)
@@ -134,7 +134,7 @@ func TestTheRecoveryVerifierExecutesAWeightedProofTheLegacyDispatchRefuses(t *te
 		return parent.Extend(block, v, r.orchestration, crypto.SHA256, r.manager.log)
 	}
 
-	legacy, err := NewIRChangeReqVerifier(r.manager.params, r.manager.blockStore)
+	legacy, err := NewIRChangeReqVerifier(r.manager.params, r.manager.blockStore())
 	require.NoError(t, err)
 	require.Nil(t, legacy.RequestHistory())
 	_, err = extend(legacy)
@@ -142,7 +142,7 @@ func TestTheRecoveryVerifierExecutesAWeightedProofTheLegacyDispatchRefuses(t *te
 	// reason behind it differs by state: the live wedge showed the member count of the nil request context, this harness's committed anchor an out-of-date round.
 	require.ErrorContains(t, err, "verifying change request: certification request verification failed")
 
-	recovery, err := r.manager.recoveryVerifier(r.manager.blockStore)
+	recovery, err := r.manager.recoveryVerifier(r.manager.blockStore())
 	require.NoError(t, err)
 	require.Same(t, r.manager.irReqVerifier.RequestHistory(), recovery.RequestHistory())
 	executed, err := extend(recovery)

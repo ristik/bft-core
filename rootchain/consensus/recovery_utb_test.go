@@ -30,11 +30,11 @@ func TestRecoveryInAUTBEpochReplaysAStateWhoseFirstQCCommitsNothingTheTreeHolds(
 	require.True(t, hasQCThatCommitsNothing(state), "premise: the state right after the anchor, whose first QCs commit the anchor or nothing")
 
 	root := utbRecoveryRoot(t, c)
-	previous := root.blockStore
+	previous := root.blockStore()
 	require.NoError(t, recoverTo(t, root, state), "the same state recovers in a legacy epoch (TestRolledRootsRejoinFromStatesWithQCsThatCommitNothing)")
-	require.NotSame(t, previous, root.blockStore, "the replacement store was installed")
+	require.NotSame(t, previous, root.blockStore(), "the replacement store was installed")
 	require.False(t, root.frontier.faulted.Load())
-	adopted, err := root.blockStore.GetState()
+	adopted, err := root.blockStore().GetState()
 	require.NoError(t, err)
 	require.Equal(t, len(state.Pending), len(adopted.Pending), "every pending block was replayed, and every certificate inserted")
 	var last uint64
@@ -43,5 +43,5 @@ func TestRecoveryInAUTBEpochReplaysAStateWhoseFirstQCCommitsNothingTheTreeHolds(
 			last = max(last, b.Qc.GetRound())
 		}
 	}
-	require.GreaterOrEqual(t, root.blockStore.GetHighQc().GetRound(), last, "the last pending certificate was inserted")
+	require.GreaterOrEqual(t, root.blockStore().GetHighQc().GetRound(), last, "the last pending certificate was inserted")
 }
