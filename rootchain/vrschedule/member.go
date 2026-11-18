@@ -54,6 +54,7 @@ const ResendEvery = 5 * time.Second
 // Staged is what the member hands to the staging hook once it holds a verified assembly: the successor body, its candidate digest, the
 // attempt and the candidate's identities (the successor's EVM validators and roots).
 type Staged struct {
+	Intent          [32]byte // the intent the candidate belongs to: a staging write is made only while it is the active one
 	Body            q3format.BodyV3
 	CandidateDigest [32]byte
 	Attempt         uint64
@@ -156,9 +157,6 @@ func NewMember(svc *Service, cfg MemberConfig) (*Member, error) {
 // decodes and names its intent. (What needs the committed context, a proof's validity against the intent, is checked when the intent is
 // current: an invalid proof is derived again then, never a readiness.)
 func (m *Member) validateFile() error {
-	if len(m.file.Intents) == 0 && m.file.Version == 0 {
-		return nil // an empty state ("{}" or "null")
-	}
 	if m.file.Version != memberFileVersion {
 		return fmt.Errorf("member file version %d, want %d", m.file.Version, memberFileVersion)
 	}
@@ -214,6 +212,9 @@ func (m *Member) validateFile() error {
 			if !bytes.Equal(r.IntentDigest, d) || r.Slot != v.View || !bytes.Equal(r.CandidateDigest, cd) {
 				return fmt.Errorf("intent %x view %d: the saved readiness is of another intent, view or candidate than its record", d[:8], v.View)
 			}
+			if rs, err := vrschema.RuleSupportDigest(r.Commitments); err != nil || !bytes.Equal(rs[:], r.RuleSupportDigest) {
+				return fmt.Errorf("intent %x view %d: the saved readiness' rule-support digest is not its commitments'", d[:8], v.View)
+			}
 			receipt, err := vrschema.ReadinessReceipt(r.Receipt, m.cfg.Self)
 			if err != nil || len(receipt.Signature) == 0 {
 				return fmt.Errorf("intent %x view %d: the saved readiness is not this node's receipt: %v", d[:8], v.View, err)
@@ -250,7 +251,8 @@ func (m *Member) persist() error {
 }
 
 // memberMaxIntents bounds the file: intents of the current or a later (root epoch, attempt) are never evicted (a revived intent's signed
-// views must survive); only strictly older ones go, oldest first, and past the bound the oldest of any.
+// views must survive); only strictly older ones go, and when the bound is still reached no further intent is recorded and the member signs
+// nothing new (it never evicts a record that may matter).
 const memberMaxIntents = 16
 
 func (m *Member) intent(d [32]byte, epoch, attempt uint64) *memberIntent {
@@ -269,7 +271,7 @@ func (m *Member) intent(d [32]byte, epoch, attempt uint64) *memberIntent {
 	}
 	m.file.Intents = kept
 	if len(m.file.Intents) >= memberMaxIntents {
-		m.file.Intents = m.file.Intents[len(m.file.Intents)-memberMaxIntents+1:]
+		return nil // the record is full of intents that may still revive: no new signing until an operator has dealt with the file
 	}
 	m.file.Intents = append(m.file.Intents, memberIntent{Intent: h, Epoch: epoch, Attempt: attempt})
 	return &m.file.Intents[len(m.file.Intents)-1]
@@ -446,6 +448,9 @@ func (m *Member) send(msg Message) {
 // a persisted one that does not verify (an older wrong key) is derived again: only the proof is replaced, never a signed view.
 func (m *Member) stepPoP(st memberState) error {
 	mi := m.intent(st.digest, st.rootEpoch, st.intent.Attempt)
+	if mi == nil {
+		return fmt.Errorf("%w: the member file holds the bound of intents that may still revive: nothing new is recorded or signed", ErrMember)
+	}
 	var p vrhandoff.PoPOffer
 	have := false
 	if mi.PoP != "" {
@@ -455,6 +460,9 @@ func (m *Member) stepPoP(st memberState) error {
 		}
 		if err == nil {
 			err = vrhandoff.VerifyPoP(st.intent, p)
+		}
+		if err == nil && p.EVMNodeID != st.self.EVMNodeID {
+			err = fmt.Errorf("the saved proof is of EVM node %s, not this member's %s", p.EVMNodeID, st.self.EVMNodeID)
 		}
 		if err != nil {
 			m.log().Warn("VR handoff member: the persisted possession proof does not verify; it is derived again", "error", err)
@@ -536,6 +544,9 @@ func (m *Member) commitments(st memberState) (cs []vrhandoff.SupportCommitment, 
 // stepReadiness: stage 4, over the verified assembly of the committed current view.
 func (m *Member) stepReadiness(st memberState) error {
 	mi := m.intent(st.digest, st.rootEpoch, st.intent.Attempt)
+	if mi == nil {
+		return fmt.Errorf("%w: the member file holds the bound of intents that may still revive: nothing new is recorded or signed", ErrMember)
+	}
 	cd := sha256.Sum256(st.assembly.Candidate)
 	if pv := mi.view(st.view); pv != nil {
 		// a persisted view is never signed again; its readiness is re-sent and re-offered
@@ -557,14 +568,10 @@ func (m *Member) stepReadiness(st memberState) error {
 					m.warned = map[uint64]bool{}
 				}
 				m.warned[st.view] = true
-				m.log().Warn("VR handoff member: the service holds another assembly of a view this member signed; its signed readiness is re-sent, nothing new is signed",
+				m.log().Warn("VR handoff member: the service holds another assembly of a view this member signed; nothing new is signed and nothing is sent for it",
 					"intent", fmt.Sprintf("%x", st.digest[:8]), "view", st.view, "signed", pv.CandidateDigest[:16], "held", hex.EncodeToString(cd[:8]))
 			}
-			if !st.complete && m.cfg.Now().Sub(m.lastRd) >= ResendEvery && m.svc.tokenValid(st.tok) {
-				m.lastRd = m.cfg.Now()
-				m.send(Message{Readiness: &r})
-			}
-			return nil
+			return nil // nothing is admitted or sent for it: a readiness is sent only over the assembly this node's service holds
 		}
 		if err := m.release(st, r); err != nil {
 			return err
@@ -643,10 +650,45 @@ func (m *Member) stepReadiness(st memberState) error {
 	return nil
 }
 
-// release admits a signed readiness into this node's own service and sends it (until the intent's certificate is complete), atomically with
-// the committed state it was decided over: a state that moved on suppresses the release (the durable record stays), and a message the local
-// service did not admit is never sent.
+// exchangePending is whether the readiness exchange is still open for this member. A K member that is no successor re-sends its support until
+// a Prepare is committed or the intent changes: it cannot know whether the other roots hold it (its own plan becoming ready says nothing of
+// theirs), and a Prepare ends every step. A successor stops once its own certificate is complete and its plan holds the K support (the stage
+// pull recovers what others miss).
+func (m *Member) exchangePending(st memberState) bool {
+	if st.kOnly || !st.complete {
+		return true
+	}
+	_, ready := m.svc.Plan()
+	return !ready
+}
+
+// verifyOwn verifies a readiness as every root will judge it under the committed state of the snapshot: the envelope, receipt and
+// commitments over the held assembly, body and trust base, and the support the gate needs of a successor.
+func (m *Member) verifyOwn(st memberState, r vrhandoff.Readiness) error {
+	if st.assembly == nil {
+		return errors.New("no assembly is held")
+	}
+	if err := vrhandoff.VerifyReadiness(st.intent, *st.assembly, st.body, st.self, st.trustBase, r); err != nil {
+		return err
+	}
+	if st.successor {
+		return vradmit.VerifySuccessorSupport(st.schedule, st.rootEpoch+1, st.intent.Network, st.table, st.self, r.Commitments)
+	}
+	return vradmit.CommitmentsInScope(st.schedule, st.intent.Network, r.Commitments)
+}
+
+// release admits a signed readiness into this node's own service and sends it, atomically with the committed state it was decided over: a
+// state that moved on suppresses the release (the durable record stays), and a message the local service did not admit is never sent. The
+// readiness is verified in full under the current committed state first, a saved one included: a readiness the current state does not verify
+// (altered bytes, a support basis that changed since it was signed) is never admitted or sent. It is re-sent until the exchange is settled:
+// the successors' certificate is complete AND the Prepare plan holds the K support it waits for (a K member's support can come after the
+// certificate), or a Prepare is committed.
 func (m *Member) release(st memberState, r vrhandoff.Readiness) error {
+	if err := m.verifyOwn(st, r); err != nil {
+		m.log().Warn("VR handoff member: a readiness this node signed does not verify under the current committed state; it is not released",
+			"intent", fmt.Sprintf("%x", st.digest[:8]), "view", st.view, "error", err)
+		return nil
+	}
 	o, err := m.svc.releaseOwn(st.tok, m.cfg.Self, Message{Readiness: &r})
 	if errors.Is(err, errStaleState) {
 		m.log().Debug("VR handoff member: the committed state moved on; the signed readiness is kept, not released", "view", st.view)
@@ -655,7 +697,7 @@ func (m *Member) release(st memberState, r vrhandoff.Readiness) error {
 	if !sendable(o) {
 		return fmt.Errorf("%w: this node's own readiness is not admitted (%s): %v", ErrMember, o, err)
 	}
-	if !st.complete && m.cfg.Now().Sub(m.lastRd) >= ResendEvery {
+	if m.exchangePending(st) && m.cfg.Now().Sub(m.lastRd) >= ResendEvery {
 		m.lastRd = m.cfg.Now()
 		m.log().Debug("VR handoff member: readiness sent", "intent", fmt.Sprintf("%x", st.digest[:8]), "view", st.view)
 		m.send(Message{Readiness: &r})
@@ -668,7 +710,7 @@ func (m *Member) stage(st memberState, body q3format.BodyV3, cd [32]byte) error 
 	if m.cfg.Stage == nil || m.staged == cd {
 		return nil
 	}
-	if err := m.cfg.Stage(Staged{Body: body, CandidateDigest: cd, Attempt: st.intent.Attempt, Identities: st.successors}); err != nil {
+	if err := m.cfg.Stage(Staged{Intent: st.digest, Body: body, CandidateDigest: cd, Attempt: st.intent.Attempt, Identities: st.successors}); err != nil {
 		return err
 	}
 	m.staged = cd

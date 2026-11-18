@@ -1191,7 +1191,8 @@ func (s *Service) kReadinessLocked(st *intentState) []vrschema.Readiness {
 	sort.Slice(views, func(i, j int) bool { return views[i] < views[j] })
 	for _, v := range views {
 		for id, r := range st.views[v].kready {
-			if _, have := byRoot[id]; !have {
+			// the earliest entry of a member that is still usable under the committed schedule: an obsolete first one does not hide a later one
+			if _, have := byRoot[id]; !have && len(r.Commitments) > 0 && vradmit.CommitmentsInScope(s.sch, st.d.Intent.Network, r.Commitments) == nil {
 				byRoot[id] = r
 			}
 		}

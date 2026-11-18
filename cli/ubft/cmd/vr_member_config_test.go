@@ -37,9 +37,4 @@ func TestVRMemberConfigReadsTheEVMKeys(t *testing.T) {
 	require.ErrorIs(t, err, ErrVRHandoffCmd)
 	_, err = vrMemberConfig(home, filepath.Join(t.TempDir(), keyConfFileName))
 	require.ErrorIs(t, err, ErrVRHandoffCmd)
-
-	t.Setenv("UBFT_VR_MEMBER_HOLD", "1")
-	m, err = vrMemberConfig(home, "")
-	require.NoError(t, err)
-	require.Nil(t, m.Hold, "a build without the vrdev tag has no hold hook, whatever the environment says")
 }

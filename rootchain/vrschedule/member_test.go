@@ -563,11 +563,8 @@ func TestAMemberResendsItsSignedReadinessAndKeepsItsIntents(t *testing.T) {
 	tamperAssembly(s.svcs[joiner], 0)
 	s.bus = nil
 	require.NoError(t, s.members[joiner].Step())
-	require.Len(t, s.bus, 1)
-	require.NotNil(t, s.bus[0].m.Readiness)
-	enc, err := s.bus[0].m.Readiness.Encode()
-	require.NoError(t, err)
-	require.Equal(t, signed, hex.EncodeToString(enc), "the readiness it signed is what is re-sent")
+	require.Empty(t, s.bus, "a different assembly is not signed, and nothing is sent for it")
+	_ = signed
 	require.Equal(t, f, readFile(t, s.paths[joiner]), "and nothing new is signed")
 
 	m := s.members[joiner]
@@ -675,4 +672,153 @@ func TestAMessageTheLocalServiceDroppedIsNotSent(t *testing.T) {
 	err = m.Step()
 	require.ErrorIs(t, err, ErrMember)
 	require.Empty(t, sent, "a dropped offer is not sent")
+}
+
+// A K member that is no successor and signs its support only after the successors' certificate is complete still gets it to every root: the
+// exchange stays open while the Prepare plan waits for the K weight (here the leaver carries 3 of 6 K weight, so the three staying members'
+// 3 do not make more than 2/3).
+func TestALateKMemberSupportReachesTheRootsAfterTheCertificate(t *testing.T) {
+	w := newWorld(t)
+	w.K[3].Weight, w.K[3].RawWeight = 3, 3 // the leaver (identity 4) carries 3 of 6
+	rule := vrschema.Activation{RuleID: vrschema.RuleID("rule-a"), ReleaseDigest: vrschema.Word{0xaa}, RootEpoch: 2, State: vrschema.ActActive, ChangeID: 1}
+	s := w.swarm(t, []vrschema.Activation{rule})
+	leaver := w.Members[4].Root
+	late := s.members[leaver]
+	delete(s.members, leaver) // the leaver is slow: it does not step at first
+	s.update(0)
+	s.run(t)
+	for id, svc := range s.svcs {
+		_, _, complete, _ := svc.Current()
+		require.True(t, complete, "%s: the successors' certificate is complete", id)
+		_, ready := svc.Plan()
+		require.False(t, ready, "%s: the plan still waits for K support", id)
+	}
+	s.members[leaver] = late
+	s.bus = nil
+	require.NoError(t, late.Step())
+	t.Logf("leaver bus after one step: %d, kready held by leaver: %d", len(s.bus), len(func() []vrhandoff.Readiness { set, _ := s.svcs[leaver].Stage(w.d, 0); return set.Readiness }()))
+	s.run(t)
+	for id, svc := range s.svcs {
+		_, ready := svc.Plan()
+		require.True(t, ready, "%s: the late K support arrived although the certificate was complete", id)
+	}
+}
+
+// A saved readiness is verified in full under the current committed state before it is admitted or sent: one signed under another support
+// basis (a rule scheduled since) and one whose receipt bytes were altered (the envelope omits them) are neither admitted nor sent.
+func TestASavedReadinessIsVerifiedUnderTheCurrentState(t *testing.T) {
+	w := newWorld(t)
+	s := w.swarm(t, nil)
+	s.update(0)
+	s.run(t)
+	joiner := w.Members[5]
+	donor, _ := s.svcs[w.Members[1].Root].Stage(w.d, 0)
+
+	restart := func(t *testing.T, path string, sch []vrschema.Activation) (*Member, *Service, *[]Message) {
+		var sent []Message
+		svc := NewService(ServiceConfig{Self: joiner.Root, Signer: joiner.RK.Signer})
+		m, err := NewMember(svc, MemberConfig{Self: joiner.Root, RootSigner: joiner.RK.Signer, EVMSigner: joiner.EK.Signer, EVMNodeID: joiner.EVM, Path: path,
+			Send: func(msg Message) { sent = append(sent, msg) }, Supports: func(vrschema.Activation) bool { return true }})
+		require.NoError(t, err)
+		c := w.committed(0)
+		c.Schedule = sch
+		svc.Update(c)
+		for _, msg := range donor.Offers() {
+			if msg.Readiness == nil || msg.Readiness.Slot != 0 {
+				_, _, _ = svc.Offer("peer", msg)
+			} else if enc, _ := msg.Readiness.Encode(); enc != nil {
+				// the donor's readiness of other members is offered; this node's own comes from its file
+				if _, err := vrschema.ReadinessReceipt(msg.Readiness.Receipt, joiner.Root); err != nil {
+					_, _, _ = svc.Offer("peer", msg)
+				}
+			}
+		}
+		return m, svc, &sent
+	}
+	copyFile := func(t *testing.T) string {
+		raw, err := os.ReadFile(s.paths[joiner.Root])
+		require.NoError(t, err)
+		path := filepath.Join(t.TempDir(), "m.json")
+		require.NoError(t, os.WriteFile(path, raw, 0o600))
+		return path
+	}
+
+	t.Run("a support basis that changed since it was signed", func(t *testing.T) {
+		rule := vrschema.Activation{RuleID: vrschema.RuleID("rule-a"), ReleaseDigest: vrschema.Word{0xaa}, RootEpoch: 2, State: vrschema.ActActive, ChangeID: 1}
+		m, svc, sent := restart(t, copyFile(t), []vrschema.Activation{rule})
+		require.NoError(t, m.Step())
+		for _, msg := range *sent {
+			require.Nil(t, msg.Readiness, "a readiness that lacks the support the current schedule needs is not sent")
+		}
+		set, _ := svc.Stage(w.d, 0)
+		for _, r := range set.Readiness {
+			_, err := vrschema.ReadinessReceipt(r.Receipt, joiner.Root)
+			require.Error(t, err, "nor admitted into the node's own service")
+		}
+	})
+	t.Run("altered receipt bytes", func(t *testing.T) {
+		path := copyFile(t)
+		f := readFile(t, path)
+		raw, err := hex.DecodeString(f.Intents[0].Views[0].Readiness)
+		require.NoError(t, err)
+		r, err := vrschema.DecodeReadiness(raw)
+		require.NoError(t, err)
+		r.Receipt = append([]byte(nil), r.Receipt...)
+		r.Receipt[len(r.Receipt)-1] ^= 1 // the receipt's last byte (inside its signature)
+		enc, err := r.Encode()
+		require.NoError(t, err)
+		f.Intents[0].Views[0].Readiness = hex.EncodeToString(enc)
+		out, err := json.Marshal(f)
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(path, out, 0o600))
+		m, svc, sent := restart(t, path, nil) // the envelope omits the receipt: the file loads
+		require.NoError(t, m.Step())
+		for _, msg := range *sent {
+			require.Nil(t, msg.Readiness)
+		}
+		set, _ := svc.Stage(w.d, 0)
+		for _, rr := range set.Readiness {
+			_, err := vrschema.ReadinessReceipt(rr.Receipt, joiner.Root)
+			require.Error(t, err)
+		}
+	})
+}
+
+// A versionless empty object and a JSON null are not an empty signing history: an existing file must carry the format's version.
+func TestAnEmptyOrNullMemberFileRefusesToStart(t *testing.T) {
+	w := newWorld(t)
+	for _, content := range []string{"{}", "null", `{"intents":[]}`} {
+		path := filepath.Join(t.TempDir(), "m.json")
+		require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+		_, err := NewMember(NewService(ServiceConfig{}), MemberConfig{Self: "x", RootSigner: w.Members[1].RK.Signer, Path: path})
+		require.ErrorIs(t, err, ErrMember, content)
+	}
+	path := filepath.Join(t.TempDir(), "m.json")
+	require.NoError(t, os.WriteFile(path, []byte(`{"version":1,"intents":[]}`), 0o600))
+	_, err := NewMember(NewService(ServiceConfig{}), MemberConfig{Self: "x", RootSigner: w.Members[1].RK.Signer, Path: path})
+	require.NoError(t, err)
+}
+
+// A record holding the bound of intents that may still revive takes no new intent, and the member signs nothing new (it never evicts one).
+func TestAFullMemberFileSignsNothingNew(t *testing.T) {
+	w := newWorld(t)
+	self := w.Members[5]
+	svc := NewService(ServiceConfig{Self: self.Root, Signer: self.RK.Signer})
+	m, err := NewMember(svc, MemberConfig{Self: self.Root, RootSigner: self.RK.Signer, EVMSigner: self.EK.Signer})
+	require.NoError(t, err)
+	m.mu.Lock()
+	for i := 0; i < memberMaxIntents; i++ {
+		m.file.Intents = append(m.file.Intents, memberIntent{Intent: hex.EncodeToString(bytesOf(byte(i + 1))), Epoch: 5, Attempt: 5})
+	}
+	m.mu.Unlock()
+	svc.Update(w.committed(0))
+	require.ErrorIs(t, m.Step(), ErrMember)
+}
+
+func bytesOf(b byte) []byte {
+	out := make([]byte, 32)
+	for i := range out {
+		out[i] = b
+	}
+	return out
 }

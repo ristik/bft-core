@@ -86,9 +86,15 @@ type vrHandoff struct {
 	member *vrschedule.Member
 	// stageIntent keeps the members the derived intent names (its successors' EVM validators and roots) as the staged successor, from the
 	// intent's derivation on; nil clears it
-	stageIntent  func(epoch uint64, ids []evmassign.Identity, roots []evmroot.Member)
+	stageIntent  func(epoch uint64, ids []evmassign.Identity, roots []evmroot.Member) error
 	intentStaged bool
 	stagedFor    [32]byte // the intent digest the staged members were stored for
+	// stageMu serializes every write of the staged successor with the refresh worker's view of the active intent: a staging write (the intent's
+	// members, a verified candidate, a prepared certificate's) is made only for the intent that is active under this lock, so a callback that
+	// outlives its intent can neither restore a cleared set nor replace another intent's
+	stageMu      sync.Mutex
+	activeIntent [32]byte
+	haveActive   bool
 	kick         chan struct{}
 
 	// the stage pull (GetStage): a (re)started root rebuilds its view state from its peers until one answers; while the current intent
@@ -393,6 +399,7 @@ func (v *vrHandoff) refresh(ctx context.Context) {
 // until one answers, then while the current intent holds no complete certificate from one peer at a time every PullInterval.
 func (v *vrHandoff) pull(ctx context.Context) {
 	intent, view, complete, ok := v.svc.Current()
+	complete = complete && v.planReady() // the exchange is open while the plan still waits for K support
 	if !ok || v.cfg.Opener == nil {
 		return
 	}
@@ -439,7 +446,7 @@ func (v *vrHandoff) pullFrom(ctx context.Context, peers []peer.ID, intent [32]by
 	sem := make(chan struct{}, PullFanOut)
 	var wg sync.WaitGroup
 	for _, p := range peers {
-		if _, _, complete, _ := v.svc.Current(); complete {
+		if _, _, complete, _ := v.svc.Current(); complete && v.planReady() {
 			break
 		}
 		sem <- struct{}{}
@@ -781,6 +788,15 @@ func (x *ConsensusManager) orderHandoffViewWith(ctx context.Context, block *rcty
 // intent; here only what this chain's epoch makes of it is checked: the next epoch of this chain, its protocol configuration, and this node
 // among the successors. Staging never signs and never activates.
 func (x *ConsensusManager) stageVRCandidate(s vrschedule.Staged) error {
+	v := x.vr
+	if v == nil {
+		return fmt.Errorf("%w: not enabled", ErrVRHandoff)
+	}
+	v.stageMu.Lock()
+	defer v.stageMu.Unlock()
+	if !v.haveActive || v.activeIntent != s.Intent {
+		return fmt.Errorf("%w: the intent this candidate belongs to is no longer the active one", ErrVRHandoff)
+	}
 	return x.operator(func() error {
 		if x.q3 == nil {
 			return fmt.Errorf("%w: no Q3 history to stage into", ErrVRHandoff)
@@ -817,13 +833,19 @@ func (v *vrHandoff) stagedMembers(c vrschedule.Committed) {
 	if v.stageIntent == nil {
 		return
 	}
+	v.stageMu.Lock()
+	defer v.stageMu.Unlock()
 	if !c.Derivable {
+		v.haveActive = false
 		if v.intentStaged {
-			v.intentStaged = false
-			v.stageIntent(0, nil, nil)
+			// cleared once the clearing is installed: a refused call is tried again at the next refresh
+			if v.stageIntent(0, nil, nil) == nil {
+				v.intentStaged = false
+			}
 		}
 		return
 	}
+	v.activeIntent, v.haveActive = c.Derived.Digest, true
 	if v.intentStaged && v.stagedFor == c.Derived.Digest {
 		return
 	}
@@ -835,23 +857,31 @@ func (v *vrHandoff) stagedMembers(c vrschedule.Committed) {
 	for _, m := range cand.RootMembers {
 		roots = append(roots, evmroot.Member{NodeID: m.NodeID, StakingID: m.NodeID, ConsensusKey: m.Key, Weight: m.Weight})
 	}
-	v.intentStaged, v.stagedFor = true, c.Derived.Digest
-	v.stageIntent(c.Derived.RootEpoch+1, cand.Identities, roots)
+	// cached only once installed: an epoch mismatch or a refused operator call is tried again at the next refresh
+	if err := v.stageIntent(c.Derived.RootEpoch+1, cand.Identities, roots); err == nil {
+		v.intentStaged, v.stagedFor = true, c.Derived.Digest
+	}
 }
 
 // stageVRIntentMembers stores the staged successor's members for the root epoch (nothing, with epoch 0, clears them). It never touches the
 // digest a verified candidate staged (Q3Staged).
-func (x *ConsensusManager) stageVRIntentMembers(epoch uint64, ids []evmassign.Identity, roots []evmroot.Member) {
-	_ = x.operator(func() error {
+func (x *ConsensusManager) stageVRIntentMembers(epoch uint64, ids []evmassign.Identity, roots []evmroot.Member) error {
+	return x.operator(func() error {
 		if epoch == 0 {
 			x.q3StagedEVM.Store(nil)
 			return nil
 		}
 		if old := x.trustBase.Load(); old == nil || epoch != old.Epoch+1 {
-			return nil
+			return fmt.Errorf("%w: the intent's successor is not the next epoch of this chain", ErrVRHandoff)
 		}
 		ids, roots = devStagedExtras(ids, roots)
 		x.storeStagedEVM(epoch, evmassign.Candidate{Identities: ids}, roots)
 		return nil
 	})
+}
+
+// planReady is whether the Prepare plan holds what its gates need (a complete certificate and the K support).
+func (v *vrHandoff) planReady() bool {
+	_, ok := v.svc.Plan()
+	return ok
 }
