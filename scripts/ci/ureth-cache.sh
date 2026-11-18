@@ -9,7 +9,7 @@
 # image. Any change to one of them is a miss and a full build or test run. ci-lane.yml restores only on pull_request; the trusted events always build and test.
 set -euo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-pins=${URETH_CACHE_PINS:-$here/lane-pins.json}
+pins=${URETH_CACHE_PINS:-$("$here/lane-product.sh" manifest)}
 
 commit() { jq -er .components.ureth.commit "$pins"; }
 rust() { jq -er .toolchains.rust "$pins"; }
