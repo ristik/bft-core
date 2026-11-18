@@ -1,6 +1,7 @@
 package vrschedule
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	libp2pnetwork "github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/unicitynetwork/bft-core/vrhandoff"
+	"github.com/unicitynetwork/bft-core/vrschema"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -35,6 +37,7 @@ const (
 	kindAssembly  = 2
 	kindReadiness = 3
 	kindGetStage  = 4
+	kindGetSource = 5
 )
 
 // ErrWire reports a malformed exchange.
@@ -48,6 +51,14 @@ type wireMessage struct {
 	Readiness *vrhandoff.Readiness
 	Intent    []byte
 	FromView  uint64
+	Result    []byte // kindGetSource: the result id whose committed source is asked for
+}
+
+// wireSource answers a GetSource: the committed source of the result when this root observed it.
+type wireSource struct {
+	_     struct{} `cbor:",toarray"`
+	Found bool
+	Entry SourceEntry
 }
 
 type wireStage struct {
@@ -130,6 +141,8 @@ type Server struct {
 	queue *Queue
 	// allowed adds the peers the caller always admits (the installed root committee); nil admits only the service's members.
 	allowed func(peer.ID) bool
+	// sources answers GetSource (nil: not served)
+	sources *Sources
 	now     func() time.Time
 
 	mu     sync.Mutex
@@ -141,6 +154,12 @@ func NewServer(svc *Service, queue *Queue, allowed func(peer.ID) bool) *Server {
 }
 
 // stageDue records a GetStage answer to from: false when it had one less than StageInterval ago.
+// WithSources makes the server answer GetSource from the root's observed sources.
+func (s *Server) WithSources(src *Sources) *Server {
+	s.sources = src
+	return s
+}
+
 func (s *Server) stageDue(from peer.ID) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -205,6 +224,18 @@ func (s *Server) Serve(from peer.ID, st Stream) {
 		set, _ := s.svc.Stage([32]byte(w.Intent), w.FromView)
 		b, err := types.Cbor.Marshal(wireStage{PoPs: set.PoPs, Assemblies: set.Assemblies, Readiness: set.Readiness})
 		if err != nil || len(b) > MaxStageBytes {
+			_ = st.Reset()
+			return
+		}
+		_ = writeFrame(st, b)
+	case kindGetSource:
+		if s.sources == nil || len(w.Result) != 32 || !s.stageDue(from) {
+			_ = st.Reset()
+			return
+		}
+		e, found := s.sources.Get(vrschema.Word(w.Result))
+		b, err := types.Cbor.Marshal(wireSource{Found: found, Entry: e})
+		if err != nil {
 			_ = st.Reset()
 			return
 		}
@@ -293,4 +324,98 @@ func (s StageSet) Offers() []Message {
 		out = append(out, Message{Readiness: &s.Readiness[i]})
 	}
 	return out
+}
+
+// GetSource asks one peer for the committed source it observed of a result (stage 0 of a handoff this root joined after its publication).
+func GetSource(ctx context.Context, opener Opener, p peer.ID, result [32]byte) (SourceEntry, bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, StreamDeadline)
+	defer cancel()
+	st, err := opener.CreateStream(ctx, p, ProtocolID)
+	if err != nil {
+		return SourceEntry{}, false, err
+	}
+	defer func() { _ = st.Close() }()
+	_ = st.SetDeadline(time.Now().Add(StreamDeadline))
+	b, err := types.Cbor.Marshal(wireMessage{Kind: kindGetSource, Result: result[:]})
+	if err != nil {
+		return SourceEntry{}, false, err
+	}
+	if err := writeFrame(st, b); err != nil {
+		_ = st.Reset()
+		return SourceEntry{}, false, err
+	}
+	if err := st.CloseWrite(); err != nil {
+		return SourceEntry{}, false, err
+	}
+	raw, err := readFrame(st, MaxMessageBytes)
+	if err != nil {
+		return SourceEntry{}, false, err
+	}
+	var w wireSource
+	if err := types.Cbor.Unmarshal(raw, &w); err != nil {
+		return SourceEntry{}, false, errors.Join(ErrWire, err)
+	}
+	return w.Entry, w.Found, nil
+}
+
+// SourceFaulty is the voting weight the Byzantine roots may hold at most among incumbents of total weight total: strictly less than a third.
+func SourceFaulty(total uint64) uint64 {
+	if total == 0 {
+		return 0
+	}
+	return (total - 1) / 3
+}
+
+// WeightedPeer is an incumbent root and its committed voting weight, read from one installed trust-base snapshot.
+type WeightedPeer struct {
+	ID     peer.ID
+	Weight uint64
+}
+
+// FetchSource asks the weighted peers for the source of result and returns it once identical answers of distinct authenticated peers carry a
+// combined weight strictly above SourceFaulty(total), where total is the installed committee's total weight (this root's own included when it
+// is one) and the peers and total come from ONE trust-base snapshot: at least one honest root observed exactly this source, whatever the weights.
+// Each peer counts once, whatever it sends; answers that differ do not combine; a peer that did not observe it, or does not answer, counts for
+// nothing. Honest incumbents observed the same first Published block, so honest answers are identical (stage 0 is fixed by committed history).
+func FetchSource(ctx context.Context, opener Opener, peers []WeightedPeer, result [32]byte, total uint64) (SourceEntry, error) {
+	type ans struct {
+		w  uint64
+		e  SourceEntry
+		ok bool
+	}
+	seen := map[peer.ID]bool{}
+	var distinct []WeightedPeer
+	var asked uint64
+	for _, p := range peers {
+		if !seen[p.ID] {
+			seen[p.ID] = true
+			distinct = append(distinct, p)
+			asked += p.Weight
+		}
+	}
+	total = max(total, asked)
+	need := SourceFaulty(total) // the combined weight must exceed this
+	res := make(chan ans, len(distinct))
+	for _, p := range distinct {
+		go func(p WeightedPeer) {
+			e, ok, err := GetSource(ctx, opener, p.ID, result)
+			res <- ans{p.Weight, e, ok && err == nil}
+		}(p)
+	}
+	weights := map[string]uint64{}
+	for range distinct {
+		a := <-res
+		if !a.ok || a.e.ResultID == nil || !bytes.Equal(a.e.ResultID, result[:]) {
+			continue
+		}
+		k, err := types.Cbor.Marshal(a.e)
+		if err != nil {
+			continue
+		}
+		weights[string(k)] += a.w // one answer per distinct peer: the channel carries exactly one per peer queried
+		if weights[string(k)] > need {
+			return a.e, nil
+		}
+	}
+	return SourceEntry{}, fmt.Errorf("%w: no identical answers above weight %d for the source of %x", ErrUnavailable, need, result[:8])
 }

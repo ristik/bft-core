@@ -31,6 +31,11 @@ vrj_start_nodes() {
   vrb_wait 90 "the joiner's root answers on its RPC" curl -sf "http://127.0.0.1:$(m2_rpc_port "$i")/api/v1/roundInfo" || return 1
   bootnodes=$(evm_bootnodes_for_peers "$boot" "$i" 1 2 3 4) || return 1
   export "EVM_ENGINE_URL_$i=http://127.0.0.1:$((rethEngineBase + i - 1))" "EVM_ETH_URL_$i=http://127.0.0.1:$((rethEthBase + i - 1))"
+  if [ "${VR_ARCHIVE:-0}" = 1 ]; then
+    vrj_log "the joiner's shard node is restored from an incumbent's archive once the incumbents stage the successor (vrj_restore_evm5)"
+    vrj_log "PASS: the joiner's root$i and reth$i are up"
+    return 0
+  fi
   EVM_ARCHIVE_REPLICA_POOL="1 2 3 4 5" start_one_evm_validator "$i" "${validators:-4}" "$partitionID" "$boot" engine-api rpc "$bootnodes" || return 1
   sleep 5
   kill -0 "$(cat "test-nodes/evm$i/pid")" 2>/dev/null || { vrj_log "FAIL: the joiner's shard node exited"; tail -30 "test-nodes/evm$i/debug.log" >&2; return 1; }
@@ -109,4 +114,31 @@ vrj_dev_follow() {
   export UBFT_VR_DEV_STAGE_EXTRA_ROOTS=$rid UBFT_VR_DEV_STAGE_EXTRA_EVM=$eid
   for n in 1 2 3 4; do vrb_restart_root "$n" "with the development staging hook" || return 1; sleep 3; done
   vrj_log "PASS: the incumbents run with the joiner staged (development hook)"
+  if [ "${VR_ARCHIVE:-0}" = 1 ]; then vrj_restore_evm5 || return 1; fi
+  vrb_wait 900 "the joiner's execution client caught up with the chain (it is driven by its shard node, which syncs from the incumbents)" vrj_reth_synced || return 1
 }
+
+vrj_eth_number() { curl -s -X POST -H 'Content-Type: application/json' --data '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' "http://127.0.0.1:$1" | python3 -c "import json,sys;print(int(json.load(sys.stdin)['result'],16))"; }
+vrj_reth_synced() {
+  local a b
+  a=$(vrj_eth_number $((rethEthBase + vrj_id - 1))) || return 1
+  b=$(vrj_eth_number "$rethEthBase") || return 1
+  vrb_log "joiner reth $a, reth1 $b"
+  [ "$a" -gt 0 ] && [ $((b - a)) -le 3 ]
+}
+
+# The joiner's shard node is restored from an incumbent's archive (as the P85 lane's joiner is, H3), staging-only: it serves only once the
+# incumbents have staged the successor (the roots' tell their shard nodes, which then serve the joiner's EVM node).
+vrj_restore_evm5() {
+  local i=$vrj_id
+  vrj_source_libs || return 1
+  declare -F lane_go_run >/dev/null || source scripts/lib/portable.sh
+  export H3_ARCHIVES=$EVM_ARCHIVE_ROOT H3_RESTORE_NO_SESSION=1 H3_RESTORE_TRUST_BASE=test-nodes/trust-base.json H3_ONLINE="1 2 3 4"
+  export EVM_ARCHIVE_REPLICA_POOL="1 2 3 4 5"
+  vrb_wait 300 "the incumbents' shard nodes hold the staged successor" vrj_incumbents_staged || return 1
+  export "EVM_ENGINE_URL_$i=http://127.0.0.1:$((rethEngineBase + i - 1))" "EVM_ETH_URL_$i=http://127.0.0.1:$((rethEthBase + i - 1))"
+  h3_restore_validator "$i" 1 || { vrj_log "FAIL: restoring the joiner's shard node"; return 1; }
+  vrb_wait 600 "the restored joiner's shard node answers" curl -fsS -m 5 -X POST -H 'content-type: application/json' -d '{}' "http://$(evm_validator_rpc_addr "$i")/api/v1/q3/status" || return 1
+  vrj_log "PASS: the joiner's shard node is restored from evm1's archive and serves its status"
+}
+vrj_incumbents_staged() { grep -q 'paired shard node holds the staged successor" node_id=[^ ]* evmNodes=[1-9]' test-nodes/root1/debug.log; }

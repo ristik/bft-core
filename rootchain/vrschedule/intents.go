@@ -37,6 +37,9 @@ type Intents struct {
 	// Fetch reads VR's open output at a certified EVM block the cache does not hold (a HandoffView judged over an executed, uncommitted
 	// parent): verified against the state root, then cached. Nil leaves an uncached state unavailable.
 	Fetch func(blockHash, stateRoot [32]byte) (*vrhandoff.Output, error)
+	// MissingSource is told that a derivation lacked the source of a result this root never observed (it joined or restarted after R's
+	// publication): the node asks its peers for it (FetchSource), never blocking the derivation. Nil leaves it unavailable.
+	MissingSource func(r vrschema.Word)
 }
 
 func (p *Intents) Intent(q storage.VRIntentQuery) (storage.VRIntent, bool, error) {
@@ -117,6 +120,9 @@ func (p *Intents) derive(q storage.VRIntentQuery, fetch bool) (Derived, bool, er
 	r := out.State.ResultID
 	src, ok := p.Sources.Get(r)
 	if !ok {
+		if p.MissingSource != nil {
+			p.MissingSource(r)
+		}
 		return none, false, fmt.Errorf("%w: the source of %x", ErrUnavailable, r[:8])
 	}
 	facts, err := q.Root()

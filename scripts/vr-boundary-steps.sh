@@ -45,6 +45,8 @@ vrb_logs_have() { grep -l -- "$1" test-nodes/root*/debug.log >/dev/null 2>&1; }
 vrb_acked() { [ "$(cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'lastAcked()(bytes32)')" = "$vrb_result" ]; }
 vrb_root_epoch2() { local r n=0; for r in $(vrb_root_rpcs); do curl -sf -X POST -H 'Content-Type: application/json' -d '{}' "$r/api/v1/q3/status" | grep -q '"activeEpoch": *2' && n=$((n+1)); done; [ "$n" -ge 3 ]; }
 
+# The development hooks (the readiness hold, the joiner staging hook) exist only in a binary built with the vrdev build tag; the lane's `make build`
+# (setup-evm-nodes.sh) takes it from MAKEFLAGS=GO_BUILD_TAGS=-tags=vrdev. A production build has no such hook and no flag or variable enables one.
 # Restarts of a member (VT-09), each verified by the content of the member file and of the messages, not by log lines:
 #   VR_RESTART_BETWEEN=1  root1 is started before the election with the readiness hold hook (UBFT_VR_MEMBER_HOLD=1 and <home>/vr-member.hold, a
 #                         development test hook): its possession proof goes out and its readiness waits. Once the proof is persisted and no view
@@ -149,10 +151,11 @@ EOF
   # 2. the PoA election publishes R
   vrb_wait 900 "VR's open output is Published" vrb_published || return 1
   vrb_result=$(vrb_open_output)
+  if [ "${VR_JOINER:-0}" = 1 ] && [ "${VR_JOINER_FOLLOW:-0}" != 1 ] && [ "${VR_ARCHIVE:-0}" = 1 ]; then vrj_restore_evm5 || return 1; fi
   cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'output(bytes32)' "$vrb_result" >"$VR_EVIDENCE/output.hex"
   vrb_log "R = $vrb_result"
   # 3. every root observed the source and derives the intent
-  vrb_wait 300 "every root derives the intent over its committed state" vrb_all_intents || return 1
+  vrb_wait "$([ "${VR_JOINER:-0}" = 1 ] && echo 900 || echo 300)" "every root derives the intent over its committed state (the joiner's included)" vrb_all_intents || return 1
   for i in $(vrb_root_rpcs); do vrb_intent "$i" | python3 -c "import json,sys;d=json.load(sys.stdin);print(sys.argv[1], d['digest'], d['view'], d['assembler'])" "$i"; done | tee "$VR_EVIDENCE/intents.txt"
   [ "$(awk '{print $2}' "$VR_EVIDENCE/intents.txt" | sort -u | wc -l)" = 1 ] || { vrb_log "FAIL: the roots derive different intents"; return 1; }
   vrb_log "PASS: every root derives the same intent"
@@ -199,9 +202,15 @@ EOF
   cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'identity(uint64)' 4 >"$VR_EVIDENCE/identity4-after.hex"
   vrb_log "PASS: the Boundary installed J"
   if [ "${VR_JOINER:-0}" = 1 ]; then vrj_validates || return 1; fi
-  for i in $(seq 1 "${validators:-4}"); do
+  for i in $(seq 1 "${validators:-4}") $([ "${VR_JOINER:-0}" = 1 ] && echo 5); do
     grep -E 'VR handoff|VR output published|root handoff outcome|switched|epoch' "test-nodes/root$i/debug.log" | tail -n 400 >"$VR_EVIDENCE/root$i-vr.log"
+    cp "test-nodes/root$i/vr-member.json" "$VR_EVIDENCE/root$i-vr-member.json" 2>/dev/null || true
   done
+  if [ "${VR_JOINER:-0}" = 1 ]; then
+    curl -s -X POST -H 'Content-Type: application/json' -d '{}' "http://127.0.0.1:$(m2_rpc_port 5)/api/v1/q3/status" >"$VR_EVIDENCE/root5-q3-status.json" 2>/dev/null
+    grep -v 'IR change request\|CertificationResp' test-nodes/root5/debug.log | tail -n 3000 >"$VR_EVIDENCE/root5-tail.log"
+    tail -n 1500 test-nodes/evm5/debug.log >"$VR_EVIDENCE/evm5-tail.log" 2>/dev/null; tail -n 200 test-nodes/reth5/reth.log >"$VR_EVIDENCE/reth5-tail.log" 2>/dev/null
+  fi
   return 0
 }
 
@@ -213,6 +222,7 @@ else
   for i in $(seq 1 "${validators:-4}"); do tail -n 1000 "test-nodes/evm$i/debug.log" >"$VR_EVIDENCE/evm$i-tail.log" 2>/dev/null; done
   if [ "${VR_JOINER:-0}" = 1 ]; then
     grep -v 'IR change request\|CertificationResp' test-nodes/root5/debug.log | tail -n 4000 >"$VR_EVIDENCE/root5-tail.log" 2>/dev/null
+    curl -s -H 'Content-Type: application/json' "http://127.0.0.1:$(m2_rpc_port 5)/api/v1/vr/member" >"$VR_EVIDENCE/root5-vr-member-status.json" 2>/dev/null
     tail -n 1500 test-nodes/evm5/debug.log >"$VR_EVIDENCE/evm5-tail.log" 2>/dev/null; tail -n 300 test-nodes/reth5/reth.log >"$VR_EVIDENCE/reth5-tail.log" 2>/dev/null
   fi
 fi

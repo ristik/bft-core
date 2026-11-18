@@ -1,8 +1,15 @@
 package consensus
 
 import (
+	"context"
 	"errors"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"slices"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/evmassign"
@@ -69,6 +76,89 @@ func derivedFor(t *testing.T, digest [32]byte) vrschedule.Committed {
 	return vrschedule.Committed{Derived: vrschedule.Derived{VRIntent: storage.VRIntent{Digest: digest}, Intent: in, RootEpoch: 1}, Derivable: true}
 }
 
+// A node reports "catching up" while an input it needs is missing and derives nothing: the root chain being recovered, VR unreadable through
+// its own execution client, the open result's source never observed; "ready" only once it derives the intent itself.
+func TestTheMemberReportsCatchingUpUntilItDerivesTheIntent(t *testing.T) {
+	w := vrhandofffix.New(t)
+	in, d := w.Intent()
+	keys, _ := w.Incumbents()
+	svc := vrschedule.NewService(vrschedule.ServiceConfig{Self: "x"})
+	v := &vrHandoff{svc: svc}
+	require.Equal(t, "idle", v.memberStatus(false, "x").State)
+
+	st := v.memberStatus(true, "x")
+	require.Equal(t, "catching up", st.State)
+	require.Contains(t, st.Reasons[0], "recovered from peers")
+
+	v.observeErr = 3
+	st = v.memberStatus(false, "x")
+	require.Equal(t, "catching up", st.State)
+	require.Contains(t, st.Reasons[0], "EVM chain is not synced")
+	v.observeErr = 0
+
+	v.noteDerive(vrschedule.ErrUnavailable)
+	st = v.memberStatus(false, "x")
+	require.Equal(t, "catching up", st.State)
+	require.Contains(t, st.Reasons[0], "intent input not observed yet")
+	v.noteDerive(nil)
+
+	svc.Update(vrschedule.Committed{Derived: vrschedule.Derived{VRIntent: storage.VRIntent{Digest: d}, Intent: in, RootEpoch: w.RC.RootEpoch, Body: w.BC},
+		Derivable: true, Incumbents: keys, K: w.K})
+	st = v.memberStatus(false, w.J[0].RootNodeID)
+	require.Equal(t, "ready", st.State)
+	require.True(t, st.Successor)
+	require.False(t, v.memberStatus(false, "someone-else").Successor)
+	require.False(t, v.memberStatus(false, w.Members[4].Root).Successor, "an incumbent that is no successor is not labelled one")
+}
+
+// The paired shard node is told the successor's EVM validators from the intent's derivation on, the latest set wins, a refused delivery is
+// retried, and an intent that dies clears it: the shard node never keeps a staged peer an intent no longer names.
+func TestThePairedShardNodeHoldsTheActiveIntentsSuccessor(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var mu sync.Mutex
+	var delivered [][]string
+	fail := true
+	v := &vrHandoff{cfg: VRHandoffConfig{Log: slog.New(slog.DiscardHandler)}, shardKick: make(chan struct{}, 1)}
+	v.cfg.ShardStaged = func(_ context.Context, _, _ uint64, ids []string) error {
+		mu.Lock()
+		defer mu.Unlock()
+		if fail {
+			return errors.New("not yet")
+		}
+		delivered = append(delivered, ids)
+		return nil
+	}
+	v.stageIntent = func(uint64, []evmassign.Identity, []evmroot.Member) error { return nil }
+	go v.shardStagedRun(ctx)
+	last := func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		if len(delivered) == 0 {
+			return []string{"none"}
+		}
+		return delivered[len(delivered)-1]
+	}
+
+	f := vrhandofffix.New(t)
+	in, _ := f.Intent()
+	c := vrschedule.Committed{Derived: vrschedule.Derived{VRIntent: storage.VRIntent{Digest: [32]byte{1}}, Intent: in, RootEpoch: 1}, Derivable: true}
+	v.stagedMembers(c)
+	var want []string
+	for _, m := range f.J {
+		want = append(want, m.EVMNodeID)
+	}
+	time.Sleep(200 * time.Millisecond)
+	require.Equal(t, []string{"none"}, last(), "a refused delivery is not recorded")
+	mu.Lock()
+	fail = false
+	mu.Unlock()
+	require.Eventually(t, func() bool { return slices.Equal(last(), want) }, 12*time.Second, 50*time.Millisecond, "retried until the shard node takes it")
+
+	v.stagedMembers(vrschedule.Committed{}) // the intent dies
+	require.Eventually(t, func() bool { return len(last()) == 0 }, 12*time.Second, 50*time.Millisecond, "an intent that died clears the shard node's staged set")
+}
+
 // A set the candidate's installation wrote is owned like the intent-level one: when the intent-level install was refused and only the
 // candidate's succeeded, the intent's end still clears it.
 func TestACandidateInstalledSetIsClearedWithItsIntent(t *testing.T) {
@@ -93,4 +183,95 @@ func TestACandidateInstalledSetIsClearedWithItsIntent(t *testing.T) {
 	v.stagedMembers(vrschedule.Committed{}) // the intent dies
 	require.Equal(t, 1, cleared, "the set the candidate wrote is cleared")
 	require.False(t, v.intentStaged)
+}
+
+// Generation stamps stay monotonic across restarts and a backward clock adjustment: a restarted root continues above the persisted counter even
+// when the wall clock is behind it, so its first clear is never below the shard's last accepted stamp.
+func TestTheStagingStampSurvivesARestartAndABackwardClock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "vr-shard-stamp")
+	mk := func() *vrHandoff {
+		v := &vrHandoff{cfg: VRHandoffConfig{ShardStampPath: path, Log: slog.New(slog.DiscardHandler)}, shardKick: make(chan struct{}, 1)}
+		n, err := readStamp(path)
+		require.NoError(t, err)
+		v.shardStamp = n
+		return v
+	}
+	v := mk()
+	v.setShardStaged(1, []string{"a"})
+	first := v.shardStamp
+	n, err := readStamp(path)
+	require.NoError(t, err)
+	require.Zero(t, n, "not persisted by the change itself: the delivery worker persists before it sends")
+	require.NoError(t, writeStamp(path, first))
+
+	// the previous run issued a stamp far ahead of this clock (the clock then went backward)
+	ahead := uint64(time.Now().Add(time.Hour).UnixNano())
+	require.NoError(t, writeStamp(path, ahead))
+	v = mk()
+	v.setShardStaged(0, nil) // the restart's first delivery: a clear
+	require.Greater(t, v.shardStamp, ahead, "above everything an earlier run issued")
+	v.setShardStaged(1, []string{"b"})
+	require.Greater(t, v.shardStamp, ahead+1)
+}
+
+// The generation is persisted before it is sent: when the counter cannot be written, nothing is delivered and the write is retried; once it
+// succeeds the same, unchanged generation goes out.
+func TestAGenerationIsPersistedBeforeItIsSent(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sub", "vr-shard-stamp") // the directory does not exist: the write fails
+	var mu sync.Mutex
+	var sent []uint64
+	v := &vrHandoff{cfg: VRHandoffConfig{ShardStampPath: path, Log: slog.New(slog.DiscardHandler)}, shardKick: make(chan struct{}, 1)}
+	v.cfg.ShardStaged = func(_ context.Context, _, stamp uint64, _ []string) error {
+		mu.Lock()
+		defer mu.Unlock()
+		sent = append(sent, stamp)
+		return nil
+	}
+	v.setShardStaged(1, []string{"a"})
+	go v.shardStagedRun(ctx)
+	time.Sleep(300 * time.Millisecond)
+	mu.Lock()
+	require.Empty(t, sent, "nothing is sent while its stamp cannot be made durable")
+	mu.Unlock()
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
+	require.Eventually(t, func() bool { mu.Lock(); defer mu.Unlock(); return len(sent) > 0 }, 12*time.Second, 50*time.Millisecond, "retried, and sent once durable")
+	mu.Lock()
+	require.Equal(t, v.shardStamp, sent[0])
+	mu.Unlock()
+	n, err := readStamp(path)
+	require.NoError(t, err)
+	require.Equal(t, v.shardStamp, n)
+}
+
+// An unreadable or corrupt counter is not a fresh install: staging delivery does not start (nothing is written over it, the wall clock is no
+// substitute); a missing file is a fresh install and starts from zero.
+func TestACorruptStampCounterStopsTheStagingDelivery(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "vr-shard-stamp")
+	cfg := VRHandoffConfig{ShardStampPath: path, Log: slog.New(slog.DiscardHandler)}
+
+	n, ok := initShardStaging(cfg)
+	require.True(t, ok, "a missing file is a fresh install")
+	require.Zero(t, n)
+
+	require.NoError(t, os.WriteFile(path, []byte("not a number\n"), 0o600))
+	_, ok = initShardStaging(cfg)
+	require.False(t, ok, "a corrupt counter: delivery does not start")
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Equal(t, "not a number\n", string(got), "and the file is left as it is")
+
+	require.NoError(t, os.Remove(path))
+	require.NoError(t, os.Mkdir(path, 0o700)) // present but unreadable as a file
+	_, ok = initShardStaging(cfg)
+	require.False(t, ok, "an unreadable counter: delivery does not start")
+
+	require.NoError(t, os.Remove(path))
+	require.NoError(t, writeStamp(path, 42))
+	n, ok = initShardStaging(cfg)
+	require.True(t, ok)
+	require.EqualValues(t, 42, n)
 }
