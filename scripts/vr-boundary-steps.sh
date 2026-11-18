@@ -151,6 +151,7 @@ EOF
   # 2. the PoA election publishes R
   vrb_wait 900 "VR's open output is Published" vrb_published || return 1
   vrb_result=$(vrb_open_output)
+  if [ "${VR_JOINER:-0}" = 1 ] && [ "${VR_JOINER_FOLLOW:-0}" != 1 ] && [ "${VR_ARCHIVE:-0}" = 1 ]; then vrj_restore_evm5 || return 1; fi
   cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'output(bytes32)' "$vrb_result" >"$VR_EVIDENCE/output.hex"
   vrb_log "R = $vrb_result"
   # 3. every root observed the source and derives the intent
