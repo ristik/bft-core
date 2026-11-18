@@ -14,6 +14,8 @@ import (
 	"github.com/unicitynetwork/bft-core/rootchain/consensus"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	"github.com/unicitynetwork/bft-core/rootchain/vrschedule"
+	"github.com/unicitynetwork/bft-core/rootchain/vrstate"
+	"github.com/unicitynetwork/bft-core/vradmit"
 	"github.com/unicitynetwork/bft-core/vrhandoff"
 	"github.com/unicitynetwork/bft-core/vrschema"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
@@ -58,6 +60,12 @@ func (o *fixtureOperator) SubmitVRCertificate(c vrschema.ViewCertificate) error 
 	return nil
 }
 
+func (o *fixtureOperator) OfferVRMessage(vrschedule.Message) error { return nil }
+
+func (o *fixtureOperator) VRStage(uint64) (vrschedule.StageSet, [32]byte, error) {
+	return vrschedule.StageSet{}, o.d.Digest, nil
+}
+
 // The operator endpoints and the development harness end to end: the harness reads the intent, signs every successor's PoP, the view's
 // assembly and every readiness over the body the root derives, and every root admits the certificate it delivers.
 func TestTheVRHandoffEndpointsAndTheHarness(t *testing.T) {
@@ -89,4 +97,101 @@ func TestTheVRHandoffEndpointsAndTheHarness(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 	_ = resp.Body.Close()
+}
+
+// serviceOperator is a root's operator surface over a real protocol service: messages are judged by it, the stage set is its own.
+type serviceOperator struct {
+	fixtureOperator
+	svc *vrschedule.Service
+}
+
+func (o *serviceOperator) OfferVRMessage(m vrschedule.Message) error {
+	_, _, err := o.svc.Offer("operator", m)
+	return err
+}
+
+func (o *serviceOperator) VRStage(from uint64) (vrschedule.StageSet, [32]byte, error) {
+	set, _ := o.svc.Stage(o.d.Digest, from)
+	return set, o.d.Digest, nil
+}
+
+// `ubft vr-handoff drive` in its default protocol mode (review #1188): the harness plays the successor members through the staged protocol
+// against two roots' services; the view's assembler root assembles from the proofs it is sent (its assembly reaches the other root as the
+// peer protocol would carry it), the harness signs every readiness over that assembly, and both roots then hold a complete verified
+// certificate whose Prepare they would plan.
+func TestTheVRHandoffDriveProtocolMode(t *testing.T) {
+	f := vrhandofffix.New(t)
+	in, d := f.Intent()
+	keys, ids := f.Incumbents()
+	derived := vrschedule.Derived{VRIntent: storage.VRIntent{Digest: d, AnchorRound: in.AnchorRound}, Intent: in, RootEpoch: f.RC.RootEpoch, Body: f.BC}
+	committed := vrschedule.Committed{Derived: derived, Derivable: true, Incumbents: keys, K: f.K}
+	assembler := vrhandoff.Assembler(d, ids, 0)
+	var other *vrschedule.Service
+	var signer abcrypto.Signer
+	for _, m := range f.Members {
+		if m.Root == assembler {
+			signer = m.RK.Signer
+		}
+	}
+	require.NotNil(t, signer)
+	first := vrschedule.NewService(vrschedule.ServiceConfig{Self: assembler, Signer: signer, Send: func(m vrschedule.Message) { _, _, _ = other.Offer(assembler, m) }})
+	other = vrschedule.NewService(vrschedule.ServiceConfig{Self: "another root"})
+	first.Update(committed)
+	other.Update(committed)
+	var urls []string
+	for _, s := range []*vrschedule.Service{first, other} {
+		op := &serviceOperator{fixtureOperator: fixtureOperator{f: f, d: derived, keys: keys}, svc: s}
+		mux := http.NewServeMux()
+		registerVRHandoffRoutes(mux, op)
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
+		urls = append(urls, srv.URL)
+	}
+	rootKeys, evmKeys := map[string]abcrypto.Signer{}, map[string]abcrypto.Signer{}
+	for _, m := range f.Members {
+		rootKeys[m.Root], evmKeys[m.EVM] = m.RK.Signer, m.EK.Signer
+	}
+	var out bytes.Buffer
+	require.NoError(t, vrDriveProtocol(vrClient{http: &http.Client{Timeout: 10 * time.Second}}, urls, rootKeys, evmKeys, 5*time.Second, &out))
+	require.Contains(t, out.String(), `"mode": "protocol"`)
+	for i, s := range []*vrschedule.Service{first, other} {
+		p, ok := s.Plan()
+		require.True(t, ok, "root %d holds a complete verified certificate", i)
+		require.Equal(t, d, p.Intent)
+	}
+}
+
+type pinlessAuthority struct{ storage.VRStateAuthority }
+
+// The VR handoff wiring of root-node run (review #1188 r2 N1, N2): a root outside VR mode is unchanged; a VR-mode root needs --pos-evm-rpc
+// (it cannot execute a HandoffView or a Freeze v5 without the intent it derives through it) and gets the generation's deployment and pins;
+// a root whose VR services are installed after the root side was wired (the wrong order against enableVRServices) is refused at startup.
+func TestTheVRHandoffWiringInRootNodeRun(t *testing.T) {
+	dep, pins, on, err := vrHandoffWiring(nil, "http://127.0.0.1:8545")
+	require.NoError(t, err)
+	require.False(t, on, "no VR services: not a VR-mode root, nothing is wired")
+	require.Zero(t, dep)
+	require.Zero(t, pins)
+	require.NoError(t, checkVRHandoffWired(nil, false))
+
+	want := vrstate.Pins{Registry: [20]byte{1}, RegistryCode: [32]byte{2}}
+	reg := &storage.VRServices{Deployment: vradmit.Deployment{RootNetwork: 3, ChainID: vrschema.U64(7)}, State: vrstate.Authority{Pins: want}}
+	_, _, on, err = vrHandoffWiring(reg, "")
+	require.ErrorIs(t, err, ErrVRHandoffCmd, "a VR-mode root without an execution client fails at startup")
+	require.False(t, on)
+
+	dep, pins, on, err = vrHandoffWiring(reg, "http://127.0.0.1:8545")
+	require.NoError(t, err)
+	require.True(t, on)
+	require.Equal(t, reg.Deployment, dep)
+	require.Equal(t, want, pins)
+	require.NoError(t, checkVRHandoffWired(reg, true))
+
+	_, _, _, err = vrHandoffWiring(&storage.VRServices{State: pinlessAuthority{}}, "http://127.0.0.1:8545")
+	require.ErrorIs(t, err, ErrVRHandoffCmd)
+
+	// the wrong order: the root side was wired while no VR services were installed (it did nothing), then they were
+	_, _, on, err = vrHandoffWiring(nil, "http://127.0.0.1:8545")
+	require.NoError(t, err)
+	require.ErrorIs(t, checkVRHandoffWired(reg, on), ErrVRHandoffCmd, "a VR-mode root whose root side is off does not start")
 }

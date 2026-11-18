@@ -40,6 +40,7 @@ type (
 		lapseLogged                          bool
 		lapseLoggedEpoch, lapseLoggedAttempt uint64
 		onCommit                             func([]*ExecutedBlock) // the commit observer (SetCommitObserver)
+		onExecuted                           func(*ExecutedBlock)   // the execution observer (SetExecutionObserver)
 	}
 
 	PersistentStore interface {
@@ -565,6 +566,14 @@ func (x *BlockStore) ProcessQc(qc *rctypes.QuorumCert) ([]*certification.Certifi
 	return ucs, nil
 }
 
+// SetExecutionObserver installs a function every added (executed, not yet committed) block is handed to: the VR handoff prefetches VR's
+// output at the EVM state such a block certifies, which its child's HandoffView is judged over (VT-05b). It must not block.
+func (x *BlockStore) SetExecutionObserver(f func(*ExecutedBlock)) {
+	x.lock.Lock()
+	defer x.lock.Unlock()
+	x.onExecuted = f
+}
+
 // SetCommitObserver installs a function every commit calls with the blocks it committed, oldest first (the validator-registry source
 // observer, VT-05b). It is called on the consensus loop and must not block.
 func (x *BlockStore) SetCommitObserver(f func([]*ExecutedBlock)) {
@@ -674,6 +683,12 @@ func (x *BlockStore) Add(block *rctypes.BlockData, verifier IRChangeReqVerifier)
 	exeBlock, err := parentBlock.extendWithAuthority(block, verifier, x.orchestration, x.hash, x.log, x.handoffAuth, x, x.pos, x.leaders)
 	if err != nil {
 		return nil, fmt.Errorf("error processing block round %v, %w", block.Round, err)
+	}
+	x.lock.RLock()
+	executed := x.onExecuted
+	x.lock.RUnlock()
+	if executed != nil {
+		executed(exeBlock)
 	}
 	if exeBlock.vrFrozen != nil {
 		// a Freeze v5: the derived body, the merged readiness receipts and the v5 view of the candidate, as for a V3 companion, and the

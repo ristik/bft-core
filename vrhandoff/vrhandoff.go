@@ -625,3 +625,41 @@ func LeaderChoice(certComplete, gatesHold, viewDue, rejectionDue, quietForPrepar
 func Deadline(open uint64, level uint8, view uint64, n uint32) (at uint64, never bool) {
 	return vrschema.Deadline(open, level, view, n)
 }
+
+// VerifyReadiness is one member's readiness for a verified assembly (design section 5.3.5 item 4, for one member): it names the
+// assembly's (intent, view, candidate digest, body), its rule-support digest is its commitments', every commitment is by the member's
+// exact binding, and the receipt (over the body's receipt context), the trust-base signature and the envelope are the member's root key's.
+func VerifyReadiness(i Intent, a Assembly, body q3format.BodyV3, member evmassign.Identity, trustBase []byte, r Readiness) error {
+	cd := sha256.Sum256(a.Candidate)
+	id := body.Identity()
+	if !bytes.Equal(r.IntentDigest, a.IntentDigest) || r.Slot != a.Slot || !bytes.Equal(r.CandidateDigest, cd[:]) || !bytes.Equal(r.BodyID, id[:]) {
+		return fmt.Errorf("%w: another assembly's context", ErrReadiness)
+	}
+	rs, err := vrschema.RuleSupportDigest(r.Commitments)
+	if err != nil || !bytes.Equal(rs[:], r.RuleSupportDigest) {
+		return fmt.Errorf("%w: rule-support digest", ErrReadiness)
+	}
+	for _, c := range r.Commitments {
+		if err := vradmit.VerifyCommitment(c, member); err != nil {
+			return errors.Join(ErrReadiness, err)
+		}
+	}
+	receipt, err := vrschema.ReadinessReceipt(r.Receipt, member.RootNodeID)
+	if err != nil {
+		return errors.Join(ErrReadiness, err)
+	}
+	if err := vrschema.Verify(member.RootKey, receipt.Signature, q3format.ContextFor(body, i.Attempt, cd).Message(member.RootNodeID)); err != nil {
+		return fmt.Errorf("%w: receipt: %w", ErrReadiness, err)
+	}
+	if err := vrschema.Verify(member.RootKey, r.TrustBaseSig, trustBase); err != nil {
+		return fmt.Errorf("%w: trust-base signature: %w", ErrReadiness, err)
+	}
+	env, err := r.EnvelopeBytes()
+	if err != nil {
+		return errors.Join(ErrReadiness, err)
+	}
+	if err := vrschema.Verify(member.RootKey, r.EnvelopeSig, env); err != nil {
+		return fmt.Errorf("%w: envelope: %w", ErrReadiness, err)
+	}
+	return nil
+}

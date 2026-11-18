@@ -506,6 +506,11 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		stopWitnesses := serveWitnesses(host, cm)
 		defer stopWitnesses()
 	}
+	// VT-05b: the VR handoff root side of a VR-mode root (observer, intent, the staged protocol, the leader path), after its VR services
+	vrHandoffOn, err := enableVRHandoffInVRMode(ctx, cm, shardConfs, flags.PosEVMRPC, flags.PathWithDefault("", ""), signer, host)
+	if err != nil {
+		return err
+	}
 	if flags.HandoffProfile {
 		// The record fetcher is installed and the bootstrap peers are dialled before the Q3 recovery: an installation interrupted before
 		// its checkpoint's P85 record-log prefix was retained completes in that recovery, which fetches the prefix from the other roots and
@@ -515,6 +520,9 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 			return fetchErr
 		}
 		cm.SetRecordFetcher(fetcher)
+	}
+	if err = checkVRHandoffWired(cm.VRServices(), vrHandoffOn); err != nil {
+		return err
 	}
 	if err = host.BootstrapConnect(ctx, log); err != nil {
 		return err
@@ -683,6 +691,9 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 			}
 			if flags.PosDeploymentFile != "" || flags.VRDeploymentFile != "" {
 				mux.HandleFunc("POST /api/v1/pos/control", rootPosControlHandler(cm))
+			}
+			if vrHandoffOn {
+				registerVRHandoffRoutes(mux, cm)
 			}
 			mux.HandleFunc("POST /api/v1/handoff/abort", rootHandoffAbortHandler(cm))
 			mux.HandleFunc("POST /api/v1/handoff/abort/status", rootHandoffAbortStatusHandler(cm))

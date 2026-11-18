@@ -242,7 +242,8 @@ type Observer struct {
 func (o *Observer) Observe(ctx context.Context, c CertifiedEVM) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	continuous := o.primed && c.RootRound > 0 && c.ParentRound == o.lastRound
+	primed, lastRound := o.primed, o.lastRound
+	continuous := primed && c.RootRound > 0 && c.ParentRound == lastRound
 	out, cached := o.Outputs.At(c.StateRoot)
 	if !cached {
 		var err error
@@ -254,13 +255,16 @@ func (o *Observer) Observe(ctx context.Context, c CertifiedEVM) error {
 		o.Outputs.Put(c.StateRoot, out)
 	}
 	prev := o.prev
-	primed, lastRound := o.primed, o.lastRound
 	o.primed, o.lastRound, o.prev = true, c.RootRound, vrschema.Word{}
 	if out == nil {
 		return nil
 	}
 	r := out.State.ResultID
 	o.prev = r
+	if !continuous && prev != r && o.Log != nil {
+		o.Log.Info("VR output published outside an unbroken observation run: no source recorded", "result", fmt.Sprintf("%x", r[:8]),
+			"evmBlock", c.BlockNumber, "rootRound", c.RootRound, "parentRound", c.ParentRound, "lastRound", lastRound, "primed", primed)
+	}
 	if !continuous || prev == r {
 		return nil
 	}
