@@ -221,3 +221,11 @@ func TestAStagedGenerationIsBoundToItsPayload(t *testing.T) {
 	require.ErrorIs(t, a.StageGeneration(next+3, 8, []string{self.String()}), ErrActivePeersStale, "a self-only list for the wrong epoch is not a clear")
 	require.True(t, a.AllowedStagedOnly(b), "the stage is intact")
 }
+
+// A zero stamp is never a generation: it cannot bypass the equal-stamp payload check on a fresh shard.
+func TestAZeroStampIsRefused(t *testing.T) {
+	a, err := NewActivePeers(newPeerID(t), nil)
+	require.NoError(t, err)
+	require.ErrorIs(t, a.StageGeneration(a.Epoch()+1, 0, []string{newPeerID(t).String()}), ErrActivePeersInvalid)
+	require.ErrorIs(t, a.StageGeneration(0, 0, []string{}), ErrActivePeersInvalid)
+}

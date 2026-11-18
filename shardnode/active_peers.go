@@ -230,10 +230,13 @@ func (a *ActivePeers) StageGeneration(shardEpoch, stamp uint64, ids []string) er
 	if err != nil {
 		return err
 	}
+	if stamp == 0 {
+		return fmt.Errorf("%w: a generation stamp is never zero", ErrActivePeersInvalid)
+	}
 	payload := stagePayloadOf(shardEpoch, ids)
 	a.mu.Lock()
 	// the next-assignment condition is on the SUBMITTED list (a non-empty list of only this node, filtered to nothing, is not a clear)
-	if stamp < a.stageStamp || (stamp == a.stageStamp && stamp != 0 && payload != a.stagePayload) || (len(ids) > 0 && shardEpoch != a.epoch+1) {
+	if stamp < a.stageStamp || (stamp == a.stageStamp && payload != a.stagePayload) || (len(ids) > 0 && shardEpoch != a.epoch+1) {
 		a.mu.Unlock()
 		return ErrActivePeersStale
 	}
