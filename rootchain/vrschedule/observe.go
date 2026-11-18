@@ -255,7 +255,6 @@ func (o *Observer) Observe(ctx context.Context, c CertifiedEVM) error {
 		o.Outputs.Put(c.StateRoot, out)
 	}
 	prev := o.prev
-	primed, lastRound := o.primed, o.lastRound
 	o.primed, o.lastRound, o.prev = true, c.RootRound, vrschema.Word{}
 	if out == nil {
 		return nil
