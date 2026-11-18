@@ -27,6 +27,16 @@ func (w *world) signerOf(root string) abcrypto.Signer {
 	return nil
 }
 
+// variant is the i-th distinct copy of a proof (another signature byte; i = 0 is the proof itself): the queue coalesces equal messages of
+// a sender, so a test of its backlog submits distinct ones.
+func variant(p vrhandoff.PoPOffer, i int) Message {
+	v := p
+	v.PoP.Signature = append([]byte(nil), p.PoP.Signature...)
+	v.PoP.Signature[0] ^= byte(i)
+	v.PoP.Signature[1] ^= byte(i >> 8)
+	return Message{PoP: &v}
+}
+
 // held is a service at view 0 holding every proof and view 0's assembly.
 func (w *world) held(c Committed) (*Service, vrhandoff.Assembly) {
 	s := w.service("x")
@@ -181,8 +191,8 @@ func TestQueueAdmissionIsFair(t *testing.T) {
 	bound := q.bound()
 	p := pops[0]
 	for i := 0; i < MaxQueuedPerPeer; i++ {
-		q.Submit("byz1", Message{PoP: &p})
-		q.Submit("byz2", Message{PoP: &p})
+		q.Submit("byz1", variant(p, i+1))
+		q.Submit("byz2", variant(p, i+1))
 	}
 	require.Equal(t, bound, q.Len())
 	for i := 0; i < 3; i++ {
@@ -192,7 +202,7 @@ func TestQueueAdmissionIsFair(t *testing.T) {
 	q.mu.Lock()
 	require.LessOrEqual(t, len(q.per["byz1"])-len(q.per["byz2"]), 1)
 	q.mu.Unlock()
-	require.False(t, q.Submit("byz1", Message{PoP: &p}), "a flooding sender displaces nobody")
+	require.False(t, q.Submit("byz1", variant(p, 1000)), "a flooding sender displaces nobody")
 }
 
 // B3: an invalid proof is verified at most 1 + MaxReplacements times per sender and successor.
@@ -447,8 +457,10 @@ func TestServiceRoundsBoundTheWaitUnderReplenishedArrivals(t *testing.T) {
 	}
 	var pending []tagged
 	p := w.PoPs(w.in)[0]
+	seq := 0
 	submit := func(sender string, now int) {
-		require.True(t, q.Submit(sender, Message{PoP: &p}))
+		seq++
+		require.True(t, q.Submit(sender, variant(p, seq)))
 		pending = append(pending, tagged{sender, now})
 	}
 	for _, x := range senders {
@@ -488,7 +500,7 @@ func TestRoundRobinSkipsNoSender(t *testing.T) {
 	p := w.PoPs(w.in)[0]
 	q.Submit("a", Message{PoP: &p})
 	q.Submit("b", Message{PoP: &p})
-	q.Submit("b", Message{PoP: &p})
+	q.Submit("b", variant(p, 1))
 	q.Submit("c", Message{PoP: &p})
 	var order []string
 	for q.Len() > 0 {
@@ -545,12 +557,83 @@ func TestDisplacementPrefersASenderSeatedLast(t *testing.T) {
 	q.bound = func() int { return 4 }
 	p := w.PoPs(w.in)[1]
 	for i := 0; i < 2; i++ {
-		require.True(t, q.Submit("aa-honest", Message{PoP: &p}))
-		require.True(t, q.Submit("zz-byz", Message{PoP: &p}))
+		require.True(t, q.Submit("aa-honest", variant(p, i+1)))
+		require.True(t, q.Submit("zz-byz", variant(p, i+1)))
 	}
 	require.True(t, q.Submit("mm-new", Message{PoP: &p}))
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	require.Len(t, q.per["aa-honest"], 2, "the honest sender keeps its messages")
 	require.Len(t, q.per["zz-byz"], 1)
+}
+
+// astra's delayed-completion reproduction (review of #1188, r2): support verdicts judged under the old basis that complete after a basis
+// change spend nothing of the new basis's allowance, and the covering readiness is retained.
+func TestOldBasisFailuresSpendNoNewAllowance(t *testing.T) {
+	w := newWorld(t)
+	rule, release := vrschema.Word{0x51}, vrschema.Word{0x52}
+	c := w.committed(0)
+	c.Schedule = []vrschema.Activation{{RuleID: rule, ReleaseDigest: release, RootEpoch: w.RC.RootEpoch, State: vrschema.ActActive, ChangeID: 1}}
+	s, a := w.held(c)
+	member := w.J[0]
+	r := w.readiness(a)[member.RootNodeID]
+	j1 := s.Prepare("member", Message{Readiness: &r})
+	require.NotNil(t, j1.Verify)
+	j2 := s.Prepare("member", Message{Readiness: &r})
+	require.NotNil(t, j2.Verify)
+	e1, e2 := j1.Verify(), j2.Verify()
+	require.ErrorIs(t, e1, vradmit.ErrSupportWait)
+	require.ErrorIs(t, e2, vradmit.ErrSupportWait)
+	signer := w.ByStaking(member.StakingID).RK.Signer
+	cm, err := vrhandoff.SignCommitment(w.in.Network, member, rule, release, signer)
+	require.NoError(t, err)
+	c.Table, err = vradmit.ApplyRuleSupport(c.Table, w.in.Network, []vrschema.SupportCommitment{cm}, w.K, c.Schedule)
+	require.NoError(t, err)
+	s.Update(c)
+	body, err := vrhandoff.DeriveBody(w.in, w.RC.RootEpoch, sha256.Sum256(a.Candidate), w.BC)
+	require.NoError(t, err)
+	covered, err := vrhandoff.SignReadiness(w.in, a, body, member.RootNodeID, w.trustBase(), []vrhandoff.SupportCommitment{cm}, signer)
+	require.NoError(t, err)
+	o, _, _ := s.Apply(j1, e1)
+	require.Equal(t, Dropped, o, "an old-basis support failure: not charged")
+	o, _, _ = s.Apply(j2, e2)
+	require.Equal(t, Dropped, o)
+	o, _, err = s.Offer("member", Message{Readiness: &covered})
+	require.NoError(t, err)
+	require.Equal(t, Retained, o, "the covering readiness is judged under the current basis")
+}
+
+// An old-basis support pass is judged again under the current basis, not retained on the old verdict.
+func TestAnOldBasisSupportPassIsJudgedAgain(t *testing.T) {
+	w := newWorld(t)
+	s, a := w.held(w.committed(0))
+	member := w.J[0]
+	r := w.readiness(a)[member.RootNodeID]
+	j := s.Prepare("member", Message{Readiness: &r})
+	require.NotNil(t, j.Verify)
+	require.NoError(t, j.Verify(), "no rule is required under the old basis")
+	c := w.committed(0)
+	c.Schedule = []vrschema.Activation{{RuleID: vrschema.Word{0x51}, ReleaseDigest: vrschema.Word{0x52}, RootEpoch: w.RC.RootEpoch, State: vrschema.ActActive, ChangeID: 1}}
+	s.Update(c)
+	o, _, _ := s.Apply(j, nil)
+	require.Equal(t, Buffered, o, "re-judged, not retained on the old verdict")
+	set, _ := s.Stage(w.d, 0)
+	require.Empty(t, set.Readiness, "under the current basis it lacks the support now required")
+}
+
+// The queue coalesces a sender's retransmissions: the same message queued once, so retransmission adds nothing to its sender's backlog.
+func TestTheQueueCoalescesRetransmissions(t *testing.T) {
+	w := newWorld(t)
+	s := w.service("x")
+	q := NewQueue(s, 0)
+	p := w.PoPs(w.in)[0]
+	for i := 0; i < 100; i++ {
+		require.True(t, q.Submit("member", Message{PoP: &p}))
+	}
+	require.Equal(t, 1, q.Len())
+	require.True(t, q.Submit("other", Message{PoP: &p}), "another sender's copy is its own")
+	require.Equal(t, 2, q.Len())
+	_, _ = q.pop()
+	require.True(t, q.Submit("member", Message{PoP: &p}), "once served, it may be queued again")
+	require.Equal(t, 2, q.Len())
 }
