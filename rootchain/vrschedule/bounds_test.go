@@ -637,3 +637,37 @@ func TestTheQueueCoalescesRetransmissions(t *testing.T) {
 	require.True(t, q.Submit("member", Message{PoP: &p}), "once served, it may be queued again")
 	require.Equal(t, 2, q.Len())
 }
+
+// astra's round 3: a round serves only the senders admitted when it begins. The queued messages of a sender the committed membership no
+// longer admits are dropped, so a round never holds more than the admitted senders, whatever the membership was when they queued.
+func TestARoundServesOnlyAdmittedSenders(t *testing.T) {
+	w := newWorld(t)
+	s := w.service("x")
+	s.Update(w.committed(0))
+	q := NewQueue(s, 0)
+	admitted := map[string]bool{"a": true, "b": true, "c": true}
+	q.Admitted = func(sender string) bool { return admitted[sender] }
+	p := w.PoPs(w.in)[0]
+	for _, x := range []string{"a", "b", "c"} {
+		for i := 0; i < 3; i++ {
+			require.True(t, q.Submit(x, variant(p, i+1)))
+		}
+	}
+	m, ok := q.pop()
+	require.True(t, ok)
+	require.Equal(t, "a", m.sender, "the first round is a, b, c")
+	delete(admitted, "c") // the committed membership changes: c is no longer a member
+	var order []string
+	for q.Len() > 0 {
+		m, _ := q.pop()
+		order = append(order, m.sender)
+	}
+	require.Equal(t, []string{"b", "c", "a", "b", "a", "b"}, order, "the round begun before the change completes; later rounds drop c")
+	q.mu.Lock()
+	require.Empty(t, q.keys["c"], "c's dropped messages may be queued again if it is admitted again")
+	q.mu.Unlock()
+	require.True(t, q.Submit("c", variant(p, 1)))
+	admitted["c"] = true
+	m, _ = q.pop()
+	require.Equal(t, "c", m.sender)
+}
