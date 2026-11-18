@@ -20,6 +20,12 @@ var (
 	ErrRoundEvidence = errors.New("proposal round does not follow its certificate")
 )
 
+// MaxProposalFrame is the largest CBOR encoding of a valid proposal (#1113). A leader leaves out of its payload the change requests that
+// would make it larger, and every root refuses a larger proposal frame before reading its payload. It bounds the shards' certification
+// requests a block carries, with their proofs, in aggregate: one request alone may be up to
+// certification.MaxBlockCertificationRequestFrame, and a block holds up to a request per member of every shard it certifies.
+const MaxProposalFrame = 128 << 20
+
 type ProposalMsg struct {
 	_           struct{}           `cbor:",toarray"`
 	Block       *abdrc.BlockData   `json:"block"`       // Proposed change

@@ -30,6 +30,7 @@ import (
 
 	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/logger"
+	"github.com/unicitynetwork/bft-core/network"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/observability"
@@ -145,9 +146,12 @@ type (
 		v3Planned            atomic.Pointer[V3Candidate]      // the last candidate PlanV3Candidate derived: the exact body the members declared readiness for
 		q3Staged             atomic.Pointer[Q3Staged]         // the V3 candidate this validator last derived for its operator
 		q3StagedEVM          atomic.Pointer[stagedEVMMembers] // the EVM validators of the successor assignment of the candidate last staged here
-		epochAnchor          *drctypes.EpochAnchor
-		primaryWitness       atomic.Pointer[PrimaryWitnessSource] // the execution client's side of a primary candidate's EVM proof
-		primaryCache         primaryCache
+		// admitted and proposers answer the root consensus network's gate on received proposals (#1113, proposal_ingress.go)
+		admitted       atomic.Pointer[admittedRoots]
+		proposers      atomic.Pointer[proposerSet]
+		epochAnchor    *drctypes.EpochAnchor
+		primaryWitness atomic.Pointer[PrimaryWitnessSource] // the execution client's side of a primary candidate's EVM proof
+		primaryCache   primaryCache
 		// approvalSink and judgeHook are test seams: where a released parked approval goes, and the intake's proof judgement
 		approvalSink func(*abdrc.HandoffApprovalMsg) error
 		judgeHook    func(*abdrc.HandoffApprovalMsg) error
@@ -293,7 +297,7 @@ func NewConsensusManager(
 	if b, err := bStore.Block(drctypes.GenesisRootRound); err == nil && b.Qc != nil {
 		genesisQC = b.Qc
 	} else {
-		genesis, err := storage.NewGenesisBlock(orchestration.NetworkID(), crypto.SHA256, cParams.NetworkProfileVersion)
+		genesis, err := storage.NewGenesisBlockOf(orchestration, crypto.SHA256, cParams.NetworkProfileVersion)
 		if err != nil {
 			return nil, fmt.Errorf("deriving the genesis QC: %w", err)
 		}
@@ -458,6 +462,14 @@ func NewConsensusManager(
 			origins.TrackOrigins()
 			consensusManager.origins = origins
 		}
+	}
+
+	// a root consensus network admits proposals only from the roots this manager names, and keeps part of its proposal budget for the
+	// leaders of the current and the next round (#1113)
+	if gated, ok := net.(interface {
+		SetRootConsensusGate(network.RootConsensusGate)
+	}); ok {
+		gated.SetRootConsensusGate(consensusManager)
 	}
 
 	if err := consensusManager.initMetrics(observe); err != nil {
@@ -737,6 +749,7 @@ func (x *ConsensusManager) loop(ctx context.Context) error {
 		}
 		// a root that does not hold the commit itself asks a root peer for the activation (#1086, PR 2)
 		x.checkAcquire(ctx, time.Now())
+		x.refreshProposers()
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -1825,6 +1838,21 @@ func (x *ConsensusManager) recoveryRunStart(round uint64) bool {
 	return ok && r.RecoveryRunStart(round)
 }
 
+// refreshProposers publishes, for the proposal ingress priority (#1113, EligibleProposer), the leaders of the pacemaker's round and of the
+// round after it, on every root: the loop calls it before each event. The publication is kept only while the round and the trust base
+// store are the same and both leaders are known: a leader the selector could not name yet (its committed history unavailable) is asked
+// again, a trust base stored meanwhile (the legacy selector reads the store by round) asks both again, and a recovery or an epoch switch
+// (resetVolatile) clears the publication, since either can change what the selector answers for the same round.
+func (x *ConsensusManager) refreshProposers() {
+	round, gen := x.pacemaker.GetCurrentRound(), x.trustBaseStore.VerifyGeneration() // the generation before the lookups that depend on it
+	if p := x.proposers.Load(); p != nil && p.round == round && p.storeGen == gen && p.ids[0] != "" && p.ids[1] != "" {
+		return
+	}
+	l, err := x.leaderSelector.GetLeaderForRound(round)
+	next, nextErr := x.leaderAfter(round)
+	x.proposers.Store(&proposerSet{round: round, storeGen: gen, ids: [2]peer.ID{leaderIf(err == nil, l), leaderIf(nextErr == nil, next)}})
+}
+
 func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 	ctx, span := x.tracer.Start(ctx, "ConsensusManager.processNewRoundEvent")
 	defer span.End()
@@ -1992,14 +2020,29 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 		Qc:        parentQC,
 		Anchor:    parentAnchor,
 	}
+	proposalMsg := &abdrc.ProposalMsg{
+		Block:       block,
+		LastRoundTc: x.pacemaker.LastRoundTC(),
+	}
+	// every root refuses a proposal frame over abdrc.MaxProposalFrame before reading it (#1113): the change requests that do not fit are
+	// left out, before the controls are ordered, since a control is placed only if the block it joins executes (a request in the block can
+	// change what a control finds), so the requests the controls were judged with are the ones the block carries
+	dropped, err := fitProposal(proposalMsg, abdrc.MaxProposalFrame-proposalSignatureRoom-proposalControlRoom)
+	for _, r := range dropped {
+		x.log.WarnContext(ctx, "change request left out of the proposal: the proposal frame limit", logger.Shard(r.Partition, r.Shard))
+	}
+	if err != nil {
+		x.log.WarnContext(ctx, "cannot propose within the proposal frame limit", logger.Error(err))
+		return
+	}
 	if profile == storage.ProfileHandoff && !oldSuffix && parentQC != nil && len(payload.PosControls) < drctypes.MaxPosControls {
 		x.orderRejection(ctx, block, parentRound)
 		x.orderSubmittedControl(ctx, block)
 		x.orderRetirements(ctx, block, parentRound)
 	}
-	proposalMsg := &abdrc.ProposalMsg{
-		Block:       block,
-		LastRoundTc: x.pacemaker.LastRoundTC(),
+	if size, err := encodedSize(proposalMsg); err != nil || size > abdrc.MaxProposalFrame-proposalSignatureRoom {
+		x.log.WarnContext(ctx, "cannot propose within the proposal frame limit: the ordered controls do not fit", "size", size, logger.Error(err))
+		return
 	}
 	// safety makes simple sanity checks and signs if everything is ok
 	if err = x.safety.Sign(proposalMsg.Block.Epoch, proposalMsg); err != nil {
@@ -2202,6 +2245,8 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 			x.frontier.latchFault(fmt.Errorf("leader selector after recovery: %w", err))
 		}
 	}
+	// the recovered state and the updated selector can name other leaders for the same round: they are published afresh (#1113)
+	x.proposers.Store(nil)
 	// Replay is complete. Ordinary live admission errors of the trigger below are not uncertain writes: the latch is armed again once the
 	// trigger is admitted (a proposal executed and signed after a recovery can fail after it has written).
 	recoveryWriteStarted = false

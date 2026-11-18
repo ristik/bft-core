@@ -75,6 +75,7 @@ type (
 		GenesisIdentitiesFile    string
 		PosGenesisIdentitiesFile string
 		PosDeploymentFile        string
+		VRDeploymentFile         string
 		PosEVMRPC                string
 		TrustHistoryDBFile       string
 		UTBGenesisFile           string // the canonical genesis entry of the signed trust-base chain (utb-genesis); enables the UTB profile
@@ -170,6 +171,8 @@ func rootNodeRunCmd(baseFlags *baseFlags) *cobra.Command {
 		"proof-of-stake: JSON identity records of the genesis committee as the custody genesis seeded them (`ubft pos-relayer genesis`), recorded once as the incumbent baseline K of the first coupled handoff; needs --pos-deployment, refused together with --genesis-identities")
 	cmd.Flags().StringVar(&flags.PosDeploymentFile, "pos-deployment", "",
 		"proof-of-stake: JSON pinning the custody deployment (networkWord, chainId, custody). Turns on the P85 control executor and the mandatory CloseLiability duty (profile 2 only); refused together with --genesis-identities")
+	cmd.Flags().StringVar(&flags.VRDeploymentFile, "vr-deployment", "",
+		"validator-registry generation (VT-14): the roots' VR deployment `ubft vr-genesis verify --out-root-deployment` wrote. Wires the VR-mode control executor (the Freeze v5 witness verifier, the VR-domain closure duty); the genesis EVM PDR must pin the same VR, and the genesis committee comes from --genesis-identities. Profile 3 only; refused together with --pos-deployment")
 	cmd.Flags().StringVar(&flags.PosEVMRPC, "pos-evm-rpc", "",
 		"proof-of-stake: JSON-RPC URL of the execution client that serves eth_getProof and custody's logs; required when the deployment pins an election (the root then builds the storage-proof witness of a primary candidate's Freeze). With it every root also builds the Retirement controls of the identities whose owner requested one (the request cursor and pending set persist in "+posRetirementStateFileName+")")
 	cmd.Flags().StringVar(&flags.OrchestrationDBFile, "orchestration-db", "",
@@ -445,7 +448,7 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		options = append(options, consensus.WithFrontierSampler(samplerCfg), consensus.WithFrontierSigning())
 	}
 
-	if flags.PosDeploymentFile != "" {
+	if flags.PosDeploymentFile != "" || flags.VRDeploymentFile != "" {
 		// the witnesses of a block's controls are fetched by hash from the other root nodes before the block is executed
 		options = append(options, consensus.WithWitnessFetcher(func(ctx context.Context, hash [32]byte, peers []peer.ID, maxBytes int) ([]byte, error) {
 			return poswitness.Fetch(ctx, poswitness.FromLibp2p(host), peers, hash, maxBytes)
@@ -479,12 +482,25 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 	if err != nil {
 		return fmt.Errorf("failed initiate distributed consensus manager: %w", err)
 	}
+	// received proposals are admitted from, and prioritized for, the roots the manager names (#1113); the manager sets this itself on an
+	// unwrapped network, a wrapped one (q4shim) is set here
+	libp2pNet.SetRootConsensusGate(cm)
 	if flags.PosDeploymentFile != "" {
 		if !flags.HandoffProfile {
 			return fmt.Errorf("%w: --pos-deployment needs --profile-3", ErrPosDeployment)
 		}
 		if err = enablePosClosure(ctx, cm, orchestration, trustBaseStore, trustBase, shardConfs, flags.PosDeploymentFile, flags.GenesisIdentitiesFile != "", flags.PosEVMRPC,
 			flags.PathWithDefault("", posRetirementStateFileName)); err != nil {
+			return err
+		}
+		stopWitnesses := serveWitnesses(host, cm)
+		defer stopWitnesses()
+	}
+	if flags.VRDeploymentFile != "" {
+		if !flags.HandoffProfile || flags.PosDeploymentFile != "" || flags.GenesisIdentitiesFile == "" {
+			return fmt.Errorf("%w: --vr-deployment needs --profile-3 and --genesis-identities, and excludes --pos-deployment", ErrVRGenesis)
+		}
+		if err = enableVRServices(cm, orchestration, trustBaseStore, trustBase, shardConfs, flags.VRDeploymentFile); err != nil {
 			return err
 		}
 		stopWitnesses := serveWitnesses(host, cm)
@@ -665,7 +681,7 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 						return orchestration.ShardConfigByEpoch(partition, types.ShardID{}, epoch)
 					}}.register(mux)
 			}
-			if flags.PosDeploymentFile != "" {
+			if flags.PosDeploymentFile != "" || flags.VRDeploymentFile != "" {
 				mux.HandleFunc("POST /api/v1/pos/control", rootPosControlHandler(cm))
 			}
 			mux.HandleFunc("POST /api/v1/handoff/abort", rootHandoffAbortHandler(cm))
