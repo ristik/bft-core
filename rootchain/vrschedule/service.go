@@ -186,9 +186,12 @@ type Service struct {
 	cfg ServiceConfig
 	mu  sync.Mutex
 	cur *intentState
-	k   []evmassign.Identity
-	tab vradmit.SupportTable
-	sch []vrschema.Activation
+	// incumbents are the installed root committee of the last committed update, kept whether or not an intent is derivable: with K and the
+	// current intent's members they are one membership version (Members)
+	incumbents map[string][]byte
+	k          []evmassign.Identity
+	tab        vradmit.SupportTable
+	sch        []vrschema.Activation
 	// buffered messages by sender (at most BufferPerPeer each): for a future view of the current intent, or for an intent not derived
 	// here yet (kept PendingExpiry updates)
 	buffered map[string][]bufItem
@@ -270,7 +273,7 @@ func (s *Service) isDead(d []byte) bool {
 
 func (s *Service) updateLocked(c Committed) followUp {
 	s.updates++
-	s.k, s.tab, s.sch = c.K, c.Table, c.Schedule
+	s.k, s.tab, s.sch, s.incumbents = c.K, c.Table, c.Schedule, c.Incumbents
 	defer s.pruneBuffered()
 	if !c.Derivable {
 		if s.cur != nil {
@@ -1095,18 +1098,19 @@ func (s *Service) Current() (intent [32]byte, view uint64, complete, ok bool) {
 	return s.cur.digest, s.cur.view, s.cur.iret != nil, true
 }
 
-// Members are the node ids the peer protocol admits for the current intent: the incumbents, the successors' roots and K's roots.
+// Members are the node ids the peer protocol admits, all of one committed update (one membership version): the installed root committee,
+// K's roots and the current intent's successors' roots. The map is a fresh snapshot.
 func (s *Service) Members() map[string]bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := map[string]bool{}
+	for id := range s.incumbents {
+		out[id] = true
+	}
 	for _, m := range s.k {
 		out[m.RootNodeID] = true
 	}
 	if s.cur != nil {
-		for id := range s.cur.incumbents {
-			out[id] = true
-		}
 		for id := range s.cur.byRoot {
 			out[id] = true
 		}
