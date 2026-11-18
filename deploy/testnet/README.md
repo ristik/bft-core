@@ -168,7 +168,7 @@ The bridged faucet and edge subnets (`--faucet-subnet`, `--edge-subnet`; default
 exists, a subnet that overlaps any Docker network on the host, including a stopped
 generation's. Give a second generation on the same host other subnets. Verify Docker's
 actual proxy socket peer: the faucet guard trusts only the faucet network's first address,
-the RPC gateway and the lock-proof endpoint only the edge network's (the manifest's
+the RPC gateway only the edge network's (the manifest's
 `networks`); nginx must overwrite X-Forwarded-For. Adjust the exact peer config deliberately if
 the host differs. Never disable hCaptcha publicly. Publish NOTICE.txt, the current
 chain/genesis manifest, wallet setup, status URL and the incident-owner role's reporting channel.
@@ -190,22 +190,21 @@ The faucet's settings are generator options: `--faucet-payout` (UCT per claim, d
 `--faucet-daily-claims` (default 50) and `--faucet-per-ip-limit` (off by default; see
 [faucet/README.md](faucet/README.md)). The manifest records them under `faucet`.
 
-A public generation with the bridge, behind one name (e.g. pos.staging.unicity.network):
+A public generation behind one name (e.g. pos.staging.unicity.network):
 
 ```
 generate.py --out /srv/testnet/tn-NAME ... --pos --utb [--faucet-subnet A --edge-subnet B]
 rehearse.py --generation G --evidence E --stages up,identity,first-tx,pos-smoke
 docker compose -f G/compose.yaml --project-directory G up -d --no-deps signer
-bridge/rehearse_bridge.py --generation G --evidence E --stages deploy,serve,tester,custody
+bridge/nb2/deploy_nb2.py G --nb2-evidence BIN   # the native bridge v2 (bridge/README.md)
 public_routes.py G --hostname NAME [--web-root /var/www/pos-staging]
 ```
 
-`serve` starts the lock-proof endpoint to stay (no `--force-recreate`); the other bridge
-stages that stop or replace services are for disposable generations. `public_routes.py`
-writes `G/public/nginx/{zones,routes}.conf` (/rpc, /aggregator, /api/v1/trustbases,
-/faucet/ with /api/network and /api/claim, /lockproof/, /bridge/, /demo/) and
-`G/public/bridge/` (the published bridge files, tester-config.json with the public URLs);
-its docstring has the install steps. Rehearse on loopback before installing the routes.
+`public_routes.py` writes `G/public/nginx/{zones,routes}.conf` (/rpc, /aggregator,
+/api/v1/trustbases, /faucet/ with /api/network and /api/claim, /demo/); its docstring has
+the install steps. Publishing the native bridge v2 files (`G/bridge/nb2/public/`) is
+bft-core#1178; the protocol 6/7 bridge's /lockproof/ and /bridge/ routes were removed with
+it (#1139). Rehearse on loopback before installing the routes.
 
 ## Monitoring, logs and incidents
 
@@ -328,15 +327,14 @@ sudo -E env "PATH=$PATH" python3 deploy/testnet/handoff_drive.py $G [<resultID>]
 ```
 
 It runs OPERATOR.md 5b (the rehearsal's pos-proposal, pos-propose, pos-install and pos-advance) as the steps `preflight`, `trust-base`, `proposal`, `propose`,
-`install`, `advance`, `lockproof`, `verify`, each printed with its timing and recorded in `$G/handoff/log.jsonl` (event `drive`). After a failure the same
+`install`, `advance`, `verify`, each printed with its timing and recorded in `$G/handoff/log.jsonl` (event `drive`). After a failure the same
 command continues after the last completed step or sub-step (a root already installed, an entity already advanced). The trust base's epoch start is set above the root's current round
 (at least the rehearsal's `200000*(N-1)` for epoch N); it is a numbering floor in the file, not a round the install waits for: the activation round comes from the
 committed handoff. An entity's advance is three sub-steps (`advance-epoch`, `replace-session`, `shard-start`); the authority's `status` is read first, so an advance
 it already holds is never sent again (the authority refuses a repeat), and `client.cred.pre-epoch-N` is kept once and never overwritten. It refuses, and changes nothing, when the
 reservation has fewer than `--min-window-rounds` (1800) rounds left before the Prepare, or when the election's members are not the committee, a prepared joiner
 (`--joiner STAKINGID=ENTITY` or `$G/handoff/joiners.json`) or a retirement (`--allow-unrehearsed-retirement`: never rehearsed). Only roots are recreated (with
-`compose.install-epoch-N.json`) and shard nodes stopped and started; signing authorities are never restarted. The lock-proof endpoint is recreated only when it
-does not rescan `network/handoff` (#996). `verify` checks every root at the new epoch, the result Acknowledged (and the block that acknowledged it), the served
+`compose.install-epoch-N.json`) and shard nodes stopped and started; signing authorities are never restarted. `verify` checks every root at the new epoch, the result Acknowledged (and the block that acknowledged it), the served
 `/api/v1/trustbases` history reaching the epoch (with `--utb`), new blocks and `recordCursor == recordCount`. `--plan` prints the result, the epochs, the change and
 the window. Unrelated no-change results that nobody drives keep being rejected in between; that is harmless.
 

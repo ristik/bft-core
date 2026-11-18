@@ -79,6 +79,10 @@ type RequestActivation struct {
 	// continuation marks a root-only continuation of the preceding record's assignment; predecessorRootBody is the root body it follows.
 	continuation        bool
 	predecessorRootBody []byte
+	// derivedTR marks an activation whose successor technical record H does not commit: a VR handoff's kind 6 or 8 change of a non-EVM
+	// shard (RegistryActivationFromVerifiedV3). Every root derives that record from the verified parent and the configuration, as the
+	// boundary block does (activateEVMAssignment), so the derived record is the authenticated one.
+	derivedTR bool
 }
 
 // PDRHash is the hash of the configuration of the assignment this interval authorises.
@@ -515,6 +519,9 @@ func expectedTR(snap *RequestSnapshot, idx int) (certification.TechnicalRecord, 
 			derived, err := successorTechnicalRecordWith(snap.frozen, act.pdr, snap.hashAlg, resetMembers)
 			if err != nil {
 				return derived, errors.Join(ErrAssignmentHistory, err)
+			}
+			if act.derivedTR {
+				return derived, nil // a function of the verified parent and the committed configuration alone: no commitment to compare
 			}
 			digest, err := derived.Hash()
 			if err != nil || !bytes.Equal(digest, act.trHash) {

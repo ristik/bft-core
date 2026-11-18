@@ -354,8 +354,11 @@ func (o *Orchestration) InstallDerivedShardConfig(conf *types.PartitionDescripti
 	return o.InstallDerivedShardConfigs([]*types.PartitionDescriptionRecord{conf}, provenance)
 }
 
-// InstallDerivedShardConfigs installs every configuration one committed handoff derives (the EVM assignment and any
-// aggregator validator replacements) in a single transaction: a crash leaves all of them or none, never a partial batch.
+// InstallDerivedShardConfigs installs every configuration one committed handoff derives (the EVM assignment, any aggregator
+// validator replacements and, on a validator-registry chain, the configurations of its AddPartition and UpdatePartition changes) in a
+// single transaction: a crash leaves all of them or none, never a partial batch. A configuration extends its shard's last one, except the
+// first configuration of a partition a committed AddPartition adds (VT-06d): an epoch-0 configuration of a non-EVM, non-reserved
+// partition with no stored shard, starting at the activation round.
 func (o *Orchestration) InstallDerivedShardConfigs(confs []*types.PartitionDescriptionRecord, provenance []byte) error {
 	if len(confs) == 0 {
 		return ErrDerivedConflict
@@ -364,7 +367,7 @@ func (o *Orchestration) InstallDerivedShardConfigs(confs []*types.PartitionDescr
 		return ErrDerivedConflict
 	}
 	for _, conf := range confs {
-		if conf == nil || conf.Epoch == 0 || conf.EpochStart == 0 {
+		if conf == nil || conf.EpochStart == 0 || rctypes.ReservedPartition(conf.PartitionID) {
 			return ErrDerivedConflict
 		}
 		if conf.NetworkID != o.networkID {
@@ -414,13 +417,31 @@ func installDerived(tx *bolt.Tx, derived *bolt.Bucket, conf *types.PartitionDesc
 	if err != nil {
 		return err
 	}
-	if last == nil || conf.Verify(last) != nil || derived.Get(key) != nil {
+	if derived.Get(key) != nil {
+		return ErrDerivedConflict
+	}
+	if last == nil {
+		// only a new partition starts without a predecessor, as one unsplit shard at epoch 0 (FD-30): never another shard of an existing
+		// partition, never the EVM partition
+		if conf.Epoch != 0 || conf.ShardID.Length() != 0 || !newPartition(tx, conf.PartitionID) || conf.PartitionTypeID == evmassign.EVMPartitionTypeID {
+			return ErrDerivedConflict
+		}
+		if err := conf.IsValid(); err != nil {
+			return errors.Join(ErrDerivedConflict, err)
+		}
+	} else if conf.Verify(last) != nil {
 		return ErrDerivedConflict
 	}
 	if err := storeShardConf(tx, conf); err != nil {
 		return err
 	}
 	return derived.Put(key, provenance)
+}
+
+// newPartition reports a partition with no stored shard configuration.
+func newPartition(tx *bolt.Tx, partitionID types.PartitionID) bool {
+	rootBucket := tx.Bucket(rootBucketName)
+	return rootBucket != nil && rootBucket.Bucket(partitionID.Bytes()) == nil
 }
 
 // ShardConfigByEpoch returns the stored configuration with the given shard

@@ -55,12 +55,12 @@ func (x *ConsensusManager) InstallEpochBundle(incoming handoffdelivery.Bundle) (
 		return nil, err
 	}
 	old, oldSigning, v, g, projected, bodyID, interval, bundle := c.old, c.oldSigning, c.v, c.g, c.projected, c.bodyID, c.interval, c.bundle
-	if archive, ok := x.blockStore.GetDB().(handoffBundleArchive); ok {
+	if archive, ok := x.blockStore().GetDB().(handoffBundleArchive); ok {
 		if err := retainEquivalentHandoffBundle(x.trustBaseStore, archive, g.Epoch, bundle, old, g.ID()); err != nil {
 			return nil, err
 		}
 	}
-	safetyStore, ok := x.blockStore.GetDB().(epochAnchorSafetyStore)
+	safetyStore, ok := x.blockStore().GetDB().(epochAnchorSafetyStore)
 	if !ok {
 		return nil, errors.New("durable epoch anchor safety store unavailable")
 	}
@@ -89,10 +89,10 @@ func (x *ConsensusManager) InstallEpochBundle(incoming handoffdelivery.Bundle) (
 	if err != nil {
 		return nil, err
 	}
-	if err := x.blockStore.RetainHandoffArtifacts(bodyID[:], body.Encode(), candidate); err != nil {
+	if err := x.blockStore().RetainHandoffArtifacts(bodyID[:], body.Encode(), candidate); err != nil {
 		return nil, fmt.Errorf("retain handoff candidate: %w", err)
 	}
-	a, err := x.blockStore.InstallEpochAnchor(head, v, g)
+	a, err := x.blockStore().InstallEpochAnchor(head, v, g)
 	if err != nil {
 		return nil, err
 	}
@@ -100,21 +100,21 @@ func (x *ConsensusManager) InstallEpochBundle(incoming handoffdelivery.Bundle) (
 	if err != nil {
 		return nil, err
 	}
-	if err := x.blockStore.ConfigureHandoffV2Authority(newTrust, installed); err != nil {
+	if err := x.blockStore().ConfigureHandoffV2Authority(newTrust, installed); err != nil {
 		return nil, err
 	}
-	reqVerifier, err := NewIRChangeReqVerifier(x.params, x.blockStore)
+	reqVerifier, err := NewIRChangeReqVerifier(x.params, x.blockStore())
 	if err != nil {
 		return nil, fmt.Errorf("successor request verifier: %w", err)
 	}
-	t2Timeouts, err := NewLucBasedT2TimeoutGenerator(x.params, x.blockStore)
+	t2Timeouts, err := NewLucBasedT2TimeoutGenerator(x.params, x.blockStore())
 	if err != nil {
 		return nil, fmt.Errorf("successor T2 timeout generator: %w", err)
 	}
 	selector, err := newEpochLeader(x.trustBaseStore, g.Epoch, g.Start, newTrust.RootNodes,
 		func() (Leader, error) { return newBootstrapLeader(x.leaderSelector, g.Start, newTrust.RootNodes) },
 		func() (Leader, error) {
-			return reputationLeader(x.params.NetworkProfileVersion, a, newTrust, x.trustBaseStore, func() leaderHeads { return x.blockStore })
+			return reputationLeader(x.params.NetworkProfileVersion, a, newTrust, x.trustBaseStore, func() leaderHeads { return x.blockStore() })
 		})
 	if err != nil {
 		return nil, err
@@ -275,18 +275,18 @@ func (x *ConsensusManager) InstalledEVMTransition(proof handoff.OldCommitProof,
 	if x.params.NetworkProfileVersion != storage.ProfileHandoff || x.epochAnchor == nil {
 		return nil, rctypes.ErrEpochAnchor
 	}
-	if err := x.blockStore.AnchoredFrozenParent(proof.Record.SuccessorTRHash, proof.Control.FrozenParent); err != nil {
+	if err := x.blockStore().AnchoredFrozenParent(proof.Record.SuccessorTRHash, proof.Control.FrozenParent); err != nil {
 		return nil, err
 	}
 	old, err := x.trustBaseStore.GetByEpoch(proof.Record.Epoch)
 	if err != nil {
 		return nil, fmt.Errorf("old root trust lineage: %w", err)
 	}
-	successorTR, err := x.blockStore.AnchoredTechnicalRecord(proof.Record.SuccessorTRHash)
+	successorTR, err := x.blockStore().AnchoredTechnicalRecord(proof.Record.SuccessorTRHash)
 	if err != nil {
 		return nil, fmt.Errorf("verified successor shard assignment: %w", err)
 	}
-	step, err := x.blockStore.AnchoredAssignmentStep(proof.Record)
+	step, err := x.blockStore().AnchoredAssignmentStep(proof.Record)
 	if err != nil {
 		return nil, err
 	}
@@ -303,7 +303,7 @@ func (x *ConsensusManager) HandoffBundle(_ context.Context, epoch uint64) (*hand
 	if x.params.NetworkProfileVersion != storage.ProfileHandoff || epoch < 2 {
 		return nil, rctypes.ErrEpochAnchor
 	}
-	archive, ok := x.blockStore.GetDB().(handoffBundleArchive)
+	archive, ok := x.blockStore().GetDB().(handoffBundleArchive)
 	if ok {
 		raw, err := archive.HandoffBundle(epoch)
 		if err != nil {
@@ -331,11 +331,11 @@ func (x *ConsensusManager) HandoffBundle(_ context.Context, epoch uint64) (*hand
 			return &bundle, nil
 		}
 	}
-	head, path, record, err := x.blockStore.HandoffCheckpoint()
+	head, path, record, err := x.blockStore().HandoffCheckpoint()
 	if err != nil || record.Epoch+1 != epoch {
 		return nil, errors.Join(handoffdelivery.ErrBundle, fmt.Errorf("handoff checkpoint into epoch %d (record epoch %d)", epoch, record.Epoch), err)
 	}
-	rawBody, err := x.blockStore.HandoffBody(record.NextBodyID)
+	rawBody, err := x.blockStore().HandoffBody(record.NextBodyID)
 	if err != nil {
 		return nil, err
 	}
@@ -343,7 +343,7 @@ func (x *ConsensusManager) HandoffBundle(_ context.Context, epoch uint64) (*hand
 	if err != nil {
 		return nil, err
 	}
-	candidate, err := x.blockStore.HandoffCandidate(record.NextBodyID)
+	candidate, err := x.blockStore().HandoffCandidate(record.NextBodyID)
 	if err != nil {
 		return nil, err
 	}
@@ -495,7 +495,12 @@ func reconcileAssignmentHistory(db any, trust *trustbase.TrustBaseStore, orchest
 		if _, err := verifyHandoffBundle(trust, bundle, old, first.Partition, first.Shard, first.ShardConfHash); err != nil {
 			return fmt.Errorf("%w: epoch %d: %w", storage.ErrAssignmentHistory, epoch, err)
 		}
-		confs, provenance, _, err := storage.DeriveActivatedConfigs(bundle.Proof.Record, bundle.Body, bundle.Candidate, bundle.Proof.Control.FrozenParent)
+		// a VR handoff's root-side changes install against the configurations in effect at its ordering round
+		installed, err := orchestration.ShardConfigs(bundle.Proof.Record.OrderedRound)
+		if err != nil {
+			return fmt.Errorf("epoch %d: %w", epoch, err)
+		}
+		confs, provenance, err := storage.DeriveActivatedConfigsAt(bundle.Proof.Record, bundle.Body.Encode(), bundle.Candidate, installed)
 		if err != nil {
 			return fmt.Errorf("epoch %d: %w", epoch, err)
 		}
@@ -518,22 +523,24 @@ func verifyHandoffBundle(trust *trustbase.TrustBaseStore, bundle handoffdelivery
 
 // SetPosServices installs the P85 control executor's collaborators on the block store: the custody deployment, the closure authority
 // and the closure proposer. It must be called before the manager starts.
-func (x *ConsensusManager) SetPosServices(s *storage.PosServices) { x.blockStore.SetPosServices(s) }
+func (x *ConsensusManager) SetPosServices(s *storage.PosServices) { x.blockStore().SetPosServices(s) }
 
 // SetRecordFetcher names where an installed epoch checkpoint's missing source-log prefix is fetched from.
 func (x *ConsensusManager) SetRecordFetcher(f storage.RecordFetcher) {
-	x.blockStore.SetRecordFetcher(f)
+	x.blockStore().SetRecordFetcher(f)
 }
 
 // ControlCut is the retained control cut of the committed root block of the round, for the shards' authenticated record feed.
 func (x *ConsensusManager) ControlCut(key storage.CutKey) (storage.ControlCut, error) {
-	return x.blockStore.ControlCut(key)
+	return x.blockStore().ControlCut(key)
 }
 
 // Records returns up to max records of the retained source log from the index.
 func (x *ConsensusManager) Records(from uint64, max int) ([]rootrecords.Record, error) {
-	return x.blockStore.Records(from, max)
+	return x.blockStore().Records(from, max)
 }
 
 // Witness is the WitnessSource of the retained control witnesses.
-func (x *ConsensusManager) Witness(hash [32]byte) ([]byte, error) { return x.blockStore.Witness(hash) }
+func (x *ConsensusManager) Witness(hash [32]byte) ([]byte, error) {
+	return x.blockStore().Witness(hash)
+}

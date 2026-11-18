@@ -1,0 +1,70 @@
+{
+  "network": 3,
+  "rootGenesisId": "0x2f8966df663d980aecbc1cf9e513a2a4c00e98fef041129c2ee0a097442c3cad",
+  "executionChainId": 3,
+  "executionRevision": 1,
+  "runtimeHash": "0xebbadc64b3f723741dbf79e3ffd7bf2ea31daf4e4a949a3e01e5656926f446ae",
+  "compilerHash": "0x2f93eb970bd354a7878eaef2409b6a3466324740a616491c76fbba8ae4eed575",
+  "maxEpochsPerUpdate": 2,
+  "deltaEv": 16,
+  "deltaHold": 17,
+  "systemGas": 124729388,
+  "forcedGas": 0,
+  "maxGas": 184729388,
+  "ordinaryCapacity": 60000000,
+  "restGas": 1650000,
+  "companionBytes": 1048576,
+  "otherCompanionBytes": 65536,
+  "genesisUcTime": 1000,
+  "recordsCustody": "0xff00000000000000000000000000000000000003",
+  "hRecords": 32,
+  "hookRecordGas": 2743763,
+  "electionContract": "0xff00000000000000000000000000000000000003",
+  "electGas": 9976804,
+  "vrHookMeasurement": {
+    "invariant": "vr-v1-single-live-output",
+    "h": 32,
+    "registry": "0xff00000000000000000000000000000000000003",
+    "registryCodeHash": "0x19094777cb74c783f82392439d1f6c79fe62b6b57c2915790f00a9e16ee490e9",
+    "moduleCodeHash": "0x193a4828e336927f92ced0232191f3babb52d61d38ab5c5382932729e3c23291",
+    "caps": {
+      "elect": 4000000,
+      "output": 1000000,
+      "record": 1500000,
+      "resolved": 500000,
+      "attach": 3000000,
+      "detach": 500000,
+      "gov": 1000000,
+      "adopt": 1000000
+    },
+    "ceilings": {
+      "committee": 16,
+      "boundChanges": 16,
+      "boundPayload": 65536,
+      "changePayload": 16384,
+      "pendingChanges": 32,
+      "activations": 64
+    },
+    "records": 52262738,
+    "boundary": 17977590,
+    "combined": [
+      {
+        "name": "mixed-first",
+        "records": 32,
+        "reservation": 67741742
+      },
+      {
+        "name": "mixed-middle",
+        "records": 32,
+        "reservation": 67010352
+      },
+      {
+        "name": "mixed-last",
+        "records": 32,
+        "reservation": 66332582
+      }
+    ],
+    "elect": 7981443,
+    "source": "ureth tests/vr_hook.rs over testdata/vr-hook.json sha256 0x54d69d3f95c67b4af77e59a8a64c3804b81848b6c9b40a3074ee679db00fa2ce (vt14/genesis (ristik/unicity-pos-contracts, VT-14 combined fixtures))"
+  }
+}

@@ -244,7 +244,7 @@ func TestRestartAcrossTheBoundary(t *testing.T) {
 	})
 
 	t.Run("it reproduces its recorded vote and never signs a second statement for the round", func(t *testing.T) {
-		block, err := voter.manager.blockStore.Block(anchor.Slot + 1)
+		block, err := voter.manager.blockStore().Block(anchor.Slot + 1)
 		require.NoError(t, err)
 		again, err := voter.manager.safety.MakeVote(c.proposal.Block, block.RootHash, nil, nil)
 		require.NoError(t, err)

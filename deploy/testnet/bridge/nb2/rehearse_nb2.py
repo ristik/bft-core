@@ -4,7 +4,7 @@ bridge stages of testnet-bridge and testnet-bridge-pos (README.md "The rehearsal
 rotate after four payments. Every wallet step is the TypeScript plug-in (driver.ts) through the public gateway only; the Go reference (nb2-evidence,
 built from this checkout) is the independent verifier.
 
-    rehearse_nb2.py --generation GEN --evidence DIR --nb2-evidence BIN [--stages ...] [--long-transfers N] [--keep-keys]
+    rehearse_nb2.py --generation GEN --evidence DIR --nb2-evidence BIN [--stages ...] [--long-transfers N] [--keep-keys] [--ubft BIN]
 
 The driver keys (`fund`: bridge/nb2/driver.env, funded from the faucet) are this run's secrets. They reach the driver only through its environment
 file, never a command line (the lane's own signing goes through the driver's `address` and `mktx`), and every console line, log and result is
@@ -42,6 +42,9 @@ PoS sequence's first invocation (deploy,fund,pos-deposit) keeps them, and its la
   pos-deposit, pos-return
                 PoS lane only, around rehearse.py's handoff: a deposit, mint and transfer in epoch 1, then a transfer, split, burn and redeem after
                 the epoch change (the verifier judges each certificate under its own epoch's authority), verdicts by all three
+  pos-sdk-clients
+                PoS lane only, after the second handoff: the public JS, Rust and Java SDKs' trust-base sessions against the roots' served history
+                (sdk_clients.py; needs --ubft, the offline verifier of that history)
 """
 import argparse
 import json
@@ -59,6 +62,7 @@ sys.path.insert(0, str(HERE.parent))
 sys.path.insert(0, str(HERE.parent.parent))
 from rehearse import PROXY_IPS, PUBLIC_RPC, Failure, Rehearsal   # noqa: E402
 import release_nb2   # noqa: E402
+from sdk_clients import SdkClients   # noqa: E402
 
 WALLETS = ('main', 'rot', 'big', 'size', 'gascap', 'walk')
 STEP_TIMEOUT = 900     # seconds: one burn, redemption or preflight of a boundary probe
@@ -78,7 +82,7 @@ def gateway_size_refusal(status, text):
         return False
 
 
-class NB2Rehearsal(Rehearsal):
+class NB2Rehearsal(SdkClients, Rehearsal):
     def __init__(self, *args, **kwargs):
         self._addresses = {}
         self.timeouts = []   # every driver command killed over its timeout, and whether its container was confirmed gone
@@ -537,7 +541,7 @@ class NB2Rehearsal(Rehearsal):
         # cannot be replaced over RPC at this pin. Recorded, not claimed: those cases stay with the forge doubles (pos#82).
         injected = {k: f[k].get('returnData') != f['baseline'].get('returnData') for k in f if k.startswith(('cert-batch', 'membership'))}
         self.say(f'  native-primitive overrides applied by this ureth: {json.dumps(injected)}')
-        (self.evidence / 'nb2/faults-note.json').write_text(json.dumps({'precompileOverridesApplied': injected, 'note': 'ureth 10552af2 eth_call ignores movePrecompileToAddress; eth_simulateV1 refuses a block without bound inputs'}, indent=2) + '\n')
+        (self.evidence / 'nb2/faults-note.json').write_text(json.dumps({'precompileOverridesApplied': injected, 'note': 'the pinned ureth (deploy/testnet/pins.json) eth_call ignores movePrecompileToAddress; eth_simulateV1 refuses a block without bound inputs (observed at 10552af2; precompileOverridesApplied records this pin)'}, indent=2) + '\n')
         self.keep('faults-d1a', 'mutations-c17x', 'mutations-d1a', 'verdicts-one1-d1a-c16x-c17x-longx')
 
     # --- gas -------------------------------------------------------------------------------------------------------------------------
@@ -797,8 +801,8 @@ class NB2Rehearsal(Rehearsal):
 
 STAGES = (('deploy', 'deploy'), ('limits', 'limits'), ('fund', 'fund'), ('circulate', 'circulate'), ('returns', 'returns'), ('evidence', 'evidence_stage'),
           ('verifier', 'verifier'), ('gas', 'gas'), ('boundary', 'boundary'), ('cold', 'cold'), ('walkthrough', 'walkthrough'), ('pos-deposit', 'pos_deposit'), ('pos-return', 'pos_return'),
-          ('custody', 'custody'))
-POS_STAGES = ('pos-deposit', 'pos-return')
+          ('custody', 'custody'), ('pos-sdk-clients', 'pos_sdk_clients'))
+POS_STAGES = ('pos-deposit', 'pos-return', 'pos-sdk-clients')
 
 
 def main():
@@ -812,6 +816,7 @@ def main():
                    'the last invocation runs without it and deletes them, on success and on failure')
     p.add_argument('--prefix', default='', help='label prefix of the 100 scenario (circulate, returns): a second, clean pass on the same generation')
     p.add_argument('--long-transfers', type=int, default=40, help='transfers of the long-history part (one aggregator batch, so at most 254)')
+    p.add_argument('--ubft', type=Path, help='the pinned ubft binary: pos-sdk-clients verifies the roots\' served history with it (rehearse.py utb_history)')
     a = p.parse_args()
     if not 1 <= a.long_transfers <= 254:
         p.error('--long-transfers must be 1 to 254')
@@ -823,6 +828,7 @@ def main():
     r.nb2_evidence = a.nb2_evidence.resolve()
     r.long_transfers = a.long_transfers
     r.prefix = a.prefix
+    r.ubft = a.ubft.resolve() if a.ubft else None
     (a.evidence / 'nb2').mkdir(parents=True, exist_ok=True)
     # every driver command reads bridge/nb2/lane.json, which deploy writes (fund too: the driver derives the keys' addresses), and every later
     # stage spends the keys fund funds: deploy, then fund, then the rest as asked

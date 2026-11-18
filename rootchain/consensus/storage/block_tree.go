@@ -131,7 +131,7 @@ func NewBlockTree(bDB PersistentStore, orchestration Orchestration, networkProfi
 	}
 	if len(blocks) == 0 {
 		// must be system bootstrap - init tree with genesis block
-		genesisBlock, err := NewGenesisBlock(orchestration.NetworkID(), crypto.SHA256, profile)
+		genesisBlock, err := NewGenesisBlockOf(orchestration, crypto.SHA256, profile)
 		if err != nil {
 			return nil, fmt.Errorf("creating genesis block for empty DB: %w", err)
 		}
@@ -303,6 +303,24 @@ func (bt *BlockTree) Branch(round uint64) []*ExecutedBlock {
 	defer bt.m.Unlock()
 
 	return bt.findPathToRoot(round)
+}
+
+/*
+ChangeInProgress returns the input record of the pending change of shard key in the uncommitted blocks of the branch which ends
+with the block of the "round", or nil when none of them has one. The change sets are read under the tree lock: Commit merges the
+change sets of the committed path into the committing block's set in place, so a walk of Branch that reads them after the lock is
+released races with a commit (#1191).
+*/
+func (bt *BlockTree) ChangeInProgress(round uint64, key basetypes.PartitionShardID) *basetypes.InputRecord {
+	bt.m.RLock()
+	defer bt.m.RUnlock()
+
+	for _, b := range bt.findPathToRoot(round) {
+		if _, ok := b.ShardState.Changed[key]; ok {
+			return b.ShardState.States[key].IR
+		}
+	}
+	return nil
 }
 
 func (bt *BlockTree) allUncommittedNodes() []*ExecutedBlock {

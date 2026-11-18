@@ -482,7 +482,7 @@ func newShardWorld(t *testing.T, cfg shardWorldConfig) *shardWorld {
 	}
 	slices.Sort(w.ids)
 	w.transport.introduceShards()
-	if si := w.h.blockStore.ShardInfo(q3fixture.PartitionID, types.ShardID{}); si != nil && si.LastCR != nil {
+	if si := w.h.blockStore().ShardInfo(q3fixture.PartitionID, types.ShardID{}); si != nil && si.LastCR != nil {
 		require.EqualValues(t, liveShardEpoch, si.LastCR.Technical.Epoch, "the live certificates name the shard epoch the shards have a configuration for")
 	}
 	// sample the shard's certificate at the watched root
@@ -594,7 +594,7 @@ func addRealShards(t *testing.T, x *liveTransport, c *q4bLive, opts shardnode.BF
 	t.Helper()
 	f := c.nodes[0].r.f
 	m := c.nodes[0].r.manager
-	si := m.blockStore.ShardInfo(q3fixture.PartitionID, types.ShardID{})
+	si := m.blockStore().ShardInfo(q3fixture.PartitionID, types.ShardID{})
 	require.NotNil(t, si)
 	luc := si.LastCR.UC
 	genesis := shardnode.BlockRef{Number: 0, Hash: shardnode.Hash(luc.InputRecord.BlockHash), StateRoot: shardnode.Hash(luc.InputRecord.Hash)}
@@ -676,7 +676,7 @@ func (w *shardWorld) dump(what string) {
 		t.Logf("request at %s from %s at %s: shard round %d block=%x dropped=%v", e.at.Format("15:04:05.000"), shortID(e.node), e.root, e.round, e.blockHash, e.dropped)
 	}
 	for _, n := range w.c.nodes {
-		si := n.r.manager.blockStore.ShardInfo(q3fixture.PartitionID, types.ShardID{})
+		si := n.r.manager.blockStore().ShardInfo(q3fixture.PartitionID, types.ShardID{})
 		if si != nil && si.LastCR != nil {
 			t.Logf("root %s: root round %d, shard LastCR seal %d, technical round %d epoch %d leader %s, IR round %d", n.name, w.c.state(n.name).Round, si.LastCR.UC.UnicitySeal.RootChainRoundNumber, si.LastCR.Technical.Round, si.LastCR.Technical.Epoch, shortID(si.LastCR.Technical.Leader), si.LastCR.UC.InputRecord.RoundNumber)
 		}
@@ -700,7 +700,7 @@ func (w *shardWorld) stallAfterLoss(marker []byte) (u certSample, armed time.Tim
 			return false
 		}
 		for _, name := range w.c.all() {
-			if w.c.nodes[w.c.idx(name)].r.manager.blockStore.IsChangeInProgress(w.c.state(name).Round, q3fixture.PartitionID, types.ShardID{}) != nil {
+			if w.c.nodes[w.c.idx(name)].r.manager.blockStore().IsChangeInProgress(w.c.state(name).Round, q3fixture.PartitionID, types.ShardID{}) != nil {
 				return false
 			}
 		}
@@ -744,7 +744,7 @@ func TestIngressLossWithRealShardsRecoversThroughTheT2Repeat(t *testing.T) {
 	}
 	require.NotEmpty(t, lost, "premise: the shard's attempt was sent and dropped")
 	for _, name := range w.c.all() {
-		if ch := w.c.nodes[w.c.idx(name)].r.manager.blockStore.IsChangeInProgress(w.c.state(name).Round, q3fixture.PartitionID, types.ShardID{}); ch != nil {
+		if ch := w.c.nodes[w.c.idx(name)].r.manager.blockStore().IsChangeInProgress(w.c.state(name).Round, q3fixture.PartitionID, types.ShardID{}); ch != nil {
 			// the only change that may be in flight is the roots' own T2 repeat of u (it needs no request); anything else is a request that got into a proposal
 			same, err := types.EqualIR(u.ir, ch)
 			require.NoError(t, err)
@@ -878,12 +878,22 @@ func TestIngressLossWithRealShardsRecoversThroughTheDuplicateResend(t *testing.T
 	w.waitFor("the real shard certifies", 2*time.Minute, func() bool { return w.certCount() >= 4 })
 
 	marker := []byte("pending-976-dup")
+	head, _ := w.shards[w.ids[0]].exec.Head(context.Background())
+	expected := executortest.ExpectedBlock(head, marker)
 	w.setDrop(func(*certification.BlockCertificationRequest) bool { return true })
 	armed := time.Now()
 	w.addPending(marker)
+	// What must be lost is each validator's attempt that carries the pending block. Requests that were already in flight when the drop was armed (a re-send of
+	// the previous round's heartbeat, whose certificate is still on its way) are not that attempt: if the drop ended on one of them the shard would simply
+	// receive the next certificate and build its first block attempt unhindered, and no duplicate-triggered re-send would be needed (#1193).
 	var lostEvents []requestEvent
-	w.waitFor("every validator's attempt is dropped", 2*time.Minute, func() bool {
-		lostEvents = w.requestsSince(armed)
+	w.waitFor("every validator's attempt carrying the pending block is dropped", 2*time.Minute, func() bool {
+		lostEvents = lostEvents[:0]
+		for _, e := range w.requestsSince(armed) {
+			if e.dropped && bytes.Equal(e.blockHash, expected.Hash) {
+				lostEvents = append(lostEvents, e)
+			}
+		}
 		return len(w.distinctNodes(lostEvents)) == len(w.ids)
 	})
 	opened := time.Now() // before the drop ends: a re-send delivered the instant it lifts must not fall between the two
@@ -891,11 +901,8 @@ func TestIngressLossWithRealShardsRecoversThroughTheDuplicateResend(t *testing.T
 	u := w.lastCert()
 	lost := map[[32]byte]bool{}
 	for _, e := range lostEvents {
-		require.True(t, e.dropped)
 		lost[e.fp] = true
 	}
-	head, _ := w.shards[w.ids[0]].exec.Head(context.Background())
-	expected := executortest.ExpectedBlock(head, marker)
 	eligible := u.seal + t2Rounds(w.h)
 
 	var fresh certSample

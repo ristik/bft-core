@@ -131,7 +131,7 @@ func TestTheRequestHistoryServesTheActivatedWeightedAssignment(t *testing.T) {
 	c := newQ3Cluster(t, q3fixture.Options{Assignment: true})
 	c.activateAll()
 	r := c.heavy()
-	hist, err := r.rt.RequestHistory(q3active.RequestHistoryConfig{Candidates: r.manager.blockStore,
+	hist, err := r.rt.RequestHistory(q3active.RequestHistoryConfig{Candidates: r.manager.blockStore(),
 		Anchor: func(types.PartitionID, types.ShardID) (*types.PartitionDescriptionRecord, error) {
 			return c.f.ShardConf, nil
 		},
@@ -141,7 +141,7 @@ func TestTheRequestHistoryServesTheActivatedWeightedAssignment(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, chain, 2, "the anchor and the activated assignment")
 
-	parent := r.manager.blockStore.ShardInfo(q3fixture.PartitionID, types.ShardID{})
+	parent := r.manager.blockStore().ShardInfo(q3fixture.PartitionID, types.ShardID{})
 	require.NotNil(t, parent)
 	parentID := []byte("verified parent block")
 	t.Run("at the boundary the weighted context is in force", func(t *testing.T) {

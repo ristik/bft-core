@@ -96,6 +96,22 @@ func verifyChangePoPs(in FoldInput, changeID uint64, pdr *types.PartitionDescrip
 	return nil
 }
 
+// executableSet is what an UpdatePartition's (unchanged) validator set must still be: nonempty with unique signing keys (IsValid already
+// requires valid members with unique node ids). An installed set that is not is not installed again.
+func executableSet(v []*types.NodeInfo) bool {
+	if len(v) == 0 {
+		return false
+	}
+	keys := make(map[string]bool, len(v))
+	for _, n := range v {
+		if n == nil || keys[string(n.SigKey)] {
+			return false
+		}
+		keys[string(n.SigKey)] = true
+	}
+	return true
+}
+
 func sameValidators(a, b []*types.NodeInfo) bool {
 	if len(a) != len(b) {
 		return false
@@ -116,7 +132,9 @@ func sameValidators(a, b []*types.NodeInfo) bool {
 //     already claimed by an earlier decoded change of this list, whatever that change's verdict; a well-formed list never has one,
 //     because binding selection defers a second change of a scope, so this rule is defensive;
 //  4. the kind's rules: Conflict (stale expected hash, a partition added earlier in the list), Invalid (design section 6, including
-//     the protocol proof-configuration predicate ProofConfigValid), Ceiling, BadPoP, PastCutoff, Earlier, Latched.
+//     the protocol proof-configuration predicate ProofConfigValid, a kind 6 or 8 change of a shard that is not installed, even one an
+//     earlier Accepted AddPartition of the list adds: FD-29, and an AddPartition whose ShardID is not the empty one: FD-30), Ceiling,
+//     BadPoP, PastCutoff, Earlier, Latched.
 //
 // Only an Accepted change updates the tentative state (installed PDRs, the partition count, the effective schedule) and enters the
 // Duplicate set. EVM-side and membership kinds are Accepted. The shard acknowledgement gate is not a fold input (AckGate). Local proof
@@ -237,7 +255,9 @@ func foldShard(in FoldInput, id uint64, k uint8, v []any, tentative map[ShardKey
 		}
 	}
 	cur := tentative[key]
-	if cur == nil || cur.PartitionTypeID == evmassign.EVMPartitionTypeID {
+	// the target is an installed shard: one that exists only through an earlier Accepted AddPartition of this list is Invalid (FD-29), so
+	// a kind 6 or 8 change never needs an acknowledgement fact that does not exist yet, and an addition is always an epoch-0 creation
+	if cur == nil || in.Installed[key] == nil || cur.PartitionTypeID == evmassign.EVMPartitionTypeID {
 		return VerdictInvalid
 	}
 	h, err := evmassign.PDRHash(cur)
@@ -258,7 +278,8 @@ func foldShard(in FoldInput, id uint64, k uint8, v []any, tentative map[ShardKey
 		}
 	case KindUpdatePartition:
 		if succ.IsValid() != nil || ProofConfigValid(succ.PartitionParams) != nil || succ.PartitionTypeID != cur.PartitionTypeID || succ.TypeIDLen != cur.TypeIDLen || succ.UnitIDLen != cur.UnitIDLen ||
-			cur.Epoch == ^uint64(0) || succ.Epoch != cur.Epoch+1 || succ.EpochStart != 0 || !sameValidators(cur.Validators, succ.Validators) {
+			cur.Epoch == ^uint64(0) || succ.Epoch != cur.Epoch+1 || succ.EpochStart != 0 || !sameValidators(cur.Validators, succ.Validators) ||
+			!executableSet(succ.Validators) {
 			return VerdictInvalid
 		}
 	}
@@ -285,8 +306,9 @@ func foldAdd(in FoldInput, id uint64, v []any, tentative map[ShardKey]*types.Par
 			return VerdictInvalid
 		}
 	}
+	// a new partition is one unsplit shard: its ShardID has zero bits, the only one-shard scheme (FD-30)
 	if reserved[p] || pdr.PartitionTypeID == evmassign.EVMPartitionTypeID || uint64(pdr.NetworkID) != in.Network || pdr.Epoch != 0 ||
-		pdr.EpochStart != 0 || evmassign.ValidateAssignment(pdr) != nil || ProofConfigValid(pdr.PartitionParams) != nil {
+		pdr.EpochStart != 0 || pdr.ShardID.Length() != 0 || evmassign.ValidateAssignment(pdr) != nil || ProofConfigValid(pdr.PartitionParams) != nil {
 		return VerdictInvalid
 	}
 	if uint32(count+1) > in.PartitionCeiling {

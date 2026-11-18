@@ -214,14 +214,7 @@ Changes in the other branches of the block tree do not count, at most one of the
 ends up being committed.
 */
 func (x *BlockStore) IsChangeInProgress(branch uint64, partition types.PartitionID, shard types.ShardID) *types.InputRecord {
-	k := types.PartitionShardID{PartitionID: partition, ShardID: shard.Key()}
-	// go through the blocks of the branch and make sure that there is no change in progress for this shard
-	for _, b := range x.tree().Branch(branch) {
-		if _, ok := b.ShardState.Changed[k]; ok {
-			return b.ShardState.States[k].IR
-		}
-	}
-	return nil
+	return x.tree().ChangeInProgress(branch, types.PartitionShardID{PartitionID: partition, ShardID: shard.Key()})
 }
 
 // ClosureControls are the CloseLiability controls a block proposed at round on the parent round's state must carry: one for every epoch
@@ -230,11 +223,16 @@ func (x *BlockStore) ClosureControls(parentRound, epoch, round uint64) ([]rctype
 	x.lock.RLock()
 	svc := x.pos
 	x.lock.RUnlock()
-	if x.profile != ProfileHandoff || !svc.mandatory() {
+	if x.profile != ProfileHandoff {
 		return nil, nil
 	}
 	parent, err := x.tree().FindBlock(parentRound)
-	if err != nil {
+	if !svc.mandatory() {
+		// the duty is always on in VR mode (design section 5.6); a P85 chain without a closure authority has none
+		if err != nil || parent.ShardState.Control == nil || len(parent.ShardState.Control.VR) == 0 {
+			return nil, nil
+		}
+	} else if err != nil {
 		return nil, err
 	}
 	pos, err := loadPos(parent.ShardState.Control)
@@ -248,7 +246,7 @@ func (x *BlockStore) ClosureControls(parentRound, epoch, round uint64) ([]rctype
 	if len(next.Awaiting) == 0 {
 		return nil, nil
 	}
-	if svc.Proposer == nil {
+	if svc == nil || svc.Proposer == nil {
 		return nil, fmt.Errorf("%w: no proposer to build the closure of epoch %d", ErrWitnessUnavailable, next.Awaiting[0].Epoch)
 	}
 	controls := make([]rctypes.PosControl, 0, len(next.Awaiting))
@@ -661,7 +659,13 @@ func (x *BlockStore) Add(block *rctypes.BlockData, verifier IRChangeReqVerifier)
 	if err != nil {
 		return nil, fmt.Errorf("error processing block round %v, %w", block.Round, err)
 	}
-	if x.profile == ProfileHandoff && len(block.Payload.HandoffRecords) == 2 &&
+	if exeBlock.vrFrozen != nil {
+		// a Freeze v5: the derived body, the merged readiness receipts and the v5 view of the candidate, as for a V3 companion, and the
+		// canonical v6 bytes the readiness signed
+		if err := x.retainVRFreeze(block, exeBlock.vrFrozen); err != nil {
+			return nil, err
+		}
+	} else if x.profile == ProfileHandoff && len(block.Payload.HandoffRecords) == 2 &&
 		exeBlock.ShardState.Control != nil && exeBlock.ShardState.Control.Phase == "endorsed" {
 		record, decodeErr := decodeOrderedRecord(block.Payload.HandoffRecords[0])
 		if decodeErr != nil || record.Kind != "freeze" {
@@ -852,6 +856,23 @@ func (x *BlockStore) HandoffCandidate(id []byte) ([]byte, error) {
 	return archive.HandoffCandidate(id)
 }
 
+// HandoffVRCandidate returns the retained candidate v6 of a successor body (a VR handoff), or nil when none is retained. The block store
+// is the candidate source of its own executor, so the activation boundary reads a VR handoff's root-side changes from it.
+func (x *BlockStore) HandoffVRCandidate(id []byte) ([]byte, error) {
+	archive, ok := x.storage.(vrCandidateSource)
+	if !ok {
+		return nil, nil
+	}
+	return archive.HandoffVRCandidate(id)
+}
+
+// HandoffCommittedPreimage is the committed candidate of a successor body in the form its body binds: the candidate v6 of a VR handoff,
+// else the evmassign preimage, else nil (a root-only handoff). A reader that checks the candidate digest against the body takes this
+// (and ResolveCommittedCandidate for the digest); a reader that decodes the evmassign candidate takes HandoffCandidate, the v5 view.
+func (x *BlockStore) HandoffCommittedPreimage(id []byte) ([]byte, error) {
+	return retainedCommittedPreimage(x, id)
+}
+
 // CommittedHandoff is the committed root's committed handoff record and the root's round (BlockTree.CommittedHandoff); ok is false
 // outside the handoff profile.
 func (x *BlockStore) CommittedHandoff() (evmroot.OrderedHandoffRecord, uint64, bool) {
@@ -981,9 +1002,33 @@ func (x *BlockStore) ReadLastVote() (any, error) {
 }
 
 func NewGenesisBlock(networkID types.NetworkID, hashAlgo crypto.Hash, networkProfile ...uint64) (*ExecutedBlock, error) {
+	return newGenesisBlock(networkID, hashAlgo, nil, networkProfile...)
+}
+
+// NewGenesisBlockOf is the genesis block of the deployment the orchestration describes: a handoff-profile genesis whose coupled EVM shard
+// configuration pins the ValidatorRegistry starts in VR mode (its control state carries the genesis VR root state, GenesisVR); any other
+// genesis is NewGenesisBlock's. Every root derives the same block from the same genesis configurations.
+func NewGenesisBlockOf(orchestration Orchestration, hashAlgo crypto.Hash, networkProfile ...uint64) (*ExecutedBlock, error) {
 	profile, err := profileVersion(networkProfile)
 	if err != nil {
 		return nil, err
+	}
+	var vr []byte
+	if profile == ProfileHandoff {
+		if vr, err = GenesisVR(orchestration); err != nil {
+			return nil, err
+		}
+	}
+	return newGenesisBlock(orchestration.NetworkID(), hashAlgo, vr, networkProfile...)
+}
+
+func newGenesisBlock(networkID types.NetworkID, hashAlgo crypto.Hash, vr []byte, networkProfile ...uint64) (*ExecutedBlock, error) {
+	profile, err := profileVersion(networkProfile)
+	if err != nil {
+		return nil, err
+	}
+	if vr != nil && profile != ProfileHandoff {
+		return nil, fmt.Errorf("%w: a validator-registry genesis needs the handoff profile", ErrNetworkProfile)
 	}
 	genesisBlock := &rctypes.BlockData{
 		Version:   1,
@@ -1013,6 +1058,7 @@ func NewGenesisBlock(networkID types.NetworkID, hashAlgo crypto.Hash, networkPro
 	if profile == ProfileHandoff {
 		state = ShardStates{States: map[types.PartitionShardID]*ShardInfo{}, Changed: ShardSet{}}
 		state.Control = initialControl(networkID)
+		state.Control.VR = vr
 		ut, _, err := state.UnicityTree(hashAlgo)
 		if err != nil {
 			return nil, err

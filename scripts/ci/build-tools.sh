@@ -25,6 +25,10 @@ if [ -n "${PRODUCT_DIR:-}" ]; then
   product=$(git -C "$pdir" rev-parse HEAD)
 fi
 echo "$product" >"$out/product-commit.txt"
+# the product and the ureth of its dependency set agree on the native precompiles (lane-product.sh; LANE_PRODUCT=pinned with PRODUCT_DIR)
+if [ -n "${PRODUCT_DIR:-}" ] && [ "${LANE_PRODUCT:-checkout}" != pinned ]; then echo "build-tools: PRODUCT_DIR is set but LANE_PRODUCT is not pinned" >&2; exit 1; fi
+if [ -z "${PRODUCT_DIR:-}" ] && [ "${LANE_PRODUCT:-checkout}" != checkout ]; then echo "build-tools: LANE_PRODUCT=$LANE_PRODUCT without PRODUCT_DIR" >&2; exit 1; fi
+scripts/ci/lane-product.sh compat-dir "$pdir" | tee "$out/selftest/product-compat.log"; [ "${PIPESTATUS[0]}" = 0 ] || { echo "build-tools: the product and its ureth disagree on the native precompiles" >&2; exit 1; }
 ( cd "$pdir" && make build >/dev/null )
 cp "$pdir/build/ubft" "$out/ubft"
 for t in utb-evidence evmtx h3slots h3-pdr h4-restore-pin m2slots f7-mintproof-extract f7-mintproof-verify s4-equivocate; do ( cd "$pdir" && go build -trimpath=false -o "$out/tools/$t" "./scripts/$t" ); done
@@ -46,6 +50,7 @@ tb=$(mktemp -d); for i in 1 2 3; do "$out/ubft" root-node init --home "$tb/root$
 grep -q '^utb lane self-test: 0 failures' "$out/selftest/utb-lane-selftest.log" || { echo "build-tools: the lane self-test failed" >&2; exit 1; }
 scripts/ci/check-pins.sh selftest 2>&1 | tee "$out/selftest/check-pins-selftest.log"
 scripts/ci/check-pins.sh selftest >/dev/null 2>&1 || { echo "build-tools: the pin checker self-test failed" >&2; exit 1; }
+scripts/ci/lane-product.sh selftest 2>&1 | tee "$out/selftest/lane-product-selftest.log"; [ "${PIPESTATUS[0]}" = 0 ] || { echo "build-tools: the product selector self-test failed" >&2; exit 1; }
 # the evidence publisher with planted canaries (a secret file and a leaked secret value must not reach the upload set)
 scripts/ci/publish-selftest.sh 2>&1 | tee "$out/selftest/publish-selftest.log"
 grep -q '^publish-evidence self-test: .* 0 failures' "$out/selftest/publish-selftest.log" || { echo "build-tools: the publisher self-test failed" >&2; exit 1; }

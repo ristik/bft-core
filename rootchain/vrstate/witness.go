@@ -276,3 +276,23 @@ func BuildRetirementWitness(ctx context.Context, src evmstate.ProofSource, pins 
 	})
 	return raw, w, err
 }
+
+// Authority is the root's verifier of the VR witnesses under one deployment's pins: the storage.VRStateAuthority the block executor judges
+// VR-mode Freezes and controls with (as evmstate.Authority is the P85 one). The witness is always verified against the EVM state root the
+// root itself certified.
+type Authority struct{ Pins Pins }
+
+// VerifyOutput is the Freeze v5 witness: VR alone, at the frozen parent.
+func (a Authority) VerifyOutput(raw []byte, stateRoot [32]byte, resultID vrschema.Word) (vradmit.OutputState, error) {
+	return VerifyOutput(raw, stateRoot, a.Pins, resultID)
+}
+
+// VerifyReject is the RejectResult v2 witness: VR and the SealRegistry's progress, at the rejection parent.
+func (a Authority) VerifyReject(raw []byte, stateRoot [32]byte, resultID vrschema.Word) (vradmit.RejectState, error) {
+	return VerifyReject(raw, stateRoot, a.Pins, resultID)
+}
+
+// VerifyRetirement is the three-account HolderRetirement witness.
+func (a Authority) VerifyRetirement(raw []byte, stateRoot [32]byte, h vrschema.HolderRetirement, blockProgress uint64, inFlight bool) (vrschema.RetirementWitness, error) {
+	return VerifyRetirement(raw, stateRoot, a.Pins, h, blockProgress, inFlight)
+}

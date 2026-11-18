@@ -91,7 +91,7 @@ func anchorSlot(r *q3Replica) uint64 {
 }
 
 func committedEpoch(r *q3Replica) (epoch, round uint64) {
-	state, err := r.manager.blockStore.GetState()
+	state, err := r.manager.blockStore().GetState()
 	if err != nil || state.CommittedHead == nil || state.CommittedHead.Block == nil {
 		return 0, 0
 	}
@@ -720,13 +720,13 @@ func q3fixtureEntry(t *testing.T, f *q3fixture.Fixture) q3format.Entry {
 // reset by resetVolatile to what the constructor leaves, or replaced by the install. A field added without a decision fails here.
 func TestInProcessSwitchAccountsForEveryManagerField(t *testing.T) {
 	kept := []string{"timeoutVerify", "shadow", "backoff", "msgSeq", "profile", "certCacheStart", "certReqCh", "certResultCh", "ucSink", "params", "id", "net",
-		"trustBaseStore", "safety", "blockStore", "orchestration", "viewResolver", "frontier", "recoveryProfile2", "utbPrevious", "utbStore", "evidence",
+		"trustBaseStore", "safety", "storeRef", "orchestration", "viewResolver", "frontier", "recoveryProfile2", "utbPrevious", "utbStore", "evidence",
 		"utbConfig", "recoveryHistory", "stageRecovery", "proposalRequestCheck", "posPrefetching", "witnesses", "q3", "primaryWitness",
 		"approvalSink", "judgeHook", "handoffMu", "switcher", "ctxMu", "ctxGen", "switchCtx", "workerRunning", "future", "switchDeclined", "origins", "acq",
-		"switchPublished", "log", "tracer",
+		"switchPublished", "log", "tracer", "deferredReady", "admitted",
 		"leaderCnt", "execMsgCnt", "execMsgDur", "voteCnt", "proposedCR", "qcSize", "qcVoters", "susVotes", "recoveryReq", "frontierFault", "addBlockDur"}
 	reset := []string{"pacemaker", "voteBuffer", "recovery", "irReqBuffer", "retained", "leaderCheckedRound", "switchCheckedRound", "posQueue",
-		"primaryCache", "v3Planned", "q3Staged", "q3StagedEVM"}
+		"primaryCache", "v3Planned", "q3Staged", "q3StagedEVM", "residence", "deferred", "proposers"}
 	installed := []string{"leaderSelector", "trustBase", "irReqVerifier", "t2Timeouts", "epochAnchor", "handoffPlans", "handoffIntent", "handoffAborts"}
 	known := map[string]bool{}
 	for _, set := range [][]string{kept, reset, installed} {

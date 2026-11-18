@@ -288,7 +288,7 @@ func (x *ConsensusManager) checkEpochSwitch(ctx context.Context) error {
 	if x.switcher == nil || x.q3 == nil {
 		return nil
 	}
-	record, round, ok := x.blockStore.CommittedHandoff()
+	record, round, ok := x.blockStore().CommittedHandoff()
 	if !ok || round == x.switchCheckedRound {
 		return nil
 	}
@@ -437,6 +437,13 @@ func (x *ConsensusManager) resetVolatile() {
 	x.v3Planned.Store(nil)
 	x.q3Staged.Store(nil)
 	x.q3StagedEVM.Store(nil)
+	// the old epoch's leaders lose the proposal ingress priority; the successor's first round publishes its own
+	x.proposers.Store(nil)
+	// the residence rule restarts with the context: the successor re-learns its views, as a restart does
+	if x.deferred != nil && x.deferred.timer != nil {
+		x.deferred.timer.Stop()
+	}
+	x.residence, x.deferred = nil, nil
 	x.acq.resetAttempts() // what this root learnt of later epochs is kept: a root several epochs behind goes on with the next one
 }
 

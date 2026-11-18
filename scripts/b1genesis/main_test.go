@@ -227,7 +227,7 @@ func TestReadProfileAcceptsTheUbftHexFile(t *testing.T) {
 	require.NoError(t, err)
 	p := f.Pair.Profile
 	hexFile, err := json.Marshal(map[string]any{
-		"network": p.Network, "rootGenesisId": "0x" + hex.EncodeToString(p.RootGenesisID[:]), "executionChainId": p.ExecutionChainID,
+		"network": p.Network, "rootGenesisId": "0x" + hex.EncodeToString(p.RootGenesisID[:]), "executionChainId": p.ExecutionChainID, "executionRevision": p.ExecutionRevision,
 		"runtimeHash": "0x" + hex.EncodeToString(p.RuntimeHash[:]), "compilerHash": "0x" + hex.EncodeToString(p.CompilerHash[:]),
 		"maxEpochsPerUpdate": p.MaxEpochsPerUpdate, "deltaEv": p.DeltaEV, "deltaHold": p.DeltaHold, "systemGas": p.SystemGas, "forcedGas": p.ForcedGas, "maxGas": p.MaxGas,
 		"ordinaryCapacity": p.OrdinaryCapacity, "restGas": p.RestGas, "companionBytes": p.CompanionBytes,

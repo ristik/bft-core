@@ -6,9 +6,12 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/evmroot"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootrecords"
+	"github.com/unicitynetwork/bft-core/vradmit"
+	"github.com/unicitynetwork/bft-core/vrschema"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -45,6 +48,44 @@ func initialControl(network types.NetworkID) *evmroot.ControlState {
 		Pos: rootrecords.NewState(1, rctypes.GenesisRootRound+1).Bytes()}
 }
 
+// The genesis EVM PDR pins VR's address and code hash under these PartitionParams (design section 2.1; rootchain/vrstate reads them, and a
+// test holds the two spellings equal: storage cannot import vrstate).
+const (
+	paramValidatorRegistry         = "validator_registry"
+	paramValidatorRegistryCodeHash = "validator_registry_code_hash"
+)
+
+// GenesisVR is the VR root state a genesis starts from (VT-14, ristik/bft-core#1158): when the coupled genesis EVM shard configuration
+// pins the ValidatorRegistry, the encoded vradmit.GenesisRootState of the genesis epoch (1) with N = the genesis committee size; nil for a
+// genesis that pins no VR (P85 and pre-VR chains), whose control state and digest are therefore unchanged. A VR pin on a configuration that
+// is not the one coupled EVM shard, or on more than one, is refused: the mode is the generation's, never ambiguous.
+func GenesisVR(orchestration Orchestration) ([]byte, error) {
+	confs, err := orchestration.ShardConfigs(rctypes.GenesisRootRound)
+	if err != nil {
+		return nil, fmt.Errorf("reading the genesis shard configurations: %w", err)
+	}
+	var pinned *types.PartitionDescriptionRecord
+	for _, c := range confs {
+		_, a := c.PartitionParams[paramValidatorRegistry]
+		_, h := c.PartitionParams[paramValidatorRegistryCodeHash]
+		if !a && !h {
+			continue
+		}
+		if !a || !h || !evmassign.CouplingRequired(c) || pinned != nil {
+			return nil, fmt.Errorf("%w: the ValidatorRegistry must be pinned (address and code hash) by exactly one coupled EVM shard configuration", ErrNetworkProfile)
+		}
+		pinned = c
+	}
+	if pinned == nil {
+		return nil, nil
+	}
+	n := len(pinned.Validators)
+	if n == 0 || n > vrschema.MaxCommittee {
+		return nil, fmt.Errorf("%w: a VR genesis committee of %d", ErrNetworkProfile, n)
+	}
+	return vradmit.GenesisRootState(1, uint32(n)).Encode()
+}
+
 func checkProfile(v uint64, state ShardStates) error {
 	if (v == ProfileHandoff) != (state.Control != nil) {
 		return ErrNetworkProfile
@@ -63,6 +104,9 @@ func checkProfile(v uint64, state ShardStates) error {
 func validateControl(c *evmroot.ControlState) error {
 	if c == nil || c.Network == 0 || c.Epoch == 0 || len(c.PredecessorBodyID) != 32 {
 		return ErrControlCheckpoint
+	}
+	if len(c.PrimaryResult) != 0 && c.Phase != "endorsed" && c.Phase != "frozen" {
+		return ErrControlCheckpoint // only an endorsed Freeze records its primary result
 	}
 	if c.Phase == "idle" {
 		if c.Attempt != 0 || c.OrderedRound != 0 || len(c.RecordBytes) != 0 || len(c.PreviousDigest) != 0 || len(c.FrozenParent) != 0 {
@@ -90,7 +134,7 @@ func validateControl(c *evmroot.ControlState) error {
 			return ErrControlCheckpoint
 		}
 	case "frozen", "endorsed":
-		if r.Kind != "freeze" || len(c.FrozenParent) != 32 {
+		if r.Kind != "freeze" || len(c.FrozenParent) != 32 || (len(c.PrimaryResult) != 0 && (len(c.PrimaryResult) != 32 || len(c.VR) != 0)) {
 			return ErrControlCheckpoint
 		}
 	case "committed":
