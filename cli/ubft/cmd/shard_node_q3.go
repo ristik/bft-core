@@ -343,7 +343,7 @@ func (s *shardQ3Staging) announceStaged(req shardQ3StageRequest) error {
 	if s.onStaged == nil || len(req.Preimage) == 0 {
 		return nil
 	}
-	c, err := evmassign.DecodeCandidate(req.Preimage)
+	c, err := evmassign.DecodeCommittedCandidate(req.Preimage)
 	if err != nil {
 		return errors.Join(ErrQ3StageBody, err)
 	}
@@ -381,7 +381,7 @@ func (s *shardQ3Staging) checkStaged(body q3format.BodyV3, digest [32]byte, req 
 		}
 	}
 	if len(req.Preimage) != 0 && s.self != "" {
-		c, err := evmassign.DecodeCandidate(req.Preimage)
+		c, err := evmassign.DecodeCommittedCandidate(req.Preimage)
 		if err != nil {
 			return errors.Join(ErrQ3StageBody, err)
 		}

@@ -266,6 +266,19 @@ func (bt *BlockTree) Add(block *ExecutedBlock) error {
 // returns nil in case of failure, when a node is not found
 // otherwise it will return list of data stored in the path nodes, excluding the root data itself, so if
 // the root node is previous node then the list is empty
+// CommitPath is the blocks a commit QC commits, oldest first: every uncommitted block between the root and the block the QC commits,
+// that block last. Empty when nothing new would be committed.
+func (bt *BlockTree) CommitPath(commitQc *abdrc.QuorumCert) []*ExecutedBlock {
+	bt.m.RLock()
+	defer bt.m.RUnlock()
+	path := bt.findPathToRoot(commitQc.GetParentRound())
+	out := make([]*ExecutedBlock, 0, len(path))
+	for i := len(path) - 1; i >= 0; i-- {
+		out = append(out, path[i])
+	}
+	return out
+}
+
 func (bt *BlockTree) findPathToRoot(round uint64) []*ExecutedBlock {
 	n, f := bt.roundToNode[round]
 	if !f {

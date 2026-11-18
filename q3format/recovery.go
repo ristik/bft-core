@@ -36,7 +36,7 @@ func readiness(b BodyV3, attempt uint64, ev Evidence, preimage, priorPreimage []
 		if sum := sha256.Sum256(preimage); !bytes.Equal(sum[:], ev.CandidateDigest) {
 			return fmt.Errorf("%w: the preimage is not the committed candidate", ErrBinding)
 		}
-		c, err := evmassign.DecodeCandidate(preimage)
+		c, err := evmassign.DecodeCommittedCandidate(preimage)
 		if err != nil {
 			return errors.Join(ErrBinding, err)
 		}
@@ -78,7 +78,7 @@ func recoveryHolds(b BodyV3, c evmassign.Candidate, priorPreimage []byte) error 
 	if len(priorPreimage) == 0 {
 		return fmt.Errorf("%w: a recovery replaces a committed primary and the preceding link committed none", evmassign.ErrRecoveryLineage)
 	}
-	p, err := evmassign.DecodeCandidate(priorPreimage)
+	p, err := evmassign.DecodeCommittedCandidate(priorPreimage)
 	if err != nil {
 		return err
 	}

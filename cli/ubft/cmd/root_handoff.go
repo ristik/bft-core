@@ -51,6 +51,10 @@ func localOperatorRequest(w http.ResponseWriter, r *http.Request) bool {
 		http.Error(w, "local operator access required", http.StatusForbidden)
 		return false
 	}
+	if !operatorHostAllowed(r.Host) {
+		http.Error(w, "the request names a host the operator endpoints do not serve", http.StatusForbidden)
+		return false
+	}
 	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil || mediaType != "application/json" || r.Header.Get("Origin") != "" {
 		http.Error(w, "application/json without Origin required", http.StatusUnsupportedMediaType)

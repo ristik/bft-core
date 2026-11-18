@@ -245,7 +245,7 @@ func AuthenticateCandidate(entry q3format.Entry, r evmroot.OrderedHandoffRecord,
 	if len(candidate) == 0 {
 		return nil
 	}
-	c, err := evmassign.DecodeCandidate(candidate)
+	c, err := evmassign.DecodeCommittedCandidate(candidate)
 	if err != nil {
 		return errors.Join(ErrCandidate, err)
 	}
