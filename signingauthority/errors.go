@@ -14,6 +14,14 @@ var (
 	// that one message for its own key, never anything a caller labels differently.
 	ErrPoPDomain = errors.New("signing-pop-domain-mismatch")
 
+	// ErrRegistrationDomain is a registration-signing request that names neither VR domain (unicity.vr.register, unicity.vr.binding), or
+	// one whose identity id contradicts its domain: the authority signs exactly the two registration digests for its own key.
+	ErrRegistrationDomain = errors.New("signing-registration-domain-mismatch")
+
+	// ErrRegistrationUnauthorized is a registration request the operator has not authorized: no registration policy at this authority, or
+	// an action, owner, identity, root binding or payee that no entry of the policy names.
+	ErrRegistrationUnauthorized = errors.New("signing-registration-unauthorized")
+
 	// ErrUnauthenticated is a request whose certificate, seal quorum, inclusion paths or bound
 	// TechnicalRecord do not verify against the authority's own trust.
 	ErrUnauthenticated = errors.New("signing-unauthenticated-input")

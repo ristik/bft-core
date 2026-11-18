@@ -135,3 +135,96 @@ func TestVRChangeToolingBuildsPayloadsTheRootsAccept(t *testing.T) {
 	require.NoError(t, json.Unmarshal(raw, &p))
 	require.Len(t, []byte(p.Signature), 65)
 }
+
+func vrTestKeys(t *testing.T, dir string, n int, pdr *types.PartitionDescriptionRecord) []string {
+	var files []string
+	for i := 0; i < n; i++ {
+		keys, err := generateKeys()
+		require.NoError(t, err)
+		signer, err := keys.Signer()
+		require.NoError(t, err)
+		v, err := signer.Verifier()
+		require.NoError(t, err)
+		pub, err := v.MarshalPublicKey()
+		require.NoError(t, err)
+		id, err := keys.NodeID()
+		require.NoError(t, err)
+		pdr.Validators = append(pdr.Validators, &types.NodeInfo{NodeID: id.String(), SigKey: pub, Stake: 1})
+		files = append(files, writeJSONTest(t, dir, "agg-keys"+strconv.Itoa(i)+".json", keys))
+	}
+	// validators in node id order, key files kept in step
+	for i := 0; i < n; i++ {
+		for j := i + 1; j < n; j++ {
+			if pdr.Validators[j].NodeID < pdr.Validators[i].NodeID {
+				pdr.Validators[i], pdr.Validators[j] = pdr.Validators[j], pdr.Validators[i]
+				files[i], files[j] = files[j], files[i]
+			}
+		}
+	}
+	return files
+}
+
+func TestVRChangeReplaceAggregatorsAndCommitteeLimits(t *testing.T) {
+	dir := t.TempDir()
+	installed := &types.PartitionDescriptionRecord{Version: 1, NetworkID: 5, PartitionID: 9, PartitionTypeID: 9, TypeIDLen: 8, UnitIDLen: 256,
+		T2Timeout: 3 * time.Second, Epoch: 2, EpochStart: 300, PartitionParams: map[string]string{"proof_type": "aggregator_rsmt_v1"}}
+	_ = vrTestKeys(t, dir, 1, installed)
+	currentFile := writeJSONTest(t, dir, "current.json", installed)
+
+	succ := &types.PartitionDescriptionRecord{}
+	*succ = *installed
+	succ.Validators = nil
+	succ.Epoch, succ.EpochStart = 3, 0
+	newKeys := vrTestKeys(t, dir, 2, succ)
+	succFile := writeJSONTest(t, dir, "succ.json", succ)
+	var pops []string
+	for i, k := range newKeys {
+		out := filepath.Join(dir, "agg-pop"+strconv.Itoa(i)+".json")
+		_, err := runVRChange(t, "pop", "--network", "5", "--change-id", "21", "--key-conf", k, "--pdr", succFile, "--out", out)
+		require.NoError(t, err)
+		pops = append(pops, out)
+	}
+	args := func(changeID string, popList []string, successor string) []string {
+		return []string{"replace-aggregators", "--network", "5", "--change-id", changeID, "--current", currentFile, "--successor", successor, "--pop", strings.Join(popList, ",")}
+	}
+	payloadHex, err := runVRChange(t, args("21", pops, succFile)...)
+	require.NoError(t, err)
+	payload, err := hex.DecodeString(strings.TrimPrefix(payloadHex, "0x"))
+	require.NoError(t, err)
+	v, err := vrschema.DecodeChangePayload(vrschema.KindReplaceAggregator, payload)
+	require.NoError(t, err)
+	require.EqualValues(t, 9, v[0].(uint64))
+	h, err := evmassign.PDRHash(installed)
+	require.NoError(t, err)
+	require.Equal(t, h, v[2].(vrschema.Word))
+	verdicts, err := vrschema.FoldVerdicts(vrschema.FoldInput{Network: 5, Installed: map[vrschema.ShardKey]*types.PartitionDescriptionRecord{
+		{Partition: 9, Shard: string(installed.ShardID.Bytes())}: installed}, PartitionCeiling: 64},
+		[]vrschema.RegistryChange{{ID: 21, Kind: uint64(vrschema.KindReplaceAggregator), Payload: payload}})
+	require.NoError(t, err)
+	require.Equal(t, []uint8{vrschema.VerdictAccepted}, verdicts)
+
+	_, err = runVRChange(t, args("22", pops, succFile)...)
+	require.ErrorContains(t, err, "BadPoP", "proofs for another change id (a lost queue race)")
+	_, err = runVRChange(t, args("21", pops[:1], succFile)...)
+	require.ErrorIs(t, err, ErrVRChange, "a validator without a proof")
+	changed := *succ
+	changed.T2Timeout = 9 * time.Second
+	_, err = runVRChange(t, args("21", pops, writeJSONTest(t, dir, "changed.json", &changed))...)
+	require.ErrorIs(t, err, ErrVRChange, "only the validators may change")
+	skipped := *succ
+	skipped.Epoch = 5
+	_, err = runVRChange(t, args("21", pops, writeJSONTest(t, dir, "skipped.json", &skipped))...)
+	require.ErrorIs(t, err, ErrVRChange, "epoch + 1")
+
+	out, err := runVRChange(t, "committee-limits", "--n-min", "4", "--n-target", "7", "--n-max", "16")
+	require.NoError(t, err)
+	raw, err := hex.DecodeString(strings.TrimPrefix(out, "0x"))
+	require.NoError(t, err)
+	l, err := vrschema.DecodeChangePayload(vrschema.KindCommitteeLimits, raw)
+	require.NoError(t, err)
+	require.Equal(t, []any{uint64(4), uint64(7), uint64(16)}, l)
+	for _, bad := range [][3]string{{"0", "1", "1"}, {"3", "2", "5"}, {"1", "5", "4"}, {"1", "5", "17"}} {
+		_, err = runVRChange(t, "committee-limits", "--n-min", bad[0], "--n-target", bad[1], "--n-max", bad[2])
+		require.ErrorIs(t, err, ErrVRChange, "%v", bad)
+	}
+}

@@ -18,6 +18,7 @@ import (
 	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/signingauthority"
+	"github.com/unicitynetwork/bft-core/vrschema"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -552,6 +553,26 @@ func (s *Server) operatorOp(ctx context.Context, operation op, payload []byte) (
 		}
 		s.log.Info("signed a delegation possession", slog.Uint64("id", wire.Id), slog.Uint64("generation", wire.Generation),
 			slog.Uint64("delegationNonce", wire.DelegationNonce), slog.String("election", fmt.Sprintf("%x", wire.Election)))
+		return sig, nil
+	case opSignRegistration:
+		var wire registrationPayload
+		if err := types.Cbor.Unmarshal(payload, &wire); err != nil {
+			return nil, fmt.Errorf("%w: registration request: %v", errMalformed, err)
+		}
+		if len(wire.Owner) != 20 || len(wire.Payee) != 20 {
+			return nil, fmt.Errorf("%w: the owner and the payee are 20-byte addresses", errMalformed)
+		}
+		request := signingauthority.RegistrationRequest{Domain: wire.Domain, ID: wire.ID, Registration: vrschema.Registration{RootNodeID: wire.RootNodeID,
+			RootKey: wire.RootKey, EVMNodeID: wire.EVMNodeID, EVMKey: wire.EVMKey, Nonce: wire.Nonce}}
+		copy(request.Owner[:], wire.Owner)
+		copy(request.Registration.Payee[:], wire.Payee)
+		sig, err := s.authority.SignRegistration(request)
+		if err != nil {
+			s.log.Warn("refusing a registration signature", slog.String("err", err.Error()))
+			return nil, err
+		}
+		s.log.Info("signed a registration", slog.String("domain", wire.Domain), slog.Uint64("id", wire.ID), slog.Uint64("nonce", wire.Nonce),
+			slog.String("owner", fmt.Sprintf("%x", wire.Owner)), slog.String("rootNode", wire.RootNodeID))
 		return sig, nil
 	case opCompleteEnrollment:
 		var conf types.PartitionDescriptionRecord

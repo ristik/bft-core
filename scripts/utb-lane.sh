@@ -42,7 +42,7 @@ Entries: epoch 2 is the K->J handoff (activated; the P85 J is never acknowledged
          message is captured and decodes to exactly that entry; the aggregator serves epoch 2
   4  U3a the aggregator restarts from its retained store (unchanged records); then it is stopped and its history store removed (the controlled fault)
   5  P85 stalled J and the derived recovery to K (epoch 3), liability closures
-  6  U3b the aggregator restarts holding the genesis only, root HTTP unavailable to it: it repairs epochs 2..3 from a genesis-committee root over GetTrustBase (log: catch-up
+  6  U3b the aggregator restarts holding the genesis only (in UTB mode it has no REST trust-base client, so only GetTrustBase can serve it): it repairs epochs 2..3 from a genesis-committee root over GetTrustBase (log: catch-up
          started / OK page from a root / finished); it serves epoch 3
   7  L2  the acknowledgement block installs both entries; U4 a token certified after the recovery; the stale client meets the unknown epoch 3, fetches [2 3] in one request
          and verifies; the aggregator restarts again, unchanged bytes, healthy;  U4b the JS SDK (the fork, UTB_SDK_JS) holds the genesis only, meets epoch 3 on the same
