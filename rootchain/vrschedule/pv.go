@@ -26,7 +26,8 @@ import (
 // its sender is served within the current round and j more, each serving at most S senders, so within (j + 1) * S * PiMax of its arrival
 // (QMax), whatever the other senders keep sending: another sender's backlog costs it one service per round, never more. S is at most the
 // senders a round admits: the incumbents, the successors' roots and K's roots (3 * MAX_COMMITTEE = 48), and the local operator identity, so
-// 49. That holds for every round across membership changes: a round drops the queued messages of senders no longer admitted (Admitted). The queue coalesces a sender's retransmissions (one copy of a message per sender is queued) and admits at most
+// 49. That holds for every round across membership changes: a round is built against one snapshot of the admitted senders and drops the
+// queued messages of senders outside it (Admission). The queue coalesces a sender's retransmissions (one copy of a message per sender is queued) and admits at most
 // MaxQueuedPerPeer = 64 per sender, so the bound the queue itself enforces is j <= 64: 65 * 49 * 100 ms = 318.5 s, a delay only a sender's
 // own backlog can cause its own messages.
 //
@@ -71,10 +72,11 @@ type Queue struct {
 	bound func() int
 	// Delivered receives what each processed message produced (this root's assembly, to send); nil drops it.
 	Delivered func(Outcome, []Message, error)
-	// Admitted reports whether a sender is admitted under the current committed membership (the transport's admission, and the local
-	// operator); a round never serves a sender it does not admit: their queued messages are dropped when the round begins, so a round holds
-	// at most the admitted senders whatever the membership was when they queued (astra review of #1188, r3). Nil admits every sender.
-	Admitted func(sender string) bool
+	// Admission is the set of senders admitted under one committed membership version (the transport's admission, and the local operator),
+	// taken once per round: a round never serves a sender outside it, and their queued messages are dropped when the round begins, so a
+	// round holds at most one version's admitted senders whatever the membership was when they queued, or changes to while the round is
+	// built (astra review of #1188, r3, r4). Nil admits every sender.
+	Admission func() map[string]bool
 
 	mu    sync.Mutex
 	per   map[string][]queued
@@ -212,10 +214,11 @@ func (q *Queue) forget(m queued) {
 // newRound orders the senders with queued messages for one service round: in their arrival order, the senders seated last after the
 // others.
 func (q *Queue) newRound() {
-	if q.Admitted != nil {
+	if q.Admission != nil {
+		admitted := q.Admission() // one snapshot for the whole round
 		kept := q.ring[:0]
 		for _, s := range q.ring {
-			if q.Admitted(s) {
+			if admitted[s] {
 				kept = append(kept, s)
 				continue
 			}

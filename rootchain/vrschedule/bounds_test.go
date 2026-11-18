@@ -638,15 +638,22 @@ func TestTheQueueCoalescesRetransmissions(t *testing.T) {
 	require.Equal(t, 2, q.Len())
 }
 
-// astra's round 3: a round serves only the senders admitted when it begins. The queued messages of a sender the committed membership no
-// longer admits are dropped, so a round never holds more than the admitted senders, whatever the membership was when they queued.
+// astra's rounds 3 and 4: a round is built against one snapshot of the admitted senders. The queued messages of a sender outside it are
+// dropped, so a round never holds more than one membership version's admitted senders, whatever the membership was when they queued or
+// changes to while the round is built; a sender admitted in the snapshot keeps its messages.
 func TestARoundServesOnlyAdmittedSenders(t *testing.T) {
 	w := newWorld(t)
 	s := w.service("x")
 	s.Update(w.committed(0))
 	q := NewQueue(s, 0)
 	admitted := map[string]bool{"a": true, "b": true, "c": true}
-	q.Admitted = func(sender string) bool { return admitted[sender] }
+	q.Admission = func() map[string]bool {
+		out := map[string]bool{}
+		for k, v := range admitted {
+			out[k] = v
+		}
+		return out
+	}
 	p := w.PoPs(w.in)[0]
 	for _, x := range []string{"a", "b", "c"} {
 		for i := 0; i < 3; i++ {
@@ -670,4 +677,42 @@ func TestARoundServesOnlyAdmittedSenders(t *testing.T) {
 	admitted["c"] = true
 	m, _ = q.pop()
 	require.Equal(t, "c", m.sender)
+}
+
+// The membership changes while a round is built (astra r4): the round uses the snapshot taken at its start, so it holds at most that
+// version's admitted senders (49 at most), and every sender of the snapshot keeps its messages, even ones the new version drops.
+func TestARoundIsBuiltAgainstOneMembershipSnapshot(t *testing.T) {
+	w := newWorld(t)
+	s := w.service("x")
+	s.Update(w.committed(0))
+	q := NewQueue(s, 0)
+	q.bound = func() int { return 1 << 20 }
+	old, next := map[string]bool{}, map[string]bool{}
+	var senders []string
+	for i := 0; i < 49; i++ {
+		id := fmt.Sprintf("old-%02d", i)
+		old[id], senders = true, append(senders, id)
+	}
+	for i := 0; i < 49; i++ {
+		id := fmt.Sprintf("new-%02d", i)
+		next[id], senders = true, append(senders, id)
+	}
+	live := old
+	q.Admission = func() map[string]bool {
+		snap := live
+		live = next // the membership changes while the round is built
+		return snap
+	}
+	p := w.PoPs(w.in)[0]
+	for _, x := range senders {
+		require.True(t, q.Submit(x, variant(p, 1)))
+	}
+	served := map[string]bool{}
+	for i := 0; i < 49; i++ {
+		m, ok := q.pop()
+		require.True(t, ok)
+		served[m.sender] = true
+	}
+	require.Len(t, q.round, 0, "the round held exactly the snapshot's 49 senders")
+	require.Equal(t, old, served, "every sender of the snapshot was served, none of another version")
 }

@@ -180,17 +180,12 @@ func (x *ConsensusManager) EnableVRHandoff(ctx context.Context, cfg VRHandoffCon
 		}
 		v.member = m
 	}
-	// a service round serves only the senders admitted now: the installed committee, the current intent's members and the local operator
-	v.queue.Admitted = func(sender string) bool {
-		if sender == vrOperator {
-			return true
-		}
-		for _, n := range x.trustBase.Load().RootNodes {
-			if n.NodeID == sender {
-				return true
-			}
-		}
-		return v.svc.Members()[sender]
+	// a service round serves only the senders of one membership snapshot: the service's members of its last committed update (the installed
+	// committee, K and the current intent's successors) and the local operator
+	v.queue.Admission = func() map[string]bool {
+		m := v.svc.Members()
+		m[vrOperator] = true
+		return m
 	}
 	v.peers = func() []peer.ID { return x.vrPeers(v) }
 	v.stageIntent = x.stageVRIntentMembers
@@ -526,6 +521,27 @@ func (x *ConsensusManager) vrCommitted() (vrschedule.Committed, error) {
 	if err != nil {
 		return c, err
 	}
+	// the membership the protocol admits is of this one committed state, derivable or not: the committee of its epoch and K
+	tb := x.trustBase.Load()
+	if x.trustBaseStore != nil {
+		if byEpoch, tbErr := x.trustBaseStore.GetByEpoch(q.Epoch); tbErr == nil && byEpoch != nil {
+			tb = byEpoch
+		}
+	}
+	c.Incumbents = map[string][]byte{}
+	for _, n := range tb.RootNodes {
+		c.Incumbents[n.NodeID] = bytes.Clone(n.SigKey)
+	}
+	if q.Root != nil {
+		facts, ferr := q.Root()
+		if ferr != nil && ok {
+			return c, ferr
+		}
+		if ferr == nil {
+			c.K, c.Schedule = facts.Lifecycle.Incumbent, facts.Fold.Schedule
+		}
+	}
+	c.Table = s.Support
 	c.Derived, c.Derivable = d, ok
 	if !ok {
 		return c, nil
@@ -537,18 +553,6 @@ func (x *ConsensusManager) vrCommitted() (vrschedule.Committed, error) {
 	if c.Prepared && len(q.Control.FrozenParent) == 32 && q.LatestEVMOK && bytes.Equal(q.LatestEVMBlock, q.Control.FrozenParent) {
 		c.FrozenParent, c.FrozenRoot = [32]byte(q.Control.FrozenParent), q.LatestEVMRoot
 	}
-	c.Incumbents = map[string][]byte{}
-	for _, n := range x.trustBase.Load().RootNodes {
-		c.Incumbents[n.NodeID] = bytes.Clone(n.SigKey)
-	}
-	if q.Root != nil {
-		facts, err := q.Root()
-		if err != nil {
-			return c, err
-		}
-		c.K, c.Schedule = facts.Lifecycle.Incumbent, facts.Fold.Schedule
-	}
-	c.Table = s.Support
 	return c, nil
 }
 

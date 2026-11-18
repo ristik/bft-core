@@ -23,8 +23,6 @@ It drives OPERATOR.md 5b for the election's reserved result, the same sequence t
                replace-session (a joiner: complete-enrollment and the restore of its shard node), shard started if it is not running. It starts as soon as
                the roots are installed: a shard cannot sign in the new epoch before its authority has advanced, so the new committee's first certificate
                and these checks no longer wait for each other. The authority is NEVER restarted or recreated
-  lockproof    with the bridge overlay: the lock-proof endpoint rescans network/handoff (#996, --shard-conf-dir) and is only checked; without that flag it is
-               recreated (the pre-#996 procedure)
   verify       every elected root certifies at E+1 (waited for here, off the advance's path), every incumbent shard logged the activation, the result Acknowledged and the EVM block that acknowledged it, the served /api/v1/trustbases history verifying to E+1 (with
                --utb), blocks still produced, recordCursor == recordCount
 
@@ -70,9 +68,8 @@ INSTALL_GATE_SECONDS = 120  # how long a root waits for verified evidence of the
 LIFETIME = 16384            # storage.ResultReservationLifetimeProgress: a result not prepared within this many registry progress rounds is rejected by the roots
 MIN_WINDOW_ROUNDS = 1800    # default margin: the steps up to the Prepare take ~10 min; at ~2 rounds/s this is ~15 min
 ZERO = '0x' + '00' * 32
-STEPS = ('preflight', 'trust-base', 'proposal', 'propose', 'install', 'advance', 'lockproof', 'verify')
+STEPS = ('preflight', 'trust-base', 'proposal', 'propose', 'install', 'advance', 'verify')
 WINDOW_STEPS = frozenset(('trust-base', 'proposal', 'propose'))   # the steps before the Prepare: the window must still be open for them
-BRIDGE_OVERRIDE = 'compose.bridge.yaml'
 OPERATOR = ('--operator-socket', '/authority/operator.sock', '--operator-credential', '/authority/operator.cred')
 
 
@@ -1108,7 +1105,7 @@ class Drive(rehearse.Rehearsal):
             self.exec_in('root1', 'ubft', 'q3', 'shard-conf', '--root-rpc', self.root_rpc, '--epoch', str(shard_epoch), '--out', '/tmp/shard-conf.json')
             conf = json.loads(self.exec_in('root1', 'cat', '/tmp/shard-conf.json'))
             self.expect(conf.get('epoch') == shard_epoch and conf.get('partitionId') == 8, f'a root holds the EVM shard configuration of epoch {shard_epoch}', str(conf)[:200])
-            tmp = self.work / f'.shard-conf-{shard_epoch}.json.tmp'   # atomic: the lock-proof endpoint's scanner does not match the temporary name (#996)
+            tmp = self.work / f'.shard-conf-{shard_epoch}.json.tmp'   # atomic: a reader of network/handoff never sees a partial file (#996)
             tmp.write_text(json.dumps(conf, indent=1) + '\n')
             os.chmod(tmp, 0o644)
             os.replace(tmp, self.work / f'shard-conf-{shard_epoch}.json')
@@ -1233,21 +1230,6 @@ class Drive(rehearse.Rehearsal):
         self.expect(finished.get('running') is True, f'the laptop\'s shard node {i} runs again', str(finished)[:300])
         self.wait_ready(i, self.target, follow, 'after a cold restore')
 
-    def step_lockproof(self, mode):
-        overlay = self.gen / BRIDGE_OVERRIDE
-        if not overlay.is_file():
-            return {'bridge': False}
-        files = handoff_ops.compose_files(self.gen) + ['-f', str(overlay)]
-        bridge = json.loads(overlay.read_text())['services']['lockproof']
-        command = bridge.get('entrypoint') or bridge.get('command') or []
-        rescans = '--shard-conf-dir' in command
-        restart = mode == 'always' or (mode == 'auto' and not rescans)
-        if restart:
-            run = subprocess.run(['docker', 'compose', *files, 'up', '-d', '--no-deps', '--force-recreate', 'lockproof'], text=True, capture_output=True)
-            self.expect(run.returncode == 0, 'the lock-proof endpoint recreated', run.stderr.strip()[-300:])
-        healthy = self.wait('the lock-proof endpoint answers /healthz', lambda: self.http('127.0.0.1:8090', 'GET', '/healthz')[0] == 200, 120)
-        return {'bridge': True, 'restarted': restart, 'rescansHandoffDir': rescans, 'healthy': bool(healthy)}
-
     def ack_block(self, result, head):
         """(the first block whose state has the result Acknowledged, None) by bisection on eth_call at a block; (None, why) when the client keeps no state that
         far back or the lookup failed (a transport error is reported, not hidden)."""
@@ -1350,8 +1332,6 @@ def main(argv=None):
                    help='the explicit cold bootstrap of a joiner (empty its state, pin, replay) instead of the root-free follower; never needed on the election path')
     p.add_argument('--joiner', action='append', help='STAKINGID=ENTITY of a prepared joiner (also read from handoff/joiners.json)')
     p.add_argument('--min-window-rounds', type=int, default=MIN_WINDOW_ROUNDS, help='refuse the steps before the Prepare with fewer progress rounds left')
-    p.add_argument('--lockproof-restart', choices=('auto', 'always', 'never'), default='auto',
-                   help='auto: recreate the lock-proof endpoint only when it does not rescan network/handoff (pre-#996)')
     p.add_argument('--allow-unrehearsed-retirement', action='store_true')
     p.add_argument('--require-member', type=int, action='append', default=[], metavar='ENTITY',
                    help='refuse a result that does not elect this entity (a joiner being prepared); repeatable')
@@ -1397,7 +1377,6 @@ def main(argv=None):
                  ('propose', lambda: d.step_propose(result, journal)),
                  ('install', lambda: d.step_install(journal)),
                  ('advance', lambda: d.step_advance(journal)),
-                 ('lockproof', lambda: d.step_lockproof(a.lockproof_restart)),
                  ('verify', lambda: d.step_verify(result, journal)))
         for name, fn in steps:
             if name in WINDOW_STEPS and not journal.done(name) and not journal.done('propose'):

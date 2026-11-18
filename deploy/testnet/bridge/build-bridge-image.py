@@ -4,9 +4,9 @@
     build-bridge-image.py --bft-source DIR --contracts-source DIR --nbp-source DIR
 
 Each source must be a clean checkout at exactly its pinned commit (contracts with its submodules). dnb-tool is built from --bft-source, which must be
-the node images' pin (deploy/testnet/pins.json "bft", the same checkout build-images.py builds ubft from): the lock-proof endpoint reads the validators'
-archives, so it must speak the nodes' archive layout (bft-core#1075: a dnb-tool older than the packed archive of #1059 found no lock proof). The pin is
-recorded, and bridge/overlay.py refuses an image recorded for another one. dnb-tool (cgo), forge's build of the contracts and
+the node images' pin (deploy/testnet/pins.json "bft", the same checkout build-images.py builds ubft from): dnb-tool reads the validators' trust base,
+so it must speak the nodes' formats (bft-core#1075: a dnb-tool older than the packed archive of #1059 could not read the nodes' archives). The pin is
+recorded, and deploy_bridge.image refuses an image recorded for another one. dnb-tool (cgo), forge's build of the contracts and
 the plug-ins' `npm ci` all run inside the image build, on the image's own platform (linux/amd64).
 Writes artifacts/bridge-images.json.
 """
