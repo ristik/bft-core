@@ -91,7 +91,7 @@ func TestPreparedRetirementsAreOrderedAfterTheClosuresInAscendingKeyOrderAndStam
 	require.NoError(t, block.Payload.IsValid(), "a valid payload")
 	require.Equal(t, 2, trials, "each added Retirement was trial-executed on the whole block")
 	for _, p := range rp.ready {
-		require.True(t, cm.blockStore.HasWitness(p.Control.WitnessHash), "the witness is retained before the block is proposed")
+		require.True(t, cm.blockStore().HasWitness(p.Control.WitnessHash), "the witness is retained before the block is proposed")
 	}
 }
 

@@ -33,8 +33,8 @@ func TestAZeroNetworkWordIsRefusedByThePlanAndVerify(t *testing.T) {
 func TestFundedAccountsAreExactInBothDirections(t *testing.T) {
 	a := common.HexToAddress("0x000000000000000000000000000000000000beef")
 	funded := func(t *testing.T) vrVerifyInput {
-		v := vrFixtureInput(t)
-		v.funded = map[common.Address]vrschema.Word{a: vrschema.U64(123)}
+		v := vrDevFixtureInput(t) // funded accounts are a development generation's premine
+		v.funded[a] = vrschema.U64(123)
 		editGenesis(t, &v, func(g map[string]any) { g["alloc"].(map[string]any)[a.Hex()] = map[string]any{"balance": "0x7b"} })
 		return v
 	}

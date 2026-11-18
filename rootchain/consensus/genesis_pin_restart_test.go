@@ -74,7 +74,7 @@ func TestConsensusManagerEarlyRestartKeepsTheGenesisPin(t *testing.T) {
 
 			cancel()
 			require.ErrorIs(t, <-runDone, context.Canceled)
-			persisted, err := cm.blockStore.Block(drctypes.GenesisRootRound)
+			persisted, err := cm.blockStore().Block(drctypes.GenesisRootRound)
 			require.NoError(t, err, "premise: the genesis block is not pruned yet")
 			require.EqualValues(t, 2, persisted.CommitQc.GetRound(), "premise: the stored CommitQc is no longer the genesis QC")
 			genuine := persisted.Qc
