@@ -1,6 +1,6 @@
 /**
  * The boundary stage's counterfactuals (driver.ts shapeOf, boundary_search.ts shapeHolds): the token with one more transfer of its own shape
- * and the token with one fewer, as tokens the plug-in's gas bound (MeasuredGasModel, bound-nb2-1179) prices like any other. One more repeats
+ * and the token with one fewer, as tokens the plug-in's gas bound (MeasuredGasModel, estimate-nb2-1179) prices like any other. One more repeats
  * the part's last transfer pair to a fresh key from a fresh state (the same UC and path, so no new claim); one fewer drops it. The
  * bound counts what the verifier counts (proofs, bytes, items, siblings, distinct claims, keys, memory), so each step is the model's own
  * answer on that token, not an average (bft-core#1179 replaced the per-hop arithmetic of the measured-nb2-05 schedule).

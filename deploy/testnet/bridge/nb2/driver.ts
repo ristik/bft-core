@@ -215,7 +215,7 @@ async function gammaCheck(): Promise<void> {
 }
 
 /**
- * The operating envelope (section 12.5) from the pinned limits, by the plug-in's gas bound (gas.ts MeasuredGasModel, bound-nb2-1179) on parts
+ * The operating envelope (section 12.5) from the pinned limits, by the plug-in's gas bound (gas.ts MeasuredGasModel, estimate-nb2-1179) on parts
  * built from the lane's template (envelope_shape.ts): per split depth, the largest root history in ENVELOPE_CERTIFICATES certificates whose
  * return passes the pre-burn preflight at returnReserveSegments (the burn at the decoder bounds), and the proofs that fit beside it at
  * redemption; for the reference part (one transfer, two split levels), the return delay its proofs support.
@@ -757,7 +757,7 @@ async function predict(w: Wallet, token: Uint8Array): Promise<{
  * Every probe is reported (out/boundary-<label>.json) with its shape diagnostics; rehearse_nb2.py then executes every one (soundness).
  */
 /**
- * TOKEN's terms as the plug-in's bound prices it at the preflight (bound-nb2-1179: the burn pair at its bound, NEED proofs), and the gas of one
+ * TOKEN's terms as the plug-in's bound prices it at the preflight (estimate-nb2-1179: the burn pair at its bound, NEED proofs), and the gas of one
  * more and one fewer transfer of its own shape (boundary_shape.ts: its last pair repeated or dropped, priced by the same bound). Null steps
  * where the counterfactual does not exist or the bound is null. The steps feed the probe's shape diagnostics (boundary_search.ts ownShape),
  * recorded and never gating; the terms are the evidence of where the gas goes.
@@ -774,7 +774,7 @@ async function shapeOf(w: Wallet, token: Uint8Array, lT: number, need: bigint): 
   if (f === null || terms === null) return { up, down };
   const detail: Record<string, number | string> = {
     evidenceBytes: lT, steps: f.steps, tokens: f.tokens, distinctClaims: f.claims.length, siblings: f.siblings, ucBytes: f.ucBytes, ucSignatures: f.ucSignatures,
-    items: f.items, keyLookups: f.keyLookups, decompressions: f.decompressions, probes: f.probes, memoryWords: terms.memoryWords,
+    scanItems: f.scan.items, skipItems: f.skip.items, keyLookups: f.keyLookups, decompressions: f.decompressions, probes: f.probes, memoryWords: terms.memoryWords,
   };
   for (const [k, v] of Object.entries(terms)) if (typeof v === 'bigint') detail[`gas.${k}`] = v.toString();
   return { up, down, detail };

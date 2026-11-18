@@ -1,6 +1,6 @@
 /**
  * The boundary stage's counterfactual steps (boundary_shape.ts) and the envelope's parts (envelope_shape.ts) against the pinned plug-in's own
- * gas bound (MeasuredGasModel, bound-nb2-1179), on parts built from the lane's template (envelope_template.cbor). Run in the bridge tools
+ * gas bound (MeasuredGasModel, estimate-nb2-1179), on parts built from the lane's template (envelope_template.cbor). Run in the bridge tools
  * image, beside the plug-in: npx --no-install tsx --test tests/live/nb2lane/boundary_shape.test.ts
  */
 import assert from 'node:assert/strict';
