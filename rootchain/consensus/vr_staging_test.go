@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"path/filepath"
 	"slices"
 	"sync"
 	"testing"
@@ -181,4 +182,28 @@ func TestACandidateInstalledSetIsClearedWithItsIntent(t *testing.T) {
 	v.stagedMembers(vrschedule.Committed{}) // the intent dies
 	require.Equal(t, 1, cleared, "the set the candidate wrote is cleared")
 	require.False(t, v.intentStaged)
+}
+
+// Generation stamps stay monotonic across restarts and a backward clock adjustment: a restarted root continues above the persisted counter even
+// when the wall clock is behind it, so its first clear is never below the shard's last accepted stamp.
+func TestTheStagingStampSurvivesARestartAndABackwardClock(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "vr-shard-stamp")
+	mk := func() *vrHandoff {
+		v := &vrHandoff{cfg: VRHandoffConfig{ShardStampPath: path, Log: slog.New(slog.DiscardHandler)}, shardKick: make(chan struct{}, 1)}
+		v.shardStamp = readStamp(path)
+		return v
+	}
+	v := mk()
+	v.setShardStaged(1, []string{"a"})
+	first := v.shardStamp
+	require.Equal(t, first, readStamp(path), "persisted with the change")
+
+	// the previous run issued a stamp far ahead of this clock (the clock then went backward)
+	ahead := uint64(time.Now().Add(time.Hour).UnixNano())
+	require.NoError(t, writeStamp(path, ahead))
+	v = mk()
+	v.setShardStaged(0, nil) // the restart's first delivery: a clear
+	require.Greater(t, v.shardStamp, ahead, "above everything an earlier run issued")
+	v.setShardStaged(1, []string{"b"})
+	require.Greater(t, v.shardStamp, ahead+1)
 }

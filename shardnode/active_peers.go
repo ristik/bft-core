@@ -1,6 +1,8 @@
 package shardnode
 
 import (
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"sort"
@@ -35,6 +37,8 @@ type ActivePeers struct {
 	staged map[peer.ID]struct{}
 	// stageStamp is the generation stamp of the staged set: a later stage must carry a stamp at least as new (an older, delayed one is stale)
 	stageStamp uint64
+	// stagePayload binds the stamp: the same stamp again is accepted only for the same (epoch, ids), never for a different update
+	stagePayload [32]byte
 	// held is set from process start until the persisted verified assignment steps have been replayed into the set: until then the set
 	// is only the genesis one, which may still name a validator that a later step retired. A held set authorizes nobody (a peer refused
 	// in that window retries; see archivewiring.ErrPeerNotAllowed) rather than authorizing a stale set.
@@ -226,16 +230,33 @@ func (a *ActivePeers) StageGeneration(shardEpoch, stamp uint64, ids []string) er
 	if err != nil {
 		return err
 	}
+	payload := stagePayloadOf(shardEpoch, ids)
 	a.mu.Lock()
-	if stamp < a.stageStamp || (len(set) > 0 && shardEpoch != a.epoch+1) {
+	// the next-assignment condition is on the SUBMITTED list (a non-empty list of only this node, filtered to nothing, is not a clear)
+	if stamp < a.stageStamp || (stamp == a.stageStamp && stamp != 0 && payload != a.stagePayload) || (len(ids) > 0 && shardEpoch != a.epoch+1) {
 		a.mu.Unlock()
 		return ErrActivePeersStale
 	}
-	a.staged, a.stageStamp = set, stamp
+	a.staged, a.stageStamp, a.stagePayload = set, stamp, payload
 	hook := a.onStage
 	a.mu.Unlock()
 	a.tell(hook, set)
 	return nil
+}
+
+// stagePayloadOf identifies an update: its epoch and its ids, order-independent.
+func stagePayloadOf(shardEpoch uint64, ids []string) [32]byte {
+	sorted := append([]string(nil), ids...)
+	sort.Strings(sorted)
+	h := sha256.New()
+	_ = binary.Write(h, binary.BigEndian, shardEpoch)
+	for _, id := range sorted {
+		_, _ = h.Write([]byte(id))
+		_, _ = h.Write([]byte{0})
+	}
+	var out [32]byte
+	copy(out[:], h.Sum(nil))
+	return out
 }
 
 // stagedSet validates node ids into a peer set (never this node itself).

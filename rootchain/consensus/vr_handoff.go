@@ -8,7 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -54,6 +57,8 @@ type VRHandoffConfig struct {
 	// ShardStaged tells the paired shard node the EVM node ids of the derived intent's successor (nil: none given; an empty list when the
 	// intent died): the shard node then serves them as staged peers so a joiner can catch its EVM chain up (VT-09b). Retried until it succeeds.
 	ShardStaged func(ctx context.Context, shardEpoch, stamp uint64, ids []string) error
+	// ShardStampPath persists the generation stamp counter: stamps stay monotonic across restarts and backward clock adjustments (empty: in memory)
+	ShardStampPath string
 	// Member, when set, makes this node do every successor-member step itself (VT-09, design 5.3.3): its sticky possession proof, its
 	// readiness over a verified assembly with the support commitments, the staging and the pre-connection; no host-side drive.
 	Member *VRMemberConfig
@@ -93,18 +98,18 @@ type vrHandoff struct {
 	srcBusy    bool
 	// the successor's EVM node ids as the paired shard node should hold them: desired is set under stageMu with the active intent, version bumped
 	// on each change; the worker delivers the latest and records what it delivered
-	shardDesired  []string
-	shardEpoch    uint64 // the shard epoch the desired assignment would install (installed + 1)
-	shardStamp    uint64 // the generation stamp: later changes carry larger ones, so the shard orders them and ignores a delayed older one
-	shardLast     time.Time
-	shardVer      uint64
-	shardDone     uint64
-	shardKick     chan struct{}
-	statMu        sync.Mutex
-	deriveErr     string           // the last derivation's refusal (an input this root lacks), empty once an intent derives
-	observeErr    int              // certified EVM blocks the observer gave up on since the last one it read
-	incumbents    func() []peer.ID // the installed committee's roots without this one
-	committeeSize func() int       // the installed committee's size (this root included): the source quorum's basis
+	shardDesired []string
+	shardEpoch   uint64 // the shard epoch the desired assignment would install (installed + 1)
+	shardStamp   uint64 // the generation stamp: later changes carry larger ones, so the shard orders them and ignores a delayed older one
+	shardLast    time.Time
+	shardVer     uint64
+	shardDone    uint64
+	shardKick    chan struct{}
+	statMu       sync.Mutex
+	deriveErr    string // the last derivation's refusal (an input this root lacks), empty once an intent derives
+	observeErr   int    // certified EVM blocks the observer gave up on since the last one it read
+	// incumbents is the installed committee's weighted roots without this one and its total weight (this root included), from ONE trust-base snapshot
+	incumbents func() ([]vrschedule.WeightedPeer, uint64)
 	// stageIntent keeps the members the derived intent names (its successors' EVM validators and roots) as the staged successor, from the
 	// intent's derivation on; nil clears it
 	stageIntent  func(epoch uint64, ids []evmassign.Identity, roots []evmroot.Member) error
@@ -196,15 +201,22 @@ func (x *ConsensusManager) EnableVRHandoff(ctx context.Context, cfg VRHandoffCon
 	}
 	v.peers = func() []peer.ID { return x.vrPeers(v) }
 	v.stageIntent = x.stageVRIntentMembers
-	v.committeeSize = func() int { return len(x.Validators()) }
-	v.incumbents = func() []peer.ID {
-		var out []peer.ID
-		for _, id := range x.Validators() {
-			if id != x.id {
-				out = append(out, id)
+	v.incumbents = func() ([]vrschedule.WeightedPeer, uint64) {
+		tb := x.trustBase.Load() // one snapshot: the peers and the total weight must come from the same committee
+		var out []vrschedule.WeightedPeer
+		var total uint64
+		for _, n := range tb.RootNodes {
+			if n == nil {
+				continue
 			}
+			total += n.Stake
+			id, err := peer.Decode(n.NodeID)
+			if err != nil || id == x.id {
+				continue
+			}
+			out = append(out, vrschedule.WeightedPeer{ID: id, Weight: n.Stake})
 		}
-		return out
+		return out, total
 	}
 	cfg.Intents.MissingSource = func(r vrschema.Word) { v.fetchSource(ctx, [32]byte(r)) }
 	v.update = x.vrCommitted
@@ -233,6 +245,9 @@ func (x *ConsensusManager) EnableVRHandoff(ctx context.Context, cfg VRHandoffCon
 	go v.queue.Run(ctx)
 	if cfg.ShardStaged != nil {
 		v.shardKick = make(chan struct{}, 1)
+		if cfg.ShardStampPath != "" {
+			v.shardStamp = readStamp(cfg.ShardStampPath) // continue above every stamp an earlier run issued
+		}
 		v.setShardStaged(0, nil) // reconcile at start: the desired state is nothing staged until an intent derives
 		go v.shardStagedRun(ctx)
 	}
@@ -990,7 +1005,7 @@ func (x *ConsensusManager) stageVRIntentMembers(epoch uint64, ids []evmassign.Id
 const SourceRetry = 5 * time.Second
 
 // fetchSource asks the incumbents for the committed source of r (once at a time, retried every SourceRetry) and records it when
-// vrschedule.SourceQuorum of them give the identical entry. It never blocks the derivation that found the source missing.
+// identical answers of incumbents carry weight above the faulty bound (vrschedule.SourceFaulty). It never blocks the derivation that found the source missing.
 func (v *vrHandoff) fetchSource(ctx context.Context, r [32]byte) {
 	if v.cfg.Opener == nil {
 		return
@@ -1005,10 +1020,10 @@ func (v *vrHandoff) fetchSource(ctx context.Context, r [32]byte) {
 	}
 	v.srcFetched[r], v.srcBusy = time.Now(), true
 	v.srcMu.Unlock()
-	peers := v.incumbents()
+	peers, total := v.incumbents()
 	go func() {
 		defer func() { v.srcMu.Lock(); v.srcBusy = false; v.srcMu.Unlock() }()
-		e, err := vrschedule.FetchSource(ctx, v.cfg.Opener, peers, r, v.committeeSize())
+		e, err := vrschedule.FetchSource(ctx, v.cfg.Opener, peers, r, total)
 		if err != nil {
 			v.cfg.Log.Debug("VR handoff: the source of a result is not available from the incumbents yet", "result", fmt.Sprintf("%x", r[:8]), "error", err)
 			return
@@ -1088,6 +1103,11 @@ func (v *vrHandoff) setShardStaged(shardEpoch uint64, ids []string) {
 	v.shardDesired, v.shardEpoch = slices.Clone(ids), shardEpoch
 	v.shardVer++
 	v.shardStamp = max(uint64(time.Now().UnixNano()), v.shardStamp+1)
+	if v.cfg.ShardStampPath != "" {
+		if err := writeStamp(v.cfg.ShardStampPath, v.shardStamp); err != nil {
+			v.cfg.Log.Warn("VR handoff: the staging generation counter could not be persisted", "error", err)
+		}
+	}
 	select {
 	case v.shardKick <- struct{}{}:
 	default:
@@ -1135,4 +1155,34 @@ func (v *vrHandoff) shardStagedRun(ctx context.Context) {
 			v.cfg.Log.Info("VR handoff: the paired shard node holds the staged successor", "evmNodes", len(ids))
 		}
 	}
+}
+
+// readStamp is the persisted generation counter (zero when absent or unreadable: the next stamp is then the wall clock's).
+func readStamp(path string) uint64 {
+	raw, err := os.ReadFile(path) // #nosec G304 -- the node's own state file
+	if err != nil {
+		return 0
+	}
+	n, err := strconv.ParseUint(strings.TrimSpace(string(raw)), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+// writeStamp persists the counter atomically (write, sync, rename).
+func writeStamp(path string, n uint64) error {
+	tmp := path + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600) // #nosec G304 -- the node's own state file
+	if err != nil {
+		return err
+	}
+	if _, err := f.WriteString(strconv.FormatUint(n, 10) + "\n"); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := errors.Join(f.Sync(), f.Close()); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
