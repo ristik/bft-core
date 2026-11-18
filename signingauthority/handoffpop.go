@@ -41,7 +41,8 @@ candidate binding and the given attempt context. It is the single, narrow except
 
 It does not touch the signing record: a possession proof is not a certification round, cannot be mistaken for one (the message
 begins with its own domain tag and a certification preimage cannot), and so cannot consume or replay a round. It is served on the
-operator channel only (see service); a shard node's client channel never reaches it.
+operator channel and on the possession-proof endpoint of the automated root member (its own credential, this operation only; see service);
+a shard node's client channel never reaches it.
 */
 func (a *Authority) SignHandoffPoP(req HandoffPoPRequest) (evmassign.PoP, error) {
 	if req.Domain != evmassign.PoPDomain {

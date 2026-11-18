@@ -7,7 +7,7 @@ backup, restore, snapshot, key-export and process-cloning domains, and a same-di
 not satisfy it merely by having a different PID. The authority package alone cannot provide that,
 because an in-process authority shares the shard's lifetime, its memory and its credentials. This
 package is the boundary across which the two can be separated: a transport carrying exactly the four
-client operations, and two credential spaces on two endpoints.
+client operations, and credential spaces per endpoint.
 
 What crosses the wire is an operation, never bytes to sign. A client may reserve a structured
 request, sign what was reserved, retain the response and release it. There is no message that

@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -55,8 +56,13 @@ func TestThePoPEndpointSignsTheHandoffPoPForTheMember(t *testing.T) {
 func TestThePoPEndpointServesNothingElse(t *testing.T) {
 	f := newFixture(t)
 	dial, credential := f.popFixture(t)
-	for _, o := range []op{opReplaceSession, opStatus, opEnrollment, opCompleteEnrollment, opAdvanceEpoch, opAdvanceWithProof, opSignElectionPoP,
-		opSignDelegationPossession, opSignRegistration, opReloadRegistrationPolicy, opReserve, opSign, opRestoreStatus} {
+	// every operation but the handoff proof, derived from the op names so a later operation is covered without editing this list
+	for n := op(1); n < 200; n++ {
+		if strings.HasPrefix(n.String(), "unknown(") || n == opSignHandoffPoP {
+			continue
+		}
+		o := n
+
 		answer, err := rawCall(t, dial, wireRequest{Version: protocolVersion, Op: uint64(o), Credential: credential})
 		require.NoError(t, err)
 		require.Equal(t, errWrongEndpoint.Error(), answer.Refusal, o.String())

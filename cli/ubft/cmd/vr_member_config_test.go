@@ -7,6 +7,9 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/unicitynetwork/bft-core/rootchain/vrschedule"
+	"github.com/unicitynetwork/bft-core/signingauthority/service"
 )
 
 // --vr-evm-keys names the EVM shard node's keys.json: its key and node id become the member's, the member file is in the home, and a wrong
@@ -37,4 +40,32 @@ func TestVRMemberConfigReadsTheEVMKeys(t *testing.T) {
 	require.ErrorIs(t, err, ErrVRHandoffCmd)
 	_, err = vrMemberConfig(home, filepath.Join(t.TempDir(), keyConfFileName))
 	require.ErrorIs(t, err, ErrVRHandoffCmd)
+}
+
+// The authority-held EVM key: both holders and a half-given authority are refused, a working configuration yields the authority provider.
+func TestVRMemberConfigWithAnAuthority(t *testing.T) {
+	home := t.TempDir()
+	cred, err := service.NewCredential()
+	require.NoError(t, err)
+	credFile := filepath.Join(t.TempDir(), "pop.cred")
+	require.NoError(t, writeCredentialFile(credFile, cred, false))
+	sock := filepath.Join(t.TempDir(), "pop.sock")
+
+	_, err = vrMemberConfig(home, filepath.Join(t.TempDir(), keyConfFileName), vrEVMAuthority{Socket: sock, Credential: credFile})
+	require.ErrorIs(t, err, ErrVRHandoffCmd, "two holders of the EVM key")
+	_, err = vrMemberConfig(home, "", vrEVMAuthority{Socket: sock})
+	require.ErrorIs(t, err, ErrVRHandoffCmd, "a socket without a credential")
+	_, err = vrMemberConfig(home, "", vrEVMAuthority{Credential: credFile})
+	require.ErrorIs(t, err, ErrVRHandoffCmd, "a credential without a socket")
+	_, err = vrMemberConfig(home, "", vrEVMAuthority{Socket: sock, Credential: filepath.Join(t.TempDir(), "missing")})
+	require.ErrorIs(t, err, ErrVRHandoffCmd, "an unreadable credential")
+
+	m, err := vrMemberConfig(home, "", vrEVMAuthority{Socket: sock, Credential: credFile})
+	require.NoError(t, err)
+	require.IsType(t, vrschedule.AuthorityPoP{}, m.EVMPoP)
+	require.Nil(t, m.EVMSigner, "no EVM key in the root process")
+
+	m, err = vrMemberConfig(home, "")
+	require.NoError(t, err)
+	require.Nil(t, m.EVMPoP)
 }

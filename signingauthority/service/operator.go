@@ -117,8 +117,8 @@ func (o *OperatorClient) AdvanceWithProof(ctx context.Context, bundle []byte) (s
 }
 
 // SignHandoffPoP asks the authority for the possession proof its own key owes a coupled handoff: the one signing operation
-// outside certification, narrow and domain-separated (see signingauthority.SignHandoffPoP). It is an operator operation: the shard
-// node's client channel refuses it.
+// outside certification, narrow and domain-separated (see signingauthority.SignHandoffPoP). It is an operator operation, also served to the
+// automated member on the possession-proof endpoint (PoPClient): the shard node's client channel refuses it.
 func (o *OperatorClient) SignHandoffPoP(ctx context.Context, req signingauthority.HandoffPoPRequest) (evmassign.PoP, error) {
 	return signHandoffPoP(ctx, o.ex, req)
 }
