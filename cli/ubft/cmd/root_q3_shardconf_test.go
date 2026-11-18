@@ -133,3 +133,27 @@ func TestShardConfEndpointReportsAStoreFailureAsAServerError(t *testing.T) {
 	require.Equal(t, http.StatusUnprocessableEntity, callQ3(t, clean, "/api/v1/q3/shard-conf", "127.0.0.1:1", q3ShardConfRequest{Partition: 8, Epoch: 1}).Code)
 	require.Equal(t, http.StatusUnprocessableEntity, callQ3(t, clean, "/api/v1/q3/shard-conf", "127.0.0.1:1", q3ShardConfRequest{Partition: 8, Epoch: 1, Shard: "zz"}).Code, "invalid input")
 }
+
+// A missing or invalid body is a 400, never a lookup of partition 0.
+func TestShardConfEndpointRefusesAMissingOrInvalidBody(t *testing.T) {
+	called := false
+	api := rootQ3API{ShardConfig: func(types.PartitionID, types.ShardID, uint64) (*types.PartitionDescriptionRecord, error) {
+		called = true
+		return nil, errors.New("must not be reached")
+	}}
+	mux := http.NewServeMux()
+	api.register(mux)
+	post := func(body string) int {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/q3/shard-conf", strings.NewReader(body))
+		req.RemoteAddr = "127.0.0.1:1"
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	for _, body := range []string{"", "not json", "{}", `{"partition":8}`, `{"epoch":1}`, `[1,2]`} {
+		require.Equal(t, http.StatusBadRequest, post(body), "body %q", body)
+	}
+	require.False(t, called, "no lookup for a request that is not well formed")
+	require.Equal(t, http.StatusInternalServerError, post(`{"partition":8,"epoch":0}`), "a well-formed request reaches the lookup")
+}

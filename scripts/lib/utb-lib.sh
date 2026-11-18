@@ -244,7 +244,7 @@ utb_step_u3a() {
   echo "U3a: the aggregator restarted from its store with unchanged records, then stopped with its history store removed"
 }
 
-# After the recovery: the aggregator restarts holding the genesis only, root HTTP unavailable to it; it repairs the missing entries from a genesis-committee root.
+# After the recovery: the aggregator restarts holding the genesis only (in UTB mode it builds no REST trust-base client: only GetTrustBase can serve it); it repairs the missing entries from a genesis-committee root.
 utb_step_u3b() {
   local i attempt out off db msg; out=$(utb_dir); db=$PWD/test-nodes/utb-agg1.db
   # Two routes can repair the aggregator's history after its restart: its own GetTrustBase catch-up from the roots, and the entries a root attaches to the first

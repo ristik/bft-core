@@ -58,11 +58,16 @@ func (a rootQ3API) register(mux *http.ServeMux) {
 		return q3HistoryResponse{Entries: entries}, err
 	}))
 	mux.HandleFunc("POST /api/v1/q3/signers", q3Endpoint(func(context.Context, json.RawMessage) (any, error) { return a.signers() }))
-	mux.HandleFunc("POST /api/v1/q3/shard-conf", q3Endpoint(func(_ context.Context, raw json.RawMessage) (any, error) {
-		var in q3ShardConfRequest
-		if err := json.Unmarshal(raw, &in); err != nil {
-			return nil, err
+	mux.HandleFunc("POST /api/v1/q3/shard-conf", q3BodyEndpoint(func(_ context.Context, raw json.RawMessage) (any, error) {
+		var req struct {
+			Partition *uint32 `json:"partition"`
+			Shard     string  `json:"shard"`
+			Epoch     *uint64 `json:"epoch"`
 		}
+		if err := json.Unmarshal(raw, &req); err != nil || req.Partition == nil || req.Epoch == nil {
+			return nil, q3BadRequest{errors.New("the body must be a JSON object with partition and epoch (and optionally shard)")}
+		}
+		in := q3ShardConfRequest{Partition: *req.Partition, Shard: req.Shard, Epoch: *req.Epoch}
 		if a.ShardConfig == nil {
 			return nil, errors.New("this root serves no shard configurations")
 		}
@@ -206,21 +211,42 @@ type q3ServerError struct{ error }
 
 func (e q3ServerError) Unwrap() error { return e.error }
 
-// q3Endpoint wraps a read function as a local-operator JSON endpoint.
+// q3BadRequest marks a request that is not well formed (a missing or invalid body): 400, not a lookup.
+type q3BadRequest struct{ error }
+
+func (e q3BadRequest) Unwrap() error { return e.error }
+
+// q3Endpoint wraps a read function as a local-operator JSON endpoint; a missing or invalid body is read as an empty object.
 func q3Endpoint(f func(ctx context.Context, body json.RawMessage) (any, error)) http.HandlerFunc {
+	return q3Handler(f, false)
+}
+
+// q3BodyEndpoint is q3Endpoint for a read that needs its body: a missing or invalid one is a 400.
+func q3BodyEndpoint(f func(ctx context.Context, body json.RawMessage) (any, error)) http.HandlerFunc {
+	return q3Handler(f, true)
+}
+
+func q3Handler(f func(ctx context.Context, body json.RawMessage) (any, error), bodyRequired bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !localOperatorRequest(w, r) {
 			return
 		}
 		var body json.RawMessage
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body); err != nil {
+			if bodyRequired {
+				http.Error(w, "the request body is missing or is not JSON", http.StatusBadRequest)
+				return
+			}
 			body = json.RawMessage(`{}`)
 		}
 		out, err := f(r.Context(), body)
 		if err != nil {
 			status := http.StatusUnprocessableEntity
-			if errors.As(err, new(q3ServerError)) {
+			switch {
+			case errors.As(err, new(q3ServerError)):
 				status = http.StatusInternalServerError // the read itself failed: a reader retries, it does not conclude the answer is "none"
+			case errors.As(err, new(q3BadRequest)):
+				status = http.StatusBadRequest
 			}
 			http.Error(w, fmt.Sprint(err), status)
 			return
