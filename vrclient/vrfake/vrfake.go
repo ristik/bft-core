@@ -44,6 +44,11 @@ type Chain struct {
 	Module   ethcommon.Address
 	Seal     ethcommon.Address
 	Tag      [32]byte
+	// Governor is the FoundationMultisig, Signers its five signers (ascending) and MsigNonce its approval nonce.
+	Governor     ethcommon.Address
+	Signers      [5]ethcommon.Address
+	MsigNonce    uint64
+	NextChangeID uint64
 
 	Identities map[uint64]*Identity
 	RegNonce   map[ethcommon.Address]uint64
@@ -84,8 +89,10 @@ func New() *Chain {
 		Poa: map[uint64][2]uint64{}, Changes: map[uint64]vrclient.ChangeView{}, Outputs: map[[32]byte]vrclient.OutputView{},
 		Head: 100, HeadTime: 1_700_000_000, BaseFee: big.NewInt(1_000_000), Nonces: map[ethcommon.Address]uint64{},
 		Balances: map[ethcommon.Address]*big.Int{}, Receipts: map[ethcommon.Hash]map[string]any{}, Progress: 5000, UcTime: 1_700_000_000}
-	c.Config = vrclient.ConfigView{Network: c.Network, NMin: 4, NTarget: 4, NMax: 16, VMax: 16, LMax: 1, RMax: 4, MaxBatch: 32,
-		DelayRounds: 2000, DelaySeconds: 3600, KnownRootEpoch: 1}
+	c.Governor = ethcommon.HexToAddress("0xff00000000000000000000000000000000000009")
+	c.NextChangeID = 1
+	c.Config = vrclient.ConfigView{Governor: c.Governor, Network: c.Network, NMin: 4, NTarget: 4, NMax: 16, VMax: 16, LMax: 1, RMax: 4, MaxBatch: 32,
+		DelayRounds: 2000, DelaySeconds: 3600, KnownRootEpoch: 1, MaxGas: 184729388, SystemGas: 124729388}
 	return c
 }
 
@@ -334,6 +341,8 @@ func (c *Chain) exec(from, to ethcommon.Address, data []byte, write bool) ([]byt
 		a = vrclient.VRABI
 	case c.Module:
 		a = vrclient.PoaABI
+	case c.Governor:
+		return c.multisig(from, data, write)
 	case c.Seal:
 		switch {
 		case bytes.Equal(data[:4], ethcrypto.Keccak256([]byte("progress()"))[:4]):
@@ -489,6 +498,8 @@ func (c *Chain) vr(from ethcommon.Address, method string, in []any, write bool) 
 		return pack(a, method, uint32(0)), nil
 	case "recordCursor":
 		return pack(a, method, c.RecordCursor), nil
+	case "queue", "execute", "cancel":
+		return c.governance(from, method, in, write)
 	case "register":
 		r := toReg(in[0])
 		if e := shape(r); e != 0 {
