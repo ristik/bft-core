@@ -151,9 +151,10 @@ func TestShardConfEndpointRefusesAMissingOrInvalidBody(t *testing.T) {
 		mux.ServeHTTP(rec, req)
 		return rec.Code
 	}
-	for _, body := range []string{"", "not json", "{}", `{"partition":8}`, `{"epoch":1}`, `[1,2]`} {
+	for _, body := range []string{"", "not json", "{}", `{"partition":8}`, `{"epoch":1}`, `[1,2]`, `{"partition":8,"epoch":0} garbage`, `{"partition":8,"epoch":0}{"partition":9,"epoch":0}`} {
 		require.Equal(t, http.StatusBadRequest, post(body), "body %q", body)
 	}
 	require.False(t, called, "no lookup for a request that is not well formed")
 	require.Equal(t, http.StatusInternalServerError, post(`{"partition":8,"epoch":0}`), "a well-formed request reaches the lookup")
+	require.Equal(t, http.StatusInternalServerError, post("{\"partition\":8,\"epoch\":0}\n  \n"), "trailing whitespace is allowed")
 }

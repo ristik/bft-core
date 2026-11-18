@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 
@@ -232,9 +233,18 @@ func q3Handler(f func(ctx context.Context, body json.RawMessage) (any, error), b
 			return
 		}
 		var body json.RawMessage
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body); err != nil {
+		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16))
+		err := dec.Decode(&body)
+		if err == nil && bodyRequired {
+			// exactly one JSON value: anything after it (but whitespace) makes the request malformed
+			var extra json.RawMessage
+			if again := dec.Decode(&extra); again != io.EOF {
+				err = errors.New("trailing data after the JSON body")
+			}
+		}
+		if err != nil {
 			if bodyRequired {
-				http.Error(w, "the request body is missing or is not JSON", http.StatusBadRequest)
+				http.Error(w, "the request body is missing, is not JSON, or has data after the JSON value", http.StatusBadRequest)
 				return
 			}
 			body = json.RawMessage(`{}`)
