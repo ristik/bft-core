@@ -326,14 +326,16 @@ func TestTheVerificationQueue(t *testing.T) {
 	s := w.service("x")
 	s.Update(w.committed(0))
 	require.Equal(t, 40, QueueBound(4))
-	require.Equal(t, 14400*time.Millisecond, QMax(3*vrschema.MaxCommittee, 2, 100*time.Millisecond), "the honest bound at S = 48")
+	require.Equal(t, 19600*time.Millisecond, QMax(3*vrschema.MaxCommittee+1, 3, 100*time.Millisecond), "the honest envelope: j = 3, S = 49")
+	require.Equal(t, 318500*time.Millisecond, QMax(3*vrschema.MaxCommittee+1, MaxQueuedPerPeer, 100*time.Millisecond), "the queue's own bound")
+	require.True(t, PVAdequate(10, 1, 19, 10), "D + delta + Q_max < 4 T at T(0, 0)")
 	q := NewQueue(s, 100*time.Millisecond)
 	var order []string
 	q.Delivered = func(Outcome, []Message, error) {}
 	ms := w.messages(0)
 	for i := 0; i < 3; i++ {
-		require.True(t, q.Submit("a", ms[0]))
-		require.True(t, q.Submit("b", ms[1]))
+		require.True(t, q.Submit("a", variant(*ms[0].PoP, i+1)))
+		require.True(t, q.Submit("b", variant(*ms[1].PoP, i+1)))
 	}
 	for q.Len() > 0 {
 		m, _ := q.pop()

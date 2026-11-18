@@ -231,3 +231,63 @@ func TestSourcesRefuseRoundZero(t *testing.T) {
 	_, err = NewSources(path)
 	require.Error(t, err)
 }
+
+// sol's review of #1185: a source is kept only once it is durable. A write that fails (here the rename, with a directory in the file's
+// place) leaves neither the store nor the observer advanced, so the worker's retry of the same block records the same first source, and
+// it survives a reopen. The same holds when the record evicts the oldest source: a failed write evicts nothing.
+func TestAFailedSourceWriteIsRetriedAndSurvivesARestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sources.json")
+	sources, err := NewSources(path)
+	require.NoError(t, err)
+	r := vrschema.Word{0x52}
+	reader := &fakeReader{at: map[[32]byte]*vrhandoff.Output{{2}: published(r)}}
+	o := &Observer{Reader: reader, Sources: sources, Outputs: NewOutputs()}
+	require.NoError(t, o.Observe(context.Background(), cert(10, 1, 1)))
+	require.NoError(t, os.Mkdir(path, 0o700))
+	require.Error(t, o.Observe(context.Background(), cert(11, 2, 2)), "the write fails")
+	_, kept := sources.Get(r)
+	require.False(t, kept, "nothing that is not durable is kept")
+	require.NoError(t, os.Remove(path))
+	require.NoError(t, o.Observe(context.Background(), cert(11, 2, 2)), "the worker retries the same block")
+	reopened, err := NewSources(path)
+	require.NoError(t, err)
+	got, ok := reopened.Get(r)
+	require.True(t, ok, "the retried source survives a restart")
+	require.EqualValues(t, 11, got.CertRootRound, "the exact first source")
+	require.Equal(t, []byte{2}, got.EVMBlockHash[:1])
+	// a later block where R is still published records nothing new
+	require.NoError(t, o.Observe(context.Background(), cert(12, 3, 2)))
+	got, _ = reopened.Get(r)
+	require.EqualValues(t, 11, got.CertRootRound)
+
+	// a record that evicts the oldest source: a failed write evicts nothing, the retry evicts it durably
+	full, err := NewSources(filepath.Join(t.TempDir(), "full.json"))
+	require.NoError(t, err)
+	for i := 0; i < maxSources; i++ {
+		recorded, err := full.Record(SourceEntry{Source: vrhandoff.Source{ResultID: append([]byte{byte(i + 1)}, make([]byte, 31)...), EVMBlockHash: make([]byte, 32),
+			CertRootRound: uint64(10 + i), OutputCommit: make([]byte, 32)}})
+		require.NoError(t, err)
+		require.True(t, recorded)
+	}
+	oldest := vrschema.Word{1}
+	require.NoError(t, os.Remove(full.path))
+	require.NoError(t, os.Mkdir(full.path, 0o700))
+	next := SourceEntry{Source: vrhandoff.Source{ResultID: append([]byte{0xee}, make([]byte, 31)...), EVMBlockHash: make([]byte, 32), CertRootRound: 99,
+		OutputCommit: make([]byte, 32)}}
+	_, err = full.Record(next)
+	require.Error(t, err)
+	_, ok = full.Get(oldest)
+	require.True(t, ok, "a failed write evicts nothing")
+	_, ok = full.Get(vrschema.Word{0xee})
+	require.False(t, ok)
+	require.NoError(t, os.Remove(full.path))
+	recorded, err := full.Record(next)
+	require.NoError(t, err)
+	require.True(t, recorded)
+	again, err := NewSources(full.path)
+	require.NoError(t, err)
+	_, ok = again.Get(oldest)
+	require.False(t, ok, "the retry evicted the oldest durably")
+	_, ok = again.Get(vrschema.Word{0xee})
+	require.True(t, ok)
+}

@@ -84,7 +84,8 @@ func (s *Sources) Get(r vrschema.Word) (SourceEntry, bool) {
 	return e, ok
 }
 
-// Record keeps the first source of R; a later observation never replaces it.
+// Record keeps the first source of R; a later observation never replaces it. The source is kept only once it is durable: a failed write
+// changes nothing (sol's review of #1185), so the caller's retry of the same transition records it.
 func (s *Sources) Record(e SourceEntry) (bool, error) {
 	if len(e.ResultID) != 32 || e.CertRootRound == 0 {
 		return false, errors.New("vrschedule: a source without a result id or a certifying round")
@@ -95,22 +96,36 @@ func (s *Sources) Record(e SourceEntry) (bool, error) {
 	if _, ok := s.by[r]; ok {
 		return false, nil
 	}
-	s.by[r] = e
-	s.order = append(s.order, r)
-	for len(s.order) > maxSources {
-		delete(s.by, s.order[0])
-		s.order = s.order[1:]
+	order := append(append([]vrschema.Word(nil), s.order...), r)
+	evicted := map[vrschema.Word]bool{}
+	for len(order) > maxSources {
+		evicted[order[0]] = true
+		order = order[1:]
 	}
-	return true, s.persist()
+	by := func(x vrschema.Word) SourceEntry {
+		if x == r {
+			return e
+		}
+		return s.by[x]
+	}
+	if err := s.persist(order, by); err != nil {
+		return false, err
+	}
+	s.by[r] = e
+	for x := range evicted {
+		delete(s.by, x)
+	}
+	s.order = order
+	return true, nil
 }
 
-func (s *Sources) persist() error {
+func (s *Sources) persist(order []vrschema.Word, by func(vrschema.Word) SourceEntry) error {
 	if s.path == "" {
 		return nil
 	}
-	fs := make([]sourceFile, 0, len(s.order))
-	for _, r := range s.order {
-		e := s.by[r]
+	fs := make([]sourceFile, 0, len(order))
+	for _, r := range order {
+		e := by(r)
 		fs = append(fs, sourceFile{ResultID: e.ResultID, EVMBlockHash: e.EVMBlockHash, EVMBlockNumber: e.EVMBlockNumber, CertRootRound: e.CertRootRound,
 			OutputCommit: e.OutputCommit, CertUCTime: e.CertUCTime})
 	}
@@ -255,8 +270,13 @@ func (o *Observer) Observe(ctx context.Context, c CertifiedEVM) error {
 	}
 	recorded, err := o.Sources.Record(SourceEntry{Source: vrhandoff.Source{ResultID: bytes.Clone(r[:]), EVMBlockHash: bytes.Clone(c.BlockHash[:]),
 		EVMBlockNumber: c.BlockNumber, CertRootRound: c.RootRound, OutputCommit: bytes.Clone(out.State.Output.OutputCommit[:])}, CertUCTime: c.RootUCTime})
+	if err != nil {
+		// not durable: this block is not observed (the store kept nothing), so the worker's retry of it records the same first source
+		o.primed, o.lastRound, o.prev = primed, lastRound, prev
+		return err
+	}
 	if recorded && o.Log != nil {
 		o.Log.Info("VR output published: source recorded", "result", fmt.Sprintf("%x", r[:8]), "evmBlock", c.BlockNumber, "certRootRound", c.RootRound)
 	}
-	return err
+	return nil
 }

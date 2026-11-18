@@ -177,6 +177,7 @@ type intentState struct {
 	iret       *PreparePlan
 	assembled  map[uint64]bool
 	basis      [32]byte // the committed schedule and support table the intent's verdicts were judged under
+	basisVer   uint64   // counts the basis changes under the intent: a support verdict is of the version it was judged under
 }
 
 type bufItem struct {
@@ -347,6 +348,7 @@ func (s *Service) pruneBuffered() {
 // Plan's, judged on every call.
 func (s *Service) rebaseLocked(st *intentState, basis [32]byte) {
 	st.basis = basis
+	st.basisVer++
 	for _, vs := range st.views {
 		vs.tried = false
 		vs.supportWait = map[string]int{}
@@ -435,6 +437,9 @@ type Job struct {
 	// conflict: the job verifies a second, different message of a signer that already has one retained in the view (equivocation
 	// evidence if it verifies)
 	conflict bool
+	// support: the verification judged the support a readiness carries under the basis of version basisVer
+	support  bool
+	basisVer uint64
 }
 
 // Prepare classifies a message under the lock: stale, buffered, duplicate, out of bounds or already equivocated is judged here; anything
@@ -588,6 +593,7 @@ func (s *Service) prepareLocked(sender string, m Message) Job {
 			}
 			return j
 		}
+		j.support, j.basisVer = true, st.basisVer
 		j.Verify = func() error {
 			if err := vrhandoff.VerifyReadiness(in, a, body, member, tb, r); err != nil {
 				return err
@@ -613,6 +619,17 @@ func (s *Service) Apply(j Job, verr error) (Outcome, []Message, error) {
 func (s *Service) apply(j Job, verr error) (Outcome, error, followUp) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if st := s.cur; j.support && st != nil && st == j.st && j.basisVer != st.basisVer {
+		// a support verdict of a basis that changed since (astra review of #1188, r2): a failure only for missing support is not charged to
+		// the current basis's allowance (its sender may send it again); a pass is judged again under the current basis. A signature or format
+		// failure stays the sender's.
+		switch {
+		case errors.Is(verr, vradmit.ErrSupportWait):
+			return Dropped, verr, followUp{}
+		case verr == nil:
+			return Buffered, nil, followUp{pend: []queued{{sender: j.sender, msg: j.msg}}, requeue: s.requeue}
+		}
+	}
 	o, err := s.applyLocked(j, verr)
 	var f followUp
 	if o == Retained {
@@ -902,10 +919,11 @@ func (s *Service) runAssembly(t *assemblyTask) (Message, followUp, bool) {
 }
 
 type certTask struct {
-	st   *intentState
-	view uint64
-	in   vradmit.CertificateInput
-	plan PreparePlan
+	st       *intentState
+	basisVer uint64 // the basis version its support was judged under
+	view     uint64
+	in       vradmit.CertificateInput
+	plan     PreparePlan
 }
 
 // completeLocked is a complete set of a retained view to check as a certificate while no certificate is held: every successor's readiness
@@ -946,7 +964,7 @@ func (s *Service) completeLocked() *certTask {
 		if err != nil {
 			continue
 		}
-		return &certTask{st: st, view: view,
+		return &certTask{st: st, basisVer: st.basisVer, view: view,
 			in: vradmit.CertificateInput{Certificate: cert, IntentDigest: st.digest, CommittedView: st.view, Incumbents: st.incumbents,
 				CandidateBytes: vs.assembly.Candidate, Successors: st.successors, Body: vs.body, Attempt: st.d.Intent.Attempt, TrustBaseBytes: st.trustBase},
 			plan: PreparePlan{Intent: st.digest, Epoch: st.d.RootEpoch, Attempt: st.d.Intent.Attempt, Predecessor: bytes.Clone(st.d.Intent.PredecessorBodyID),
@@ -965,8 +983,8 @@ func (s *Service) runCertificate(t *certTask) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st := s.cur
-	if st == nil || st != t.st || st.iret != nil {
-		return
+	if st == nil || st != t.st || st.iret != nil || st.basisVer != t.basisVer {
+		return // a changed basis has the retained views' complete sets checked again
 	}
 	plan := t.plan
 	st.iret = &plan

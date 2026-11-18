@@ -2,6 +2,7 @@ package vrschedule
 
 import (
 	"context"
+	"crypto/sha256"
 	"sync"
 	"time"
 
@@ -21,11 +22,20 @@ import (
 // message's verification and the work its admission triggers (this root's assembly, a complete set's certificate check), each at most once
 // per view. That it holds on the host is an operating premise, measured, not enforced.
 //
-// Q_max, the premise PV's bound, follows from the scheduler: a message that arrives as the j-th queued message of its sender is served
-// within the current round and j more, each serving at most S senders, so within (j + 1) * S * PiMax of its arrival (QMax), whatever the
-// other senders keep sending. S is at most the admitted senders: the incumbents, the successors' roots and K's roots, 3 * MAX_COMMITTEE = 48.
-// An honest sender has at most 2 messages queued at a root (a proof and a readiness, or an assembly): at S = 48 and PiMax = 100 ms that is
-// 14.4 s, inside the 4 T >= 40 s the adequacy condition D + delta + Q_max < 4 T needs at T(0, 0) = 10 s.
+// Q_max, the premise PV's bound, follows from the scheduler (astra review of #1188, r2): a message that arrives as the j-th queued message of
+// its sender is served within the current round and j more, each serving at most S senders, so within (j + 1) * S * PiMax of its arrival
+// (QMax), whatever the other senders keep sending: another sender's backlog costs it one service per round, never more. S is at most the
+// senders that can hold queued messages: the incumbents, the successors' roots and K's roots (3 * MAX_COMMITTEE = 48), and the local operator
+// identity, so 49. The queue coalesces a sender's retransmissions (one copy of a message per sender is queued) and admits at most
+// MaxQueuedPerPeer = 64 per sender, so the bound the queue itself enforces is j <= 64: 65 * 49 * 100 ms = 318.5 s, a delay only a sender's
+// own backlog can cause its own messages.
+//
+// The operating envelope PV is premised on: an honest sender keeps j <= 3. A member's root sends its proof and one readiness for the
+// committed view (readiness for views ahead waits in the service's buffer, not the queue, until its view commits, and a view commits after
+// the previous one), and an incumbent its assembly once per view it assembles; retransmissions coalesce. At j = 3, S = 49 and PiMax = 100 ms,
+// Q_max = 19.6 s, and with the design's illustrative D = 10 s and delta = 1 s, D + delta + Q_max = 30.6 s < 4 T = 40 s at T(0, 0) = 10 s.
+// PiMax must be measured over a whole service (the verification and the work its admission triggers) and with the stage pulls' verifications,
+// which run outside the queue, competing for the host.
 
 // DefaultPiMax is the default verification cost bound per message.
 const DefaultPiMax = 100 * time.Millisecond
@@ -42,6 +52,15 @@ func QMax(senders, j int, piMax time.Duration) time.Duration {
 type queued struct {
 	sender string
 	msg    Message
+	key    [32]byte // the message's wire digest: one copy of a message per sender is queued
+}
+
+func messageKey(m Message) [32]byte {
+	b, err := encodeMessage(m)
+	if err != nil {
+		return [32]byte{}
+	}
+	return sha256.Sum256(b)
 }
 
 // Queue is the bounded, round-robin verification queue in front of a Service.
@@ -55,8 +74,9 @@ type Queue struct {
 
 	mu    sync.Mutex
 	per   map[string][]queued
-	ring  []string // the senders with queued messages, in arrival order
-	round []string // the senders still to serve in the current round
+	keys  map[string]map[[32]byte]bool // the queued messages' keys by sender
+	ring  []string                     // the senders with queued messages, in arrival order
+	round []string                     // the senders still to serve in the current round
 	n     int
 	ready chan struct{}
 }
@@ -67,7 +87,7 @@ func NewQueue(svc *Service, piMax time.Duration) *Queue {
 	if piMax <= 0 {
 		piMax = DefaultPiMax
 	}
-	q := &Queue{svc: svc, piMax: piMax, now: time.Now, per: map[string][]queued{}, ready: make(chan struct{}, 1),
+	q := &Queue{svc: svc, piMax: piMax, now: time.Now, per: map[string][]queued{}, keys: map[string]map[[32]byte]bool{}, ready: make(chan struct{}, 1),
 		bound: func() int { return QueueBound(svc.successors()) }}
 	svc.mu.Lock()
 	svc.requeue = q.Submit
@@ -79,6 +99,10 @@ func NewQueue(svc *Service, piMax time.Duration) *Queue {
 func (q *Queue) Submit(sender string, m Message) bool {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	key := messageKey(m)
+	if q.keys[sender][key] {
+		return true // coalesced: the same message of this sender is already queued (a retransmission adds nothing to its backlog)
+	}
 	if len(q.per[sender]) >= MaxQueuedPerPeer {
 		return false
 	}
@@ -88,7 +112,11 @@ func (q *Queue) Submit(sender string, m Message) bool {
 	if _, ok := q.per[sender]; !ok {
 		q.ring = append(q.ring, sender)
 	}
-	q.per[sender] = append(q.per[sender], queued{sender, m})
+	q.per[sender] = append(q.per[sender], queued{sender: sender, msg: m, key: key})
+	if q.keys[sender] == nil {
+		q.keys[sender] = map[[32]byte]bool{}
+	}
+	q.keys[sender][key] = true
 	q.n++
 	select {
 	case q.ready <- struct{}{}:
@@ -115,6 +143,7 @@ func (q *Queue) displaceFor(sender string) bool {
 	if long == "" || len(q.per[long]) < len(q.per[sender])+2 {
 		return false
 	}
+	q.forget(q.per[long][len(q.per[long])-1])
 	q.per[long] = q.per[long][:len(q.per[long])-1]
 	q.n--
 	return true
@@ -145,6 +174,7 @@ func (q *Queue) pop() (queued, bool) {
 			}
 			m := q.per[sender][0]
 			q.per[sender] = q.per[sender][1:]
+			q.forget(m)
 			q.n--
 			if len(q.per[sender]) == 0 {
 				delete(q.per, sender)
@@ -158,6 +188,14 @@ func (q *Queue) pop() (queued, bool) {
 			return m, true
 		}
 		q.newRound()
+	}
+}
+
+// forget drops a message that leaves the queue from its sender's coalescing set.
+func (q *Queue) forget(m queued) {
+	delete(q.keys[m.sender], m.key)
+	if len(q.keys[m.sender]) == 0 {
+		delete(q.keys, m.sender)
 	}
 }
 
