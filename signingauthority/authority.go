@@ -86,6 +86,8 @@ type Authority struct {
 	// advanceHook, when set (WithAdvanceHook), is called once a proof advance has taken its snapshot and before it verifies anything,
 	// outside every lock: the seam fault-injection tests pause verification at.
 	advanceHook func()
+	// registration is the operator's registration policy (WithRegistrationPolicy); nil: this authority signs no registration.
+	registration *RegistrationPolicy
 }
 
 // WithAdvanceHook calls hook at the start of every proof verification, outside the authority's locks. It changes no decision; it exists

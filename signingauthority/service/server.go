@@ -18,6 +18,7 @@ import (
 	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/signingauthority"
+	"github.com/unicitynetwork/bft-core/vrschema"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -553,6 +554,54 @@ func (s *Server) operatorOp(ctx context.Context, operation op, payload []byte) (
 		s.log.Info("signed a delegation possession", slog.Uint64("id", wire.Id), slog.Uint64("generation", wire.Generation),
 			slog.Uint64("delegationNonce", wire.DelegationNonce), slog.String("election", fmt.Sprintf("%x", wire.Election)))
 		return sig, nil
+	case opSignRegistration:
+		var wire registrationPayload
+		if err := types.Cbor.Unmarshal(payload, &wire); err != nil {
+			return nil, fmt.Errorf("%w: registration request: %v", errMalformed, err)
+		}
+		if len(wire.Owner) != 20 || len(wire.Payee) != 20 {
+			return nil, fmt.Errorf("%w: the owner and the payee are 20-byte addresses", errMalformed)
+		}
+		request := signingauthority.RegistrationRequest{Domain: wire.Domain, ID: wire.ID, Registration: vrschema.Registration{RootNodeID: wire.RootNodeID,
+			RootKey: wire.RootKey, EVMNodeID: wire.EVMNodeID, EVMKey: wire.EVMKey, Nonce: wire.Nonce}}
+		copy(request.Owner[:], wire.Owner)
+		copy(request.Registration.Payee[:], wire.Payee)
+		sig, err := s.authority.SignRegistration(request)
+		if err != nil {
+			s.log.Warn("refusing a registration signature", slog.String("err", err.Error()))
+			return nil, err
+		}
+		s.log.Info("signed a registration", slog.String("domain", wire.Domain), slog.Uint64("id", wire.ID), slog.Uint64("nonce", wire.Nonce),
+			slog.String("owner", fmt.Sprintf("%x", wire.Owner)), slog.String("rootNode", wire.RootNodeID))
+		return sig, nil
+	case opReloadRegistrationPolicy:
+		var wire registrationPolicyPayload
+		if err := types.Cbor.Unmarshal(payload, &wire); err != nil {
+			return nil, fmt.Errorf("%w: registration policy: %v", errMalformed, err)
+		}
+		if len(wire.Network) != 32 || len(wire.ChainID) != 32 || len(wire.Registry) != 20 {
+			return nil, fmt.Errorf("%w: the policy names its deployment: a 32-byte network word and chain id and a 20-byte registry", errMalformed)
+		}
+		var expect signingauthority.RegistrationDeployment
+		copy(expect.Network[:], wire.Network)
+		copy(expect.ChainID[:], wire.ChainID)
+		copy(expect.Registry[:], wire.Registry)
+		var list []signingauthority.RegistrationAuthorization
+		for _, x := range wire.Authorized {
+			if len(x.Owner) != 20 || len(x.Payee) != 20 {
+				return nil, fmt.Errorf("%w: the owner and the payee are 20-byte addresses", errMalformed)
+			}
+			a := signingauthority.RegistrationAuthorization{Domain: x.Domain, ID: x.ID, RootNodeID: x.RootNodeID, RootKey: x.RootKey}
+			copy(a.Owner[:], x.Owner)
+			copy(a.Payee[:], x.Payee)
+			list = append(list, a)
+		}
+		if err := s.authority.ReloadRegistrationAuthorizations(expect, list); err != nil {
+			s.log.Warn("refusing a registration policy reload", slog.String("err", err.Error()))
+			return nil, err
+		}
+		s.log.Info("registration policy reloaded", slog.Int("authorized", len(list)))
+		return nil, nil
 	case opCompleteEnrollment:
 		var conf types.PartitionDescriptionRecord
 		if err := types.Cbor.Unmarshal(payload, &conf); err != nil {

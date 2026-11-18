@@ -209,9 +209,17 @@ func findID(ctx context.Context, v *loadedValidator, ch *validatorChain, owner c
 }
 
 // registration is this validator's registration from its keys and payee.
-func registration(v *loadedValidator, keys *validatorKeys, nonce uint64) (vrclient.Registration, vrclient.NodeKeys, vrclient.NodeKeys, error) {
+func registration(v *loadedValidator, keys *validatorKeys, nonce uint64) (vrclient.Registration, vrclient.NodeKeys, vrclient.Prover, error) {
 	root, err1 := nodeKeys(keys.Root)
-	evm, err2 := nodeKeys(keys.EVM)
+	var evm vrclient.Prover
+	var err2 error
+	if keys.EVMAuth != nil {
+		evm = keys.EVMAuth
+	} else {
+		var nk vrclient.NodeKeys
+		nk, err2 = nodeKeys(keys.EVM)
+		evm = nk
+	}
 	payee, err3 := v.payee()
 	if err := errors.Join(err1, err2, err3); err != nil {
 		return vrclient.Registration{}, root, evm, err
@@ -289,7 +297,7 @@ func validatorApply(cmd *cobra.Command, f *txFlags) error {
 		if err != nil {
 			return err
 		}
-		signed, err := vrclient.Sign(ch.domain(), owner, false, 0, r, root, evm)
+		signed, err := vrclient.SignWith(ctx, ch.domain(), owner, false, 0, r, root, evm)
 		if err != nil {
 			return err
 		}
@@ -309,7 +317,7 @@ func validatorApply(cmd *cobra.Command, f *txFlags) error {
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(w, "registration digest %x, signed by the root node key and the EVM shard node key\n", signed.Digest)
+		fmt.Fprintf(w, "registration digest %x, signed by the root node key and the EVM shard node key%s\n", signed.Digest, viaAuthority(keys))
 		steps = append(steps,
 			step{what: "register the validator's keys and payee in VR", tx: regTx},
 			step{what: fmt.Sprintf("apply identity %d (predicted) to the PoA committee", predicted), tx: vrclient.Tx{To: module, Data: apply},
@@ -449,6 +457,16 @@ type rotateFlags struct {
 	RootKeys string
 	EVMKeys  string
 	Payee    string
+	// the new EVM key held by a signing authority (instead of --new-evm-keys)
+	EVMAuthoritySocket, EVMAuthorityCredential, EVMNodeInfo string
+}
+
+// viaAuthority notes that the EVM proof came from a signing authority.
+func viaAuthority(k *validatorKeys) string {
+	if k.EVMAuth != nil {
+		return " (held by the signing authority)"
+	}
+	return ""
 }
 
 func validatorRotateCmd(base *baseFlags) *cobra.Command {
@@ -465,13 +483,20 @@ new directory) and/or a new payee; what is not passed stays. Run the nodes with 
 	f.txFlags.add(cmd)
 	cmd.Flags().StringVar(&f.RootKeys, "new-root-keys", "", "the root node's new key file")
 	cmd.Flags().StringVar(&f.EVMKeys, "new-evm-keys", "", "the EVM shard node's new key file")
+	cmd.Flags().StringVar(&f.EVMAuthoritySocket, "new-evm-authority-socket", "", "the new EVM key is held by a signing authority: its operator socket, relative to the validator home (instead of --new-evm-keys; needs --new-evm-authority-credential and --new-evm-node-info)")
+	cmd.Flags().StringVar(&f.EVMAuthorityCredential, "new-evm-authority-credential", "", "the operator credential of the new EVM key's authority")
+	cmd.Flags().StringVar(&f.EVMNodeInfo, "new-evm-node-info", "", "the node info of the new EVM key's authority (`signing-authority node-info`)")
 	cmd.Flags().StringVar(&f.Payee, "new-payee", "", "the new payee address")
 	return cmd
 }
 
 func validatorRotate(cmd *cobra.Command, f *rotateFlags) error {
-	if f.RootKeys == "" && f.EVMKeys == "" && f.Payee == "" {
-		return fmt.Errorf("%w: pass --new-root-keys, --new-evm-keys and/or --new-payee", ErrValidator)
+	newAuth := f.EVMAuthoritySocket != "" || f.EVMAuthorityCredential != "" || f.EVMNodeInfo != ""
+	if f.RootKeys == "" && f.EVMKeys == "" && f.Payee == "" && !newAuth {
+		return fmt.Errorf("%w: pass --new-root-keys, --new-evm-keys (or --new-evm-authority-*) and/or --new-payee", ErrValidator)
+	}
+	if newAuth && f.EVMKeys != "" {
+		return fmt.Errorf("%w: --new-evm-keys and --new-evm-authority-* are two holders of the new EVM key: give one", ErrValidator)
 	}
 	ctx := cmd.Context()
 	w := cmd.OutOrStdout()
@@ -501,6 +526,13 @@ func validatorRotate(cmd *cobra.Command, f *rotateFlags) error {
 		if next.EVM, err = readKeyConf(f.EVMKeys); err != nil {
 			return fmt.Errorf("%w: new EVM keys: %w", ErrValidator, err)
 		}
+		next.EVMAuth = nil
+	}
+	if newAuth {
+		if next.EVMAuth, err = loadEVMAuthority(evmAuthorityConfig{Socket: v.abs(f.EVMAuthoritySocket), Credential: v.abs(f.EVMAuthorityCredential), NodeInfo: v.abs(f.EVMNodeInfo)}); err != nil {
+			return err
+		}
+		next.EVM = nil
 	}
 	if err := next.distinct(); err != nil {
 		return err
@@ -516,7 +548,7 @@ func validatorRotate(cmd *cobra.Command, f *rotateFlags) error {
 	if vrclient.BindingMatches(idn.Current, r) {
 		return fmt.Errorf("%w: the proposed binding is identity %d's current one", ErrValidator, id)
 	}
-	signed, err := vrclient.Sign(ch.domain(), s.From(), true, id, r, root, evm)
+	signed, err := vrclient.SignWith(ctx, ch.domain(), s.From(), true, id, r, root, evm)
 	if err != nil {
 		return err
 	}

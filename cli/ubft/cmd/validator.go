@@ -59,12 +59,15 @@ type validatorConfig struct {
 	Registry string `json:"registry"`
 	ChainID  uint64 `json:"chainId,omitempty"`
 
-	RootKeys    string `json:"rootKeys"`
-	EVMKeys     string `json:"evmKeys"`
-	UrethKey    string `json:"urethKey"`
-	JWT         string `json:"jwt"`
-	OperatorKey string `json:"operatorKey"`
-	Payee       string `json:"payee"`
+	RootKeys string `json:"rootKeys"`
+	EVMKeys  string `json:"evmKeys"`
+	// EVMAuthority, when set, holds the EVM key in a signing authority instead of EVMKeys (VT-10): apply and rotate then take the EVM
+	// proof from the authority's registration operation.
+	EVMAuthority *evmAuthorityConfig `json:"evmAuthority,omitempty"`
+	UrethKey     string              `json:"urethKey"`
+	JWT          string              `json:"jwt"`
+	OperatorKey  string              `json:"operatorKey"`
+	Payee        string              `json:"payee"`
 	// ID is the VR identity, written by apply once registered.
 	ID uint64 `json:"id,omitempty"`
 	// DataDir is where the services keep their data (doctor checks its disk).
@@ -121,6 +124,9 @@ func (f *validatorFlags) load() (*loadedValidator, error) {
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&cfg); err != nil {
 		return nil, fmt.Errorf("%w: %s: %v", ErrValidator, p, err)
+	}
+	if cfg.EVMAuthority != nil && cfg.EVMKeys != "" {
+		return nil, fmt.Errorf("%w: %s: evmKeys and evmAuthority are two holders of the EVM key: clear evmKeys (the config is edited by hand to select an authority)", ErrValidator, p)
 	}
 	if cfg.Format != validatorConfigFormat {
 		return nil, fmt.Errorf("%w: %s: format %q, want %q", ErrValidator, p, cfg.Format, validatorConfigFormat)
@@ -256,13 +262,20 @@ func createExclusive(path string, b []byte) (bool, error) {
 
 // keyPaths are every file init creates or keeps, by role: no two may be the same file.
 func (v *loadedValidator) keyPaths() []struct{ name, path string } {
-	root, evm := v.abs(v.cfg.RootKeys), v.abs(v.cfg.EVMKeys)
-	return []struct{ name, path string }{
+	root := v.abs(v.cfg.RootKeys)
+	out := []struct{ name, path string }{
 		{"validator config", v.path},
 		{"root node keys", root}, {"root node info", filepath.Join(filepath.Dir(root), nodeInfoFileName)},
-		{"EVM shard node keys", evm}, {"EVM shard node info", filepath.Join(filepath.Dir(evm), nodeInfoFileName)},
-		{"ureth devp2p key", v.abs(v.cfg.UrethKey)}, {"Engine JWT", v.abs(v.cfg.JWT)}, {"operator key", v.abs(v.cfg.OperatorKey)},
 	}
+	if a := v.cfg.EVMAuthority; a != nil {
+		out = append(out, struct{ name, path string }{"EVM authority node info", v.abs(a.NodeInfo)},
+			struct{ name, path string }{"EVM authority credential", v.abs(a.Credential)}, struct{ name, path string }{"EVM authority socket", v.abs(a.Socket)})
+	} else {
+		evm := v.abs(v.cfg.EVMKeys)
+		out = append(out, struct{ name, path string }{"EVM shard node keys", evm}, struct{ name, path string }{"EVM shard node info", filepath.Join(filepath.Dir(evm), nodeInfoFileName)})
+	}
+	return append(out, struct{ name, path string }{"ureth devp2p key", v.abs(v.cfg.UrethKey)}, struct{ name, path string }{"Engine JWT", v.abs(v.cfg.JWT)},
+		struct{ name, path string }{"operator key", v.abs(v.cfg.OperatorKey)})
 }
 
 // canonicalPath resolves symlinks of the longest existing prefix, so two spellings of one file compare equal before it exists.
@@ -337,8 +350,10 @@ func (v *loadedValidator) payee() (common.Address, error) {
 
 // validatorKeys are the entity's keys: one per service, plus the operator account that owns the VR identity.
 type validatorKeys struct {
-	Root     *KeyConf
+	Root *KeyConf
+	// EVM is the EVM shard node's key file; nil when a signing authority holds the key (EVMAuth).
 	EVM      *KeyConf
+	EVMAuth  *evmAuthority
 	Ureth    *ecdsa.PrivateKey
 	Operator *ecdsa.PrivateKey
 }
@@ -394,7 +409,12 @@ func (v *loadedValidator) keys() (*validatorKeys, error) {
 	if k.Root, err = readKeyConf(v.abs(v.cfg.RootKeys)); err != nil {
 		errs = append(errs, fmt.Errorf("root node keys: %w", err))
 	}
-	if k.EVM, err = readKeyConf(v.abs(v.cfg.EVMKeys)); err != nil {
+	if a := v.cfg.EVMAuthority; a != nil {
+		ac := evmAuthorityConfig{Socket: v.abs(a.Socket), Credential: v.abs(a.Credential), NodeInfo: v.abs(a.NodeInfo)}
+		if k.EVMAuth, err = loadEVMAuthority(ac); err != nil {
+			errs = append(errs, err)
+		}
+	} else if k.EVM, err = readKeyConf(v.abs(v.cfg.EVMKeys)); err != nil {
 		errs = append(errs, fmt.Errorf("EVM shard node keys: %w", err))
 	}
 	if k.Ureth, err = readUrethKey(v.abs(v.cfg.UrethKey)); err != nil {
@@ -419,8 +439,16 @@ func (k *validatorKeys) distinct() error {
 		key  []byte
 	}
 	all := []named{{"root node signing key", k.Root.SigKey.PrivateKey}, {"root node authentication key", k.Root.AuthKey.PrivateKey},
-		{"EVM shard node signing key", k.EVM.SigKey.PrivateKey}, {"EVM shard node authentication key", k.EVM.AuthKey.PrivateKey},
 		{"ureth devp2p key", ethcrypto.FromECDSA(k.Ureth)}, {"operator account key", ethcrypto.FromECDSA(k.Operator)}}
+	if k.EVM != nil {
+		all = append(all, named{"EVM shard node signing key", k.EVM.SigKey.PrivateKey}, named{"EVM shard node authentication key", k.EVM.AuthKey.PrivateKey})
+	}
+	if k.EVMAuth != nil && k.Root != nil {
+		// the authority's key is public here: it must not be the root node's signing key
+		if rn, err := nodeKeys(k.Root); err == nil && bytes.Equal(rn.Public(), k.EVMAuth.pub) {
+			return fmt.Errorf("%w: the EVM authority's key is the root node's signing key", ErrValidator)
+		}
+	}
 	var errs []error
 	for i := range all {
 		for j := i + 1; j < len(all); j++ {
@@ -557,6 +585,14 @@ func readJWT(path string) error {
 	return nil
 }
 
+// evmKeyCount is how many of init's node key files exist: the root node's, and the EVM shard node's unless a signing authority holds that key.
+func evmKeyCount(auth *evmAuthorityConfig) int {
+	if auth != nil {
+		return 1
+	}
+	return 2
+}
+
 type validatorInitFlags struct {
 	validatorFlags
 	LocalRPC    string
@@ -570,6 +606,8 @@ type validatorInitFlags struct {
 	DataDir     string
 	Ports       []int
 	Force       bool
+	// the EVM key held by a signing authority (VT-10) instead of EVMKeys
+	AuthoritySocket, AuthorityCredential, AuthorityNodeInfo string
 }
 
 func validatorInitCmd(base *baseFlags) *cobra.Command {
@@ -598,6 +636,9 @@ The payee (where rewards and withdrawals go) is a plain EVM address; it defaults
 	cmd.Flags().StringVar(&f.OperatorKey, "operator-key", "operator/key", "operator account key file (0x-hex)")
 	cmd.Flags().StringVar(&f.DataDir, "data-dir", ".", "where the services keep their data (doctor checks its disk)")
 	cmd.Flags().IntSliceVar(&f.Ports, "ports", defaultValidatorPorts, "the services' listen ports (root p2p, shard p2p, ureth devp2p)")
+	cmd.Flags().StringVar(&f.AuthoritySocket, "evm-authority-socket", "", "the EVM key is held by a signing authority: its operator socket, relative to the validator home (instead of --evm-keys; needs --evm-authority-credential and --evm-authority-node-info). No EVM key file is created")
+	cmd.Flags().StringVar(&f.AuthorityCredential, "evm-authority-credential", "", "the authority's operator credential file (relative paths are resolved against the validator home)")
+	cmd.Flags().StringVar(&f.AuthorityNodeInfo, "evm-authority-node-info", "", "the authority's node info (`signing-authority node-info`): its enrolled EVM node and public key (relative to the validator home)")
 	cmd.Flags().BoolVar(&f.Force, "force", false, "rewrite an existing validator config (keys are still never replaced)")
 	return cmd
 }
@@ -611,18 +652,48 @@ func validatorInit(cmd *cobra.Command, f *validatorInitFlags) error {
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		return err
 	}
+	// the holder of the EVM key: flags select an authority; --force keeps the authority an existing config selected unless --evm-keys was
+	// given explicitly (a deliberate switch back to a key file)
+	var auth *evmAuthorityConfig
+	var holderErr error
+	if f.AuthoritySocket != "" || f.AuthorityCredential != "" || f.AuthorityNodeInfo != "" {
+		auth = &evmAuthorityConfig{Socket: f.AuthoritySocket, Credential: f.AuthorityCredential, NodeInfo: f.AuthorityNodeInfo}
+		if err := auth.validate(); err != nil {
+			return err
+		}
+		if cmd.Flags().Changed("evm-keys") {
+			return fmt.Errorf("%w: --evm-keys and --evm-authority-* are two holders of the EVM key: give one", ErrValidator)
+		}
+	} else if f.Force && !cmd.Flags().Changed("evm-keys") {
+		if util.FileExists(path) {
+			// a config that cannot be read is not silently replaced by one with a new EVM key file: fix it, or say which holder is meant
+			old, err := (&validatorFlags{baseFlags: f.baseFlags, Config: f.Config}).load()
+			if err != nil {
+				// raised after the shared-file check below, which names the more specific problem when the "config" is a key file
+				holderErr = fmt.Errorf("%w: --force cannot tell which holder the existing config selects (%v); fix it, or give --evm-keys or --evm-authority-* explicitly", ErrValidator, err)
+			} else {
+				auth = old.cfg.EVMAuthority
+			}
+		}
+	}
 	if f.RPC == "" {
 		return fmt.Errorf("%w: --rpc (the public JSON-RPC endpoint) is required", ErrValidator)
 	}
 	v := &loadedValidator{path: path, home: home, cfg: validatorConfig{Format: validatorConfigFormat, RPC: f.RPC, LocalRPC: f.LocalRPC,
 		Registry: f.Registry, ChainID: f.ChainID, RootKeys: f.RootKeys, EVMKeys: f.EVMKeys, UrethKey: f.UrethKey, JWT: f.JWT,
 		OperatorKey: f.OperatorKey, ID: f.ID, DataDir: f.DataDir, Ports: f.Ports}}
+	if auth != nil {
+		v.cfg.EVMAuthority, v.cfg.EVMKeys = auth, ""
+	}
 	if v.cfg.Registry == "" {
 		v.cfg.Registry = strings.ToLower(vrclient.DefaultRegistry.Hex())
 	}
 	// before anything is created: no two roles in one file (a config over a key would destroy the key)
 	if err := v.checkPaths(); err != nil {
 		return err
+	}
+	if holderErr != nil {
+		return holderErr
 	}
 	var all []string
 	for _, kp := range v.keyPaths() {
@@ -634,7 +705,7 @@ func validatorInit(cmd *cobra.Command, f *validatorInitFlags) error {
 	for _, s := range []struct {
 		name string
 		path string
-	}{{"root node", v.abs(f.RootKeys)}, {"EVM shard node", v.abs(f.EVMKeys)}} {
+	}{{"root node", v.abs(f.RootKeys)}, {"EVM shard node", v.abs(f.EVMKeys)}}[:evmKeyCount(auth)] {
 		kc, created, err := ensureKeyConf(s.path)
 		if err != nil {
 			return fmt.Errorf("%w: %s keys: %w", ErrValidator, s.name, err)
@@ -668,14 +739,20 @@ func validatorInit(cmd *cobra.Command, f *validatorInitFlags) error {
 		return err
 	}
 	// node infos only for keys that passed the separation check
-	for i, p := range []string{v.abs(f.RootKeys), v.abs(f.EVMKeys)} {
+	for i, p := range []string{v.abs(f.RootKeys), v.abs(f.EVMKeys)}[:evmKeyCount(auth)] {
 		if err := writeNodeInfo(p, kcs[i]); err != nil {
 			return err
 		}
 	}
 	operator := ethcrypto.PubkeyToAddress(keys.Operator.PublicKey)
-	out[2].public = "enode public key " + hex.EncodeToString(ethcrypto.FromECDSAPub(&keys.Ureth.PublicKey)[1:])
-	out[4].public = operator.Hex()
+	for i := range out {
+		switch out[i].name {
+		case "ureth devp2p":
+			out[i].public = "enode public key " + hex.EncodeToString(ethcrypto.FromECDSAPub(&keys.Ureth.PublicKey)[1:])
+		case "operator account":
+			out[i].public = operator.Hex()
+		}
+	}
 	v.cfg.Payee = f.Payee
 	if v.cfg.Payee == "" {
 		v.cfg.Payee = operator.Hex()
