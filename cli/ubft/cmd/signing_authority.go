@@ -65,6 +65,7 @@ Deployment order:
 	cmd.AddCommand(signingAuthorityAdvanceWithProofCmd(baseFlags))
 	cmd.AddCommand(signingAuthorityReplaceSessionCmd(baseFlags))
 	cmd.AddCommand(signingAuthorityStatusCmd(baseFlags))
+	cmd.AddCommand(signingAuthorityRegistrationPolicyCmd(baseFlags))
 	return cmd
 }
 
@@ -75,6 +76,9 @@ type signingAuthorityRunFlags struct {
 	ClientSocket       string
 	OperatorSocket     string
 	OperatorCredential string
+
+	// the registrations this authority may sign (VT-10); empty: none
+	RegistrationPolicy string
 
 	AuthorityID string
 	NodeID      string
@@ -106,6 +110,7 @@ key exists: the authority starts pending and admits no client until complete-enr
 	cmd.Flags().StringVar(&flags.ClientSocket, "client-socket", "", "Unix socket the shard node connects to; its directory is restricted to the owner")
 	cmd.Flags().StringVar(&flags.OperatorSocket, "operator-socket", "", "Unix socket for the operator commands; its directory is restricted to the owner")
 	cmd.Flags().StringVar(&flags.OperatorCredential, "operator-credential", "", "path to the operator credential (see `signing-authority credential`)")
+	cmd.Flags().StringVar(&flags.RegistrationPolicy, "registration-policy", "", "JSON file pinning the VR deployment and listing the registrations this authority may sign for its EVM key (VT-10): without it the authority signs none. Fixed for the authority's lifetime")
 	cmd.Flags().StringVar(&flags.AuthorityID, "authority-id", "", "operator-assigned name for this authority lifetime, for diagnostics")
 	cmd.Flags().StringVar(&flags.NodeID, "node-id", "", "the shard validator this authority signs for (`ubft node-id` on the shard node's key configuration)")
 	cmd.Flags().Uint16Var(&flags.NetworkID, "network-id", 0, "network identifier")
@@ -160,6 +165,13 @@ func signingAuthorityRun(ctx context.Context, flags *signingAuthorityRunFlags) e
 	opts, err := flags.lineageOptions(log)
 	if err != nil {
 		return err
+	}
+	if flags.RegistrationPolicy != "" {
+		policy, err := readRegistrationPolicy(flags.RegistrationPolicy)
+		if err != nil {
+			return err
+		}
+		opts = append(opts, signingauthority.WithRegistrationPolicy(policy))
 	}
 	// The key is generated here. The enrollment has no configuration hash yet, on purpose.
 	authority, err := signingauthority.New(signingauthority.Enrollment{
@@ -699,4 +711,41 @@ func writeCredentialFile(path string, credential []byte, replace bool) error {
 		return err
 	}
 	return os.Rename(tmp.Name(), path)
+}
+
+func signingAuthorityRegistrationPolicyCmd(baseFlags *baseFlags) *cobra.Command {
+	flags := &signingAuthorityOperatorFlags{baseFlags: baseFlags}
+	var file string
+	cmd := &cobra.Command{
+		Use:   "registration-policy",
+		Short: "Replace the registrations a running authority may sign (VT-10)",
+		Long: `Replace the authorized registrations of the running authority with those of the policy file. The identity id is allocated by VR at
+registration and a later payee or root key is not known when the authority starts, so the operator authorizes them here, on the
+operator channel. The deployment pin the authority started with, its key and its signing record are untouched: the file's deployment
+must equal the authority's pin (a policy for another deployment is refused), and an authority started without --registration-policy refuses the reload. The list replaces the old one.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			policy, err := readRegistrationPolicy(file)
+			if err != nil {
+				return err
+			}
+			operator, err := flags.operator()
+			if err != nil {
+				return err
+			}
+			defer func() { _ = operator.Close() }()
+			ctx, cancel := context.WithTimeout(cmd.Context(), flags.Timeout)
+			defer cancel()
+			if err := operator.ReloadRegistrationPolicy(ctx, policy.Deployment, policy.Authorized); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "registration policy reloaded: %d authorized\n", len(policy.Authorized))
+			return nil
+		},
+	}
+	flags.addOperatorFlags(cmd)
+	cmd.Flags().StringVar(&file, "policy", "", "the registration policy file (the format of `signing-authority run --registration-policy`)")
+	if err := cmd.MarkFlagRequired("policy"); err != nil {
+		panic(err)
+	}
+	return cmd
 }
