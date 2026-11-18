@@ -78,7 +78,8 @@ f=json.load(open('test-nodes/root$1/vr-member.json'))
 print(f['intents'][-1]['views'][0]['readiness'])"; }
 # vrb_stage_has <root n> <hex>: the root's retained stage set holds exactly this readiness encoding
 vrb_stage_has() {
-  curl -sf "$(vrb_rpc_of "$1")/api/v1/vr/stage?from=0" >"$VR_EVIDENCE/stage-root$1.json" || return 1
+  curl -s -o "$VR_EVIDENCE/stage-root$1.json" -w '%{http_code}\n' "$(vrb_rpc_of "$1")/api/v1/vr/stage?from=0" >"$VR_EVIDENCE/stage-root$1.code" 2>&1
+  grep -q '^200$' "$VR_EVIDENCE/stage-root$1.code" || return 1
   python3 -c "
 import json,sys
 want=sys.argv[1].lower().removeprefix('0x')
