@@ -101,6 +101,9 @@ vrb_restart_member() { # VR_RESTART_MEMBER=1: after the certificate, before the 
 
 vrb_main() {
   local i keys owner payee cfg p1
+  if [ "${VR_RESTART_BETWEEN:-0}" = 1 ] || [ "${VR_RESTART_EARLY:-0}" = 1 ] || [ "${VR_JOINER_FOLLOW:-0}" = 1 ]; then
+    grep -qa UBFT_VR_MEMBER_HOLD build/ubft || { vrb_log "FAIL: these runs need a binary built with -tags vrdev (the development hooks)"; return 1; }
+  fi
   if [ "${VR_JOINER:-0}" = 1 ]; then
     source scripts/vr-joiner-steps.sh
     vrj_start_nodes || return 1
@@ -208,4 +211,8 @@ else
   failures=$((failures + 1))
   for i in $(seq 1 "${validators:-4}"); do tail -n 3000 "test-nodes/root$i/debug.log" >"$VR_EVIDENCE/root$i-tail.log" 2>/dev/null; done
   for i in $(seq 1 "${validators:-4}"); do tail -n 1000 "test-nodes/evm$i/debug.log" >"$VR_EVIDENCE/evm$i-tail.log" 2>/dev/null; done
+  if [ "${VR_JOINER:-0}" = 1 ]; then
+    grep -v 'IR change request\|CertificationResp' test-nodes/root5/debug.log | tail -n 4000 >"$VR_EVIDENCE/root5-tail.log" 2>/dev/null
+    tail -n 1500 test-nodes/evm5/debug.log >"$VR_EVIDENCE/evm5-tail.log" 2>/dev/null; tail -n 300 test-nodes/reth5/reth.log >"$VR_EVIDENCE/reth5-tail.log" 2>/dev/null
+  fi
 fi

@@ -125,10 +125,7 @@ const vrMemberFileName = "vr-member.json"
 // already holds both. The member refuses to sign when the key is not the EVM node the intent names for this node.
 func vrMemberConfig(home, evmKeys string) (*consensus.VRMemberConfig, error) {
 	m := &consensus.VRMemberConfig{Path: filepath.Join(home, vrMemberFileName)}
-	if os.Getenv("UBFT_VR_MEMBER_HOLD") == "1" { // development test hook (scripts/vr-boundary-steps.sh): readiness is held while <home>/vr-member.hold exists
-		hold := filepath.Join(home, "vr-member.hold")
-		m.Hold = func() bool { _, err := os.Stat(hold); return err == nil }
-	}
+	m.Hold = devMemberHold(home)
 	if evmKeys == "" {
 		return m, nil
 	}
