@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -199,11 +200,6 @@ func TestAMemberSignsAViewOnceAndRestartsWithoutResigning(t *testing.T) {
 	require.True(t, have, "the persisted readiness is in the restarted service again")
 
 	// a different assembly of an already signed view is not signed
-	pf := readFile(t, s.paths[joiner])
-	pf.Intents[0].Views[0].CandidateDigest = hex.EncodeToString(make([]byte, 32))
-	raw, err := json.Marshal(pf)
-	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(s.paths[joiner], raw, 0o600))
 	s.start(t, joiner, s.paths[joiner], true)
 	s.svcs[joiner].Update(w.committed(0))
 	for _, m := range set.Offers() {
@@ -211,6 +207,7 @@ func TestAMemberSignsAViewOnceAndRestartsWithoutResigning(t *testing.T) {
 			_, _, _ = s.svcs[joiner].Offer("peer", m)
 		}
 	}
+	tamperAssembly(s.svcs[joiner], 0)
 	s.bus = nil
 	require.NoError(t, s.members[joiner].Step())
 	for _, b := range s.bus {
@@ -220,6 +217,7 @@ func TestAMemberSignsAViewOnceAndRestartsWithoutResigning(t *testing.T) {
 			require.Equal(t, v.Readiness, hex.EncodeToString(enc), "only the readiness it signed is re-sent, nothing new")
 		}
 	}
+	require.Equal(t, f, readFile(t, s.paths[joiner]))
 }
 
 // Messages for a view that is not committed are not signed: a member waits for the committed view, and signs the next view's assembly only
@@ -392,43 +390,73 @@ func TestAWrongEVMKeyIsRefusedAndAnInvalidStoredPoPIsRecovered(t *testing.T) {
 	_, statErr = os.Stat(path)
 	require.True(t, os.IsNotExist(statErr))
 
-	// a stored proof that does not verify (written by an older run with the wrong key) is replaced; a signed view stays
-	bad := memberFile{Intents: []memberIntent{{Intent: hex.EncodeToString(w.d[:]), Epoch: w.RC.RootEpoch, Attempt: w.in.Attempt, PoP: "00",
-		Views: []memberView{{View: 0, CandidateDigest: hex.EncodeToString(make([]byte, 32)), Readiness: "00"}}}}}
-	raw, err := json.Marshal(bad)
+	// a stored proof that does not verify (written by an older run with the wrong key) is derived again: only the proof is replaced, a signed
+	// view stays. The record is a genuine one (the joiner signed its view 0), its proof then replaced by one of another EVM key.
+	s := w.swarm(t, nil)
+	s.update(0)
+	s.run(t)
+	f := readFile(t, s.paths[self.Root])
+	wrongPoP, err := vrhandoff.SignPoP(w.in, w.J[3], w.Members[1].EK.Signer) // member 5's identity, another node's EVM key
 	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(path, raw, 0o600))
-	m, err := NewMember(svc, MemberConfig{Self: self.Root, RootSigner: self.RK.Signer, EVMSigner: self.EK.Signer, EVMNodeID: self.EVM, Path: path})
+	rawPoP, err := types.Cbor.Marshal(wrongPoP)
 	require.NoError(t, err)
-	require.NoError(t, m.Step())
-	f := readFile(t, path)
-	require.NotEqual(t, "00", f.Intents[0].PoP)
-	require.Len(t, f.Intents[0].Views, 1, "the signed view was not wiped")
+	f.Intents[0].PoP = hex.EncodeToString(rawPoP)
+	raw, err := json.Marshal(f)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(s.paths[self.Root], raw, 0o600))
+	s.start(t, self.Root, s.paths[self.Root], true)
+	s.svcs[self.Root].Update(w.committed(0))
+	require.NoError(t, s.members[self.Root].Step())
+	g := readFile(t, s.paths[self.Root])
+	require.NotEqual(t, f.Intents[0].PoP, g.Intents[0].PoP, "the invalid stored proof was derived again")
+	require.Equal(t, f.Intents[0].Views, g.Intents[0].Views, "the signed view was not wiped")
 }
 
-// A corrupt persisted readiness is an error and is never signed over again.
-func TestACorruptPersistedReadinessIsNeverSignedOver(t *testing.T) {
+// The restart loader validates the persisted anti-equivocation record in full, not only its syntax: any inconsistency refuses to start the
+// member (nothing is silently dropped, so a signed view is never forgotten and signing never resumes over an untrusted record).
+func TestAnInconsistentMemberFileRefusesToStart(t *testing.T) {
 	w := newWorld(t)
 	s := w.swarm(t, nil)
 	s.update(0)
 	s.run(t)
-	joiner := w.Members[5].Root
-	f := readFile(t, s.paths[joiner])
-	f.Intents[0].Views[0].Readiness = "zz"
-	raw, _ := json.Marshal(f)
-	require.NoError(t, os.WriteFile(s.paths[joiner], raw, 0o600))
-	s.start(t, joiner, s.paths[joiner], true)
-	s.svcs[joiner].Update(w.committed(0))
-	set, _ := s.svcs[w.Members[1].Root].Stage(w.d, 0)
-	for _, m := range set.Offers() {
-		if m.Readiness == nil {
-			_, _, _ = s.svcs[joiner].Offer("peer", m)
-		}
+	joiner := w.Members[5]
+	good := readFile(t, s.paths[joiner.Root])
+	require.Equal(t, 1, good.Version)
+
+	load := func(mutate func(f *memberFile)) error {
+		raw, err := json.Marshal(good)
+		require.NoError(t, err)
+		var f memberFile
+		require.NoError(t, json.Unmarshal(raw, &f)) // a deep copy
+		mutate(&f)
+		out, err := json.Marshal(f)
+		require.NoError(t, err)
+		path := filepath.Join(t.TempDir(), "m.json")
+		require.NoError(t, os.WriteFile(path, out, 0o600))
+		_, err = NewMember(NewService(ServiceConfig{}), MemberConfig{Self: joiner.Root, RootSigner: joiner.RK.Signer, Path: path})
+		return err
 	}
-	s.bus = nil
-	require.ErrorIs(t, s.members[joiner].Step(), ErrMember)
-	require.Empty(t, s.bus)
-	require.Equal(t, "zz", readFile(t, s.paths[joiner]).Intents[0].Views[0].Readiness)
+	require.NoError(t, load(func(*memberFile) {}), "the genuine record loads")
+	for name, mut := range map[string]func(f *memberFile){
+		"a version that is not this format's":     func(f *memberFile) { f.Version = 7 },
+		"the outer view not the readiness's":      func(f *memberFile) { f.Intents[0].Views[0].View = 123 },
+		"a candidate digest of another candidate": func(f *memberFile) { f.Intents[0].Views[0].CandidateDigest = hex.EncodeToString(make([]byte, 32)) },
+		"a readiness that is not hex":             func(f *memberFile) { f.Intents[0].Views[0].Readiness = "zz" },
+		"an empty readiness":                      func(f *memberFile) { f.Intents[0].Views[0].Readiness = "" },
+		"a readiness of another intent": func(f *memberFile) {
+			f.Intents[0].Intent = hex.EncodeToString(make([]byte, 32))
+		},
+		"a non-canonical intent id":       func(f *memberFile) { f.Intents[0].Intent = strings.ToUpper(f.Intents[0].Intent) },
+		"a short intent id":               func(f *memberFile) { f.Intents[0].Intent = f.Intents[0].Intent[:10] },
+		"a view recorded twice":           func(f *memberFile) { f.Intents[0].Views = append(f.Intents[0].Views, f.Intents[0].Views[0]) },
+		"an intent recorded twice":        func(f *memberFile) { f.Intents = append(f.Intents, f.Intents[0]) },
+		"a possession proof of no intent": func(f *memberFile) { f.Intents[0].PoP = "00" },
+	} {
+		require.ErrorIs(t, load(mut), ErrMember, name)
+	}
+	// a readiness signed by another root key is not this node's record
+	other := readFile(t, s.paths[w.Members[1].Root])
+	require.ErrorIs(t, load(func(f *memberFile) { f.Intents[0].Views[0].Readiness = other.Intents[0].Views[0].Readiness }), ErrMember, "another node's readiness")
 }
 
 // When the readiness cannot be persisted nothing is released: no message, nothing in the member's own service.
@@ -524,9 +552,6 @@ func TestAMemberResendsItsSignedReadinessAndKeepsItsIntents(t *testing.T) {
 	joiner := w.Members[5].Root
 	f := readFile(t, s.paths[joiner])
 	signed := f.Intents[0].Views[0].Readiness
-	f.Intents[0].Views[0].CandidateDigest = hex.EncodeToString(make([]byte, 32))
-	raw, _ := json.Marshal(f)
-	require.NoError(t, os.WriteFile(s.paths[joiner], raw, 0o600))
 	set, _ := s.svcs[w.Members[1].Root].Stage(w.d, 0)
 	s.start(t, joiner, s.paths[joiner], true)
 	s.svcs[joiner].Update(w.committed(0))
@@ -535,6 +560,7 @@ func TestAMemberResendsItsSignedReadinessAndKeepsItsIntents(t *testing.T) {
 			_, _, _ = s.svcs[joiner].Offer("peer", m)
 		}
 	}
+	tamperAssembly(s.svcs[joiner], 0)
 	s.bus = nil
 	require.NoError(t, s.members[joiner].Step())
 	require.Len(t, s.bus, 1)
@@ -567,4 +593,86 @@ func (w *world) byRoot(id string) vrhandofffix.Member {
 	}
 	w.T.Fatalf("no member %s", id)
 	return vrhandofffix.Member{}
+}
+
+// tamperAssembly makes the service hold another assembly of a view (a different candidate), as if its assembler had equivocated: the held
+// assembly's candidate bytes change, so its digest is no longer the one the member signed.
+func tamperAssembly(svc *Service, view uint64) {
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	vs := svc.cur.views[view]
+	a := *vs.assembly
+	a.Candidate = append(append([]byte(nil), a.Candidate...), 0)
+	vs.assembly = &a
+}
+
+// The sign/persist/send step is atomic against a committed-state update: when the committed view advances, the intent dies or a Prepare
+// commits between the member's snapshot and its signature (here, inside its support policy, called while it builds the readiness), nothing
+// is signed, persisted or sent over the old state.
+func TestACommittedStateChangeDuringSigningReleasesNothing(t *testing.T) {
+	for name, change := range map[string]func(w *world, svc *Service){
+		"the view advances": func(w *world, svc *Service) { svc.Update(w.committed(1)) },
+		"the intent dies":   func(w *world, svc *Service) { svc.Update(Committed{}) },
+		"a Prepare commits": func(w *world, svc *Service) { c := w.committed(0); c.Prepared = true; svc.Update(c) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			w := newWorld(t)
+			self := w.Members[5]
+			path := filepath.Join(t.TempDir(), "m.json")
+			var sent []Message
+			svc := NewService(ServiceConfig{Self: self.Root, Signer: self.RK.Signer})
+			rule := vrschema.Activation{RuleID: vrschema.RuleID("rule-a"), ReleaseDigest: vrschema.Word{0xaa}, RootEpoch: 2, State: vrschema.ActActive, ChangeID: 1}
+			fired := false
+			m, err := NewMember(svc, MemberConfig{Self: self.Root, RootSigner: self.RK.Signer, EVMSigner: self.EK.Signer, Path: path,
+				Send: func(msg Message) { sent = append(sent, msg) },
+				Supports: func(vrschema.Activation) bool {
+					if !fired { // called after the snapshot, before the signature
+						fired = true
+						change(w, svc)
+					}
+					return true
+				}})
+			require.NoError(t, err)
+			c := w.committed(0)
+			c.Schedule = []vrschema.Activation{rule}
+			svc.Update(c)
+			pops := w.PoPs(w.in)
+			for i := range pops {
+				_, _, _ = svc.Offer("peer", Message{PoP: &pops[i]})
+			}
+			a := w.Assembly(w.in, w.d, 0, pops)
+			_, _, _ = svc.Offer("peer", Message{Assembly: &a})
+			require.NoError(t, m.Step())
+			require.True(t, fired)
+			for _, msg := range sent {
+				require.Nil(t, msg.Readiness, "no readiness over the state that moved on")
+			}
+			if f, err := os.ReadFile(path); err == nil {
+				var mf memberFile
+				require.NoError(t, json.Unmarshal(f, &mf))
+				for _, mi := range mf.Intents {
+					require.Empty(t, mi.Views, "no signed view was persisted")
+				}
+			}
+			set, _ := svc.Stage(w.d, 0)
+			require.Empty(t, set.Readiness)
+		})
+	}
+}
+
+// A message the member's own service did not admit is never sent: here the service refuses to take the node's proof (its allowance is spent).
+func TestAMessageTheLocalServiceDroppedIsNotSent(t *testing.T) {
+	w := newWorld(t)
+	self := w.Members[5]
+	var sent []Message
+	svc := NewService(ServiceConfig{Self: self.Root, Signer: self.RK.Signer})
+	m, err := NewMember(svc, MemberConfig{Self: self.Root, RootSigner: self.RK.Signer, EVMSigner: self.EK.Signer, Send: func(msg Message) { sent = append(sent, msg) }})
+	require.NoError(t, err)
+	svc.Update(w.committed(0))
+	svc.mu.Lock()
+	svc.cur.popRefused[popKey(self.Root, self.EVM)] = MaxReplacements + 1
+	svc.mu.Unlock()
+	err = m.Step()
+	require.ErrorIs(t, err, ErrMember)
+	require.Empty(t, sent, "a dropped offer is not sent")
 }
