@@ -120,6 +120,38 @@ func (o *OperatorClient) AdvanceWithProof(ctx context.Context, bundle []byte) (s
 // outside certification, narrow and domain-separated (see signingauthority.SignHandoffPoP). It is an operator operation: the shard
 // node's client channel refuses it.
 func (o *OperatorClient) SignHandoffPoP(ctx context.Context, req signingauthority.HandoffPoPRequest) (evmassign.PoP, error) {
+	return signHandoffPoP(ctx, o.ex, req)
+}
+
+/*
+PoPClient is the automated root member's end of its authority: the one operation its handoff duty needs, over the possession-proof
+endpoint and under its own credential. It cannot replace a session, advance an epoch, read the enrollment or status, or sign a
+registration, and its credential is refused on every other endpoint. The authority keeps its own checks on every proof it signs
+(enrollment, health, retirement, the permitted epoch range, the exact node id and key).
+*/
+type PoPClient struct {
+	ex *exchange
+}
+
+// NewPoPClient provisions the member's client. It does not connect.
+func NewPoPClient(cfg ClientConfig) (*PoPClient, error) {
+	if cfg.Dial == nil {
+		return nil, errors.New("service: no dialer for the authority")
+	}
+	if len(cfg.Credential) < CredentialBytes {
+		return nil, fmt.Errorf("service: the possession-proof credential must be at least %d bytes", CredentialBytes)
+	}
+	return &PoPClient{ex: newExchange(cfg)}, nil
+}
+
+func (c *PoPClient) Close() error { return c.ex.close() }
+
+// SignHandoffPoP asks for the possession proof of the authority's own key (see signingauthority.SignHandoffPoP).
+func (c *PoPClient) SignHandoffPoP(ctx context.Context, req signingauthority.HandoffPoPRequest) (evmassign.PoP, error) {
+	return signHandoffPoP(ctx, c.ex, req)
+}
+
+func signHandoffPoP(ctx context.Context, ex *exchange, req signingauthority.HandoffPoPRequest) (evmassign.PoP, error) {
 	if req.Successor == nil {
 		return evmassign.PoP{}, fmt.Errorf("%w: no successor binding", signingauthority.ErrContextMismatch)
 	}
@@ -132,7 +164,7 @@ func (o *OperatorClient) SignHandoffPoP(ctx context.Context, req signingauthorit
 	if err != nil {
 		return evmassign.PoP{}, err
 	}
-	answer, err := o.ex.call(ctx, opSignHandoffPoP, payload)
+	answer, err := ex.call(ctx, opSignHandoffPoP, payload)
 	if err != nil {
 		return evmassign.PoP{}, err
 	}

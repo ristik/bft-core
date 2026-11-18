@@ -66,6 +66,9 @@ type MemberConfig struct {
 	Self       string          // this node's root node id
 	RootSigner abcrypto.Signer // its root key: the readiness and the support commitments
 	EVMSigner  abcrypto.Signer // its EVM key: the possession proof; nil: the node holds no EVM key and sends none
+	// EVMPoP is the typed possession-proof provider (VT-09, #1201): the local one (LocalPoP, the EVM key in this process) or the authority
+	// one (AuthorityPoP: the key stays in its signing authority). It takes precedence over EVMSigner, which is shorthand for LocalPoP.
+	EVMPoP PoPProvider
 	// Path is the member's persisted state (sticky proofs, signed views); empty keeps it in memory only (tests).
 	Path string
 	// Send hands an outbound message to the transport; nil sends nothing.
@@ -130,6 +133,9 @@ func NewMember(svc *Service, cfg MemberConfig) (*Member, error) {
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
+	}
+	if cfg.EVMPoP == nil && cfg.EVMSigner != nil {
+		cfg.EVMPoP = LocalPoP{Signer: cfg.EVMSigner}
 	}
 	m := &Member{cfg: cfg, svc: svc}
 	if cfg.Path != "" {
@@ -472,7 +478,7 @@ func (m *Member) stepPoP(st memberState) error {
 		}
 	}
 	if !have {
-		if m.cfg.EVMSigner == nil {
+		if m.cfg.EVMPoP == nil {
 			if !m.noEVMKey {
 				m.noEVMKey = true
 				m.log().Warn("VR handoff member: this node holds no EVM key, so it cannot send its possession proof", "intent", fmt.Sprintf("%x", st.digest[:8]))
@@ -483,7 +489,7 @@ func (m *Member) stepPoP(st memberState) error {
 			return fmt.Errorf("%w: the EVM key given (--vr-evm-keys) is node %s, the intent names %s as this node's EVM node", ErrMember, m.cfg.EVMNodeID, st.self.EVMNodeID)
 		}
 		var err error
-		if p, err = vrhandoff.SignPoP(st.intent, st.self, m.cfg.EVMSigner); err != nil {
+		if p, err = m.offerPoP(st); err != nil {
 			return fmt.Errorf("%w: possession proof: %w", ErrMember, err)
 		}
 		if err := vrhandoff.VerifyPoP(st.intent, p); err != nil {

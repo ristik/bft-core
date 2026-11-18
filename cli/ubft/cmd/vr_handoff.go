@@ -25,6 +25,7 @@ import (
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	"github.com/unicitynetwork/bft-core/rootchain/vrschedule"
 	"github.com/unicitynetwork/bft-core/rootchain/vrstate"
+	"github.com/unicitynetwork/bft-core/signingauthority/service"
 	"github.com/unicitynetwork/bft-core/vradmit"
 	"github.com/unicitynetwork/bft-core/vrhandoff"
 	"github.com/unicitynetwork/bft-core/vrschema"
@@ -48,7 +49,7 @@ const vrSourcesFileName = "vr-sources.json"
 // enableVRHandoff wires the VR handoff root side of a VR-mode manager: the observer over the execution client at rpcURL (eth_getProof
 // and eth_call at the certified block hashes), the persisted sources, the intent provider and the Freeze witness builder.
 func enableVRHandoff(ctx context.Context, cm *consensus.ConsensusManager, dep vradmit.Deployment, pins vrstate.Pins, shardConfs []*types.PartitionDescriptionRecord,
-	rpcURL, home, evmKeys, shardRPC string, signer abcrypto.Signer, host *network.Peer) error {
+	rpcURL, home, evmKeys, shardRPC string, signer abcrypto.Signer, host *network.Peer, authority ...vrEVMAuthority) error {
 	if rpcURL == "" {
 		return fmt.Errorf("%w: a VR generation's roots read VR through --pos-evm-rpc", ErrVRHandoffCmd)
 	}
@@ -69,7 +70,7 @@ func enableVRHandoff(ctx context.Context, cm *consensus.ConsensusManager, dep vr
 	if err != nil {
 		return err
 	}
-	member, err := vrMemberConfig(home, evmKeys)
+	member, err := vrMemberConfig(home, evmKeys, authority...)
 	if err != nil {
 		return err
 	}
@@ -111,16 +112,21 @@ func enableVRHandoff(ctx context.Context, cm *consensus.ConsensusManager, dep vr
 // script (handoff_drive.py) there. A root outside VR mode is unchanged. It must run after the VR services are installed (enableVRServices);
 // checkVRHandoffWired, before the root starts, refuses a VR-mode root whose root side is off. It reports whether the root side is on.
 func enableVRHandoffInVRMode(ctx context.Context, cm *consensus.ConsensusManager, shardConfs []*types.PartitionDescriptionRecord, rpcURL, home, evmKeys, shardRPC string,
-	signer abcrypto.Signer, host *network.Peer) (bool, error) {
+	signer abcrypto.Signer, host *network.Peer, authority ...vrEVMAuthority) (bool, error) {
 	dep, pins, on, err := vrHandoffWiring(cm.VRServices(), rpcURL)
 	if err != nil || !on {
 		return false, err
 	}
-	if err := enableVRHandoff(ctx, cm, dep, pins, shardConfs, rpcURL, home, evmKeys, shardRPC, signer, host); err != nil {
+	if err := enableVRHandoff(ctx, cm, dep, pins, shardConfs, rpcURL, home, evmKeys, shardRPC, signer, host, authority...); err != nil {
 		return false, err
 	}
 	return true, nil
 }
+
+// vrEVMAuthority is the node's signing authority as the member reaches it: its possession-proof socket and the member's credential.
+type vrEVMAuthority struct{ Socket, Credential string }
+
+func (a vrEVMAuthority) empty() bool { return a.Socket == "" && a.Credential == "" }
 
 // vrMemberFileName is the node's persisted member state (sticky proofs, signed views) in its home.
 const vrMemberFileName = "vr-member.json"
@@ -130,9 +136,29 @@ const vrMemberFileName = "vr-member.json"
 // configuration names as evmKeys); without one the node signs readiness but cannot send its proof. The root process then holds that EVM
 // validator key (and the file's auth key): a compromised root process compromises the EVM validator too, so give the flag only on a host that
 // already holds both. The member refuses to sign when the key is not the EVM node the intent names for this node.
-func vrMemberConfig(home, evmKeys string) (*consensus.VRMemberConfig, error) {
+func vrMemberConfig(home, evmKeys string, authority ...vrEVMAuthority) (*consensus.VRMemberConfig, error) {
 	m := &consensus.VRMemberConfig{Path: filepath.Join(home, vrMemberFileName)}
 	m.Hold = devMemberHold(home)
+	if len(authority) > 0 && !authority[0].empty() {
+		// the EVM key stays in the node's signing authority: the member reaches its possession-proof endpoint (VT-09, #1201)
+		a := authority[0]
+		if evmKeys != "" {
+			return nil, fmt.Errorf("%w: --vr-evm-keys and --vr-evm-authority-socket are two holders of the EVM key: give one", ErrVRHandoffCmd)
+		}
+		if a.Socket == "" || a.Credential == "" {
+			return nil, fmt.Errorf("%w: --vr-evm-authority-socket needs --vr-evm-authority-credential", ErrVRHandoffCmd)
+		}
+		credential, err := readCredentialFile(a.Credential)
+		if err != nil {
+			return nil, fmt.Errorf("%w: loading the possession-proof credential: %v", ErrVRHandoffCmd, err)
+		}
+		c, err := service.NewPoPClient(service.ClientConfig{Dial: service.UnixDialer(a.Socket), Credential: credential, Timeout: vrschedule.AuthorityPoPTimeout})
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrVRHandoffCmd, err)
+		}
+		m.EVMPoP = vrschedule.AuthorityPoP{Client: c}
+		return m, nil
+	}
 	if evmKeys == "" {
 		return m, nil
 	}
