@@ -43,7 +43,7 @@ elif [ -n "${POST_M2A_URETH_BIN:-}" ] || [ -n "${POST_M2A_URETH_COMMIT:-}" ]; th
 elif [ "${VR_LANE:-0}" = 1 ] && [ "${M2_PROFILE2:-0}" = 1 ]; then
   # a VR generation runs the client of the combined lane (ureth main), the pin scripts/ci/lane-pins.json holds: an older client (the vt15 lane pin)
   # fails engine-api's execution-profile check (bft-core#1200). POST_M2A_URETH_BIN and _COMMIT (above) still name another client explicitly.
-  URETH_PIN_COMMIT=$(python3 -I -c 'import json,sys;print(json.load(open(sys.argv[1]))["components"]["ureth"]["commit"])' scripts/ci/lane-pins.json) || { echo "the ureth pin of scripts/ci/lane-pins.json is unreadable" >&2; exit 2; }
+  URETH_PIN_COMMIT=$(python3 -I -c 'import json,sys;import re;c=json.load(open(sys.argv[1]))["components"]["ureth"]["commit"];assert isinstance(c,str) and re.fullmatch("[0-9a-f]{40}",c),"not a 40-hex commit: %r"%(c,);print(c)' scripts/ci/lane-pins.json) || { echo "the ureth pin of scripts/ci/lane-pins.json is unreadable" >&2; exit 2; }
   M2_RUN_LOG_DIR=${M2_RUN_LOG_DIR:-/Users/risto/uni/agre/briefs/devnet-runs/m2-p2-$(date -u +%Y%m%dT%H%M%SZ)}
   echo "profile-2 logs: $M2_RUN_LOG_DIR"
 elif [ "${M2_PROFILE2:-0}" = 1 ]; then
@@ -85,7 +85,10 @@ if [ "${VR_LANE:-0}" = 1 ]; then
   # 256 blocks, so the archive stores are on (an archive-replica restore also needs them), the journal bounds are raised to the maximum the node accepts,
   # and the shard node has an operator RPC (the root tells its paired shard node the staged successor there). Each can be overridden in the environment.
   export VR_ARCHIVE=${VR_ARCHIVE:-1} EVM_OPERATOR_STATUS_RPC=${EVM_OPERATOR_STATUS_RPC:-1}
-  export EVM_EXTRA_ARGS=${EVM_EXTRA_ARGS---journal-candidates 4096 --journal-observations 8192 --journal-bytes 134217728}
+  # the candidate bound is the existing knob (helper.sh emits the flag once); the replicas are derived by the node from the current assignment (as the P85 lane's),
+  # never named from the genesis validators, which an assignment change retires
+  export EVM_JOURNAL_CANDIDATES=${EVM_JOURNAL_CANDIDATES:-4096} EVM_ARCHIVE_DERIVED=${EVM_ARCHIVE_DERIVED-1}
+  export EVM_EXTRA_ARGS=${EVM_EXTRA_ARGS---journal-observations 8192 --journal-bytes 134217728}
   # Live-verified (bft-core#1201): the genesis, enrolment and the lane's start work under SIGNING=authority, but the root's member signs its possession proof with the
   # key in the EVM node's keys.json, while the shard configuration names the authority's key: "the possession proof of the EVM key given does not verify against the intent".
   # VR.register's EVM proof has the same gap. Until the member and `ubft validator` can sign through an authority, refuse it here rather than stall at the first handoff.
