@@ -17,6 +17,7 @@ package cmd
 // reads and transactions use a public JSON-RPC endpoint only.
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"encoding/json"
@@ -35,6 +36,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/unicitynetwork/bft-core/vrclient"
+	"github.com/unicitynetwork/bft-core/vrschema"
 )
 
 // ErrGovernance is returned for a refusal of a `ubft governance` command.
@@ -49,9 +51,12 @@ const (
 // govProposal is one call the multisig is asked to approve. The digest is derived, never trusted: every reader recomputes it from the other
 // fields, and a signer reads what the call does from Data, not from Description.
 type govProposal struct {
-	Format      string `json:"format"`
-	ChainID     uint64 `json:"chainId"`
-	Multisig    string `json:"multisig"`
+	Format   string `json:"format"`
+	ChainID  uint64 `json:"chainId"`
+	Multisig string `json:"multisig"`
+	// Registry is the deployment's ValidatorRegistry. A proposal's target must be it (or the nonce burn's dead address): the signer
+	// confirms it, so a call to another contract with VR's selectors (GovernanceParams.cancel has VR.cancel's) is never signed.
+	Registry    string `json:"registry"`
 	Target      string `json:"target"`
 	Data        string `json:"data"`
 	Nonce       uint64 `json:"nonce"`
@@ -78,6 +83,7 @@ type govBundle struct {
 type checkedProposal struct {
 	p        govProposal
 	multisig common.Address
+	registry common.Address
 	target   common.Address
 	data     []byte
 	digest   [32]byte
@@ -85,51 +91,88 @@ type checkedProposal struct {
 
 func (p govProposal) check() (*checkedProposal, error) {
 	if p.Format != proposalFormat {
-		return nil, fmt.Errorf("%w: proposal format %q, want %q", ErrGovernance, p.Format, proposalFormat)
+		return nil, fmt.Errorf("%w: proposal format %q, want %q", ErrGovernance, vrclient.Clean(p.Format), proposalFormat)
 	}
-	if !common.IsHexAddress(p.Multisig) || !common.IsHexAddress(p.Target) {
-		return nil, fmt.Errorf("%w: the proposal's multisig or target is not an address", ErrGovernance)
+	if !common.IsHexAddress(p.Multisig) || !common.IsHexAddress(p.Target) || !common.IsHexAddress(p.Registry) {
+		return nil, fmt.Errorf("%w: the proposal's multisig, registry or target is not an address (an older proposal file without a registry is refused)", ErrGovernance)
 	}
 	data, err := hexutil.Decode(p.Data)
 	if err != nil {
-		return nil, fmt.Errorf("%w: proposal data: %v", ErrGovernance, err)
+		return nil, fmt.Errorf("%w: proposal data: %v", ErrGovernance, vrclient.Clean(err.Error()))
 	}
-	c := &checkedProposal{p: p, multisig: common.HexToAddress(p.Multisig), target: common.HexToAddress(p.Target), data: data}
+	c := &checkedProposal{p: p, multisig: common.HexToAddress(p.Multisig), registry: common.HexToAddress(p.Registry), target: common.HexToAddress(p.Target), data: data}
+	if c.target != c.registry && !c.isBurn() {
+		return nil, fmt.Errorf("%w: the proposal's target %s is not the ValidatorRegistry %s: only calls to the registry are signed", ErrGovernance,
+			c.target.Hex(), c.registry.Hex())
+	}
 	c.digest, err = vrclient.CallDigest(new(big.Int).SetUint64(p.ChainID), c.multisig, c.target, data, p.Nonce)
 	if err != nil {
 		return nil, err
 	}
 	if want := hexutil.Encode(c.digest[:]); !strings.EqualFold(p.Digest, want) {
 		return nil, fmt.Errorf("%w: the proposal's digest %s is not the digest of its fields (%s): the file was altered or is not for this multisig",
-			ErrGovernance, p.Digest, want)
+			ErrGovernance, vrclient.Clean(p.Digest), want)
 	}
 	return c, nil
 }
 
-// what reads the call a proposal makes. Only VR.queue and VR.cancel are the Foundation's proposals; any other call is refused.
-func (c *checkedProposal) what() (string, error) {
+// burnTarget is the address of the nonce burn: nothing is deployed there, so an empty call to it succeeds and does nothing.
+var burnTarget = common.HexToAddress("0x000000000000000000000000000000000000dEaD")
+
+// isBurn is the nonce burn: an empty call to the burn address. It exists so that three signers can withdraw every other approval at a
+// nonce (approvals never expire).
+func (c *checkedProposal) isBurn() bool { return c.target == burnTarget && len(c.data) == 0 }
+
+// what reads the call a proposal makes, and a warning where the call is one that needs a second look. Only VR.queue and VR.cancel at the
+// registry, and the nonce burn, are the Foundation's proposals; the calldata must be the canonical encoding of what it decodes to.
+func (c *checkedProposal) what() (text, warning string, err error) {
+	if c.isBurn() {
+		return "NONCE BURN: an empty call to an address with no code. It does nothing except consume nonce " + fmt.Sprint(c.p.Nonce) +
+			", which makes every other approval at this nonce unusable", "", nil
+	}
 	call, err := vrclient.DecodeCall(c.data)
 	if err != nil || call.Contract != "ValidatorRegistry" {
-		return "", fmt.Errorf("%w: the proposal's call is not a ValidatorRegistry call this tool signs (queue or cancel)", ErrGovernance)
+		return "", "", fmt.Errorf("%w: the proposal's call is not a ValidatorRegistry call this tool signs (queue or cancel)", ErrGovernance)
+	}
+	args := make([]any, len(call.Args))
+	for i, a := range call.Args {
+		args[i] = a.Value
+	}
+	if again, err := vrclient.VRABI.Pack(call.Method, args...); err != nil || !bytes.Equal(again, c.data) {
+		return "", "", fmt.Errorf("%w: the proposal's calldata is not the canonical encoding of VR.%s", ErrGovernance, call.Method)
 	}
 	switch call.Method {
 	case "queue":
-		return "VR.queue: " + vrclient.DescribeChange(call.Args[0].Value.(uint8), call.Args[1].Value.([]byte)), nil
+		kind := call.Args[0].Value.(uint8)
+		switch kind {
+		case vrclient.KindSetModule:
+			warning = "this REPLACES THE ELECTION MODULE"
+		case vrclient.KindSetGovernor:
+			warning = "this REPLACES THE GOVERNOR (the multisig itself)"
+		}
+		return "ValidatorRegistry.queue: " + vrclient.DescribeChange(kind, call.Args[1].Value.([]byte)), warning, nil
 	case "cancel":
-		return fmt.Sprintf("VR.cancel: change %d", call.Args[0].Value.(uint64)), nil
+		return fmt.Sprintf("ValidatorRegistry.cancel: change %d", call.Args[0].Value.(uint64)), "", nil
 	}
-	return "", fmt.Errorf("%w: VR.%s is not a proposal this tool signs (queue or cancel)", ErrGovernance, call.Method)
+	return "", "", fmt.Errorf("%w: VR.%s is not a proposal this tool signs (queue or cancel)", ErrGovernance, call.Method)
 }
 
 func (c *checkedProposal) preview(w io.Writer) error {
-	what, err := c.what()
+	what, warning, err := c.what()
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(w, "proposal: chain %d, multisig %s, nonce %d\n  target: %s\n  call:   %s\n  digest: %s\n", c.p.ChainID, c.multisig.Hex(), c.p.Nonce,
-		c.target.Hex(), what, hexutil.Encode(c.digest[:]))
+	fmt.Fprintf(w, "proposal: chain %d, multisig %s, nonce %d\n  target: %s", c.p.ChainID, c.multisig.Hex(), c.p.Nonce, c.target.Hex())
+	if c.target == c.registry {
+		fmt.Fprintf(w, " (the ValidatorRegistry)")
+	}
+	fmt.Fprintf(w, "\n  call:   %s\n", what)
+	if warning != "" {
+		fmt.Fprintf(w, "  WARNING: %s\n", warning)
+	}
+	fmt.Fprintf(w, "  digest: %s\n", hexutil.Encode(c.digest[:]))
 	if c.p.Description != "" {
-		fmt.Fprintf(w, "  note:   %s (the proposer's words; the call above is what is signed)\n", c.p.Description)
+		fmt.Fprintf(w, "  ---- unsigned note from the proposer, not covered by the digest; it is not what you sign ----\n  %s\n", vrclient.Clean(c.p.Description))
 	}
 	return nil
 }
@@ -316,6 +359,45 @@ func (f *proposeFlags) add(cmd *cobra.Command) {
 	cmd.Flags().BoolVar(&f.DryRun, "dry-run", false, "decode and simulate, write nothing")
 }
 
+// localQueueCheck runs the frozen schema's queue check (vrschema.QueueCheck, the reference of VR's own) on a VR.queue call against the
+// state it reads: the pending changes, the committee in force, the clock and the fee profile. VR's own check follows in the simulation.
+func localQueueCheck(ctx context.Context, gc *govChain, data []byte) error {
+	call, err := vrclient.DecodeCall(data)
+	if err != nil || call.Contract != "ValidatorRegistry" || call.Method != "queue" {
+		return nil
+	}
+	pending, err := gc.vr.PendingChanges(ctx)
+	if err != nil {
+		return err
+	}
+	env := vrschema.QueueEnv{KnownRootEpoch: gc.cfg.KnownRootEpoch, Pending: len(pending), MaxGas: gc.cfg.MaxGas, SystemGas: gc.cfg.SystemGas}
+	for _, id := range pending {
+		ch, err := gc.vr.Change(ctx, id)
+		if err != nil {
+			return err
+		}
+		if ch.Kind == vrclient.KindForceRemove {
+			env.PendingForce++
+		}
+	}
+	members, err := gc.vr.Committee(ctx)
+	if err != nil {
+		return err
+	}
+	for _, m := range members {
+		env.Committee = append(env.Committee, m.Id)
+	}
+	clk, err := gc.vr.Clock(ctx)
+	if err != nil {
+		return err
+	}
+	env.UCTime = clk.UcTime
+	if err := vrschema.QueueCheck(call.Args[0].Value.(uint8), call.Args[1].Value.([]byte), env); err != nil {
+		return fmt.Errorf("%w: the frozen queue check refuses the change: %w", ErrGovernance, err)
+	}
+	return nil
+}
+
 // propose is the common tail of every proposal: the multisig's nonce, the digest (checked against the multisig's own), the queue
 // simulated as the governor, the preview, the file.
 func propose(cmd *cobra.Command, f *proposeFlags, gc *govChain, target common.Address, data []byte) error {
@@ -338,7 +420,10 @@ func propose(cmd *cobra.Command, f *proposeFlags, gc *govChain, target common.Ad
 	} else if onchain != digest {
 		return fmt.Errorf("%w: the multisig computes digest %x, this tool %x (a different multisig version or chain)", ErrGovernance, onchain, digest)
 	}
-	p := govProposal{Format: proposalFormat, ChainID: gc.chainID.Uint64(), Multisig: gov.Hex(), Target: target.Hex(), Data: hexutil.Encode(data),
+	if err := localQueueCheck(ctx, gc, data); err != nil {
+		return err
+	}
+	p := govProposal{Format: proposalFormat, ChainID: gc.chainID.Uint64(), Multisig: gov.Hex(), Registry: gc.vr.Registry.Hex(), Target: target.Hex(), Data: hexutil.Encode(data),
 		Nonce: nonce, Digest: hexutil.Encode(digest[:]), Description: f.Description}
 	cp, err := p.check()
 	if err != nil {
@@ -381,7 +466,7 @@ func newGovProposeCmd() *cobra.Command {
 pre-judges the payload with the frozen schema checks, simulates the call as the governor against the chain (a VR refusal is decoded) and
 writes the proposal file. The preview shows the decoded call; signers sign what it does, not the note.`,
 	}
-	cmd.AddCommand(govModuleActionCmd("admit", "Admit an applied validator (PoA ModuleAction Admit)", vrclient.ActionAdmit),
+	cmd.AddCommand(govBurnNonceCmd(), govModuleActionCmd("admit", "Admit an applied validator (PoA ModuleAction Admit)", vrclient.ActionAdmit),
 		govModuleActionCmd("confirm-exit", "Confirm a validator's requested exit (PoA ModuleAction ConfirmExit)", vrclient.ActionConfirmExit),
 		govModuleActionCmd("remove", "Remove a validator in any state but None and Exited (PoA ModuleAction Remove)", vrclient.ActionRemove),
 		govForceRemoveCmd(), govCommitteeLimitsCmd(), govFeeParamsCmd(), govCancelCmd(), govRawCmd())
@@ -548,6 +633,31 @@ func govFeeParamsCmd() *cobra.Command {
 	return cmd
 }
 
+func govBurnNonceCmd() *cobra.Command {
+	f := &proposeFlags{}
+	cmd := &cobra.Command{Use: "burn-nonce", Short: "Withdraw every other approval at the current nonce: a no-op call that consumes it",
+		Long: `Approvals never expire: a signed bundle stays executable by anyone who holds it until some call consumes its nonce. The burn is an empty
+call to an address with no code (` + "0x..dEaD" + `): it succeeds, does nothing, and consumes the nonce, so every other bundle at that nonce becomes stale.
+It takes the same three approvals as any proposal.`,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			gc, err := f.dial(cmd.Context())
+			if err != nil {
+				return err
+			}
+			defer gc.close()
+			var code hexutil.Bytes
+			if err := gc.rpc.CallContext(cmd.Context(), &code, "eth_getCode", burnTarget, gc.vr.Block); err != nil {
+				return err
+			}
+			if len(code) != 0 {
+				return fmt.Errorf("%w: there is code at the burn address %s: not a no-op", ErrGovernance, burnTarget.Hex())
+			}
+			return propose(cmd, f, gc, burnTarget, nil)
+		}}
+	f.add(cmd)
+	return cmd
+}
+
 func govCancelCmd() *cobra.Command {
 	f := &proposeFlags{}
 	var id uint64
@@ -581,11 +691,27 @@ func govRawCmd() *cobra.Command {
 	f := &proposeFlags{}
 	var kind uint8
 	var payloadHex string
-	cmd := &cobra.Command{Use: "raw", Short: "Queue any change kind from an abi.encode payload built elsewhere",
+	var understand bool
+	cmd := &cobra.Command{Use: "raw", Short: "Queue a change kind that has no builder here, from an abi.encode payload built elsewhere",
 		Long: `For the kinds whose payloads are built by their own tools: AddPartition (7) and UpdatePartition (8) from
 ` + "`ubft vr-change add-partition` and `update-partition`" + `, and SetModule (1), SetGovernor (3), ReplaceAggregatorValidators (6) and
-ScheduleActivation (9). The payload is pre-judged with the frozen queue check before anything is simulated.`,
+ScheduleActivation (9). The kinds with a builder here (ModuleAction 2, CommitteeLimits 4, FeeParams 5, ForceRemove 10) are refused: their
+builders check the module's guard and the live values. The payload goes through the frozen queue check (vrschema.QueueCheck) against
+the state read from the chain, then VR's own check is simulated as the governor. SetModule (1) and SetGovernor (3) replace the election
+module or the governor itself: they need --i-understand, and every signer sees a warning.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			switch kind {
+			case vrclient.KindModuleAction, vrclient.KindCommitteeLimits, vrclient.KindFeeParams, vrclient.KindForceRemove:
+				return fmt.Errorf("%w: kind %d (%s) has its own builder: use `propose admit|confirm-exit|remove|committee-limits|fee-params|force-remove`",
+					ErrGovernance, kind, vrclient.ChangeKind(kind))
+			case vrclient.KindSetModule, vrclient.KindSetGovernor:
+				if !understand {
+					return fmt.Errorf("%w: kind %d (%s) replaces the election module or the governor itself: pass --i-understand", ErrGovernance, kind, vrclient.ChangeKind(kind))
+				}
+			case vrclient.KindReplaceAggregator, vrclient.KindAddPartition, vrclient.KindUpdatePartition, vrclient.KindScheduleActivation:
+			default:
+				return fmt.Errorf("%w: unknown change kind %d", ErrGovernance, kind)
+			}
 			payload, err := hexutil.Decode(strings.TrimSpace(payloadHex))
 			if err != nil {
 				return fmt.Errorf("%w: --payload: %v", ErrGovernance, err)
@@ -604,6 +730,7 @@ ScheduleActivation (9). The payload is pre-judged with the frozen queue check be
 	f.add(cmd)
 	cmd.Flags().Uint8Var(&kind, "kind", 0, "the change kind (1 SetModule, 3 SetGovernor, 6 ReplaceAggregatorValidators, 7 AddPartition, 8 UpdatePartition, 9 ScheduleActivation)")
 	cmd.Flags().StringVar(&payloadHex, "payload", "", "the payload, 0x-hex (or @file to read it from a file)")
+	cmd.Flags().BoolVar(&understand, "i-understand", false, "confirm a SetModule or SetGovernor proposal")
 	_ = cmd.MarkFlagRequired("kind")
 	_ = cmd.MarkFlagRequired("payload")
 	cmd.PreRunE = func(_ *cobra.Command, _ []string) error {
@@ -619,10 +746,28 @@ ScheduleActivation (9). The payload is pre-judged with the frozen queue check be
 	return cmd
 }
 
+// confirmRegistry is the offline signer's confirmation of the deployment: the proposal's registry must be the one the signer expects
+// (--registry, else the genesis address 0xff..03).
+func confirmRegistry(cp *checkedProposal, flag string) error {
+	want := vrclient.DefaultRegistry
+	if flag != "" {
+		if !common.IsHexAddress(flag) {
+			return fmt.Errorf("%w: --registry %q is not an address", ErrGovernance, flag)
+		}
+		want = common.HexToAddress(flag)
+	}
+	if cp.registry != want {
+		return fmt.Errorf("%w: the proposal's registry is %s, the expected one is %s (pass --registry to confirm another deployment)", ErrGovernance,
+			cp.registry.Hex(), want.Hex())
+	}
+	return nil
+}
+
 // ---- sign ----------------------------------------------------------------------------------------------------------------------------
 
 func govSignCmd() *cobra.Command {
 	var proposalFile, keyFile, out string
+	var wantChain uint64
 	var f govFlags
 	cmd := &cobra.Command{
 		Use:   "sign",
@@ -638,6 +783,12 @@ current. The signature is an approval file for ` + "`ubft governance aggregate`"
 			cp, err := p.check()
 			if err != nil {
 				return err
+			}
+			if err := confirmRegistry(cp, f.Registry); err != nil {
+				return err
+			}
+			if wantChain != 0 && wantChain != cp.p.ChainID {
+				return fmt.Errorf("%w: the proposal is for chain %d, you expected chain %d", ErrGovernance, cp.p.ChainID, wantChain)
 			}
 			if err := cp.preview(cmd.ErrOrStderr()); err != nil {
 				return err
@@ -668,6 +819,7 @@ current. The signature is an approval file for ` + "`ubft governance aggregate`"
 	cmd.Flags().StringVar(&proposalFile, "proposal", "", "the proposal file")
 	cmd.Flags().StringVar(&keyFile, "signer-key", "", "the signer's key file")
 	cmd.Flags().StringVar(&out, "out", "", "approval file to create (default: standard output; never overwritten)")
+	cmd.Flags().Uint64Var(&wantChain, "chain-id", 0, "the chain id you expect (the same multisig address exists on every network; refused if the proposal differs)")
 	_ = cmd.MarkFlagRequired("proposal")
 	_ = cmd.MarkFlagRequired("signer-key")
 	return cmd
@@ -702,8 +854,8 @@ func (gc *govChain) checkProposalCurrent(ctx context.Context, cp *checkedProposa
 	if cp.multisig != gc.cfg.Governor {
 		return fmt.Errorf("%w: the proposal is for multisig %s, VR's governor is %s", ErrGovernance, cp.multisig.Hex(), gc.cfg.Governor.Hex())
 	}
-	if cp.target != gc.vr.Registry {
-		return fmt.Errorf("%w: the proposal's target %s is not the registry %s", ErrGovernance, cp.target.Hex(), gc.vr.Registry.Hex())
+	if cp.registry != gc.vr.Registry {
+		return fmt.Errorf("%w: the proposal's registry %s is not the registry %s of this endpoint", ErrGovernance, cp.registry.Hex(), gc.vr.Registry.Hex())
 	}
 	nonce, err := gc.vr.MultisigNonce(ctx, cp.multisig)
 	if err != nil {
@@ -736,7 +888,10 @@ the multisig's five signers, and a proposal whose nonce has passed.`,
 			if err != nil {
 				return err
 			}
-			if _, err := cp.what(); err != nil {
+			if err := confirmRegistry(cp, f.Registry); err != nil {
+				return err
+			}
+			if _, _, err := cp.what(); err != nil {
 				return err
 			}
 			var as []vrclient.Approval
@@ -746,7 +901,7 @@ the multisig's five signers, and a proposal whose nonce has passed.`,
 					return err
 				}
 				if a.Digest != "" && !strings.EqualFold(a.Digest, hexutil.Encode(cp.digest[:])) {
-					return fmt.Errorf("%w: %s approves digest %s, not this proposal's %x", ErrGovernance, af, a.Digest, cp.digest)
+					return fmt.Errorf("%w: %s approves digest %s, not this proposal's %x", ErrGovernance, af, vrclient.Clean(a.Digest), cp.digest)
 				}
 				sig, err := hexutil.Decode(a.Signature)
 				if err != nil || !common.IsHexAddress(a.Signer) {
@@ -818,6 +973,7 @@ type executeFlags struct {
 	Bundle    string
 	Change    uint64
 	SenderKey string
+	Force     bool
 	DryRun    bool
 	Wait      time.Duration
 }
@@ -860,6 +1016,7 @@ VR refusal is named) and the transaction itself. After a ModuleAction executes, 
 	cmd.Flags().StringVar(&f.Bundle, "bundle", "", "the aggregated bundle (`ubft governance aggregate`)")
 	cmd.Flags().Uint64Var(&f.Change, "change", 0, "the queued change to execute")
 	cmd.Flags().StringVar(&f.SenderKey, "sender-key", "", "key file of the account that sends and pays (0x-hex)")
+	cmd.Flags().BoolVar(&f.Force, "force", false, "execute a ModuleAction although the module would refuse it or it targets another module")
 	cmd.Flags().BoolVar(&f.DryRun, "dry-run", false, "build, decode and simulate the transaction, send nothing")
 	cmd.Flags().DurationVar(&f.Wait, "wait", 2*time.Minute, "how long to wait for the receipt")
 	return cmd
@@ -950,11 +1107,37 @@ func executeChange(cmd *cobra.Command, f *executeFlags, gc *govChain, s vrclient
 		return err
 	}
 	fmt.Fprintf(w, "delays: %s\n", delayText(ch, clk))
+	// a ModuleAction runs in the module's guard at execution, not at queue: the state may have moved since the proposal (--dry-run shows it)
+	module := gc.module.Module
+	if ch.Kind == vrclient.KindModuleAction {
+		if ma, ok := vrclient.DecodeModuleAction(ch.Payload); ok {
+			module = ma.Module
+			if ma.Module != gc.module.Module {
+				err := fmt.Errorf("%w: change %d targets module %s, but VR's active module is %s: VR would end it Rejected (not active)", ErrGovernance, id,
+					ma.Module.Hex(), gc.module.Module.Hex())
+				if !f.Force {
+					return fmt.Errorf("%w (--force overrides)", err)
+				}
+				fmt.Fprintf(w, "WARNING: %v\n", err)
+			} else {
+				state, since, err := gc.vr.PoaStatus(ctx, ma.Module, ma.ID)
+				if err != nil {
+					return err
+				}
+				fmt.Fprintf(w, "guard: identity %d is %s (since progress %d)\n", ma.ID, vrclient.PoaState(state), since)
+				if err := checkActionState(ma.Action, ma.ID, state); err != nil {
+					if !f.Force {
+						return fmt.Errorf("%w; executing it would spend the change with no effect (--force overrides)", err)
+					}
+					fmt.Fprintf(w, "WARNING: %v\n", err)
+				}
+			}
+		}
+	}
 	data, err := vrclient.ExecuteChangeCalldata(id)
 	if err != nil {
 		return err
 	}
-	module := gc.module.Module
 	after := func(_ int, r *vrclient.Receipt) ([]step, error) {
 		fresh := *gc.vr
 		fresh.Block = ""
@@ -962,7 +1145,10 @@ func executeChange(cmd *cobra.Command, f *executeFlags, gc *govChain, s vrclient
 		if err != nil {
 			return nil, err
 		}
-		fmt.Fprintf(w, "  change %d is now %s\n", id, vrclient.ChangeState(now.State))
+		fmt.Fprintf(w, "  change %d is now %s%s\n", id, vrclient.ChangeState(now.State), rejectText(now))
+		if now.State == vrclient.ChangeRejected {
+			return nil, fmt.Errorf("%w: VR ended change %d Rejected%s", ErrGovernance, id, rejectText(now))
+		}
 		if refused := vrclient.ActionRefusals(r, module); len(refused) > 0 {
 			for _, a := range refused {
 				fmt.Fprintf(w, "  %s\n", a)

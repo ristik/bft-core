@@ -49,8 +49,8 @@ func TestGovernanceE2E(t *testing.T) {
 		t.Logf("ubft governance %v:\n%s", args[0], out)
 		return out
 	}
-	// pipeline: propose -> sign by the given signers -> aggregate -> execute --bundle -> clock past the delays -> execute --change
-	approve := func(name string, who []int, propose ...string) uint64 {
+	// pipeline: propose -> sign by the given signers -> aggregate (-> execute --bundle -> clock past the delays -> execute --change)
+	bundleOf := func(name string, who []int, propose ...string) string {
 		t.Helper()
 		prop := filepath.Join(dir, name+".proposal.json")
 		gov(append(append([]string{"propose"}, propose...), "--out", prop)...)
@@ -63,19 +63,33 @@ func TestGovernanceE2E(t *testing.T) {
 		}
 		bundle := filepath.Join(dir, name+".bundle.json")
 		gov(append(agg, "--out", bundle)...)
-		out := gov("execute", "--bundle", bundle, "--sender-key", sender)
+		return bundle
+	}
+	queue := func(name string, who []int, propose ...string) (uint64, vrclient.ChangeView) {
+		t.Helper()
+		out := gov("execute", "--bundle", bundleOf(name, who, propose...), "--sender-key", sender)
 		require.Contains(t, out, "queued: change")
 		pending, err := a.vr.PendingChanges(t.Context())
 		require.NoError(t, err)
 		id := pending[len(pending)-1]
 		ch, err := a.vr.Change(t.Context(), id)
 		require.NoError(t, err)
-		listed := gov("list")
-		require.Contains(t, listed, fmt.Sprintf("#%d ", id))
-		out, err = runGov(t, append([]string{"execute", "--change", fmt.Sprint(id), "--sender-key", sender}, rpcArgs...)...)
+		require.Contains(t, gov("list"), fmt.Sprintf("#%d ", id))
+		return id, ch
+	}
+	execChange := func(id uint64, ch vrclient.ChangeView, extra ...string) (string, error) {
+		t.Helper()
+		out, err := runGov(t, append([]string{"execute", "--change", fmt.Sprint(id), "--sender-key", sender}, rpcArgs...)...)
 		require.ErrorContains(t, err, "DelayNotElapsed", out)
 		a.setClock(ch.NotBeforeProgress, ch.NotBeforeTime)
-		gov("execute", "--change", fmt.Sprint(id), "--sender-key", sender)
+		return runGov(t, append(append([]string{"execute", "--change", fmt.Sprint(id), "--sender-key", sender}, extra...), rpcArgs...)...)
+	}
+	approve := func(name string, who []int, propose ...string) uint64 {
+		t.Helper()
+		id, ch := queue(name, who, propose...)
+		out, err := execChange(id, ch)
+		require.NoError(t, err, out)
+		t.Logf("execute --change %d:\n%s", id, out)
 		return id
 	}
 
@@ -118,23 +132,63 @@ func TestGovernanceE2E(t *testing.T) {
 	require.NoError(t, err, out)
 	require.Contains(t, out, "PoA state   Removing")
 
+	// ActionRefused from the real module: Admit of an identity that is no longer Applied. The guard check refuses it at propose and at
+	// execute; with the overrides the real PoaElection refuses the action without reverting (VR shows the change Active), and the
+	// command reads the ActionRefused log of the module's address and fails.
+	_, err = runGov(t, append([]string{"propose", "admit", "--id", "5", "--dry-run"}, rpcArgs...)...)
+	require.ErrorContains(t, err, "would refuse Admit")
+	refusedID, refusedCh := queue("refused", []int{1, 2, 3}, "admit", "--id", "5", "--no-state-check")
+	a.setClock(refusedCh.NotBeforeProgress, refusedCh.NotBeforeTime)
+	out, err = runGov(t, append([]string{"execute", "--change", fmt.Sprint(refusedID), "--sender-key", sender, "--dry-run"}, rpcArgs...)...)
+	require.ErrorContains(t, err, "would refuse Admit")
+	out, err = runGov(t, append([]string{"execute", "--change", fmt.Sprint(refusedID), "--sender-key", sender, "--force"}, rpcArgs...)...)
+	t.Logf("execute --change %d --force (the real module refuses):\n%s", refusedID, out)
+	require.ErrorContains(t, err, "the module refused the action")
+	require.Contains(t, out, "PoaElection refused Admit of identity 5")
+	ch, err = a.vr.Change(t.Context(), refusedID)
+	require.NoError(t, err)
+	require.Equal(t, "Active", vrclient.ChangeState(ch.State), "VR calls a refused action delivered")
+
+	// a decoded VR refusal: cancel of an Active change fails at propose with VR's reason, and a bundle approved while the change was
+	// cancellable is refused at execute --bundle with the same reason (inside the multisig it would be a bare CallFailed)
+	_, err = runGov(t, append([]string{"propose", "cancel", "--change", fmt.Sprint(refusedID)}, rpcArgs...)...)
+	require.ErrorContains(t, err, "NotCancellable")
+	mID, mCh := queue("remove-again", []int{1, 2, 3}, "remove", "--id", "5")
+	cancelBundle := bundleOf("cancel-m", []int{1, 2, 3}, "cancel", "--change", fmt.Sprint(mID))
+	out, err = execChange(mID, mCh)
+	require.NoError(t, err, out)
+	out, err = runGov(t, append([]string{"execute", "--bundle", cancelBundle, "--sender-key", sender}, rpcArgs...)...)
+	require.ErrorContains(t, err, "NotCancellable", out)
+
+	// fee parameters and a force-remove, queued, executed (Scheduled), then the fee change cancelled by the multisig
+	feeID, feeCh := queue("fees", []int{1, 2, 3}, "fee-params", "--base-fee-floor", "2000000", "--change-denominator", "8",
+		"--fee-collector", "0x00000000000000000000000000000000000000fe")
+	out, err = execChange(feeID, feeCh)
+	require.NoError(t, err, out)
+	require.Contains(t, out, "is now Scheduled")
+	forceID, forceCh := queue("force", []int{2, 3, 4}, "force-remove", "--id", "4")
+	out, err = execChange(forceID, forceCh)
+	require.NoError(t, err, out)
+	require.Contains(t, out, "is now Scheduled")
+	_, err = runGov(t, append([]string{"propose", "force-remove", "--id", "99", "--dry-run"}, rpcArgs...)...)
+	require.ErrorContains(t, err, "NotInCommittee")
+	gov("execute", "--bundle", bundleOf("cancel-fees", []int{1, 2, 3}, "cancel", "--change", fmt.Sprint(feeID)), "--sender-key", sender)
+	ch, err = a.vr.Change(t.Context(), feeID)
+	require.NoError(t, err)
+	require.Equal(t, "Cancelled", vrclient.ChangeState(ch.State))
+	listed := gov("list", "--change", fmt.Sprint(forceID))
+	require.Contains(t, listed, "ForceRemove(id=4)")
+	require.Contains(t, listed, "state Scheduled")
+
+	// the nonce burn withdraws a held bundle
+	held := bundleOf("held", []int{1, 2, 3}, "committee-limits", "--n-min", "4", "--n-target", "4", "--n-max", "12")
+	gov("execute", "--bundle", bundleOf("burn", []int{3, 4, 5}, "burn-nonce"), "--sender-key", sender)
+	out, err = runGov(t, append([]string{"execute", "--bundle", held, "--sender-key", sender}, rpcArgs...)...)
+	require.ErrorContains(t, err, "propose again", out)
+
 	// live configuration: queued by three signers, listed with its delays
-	approveQueueOnly := func() {
-		prop := filepath.Join(dir, "limits.proposal.json")
-		gov("propose", "committee-limits", "--n-min", "4", "--n-target", "4", "--n-max", "12", "--out", prop)
-		agg := []string{"aggregate", "--proposal", prop}
-		for _, i := range []int{1, 2, 3} {
-			ap := filepath.Join(dir, fmt.Sprintf("limits.approval-%d.json", i))
-			o, err := runGov(t, "sign", "--proposal", prop, "--signer-key", signers[i-1], "--out", ap)
-			require.NoError(t, err, o)
-			agg = append(agg, "--approval", ap)
-		}
-		bundle := filepath.Join(dir, "limits.bundle.json")
-		gov(append(agg, "--out", bundle)...)
-		gov("execute", "--bundle", bundle, "--sender-key", sender)
-	}
-	approveQueueOnly()
-	listed := gov("list")
+	_, _ = queue("limits", []int{1, 2, 3}, "committee-limits", "--n-min", "4", "--n-target", "4", "--n-max", "12")
+	listed = gov("list")
 	require.Contains(t, listed, "CommitteeLimits(nMin=4, nTarget=4, nMax=12)")
 	require.Contains(t, listed, "state Queued")
 }

@@ -35,13 +35,14 @@ utb_shard_flags() { echo "--utb-genesis test-nodes/utb-genesis.cbor --utb-genesi
 
 # The environment of the aggregator (ristik/aggregator-go integration/enshrined-evm at the pinned AGG_COMMIT, built by utb_agg_build): UTB mode is enabled by UTB_GENESIS_ID; the
 # genesis entry file is the fresh chain's history (UTB_BUNDLE_FILE would be a complete tagged history instead); UTB_ENTRIES_DB is its own append-only store. In UTB mode
-# the binary uses neither the V1 trust-base files nor root REST.
+# the binary uses neither the V1 trust-base files nor root REST for trust bases.
 utb_agg_env() { # K (1-based)
   local k=${1:-1}
   [ -s test-nodes/utb-genesis.cbor ] && [ -s test-nodes/utb-genesis.id ] || { echo "utb_agg_env: no UTB genesis (utb_prepare_genesis first)" >&2; return 1; }
-  # BFT_RPC_ADDRESS is a dead port: in UTB mode the aggregator builds no root REST client, and the lane shows root HTTP is not what it uses. JSON logs: the
-  # evidence reads the log lines by their exact messages (the markers of the aggregator's UTB history code: internal/bft/utb.go).
-  echo "UTB_GENESIS_FILE=$PWD/test-nodes/utb-genesis.cbor UTB_GENESIS_ID=$(utb_pin) UTB_ENTRIES_DB=$PWD/test-nodes/utb-agg$k.db BFT_RPC_ADDRESS=http://127.0.0.1:1 LOG_LEVEL=debug LOG_FORMAT=json LOG_ENABLE_JSON=true"
+  # BFT_RPC_ADDRESS stays the live root's operator RPC that start_agg sets (scripts/lib/agg-lib.sh): in UTB mode the aggregator takes its trust bases from the signed history, never from
+  # root REST, but it reads the successor shard configuration of a validator-registry kind 6 or 8 change from the root's guarded POST /api/v1/q3/shard-conf there (its checkpoint is per
+  # aggregator, in its own directory). JSON logs: the evidence reads the log lines by their exact messages (the markers of the aggregator's UTB history code: internal/bft/utb.go).
+  echo "UTB_GENESIS_FILE=$PWD/test-nodes/utb-genesis.cbor UTB_GENESIS_ID=$(utb_pin) UTB_ENTRIES_DB=$PWD/test-nodes/utb-agg$k.db LOG_LEVEL=debug LOG_FORMAT=json LOG_ENABLE_JSON=true"
 }
 # The aggregator's read-only binary history range (design 11.3 item 4): GET /api/v1/trustbases?from=E[&to=E]..., the PR6 response codec. The same endpoint serves the
 # lane's reference client; port is the aggregator's (agg_port from scripts/lib/agg-lib.sh when it is loaded).
@@ -243,7 +244,7 @@ utb_step_u3a() {
   echo "U3a: the aggregator restarted from its store with unchanged records, then stopped with its history store removed"
 }
 
-# After the recovery: the aggregator restarts holding the genesis only, root HTTP unavailable to it; it repairs the missing entries from a genesis-committee root.
+# After the recovery: the aggregator restarts holding the genesis only (in UTB mode it builds no REST trust-base client: only GetTrustBase can serve it); it repairs the missing entries from a genesis-committee root.
 utb_step_u3b() {
   local i attempt out off db msg; out=$(utb_dir); db=$PWD/test-nodes/utb-agg1.db
   # Two routes can repair the aggregator's history after its restart: its own GetTrustBase catch-up from the roots, and the entries a root attaches to the first
