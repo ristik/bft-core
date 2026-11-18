@@ -76,6 +76,9 @@ type signingAuthorityRunFlags struct {
 	OperatorSocket     string
 	OperatorCredential string
 
+	// the registrations this authority may sign (VT-10); empty: none
+	RegistrationPolicy string
+
 	AuthorityID string
 	NodeID      string
 	NetworkID   uint16
@@ -106,6 +109,7 @@ key exists: the authority starts pending and admits no client until complete-enr
 	cmd.Flags().StringVar(&flags.ClientSocket, "client-socket", "", "Unix socket the shard node connects to; its directory is restricted to the owner")
 	cmd.Flags().StringVar(&flags.OperatorSocket, "operator-socket", "", "Unix socket for the operator commands; its directory is restricted to the owner")
 	cmd.Flags().StringVar(&flags.OperatorCredential, "operator-credential", "", "path to the operator credential (see `signing-authority credential`)")
+	cmd.Flags().StringVar(&flags.RegistrationPolicy, "registration-policy", "", "JSON file pinning the VR deployment and listing the registrations this authority may sign for its EVM key (VT-10): without it the authority signs none. Fixed for the authority's lifetime")
 	cmd.Flags().StringVar(&flags.AuthorityID, "authority-id", "", "operator-assigned name for this authority lifetime, for diagnostics")
 	cmd.Flags().StringVar(&flags.NodeID, "node-id", "", "the shard validator this authority signs for (`ubft node-id` on the shard node's key configuration)")
 	cmd.Flags().Uint16Var(&flags.NetworkID, "network-id", 0, "network identifier")
@@ -160,6 +164,13 @@ func signingAuthorityRun(ctx context.Context, flags *signingAuthorityRunFlags) e
 	opts, err := flags.lineageOptions(log)
 	if err != nil {
 		return err
+	}
+	if flags.RegistrationPolicy != "" {
+		policy, err := readRegistrationPolicy(flags.RegistrationPolicy)
+		if err != nil {
+			return err
+		}
+		opts = append(opts, signingauthority.WithRegistrationPolicy(policy))
 	}
 	// The key is generated here. The enrollment has no configuration hash yet, on purpose.
 	authority, err := signingauthority.New(signingauthority.Enrollment{

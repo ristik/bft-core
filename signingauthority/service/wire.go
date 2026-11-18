@@ -73,6 +73,8 @@ const (
 	// opAdvanceWithProof is the proof-verified advance (#1085): one root activation bundle, which the authority verifies against its own
 	// lineage. Operator channel only. It is bounded by the frame like every message: one activation per call.
 	opAdvanceWithProof op = 109
+	// opSignRegistration asks for the EVM possession signature of VR.register / VR.proposeBinding (VT-10). Operator channel only.
+	opSignRegistration op = 110
 )
 
 // MaxAdvanceProofBytes is the largest activation bundle one opAdvanceWithProof can carry: the frame less an allowance for the request's
@@ -92,7 +94,7 @@ func (o op) servedToClient() bool {
 func (o op) servedToOperator() bool {
 	switch o {
 	case opReplaceSession, opStatus, opEnrollment, opCompleteEnrollment, opAdvanceEpoch, opSignHandoffPoP, opSignElectionPoP, opSignDelegationPossession,
-		opAdvanceWithProof:
+		opAdvanceWithProof, opSignRegistration:
 		return true
 	}
 	return false
@@ -128,6 +130,8 @@ func (o op) String() string {
 		return "sign-delegation-possession"
 	case opAdvanceWithProof:
 		return "advance-with-proof"
+	case opSignRegistration:
+		return "sign-registration"
 	}
 	return fmt.Sprintf("unknown(%d)", uint64(o))
 }
@@ -286,6 +290,21 @@ type electionPoPPayload struct {
 	Custody     []byte
 	Election    []byte
 	Attempt     uint64
+}
+
+// registrationPayload is the structured request of opSignRegistration: the domain, the owner, the identity and the registration. The digest
+// is computed by the authority; the deployment is pinned there.
+type registrationPayload struct {
+	_          struct{} `cbor:",toarray"`
+	Domain     string
+	Owner      []byte
+	ID         uint64
+	RootNodeID string
+	RootKey    []byte
+	EVMNodeID  string
+	EVMKey     []byte
+	Payee      []byte
+	Nonce      uint64
 }
 
 // delegationPayload is the structured request of opSignDelegationPossession: the admitDelegation payload and the election it is for.
