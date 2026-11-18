@@ -154,7 +154,7 @@ EOF
   cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'output(bytes32)' "$vrb_result" >"$VR_EVIDENCE/output.hex"
   vrb_log "R = $vrb_result"
   # 3. every root observed the source and derives the intent
-  vrb_wait 300 "every root derives the intent over its committed state" vrb_all_intents || return 1
+  vrb_wait "$([ "${VR_JOINER:-0}" = 1 ] && echo 900 || echo 300)" "every root derives the intent over its committed state (the joiner's included)" vrb_all_intents || return 1
   for i in $(vrb_root_rpcs); do vrb_intent "$i" | python3 -c "import json,sys;d=json.load(sys.stdin);print(sys.argv[1], d['digest'], d['view'], d['assembler'])" "$i"; done | tee "$VR_EVIDENCE/intents.txt"
   [ "$(awk '{print $2}' "$VR_EVIDENCE/intents.txt" | sort -u | wc -l)" = 1 ] || { vrb_log "FAIL: the roots derive different intents"; return 1; }
   vrb_log "PASS: every root derives the same intent"
@@ -201,9 +201,15 @@ EOF
   cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'identity(uint64)' 4 >"$VR_EVIDENCE/identity4-after.hex"
   vrb_log "PASS: the Boundary installed J"
   if [ "${VR_JOINER:-0}" = 1 ]; then vrj_validates || return 1; fi
-  for i in $(seq 1 "${validators:-4}"); do
+  for i in $(seq 1 "${validators:-4}") $([ "${VR_JOINER:-0}" = 1 ] && echo 5); do
     grep -E 'VR handoff|VR output published|root handoff outcome|switched|epoch' "test-nodes/root$i/debug.log" | tail -n 400 >"$VR_EVIDENCE/root$i-vr.log"
+    cp "test-nodes/root$i/vr-member.json" "$VR_EVIDENCE/root$i-vr-member.json" 2>/dev/null || true
   done
+  if [ "${VR_JOINER:-0}" = 1 ]; then
+    curl -s -X POST -H 'Content-Type: application/json' -d '{}' "http://127.0.0.1:$(m2_rpc_port 5)/api/v1/q3/status" >"$VR_EVIDENCE/root5-q3-status.json" 2>/dev/null
+    grep -v 'IR change request\|CertificationResp' test-nodes/root5/debug.log | tail -n 3000 >"$VR_EVIDENCE/root5-tail.log"
+    tail -n 1500 test-nodes/evm5/debug.log >"$VR_EVIDENCE/evm5-tail.log" 2>/dev/null; tail -n 200 test-nodes/reth5/reth.log >"$VR_EVIDENCE/reth5-tail.log" 2>/dev/null
+  fi
   return 0
 }
 
