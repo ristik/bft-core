@@ -317,8 +317,10 @@ type registrationPayload struct {
 
 // registrationPolicyPayload is the structured request of opReloadRegistrationPolicy: the authorized registrations, never a deployment.
 type registrationPolicyPayload struct {
-	_          struct{} `cbor:",toarray"`
-	Authorized []authorizedRegistration
+	_ struct{} `cbor:",toarray"`
+	// the deployment the list is for: expected to equal the authority's pin
+	Network, ChainID, Registry []byte
+	Authorized                 []authorizedRegistration
 }
 
 type authorizedRegistration struct {

@@ -751,7 +751,7 @@ func signingAuthorityRegistrationPolicyCmd(baseFlags *baseFlags) *cobra.Command 
 		Long: `Replace the authorized registrations of the running authority with those of the policy file. The identity id is allocated by VR at
 registration and a later payee or root key is not known when the authority starts, so the operator authorizes them here, on the
 operator channel. The deployment pin the authority started with, its key and its signing record are untouched: the file's deployment
-fields are not sent, and an authority started without --registration-policy refuses the reload. The list replaces the old one.`,
+must equal the authority's pin (a policy for another deployment is refused), and an authority started without --registration-policy refuses the reload. The list replaces the old one.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			policy, err := readRegistrationPolicy(file)
 			if err != nil {
@@ -764,7 +764,7 @@ fields are not sent, and an authority started without --registration-policy refu
 			defer func() { _ = operator.Close() }()
 			ctx, cancel := context.WithTimeout(cmd.Context(), flags.Timeout)
 			defer cancel()
-			if err := operator.ReloadRegistrationPolicy(ctx, policy.Authorized); err != nil {
+			if err := operator.ReloadRegistrationPolicy(ctx, policy.Deployment, policy.Authorized); err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "registration policy reloaded: %d authorized\n", len(policy.Authorized))

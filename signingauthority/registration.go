@@ -44,6 +44,9 @@ type RegistrationPolicy struct {
 // WithRegistrationPolicy enables SignRegistration under the policy.
 func WithRegistrationPolicy(p RegistrationPolicy) Option {
 	return func(a *Authority) error {
+		if d := p.Deployment; d.Network == [32]byte{} || d.ChainID == [32]byte{} || d.Registry == [20]byte{} {
+			return fmt.Errorf("the registration policy's deployment pin is incomplete: network, chain id and registry are all required")
+		}
 		// An empty list is a valid start: the deployment is pinned and nothing is authorized yet (ReloadRegistrationAuthorizations).
 		auth, err := copyAuthorizations(p.Authorized)
 		if err != nil {
@@ -60,6 +63,18 @@ func copyAuthorizations(in []RegistrationAuthorization) ([]RegistrationAuthoriza
 		if x.Domain != vrschema.RegisterDomainText && x.Domain != vrschema.BindingDomainText {
 			return nil, fmt.Errorf("%w: policy entry domain %q", ErrRegistrationDomain, x.Domain)
 		}
+		// an entry that can never match a request is a typo the operator should hear of now, not at registration time
+		switch {
+		case (x.Domain == vrschema.RegisterDomainText) != (x.ID == 0):
+			return nil, fmt.Errorf("%w: a register entry has id 0 and a binding entry the identity's nonzero id", ErrRegistrationDomain)
+		case len(x.RootNodeID) < 1 || len(x.RootNodeID) > 128:
+			return nil, fmt.Errorf("policy entry: the root node id is 1..128 bytes")
+		case x.Owner == [20]byte{} || x.Payee == [20]byte{}:
+			return nil, fmt.Errorf("policy entry: the owner and the payee are nonzero addresses")
+		}
+		if _, err := ethcrypto.DecompressPubkey(x.RootKey); err != nil || len(x.RootKey) != 33 {
+			return nil, fmt.Errorf("policy entry: the root key is not a 33-byte compressed point of the curve")
+		}
 		x.RootKey = bytes.Clone(x.RootKey)
 		out = append(out, x)
 	}
@@ -70,7 +85,10 @@ func copyAuthorizations(in []RegistrationAuthorization) ([]RegistrationAuthoriza
 // identity id is allocated by VR only at registration, and a later payee or root key is unknown at startup). It changes nothing else: the
 // deployment pin, the signing key and the signing record stay as they are, and an authority started without a policy refuses it. Operator
 // channel only.
-func (a *Authority) ReloadRegistrationAuthorizations(list []RegistrationAuthorization) error {
+//
+// The caller names the deployment its list is for; it must equal the pin from startup, so a policy file made for another deployment
+// (staging against production) is refused whole.
+func (a *Authority) ReloadRegistrationAuthorizations(expect RegistrationDeployment, list []RegistrationAuthorization) error {
 	auth, err := copyAuthorizations(list)
 	if err != nil {
 		return err
@@ -79,6 +97,9 @@ func (a *Authority) ReloadRegistrationAuthorizations(list []RegistrationAuthoriz
 	defer a.mu.Unlock()
 	if a.registration == nil {
 		return fmt.Errorf("%w: this authority was started without a registration policy (no deployment pin)", ErrRegistrationUnauthorized)
+	}
+	if expect != a.registration.Deployment {
+		return fmt.Errorf("%w: the policy is for another deployment (network, chain id or registry) than this authority's pin", ErrRegistrationUnauthorized)
 	}
 	a.registration = &RegistrationPolicy{Deployment: a.registration.Deployment, Authorized: auth}
 	return nil

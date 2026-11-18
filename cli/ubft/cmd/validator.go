@@ -125,6 +125,9 @@ func (f *validatorFlags) load() (*loadedValidator, error) {
 	if err := dec.Decode(&cfg); err != nil {
 		return nil, fmt.Errorf("%w: %s: %v", ErrValidator, p, err)
 	}
+	if cfg.EVMAuthority != nil && cfg.EVMKeys != "" {
+		return nil, fmt.Errorf("%w: %s: evmKeys and evmAuthority are two holders of the EVM key: clear evmKeys (the config is edited by hand to select an authority)", ErrValidator, p)
+	}
 	if cfg.Format != validatorConfigFormat {
 		return nil, fmt.Errorf("%w: %s: format %q, want %q", ErrValidator, p, cfg.Format, validatorConfigFormat)
 	}

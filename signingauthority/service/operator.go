@@ -227,8 +227,8 @@ func (o *OperatorClient) SignRegistration(ctx context.Context, req signingauthor
 
 // ReloadRegistrationPolicy replaces the authorized registrations of the running authority (see
 // signingauthority.ReloadRegistrationAuthorizations); the deployment pin, the key and the signing record are untouched.
-func (o *OperatorClient) ReloadRegistrationPolicy(ctx context.Context, list []signingauthority.RegistrationAuthorization) error {
-	w := registrationPolicyPayload{Authorized: []authorizedRegistration{}}
+func (o *OperatorClient) ReloadRegistrationPolicy(ctx context.Context, expect signingauthority.RegistrationDeployment, list []signingauthority.RegistrationAuthorization) error {
+	w := registrationPolicyPayload{Network: expect.Network[:], ChainID: expect.ChainID[:], Registry: expect.Registry[:], Authorized: []authorizedRegistration{}}
 	for _, x := range list {
 		w.Authorized = append(w.Authorized, authorizedRegistration{Domain: x.Domain, Owner: x.Owner[:], ID: x.ID, RootNodeID: x.RootNodeID, RootKey: x.RootKey, Payee: x.Payee[:]})
 	}

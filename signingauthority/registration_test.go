@@ -21,9 +21,6 @@ type regFixture struct {
 func newRegFixture(t *testing.T, policy bool) *regFixture {
 	t.Helper()
 	f := newFixture(t, 1)
-	probe, err := New(f.enroll, trustStub{tb: f.tb})
-	require.NoError(t, err)
-	_ = probe // the key is generated per authority: the policy names the root binding, not the EVM key
 	rootKey, err := ethcrypto.GenerateKey()
 	require.NoError(t, err)
 	rk := ethcrypto.CompressPubkey(&rootKey.PublicKey)
@@ -122,7 +119,7 @@ func TestRegistrationNeedsAPolicy(t *testing.T) {
 	f := newRegFixture(t, false)
 	_, err := f.a.SignRegistration(f.req)
 	require.ErrorIs(t, err, ErrRegistrationUnauthorized)
-	require.ErrorIs(t, f.a.ReloadRegistrationAuthorizations(nil), ErrRegistrationUnauthorized, "no pin to keep: no reload")
+	require.ErrorIs(t, f.a.ReloadRegistrationAuthorizations(f.depl, nil), ErrRegistrationUnauthorized, "no pin to keep: no reload")
 }
 
 // The operator refreshes the authorizations of the running authority: a pin-only start signs nothing, a reload authorizes a registration,
@@ -130,12 +127,12 @@ func TestRegistrationNeedsAPolicy(t *testing.T) {
 func TestRegistrationPolicyReloadKeepsKeyPinAndRecord(t *testing.T) {
 	f := newRegFixture(t, true)
 	reg, bind := f.policy.Authorized[0], f.policy.Authorized[1]
-	require.NoError(t, f.a.ReloadRegistrationAuthorizations(nil))
+	require.NoError(t, f.a.ReloadRegistrationAuthorizations(f.depl, nil))
 	_, err := f.a.SignRegistration(f.req)
 	require.ErrorIs(t, err, ErrRegistrationUnauthorized)
 
 	before := f.a.Status()
-	require.NoError(t, f.a.ReloadRegistrationAuthorizations([]RegistrationAuthorization{reg}))
+	require.NoError(t, f.a.ReloadRegistrationAuthorizations(f.depl, []RegistrationAuthorization{reg}))
 	_, err = f.a.SignRegistration(f.req)
 	require.NoError(t, err)
 	rot := f.req
@@ -143,7 +140,7 @@ func TestRegistrationPolicyReloadKeepsKeyPinAndRecord(t *testing.T) {
 	_, err = f.a.SignRegistration(rot)
 	require.ErrorIs(t, err, ErrRegistrationUnauthorized, "no rotation is authorized yet")
 
-	require.NoError(t, f.a.ReloadRegistrationAuthorizations([]RegistrationAuthorization{reg, bind}))
+	require.NoError(t, f.a.ReloadRegistrationAuthorizations(f.depl, []RegistrationAuthorization{reg, bind}))
 	sig, err := f.a.SignRegistration(rot)
 	require.NoError(t, err)
 	d := vrschema.RegistrationDigest(true, f.depl.Network, f.depl.ChainID, f.depl.Registry, rot.Owner, 7, rot.Registration)
@@ -154,5 +151,70 @@ func TestRegistrationPolicyReloadKeepsKeyPinAndRecord(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, f.pub, pub)
 	require.Equal(t, before, f.a.Status(), "a possession-style signature touches no signing record")
-	require.ErrorIs(t, f.a.ReloadRegistrationAuthorizations([]RegistrationAuthorization{{Domain: "x"}}), ErrRegistrationDomain)
+	require.ErrorIs(t, f.a.ReloadRegistrationAuthorizations(f.depl, []RegistrationAuthorization{{Domain: "x"}}), ErrRegistrationDomain)
+	// a list made for another deployment (staging against production) is refused whole, and what was authorized stays
+	for name, d := range map[string]RegistrationDeployment{
+		"another network":  {Network: [32]byte{9}, ChainID: f.depl.ChainID, Registry: f.depl.Registry},
+		"another chain id": {Network: f.depl.Network, ChainID: vrschema.U64(99), Registry: f.depl.Registry},
+		"another registry": {Network: f.depl.Network, ChainID: f.depl.ChainID, Registry: [20]byte{9}},
+	} {
+		require.ErrorIs(t, f.a.ReloadRegistrationAuthorizations(d, nil), ErrRegistrationUnauthorized, name)
+	}
+	_, err = f.a.SignRegistration(rot)
+	require.NoError(t, err, "a refused reload changed nothing")
+}
+
+// A policy entry that can never match, or an incomplete deployment pin, is refused when the policy is given.
+func TestRegistrationPolicyRefusesEntriesThatCanNeverMatch(t *testing.T) {
+	f := newRegFixture(t, true)
+	good := f.policy.Authorized[0]
+	other, err := ethcrypto.GenerateKey()
+	require.NoError(t, err)
+	for name, mutate := range map[string]func(*RegistrationAuthorization){
+		"register with an id":   func(x *RegistrationAuthorization) { x.ID = 7 },
+		"binding without an id": func(x *RegistrationAuthorization) { x.Domain = vrschema.BindingDomainText },
+		"a short root key":      func(x *RegistrationAuthorization) { x.RootKey = []byte{1} },
+		"an off-curve root key": func(x *RegistrationAuthorization) { x.RootKey = append([]byte{2}, make([]byte, 32)...) },
+		"no root node id":       func(x *RegistrationAuthorization) { x.RootNodeID = "" },
+		"a zero owner":          func(x *RegistrationAuthorization) { x.Owner = [20]byte{} },
+		"a zero payee":          func(x *RegistrationAuthorization) { x.Payee = [20]byte{} },
+	} {
+		x := good
+		x.RootKey = ethcrypto.CompressPubkey(&other.PublicKey)
+		mutate(&x)
+		fx := newFixture(t, 1)
+		_, err := New(fx.enroll, trustStub{tb: fx.tb}, WithRegistrationPolicy(RegistrationPolicy{Deployment: f.depl, Authorized: []RegistrationAuthorization{x}}))
+		require.Error(t, err, name)
+		require.Error(t, f.a.ReloadRegistrationAuthorizations(f.depl, []RegistrationAuthorization{x}), name)
+	}
+	for name, d := range map[string]RegistrationDeployment{
+		"no network":  {ChainID: f.depl.ChainID, Registry: f.depl.Registry},
+		"no chain id": {Network: f.depl.Network, Registry: f.depl.Registry},
+		"no registry": {Network: f.depl.Network, ChainID: f.depl.ChainID},
+	} {
+		fx := newFixture(t, 1)
+		_, err := New(fx.enroll, trustStub{tb: fx.tb}, WithRegistrationPolicy(RegistrationPolicy{Deployment: d}))
+		require.Error(t, err, name)
+	}
+}
+
+// At `apply` time a joiner's authority is still pending (no configuration hash): it signs a registration all the same.
+func TestAPendingAuthoritySignsARegistration(t *testing.T) {
+	f := newFixture(t, 1)
+	enroll := f.enroll
+	enroll.ShardConfHash = nil
+	rk, err := ethcrypto.GenerateKey()
+	require.NoError(t, err)
+	rkb := ethcrypto.CompressPubkey(&rk.PublicKey)
+	owner, payee := [20]byte{1}, [20]byte{2}
+	depl := RegistrationDeployment{Network: vrschema.Keccak([]byte("n")), ChainID: vrschema.U64(3), Registry: vrschema.ValidatorRegistry}
+	a, err := New(enroll, trustStub{tb: f.tb}, WithRegistrationPolicy(RegistrationPolicy{Deployment: depl, Authorized: []RegistrationAuthorization{
+		{Domain: vrschema.RegisterDomainText, Owner: owner, RootNodeID: "r", RootKey: rkb, Payee: payee}}}))
+	require.NoError(t, err)
+	t.Cleanup(a.Close)
+	pub, err := a.SigningPublicKey()
+	require.NoError(t, err)
+	_, err = a.SignRegistration(RegistrationRequest{Domain: vrschema.RegisterDomainText, Owner: owner,
+		Registration: vrschema.Registration{RootNodeID: "r", RootKey: rkb, EVMNodeID: testNodeID, EVMKey: pub, Payee: payee}})
+	require.NoError(t, err)
 }
