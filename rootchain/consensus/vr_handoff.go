@@ -108,7 +108,7 @@ const PullInterval = 5 * time.Second
 // observer, the protocol service with its verification queue, and their workers (stopped with ctx). It must be called before the manager
 // starts.
 func (x *ConsensusManager) EnableVRHandoff(ctx context.Context, cfg VRHandoffConfig) error {
-	svc := x.blockStore.PosServices()
+	svc := x.blockStore().PosServices()
 	if svc == nil || svc.Registry == nil || cfg.Intents == nil || cfg.Reader == nil || cfg.Witness == nil {
 		return fmt.Errorf("%w: the VR services, the intent provider, the VR reader and the witness builder are required", ErrVRHandoff)
 	}
@@ -147,8 +147,8 @@ func (x *ConsensusManager) EnableVRHandoff(ctx context.Context, cfg VRHandoffCon
 	v.peers = func() []peer.ID { return x.vrPeers(v) }
 	v.update = x.vrCommitted
 	v.now = time.Now
-	v.opening = x.blockStore.CommittedVROpening
-	v.queryAt = x.blockStore.VRQueryAt
+	v.opening = func() (storage.VROpening, bool, error) { return x.blockStore().CommittedVROpening() }
+	v.queryAt = func(b *storage.ExecutedBlock) (storage.VRIntentQuery, bool, error) { return x.blockStore().VRQueryAt(b) }
 	v.derive = cfg.Intents.DeriveCached // the leader's checks never wait on the execution client (review #1188 B9)
 	v.leader = vrschedule.LeaderRecords
 	v.reject = x.preferRejection
@@ -161,8 +161,8 @@ func (x *ConsensusManager) EnableVRHandoff(ctx context.Context, cfg VRHandoffCon
 		return reader.OpenOutput(c, blockHash, stateRoot)
 	}
 	x.vr = v
-	x.blockStore.SetCommitObserver(v.onCommit)
-	x.blockStore.SetExecutionObserver(v.onExecuted)
+	x.blockStore().SetCommitObserver(v.onCommit)
+	x.blockStore().SetExecutionObserver(v.onExecuted)
 	go v.run(ctx)
 	go v.prefetchRun(ctx)
 	go v.queue.Run(ctx)
@@ -241,7 +241,7 @@ func (v *vrHandoff) prefetchRun(ctx context.Context) {
 
 // VRServices are the VR-mode collaborators installed into the control executor (nil on a root that is not in VR mode).
 func (x *ConsensusManager) VRServices() *storage.VRServices {
-	if svc := x.blockStore.PosServices(); svc != nil {
+	if svc := x.blockStore().PosServices(); svc != nil {
 		return svc.Registry
 	}
 	return nil
@@ -439,7 +439,7 @@ func (v *vrHandoff) pullFrom(ctx context.Context, peers []peer.ID, intent [32]by
 // attempt, the incumbents, K, the committed support table and schedule.
 func (x *ConsensusManager) vrCommitted() (vrschedule.Committed, error) {
 	var c vrschedule.Committed
-	q, on, err := x.blockStore.CommittedVRQuery()
+	q, on, err := x.blockStore().CommittedVRQuery()
 	if err != nil || !on {
 		return c, errors.Join(ErrVRHandoff, errors.New("no committed VR state"), err)
 	}
@@ -492,7 +492,7 @@ func (x *ConsensusManager) vrDerived() (vrschedule.Derived, map[string][]byte, e
 	if x.vr == nil {
 		return vrschedule.Derived{}, nil, fmt.Errorf("%w: not enabled", ErrVRHandoff)
 	}
-	q, on, err := x.blockStore.CommittedVRQuery()
+	q, on, err := x.blockStore().CommittedVRQuery()
 	if err != nil || !on {
 		return vrschedule.Derived{}, nil, errors.Join(ErrVRHandoff, errors.New("no committed VR state"), err)
 	}
@@ -521,7 +521,7 @@ func (x *ConsensusManager) VRIntent() (VRIntentView, error) {
 		ids = append(ids, id)
 	}
 	view := uint64(0)
-	if s, ok, _ := x.blockStore.CommittedVRState(); ok && bytes.Equal(s.Backoff.Intent, d.Digest[:]) {
+	if s, ok, _ := x.blockStore().CommittedVRState(); ok && bytes.Equal(s.Backoff.Intent, d.Digest[:]) {
 		view = s.Backoff.LastView
 	}
 	order := vrhandoff.AssemblerOrder(d.Digest, ids)
@@ -697,7 +697,7 @@ func (v *vrHandoff) fetchWitness(ctx context.Context, p, root [32]byte, h vrsche
 // the leader's own residence wait for the committed opening has passed and the trial execution over the parent (the replay rule) admits
 // it. The voters apply the same residence rule before voting.
 func (x *ConsensusManager) orderHandoffView(ctx context.Context, block *rctypes.BlockData) {
-	x.orderHandoffViewWith(ctx, block, func(b *rctypes.BlockData) error { return x.blockStore.TrialExecute(b, x.irReqVerifier) })
+	x.orderHandoffViewWith(ctx, block, func(b *rctypes.BlockData) error { return x.blockStore().TrialExecute(b, x.irReqVerifier) })
 }
 
 func (x *ConsensusManager) orderHandoffViewWith(ctx context.Context, block *rctypes.BlockData, trialExecute func(*rctypes.BlockData) error) {

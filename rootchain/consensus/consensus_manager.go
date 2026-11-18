@@ -112,7 +112,7 @@ type (
 		trustBaseStore     *trustbase.TrustBaseStore
 		irReqBuffer        *IrReqBuffer
 		safety             *SafetyModule
-		blockStore         *storage.BlockStore
+		storeRef           atomic.Pointer[storage.BlockStore] // the block store, read through blockStore() (#1191)
 		orchestration      Orchestration
 		irReqVerifier      *IRChangeReqVerifier
 		t2Timeouts         *PartitionTimeoutGenerator
@@ -350,19 +350,19 @@ func NewConsensusManager(
 			return nil, err
 		}
 	}
-	// The lookup reads the manager's CURRENT block store: recovery replaces x.blockStore, and a store captured here would go stale.
+	// The lookup reads the manager's CURRENT block store: recovery replaces x.blockStore(), and a store captured here would go stale.
 	// The manager is assigned below, before anything can sign.
 	var manager *ConsensusManager
 	safetyOptions := []SafetyOption{
 		WithParentTimestamp(func(round uint64) (uint64, error) {
-			b, err := manager.blockStore.Block(round)
+			b, err := manager.blockStore().Block(round)
 			if err != nil {
 				return 0, err
 			}
 			return b.BlockData.Timestamp, nil
 		}),
 		WithDomainBoundSigning(trustBaseStore, func(round uint64) (CommittedBlockInfo, error) {
-			b, err := manager.blockStore.Block(round)
+			b, err := manager.blockStore().Block(round)
 			if err != nil {
 				return CommittedBlockInfo{}, err
 			}
@@ -374,7 +374,7 @@ func NewConsensusManager(
 	if optional.UTBPrevious != nil {
 		// the successor entry of a committing vote comes from the manager's CURRENT block store, like the executed block above
 		safetyOptions = append(safetyOptions, WithUTB(func(committed *drctypes.RoundInfo, epoch uint64) ([]byte, error) {
-			return UTBSuccessor{State: manager.blockStore, Previous: optional.UTBPrevious}.Entry(committed, epoch)
+			return UTBSuccessor{State: manager.blockStore(), Previous: optional.UTBPrevious}.Entry(committed, epoch)
 		}))
 		bStore.SetUTBBinding(utbBindingFor(trustBaseStore.SigningConfig, bStore, optional.UTBPrevious))
 		if optional.UTBStore != nil {
@@ -405,7 +405,7 @@ func NewConsensusManager(
 		chosenLeader, err = newEpochLeader(trustBaseStore, installedAnchor.Epoch, installedAnchor.Slot+1, trustBase.RootNodes,
 			func() (Leader, error) { return newBootstrapLeader(ls, installedAnchor.Slot+1, trustBase.RootNodes) },
 			func() (Leader, error) {
-				return reputationLeader(cParams.NetworkProfileVersion, installedAnchor, trustBase, trustBaseStore, func() leaderHeads { return manager.blockStore })
+				return reputationLeader(cParams.NetworkProfileVersion, installedAnchor, trustBase, trustBaseStore, func() leaderHeads { return manager.blockStore() })
 			})
 	} else if cParams.NetworkProfileVersion == storage.ProfileHandoff {
 		// the genesis epoch: its schedule starts at the genesis round, whatever start the trust base records
@@ -433,7 +433,6 @@ func NewConsensusManager(
 		trustBaseStore:   trustBaseStore,
 		irReqBuffer:      NewIrReqBuffer(log, cParams.NetworkProfileVersion),
 		safety:           safetyModule,
-		blockStore:       bStore,
 		orchestration:    orchestration,
 		irReqVerifier:    reqVerifier,
 		t2Timeouts:       t2TimeoutGen,
@@ -453,6 +452,7 @@ func NewConsensusManager(
 		tracer:           observe.Tracer("cm.distributed"),
 	}
 
+	consensusManager.storeRef.Store(bStore)
 	// Probably not the correct trust base, but we start with it and update as we discover current round
 	consensusManager.trustBase.Store(trustBase)
 	// what a manager that may switch epoch in process keeps of the next epoch's unverified messages is accounted to their authenticated
@@ -669,12 +669,12 @@ func (x *ConsensusManager) startAndLoop(ctx context.Context, started bool) error
 // TC, and the round after max(high QC, anchor slot). It signs and sends nothing. An in-process switch runs it while still fenced, before
 // the successor is published (#1086).
 func (x *ConsensusManager) startContext(ctx context.Context) error {
-	vote, err := x.blockStore.ReadLastVote()
+	vote, err := x.blockStore().ReadLastVote()
 	if err != nil {
 		return fmt.Errorf("last vote read failed: %w", err)
 	}
-	hQc := x.blockStore.GetHighQc()
-	lastTC, err := x.blockStore.GetLastTC()
+	hQc := x.blockStore().GetHighQc()
+	lastTC, err := x.blockStore().GetLastTC()
 	if err != nil {
 		return fmt.Errorf("failed to read last TC from block store: %w", err)
 	}
@@ -940,7 +940,7 @@ func (x *ConsensusManager) sendTimeoutVote(ctx context.Context) {
 	rebroadcast := timeoutVoteMsg != nil // the round's vote was already sent: this attempt is a repeat (shadow backoff model only)
 	if timeoutVoteMsg == nil {
 		// create timeout vote
-		qc := x.blockStore.GetHighQc()
+		qc := x.blockStore().GetHighQc()
 		var timeout *drctypes.Timeout
 		if x.epochAnchor != nil && qc == nil {
 			timeout = drctypes.NewAnchorTimeout(x.pacemaker.GetCurrentRound(), x.epochAnchor)
@@ -985,7 +985,7 @@ func (x *ConsensusManager) sendTimeoutVote(ctx context.Context) {
 		// is what the node sends again for the round, so a vote on the wire with no stored copy could be followed by a different
 		// one. Nothing is remembered either: the next local timeout tries again (and, in a scheme 2 epoch, finds its recorded
 		// decision).
-		if err := x.blockStore.StoreLastVote(timeoutVoteMsg); err != nil {
+		if err := x.blockStore().StoreLastVote(timeoutVoteMsg); err != nil {
 			x.log.WarnContext(ctx, "timeout vote not sent: storing it failed", logger.Error(err))
 			return
 		}
@@ -1006,7 +1006,7 @@ func (x *ConsensusManager) sendTimeoutVote(ctx context.Context) {
 // nil otherwise (no last vote, a vote for a proposal, another round). A store that cannot be read yields nil with a warning: the
 // caller then signs under the safety rules as before.
 func (x *ConsensusManager) storedTimeoutVote(ctx context.Context, epoch, round uint64) *abdrc.TimeoutMsg {
-	last, err := x.blockStore.ReadLastVote()
+	last, err := x.blockStore().ReadLastVote()
 	if err != nil {
 		x.log.WarnContext(ctx, "failed to read the last vote", logger.Error(err))
 		return nil
@@ -1067,7 +1067,7 @@ func (x *ConsensusManager) SelectRequestHistory(h storage.RequestHistory) error 
 	// the committed parent: the shard's state and the identity of its block from one read of the committed root (#1032), never two
 	// reads a commit can fall between
 	parent := func(p types.PartitionID, s types.ShardID) (*storage.ShardInfo, []byte, *types.InputRecord, error) {
-		si, id, err := x.blockStore.CommittedShardParent(p, s)
+		si, id, err := x.blockStore().CommittedShardParent(p, s)
 		return si, id, nil, err
 	}
 	resolver, err := NewRequestViewResolver(h, crypto.SHA256, parent, nil)
@@ -1087,13 +1087,13 @@ var ErrNoRequestHistory = errors.New("consensus: no request history to select")
 
 // HandoffCandidate is the retained candidate preimage of a committed successor body: the source a request history serves from.
 func (x *ConsensusManager) HandoffCandidate(bodyID []byte) ([]byte, error) {
-	return x.blockStore.HandoffCandidate(bodyID)
+	return x.blockStore().HandoffCandidate(bodyID)
 }
 
 // HandoffCommittedPreimage is the committed candidate of a successor body in the form the body binds (the candidate v6 of a VR handoff):
 // what a request history that checks the candidate against the body reads.
 func (x *ConsensusManager) HandoffCommittedPreimage(bodyID []byte) ([]byte, error) {
-	return x.blockStore.HandoffCommittedPreimage(bodyID)
+	return x.blockStore().HandoffCommittedPreimage(bodyID)
 }
 
 // SetViewResolver selects the view-aware branch of the leader's buffer, timeouts and proposal payload. Production selects it only through
@@ -1229,11 +1229,11 @@ func (x *ConsensusManager) refuseFrozenIR(req *drctypes.IRChangeReq) error {
 	if req == nil || x.params.NetworkProfileVersion != storage.ProfileHandoff {
 		return nil
 	}
-	qc := x.blockStore.GetHighQc()
+	qc := x.blockStore().GetHighQc()
 	if qc == nil {
 		return nil
 	}
-	frozen, active, err := x.blockStore.FrozenShardAt(qc.GetRound())
+	frozen, active, err := x.blockStore().FrozenShardAt(qc.GetRound())
 	if err != nil {
 		return err
 	}
@@ -1483,7 +1483,7 @@ not attached to it.
 func (x *ConsensusManager) checkRecoveryNeeded(qc *drctypes.QuorumCert) error {
 	// when node has fallen behind we trigger recovery here as we fail to load block for
 	// the round - it would be nicer to have explicit round check?
-	block, err := x.blockStore.Block(qc.VoteInfo.RoundNumber)
+	block, err := x.blockStore().Block(qc.VoteInfo.RoundNumber)
 	if err != nil {
 		return fmt.Errorf("failed to read root hash for round %d from local block store: %w", qc.VoteInfo.RoundNumber, err)
 	}
@@ -1543,12 +1543,12 @@ func (x *ConsensusManager) onProposalMsg(ctx context.Context, proposal *abdrc.Pr
 	}
 	x.processTC(ctx, proposal.LastRoundTc)
 	// the witnesses of the block's controls are not in the proposal: fetch what is missing from the root nodes, the author first
-	if err := x.fetchWitnesses(ctx, x.blockStore, proposal.Block); err != nil {
+	if err := x.fetchWitnesses(ctx, x.blockStore(), proposal.Block); err != nil {
 		return fmt.Errorf("proposal controls: %w", err)
 	}
 	// execute proposed payload
 	start := time.Now()
-	execStateId, err := x.blockStore.Add(proposal.Block, x.irReqVerifier)
+	execStateId, err := x.blockStore().Add(proposal.Block, x.irReqVerifier)
 	x.addBlockDur.Record(ctx, time.Since(start).Seconds())
 	if err != nil {
 		// wait for timeout, if others make progress this node will need to recover
@@ -1579,14 +1579,14 @@ func (x *ConsensusManager) onProposalMsg(ctx context.Context, proposal *abdrc.Pr
 
 // castVote signs, stores and sends the vote for an executed proposal.
 func (x *ConsensusManager) castVote(ctx context.Context, block *drctypes.BlockData, execStateId []byte) error {
-	voteMsg, err := x.safety.MakeVote(block, execStateId, x.blockStore.GetHighQc(), x.pacemaker.LastRoundTC())
+	voteMsg, err := x.safety.MakeVote(block, execStateId, x.blockStore().GetHighQc(), x.pacemaker.LastRoundTC())
 	if err != nil {
 		// wait for timeout, if others make progress this node will need to recover
 		return fmt.Errorf("failed to sign vote: %w", err)
 	}
 	x.log.InfoContext(ctx, "signed vote", "round", block.Round, "messageID", voteMessageID(voteMsg))
 	// stored before it is sent, and not sent if it cannot be stored (see onLocalTimeout); the round then ends by timeout
-	if err = x.blockStore.StoreLastVote(voteMsg); err != nil {
+	if err = x.blockStore().StoreLastVote(voteMsg); err != nil {
 		return fmt.Errorf("vote not sent: storing it failed: %w", err)
 	}
 	x.pacemaker.SetVoted(voteMsg)
@@ -1615,7 +1615,7 @@ func (x *ConsensusManager) processQC(ctx context.Context, qc *drctypes.QuorumCer
 	if x.epochAnchor != nil && (qc.VoteInfo == nil || qc.VoteInfo.Epoch != x.epochAnchor.Epoch) {
 		return fmt.Errorf("QC is not of the epoch %d of the installed anchor", x.epochAnchor.Epoch)
 	}
-	if parent, err := x.blockStore.Block(qc.GetRound()); err == nil && parent.BlockData.Anchor == nil {
+	if parent, err := x.blockStore().Block(qc.GetRound()); err == nil && parent.BlockData.Anchor == nil {
 		if err := drctypes.VerifyTimestampProof(parent.BlockData, qc); err != nil {
 			x.log.WarnContext(ctx, "QC timestamp differs from executed block", logger.Error(err))
 			if e := x.sendRecoveryRequests(ctx, qc); e != nil {
@@ -1624,7 +1624,7 @@ func (x *ConsensusManager) processQC(ctx context.Context, qc *drctypes.QuorumCer
 			return fmt.Errorf("QC of round %d does not match the executed block: %w", qc.GetRound(), err)
 		}
 	}
-	certs, err := x.blockStore.ProcessQc(qc)
+	certs, err := x.blockStore().ProcessQc(qc)
 	if err != nil {
 		if x.frontier != nil && errors.Is(err, storage.ErrPersistenceUncertain) {
 			x.frontier.latchFault(fmt.Errorf("QC of round %d: %w", qc.GetRound(), err))
@@ -1656,7 +1656,7 @@ func (x *ConsensusManager) processQC(ctx context.Context, qc *drctypes.QuorumCer
 	// in the "DiemBFT v4" pseudocode the process_certificate_qc first calls
 	// leaderSelector.Update and after that pacemaker.AdvanceRound - we do it the
 	// other way around as otherwise current leader goes out of sync with peers...
-	if err := x.leaderSelector.Update(qc, x.pacemaker.GetCurrentRound(), x.blockStore.Block); errors.Is(err, leader.ErrNotConsecutive) {
+	if err := x.leaderSelector.Update(qc, x.pacemaker.GetCurrentRound(), x.blockStore().Block); errors.Is(err, leader.ErrNotConsecutive) {
 		// a timed-out round precedes the QC: no election, the next leader is the round-robin fallback on every node
 		x.log.DebugContext(ctx, "leader selector not updated", logger.Error(err))
 	} else if err != nil {
@@ -1679,7 +1679,7 @@ func (x *ConsensusManager) processTC(ctx context.Context, tc *drctypes.TimeoutCe
 	if x.validateTimeoutCert(tc) != nil {
 		return
 	}
-	if err := x.blockStore.ProcessTc(tc); err != nil {
+	if err := x.blockStore().ProcessTc(tc); err != nil {
 		// the TC is used anyway, only storing it failed
 		x.log.WarnContext(ctx, "processing timeout certificate", logger.Error(err))
 	}
@@ -1875,7 +1875,7 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 
 	// the proposal extends the block of the high QC (the epoch's anchor for its first block), only changes in that branch are in the way
 	// of new ones
-	highQc := x.blockStore.GetHighQc()
+	highQc := x.blockStore().GetHighQc()
 	var branch uint64
 	switch {
 	case highQc != nil:
@@ -1884,7 +1884,7 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 		branch = x.epochAnchor.Slot
 	}
 	inProgress := func(partition types.PartitionID, shard types.ShardID) *types.InputRecord {
-		return x.blockStore.IsChangeInProgress(branch, partition, shard)
+		return x.blockStore().IsChangeInProgress(branch, partition, shard)
 	}
 	// find shards with T2 timeouts
 	profile := x.params.NetworkProfileVersion
@@ -1892,8 +1892,8 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 		profile = storage.ProfileLegacy
 	}
 	oldSuffix := false
-	if highQC := x.blockStore.GetHighQc(); profile == storage.ProfileHandoff && highQC != nil {
-		oldSuffix, err = x.blockStore.SuffixParent(highQC.GetRound(), x.trustBase.Load().Epoch)
+	if highQC := x.blockStore().GetHighQc(); profile == storage.ProfileHandoff && highQC != nil {
+		oldSuffix, err = x.blockStore().SuffixParent(highQC.GetRound(), x.trustBase.Load().Epoch)
 		if err != nil {
 			x.log.WarnContext(ctx, "cannot establish parent control state", logger.Error(err))
 			return
@@ -1905,7 +1905,7 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 	var switching storage.ShardSet
 	if !oldSuffix {
 		if highQc != nil || x.epochAnchor != nil {
-			if switching, err = x.blockStore.SwitchingShardsForBlock(branch, round); err != nil {
+			if switching, err = x.blockStore().SwitchingShardsForBlock(branch, round); err != nil {
 				x.log.WarnContext(ctx, "cannot establish the shards that switch configuration in the proposal", logger.Error(err))
 				return
 			}
@@ -1932,7 +1932,7 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 	if profile == storage.ProfileHandoff {
 		payload.Version = profile
 	}
-	parentQC := x.blockStore.GetHighQc()
+	parentQC := x.blockStore().GetHighQc()
 	var handoffRecords [][]byte
 	if profile == storage.ProfileHandoff && !oldSuffix {
 		handoffRecords, err = x.handoffRecordsForRound(round, parentQC)
@@ -1965,7 +1965,7 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 		if profile == storage.ProfileHandoff {
 			payload.Version = profile
 			if parentQC != nil {
-				frozen, active, err := x.blockStore.FrozenShardForBlock(parentQC.GetRound(), round)
+				frozen, active, err := x.blockStore().FrozenShardForBlock(parentQC.GetRound(), round)
 				if err != nil {
 					x.log.WarnContext(ctx, "cannot establish frozen EVM shard", logger.Error(err))
 					return
@@ -1997,14 +1997,14 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 	}
 	if profile == storage.ProfileHandoff && !oldSuffix && (parentQC != nil || parentAnchor != nil) {
 		// a closed epoch's CloseLiability is mandatory in the first ordinary block after its freeze, and in every block until it is in
-		closures, err := x.blockStore.ClosureControls(parentRound, x.trustBase.Load().Epoch, round)
+		closures, err := x.blockStore().ClosureControls(parentRound, x.trustBase.Load().Epoch, round)
 		if err != nil {
 			x.log.WarnContext(ctx, "cannot build the mandatory closure of the proposal", logger.Error(err))
 			return
 		}
 		payload.PosControls = append(closures, payload.PosControls...)
 	}
-	parent, err := x.blockStore.Block(parentRound)
+	parent, err := x.blockStore().Block(parentRound)
 	if err != nil {
 		x.log.WarnContext(ctx, "cannot read proposal parent timestamp", logger.Error(err))
 		return
@@ -2081,7 +2081,7 @@ func (x *ConsensusManager) onStateReq(ctx context.Context, req *abdrc.StateReque
 	if err != nil {
 		return fmt.Errorf("invalid receiver identifier %q: %w", req.NodeId, err)
 	}
-	stateMsg, err := x.blockStore.GetState()
+	stateMsg, err := x.blockStore().GetState()
 	if err != nil {
 		return fmt.Errorf("creating state message: %w", err)
 	}
@@ -2107,7 +2107,7 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 		if x.recoveryHistory == nil {
 			return fmt.Errorf("recovery response verification failed: %w", abdrc.ErrHistoricalTrustBase)
 		}
-		verifyErr = rsp.VerifyWithAnchorSigning(x.params.HashAlgorithm, x.trustBase.Load(), x.stateHistory(), x.blockStore, x.trustBaseStore, x.trustBaseStore.GenesisPin())
+		verifyErr = rsp.VerifyWithAnchorSigning(x.params.HashAlgorithm, x.trustBase.Load(), x.stateHistory(), x.blockStore(), x.trustBaseStore, x.trustBaseStore.GenesisPin())
 	} else {
 		verifyErr = rsp.VerifySigning(x.params.HashAlgorithm, x.trustBase.Load(), x.trustBaseStore, x.trustBaseStore.GenesisPin())
 	}
@@ -2128,7 +2128,7 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 	// fetches them before each Add (witnesses are content-addressed and hash-checked: holding them early changes nothing else). Without this a root that
 	// lacks a witness would refuse a state it could recover from.
 	for i, block := range rsp.Pending {
-		if err := x.fetchWitnesses(ctx, x.blockStore, block); err != nil {
+		if err := x.fetchWitnesses(ctx, x.blockStore(), block); err != nil {
 			return fmt.Errorf("recovery block %d controls: %w", i, err)
 		}
 	}
@@ -2152,15 +2152,15 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 	// The head commits a source log this root may not retain in full (the records committed while it was away): complete it from the
 	// other roots before the head replaces the root, while the store is still untouched, or the first record past the head finds a gap.
 	if rsp.CommittedHead.Anchor == nil {
-		if err := x.blockStore.EnsureRecordPrefix(ctx, rsp.CommittedHead); err != nil {
+		if err := x.blockStore().EnsureRecordPrefix(ctx, rsp.CommittedHead); err != nil {
 			recoveryWriteStarted = false
 			return fmt.Errorf("recovery, source log of the committed head: %w", err)
 		}
 	}
 	if x.recoveryProfile2 && rsp.CommittedHead.Anchor != nil {
-		blockStore, err = x.blockStore.NewFromAnchorState(rsp.CommittedHead)
+		blockStore, err = x.blockStore().NewFromAnchorState(rsp.CommittedHead)
 	} else {
-		blockStore, err = storage.NewFromState(x.params.HashAlgorithm, rsp.CommittedHead, x.blockStore.GetDB(), x.orchestration, x.log, x.params.NetworkProfileVersion)
+		blockStore, err = storage.NewFromState(x.params.HashAlgorithm, rsp.CommittedHead, x.blockStore().GetDB(), x.orchestration, x.log, x.params.NetworkProfileVersion)
 	}
 	if err != nil {
 		if errors.Is(err, storage.ErrRefusedBeforeWrite) {
@@ -2181,12 +2181,12 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 		return fmt.Errorf("verifier construction failed: %w", err)
 	}
 	// the replacement store executes the recovery blocks and then the live ones: it needs the control collaborators of the one it replaces
-	blockStore.SetPosServices(x.blockStore.PosServices())
+	blockStore.SetPosServices(x.blockStore().PosServices())
 	if x.vr != nil {
 		blockStore.SetCommitObserver(x.vr.onCommit)
 		blockStore.SetExecutionObserver(x.vr.onExecuted)
 	}
-	blockStore.SetLeaderInputs(x.blockStore.LeaderInputs())
+	blockStore.SetLeaderInputs(x.blockStore().LeaderInputs())
 	if x.utbPrevious != nil {
 		blockStore.SetUTBBinding(utbBindingFor(x.utbSigningConfig(), blockStore, x.utbPrevious))
 		if x.utbStore != nil {
@@ -2224,7 +2224,7 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 		return fmt.Errorf("recovery T2 timeout generator init failed: %w", err)
 	}
 	// all ok
-	x.blockStore = blockStore
+	x.storeRef.Store(blockStore)
 	x.irReqVerifier = reqVerifier
 	x.t2Timeouts = t2TimeoutGen
 	x.observeVR() // a recovered root re-learns its committed opening now
@@ -2238,7 +2238,7 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 	// in the "DiemBFT v4" pseudocode the process_certificate_qc first calls
 	// leaderSelector.Update and after that pacemaker.AdvanceRound - we do it the
 	// other way around as otherwise current leader goes out of sync with peers...
-	if err = x.leaderSelector.Update(x.blockStore.GetHighQc(), x.pacemaker.GetCurrentRound(), x.blockStore.Block); errors.Is(err, leader.ErrNotConsecutive) {
+	if err = x.leaderSelector.Update(x.blockStore().GetHighQc(), x.pacemaker.GetCurrentRound(), x.blockStore().Block); errors.Is(err, leader.ErrNotConsecutive) {
 		// not a fault: see the live path, the round-robin fallback applies
 		x.log.DebugContext(ctx, "leader selector not updated", logger.Error(err))
 	} else if err != nil {
@@ -2377,13 +2377,13 @@ func (x *ConsensusManager) voteAfterRecovery(ctx context.Context, prop *abdrc.Pr
 	// is the proposed block: Add compares the hashes of the complete blocks if the round exists, returns the stored root for the same block,
 	// executes the proposal if the round is not there, and fails otherwise. In case of failure the node does not vote (the vote state is not
 	// touched) and waits for the timeout or the next proposal, as the node cannot sign the proposal with a state it did not compute for it.
-	if _, berr := x.blockStore.Block(prop.Block.Round); berr != nil {
+	if _, berr := x.blockStore().Block(prop.Block.Round); berr != nil {
 		// not stored: the witnesses of its payload are fetched before it is executed
-		if err := x.fetchWitnesses(ctx, x.blockStore, prop.Block); err != nil {
+		if err := x.fetchWitnesses(ctx, x.blockStore(), prop.Block); err != nil {
 			return fmt.Errorf("recovery failed to execute proposal: %w", err)
 		}
 	}
-	stateHash, err := x.blockStore.Add(prop.Block, x.irReqVerifier)
+	stateHash, err := x.blockStore().Add(prop.Block, x.irReqVerifier)
 	if err != nil {
 		return fmt.Errorf("recovery failed to execute proposal: %w", err)
 	}
@@ -2395,7 +2395,7 @@ func (x *ConsensusManager) voteAfterRecovery(ctx context.Context, prop *abdrc.Pr
 		return nil
 	}
 	// send a vote message to next leader
-	voteMsg, err := x.safety.MakeVote(prop.Block, stateHash, x.blockStore.GetHighQc(), x.pacemaker.LastRoundTC())
+	voteMsg, err := x.safety.MakeVote(prop.Block, stateHash, x.blockStore().GetHighQc(), x.pacemaker.LastRoundTC())
 	if err != nil {
 		// wait for timeout, if others make progress this node will need to recover
 		return fmt.Errorf("failed to sign vote: %w", err)
@@ -2403,7 +2403,7 @@ func (x *ConsensusManager) voteAfterRecovery(ctx context.Context, prop *abdrc.Pr
 	// the vote is stored like any other before it is sent (a vote that cannot be stored is not sent: the last vote restores the pacemaker after a
 	// restart, and the vote-store-before-send rule holds on the recovery path too). Upstream warns here and sends: MakeVote has advanced the voting
 	// rounds durably before it signed, so this node does not sign the round twice either way; ours keeps the stricter rule.
-	if err = x.blockStore.StoreLastVote(voteMsg); err != nil {
+	if err = x.blockStore().StoreLastVote(voteMsg); err != nil {
 		return fmt.Errorf("vote not sent after recovery: storing it failed: %w", err)
 	}
 	x.pacemaker.SetVoted(voteMsg)
@@ -2520,6 +2520,10 @@ func (x *ConsensusManager) pendingStaged() *stagedEVMMembers {
 	return staged
 }
 
+// blockStore is the current block store. A recovery installs a new one on the loop while shard-facing, operator and serving goroutines
+// read it (ShardInfo, GetState, the frontier cut, the record and witness feeds), so it is published atomically (#1191).
+func (x *ConsensusManager) blockStore() *storage.BlockStore { return x.storeRef.Load() }
+
 func (x *ConsensusManager) ShardInfo(partition types.PartitionID, shard types.ShardID) (*storage.ShardInfo, error) {
 	// the shard-facing node reads one published context, under the barrier's read side (#1086)
 	var si *storage.ShardInfo
@@ -2527,7 +2531,7 @@ func (x *ConsensusManager) ShardInfo(partition types.PartitionID, shard types.Sh
 		if x.recovery.InRecovery() {
 			return fmt.Errorf("node is in recovery: %s", x.recovery)
 		}
-		si = x.blockStore.ShardInfo(partition, shard)
+		si = x.blockStore().ShardInfo(partition, shard)
 		return nil
 	}); err != nil {
 		return nil, err
@@ -2556,7 +2560,7 @@ func (x *ConsensusManager) updateQCMetrics(ctx context.Context, qc *drctypes.Quo
 }
 
 func (x *ConsensusManager) GetState() (*abdrc.StateMsg, error) {
-	return x.blockStore.GetState()
+	return x.blockStore().GetState()
 }
 
 func addAll(set map[peer.ID]struct{}, items peer.IDSlice) {
@@ -2706,8 +2710,8 @@ func (x *ConsensusManager) checkControlEnvelope(c drctypes.PosControl, block *dr
 		return fmt.Errorf("%w: a control names another ordering position than its block", storage.ErrPosControlRefused)
 	}
 	var svc *storage.PosServices
-	if x.blockStore != nil {
-		svc = x.blockStore.PosServices()
+	if x.blockStore() != nil {
+		svc = x.blockStore().PosServices()
 	}
 	if svc != nil &&
 		(c.Network != svc.Deployment.RootNetwork || c.ChainID != svc.Deployment.ChainID || c.Custody != svc.Deployment.Custody) {
@@ -2769,19 +2773,19 @@ func (x *ConsensusManager) utbSigningConfig() func(uint64) (votesig.Config, erro
 // root runs in, the control services, the UTB binding without its durable retention): the head and every pending block must execute and be
 // certified as the state message says before anything is written.
 func (x *ConsensusManager) validateRecoveryState(rsp *abdrc.StateMsg) error {
-	return storage.ValidateRecoveryState(x.params.HashAlgorithm, rsp, x.recovery.ToRound(), x.orchestration, x.blockStore.GetDB(),
+	return storage.ValidateRecoveryState(x.params.HashAlgorithm, rsp, x.recovery.ToRound(), x.orchestration, x.blockStore().GetDB(),
 		func(bs *storage.BlockStore) (storage.IRChangeReqVerifier, error) {
 			if x.params.NetworkProfileVersion == storage.ProfileHandoff {
 				if err := configureHandoffAuthorities(bs, x.trustBase.Load(), x.epochAnchor, x.q3, x.recoveryHistory); err != nil {
 					return nil, fmt.Errorf("recovery: %w", err)
 				}
 			}
-			bs.SetPosServices(x.blockStore.PosServices())
+			bs.SetPosServices(x.blockStore().PosServices())
 			if x.vr != nil {
 				bs.SetCommitObserver(x.vr.onCommit)
 				bs.SetExecutionObserver(x.vr.onExecuted)
 			}
-			bs.SetLeaderInputs(x.blockStore.LeaderInputs())
+			bs.SetLeaderInputs(x.blockStore().LeaderInputs())
 			if x.utbPrevious != nil {
 				bs.SetUTBBinding(utbBindingFor(x.utbSigningConfig(), bs, x.utbPrevious))
 			}

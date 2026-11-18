@@ -109,7 +109,7 @@ func TestOperatorHandoffPreparesBeforeEndorsement(t *testing.T) {
 	_, _, _ = node, old, mockNet
 	_, err := cm.PlanHandoff(&next, nil)
 	require.ErrorIs(t, err, ErrHandoffApproval, "no certified EVM shard in the committed state: nothing to plan for")
-	state, err := cm.blockStore.GetState()
+	state, err := cm.blockStore().GetState()
 	require.NoError(t, err)
 	state.CommittedHead.ShardInfo = []abdrc.ShardInfo{{Partition: 8, IR: &types.InputRecord{BlockHash: parentHash}}}
 	plan, err := cm.buildHandoffPlanFromState(&next, state, nil)
@@ -127,7 +127,7 @@ func TestOperatorHandoffPreparesBeforeEndorsement(t *testing.T) {
 	})
 
 	t.Run("the leader orders Prepare for the held intent only", func(t *testing.T) {
-		parentQC := cm.blockStore.GetHighQc()
+		parentQC := cm.blockStore().GetHighQc()
 		records, err := cm.handoffRecordsForRound(parentQC.GetRound()+1, parentQC)
 		require.NoError(t, err)
 		require.Empty(t, records, "no intent held: no Prepare")
@@ -269,8 +269,8 @@ func TestOperatorHandoffPreparesBeforeEndorsement(t *testing.T) {
 	require.Equal(t, plan.Body, approved.plan.Body)
 
 	// With a quorum of endorsements of the PREPARED state, the leader orders the Freeze that names the bound parent.
-	parentQC := cm.blockStore.GetHighQc()
-	parentBlock, err := cm.blockStore.Block(parentQC.GetRound())
+	parentQC := cm.blockStore().GetHighQc()
+	parentBlock, err := cm.blockStore().Block(parentQC.GetRound())
 	require.NoError(t, err)
 	parentBlock.ShardState.Control = prepared.CommittedHead.Control
 	parentBlock.ShardState.States[types.PartitionShardID{PartitionID: 8, ShardID: (types.ShardID{}).Key()}] = &storage.ShardInfo{IR: &types.InputRecord{BlockHash: bytes.Clone(parentHash)}}
@@ -350,8 +350,8 @@ func TestLeaderAbortsWhenEVMAdvancesPastFrozenParent(t *testing.T) {
 	require.NoError(t, err)
 
 	frozenParent := bytes.Repeat([]byte{0x42}, 32)
-	parentQC := cm.blockStore.GetHighQc()
-	parent, err := cm.blockStore.Block(parentQC.GetRound())
+	parentQC := cm.blockStore().GetHighQc()
+	parent, err := cm.blockStore().Block(parentQC.GetRound())
 	require.NoError(t, err)
 	shardKey := types.PartitionShardID{PartitionID: 8, ShardID: (types.ShardID{}).Key()}
 	parent.ShardState.States[shardKey] = &storage.ShardInfo{IR: &types.InputRecord{BlockHash: bytes.Clone(frozenParent)}}
@@ -461,8 +461,8 @@ func newExplicitAbortFixture(t *testing.T, phase ...string) (*ConsensusManager, 
 	require.NoError(t, err)
 	predecessor, err := cm.handoffPredecessor()
 	require.NoError(t, err)
-	parentQC := cm.blockStore.GetHighQc()
-	parent, err := cm.blockStore.Block(parentQC.GetRound())
+	parentQC := cm.blockStore().GetHighQc()
+	parent, err := cm.blockStore().Block(parentQC.GetRound())
 	require.NoError(t, err)
 	record := evmroot.OrderedHandoffRecord{Network: 5, Epoch: 1, Attempt: 0,
 		OrderedRound: parentQC.GetRound(), ActivationRound: parentQC.GetRound() + 8,
@@ -502,7 +502,7 @@ func TestExplicitAbortPrioritizesEndorsedPhaseWithoutPlanCache(t *testing.T) {
 		}))
 	}
 	cm.handoffPlans = nil
-	parentQC := cm.blockStore.GetHighQc()
+	parentQC := cm.blockStore().GetHighQc()
 	records, err := cm.handoffRecordsForRound(parentQC.GetRound()+1, parentQC)
 	require.NoError(t, err)
 	require.Len(t, records, 2)
@@ -513,8 +513,8 @@ func TestExplicitAbortPrioritizesEndorsedPhaseWithoutPlanCache(t *testing.T) {
 
 func TestLeaderDoesNotBuildAbortAfterCommittedH(t *testing.T) {
 	cm, _, _, target, record := newExplicitAbortFixture(t)
-	parentQC := cm.blockStore.GetHighQc()
-	parent, err := cm.blockStore.Block(parentQC.GetRound())
+	parentQC := cm.blockStore().GetHighQc()
+	parent, err := cm.blockStore().Block(parentQC.GetRound())
 	require.NoError(t, err)
 	record.Kind = "commit"
 	record.FrozenID = bytes.Repeat([]byte{0x73}, 32)
@@ -576,7 +576,7 @@ func TestExplicitAbortQuorumPrioritizesRecordWithoutHandoffPlanCache(t *testing.
 	_, ready = cm.readyHandoffAbort(target)
 	require.True(t, ready, "retained operator input can recollect quorum after cache loss")
 	cm.handoffPlans = nil // simulate restart/cache loss for the volatile plan
-	parentQC := cm.blockStore.GetHighQc()
+	parentQC := cm.blockStore().GetHighQc()
 	records, err := cm.handoffRecordsForRound(parentQC.GetRound()+1, parentQC)
 	require.NoError(t, err)
 	require.Len(t, records, 2)
@@ -634,8 +634,8 @@ func TestExplicitAbortRejectsOutsiderSignature(t *testing.T) {
 func TestExplicitAbortIsIdempotentAndTooLateAfterCommit(t *testing.T) {
 	ctx := context.Background()
 	cm, _, _, target, record := newExplicitAbortFixture(t)
-	root := cm.blockStore.GetHighQc()
-	parent, err := cm.blockStore.Block(root.GetRound())
+	root := cm.blockStore().GetHighQc()
+	parent, err := cm.blockStore().Block(root.GetRound())
 	require.NoError(t, err)
 	record.Kind = "abort"
 	record.OrderedRound = root.GetRound()
@@ -687,7 +687,7 @@ func TestLapseThenReplanEndorsesAtTheNextAttempt(t *testing.T) {
 	ctx := context.Background()
 	f := newPlanFixture(t)
 	cm := f.cm
-	state, err := cm.blockStore.GetState()
+	state, err := cm.blockStore().GetState()
 	require.NoError(t, err)
 	state.CommittedHead.ShardInfo = []abdrc.ShardInfo{{Partition: 8, IR: &types.InputRecord{BlockHash: f.parentHash}}}
 	idle := state.CommittedHead.Control
@@ -724,15 +724,15 @@ func TestLapseThenReplanEndorsesAtTheNextAttempt(t *testing.T) {
 func TestNoPrepareIsOrderedAfterALapseWithoutANewPlan(t *testing.T) {
 	f := newPlanFixture(t)
 	cm := f.cm
-	state, err := cm.blockStore.GetState()
+	state, err := cm.blockStore().GetState()
 	require.NoError(t, err)
 	state.CommittedHead.ShardInfo = []abdrc.ShardInfo{{Partition: 8, IR: &types.InputRecord{BlockHash: f.parentHash}}}
 	idle := *state.CommittedHead.Control
 	plan0, err := cm.buildHandoffPlanFromState(&f.next, state, nil)
 	require.NoError(t, err)
 
-	parentQC := cm.blockStore.GetHighQc()
-	parentBlock, err := cm.blockStore.Block(parentQC.GetRound())
+	parentQC := cm.blockStore().GetHighQc()
+	parentBlock, err := cm.blockStore().Block(parentQC.GetRound())
 	require.NoError(t, err)
 	preparedAt := parentQC.GetRound()
 	setControl := func(c *evmroot.ControlState) { parentBlock.ShardState.Control = c }
@@ -795,7 +795,7 @@ func TestWrongParentEndorsementDoesNotBlockTheQuorum(t *testing.T) {
 	ctx := context.Background()
 	f := newPlanFixture(t)
 	cm := f.cm
-	state, err := cm.blockStore.GetState()
+	state, err := cm.blockStore().GetState()
 	require.NoError(t, err)
 	state.CommittedHead.ShardInfo = []abdrc.ShardInfo{{Partition: 8, IR: &types.InputRecord{BlockHash: f.parentHash}}}
 	idle := *state.CommittedHead.Control
@@ -807,8 +807,8 @@ func TestWrongParentEndorsementDoesNotBlockTheQuorum(t *testing.T) {
 	predecessor, err := cm.handoffPredecessor()
 	require.NoError(t, err)
 
-	parentQC := cm.blockStore.GetHighQc()
-	parentBlock, err := cm.blockStore.Block(parentQC.GetRound())
+	parentQC := cm.blockStore().GetHighQc()
+	parentBlock, err := cm.blockStore().Block(parentQC.GetRound())
 	require.NoError(t, err)
 	prepared := f.preparedControl(t, &idle, plan, parentQC.GetRound())
 
@@ -899,15 +899,15 @@ func TestWrongParentEndorsementDoesNotBlockTheQuorum(t *testing.T) {
 func TestLeaderOrdersNoPrepareDuringTheCooldownAndOneAfterIt(t *testing.T) {
 	f := newPlanFixture(t)
 	cm := f.cm
-	state, err := cm.blockStore.GetState()
+	state, err := cm.blockStore().GetState()
 	require.NoError(t, err)
 	state.CommittedHead.ShardInfo = []abdrc.ShardInfo{{Partition: 8, IR: &types.InputRecord{BlockHash: f.parentHash}}}
 	idle := *state.CommittedHead.Control
 	plan0, err := cm.buildHandoffPlanFromState(&f.next, state, nil)
 	require.NoError(t, err)
 
-	parentQC := cm.blockStore.GetHighQc()
-	parentBlock, err := cm.blockStore.Block(parentQC.GetRound())
+	parentQC := cm.blockStore().GetHighQc()
+	parentBlock, err := cm.blockStore().Block(parentQC.GetRound())
 	require.NoError(t, err)
 	preparedAt := parentQC.GetRound()
 	prepared0 := f.preparedControl(t, &idle, plan0, preparedAt)

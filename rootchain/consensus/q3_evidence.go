@@ -30,7 +30,7 @@ func (x *ConsensusManager) Q3ActivationEvidence(epoch uint64) (q3format.Link, *a
 	if x.q3 == nil || x.params.NetworkProfileVersion != storage.ProfileHandoff || epoch < 2 {
 		return q3format.Link{}, nil, nil, fmt.Errorf("%w: epoch %d", ErrNoQ3Evidence, epoch)
 	}
-	return q3ActivationEvidence(x.blockStore, epoch)
+	return q3ActivationEvidence(x.blockStore(), epoch)
 }
 
 // q3EvidenceSource is what the evidence is assembled from: the committed checkpoint of the handoff and the artifacts retained when the

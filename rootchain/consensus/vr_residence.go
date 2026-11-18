@@ -104,7 +104,7 @@ func (r *vrResidence) wait(o storage.VROpening, intent [32]byte, view uint64, no
 
 // observeVR records the committed VR opening this root holds now: called whenever the committed root may have changed.
 func (x *ConsensusManager) observeVR() {
-	o, on, err := x.blockStore.CommittedVROpening()
+	o, on, err := x.blockStore().CommittedVROpening()
 	if err != nil || !on {
 		return
 	}
@@ -131,7 +131,7 @@ func (x *ConsensusManager) residenceDefers(block *rctypes.BlockData, stateID []b
 	if !has {
 		return false, nil
 	}
-	o, on, err := x.blockStore.CommittedVROpening()
+	o, on, err := x.blockStore().CommittedVROpening()
 	if err != nil || !on {
 		return true, fmt.Errorf("residence rule: the committed VR state is unavailable: %v", err)
 	}

@@ -1,0 +1,78 @@
+{
+  "format": "unicity.vr.genesis-input.v1",
+  "chainId": 3,
+  "network": "0xeca44ba9e032b019ced6b13d302aa9bed2c155e08199a9c3c567c79af88b6432",
+  "governorSigners": [
+    "0x2c09e4c566a7d48bdb67a842d5a33d43fdad4114",
+    "0x79fb0dda435e86ec748c583fd532fdd9aebcc602",
+    "0x7e805b9378fdfc6f1f1773078fcf2932f794bd73",
+    "0xb7811e725e613721dd0a7b8fad508d70e2a2c31e",
+    "0xf8f4a33fb545caa0fb1909b91f4a957aa53afd76"
+  ],
+  "limits": {
+    "nMin": 4,
+    "nTarget": 4,
+    "nMax": 16,
+    "vMax": 16,
+    "lMax": 1,
+    "rMax": 4,
+    "maxBatch": 32
+  },
+  "knownRootEpoch": 1,
+  "epochStartProgress": 0,
+  "fees": {
+    "baseFeeFloor": 1000000,
+    "changeDenominator": 8,
+    "feeCollector": "0x00000000000000000000000000000000000000fe"
+  },
+  "maxGas": 184729388,
+  "systemGas": 124729388,
+  "continuity": {
+    "maxM": 4,
+    "distNum": 1,
+    "distDen": 2
+  },
+  "identityCount": 4,
+  "identities": [
+    {
+      "id": 1,
+      "owner": "0xd719d831eacd9e93c7768567f6790203e4fdaf6f",
+      "rootNodeID": "16Uiu2HAm1RgYi5u9a1LccVhh7WNCayVfynRxkUhbtJn3XPNXmbU8",
+      "rootKey": "0x02c44ffdfb4c4c4cf095410bc98a05fa53916a48c428a42f4ed5bbfafd78c517be",
+      "evmNodeID": "16Uiu2HAmQVbLKC4xkSSgg2BbS9tPkEbjYmERVEVDHxZw1WoH9kMQ",
+      "evmKey": "0x038317fd490f496e757173d4caca3a5f89ec6d9155b8b69667ad49c9a46f496809",
+      "payee": "0xd719d831eacd9e93c7768567f6790203e4fdaf6f",
+      "rawWeight": 1
+    },
+    {
+      "id": 2,
+      "owner": "0x11fed1fc0b7437571ecba4956e7a231d4e68b4ba",
+      "rootNodeID": "16Uiu2HAm315roQmGuBgoswxGp12NkdFFPxX1mFrtDExyH9C8iYEq",
+      "rootKey": "0x03f6f3e4d3ca2db693f385ec266dcd57edd60fb9a0d19163bc63f8c2e30774ba0d",
+      "evmNodeID": "16Uiu2HAmT6YbqHaUeHpSLGnDFs58V5SAkV6EKQnPYvRJGjLZbMwF",
+      "evmKey": "0x0261a68244860b93334a1a03c398a0fb40cd1d2f453a23ff3be49e260ef23a8b61",
+      "payee": "0x11fed1fc0b7437571ecba4956e7a231d4e68b4ba",
+      "rawWeight": 1
+    },
+    {
+      "id": 3,
+      "owner": "0xba56f3c1787e37bcab1751533d37824f0bb59a8a",
+      "rootNodeID": "16Uiu2HAm5opp5gZHPMsGUcu4syXeFDSZKxo1CLk7BpJCBVLFXqMN",
+      "rootKey": "0x030c91eb108f3e1c9f26485de76b3c652441254b5751537c57fd8f3ffa9f886154",
+      "evmNodeID": "16Uiu2HAm6sRxHEzWHib6uopHQDvak3Vm2qgyMuDQUdjBeo9BEDCD",
+      "evmKey": "0x02916fa80a635638af22368680100b3d21c99d5b2028f274669720c343685f3e12",
+      "payee": "0xba56f3c1787e37bcab1751533d37824f0bb59a8a",
+      "rawWeight": 1
+    },
+    {
+      "id": 4,
+      "owner": "0x76c61692d44c58f09cb90b66f43d0d5f91bba144",
+      "rootNodeID": "16Uiu2HAmTwowdNrumbrWBjp2x2aWqkAzpYVBdpPCiaqxrAa8u5ie",
+      "rootKey": "0x03b1843c6476fa06d9a93a593cba07bcd657a34e7050be3a5f65d66541bcad9800",
+      "evmNodeID": "16Uiu2HAmJWB59TZM9DMJebKpFpk3RB7ZXKFzo1zS5HDmmFvykNpr",
+      "evmKey": "0x02df8bda82fb73ca08aa89d416ae33b9077ecbdcc26fe7bd09b446896c4033d778",
+      "payee": "0x76c61692d44c58f09cb90b66f43d0d5f91bba144",
+      "rawWeight": 1
+    }
+  ]
+}
