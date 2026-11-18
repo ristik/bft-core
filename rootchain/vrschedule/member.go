@@ -607,35 +607,45 @@ func (m *Member) stepReadiness(st memberState) error {
 	if st.kOnly && len(cs) == 0 {
 		return nil // a K member that is no successor has nothing else to send: no rule needs its support
 	}
-	if !m.svc.tokenValid(st.tok) {
-		return nil // the committed state moved on since this step's snapshot: sign nothing over it
-	}
-	r, err := vrhandoff.SignReadiness(st.intent, *st.assembly, body, m.cfg.Self, st.trustBase, cs, m.cfg.RootSigner)
-	if err != nil {
-		return fmt.Errorf("%w: %w", ErrMember, err)
-	}
-	// what is about to be made durable verifies exactly as every root will judge it
-	if err := vrhandoff.VerifyReadiness(st.intent, *st.assembly, body, st.self, st.trustBase, r); err != nil {
-		return fmt.Errorf("%w: this node's own readiness does not verify: %w", ErrMember, err)
-	}
-	if st.successor {
-		if err := vradmit.VerifySuccessorSupport(st.schedule, st.rootEpoch+1, st.intent.Network, st.table, st.self, r.Commitments); err != nil {
-			return fmt.Errorf("%w: this node's own readiness lacks the support the gate needs: %w", ErrMember, err)
+	// The decision, the signature and the durable record are one step, serialized with the committed-state transition: the service's lock is
+	// held from the state check to the end of the write, so no committed update (a view advancing, an intent dying, a Prepare, a support
+	// basis change) lands between the check and the record, and no signing call of the old state happens after the update. The signing, the
+	// verification and the write touch no service state, so holding the lock across them cannot deadlock; the committed update waits for them
+	// (a signature and one fsync).
+	var r vrhandoff.Readiness
+	var cfgErr error
+	valid, err := m.svc.underToken(st.tok, func() error {
+		var err error
+		if r, err = vrhandoff.SignReadiness(st.intent, *st.assembly, body, m.cfg.Self, st.trustBase, cs, m.cfg.RootSigner); err != nil {
+			return fmt.Errorf("%w: %w", ErrMember, err)
 		}
-	}
-	// signed over the snapshot, so it is made durable only while the snapshot still holds: a signature the committed state has overtaken is
-	// discarded unreleased (nothing was persisted or sent, so nothing can equivocate)
-	if !m.svc.tokenValid(st.tok) {
+		// what is made durable verifies exactly as every root will judge it
+		if err := vrhandoff.VerifyReadiness(st.intent, *st.assembly, body, st.self, st.trustBase, r); err != nil {
+			cfgErr = fmt.Errorf("%w: this node's own readiness does not verify: %w", ErrMember, err)
+			return cfgErr
+		}
+		if st.successor {
+			if err := vradmit.VerifySuccessorSupport(st.schedule, st.rootEpoch+1, st.intent.Network, st.table, st.self, r.Commitments); err != nil {
+				cfgErr = fmt.Errorf("%w: this node's own readiness lacks the support the gate needs: %w", ErrMember, err)
+				return cfgErr
+			}
+		}
+		enc, err := r.Encode()
+		if err != nil {
+			return err
+		}
+		mi.Views = append(mi.Views, memberView{View: st.view, CandidateDigest: hex.EncodeToString(cd[:]), Readiness: hex.EncodeToString(enc)})
+		if err := m.persist(); err != nil { // (intent, view, candidate digest) is durable before the readiness is released
+			mi.Views = mi.Views[:len(mi.Views)-1]
+			return fmt.Errorf("%w: persisting the signed view: %w", ErrMember, err)
+		}
 		return nil
+	})
+	if !valid {
+		return nil // the committed state moved on since this step's snapshot: nothing was signed over it
 	}
-	enc, err := r.Encode()
 	if err != nil {
 		return err
-	}
-	mi.Views = append(mi.Views, memberView{View: st.view, CandidateDigest: hex.EncodeToString(cd[:]), Readiness: hex.EncodeToString(enc)})
-	if err := m.persist(); err != nil { // (intent, view, candidate digest) is durable before the readiness is released
-		mi.Views = mi.Views[:len(mi.Views)-1]
-		return fmt.Errorf("%w: persisting the signed view: %w", ErrMember, err)
 	}
 	m.log().Info("VR handoff member: readiness", "intent", fmt.Sprintf("%x", st.digest[:8]), "view", st.view, "commitments", len(cs))
 	m.lastRd = time.Time{}
@@ -648,6 +658,40 @@ func (m *Member) stepReadiness(st memberState) error {
 		}
 	}
 	return nil
+}
+
+// underToken runs fn while the service holds exactly the state tok names (the intent, its committed view, no Prepare, the support basis),
+// serialized with every committed-state update: it reports false without running fn when the state moved on. fn must not call back into the
+// service.
+func (s *Service) underToken(t stateToken, fn func() error) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.tokenValidLocked(t) {
+		return false, nil
+	}
+	return true, fn()
+}
+
+// ExchangeOpen is whether this root's readiness exchange is still open, so that it keeps pulling stage sets: while no certificate is held, or
+// one is held but the Prepare plan still waits for K support. After a committed Prepare it is open only for a root that does not hold the
+// certificate (it needs recovery), never for one that does.
+func (s *Service) ExchangeOpen() bool {
+	s.mu.Lock()
+	st := s.cur
+	if st == nil {
+		s.mu.Unlock()
+		return false
+	}
+	prepared, held := st.prepared, st.iret != nil
+	s.mu.Unlock()
+	if prepared {
+		return !held
+	}
+	if !held {
+		return true
+	}
+	_, ready := s.Plan()
+	return !ready
 }
 
 // exchangePending is whether the readiness exchange is still open for this member. A K member that is no successor re-sends its support until
