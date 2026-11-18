@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-core/internal/testutils/vrhandofffix"
 	"github.com/unicitynetwork/bft-core/vrhandoff"
 	"github.com/unicitynetwork/bft-core/vrschema"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -24,6 +25,8 @@ type swarm struct {
 	bus      []busMsg
 	sentKind map[string]int
 	sch      []vrschema.Activation
+	supports func(vrschema.Activation) bool
+	stages   map[string]int
 }
 
 type busMsg struct {
@@ -32,7 +35,7 @@ type busMsg struct {
 }
 
 func (w *world) swarm(t *testing.T, sch []vrschema.Activation) *swarm {
-	s := &swarm{w: w, svcs: map[string]*Service{}, members: map[string]*Member{}, paths: map[string]string{}, sentKind: map[string]int{}, sch: sch}
+	s := &swarm{w: w, svcs: map[string]*Service{}, members: map[string]*Member{}, paths: map[string]string{}, sentKind: map[string]int{}, sch: sch, stages: map[string]int{}, supports: func(vrschema.Activation) bool { return true }}
 	dir := t.TempDir()
 	for i := uint64(1); i <= 5; i++ {
 		s.start(t, w.Members[i].Root, filepath.Join(dir, w.Members[i].Root+".json"), true)
@@ -50,7 +53,8 @@ func (s *swarm) start(t *testing.T, id, path string, member bool) {
 		s.svcs[id] = svc
 		if member {
 			var err error
-			m, err = NewMember(svc, MemberConfig{Self: id, RootSigner: x.RK.Signer, EVMSigner: x.EK.Signer, Path: path, Send: func(msg Message) { s.record(id, msg) }})
+			m, err = NewMember(svc, MemberConfig{Self: id, RootSigner: x.RK.Signer, EVMSigner: x.EK.Signer, Path: path, Send: func(msg Message) { s.record(id, msg) }, Supports: s.supports,
+				Stage: func(Staged) error { s.stages[id]++; return nil }})
 			require.NoError(t, err)
 			s.members[id] = m
 		}
@@ -209,7 +213,13 @@ func TestAMemberSignsAViewOnceAndRestartsWithoutResigning(t *testing.T) {
 	}
 	s.bus = nil
 	require.NoError(t, s.members[joiner].Step())
-	require.Empty(t, s.bus, "a view signed for another candidate is never signed again")
+	for _, b := range s.bus {
+		if b.m.Readiness != nil {
+			enc, err := b.m.Readiness.Encode()
+			require.NoError(t, err)
+			require.Equal(t, v.Readiness, hex.EncodeToString(enc), "only the readiness it signed is re-sent, nothing new")
+		}
+	}
 }
 
 // Messages for a view that is not committed are not signed: a member waits for the committed view, and signs the next view's assembly only
@@ -310,3 +320,251 @@ func TestAKMembersReadinessNeedsACommitmentAndOutsidersAreDropped(t *testing.T) 
 }
 
 func sha256sum(b []byte) [32]byte { return sha256.Sum256(b) }
+
+// Rule support is fail-closed: a node that does not implement a scheduled rule signs no readiness (it would burn its one signature of the view
+// and claim a release it does not run), and logs UpgradeRequired; with the rule implemented it commits to it, in ascending rule order, for
+// the rules the gate needs only (a latched rule is committed, a rule beyond the successor epoch's reach is not).
+func TestAMemberSupportsOnlyWhatItImplements(t *testing.T) {
+	w := newWorld(t)
+	rule := vrschema.Activation{RuleID: vrschema.RuleID("rule-a"), ReleaseDigest: vrschema.Word{0xaa}, RootEpoch: 2, State: vrschema.ActActive, ChangeID: 1}
+	latched := vrschema.Activation{RuleID: vrschema.RuleID("rule-b"), ReleaseDigest: vrschema.Word{0xbb}, RootEpoch: 1, State: vrschema.ActLatched, ChangeID: 2}
+	far := vrschema.Activation{RuleID: vrschema.RuleID("rule-c"), ReleaseDigest: vrschema.Word{0xcc}, RootEpoch: 9, State: vrschema.ActActive, ChangeID: 3}
+	sch := []vrschema.Activation{rule, latched, far}
+
+	// the default: ImplementedRules (empty): nothing is supported, so nothing is signed and the view does not complete
+	s := w.swarm(t, sch)
+	s.supports = nil
+	for id := range s.members {
+		svc := s.svcs[id]
+		m, err := NewMember(svc, MemberConfig{Self: id, RootSigner: w.byRoot(id).RK.Signer, EVMSigner: w.byRoot(id).EK.Signer, Send: func(msg Message) { s.record(id, msg) }})
+		require.NoError(t, err)
+		s.members[id] = m
+	}
+	s.update(0)
+	s.run(t)
+	require.Zero(t, s.sentKind["readiness"], "a node that implements none of the scheduled rules signs no readiness")
+	for _, svc := range s.svcs {
+		_, _, complete, _ := svc.Current()
+		require.False(t, complete)
+	}
+
+	// implementing them: the commitments are the rules the gate needs (E <= epoch+1), ascending, the far rule excluded
+	ImplementedRules[[2]vrschema.Word{rule.RuleID, rule.ReleaseDigest}] = true
+	ImplementedRules[[2]vrschema.Word{latched.RuleID, latched.ReleaseDigest}] = true
+	t.Cleanup(func() {
+		delete(ImplementedRules, [2]vrschema.Word{rule.RuleID, rule.ReleaseDigest})
+		delete(ImplementedRules, [2]vrschema.Word{latched.RuleID, latched.ReleaseDigest})
+	})
+	s.update(0)
+	s.run(t)
+	set, _ := s.svcs[w.Members[1].Root].Stage(w.d, 0)
+	require.NotEmpty(t, set.Readiness)
+	for _, r := range set.Readiness {
+		require.Len(t, r.Commitments, 2)
+		require.Less(t, string(r.Commitments[0].RuleID), string(r.Commitments[1].RuleID))
+		for _, c := range r.Commitments {
+			require.NotEqual(t, far.RuleID[:], c.RuleID, "a rule beyond the successor epoch's reach is not committed")
+		}
+	}
+}
+
+// The EVM key must be the member's: a key of another node is refused before anything is persisted; a persisted proof that does not verify is
+// derived again, and only the proof, never a signed view.
+func TestAWrongEVMKeyIsRefusedAndAnInvalidStoredPoPIsRecovered(t *testing.T) {
+	w := newWorld(t)
+	self := w.Members[5]
+	path := filepath.Join(t.TempDir(), "m.json")
+	svc := NewService(ServiceConfig{Self: self.Root, Signer: self.RK.Signer})
+	svc.Update(w.committed(0))
+
+	wrong, err := NewMember(svc, MemberConfig{Self: self.Root, RootSigner: self.RK.Signer, EVMSigner: w.Members[1].EK.Signer, EVMNodeID: w.Members[1].EVM, Path: path})
+	require.NoError(t, err)
+	err = wrong.Step()
+	require.ErrorIs(t, err, ErrMember)
+	require.Contains(t, err.Error(), "--vr-evm-keys")
+	_, statErr := os.Stat(path)
+	require.True(t, os.IsNotExist(statErr), "nothing was persisted")
+
+	// the node id is not known to the caller, but the key is another node's: the proof does not verify and is not persisted either
+	anon, err := NewMember(svc, MemberConfig{Self: self.Root, RootSigner: self.RK.Signer, EVMSigner: w.Members[1].EK.Signer, Path: path})
+	require.NoError(t, err)
+	require.ErrorIs(t, anon.Step(), ErrMember)
+	_, statErr = os.Stat(path)
+	require.True(t, os.IsNotExist(statErr))
+
+	// a stored proof that does not verify (written by an older run with the wrong key) is replaced; a signed view stays
+	bad := memberFile{Intents: []memberIntent{{Intent: hex.EncodeToString(w.d[:]), Epoch: w.RC.RootEpoch, Attempt: w.in.Attempt, PoP: "00",
+		Views: []memberView{{View: 0, CandidateDigest: hex.EncodeToString(make([]byte, 32)), Readiness: "00"}}}}}
+	raw, err := json.Marshal(bad)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, raw, 0o600))
+	m, err := NewMember(svc, MemberConfig{Self: self.Root, RootSigner: self.RK.Signer, EVMSigner: self.EK.Signer, EVMNodeID: self.EVM, Path: path})
+	require.NoError(t, err)
+	require.NoError(t, m.Step())
+	f := readFile(t, path)
+	require.NotEqual(t, "00", f.Intents[0].PoP)
+	require.Len(t, f.Intents[0].Views, 1, "the signed view was not wiped")
+}
+
+// A corrupt persisted readiness is an error and is never signed over again.
+func TestACorruptPersistedReadinessIsNeverSignedOver(t *testing.T) {
+	w := newWorld(t)
+	s := w.swarm(t, nil)
+	s.update(0)
+	s.run(t)
+	joiner := w.Members[5].Root
+	f := readFile(t, s.paths[joiner])
+	f.Intents[0].Views[0].Readiness = "zz"
+	raw, _ := json.Marshal(f)
+	require.NoError(t, os.WriteFile(s.paths[joiner], raw, 0o600))
+	s.start(t, joiner, s.paths[joiner], true)
+	s.svcs[joiner].Update(w.committed(0))
+	set, _ := s.svcs[w.Members[1].Root].Stage(w.d, 0)
+	for _, m := range set.Offers() {
+		if m.Readiness == nil {
+			_, _, _ = s.svcs[joiner].Offer("peer", m)
+		}
+	}
+	s.bus = nil
+	require.ErrorIs(t, s.members[joiner].Step(), ErrMember)
+	require.Empty(t, s.bus)
+	require.Equal(t, "zz", readFile(t, s.paths[joiner]).Intents[0].Views[0].Readiness)
+}
+
+// When the readiness cannot be persisted nothing is released: no message, nothing in the member's own service.
+func TestAPersistFailureReleasesNothing(t *testing.T) {
+	w := newWorld(t)
+	dir := t.TempDir()
+	self := w.Members[5]
+	var sent []Message
+	svc := NewService(ServiceConfig{Self: self.Root, Signer: self.RK.Signer})
+	m, err := NewMember(svc, MemberConfig{Self: self.Root, RootSigner: self.RK.Signer, EVMSigner: self.EK.Signer, Path: filepath.Join(dir, "m.json"),
+		Send: func(msg Message) { sent = append(sent, msg) }, Supports: func(vrschema.Activation) bool { return true }})
+	require.NoError(t, err)
+	svc.Update(w.committed(0))
+	pops := w.PoPs(w.in)
+	for i := range pops {
+		_, _, _ = svc.Offer("peer", Message{PoP: &pops[i]})
+	}
+	a := w.Assembly(w.in, w.d, 0, pops)
+	_, _, _ = svc.Offer("peer", Message{Assembly: &a})
+	require.NoError(t, os.Chmod(dir, 0o500)) // the state can no longer be written
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	require.Error(t, m.Step())
+	for _, msg := range sent {
+		require.Nil(t, msg.Readiness)
+	}
+	set, _ := svc.Stage(w.d, 0)
+	require.Empty(t, set.Readiness, "not even the member's own service holds a readiness")
+}
+
+// A validly signed assembly of a view that is not committed yet is buffered and never signed; it is signed once its view commits.
+func TestAMemberDoesNotSignAnUncommittedView(t *testing.T) {
+	w := newWorld(t)
+	self := w.Members[5]
+	path := filepath.Join(t.TempDir(), "m.json")
+	var sent []Message
+	svc := NewService(ServiceConfig{Self: self.Root, Signer: self.RK.Signer})
+	m, err := NewMember(svc, MemberConfig{Self: self.Root, RootSigner: self.RK.Signer, EVMSigner: self.EK.Signer, Path: path, Send: func(msg Message) { sent = append(sent, msg) }})
+	require.NoError(t, err)
+	svc.Update(w.committed(0))
+	pops := w.PoPs(w.in)
+	for i := range pops {
+		_, _, _ = svc.Offer("peer", Message{PoP: &pops[i]})
+	}
+	a1 := w.Assembly(w.in, w.d, 1, pops)
+	o, _, _ := svc.Offer("peer", Message{Assembly: &a1})
+	require.Equal(t, Buffered, o)
+	require.NoError(t, m.Step())
+	for _, msg := range sent {
+		require.Nil(t, msg.Readiness, "no readiness for an uncommitted view")
+	}
+	require.Empty(t, readFile(t, path).Intents[0].Views)
+	svc.Update(w.committed(1))
+	require.NoError(t, m.Step())
+	views := readFile(t, path).Intents[0].Views
+	require.Len(t, views, 1)
+	require.EqualValues(t, 1, views[0].View)
+}
+
+// A node that learns the certificate's assembly only after the Prepare commits (it restarted, or joined late) still stages it, once.
+func TestAMemberStagesAfterThePrepareCommits(t *testing.T) {
+	w := newWorld(t)
+	s := w.swarm(t, nil)
+	s.update(0)
+	s.run(t)
+	joiner := w.Members[5].Root
+	donor, _ := s.svcs[w.Members[1].Root].Stage(w.d, 0)
+
+	var staged int
+	x := w.Members[5]
+	svc := NewService(ServiceConfig{Self: joiner, Signer: x.RK.Signer})
+	m, err := NewMember(svc, MemberConfig{Self: joiner, RootSigner: x.RK.Signer, EVMSigner: x.EK.Signer, Path: s.paths[joiner],
+		Stage: func(Staged) error { staged++; return nil }})
+	require.NoError(t, err)
+	svc.Update(w.committed(0))
+	for _, msg := range donor.Offers() {
+		_, _, _ = svc.Offer("peer", msg)
+	}
+	c := w.committed(0)
+	c.Prepared = true
+	svc.Update(c)
+	require.NoError(t, m.Step())
+	require.NoError(t, m.Step())
+	require.Equal(t, 1, staged, "staged once, after the Prepare")
+}
+
+// A signed view whose assembly the service now holds differently is not signed again; its readiness is still sent to the peers, and it is
+// logged. A view is never lost to the retention of other intents: only intents of an older (epoch, attempt) go.
+func TestAMemberResendsItsSignedReadinessAndKeepsItsIntents(t *testing.T) {
+	w := newWorld(t)
+	s := w.swarm(t, nil)
+	s.update(0)
+	s.run(t)
+	joiner := w.Members[5].Root
+	f := readFile(t, s.paths[joiner])
+	signed := f.Intents[0].Views[0].Readiness
+	f.Intents[0].Views[0].CandidateDigest = hex.EncodeToString(make([]byte, 32))
+	raw, _ := json.Marshal(f)
+	require.NoError(t, os.WriteFile(s.paths[joiner], raw, 0o600))
+	set, _ := s.svcs[w.Members[1].Root].Stage(w.d, 0)
+	s.start(t, joiner, s.paths[joiner], true)
+	s.svcs[joiner].Update(w.committed(0))
+	for _, m := range set.Offers() {
+		if m.Readiness == nil {
+			_, _, _ = s.svcs[joiner].Offer("peer", m)
+		}
+	}
+	s.bus = nil
+	require.NoError(t, s.members[joiner].Step())
+	require.Len(t, s.bus, 1)
+	require.NotNil(t, s.bus[0].m.Readiness)
+	enc, err := s.bus[0].m.Readiness.Encode()
+	require.NoError(t, err)
+	require.Equal(t, signed, hex.EncodeToString(enc), "the readiness it signed is what is re-sent")
+	require.Equal(t, f, readFile(t, s.paths[joiner]), "and nothing new is signed")
+
+	m := s.members[joiner]
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	d1, d2, d3, d4 := [32]byte{1}, [32]byte{2}, [32]byte{3}, [32]byte{4}
+	m.file = memberFile{}
+	m.intent(d1, 1, 0)
+	m.intent(d2, 1, 0) // the same attempt: both are kept
+	require.Len(t, m.file.Intents, 2)
+	m.intent(d3, 1, 1) // a later attempt: the older ones go
+	require.Len(t, m.file.Intents, 1)
+	m.intent(d4, 1, 1)
+	m.intent(d1, 1, 0) // an intent of an older attempt that comes back: not kept beside the current ones, but the current stay
+	require.GreaterOrEqual(t, len(m.file.Intents), 2)
+}
+
+func (w *world) byRoot(id string) vrhandofffix.Member {
+	for _, m := range w.Members {
+		if m.Root == id {
+			return m
+		}
+	}
+	w.T.Fatalf("no member %s", id)
+	return vrhandofffix.Member{}
+}

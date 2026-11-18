@@ -120,7 +120,9 @@ const vrMemberFileName = "vr-member.json"
 
 // vrMemberConfig is the node's member participation (VT-09): every VR-mode node does the successor-member steps itself when an intent names
 // it. The possession proof is signed by its EVM key, read from the EVM shard node's keys.json (--vr-evm-keys, the key the validator
-// configuration names as evmKeys); without one the node signs readiness but cannot send its proof.
+// configuration names as evmKeys); without one the node signs readiness but cannot send its proof. The root process then holds that EVM
+// validator key (and the file's auth key): a compromised root process compromises the EVM validator too, so give the flag only on a host that
+// already holds both. The member refuses to sign when the key is not the EVM node the intent names for this node.
 func vrMemberConfig(home, evmKeys string) (*consensus.VRMemberConfig, error) {
 	m := &consensus.VRMemberConfig{Path: filepath.Join(home, vrMemberFileName)}
 	if os.Getenv("UBFT_VR_MEMBER_HOLD") == "1" { // development test hook (scripts/vr-boundary-steps.sh): readiness is held while <home>/vr-member.hold exists
@@ -135,11 +137,11 @@ func vrMemberConfig(home, evmKeys string) (*consensus.VRMemberConfig, error) {
 		return nil, fmt.Errorf("%w: --vr-evm-keys must name a %s", ErrVRHandoffCmd, keyConfFileName)
 	}
 	ks, err := homeKeys([]string{dir})
-	if err != nil {
-		return nil, fmt.Errorf("%w: --vr-evm-keys: %w", ErrVRHandoffCmd, err)
+	if err != nil || len(ks) != 1 {
+		return nil, fmt.Errorf("%w: --vr-evm-keys: %v (%d keys)", ErrVRHandoffCmd, err, len(ks))
 	}
-	for _, s := range ks {
-		m.EVMSigner = s
+	for id, s := range ks { // exactly one entry: the file's own key
+		m.EVMNodeID, m.EVMSigner = id, s
 	}
 	return m, nil
 }

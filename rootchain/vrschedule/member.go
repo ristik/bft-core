@@ -30,6 +30,18 @@ import (
 // candidate's semantics and every possession proof, the derived body) in the committed current view; (intent, view, candidate digest) is
 // persisted durably before the readiness is released, and at most one assembly is signed per view; a restarted member resumes at the
 // committed view (the service's) and never re-signs a persisted view: it re-sends what it persisted. Nothing here advances a view.
+//
+// The member file (vr-member.json in the node's home) is a safety store like the root's safety store and the key store: it must be
+// preserved across restarts, upgrades and backups. A node that loses it can sign a second assembly in a view it already signed, which is
+// equivocation. A missing file is an empty state and is never an error, so deleting it is silent.
+//
+// Rule support (7.3): a member commits only to rules whose (ruleId, releaseDigest) this binary implements (ImplementedRules, empty for PoA
+// today, or MemberConfig.Supports). It signs no readiness for a view while a rule the gate requires is not implemented here: it logs
+// UpgradeRequired and waits, rather than counting as a supporter of a release it does not run.
+
+// ImplementedRules are the rules (ruleId, releaseDigest) this binary implements, which its members may support (design 7.3, 7.4). It is empty
+// today (the PoA generation has no activation rule); a release that implements a rule adds its pair here.
+var ImplementedRules = map[[2]vrschema.Word]bool{}
 
 // ErrMember reports a member step this node refuses.
 var ErrMember = errors.New("vrschedule: member")
@@ -37,9 +49,6 @@ var ErrMember = errors.New("vrschedule: member")
 // ResendEvery is how often a member re-sends its possession proof until the view's assembly is held, and its readiness until the
 // intent's certificate is complete (a peer that was not reachable or that restarted learns it; peers also pull it with GetStage).
 const ResendEvery = 5 * time.Second
-
-// Intents the member's file remembers (the newest ones).
-const memberKeptIntents = 2
 
 // Staged is what the member hands to the staging hook once it holds a verified assembly: the successor body, its candidate digest, the
 // attempt and the candidate's identities (the successor's EVM validators and roots).
@@ -59,9 +68,12 @@ type MemberConfig struct {
 	Path string
 	// Send hands an outbound message to the transport; nil sends nothing.
 	Send func(Message)
-	// Supports reports whether this node runs the release of an effective rule and supports it; nil supports every rule of the committed
-	// schedule (the node's binary is the implementation the schedule's rules name).
+	// Supports reports whether this node implements an effective rule's release and supports it; nil: the compiled-in ImplementedRules
+	// (a node supports nothing it does not run).
 	Supports func(vrschema.Activation) bool
+	// EVMNodeID is the node id of the EVM key (EVMSigner): the member refuses to sign a possession proof when it is not the EVM node id the
+	// intent names for this node (a wrong --vr-evm-keys).
+	EVMNodeID string
 	// Stage stages a verified candidate for the pre-connection and the in-process switch; its error is logged, never fatal.
 	Stage func(Staged) error
 	// Hold, when set and true, makes the member hold back its readiness (the possession proof goes out): a development test hook that lets a
@@ -77,9 +89,11 @@ type memberFile struct {
 }
 
 type memberIntent struct {
-	Intent string       `json:"intent"`
-	PoP    string       `json:"pop,omitempty"`
-	Views  []memberView `json:"views,omitempty"`
+	Intent  string       `json:"intent"`
+	Epoch   uint64       `json:"rootEpoch"`
+	Attempt uint64       `json:"attempt"`
+	PoP     string       `json:"pop,omitempty"`
+	Views   []memberView `json:"views,omitempty"`
 }
 
 type memberView struct {
@@ -99,6 +113,8 @@ type Member struct {
 	lastRd   time.Time
 	staged   [32]byte
 	noEVMKey bool
+	warned   map[uint64]bool
+	upgrade  map[vrschema.Word]bool
 }
 
 // NewMember loads the persisted state (a missing file is an empty state; a corrupt one is an error: a member must not forget a signed view).
@@ -143,17 +159,29 @@ func (m *Member) persist() error {
 	return writeDurable(m.cfg.Path, raw)
 }
 
-func (m *Member) intent(d [32]byte) *memberIntent {
+// memberMaxIntents bounds the file: intents of the current or a later (root epoch, attempt) are never evicted (a revived intent's signed
+// views must survive); only strictly older ones go, oldest first, and past the bound the oldest of any.
+const memberMaxIntents = 16
+
+func (m *Member) intent(d [32]byte, epoch, attempt uint64) *memberIntent {
 	h := hex.EncodeToString(d[:])
 	for i := range m.file.Intents {
 		if m.file.Intents[i].Intent == h {
 			return &m.file.Intents[i]
 		}
 	}
-	if len(m.file.Intents) >= memberKeptIntents {
-		m.file.Intents = m.file.Intents[len(m.file.Intents)-memberKeptIntents+1:]
+	kept := m.file.Intents[:0]
+	for _, x := range m.file.Intents {
+		if x.Epoch < epoch || (x.Epoch == epoch && x.Attempt < attempt) {
+			continue // strictly older than the intent in hand
+		}
+		kept = append(kept, x)
 	}
-	m.file.Intents = append(m.file.Intents, memberIntent{Intent: h})
+	m.file.Intents = kept
+	if len(m.file.Intents) >= memberMaxIntents {
+		m.file.Intents = m.file.Intents[len(m.file.Intents)-memberMaxIntents+1:]
+	}
+	m.file.Intents = append(m.file.Intents, memberIntent{Intent: h, Epoch: epoch, Attempt: attempt})
 	return &m.file.Intents[len(m.file.Intents)-1]
 }
 
@@ -169,24 +197,27 @@ func (mi *memberIntent) view(v uint64) *memberView {
 // memberState is what a successor member reads of its service: the derived intent, whether this node is one of its successors, what the
 // service holds of its messages, and the committed current view's verified assembly.
 type memberState struct {
-	intent     vrhandoff.Intent
-	digest     [32]byte
-	rootEpoch  uint64
-	self       evmassign.Identity
-	successor  bool
-	kOnly      bool // a K member that is no successor: it sends readiness for rule support only
-	popHeld    bool
-	view       uint64
-	prepared   bool
-	complete   bool
-	assembly   *vrhandoff.Assembly
-	body       q3format.BodyV3
-	candidate  [32]byte
-	trustBase  []byte
-	readyHeld  bool
-	schedule   []vrschema.Activation
-	table      vradmit.SupportTable
-	successors []evmassign.Identity
+	intent    vrhandoff.Intent
+	digest    [32]byte
+	rootEpoch uint64
+	self      evmassign.Identity
+	successor bool
+	kOnly     bool // a K member that is no successor: it sends readiness for rule support only
+	popHeld   bool
+	view      uint64
+	prepared  bool
+	complete  bool
+	assembly  *vrhandoff.Assembly
+	body      q3format.BodyV3
+	candidate [32]byte
+	trustBase []byte
+	readyHeld bool
+	// the assembly and body of the retained certificate once a Prepare is committed (the staging of a node that learns of it only then)
+	prepAssembly *vrhandoff.Assembly
+	prepBody     q3format.BodyV3
+	schedule     []vrschema.Activation
+	table        vradmit.SupportTable
+	successors   []evmassign.Identity
 }
 
 func (s *Service) memberState(self string) (memberState, bool) {
@@ -211,6 +242,10 @@ func (s *Service) memberState(self string) (memberState, bool) {
 		return ms, true
 	}
 	_, ms.popHeld = st.pops[ms.self.EVMNodeID]
+	if st.prepared && st.iret != nil {
+		a := st.iret.Certificate.Assembly
+		ms.prepAssembly, ms.prepBody = &a, st.iret.Body
+	}
 	if vs := st.views[st.view]; vs != nil {
 		if vs.assembly != nil {
 			a := *vs.assembly
@@ -225,11 +260,22 @@ func (s *Service) memberState(self string) (memberState, bool) {
 // every retained message and on a timer. It returns the first error of its steps (logged by the caller; a later Step retries).
 func (m *Member) Step() error {
 	st, ok := m.svc.memberState(m.cfg.Self)
-	if !ok || !(st.successor || st.kOnly) || st.prepared {
+	if !ok || !(st.successor || st.kOnly) {
 		return nil
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if st.prepared {
+		// a Prepare is committed: nothing is signed any more, but a successor that learns the certificate's assembly only now (it restarted, or
+		// joined late) still stages it, for the pre-connection and the in-process switch
+		if st.successor && st.prepAssembly != nil {
+			cd := sha256.Sum256(st.prepAssembly.Candidate)
+			if err := m.stage(st, st.prepBody, cd); err != nil {
+				m.log().Warn("VR handoff member: staging the prepared candidate failed", "error", err)
+			}
+		}
+		return nil
+	}
 	var errs []error
 	if st.successor {
 		if err := m.stepPoP(st); err != nil {
@@ -250,12 +296,29 @@ func (m *Member) send(msg Message) {
 	}
 }
 
-// stepPoP: stage 2. One proof per (intent, member), signed once, persisted, kept in the service and re-sent until the view's assembly is
-// held. A restarted member re-offers its persisted proof to its fresh service.
+// stepPoP: stage 2. One proof per (intent, member), signed once, verified, persisted, kept in the service and re-sent until the view's
+// assembly is held. A restarted member re-offers its persisted proof to its fresh service. A proof is never persisted before it verifies, and
+// a persisted one that does not verify (an older wrong key) is derived again: only the proof is replaced, never a signed view.
 func (m *Member) stepPoP(st memberState) error {
-	mi := m.intent(st.digest)
+	mi := m.intent(st.digest, st.rootEpoch, st.intent.Attempt)
 	var p vrhandoff.PoPOffer
-	if mi.PoP == "" {
+	have := false
+	if mi.PoP != "" {
+		raw, err := hex.DecodeString(mi.PoP)
+		if err == nil {
+			err = types.Cbor.Unmarshal(raw, &p)
+		}
+		if err == nil {
+			err = vrhandoff.VerifyPoP(st.intent, p)
+		}
+		if err != nil {
+			m.log().Warn("VR handoff member: the persisted possession proof does not verify; it is derived again", "error", err)
+			mi.PoP = ""
+		} else {
+			have = true
+		}
+	}
+	if !have {
 		if m.cfg.EVMSigner == nil {
 			if !m.noEVMKey {
 				m.noEVMKey = true
@@ -263,9 +326,15 @@ func (m *Member) stepPoP(st memberState) error {
 			}
 			return nil
 		}
+		if m.cfg.EVMNodeID != "" && m.cfg.EVMNodeID != st.self.EVMNodeID {
+			return fmt.Errorf("%w: the EVM key given (--vr-evm-keys) is node %s, the intent names %s as this node's EVM node", ErrMember, m.cfg.EVMNodeID, st.self.EVMNodeID)
+		}
 		var err error
 		if p, err = vrhandoff.SignPoP(st.intent, st.self, m.cfg.EVMSigner); err != nil {
 			return fmt.Errorf("%w: possession proof: %w", ErrMember, err)
+		}
+		if err := vrhandoff.VerifyPoP(st.intent, p); err != nil {
+			return fmt.Errorf("%w: the possession proof of the EVM key given does not verify against the intent: %w", ErrMember, err)
 		}
 		raw, err := types.Cbor.Marshal(p)
 		if err != nil {
@@ -277,14 +346,6 @@ func (m *Member) stepPoP(st memberState) error {
 			return fmt.Errorf("%w: persisting the possession proof: %w", ErrMember, err)
 		}
 		m.log().Info("VR handoff member: possession proof", "intent", fmt.Sprintf("%x", st.digest[:8]), "evm", st.self.EVMNodeID)
-	} else {
-		raw, err := hex.DecodeString(mi.PoP)
-		if err == nil {
-			err = types.Cbor.Unmarshal(raw, &p)
-		}
-		if err != nil {
-			return fmt.Errorf("%w: persisted possession proof: %w", ErrMember, err)
-		}
 	}
 	if !st.popHeld {
 		// the service verifies it like any peer's; a held proof is sticky, so this is a no-op once it is retained
@@ -299,51 +360,92 @@ func (m *Member) stepPoP(st memberState) error {
 	return nil
 }
 
+// supports reports whether this node implements and supports a rule's release: its own Supports, else the compiled-in ImplementedRules.
+func (m *Member) supports(a vrschema.Activation) bool {
+	if m.cfg.Supports != nil {
+		return m.cfg.Supports(a)
+	}
+	return ImplementedRules[[2]vrschema.Word{a.RuleID, a.ReleaseDigest}]
+}
+
 // commitments are the support commitments of every effective or latched rule the gate needs for a successor of this root epoch (strictly
-// ascending by rule id), by this node's root key, for the rules this node supports.
-func (m *Member) commitments(st memberState) ([]vrhandoff.SupportCommitment, error) {
-	var out []vrhandoff.SupportCommitment
+// ascending by rule id), by this node's root key. A rule this node does not support is reported in missing: a successor signs no readiness
+// while one is missing (it would burn its one signature of the view on a readiness the gate refuses, and claim a release it does not run).
+func (m *Member) commitments(st memberState) (cs []vrhandoff.SupportCommitment, missing []vrschema.Activation, err error) {
 	for _, a := range vradmit.RequiredRules(st.schedule, st.rootEpoch+1) {
-		if m.cfg.Supports != nil && !m.cfg.Supports(a) {
+		if !m.supports(a) {
+			missing = append(missing, a)
 			continue
 		}
 		c, err := vrhandoff.SignCommitment(st.intent.Network, st.self, a.RuleID, a.ReleaseDigest, m.cfg.RootSigner)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		out = append(out, c)
+		cs = append(cs, c)
 	}
-	return out, nil
+	return cs, missing, nil
 }
 
 // stepReadiness: stage 4, over the verified assembly of the committed current view.
 func (m *Member) stepReadiness(st memberState) error {
-	mi := m.intent(st.digest)
+	mi := m.intent(st.digest, st.rootEpoch, st.intent.Attempt)
 	cd := sha256.Sum256(st.assembly.Candidate)
-	if st.successor {
-		if err := m.stage(st, cd); err != nil {
-			m.log().Warn("VR handoff member: staging the candidate failed", "error", err)
-		}
-	}
 	if pv := mi.view(st.view); pv != nil {
 		// a persisted view is never signed again; its readiness is re-sent and re-offered
-		if pv.CandidateDigest != hex.EncodeToString(cd[:]) {
-			return nil // another assembly of a view this member already signed: not signed (at most one per view)
-		}
 		var r vrhandoff.Readiness
 		raw, err := hex.DecodeString(pv.Readiness)
-		if err == nil {
+		if err == nil && pv.Readiness != "" {
 			r, err = vrschema.DecodeReadiness(raw)
+		} else if err == nil {
+			err = errors.New("empty")
 		}
-		if err != nil || pv.Readiness == "" {
-			return fmt.Errorf("%w: persisted readiness of view %d: %v", ErrMember, st.view, err)
+		if err != nil {
+			return fmt.Errorf("%w: persisted readiness of view %d: %w", ErrMember, st.view, err)
+		}
+		if pv.CandidateDigest != hex.EncodeToString(cd[:]) {
+			// another assembly of a view this member already signed: not signed (at most one per view), and not staged; the readiness it
+			// signed is still sent to the peers that hold that assembly. This is the evidence of an equivocating assembler, or of a revived state.
+			if !m.warned[st.view] {
+				if m.warned == nil {
+					m.warned = map[uint64]bool{}
+				}
+				m.warned[st.view] = true
+				m.log().Warn("VR handoff member: the service holds another assembly of a view this member signed; its signed readiness is re-sent, nothing new is signed",
+					"intent", fmt.Sprintf("%x", st.digest[:8]), "view", st.view, "signed", pv.CandidateDigest[:16], "held", hex.EncodeToString(cd[:8]))
+			}
+			if !st.complete && m.cfg.Now().Sub(m.lastRd) >= ResendEvery {
+				m.lastRd = m.cfg.Now()
+				m.send(Message{Readiness: &r})
+			}
+			return nil
+		}
+		if st.successor {
+			if err := m.stage(st, st.body, cd); err != nil {
+				m.log().Warn("VR handoff member: staging the candidate failed", "error", err)
+			}
 		}
 		return m.release(st, r)
 	}
 	body := st.body
-	cs, err := m.commitments(st)
+	cs, missing, err := m.commitments(st)
 	if err != nil {
 		return fmt.Errorf("%w: support commitments: %w", ErrMember, err)
+	}
+	if len(missing) > 0 {
+		if st.successor {
+			for _, a := range missing {
+				if !m.upgrade[a.RuleID] {
+					if m.upgrade == nil {
+						m.upgrade = map[vrschema.Word]bool{}
+					}
+					m.upgrade[a.RuleID] = true
+					m.log().Warn("VR handoff member: UpgradeRequired: the committed schedule holds a rule this binary does not implement; this node signs no readiness (it does not support it)",
+						"ruleId", fmt.Sprintf("%x", a.RuleID[:8]), "releaseDigest", fmt.Sprintf("%x", a.ReleaseDigest[:8]), "rootEpoch", a.RootEpoch)
+				}
+			}
+			return nil
+		}
+		// a K member that is no successor sends what it supports: nothing else is asked of it
 	}
 	if st.kOnly && len(cs) == 0 {
 		return nil // a K member that is no successor has nothing else to send: no rule needs its support
@@ -363,6 +465,11 @@ func (m *Member) stepReadiness(st memberState) error {
 	}
 	m.log().Info("VR handoff member: readiness", "intent", fmt.Sprintf("%x", st.digest[:8]), "view", st.view, "commitments", len(cs))
 	m.lastRd = time.Time{}
+	if st.successor {
+		if err := m.stage(st, st.body, cd); err != nil {
+			m.log().Warn("VR handoff member: staging the candidate failed", "error", err)
+		}
+	}
 	return m.release(st, r)
 }
 
@@ -375,20 +482,21 @@ func (m *Member) release(st memberState, r vrhandoff.Readiness) error {
 	}
 	if !st.complete && m.cfg.Now().Sub(m.lastRd) >= ResendEvery {
 		m.lastRd = m.cfg.Now()
+		m.log().Debug("VR handoff member: readiness sent", "intent", fmt.Sprintf("%x", st.digest[:8]), "view", st.view)
 		m.send(Message{Readiness: &r})
 	}
 	return nil
 }
 
 // stage hands the verified candidate to the staging hook once per assembly.
-func (m *Member) stage(st memberState, cd [32]byte) error {
+func (m *Member) stage(st memberState, body q3format.BodyV3, cd [32]byte) error {
 	if m.cfg.Stage == nil || m.staged == cd {
 		return nil
 	}
-	if err := m.cfg.Stage(Staged{Body: st.body, CandidateDigest: cd, Attempt: st.intent.Attempt, Identities: st.successors}); err != nil {
+	if err := m.cfg.Stage(Staged{Body: body, CandidateDigest: cd, Attempt: st.intent.Attempt, Identities: st.successors}); err != nil {
 		return err
 	}
 	m.staged = cd
-	m.log().Info("VR handoff member: candidate staged", "intent", fmt.Sprintf("%x", st.digest[:8]), "view", st.view, "body", fmt.Sprintf("%x", st.body.Identity()))
+	m.log().Info("VR handoff member: candidate staged", "intent", fmt.Sprintf("%x", st.digest[:8]), "view", st.view, "body", fmt.Sprintf("%x", body.Identity()))
 	return nil
 }

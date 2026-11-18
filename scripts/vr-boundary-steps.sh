@@ -95,6 +95,16 @@ vrb_between_pop_and_readiness() {
 }
 vrb_main() {
   local i keys owner payee cfg
+  if [ "${VR_JOINER:-0}" = 1 ]; then
+    source scripts/vr-joiner-steps.sh
+    vrj_start_nodes || return 1
+    if [ "${VR_JOINER_ONLY:-0}" = 1 ]; then
+      sleep 60
+      for i in 5; do curl -sf -X POST -H 'Content-Type: application/json' -d '{}' "http://127.0.0.1:$(m2_rpc_port $i)/api/v1/q3/status" >"$VR_EVIDENCE/joiner-root-status.json"; done
+      cat "$VR_EVIDENCE/joiner-root-status.json"; tail -n 5 test-nodes/evm5/debug.log; tail -n 5 test-nodes/root5/debug.log | cut -c1-300
+      return 0
+    fi
+  fi
   vrb_log "roots: $(vrb_root_rpcs | tr '\n' ' ')"
   if [ "${VR_RESTART_BETWEEN:-0}" = 1 ]; then vrb_between_pop_and_readiness || return 1; fi
   # 1. an owner stages a new payee for identity 4: the election is due (a staged binding)
