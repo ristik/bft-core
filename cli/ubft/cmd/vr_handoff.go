@@ -90,10 +90,11 @@ func enableVRHandoff(ctx context.Context, cm *consensus.ConsensusManager, dep vr
 		Witness: func(ctx context.Context, blockHash, stateRoot [32]byte, result vrschema.Word) ([]byte, error) {
 			return reader.OutputState(ctx, blockHash, stateRoot, result)
 		},
-		Signer:      signer,
-		Opener:      opener,
-		Member:      member,
-		ShardStaged: shard,
+		Signer:         signer,
+		Opener:         opener,
+		Member:         member,
+		ShardStaged:    shard,
+		ShardStampPath: filepath.Join(home, "vr-shard-stamp"),
 	}); err != nil {
 		return err
 	}
@@ -721,7 +722,7 @@ func vrShardSink(rawURL string) (func(ctx context.Context, shardEpoch, stamp uin
 		if ids == nil {
 			ids = []string{} // an explicit empty list: the only way to clear
 		}
-		body, err := json.Marshal(vrStagedRequest{ShardEpoch: shardEpoch, Stamp: stamp, IDs: &ids})
+		body, err := json.Marshal(vrStagedRequest{ShardEpoch: &shardEpoch, Stamp: &stamp, IDs: &ids})
 		if err != nil {
 			return err
 		}

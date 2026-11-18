@@ -106,13 +106,13 @@ func TestAJoinerFetchesTheSourceFromAQuorumOfPeers(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	require.Equal(t, 2, SourceQuorum(4))
-	got, err := FetchSource(ctx, FromLibp2p(joiner), ids, r, 4)
+	require.EqualValues(t, 2, SourceFaulty(4)+1)
+	got, err := FetchSource(ctx, FromLibp2p(joiner), weighted(ids, 1), r, 4)
 	require.NoError(t, err)
 	require.Equal(t, good, got)
 
 	// one honest, one liar, two that did not observe it: no quorum
-	_, err = FetchSource(ctx, FromLibp2p(joiner), []peer.ID{servers[0].ID(), servers[3].ID(), servers[4].ID(), servers[4].ID()}, r, 4)
+	_, err = FetchSource(ctx, FromLibp2p(joiner), weighted([]peer.ID{servers[0].ID(), servers[3].ID(), servers[4].ID(), servers[4].ID()}, 1), r, 4)
 	require.ErrorIs(t, err, ErrUnavailable)
 }
 
@@ -141,14 +141,56 @@ func TestTheSourceQuorumRestsOnTheCommitteeNotOnThePeersAsked(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	// three peers asked of a committee of four: the quorum is 2, and a single honest answer is not it
-	_, err := FetchSource(ctx, FromLibp2p(joiner), []peer.ID{honest, none1, none2}, r, 4)
+	_, err := FetchSource(ctx, FromLibp2p(joiner), weighted([]peer.ID{honest, none1, none2}, 1), r, 4)
 	require.ErrorIs(t, err, ErrUnavailable)
 	// the same peer listed three times is one responder
-	_, err = FetchSource(ctx, FromLibp2p(joiner), []peer.ID{honest, honest, honest}, r, 4)
+	_, err = FetchSource(ctx, FromLibp2p(joiner), weighted([]peer.ID{honest, honest, honest}, 1), r, 4)
 	require.ErrorIs(t, err, ErrUnavailable)
 	// two distinct peers with the identical entry make it
 	second, third := serve(&e), serve(&e) // fresh servers: a server answers one peer at most once per StageInterval
-	got, err := FetchSource(ctx, FromLibp2p(joiner), []peer.ID{second, third, none1}, r, 4)
+	got, err := FetchSource(ctx, FromLibp2p(joiner), weighted([]peer.ID{second, third, none1}, 1), r, 4)
 	require.NoError(t, err)
 	require.Equal(t, e, got)
+}
+
+func weighted(ids []peer.ID, w uint64) []WeightedPeer {
+	var out []WeightedPeer
+	for _, id := range ids {
+		out = append(out, WeightedPeer{ID: id, Weight: w})
+	}
+	return out
+}
+
+// The agreement is by voting weight: with incumbents of weight 4, 4, 1, 1 (total 10, faulty weight at most 3) the two light roots' identical
+// answer (weight 2) is within what Byzantine roots may hold and is not taken; one heavy root's answer (weight 4) is.
+func TestSourceAgreementIsByVotingWeight(t *testing.T) {
+	w := newWorld(t)
+	r := [32]byte{0x53}
+	lie := SourceEntry{Source: vrhandoff.Source{ResultID: r[:], EVMBlockHash: bytes.Repeat([]byte{1}, 32), EVMBlockNumber: 5, CertRootRound: 9, OutputCommit: bytes.Repeat([]byte{2}, 32)}, CertUCTime: 1}
+	truth := lie
+	truth.EVMBlockNumber = 6
+	joiner := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
+	serve := func(entry SourceEntry) peer.ID {
+		p := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
+		joiner.Network().Peerstore().AddAddrs(p.ID(), p.MultiAddresses(), peerstore.PermanentAddrTTL)
+		src, err := NewSources("")
+		require.NoError(t, err)
+		_, err = src.Record(entry)
+		require.NoError(t, err)
+		svc := w.service("x")
+		p.RegisterProtocolHandler(ProtocolID, NewServer(svc, NewQueue(svc, 0), func(peer.ID) bool { return true }).WithSources(src).Handler)
+		t.Cleanup(func() { p.RemoveProtocolHandler(ProtocolID) })
+		return p.ID()
+	}
+	heavy1, heavy2, light1, light2 := serve(truth), serve(truth), serve(lie), serve(lie)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	peers := []WeightedPeer{{heavy1, 4}, {heavy2, 4}, {light1, 1}, {light2, 1}}
+	require.EqualValues(t, 3, SourceFaulty(10))
+	got, err := FetchSource(ctx, FromLibp2p(joiner), peers, r, 10)
+	require.NoError(t, err)
+	require.Equal(t, truth, got, "the entry the heavy roots give, not the two light roots'")
+	// only the two light roots answer the same lie: weight 2 is not above 3
+	_, err = FetchSource(ctx, FromLibp2p(joiner), []WeightedPeer{{light1, 1}, {light2, 1}}, r, 10)
+	require.ErrorIs(t, err, ErrUnavailable)
 }

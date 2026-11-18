@@ -57,7 +57,9 @@ func TestTheShardNodesStagedSuccessorEndpoint(t *testing.T) {
 	require.Len(t, got, 2)
 
 	for name, body := range map[string]string{"an empty body": "", "not JSON": "garbage", "no ids": `{"shardEpoch":2,"stamp":13}`, "null ids": `{"shardEpoch":2,"stamp":13,"ids":null}`,
-		"an unknown field": `{"shardEpoch":2,"stamp":13,"ids":[],"x":1}`, "an empty object": `{}`} {
+		"an unknown field": `{"shardEpoch":2,"stamp":13,"ids":[],"x":1}`, "an empty object": `{}`,
+		"a missing epoch": `{"stamp":13,"ids":[]}`, "a null epoch": `{"shardEpoch":null,"stamp":13,"ids":[]}`, "a missing stamp": `{"shardEpoch":0,"ids":[]}`, "a null stamp": `{"shardEpoch":0,"stamp":null,"ids":[]}`,
+		"a second object": `{"shardEpoch":0,"stamp":13,"ids":[]}{"shardEpoch":0,"stamp":14,"ids":["a"]}`, "trailing garbage": `{"shardEpoch":0,"stamp":13,"ids":[]} x`} {
 		require.Equal(t, http.StatusBadRequest, post(t, srv.URL, body), name)
 	}
 	require.Len(t, got, 2, "none of them cleared or set anything")

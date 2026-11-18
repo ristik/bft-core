@@ -358,38 +358,51 @@ func GetSource(ctx context.Context, opener Opener, p peer.ID, result [32]byte) (
 	return w.Entry, w.Found, nil
 }
 
-// SourceQuorum is how many identical answers of authenticated roots a joiner needs for a source: strictly more than the f Byzantine roots of
-// n incumbents (f = (n-1)/3), so at least one honest root observed exactly this source.
-func SourceQuorum(n int) int { return (n-1)/3 + 1 }
+// SourceFaulty is the voting weight the Byzantine roots may hold at most among incumbents of total weight total: strictly less than a third.
+func SourceFaulty(total uint64) uint64 {
+	if total == 0 {
+		return 0
+	}
+	return (total - 1) / 3
+}
 
-// FetchSource asks the peers for the source of result and returns it once SourceQuorum(committee) distinct authenticated peers give the identical
-// entry, where committee is the size of the INSTALLED committee (this root included when it is one), not the number of peers asked: a root that
-// excludes itself from the dial list, or asks fewer peers, needs no fewer answers. Each peer counts once, whatever it sends; answers that differ
-// do not combine; a peer that did not observe it, or does not answer, counts for nothing. Honest incumbents observed the same first Published
-// block, so honest answers are identical (stage 0 is fixed by committed history).
-func FetchSource(ctx context.Context, opener Opener, peers []peer.ID, result [32]byte, committee int) (SourceEntry, error) {
+// WeightedPeer is an incumbent root and its committed voting weight, read from one installed trust-base snapshot.
+type WeightedPeer struct {
+	ID     peer.ID
+	Weight uint64
+}
+
+// FetchSource asks the weighted peers for the source of result and returns it once identical answers of distinct authenticated peers carry a
+// combined weight strictly above SourceFaulty(total), where total is the installed committee's total weight (this root's own included when it
+// is one) and the peers and total come from ONE trust-base snapshot: at least one honest root observed exactly this source, whatever the weights.
+// Each peer counts once, whatever it sends; answers that differ do not combine; a peer that did not observe it, or does not answer, counts for
+// nothing. Honest incumbents observed the same first Published block, so honest answers are identical (stage 0 is fixed by committed history).
+func FetchSource(ctx context.Context, opener Opener, peers []WeightedPeer, result [32]byte, total uint64) (SourceEntry, error) {
 	type ans struct {
-		from peer.ID
-		e    SourceEntry
-		ok   bool
+		w  uint64
+		e  SourceEntry
+		ok bool
 	}
 	seen := map[peer.ID]bool{}
-	var distinct []peer.ID
+	var distinct []WeightedPeer
+	var asked uint64
 	for _, p := range peers {
-		if !seen[p] {
-			seen[p] = true
+		if !seen[p.ID] {
+			seen[p.ID] = true
 			distinct = append(distinct, p)
+			asked += p.Weight
 		}
 	}
+	total = max(total, asked)
+	need := SourceFaulty(total) // the combined weight must exceed this
 	res := make(chan ans, len(distinct))
 	for _, p := range distinct {
-		go func(p peer.ID) {
-			e, ok, err := GetSource(ctx, opener, p, result)
-			res <- ans{p, e, ok && err == nil}
+		go func(p WeightedPeer) {
+			e, ok, err := GetSource(ctx, opener, p.ID, result)
+			res <- ans{p.Weight, e, ok && err == nil}
 		}(p)
 	}
-	need := SourceQuorum(max(committee, len(distinct)))
-	counts := map[string]int{}
+	weights := map[string]uint64{}
 	for range distinct {
 		a := <-res
 		if !a.ok || a.e.ResultID == nil || !bytes.Equal(a.e.ResultID, result[:]) {
@@ -399,10 +412,10 @@ func FetchSource(ctx context.Context, opener Opener, peers []peer.ID, result [32
 		if err != nil {
 			continue
 		}
-		counts[string(k)]++ // one answer per distinct peer: the channel carries exactly one per peer queried
-		if counts[string(k)] >= need {
+		weights[string(k)] += a.w // one answer per distinct peer: the channel carries exactly one per peer queried
+		if weights[string(k)] > need {
 			return a.e, nil
 		}
 	}
-	return SourceEntry{}, fmt.Errorf("%w: no %d identical answers for the source of %x", ErrUnavailable, need, result[:8])
+	return SourceEntry{}, fmt.Errorf("%w: no identical answers above weight %d for the source of %x", ErrUnavailable, need, result[:8])
 }

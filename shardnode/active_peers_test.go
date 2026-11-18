@@ -205,3 +205,19 @@ func TestAStagedSetIsBoundToItsGeneration(t *testing.T) {
 	require.False(t, a.AllowedStagedOnly(other))
 	require.ErrorIs(t, a.StageGeneration(next, 14, []string{other.String()}), ErrActivePeersStale, "a request for the installed assignment cannot restage it")
 }
+
+// The same stamp is accepted again only for the same update; a different update cannot reuse a generation. A non-empty list for the wrong epoch
+// is stale even when it filters to nothing (only this node's own id): it does not clear an existing stage.
+func TestAStagedGenerationIsBoundToItsPayload(t *testing.T) {
+	self := newPeerID(t)
+	b := newPeerID(t)
+	c := newPeerID(t)
+	a, err := NewActivePeers(self, nil)
+	require.NoError(t, err)
+	next := a.Epoch() + 1
+	require.NoError(t, a.StageGeneration(next, 7, []string{b.String(), c.String()}))
+	require.NoError(t, a.StageGeneration(next, 7, []string{c.String(), b.String()}), "the same update again, in another order")
+	require.ErrorIs(t, a.StageGeneration(next, 7, []string{b.String()}), ErrActivePeersStale, "a different update under the same stamp")
+	require.ErrorIs(t, a.StageGeneration(next+3, 8, []string{self.String()}), ErrActivePeersStale, "a self-only list for the wrong epoch is not a clear")
+	require.True(t, a.AllowedStagedOnly(b), "the stage is intact")
+}
