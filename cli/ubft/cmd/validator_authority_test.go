@@ -99,10 +99,57 @@ func TestValidatorInitWithAnAuthority(t *testing.T) {
 	_, err = runValidator(t, home, "init", "--rpc", "http://127.0.0.1:1", "--force", "--evm-authority-socket", sock)
 	require.ErrorIs(t, err, ErrValidator)
 
+	// the authority's credential and socket are in the alias checks: not a config to overwrite, not another service's key
+	base := []string{"init", "--rpc", "http://127.0.0.1:1", "--force"}
+	for name, extra := range map[string][]string{
+		"the config is the credential":  {"--validator-config", cred},
+		"ureth key is the credential":   {"--ureth-key", cred},
+		"the JWT is the credential":     {"--jwt", cred},
+		"operator key is the socket":    {"--operator-key", sock},
+		"the config is the socket path": {"--validator-config", sock},
+	} {
+		before, rerr := os.ReadFile(cred)
+		require.NoError(t, rerr)
+		_, err = runValidator(t, home, append(append(append([]string{}, base...), auth...), extra...)...)
+		require.ErrorIs(t, err, ErrValidator, name)
+		after, rerr := os.ReadFile(cred)
+		require.NoError(t, rerr)
+		require.Equal(t, before, after, "%s: the credential is untouched", name)
+	}
+
+	// an existing config that cannot be loaded is not silently replaced by a key-file one
+	bad := readConfig(t, home)
+	bad.EVMKeys = "evm/keys.json" // both holders: refused at load
+	bb, err := configBytes(bad)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(home, validatorConfigFile), bb, 0o600))
+	_, err = runValidator(t, home, base...)
+	require.ErrorContains(t, err, "cannot tell which holder")
+	_, statErr = os.Stat(filepath.Join(home, "evm"))
+	require.True(t, os.IsNotExist(statErr))
+	require.NoError(t, os.WriteFile(filepath.Join(home, validatorConfigFile), mustBytes(t, readConfigWithAuthority(t, home, sock, cred, info)), 0o600))
+
 	// an explicit --evm-keys switches back to a key file
 	out, err = runValidator(t, home, "init", "--rpc", "http://127.0.0.1:1", "--force", "--evm-keys", "evm/keys.json")
 	require.NoError(t, err, out)
 	c = readConfig(t, home)
 	require.Nil(t, c.EVMAuthority)
 	require.Equal(t, "evm/keys.json", c.EVMKeys)
+}
+
+func mustBytes(t *testing.T, c validatorConfig) []byte {
+	b, err := configBytes(c)
+	require.NoError(t, err)
+	return b
+}
+
+// readConfigWithAuthority is the config of home with the authority selected and no key file named (the config bad above was cleaned by hand).
+func readConfigWithAuthority(t *testing.T, home, sock, cred, info string) validatorConfig {
+	raw, err := os.ReadFile(filepath.Join(home, validatorConfigFile))
+	require.NoError(t, err)
+	var c validatorConfig
+	require.NoError(t, json.Unmarshal(raw, &c))
+	c.EVMKeys = ""
+	c.EVMAuthority = &evmAuthorityConfig{Socket: sock, Credential: cred, NodeInfo: info}
+	return c
 }

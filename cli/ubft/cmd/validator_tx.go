@@ -483,7 +483,7 @@ new directory) and/or a new payee; what is not passed stays. Run the nodes with 
 	f.txFlags.add(cmd)
 	cmd.Flags().StringVar(&f.RootKeys, "new-root-keys", "", "the root node's new key file")
 	cmd.Flags().StringVar(&f.EVMKeys, "new-evm-keys", "", "the EVM shard node's new key file")
-	cmd.Flags().StringVar(&f.EVMAuthoritySocket, "new-evm-authority-socket", "", "the new EVM key is held by a signing authority: its operator socket (instead of --new-evm-keys; needs --new-evm-authority-credential and --new-evm-node-info)")
+	cmd.Flags().StringVar(&f.EVMAuthoritySocket, "new-evm-authority-socket", "", "the new EVM key is held by a signing authority: its operator socket, relative to the validator home (instead of --new-evm-keys; needs --new-evm-authority-credential and --new-evm-node-info)")
 	cmd.Flags().StringVar(&f.EVMAuthorityCredential, "new-evm-authority-credential", "", "the operator credential of the new EVM key's authority")
 	cmd.Flags().StringVar(&f.EVMNodeInfo, "new-evm-node-info", "", "the node info of the new EVM key's authority (`signing-authority node-info`)")
 	cmd.Flags().StringVar(&f.Payee, "new-payee", "", "the new payee address")
@@ -529,7 +529,7 @@ func validatorRotate(cmd *cobra.Command, f *rotateFlags) error {
 		next.EVMAuth = nil
 	}
 	if newAuth {
-		if next.EVMAuth, err = loadEVMAuthority(evmAuthorityConfig{Socket: f.EVMAuthoritySocket, Credential: f.EVMAuthorityCredential, NodeInfo: f.EVMNodeInfo}); err != nil {
+		if next.EVMAuth, err = loadEVMAuthority(evmAuthorityConfig{Socket: v.abs(f.EVMAuthoritySocket), Credential: v.abs(f.EVMAuthorityCredential), NodeInfo: v.abs(f.EVMNodeInfo)}); err != nil {
 			return err
 		}
 		next.EVM = nil

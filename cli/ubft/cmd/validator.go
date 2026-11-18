@@ -268,7 +268,8 @@ func (v *loadedValidator) keyPaths() []struct{ name, path string } {
 		{"root node keys", root}, {"root node info", filepath.Join(filepath.Dir(root), nodeInfoFileName)},
 	}
 	if a := v.cfg.EVMAuthority; a != nil {
-		out = append(out, struct{ name, path string }{"EVM authority node info", v.abs(a.NodeInfo)})
+		out = append(out, struct{ name, path string }{"EVM authority node info", v.abs(a.NodeInfo)},
+			struct{ name, path string }{"EVM authority credential", v.abs(a.Credential)}, struct{ name, path string }{"EVM authority socket", v.abs(a.Socket)})
 	} else {
 		evm := v.abs(v.cfg.EVMKeys)
 		out = append(out, struct{ name, path string }{"EVM shard node keys", evm}, struct{ name, path string }{"EVM shard node info", filepath.Join(filepath.Dir(evm), nodeInfoFileName)})
@@ -635,9 +636,9 @@ The payee (where rewards and withdrawals go) is a plain EVM address; it defaults
 	cmd.Flags().StringVar(&f.OperatorKey, "operator-key", "operator/key", "operator account key file (0x-hex)")
 	cmd.Flags().StringVar(&f.DataDir, "data-dir", ".", "where the services keep their data (doctor checks its disk)")
 	cmd.Flags().IntSliceVar(&f.Ports, "ports", defaultValidatorPorts, "the services' listen ports (root p2p, shard p2p, ureth devp2p)")
-	cmd.Flags().StringVar(&f.AuthoritySocket, "evm-authority-socket", "", "the EVM key is held by a signing authority: its operator socket (instead of --evm-keys; needs --evm-authority-credential and --evm-authority-node-info). No EVM key file is created")
-	cmd.Flags().StringVar(&f.AuthorityCredential, "evm-authority-credential", "", "the authority's operator credential file")
-	cmd.Flags().StringVar(&f.AuthorityNodeInfo, "evm-authority-node-info", "", "the authority's node info (`signing-authority node-info`): its enrolled EVM node and public key")
+	cmd.Flags().StringVar(&f.AuthoritySocket, "evm-authority-socket", "", "the EVM key is held by a signing authority: its operator socket, relative to the validator home (instead of --evm-keys; needs --evm-authority-credential and --evm-authority-node-info). No EVM key file is created")
+	cmd.Flags().StringVar(&f.AuthorityCredential, "evm-authority-credential", "", "the authority's operator credential file (relative paths are resolved against the validator home)")
+	cmd.Flags().StringVar(&f.AuthorityNodeInfo, "evm-authority-node-info", "", "the authority's node info (`signing-authority node-info`): its enrolled EVM node and public key (relative to the validator home)")
 	cmd.Flags().BoolVar(&f.Force, "force", false, "rewrite an existing validator config (keys are still never replaced)")
 	return cmd
 }
@@ -654,6 +655,7 @@ func validatorInit(cmd *cobra.Command, f *validatorInitFlags) error {
 	// the holder of the EVM key: flags select an authority; --force keeps the authority an existing config selected unless --evm-keys was
 	// given explicitly (a deliberate switch back to a key file)
 	var auth *evmAuthorityConfig
+	var holderErr error
 	if f.AuthoritySocket != "" || f.AuthorityCredential != "" || f.AuthorityNodeInfo != "" {
 		auth = &evmAuthorityConfig{Socket: f.AuthoritySocket, Credential: f.AuthorityCredential, NodeInfo: f.AuthorityNodeInfo}
 		if err := auth.validate(); err != nil {
@@ -663,8 +665,15 @@ func validatorInit(cmd *cobra.Command, f *validatorInitFlags) error {
 			return fmt.Errorf("%w: --evm-keys and --evm-authority-* are two holders of the EVM key: give one", ErrValidator)
 		}
 	} else if f.Force && !cmd.Flags().Changed("evm-keys") {
-		if old, err := (&validatorFlags{baseFlags: f.baseFlags, Config: f.Config}).load(); err == nil && old.cfg.EVMAuthority != nil {
-			auth = old.cfg.EVMAuthority
+		if util.FileExists(path) {
+			// a config that cannot be read is not silently replaced by one with a new EVM key file: fix it, or say which holder is meant
+			old, err := (&validatorFlags{baseFlags: f.baseFlags, Config: f.Config}).load()
+			if err != nil {
+				// raised after the shared-file check below, which names the more specific problem when the "config" is a key file
+				holderErr = fmt.Errorf("%w: --force cannot tell which holder the existing config selects (%v); fix it, or give --evm-keys or --evm-authority-* explicitly", ErrValidator, err)
+			} else {
+				auth = old.cfg.EVMAuthority
+			}
 		}
 	}
 	if f.RPC == "" {
@@ -682,6 +691,9 @@ func validatorInit(cmd *cobra.Command, f *validatorInitFlags) error {
 	// before anything is created: no two roles in one file (a config over a key would destroy the key)
 	if err := v.checkPaths(); err != nil {
 		return err
+	}
+	if holderErr != nil {
+		return holderErr
 	}
 	var all []string
 	for _, kp := range v.keyPaths() {
