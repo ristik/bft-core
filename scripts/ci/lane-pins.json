@@ -35,7 +35,7 @@
       "branch": "integration/enshrined-evm",
       "note": "the frozen PoS release product SHA (deploy/testnet/evidence/release-manifest.md, arch plan section 10): enforced only when a run asks for product=pinned (a campaign run: dispatch input, or run-inputs.json on a ci-lane-run/** branch). Pull request, scheduled and default runs build the checkout under test and do not read this pin. In a pinned run ubft and the Go tools are built from a separate checkout of exactly this commit; the harness (scripts, workflow) stays the checkout's own. Its dependency set is dependencies below, not the components'",
       "dependencies": {
-        "note": "the frozen product's own dependency set (deploy/testnet/evidence/release-manifest.md section 3, 2026-11-10): a product=pinned run builds and checks these commits instead of the components' (scripts/ci/lane-product.sh manifest). The product requires the protocol 6/7 bridge precompile 0x0105 and carries the pre-VT-15 SealRegistry, so it cannot run with the components' ureth (b8a50547, no 0x0105, bft-core#1139); moving the product pin is a release-process step, not a pin batch. Components not named here (aggregator-go, state-transition-sdk-js, the toolchains) are shared with the checkout product",
+        "note": "the frozen product's own dependency set (deploy/testnet/evidence/release-manifest.md section 3, 2026-11-10): a product=pinned run builds and checks these commits instead of the components' (scripts/ci/lane-product.sh manifest). The product requires the protocol 6/7 bridge precompile 0x0105 and carries the pre-VT-15 SealRegistry, so it cannot run with the components' ureth (b8a50547, no 0x0105, bft-core#1139); moving the product pin is a release-process step, not a pin batch. The aggregator is paired with the product's root: the checkout's aggregator-go follows live shard configuration changes through the root's shard-aware POST /api/v1/q3/shard-conf (bft-core#1203), which the frozen product's root does not have, so the frozen product keeps the aggregator it was frozen with (and has no kind 6 or 8 change to follow). Components not named here (state-transition-sdk-js, the toolchains) are shared with the checkout product",
         "ureth": {
           "commit": "10552af21b31b2118c51d6215cd23cfb80faf33c",
           "nativePrecompiles": {
@@ -47,12 +47,15 @@
         },
         "contracts": {
           "commit": "7b510f6b5a9cf3987ccc5d7dc77d39f33de12330"
+        },
+        "aggregator-go": {
+          "commit": "b3909de4c8c0dc4682fbb6c7ff9732e7c1771207"
         }
       }
     },
     "aggregator-go": {
       "repository": "https://github.com/ristik/aggregator-go.git",
-      "commit": "2f9492694ffd38c92a9d324e9fb6c9e46dd8df1f",
+      "commit": "9b9c3900cd3f57a1c08f9f0b462e267d18d71a8e",
       "branch": "integration/enshrined-evm"
     },
     "contracts": {

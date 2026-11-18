@@ -338,6 +338,11 @@ class UtbProfile(unittest.TestCase):
         self.assertIn('./aggregator-utb:/utb',agg['volumes'])
         self.assertIn('./aggregator:/state:ro',agg['volumes'],'the signing key mount stays read-only')
         self.assertNotIn('UTB_BUNDLE_FILE',env,'a fresh chain starts from the genesis entry, not from a bundle')
+    def test_the_aggregator_persists_its_shard_configuration_checkpoint_on_a_writable_mount(self):
+        for utb in (self.PIN, None):
+            agg=self.topo(4,utb)['services']['aggregator']
+            self.assertEqual(agg['environment']['BFT_SHARD_CONF_CHECKPOINT_FILE'],'/shardconf/shard-conf-checkpoint.json')
+            self.assertIn('./aggregator-conf:/shardconf',agg['volumes'],'a mount that survives the container, writable: its /state is read-only')
     def test_the_upstream_facing_aggregator_gets_the_bundle_pin_and_network_and_no_bolt_store(self):
         with tempfile.TemporaryDirectory() as tmp:
             out=Path(tmp)/'tn-fixture';out.mkdir()

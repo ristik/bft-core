@@ -68,6 +68,9 @@ func (a rootQ3API) register(mux *http.ServeMux) {
 		}
 		var shard types.ShardID
 		if in.Shard != "" {
+			if len(in.Shard) > maxShardTextLen {
+				return nil, fmt.Errorf("shard: more than %d characters", maxShardTextLen)
+			}
 			if err := shard.UnmarshalText([]byte(in.Shard)); err != nil {
 				return nil, fmt.Errorf("shard: %w", err)
 			}
@@ -79,6 +82,9 @@ func (a rootQ3API) register(mux *http.ServeMux) {
 		return pdr, nil
 	}))
 }
+
+// maxShardTextLen bounds the hex text of a ShardID a request carries (the longest id is far shorter; the bound is before any decoding).
+const maxShardTextLen = 128
 
 type q3ShardConfRequest struct {
 	Partition uint32 `json:"partition"`

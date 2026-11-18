@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -72,9 +73,9 @@ func TestShardConfEndpointAndCommandReturnTheConfigurationTheRootHoldsForAShardE
 	})
 }
 
-// A shard's aggregator follows a kind 6 or 8 change by reading the successor configuration of its own shard: the endpoint is shard-aware (the
-// split shards of a partition hold separate histories) and public (GET, not limited to the root's host), and answers only what is stored.
-func TestShardConfReadEndpointIsShardAwareAndPublic(t *testing.T) {
+// A shard's aggregator follows a kind 6 or 8 change by reading the successor configuration of its own shard over the root's loopback RPC: the
+// source-guarded endpoint is shard-aware (the split shards of a partition hold separate histories), bounds its input, and answers only what is stored.
+func TestShardConfEndpointIsShardAwareAndSourceGuarded(t *testing.T) {
 	o, err := partitions.NewOrchestration(5, filepath.Join(t.TempDir(), "orchestration.db"), logger.New(t))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = o.Close() })
@@ -91,29 +92,26 @@ func TestShardConfReadEndpointIsShardAwareAndPublic(t *testing.T) {
 	for _, p := range []*types.PartitionDescriptionRecord{mk(left, 0, 2*time.Second), mk(right, 0, 3*time.Second), mk(left, 1, 4*time.Second)} {
 		require.NoError(t, o.AddShardConfig(p))
 	}
-	h := getShardConfHandler(o.ShardConfigByEpoch)
-	get := func(query string) *httptest.ResponseRecorder {
-		req := httptest.NewRequest(http.MethodGet, "/api/v1/shardConf?"+query, nil)
-		req.RemoteAddr = "203.0.113.9:4000" // not the local host
-		rec := httptest.NewRecorder()
-		h(rec, req)
-		return rec
-	}
+	api := rootQ3API{ShardConfig: o.ShardConfigByEpoch}
 	leftText, _ := left.MarshalText()
 	rightText, _ := right.MarshalText()
+	ask := func(remote string, req q3ShardConfRequest) *httptest.ResponseRecorder {
+		return callQ3(t, api, "/api/v1/q3/shard-conf", remote, req)
+	}
 	var got types.PartitionDescriptionRecord
-	rec := get("partition=8&epoch=1&shard=" + string(leftText))
+	rec := ask("127.0.0.1:1", q3ShardConfRequest{Partition: 8, Epoch: 1, Shard: string(leftText)})
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
 	require.EqualValues(t, 1, got.Epoch)
 	require.True(t, got.ShardID.Equal(left))
 	require.Equal(t, 4*time.Second, got.T2Timeout)
-	rec = get("partition=8&epoch=0&shard=" + string(rightText))
+	rec = ask("127.0.0.1:1", q3ShardConfRequest{Partition: 8, Epoch: 0, Shard: string(rightText)})
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
 	require.True(t, got.ShardID.Equal(right))
-	require.Equal(t, http.StatusNotFound, get("partition=8&epoch=1&shard="+string(rightText)).Code, "the sibling has no epoch 1")
-	require.Equal(t, http.StatusNotFound, get("partition=8&epoch=0").Code, "the unsplit shard is not this partition's")
-	require.Equal(t, http.StatusBadRequest, get("partition=8&shard="+string(leftText)).Code)
-	require.Equal(t, http.StatusBadRequest, get("partition=8&epoch=0&shard=zz").Code)
+	require.Equal(t, http.StatusUnprocessableEntity, ask("127.0.0.1:1", q3ShardConfRequest{Partition: 8, Epoch: 1, Shard: string(rightText)}).Code, "the sibling has no epoch 1")
+	require.Equal(t, http.StatusUnprocessableEntity, ask("127.0.0.1:1", q3ShardConfRequest{Partition: 8, Epoch: 0}).Code, "the unsplit shard is not this partition's")
+	require.Equal(t, http.StatusUnprocessableEntity, ask("127.0.0.1:1", q3ShardConfRequest{Partition: 8, Epoch: 0, Shard: "zz"}).Code)
+	require.Equal(t, http.StatusUnprocessableEntity, ask("127.0.0.1:1", q3ShardConfRequest{Partition: 8, Epoch: 0, Shard: strings.Repeat("a", maxShardTextLen+1)}).Code, "the shard text is bounded")
+	require.Equal(t, http.StatusForbidden, ask("203.0.113.9:4000", q3ShardConfRequest{Partition: 8, Epoch: 1, Shard: string(leftText)}).Code, "a peer that is not an operator source")
 }
