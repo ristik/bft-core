@@ -6,7 +6,7 @@
 # (an empty selection is not a pass).
 set -uo pipefail
 out=${1:?usage: test-ureth.sh OUT_DIR [WORK_DIR]}; work=${2:-${RUNNER_TEMP:-/tmp}/ureth-test}
-here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd); pins=$here/lane-pins.json
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd); pins=$("$here/lane-product.sh" manifest)
 repo=$(jq -r .components.ureth.repository "$pins"); commit=$(jq -r .components.ureth.commit "$pins"); rust=$(jq -r .toolchains.rust "$pins")
 mapfile -t pkgs < <(jq -r '.components.ureth.targetedPackages[]' "$pins")
 [ "${#pkgs[@]}" -gt 0 ] || { echo "test-ureth: no targeted packages in the manifest" >&2; exit 2; }

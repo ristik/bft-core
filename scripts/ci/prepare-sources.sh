@@ -5,7 +5,7 @@
 # Each archive holds a git checkout at exactly the pinned commit (scripts/ci/check-pins.sh git verifies it in the run job).
 #   scripts/ci/prepare-sources.sh OUT_DIR [WORK_DIR]       needs git, jq, forge (Foundry on PATH), node/npm, zstd
 set -euo pipefail
-here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd); pins=$here/lane-pins.json
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd); pins=$("$here/lane-product.sh" manifest)
 out=${1:?usage: prepare-sources.sh OUT_DIR [WORK_DIR]}; work=${2:-${RUNNER_TEMP:-/tmp}/sources}
 mkdir -p "$out" "$work"
 
