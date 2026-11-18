@@ -123,6 +123,10 @@ const vrMemberFileName = "vr-member.json"
 // configuration names as evmKeys); without one the node signs readiness but cannot send its proof.
 func vrMemberConfig(home, evmKeys string) (*consensus.VRMemberConfig, error) {
 	m := &consensus.VRMemberConfig{Path: filepath.Join(home, vrMemberFileName)}
+	if os.Getenv("UBFT_VR_MEMBER_HOLD") == "1" { // development test hook (scripts/vr-boundary-steps.sh): readiness is held while <home>/vr-member.hold exists
+		hold := filepath.Join(home, "vr-member.hold")
+		m.Hold = func() bool { _, err := os.Stat(hold); return err == nil }
+	}
 	if evmKeys == "" {
 		return m, nil
 	}

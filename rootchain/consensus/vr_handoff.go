@@ -61,6 +61,7 @@ type VRMemberConfig struct {
 	EVMSigner abcrypto.Signer
 	Path      string
 	Supports  func(vrschema.Activation) bool
+	Hold      func() bool // development test hook: true holds the readiness back (see vrschedule.MemberConfig.Hold)
 }
 
 type vrHandoff struct {
@@ -138,7 +139,7 @@ func (x *ConsensusManager) EnableVRHandoff(ctx context.Context, cfg VRHandoffCon
 	}
 	if cfg.Member != nil {
 		m, err := vrschedule.NewMember(v.svc, vrschedule.MemberConfig{Self: x.id.String(), RootSigner: cfg.Signer, EVMSigner: cfg.Member.EVMSigner,
-			Path: cfg.Member.Path, Send: func(m vrschedule.Message) { v.send(ctx, m) }, Supports: cfg.Member.Supports, Stage: x.stageVRCandidate, Log: cfg.Log})
+			Path: cfg.Member.Path, Send: func(m vrschedule.Message) { v.send(ctx, m) }, Supports: cfg.Member.Supports, Hold: cfg.Member.Hold, Stage: x.stageVRCandidate, Log: cfg.Log})
 		if err != nil {
 			return err
 		}

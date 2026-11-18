@@ -69,9 +69,34 @@ vrb_restart_member() {
   vrb_log "PASS: root$node restarted mid-protocol and signed nothing again"
 }
 
+# VR_RESTART_BETWEEN=1: root1 is restarted before the election with the readiness hold hook (UBFT_VR_MEMBER_HOLD=1 and <home>/vr-member.hold, a
+# development test hook), so that its possession proof goes out and its readiness waits. Once the proof is persisted and no view is signed, it is
+# stopped and started again (still held): the proof is the same bytes and nothing is signed; releasing the hold lets it sign its readiness and the
+# handoff completes.
+vrb_restart_root1() { # <description>
+  local node=1 boot rc
+  declare -F m2_start_root >/dev/null || source scripts/lib/m2-handoff-lib.sh || { vrb_log "FAIL: the root restart library"; return 1; }
+  boot=$(m2_root_addr 2)
+  stop_pidfile "test-nodes/root$node/pid" 'ubft root-node' || { vrb_log "FAIL: stopping root$node"; return 1; }
+  { m2_start_root "$node" 1 "$boot"; rc=$?; } >/dev/null 2>&1
+  vrb_wait 90 "root$node answers on its RPC $1" curl -sf "http://127.0.0.1:$(m2_rpc_port "$node")/api/v1/roundInfo" || return 1
+}
+vrb_member_state() { python3 -c "
+import json,sys
+f=json.load(open('test-nodes/root1/vr-member.json'))
+i=f['intents'][-1]
+print(('pop' if i.get('pop') else 'nopop'), len(i.get('views') or []))" 2>/dev/null; }
+vrb_held_ok() { [ "$(vrb_member_state)" = "pop 0" ]; }
+vrb_between_pop_and_readiness() {
+  vrb_log "root1 holds its readiness (test hook) after a restart"
+  touch test-nodes/root1/vr-member.hold
+  UBFT_VR_MEMBER_HOLD=1 vrb_restart_root1 "with the readiness hold" || return 1
+  return 0
+}
 vrb_main() {
   local i keys owner payee cfg
   vrb_log "roots: $(vrb_root_rpcs | tr '\n' ' ')"
+  if [ "${VR_RESTART_BETWEEN:-0}" = 1 ]; then vrb_between_pop_and_readiness || return 1; fi
   # 1. an owner stages a new payee for identity 4: the election is due (a staged binding)
   keys=$VR_DIR/dev-keys/keys.json
   owner=$(python3 -c "import json;print(json.load(open('$keys'))['owners'][3]['privateKey'])")
@@ -107,6 +132,20 @@ EOF
   cp "$VR_DIR"/../root1/vr-sources.json "$VR_EVIDENCE/root1-vr-sources.json" 2>/dev/null || true
   # 4. the members do their steps themselves (VT-09): no harness message is sent. Every successor's root node logs its own proof and readiness.
   vrb_wait 300 "every successor member signed its possession proof itself" vrb_members_logged 'VR handoff member: possession proof' || return 1
+  if [ "${VR_RESTART_BETWEEN:-0}" = 1 ]; then
+    vrb_wait 120 "root1 persisted its possession proof and holds its readiness" vrb_held_ok || return 1
+    cp test-nodes/root1/vr-member.json "$VR_EVIDENCE/root1-vr-member-held-before-restart.json"
+    UBFT_VR_MEMBER_HOLD=1 vrb_restart_root1 "again, between its proof and its readiness" || return 1
+    sleep 5
+    [ "$(vrb_member_state)" = "pop 0" ] || { vrb_log "FAIL: root1 signed a view while held"; return 1; }
+    python3 - "$VR_EVIDENCE/root1-vr-member-held-before-restart.json" test-nodes/root1/vr-member.json <<'PY' || { vrb_log "FAIL: root1's proof changed across the restart"; return 1; }
+import json,sys
+a,b=[json.load(open(p))['intents'][-1]['pop'] for p in sys.argv[1:]]
+sys.exit(0 if a==b else 1)
+PY
+    vrb_log "PASS: root1 restarted between its possession proof and its readiness: the proof is the same, nothing was signed"
+    rm -f test-nodes/root1/vr-member.hold
+  fi
   vrb_wait 300 "every successor member signed its readiness itself" vrb_members_logged 'VR handoff member: readiness' || return 1
   vrb_wait 300 "the committed view's assembler root assembled" vrb_logs_have 'VR handoff: assembled' || return 1
   vrb_wait 300 "a complete verified certificate is held" vrb_logs_have 'a complete verified certificate is held' || return 1

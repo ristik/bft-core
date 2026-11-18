@@ -64,8 +64,11 @@ type MemberConfig struct {
 	Supports func(vrschema.Activation) bool
 	// Stage stages a verified candidate for the pre-connection and the in-process switch; its error is logged, never fatal.
 	Stage func(Staged) error
-	Log   *slog.Logger
-	Now   func() time.Time
+	// Hold, when set and true, makes the member hold back its readiness (the possession proof goes out): a development test hook that lets a
+	// lane restart a member between its proof and its readiness. Production nodes leave it nil.
+	Hold func() bool
+	Log  *slog.Logger
+	Now  func() time.Time
 }
 
 // memberFile is the persisted member state.
@@ -233,7 +236,7 @@ func (m *Member) Step() error {
 			errs = append(errs, err)
 		}
 	}
-	if st.assembly != nil {
+	if st.assembly != nil && (m.cfg.Hold == nil || !m.cfg.Hold()) {
 		if err := m.stepReadiness(st); err != nil {
 			errs = append(errs, err)
 		}
