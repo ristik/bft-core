@@ -54,7 +54,7 @@ func TestTheOperatorChannelSignsARegistrationAndRefusesByName(t *testing.T) {
 
 // Neither the shard node's client channel nor the member's possession-proof channel serves it.
 func TestRegistrationSigningIsOperatorOnly(t *testing.T) {
-	f, req, _ := registrationFixture(t)
+	f, _, _ := registrationFixture(t)
 	client := f.admit(t)
 	_, has := reflectMethods(client)["SignRegistration"]
 	require.False(t, has)
@@ -62,22 +62,26 @@ func TestRegistrationSigningIsOperatorOnly(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, errWrongEndpoint.Error(), answer.Refusal)
 	require.Empty(t, answer.Payload)
-	_ = req
 }
 
 // The operator reloads the authorizations over its channel: afterwards a registration the start did not authorize is signed, with the same
 // key; the client channel does not serve the reload.
 func TestTheOperatorReloadsTheRegistrationPolicyOverTheWire(t *testing.T) {
-	f, req, _ := registrationFixture(t)
+	f, req, depl := registrationFixture(t)
 	ctx := context.Background()
-	require.NoError(t, f.operator.ReloadRegistrationPolicy(ctx, nil))
+	require.NoError(t, f.operator.ReloadRegistrationPolicy(ctx, depl, nil))
 	_, err := f.operator.SignRegistration(ctx, req)
 	require.ErrorIs(t, err, signingauthority.ErrRegistrationUnauthorized)
 	entry := signingauthority.RegistrationAuthorization{Domain: vrschema.RegisterDomainText, Owner: req.Owner, RootNodeID: req.Registration.RootNodeID,
 		RootKey: req.Registration.RootKey, Payee: req.Registration.Payee}
-	require.NoError(t, f.operator.ReloadRegistrationPolicy(ctx, []signingauthority.RegistrationAuthorization{entry}))
+	require.NoError(t, f.operator.ReloadRegistrationPolicy(ctx, depl, []signingauthority.RegistrationAuthorization{entry}))
 	_, err = f.operator.SignRegistration(ctx, req)
 	require.NoError(t, err)
+	other := depl
+	other.Registry[0] ^= 1
+	require.ErrorIs(t, f.operator.ReloadRegistrationPolicy(ctx, other, nil), signingauthority.ErrRegistrationUnauthorized, "a policy for another deployment is refused over the wire")
+	_, err = f.operator.SignRegistration(ctx, req)
+	require.NoError(t, err, "and what was authorized stays")
 	_, key, err := f.operator.Enrollment(ctx)
 	require.NoError(t, err)
 	require.Equal(t, req.Registration.EVMKey, key)

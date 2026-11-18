@@ -116,6 +116,9 @@ func readRegistrationPolicy(path string) (signingauthority.RegistrationPolicy, e
 	if err := dec.Decode(&f); err != nil {
 		return p, fmt.Errorf("registration policy %s: %w", path, err)
 	}
+	if dec.More() {
+		return p, fmt.Errorf("registration policy %s: trailing data after the policy object", path)
+	}
 	nw, err := hexutil.Decode(f.Network)
 	if err != nil || len(nw) != 32 || !common.IsHexAddress(f.Registry) {
 		return p, fmt.Errorf("registration policy %s: network is 32 bytes of 0x-hex and registry an address", path)

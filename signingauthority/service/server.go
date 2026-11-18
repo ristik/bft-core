@@ -551,6 +551,13 @@ func (s *Server) operatorOp(ctx context.Context, operation op, payload []byte) (
 		if err := types.Cbor.Unmarshal(payload, &wire); err != nil {
 			return nil, fmt.Errorf("%w: registration policy: %v", errMalformed, err)
 		}
+		if len(wire.Network) != 32 || len(wire.ChainID) != 32 || len(wire.Registry) != 20 {
+			return nil, fmt.Errorf("%w: the policy names its deployment: a 32-byte network word and chain id and a 20-byte registry", errMalformed)
+		}
+		var expect signingauthority.RegistrationDeployment
+		copy(expect.Network[:], wire.Network)
+		copy(expect.ChainID[:], wire.ChainID)
+		copy(expect.Registry[:], wire.Registry)
 		var list []signingauthority.RegistrationAuthorization
 		for _, x := range wire.Authorized {
 			if len(x.Owner) != 20 || len(x.Payee) != 20 {
@@ -561,7 +568,7 @@ func (s *Server) operatorOp(ctx context.Context, operation op, payload []byte) (
 			copy(a.Payee[:], x.Payee)
 			list = append(list, a)
 		}
-		if err := s.authority.ReloadRegistrationAuthorizations(list); err != nil {
+		if err := s.authority.ReloadRegistrationAuthorizations(expect, list); err != nil {
 			s.log.Warn("refusing a registration policy reload", slog.String("err", err.Error()))
 			return nil, err
 		}
