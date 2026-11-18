@@ -75,6 +75,9 @@ const (
 	opAdvanceWithProof op = 109
 	// opSignRegistration asks for the EVM possession signature of VR.register / VR.proposeBinding (VT-10). Operator channel only.
 	opSignRegistration op = 110
+	// opReloadRegistrationPolicy replaces the authorized registrations of a running authority; the deployment pin, key and record are
+	// untouched. Operator channel only.
+	opReloadRegistrationPolicy op = 111
 )
 
 // MaxAdvanceProofBytes is the largest activation bundle one opAdvanceWithProof can carry: the frame less an allowance for the request's
@@ -97,7 +100,7 @@ func (o op) servedToPoP() bool { return o == opSignHandoffPoP }
 func (o op) servedToOperator() bool {
 	switch o {
 	case opReplaceSession, opStatus, opEnrollment, opCompleteEnrollment, opAdvanceEpoch, opSignHandoffPoP, opSignElectionPoP, opSignDelegationPossession,
-		opAdvanceWithProof, opSignRegistration:
+		opAdvanceWithProof, opSignRegistration, opReloadRegistrationPolicy:
 		return true
 	}
 	return false
@@ -135,6 +138,8 @@ func (o op) String() string {
 		return "advance-with-proof"
 	case opSignRegistration:
 		return "sign-registration"
+	case opReloadRegistrationPolicy:
+		return "reload-registration-policy"
 	}
 	return fmt.Sprintf("unknown(%d)", uint64(o))
 }
@@ -308,6 +313,22 @@ type registrationPayload struct {
 	EVMKey     []byte
 	Payee      []byte
 	Nonce      uint64
+}
+
+// registrationPolicyPayload is the structured request of opReloadRegistrationPolicy: the authorized registrations, never a deployment.
+type registrationPolicyPayload struct {
+	_          struct{} `cbor:",toarray"`
+	Authorized []authorizedRegistration
+}
+
+type authorizedRegistration struct {
+	_          struct{} `cbor:",toarray"`
+	Domain     string
+	Owner      []byte
+	ID         uint64
+	RootNodeID string
+	RootKey    []byte
+	Payee      []byte
 }
 
 // delegationPayload is the structured request of opSignDelegationPossession: the admitDelegation payload and the election it is for.

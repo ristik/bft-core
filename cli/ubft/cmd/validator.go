@@ -406,7 +406,7 @@ func (v *loadedValidator) keys() (*validatorKeys, error) {
 		errs = append(errs, fmt.Errorf("root node keys: %w", err))
 	}
 	if a := v.cfg.EVMAuthority; a != nil {
-		ac := evmAuthorityConfig{Socket: a.Socket, Credential: v.abs(a.Credential), NodeInfo: v.abs(a.NodeInfo)}
+		ac := evmAuthorityConfig{Socket: v.abs(a.Socket), Credential: v.abs(a.Credential), NodeInfo: v.abs(a.NodeInfo)}
 		if k.EVMAuth, err = loadEVMAuthority(ac); err != nil {
 			errs = append(errs, err)
 		}

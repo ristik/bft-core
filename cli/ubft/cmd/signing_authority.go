@@ -66,6 +66,7 @@ Deployment order:
 	cmd.AddCommand(signingAuthorityAdvanceWithProofCmd(baseFlags))
 	cmd.AddCommand(signingAuthorityReplaceSessionCmd(baseFlags))
 	cmd.AddCommand(signingAuthorityStatusCmd(baseFlags))
+	cmd.AddCommand(signingAuthorityRegistrationPolicyCmd(baseFlags))
 	return cmd
 }
 
@@ -739,4 +740,41 @@ func writeCredentialFile(path string, credential []byte, replace bool) error {
 		return err
 	}
 	return os.Rename(tmp.Name(), path)
+}
+
+func signingAuthorityRegistrationPolicyCmd(baseFlags *baseFlags) *cobra.Command {
+	flags := &signingAuthorityOperatorFlags{baseFlags: baseFlags}
+	var file string
+	cmd := &cobra.Command{
+		Use:   "registration-policy",
+		Short: "Replace the registrations a running authority may sign (VT-10)",
+		Long: `Replace the authorized registrations of the running authority with those of the policy file. The identity id is allocated by VR at
+registration and a later payee or root key is not known when the authority starts, so the operator authorizes them here, on the
+operator channel. The deployment pin the authority started with, its key and its signing record are untouched: the file's deployment
+fields are not sent, and an authority started without --registration-policy refuses the reload. The list replaces the old one.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			policy, err := readRegistrationPolicy(file)
+			if err != nil {
+				return err
+			}
+			operator, err := flags.operator()
+			if err != nil {
+				return err
+			}
+			defer func() { _ = operator.Close() }()
+			ctx, cancel := context.WithTimeout(cmd.Context(), flags.Timeout)
+			defer cancel()
+			if err := operator.ReloadRegistrationPolicy(ctx, policy.Authorized); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "registration policy reloaded: %d authorized\n", len(policy.Authorized))
+			return nil
+		},
+	}
+	flags.addOperatorFlags(cmd)
+	cmd.Flags().StringVar(&file, "policy", "", "the registration policy file (the format of `signing-authority run --registration-policy`)")
+	if err := cmd.MarkFlagRequired("policy"); err != nil {
+		panic(err)
+	}
+	return cmd
 }

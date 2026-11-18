@@ -6,6 +6,7 @@ package cmd
 //	UBFT_VALIDATOR_E2E_ANVIL=$(which anvil) go test ./cli/ubft/cmd -run TestValidatorE2EAuthority -v
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"encoding/json"
@@ -14,9 +15,11 @@ import (
 	"testing"
 
 	ethcommon "github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/stretchr/testify/require"
 
+	testobserve "github.com/unicitynetwork/bft-core/internal/testutils/observability"
 	"github.com/unicitynetwork/bft-core/internal/testutils/trustbase"
 	"github.com/unicitynetwork/bft-core/signingauthority"
 	"github.com/unicitynetwork/bft-core/signingauthority/service"
@@ -93,12 +96,10 @@ func TestValidatorE2EAuthority(t *testing.T) {
 	newPayee := ethcommon.HexToAddress("0x00000000000000000000000000000000000000c7")
 	chain := vrschema.U64(3)
 
-	// the operator authorizes: the registration of this owner, root binding and payee, and one rotation of the predicted identity 5
+	// the operator authorizes the registration of this owner, root binding and payee only: the identity id is not known yet
+	regEntry := signingauthority.RegistrationAuthorization{Domain: vrschema.RegisterDomainText, Owner: operator, RootNodeID: root.NodeID, RootKey: root.Public(), Payee: payee}
 	policy := signingauthority.RegistrationPolicy{Deployment: signingauthority.RegistrationDeployment{Network: cfg.Network, ChainID: chain, Registry: a.vr.Registry},
-		Authorized: []signingauthority.RegistrationAuthorization{
-			{Domain: vrschema.RegisterDomainText, Owner: operator, RootNodeID: root.NodeID, RootKey: root.Public(), Payee: payee},
-			{Domain: vrschema.BindingDomainText, Owner: operator, ID: 5, RootNodeID: root.NodeID, RootKey: root.Public(), Payee: newPayee},
-		}}
+		Authorized: []signingauthority.RegistrationAuthorization{regEntry}}
 	socket, cred, info := startAuthority(t, policy)
 
 	// the validator config selects the authority and its enrolled identity; there is no EVM key file on this host
@@ -110,7 +111,13 @@ func TestValidatorE2EAuthority(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(home, validatorConfigFile), b, 0o600))
 	require.NoError(t, os.RemoveAll(filepath.Join(home, "evm")))
 
-	out, err := runValidator(t, home, "apply")
+	// doctor checks the authority's node info, credential and socket instead of a local EVM key file
+	out, err := runValidator(t, home, "doctor")
+	require.Contains(t, out, "EVM authority node info")
+	require.Contains(t, out, "enrollment matches the node info")
+	require.NotContains(t, out, "EVM keys")
+
+	out, err = runValidator(t, home, "apply")
 	require.NoError(t, err, out)
 	require.Contains(t, out, "held by the signing authority")
 	require.Equal(t, uint64(5), readConfig(t, home).ID)
@@ -119,6 +126,27 @@ func TestValidatorE2EAuthority(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, k.EVMAuth.pub, idn.Current.EvmKey, "VR's KeyLib accepted the authority's registration proof; the binding names its key")
 	require.Equal(t, "e2e-evm-auth", idn.Current.EvmNodeID)
+
+	// before the rotation is authorized the authority refuses it, by name
+	out, err = runValidator(t, home, "rotate", "--new-payee", newPayee.Hex())
+	require.Error(t, err)
+	require.Contains(t, err.Error()+out, "signing-registration-unauthorized")
+
+	// the operator reloads the policy of the same running authority with the id VR assigned and the new payee: same key, same pin
+	id := readConfig(t, home).ID
+	policyFile := filepath.Join(t.TempDir(), "policy.json")
+	pf, err := json.Marshal(map[string]any{"network": hexutil.Encode(cfg.Network[:]), "chainId": 3, "registry": a.vr.Registry.Hex(), "authorized": []map[string]any{
+		{"action": "register", "owner": operator.Hex(), "rootNodeId": root.NodeID, "rootKey": hexutil.Encode(root.Public()), "payee": payee.Hex()},
+		{"action": "binding", "owner": operator.Hex(), "id": id, "rootNodeId": root.NodeID, "rootKey": hexutil.Encode(root.Public()), "payee": newPayee.Hex()}}})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(policyFile, pf, 0o600))
+	reload := New(testobserve.NewFactory(t))
+	var rout bytes.Buffer
+	reload.baseCmd.SetOut(&rout)
+	reload.baseCmd.SetErr(&rout)
+	reload.baseCmd.SetArgs([]string{"signing-authority", "registration-policy", "--operator-socket", socket, "--operator-credential", cred, "--policy", policyFile})
+	require.NoError(t, reload.Execute(ctx), rout.String())
+	require.Contains(t, rout.String(), "2 authorized")
 
 	// rotation to an authorized payee: the authority signs the binding domain; VR stages it
 	out, err = runValidator(t, home, "rotate", "--new-payee", newPayee.Hex())

@@ -225,6 +225,21 @@ func (o *OperatorClient) SignRegistration(ctx context.Context, req signingauthor
 	return o.ex.call(ctx, opSignRegistration, payload)
 }
 
+// ReloadRegistrationPolicy replaces the authorized registrations of the running authority (see
+// signingauthority.ReloadRegistrationAuthorizations); the deployment pin, the key and the signing record are untouched.
+func (o *OperatorClient) ReloadRegistrationPolicy(ctx context.Context, list []signingauthority.RegistrationAuthorization) error {
+	w := registrationPolicyPayload{Authorized: []authorizedRegistration{}}
+	for _, x := range list {
+		w.Authorized = append(w.Authorized, authorizedRegistration{Domain: x.Domain, Owner: x.Owner[:], ID: x.ID, RootNodeID: x.RootNodeID, RootKey: x.RootKey, Payee: x.Payee[:]})
+	}
+	payload, err := types.Cbor.Marshal(w)
+	if err != nil {
+		return err
+	}
+	_, err = o.ex.call(ctx, opReloadRegistrationPolicy, payload)
+	return err
+}
+
 // Status reports what the authority is holding.
 func (o *OperatorClient) Status(ctx context.Context) (signingauthority.Status, error) {
 	answer, err := o.ex.call(ctx, opStatus, nil)

@@ -297,8 +297,15 @@ func fileMode(path string) (os.FileMode, error) {
 
 func keyChecks(v *loadedValidator) []doctorCheck {
 	var cs []doctorCheck
-	for _, k := range []struct{ name, path string }{{"root keys", v.cfg.RootKeys}, {"EVM keys", v.cfg.EVMKeys}, {"ureth key", v.cfg.UrethKey},
-		{"engine JWT", v.cfg.JWT}, {"operator key", v.cfg.OperatorKey}} {
+	files := []struct{ name, path string }{{"root keys", v.cfg.RootKeys}}
+	if v.cfg.EVMAuthority == nil {
+		files = append(files, struct{ name, path string }{"EVM keys", v.cfg.EVMKeys})
+	} else {
+		cs = append(cs, authorityChecks(v)...)
+	}
+	files = append(files, struct{ name, path string }{"ureth key", v.cfg.UrethKey}, struct{ name, path string }{"engine JWT", v.cfg.JWT},
+		struct{ name, path string }{"operator key", v.cfg.OperatorKey})
+	for _, k := range files {
 		path := v.abs(k.path)
 		cs = append(cs, doctorCheck{k.name, func(context.Context) (bool, string, string) {
 			if path == "" {
@@ -450,4 +457,58 @@ func rpcChecks(v *loadedValidator, h hostFacts) []doctorCheck {
 		return true, d, ""
 	}})
 	return cs
+}
+
+// authorityChecks are the checks of an EVM key held by a signing authority: the public node info, the credential and the socket (and the
+// authority's own enrollment against the node info), instead of a local key file.
+func authorityChecks(v *loadedValidator) []doctorCheck {
+	a := v.cfg.EVMAuthority
+	info, cred, socket := v.abs(a.NodeInfo), v.abs(a.Credential), v.abs(a.Socket)
+	var ident *evmAuthority
+	return []doctorCheck{
+		{"EVM authority node info", func(context.Context) (bool, string, string) {
+			var err error
+			if ident, err = loadEVMAuthority(evmAuthorityConfig{Socket: socket, Credential: cred, NodeInfo: info}); err != nil {
+				return false, err.Error(), "write it with `ubft signing-authority node-info --out " + info + "`"
+			}
+			return true, fmt.Sprintf("%s (EVM node %s)", info, ident.nodeID), ""
+		}},
+		{"EVM authority credential", func(context.Context) (bool, string, string) {
+			mode, err := fileMode(cred)
+			if err != nil {
+				return false, err.Error(), "the authority operator credential file (`ubft signing-authority credential`)"
+			}
+			if _, err := readCredentialFile(cred); err != nil {
+				return false, err.Error(), "write a credential with `ubft signing-authority credential --out`"
+			}
+			if mode&0o077 != 0 {
+				return true, fmt.Sprintf("%s (mode %o)", cred, mode), "chmod 600 " + cred
+			}
+			return true, cred, ""
+		}},
+		{"EVM authority socket", func(ctx context.Context) (bool, string, string) {
+			st, err := os.Stat(socket)
+			if err != nil || st.Mode()&os.ModeSocket == 0 {
+				return false, fmt.Sprintf("%s is not a socket (%v)", socket, err), "start `ubft signing-authority run` with this --operator-socket"
+			}
+			if ident == nil {
+				return true, socket, ""
+			}
+			op, err := openOperator(socket, cred)
+			if err != nil {
+				return false, err.Error(), ""
+			}
+			defer func() { _ = op.Close() }()
+			ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
+			enrolled, key, err := op.Enrollment(ctx)
+			if err != nil {
+				return false, "the authority did not answer: " + err.Error(), "check the credential and that the authority runs"
+			}
+			if enrolled.NodeID != ident.nodeID || !bytes.Equal(key, ident.pub) {
+				return false, fmt.Sprintf("the authority is node %s with another key than the node info", enrolled.NodeID), "an authority restart generates a new key: re-run `signing-authority node-info` and the enrollment"
+			}
+			return true, socket + " (enrollment matches the node info)", ""
+		}},
+	}
 }
