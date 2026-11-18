@@ -158,7 +158,7 @@ func TestRegistrationPolicyReloadKeepsKeyPinAndRecord(t *testing.T) {
 		"another chain id": {Network: f.depl.Network, ChainID: vrschema.U64(99), Registry: f.depl.Registry},
 		"another registry": {Network: f.depl.Network, ChainID: f.depl.ChainID, Registry: [20]byte{9}},
 	} {
-		require.ErrorIs(t, f.a.ReloadRegistrationAuthorizations(d, nil), ErrRegistrationUnauthorized, name)
+		require.ErrorIs(t, f.a.ReloadRegistrationAuthorizations(d, nil), ErrRegistrationDeployment, name)
 	}
 	_, err = f.a.SignRegistration(rot)
 	require.NoError(t, err, "a refused reload changed nothing")

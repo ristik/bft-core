@@ -22,6 +22,10 @@ var (
 	// an action, owner, identity, root binding or payee that no entry of the policy names.
 	ErrRegistrationUnauthorized = errors.New("signing-registration-unauthorized")
 
+	// ErrRegistrationDeployment is a policy reload made for another VR deployment (network, chain id or registry) than the one this
+	// authority pinned at startup: a staging policy file is not applied to a production authority.
+	ErrRegistrationDeployment = errors.New("signing-registration-deployment-mismatch")
+
 	// ErrUnauthenticated is a request whose certificate, seal quorum, inclusion paths or bound
 	// TechnicalRecord do not verify against the authority's own trust.
 	ErrUnauthenticated = errors.New("signing-unauthenticated-input")

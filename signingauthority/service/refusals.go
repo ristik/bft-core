@@ -18,6 +18,7 @@ never a nil error and never silently one of the known ones.
 var refusalsByName = map[string]error{
 	signingauthority.ErrContextMismatch.Error():          signingauthority.ErrContextMismatch,
 	signingauthority.ErrPoPDomain.Error():                signingauthority.ErrPoPDomain,
+	signingauthority.ErrRegistrationDeployment.Error():   signingauthority.ErrRegistrationDeployment,
 	signingauthority.ErrRegistrationDomain.Error():       signingauthority.ErrRegistrationDomain,
 	signingauthority.ErrRegistrationUnauthorized.Error(): signingauthority.ErrRegistrationUnauthorized,
 	signingauthority.ErrUnauthenticated.Error():          signingauthority.ErrUnauthenticated,
