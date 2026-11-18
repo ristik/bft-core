@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"slices"
 	"sync"
@@ -196,7 +197,8 @@ func TestTheStagingStampSurvivesARestartAndABackwardClock(t *testing.T) {
 	v := mk()
 	v.setShardStaged(1, []string{"a"})
 	first := v.shardStamp
-	require.Equal(t, first, readStamp(path), "persisted with the change")
+	require.Zero(t, readStamp(path), "not persisted by the change itself: the delivery worker persists before it sends")
+	require.NoError(t, writeStamp(path, first))
 
 	// the previous run issued a stamp far ahead of this clock (the clock then went backward)
 	ahead := uint64(time.Now().Add(time.Hour).UnixNano())
@@ -206,4 +208,34 @@ func TestTheStagingStampSurvivesARestartAndABackwardClock(t *testing.T) {
 	require.Greater(t, v.shardStamp, ahead, "above everything an earlier run issued")
 	v.setShardStaged(1, []string{"b"})
 	require.Greater(t, v.shardStamp, ahead+1)
+}
+
+// The generation is persisted before it is sent: when the counter cannot be written, nothing is delivered and the write is retried; once it
+// succeeds the same, unchanged generation goes out.
+func TestAGenerationIsPersistedBeforeItIsSent(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sub", "vr-shard-stamp") // the directory does not exist: the write fails
+	var mu sync.Mutex
+	var sent []uint64
+	v := &vrHandoff{cfg: VRHandoffConfig{ShardStampPath: path, Log: slog.New(slog.DiscardHandler)}, shardKick: make(chan struct{}, 1)}
+	v.cfg.ShardStaged = func(_ context.Context, _, stamp uint64, _ []string) error {
+		mu.Lock()
+		defer mu.Unlock()
+		sent = append(sent, stamp)
+		return nil
+	}
+	v.setShardStaged(1, []string{"a"})
+	go v.shardStagedRun(ctx)
+	time.Sleep(300 * time.Millisecond)
+	mu.Lock()
+	require.Empty(t, sent, "nothing is sent while its stamp cannot be made durable")
+	mu.Unlock()
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
+	require.Eventually(t, func() bool { mu.Lock(); defer mu.Unlock(); return len(sent) > 0 }, 12*time.Second, 50*time.Millisecond, "retried, and sent once durable")
+	mu.Lock()
+	require.Equal(t, v.shardStamp, sent[0])
+	mu.Unlock()
+	require.Equal(t, v.shardStamp, readStamp(path))
 }

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -98,16 +99,17 @@ type vrHandoff struct {
 	srcBusy    bool
 	// the successor's EVM node ids as the paired shard node should hold them: desired is set under stageMu with the active intent, version bumped
 	// on each change; the worker delivers the latest and records what it delivered
-	shardDesired []string
-	shardEpoch   uint64 // the shard epoch the desired assignment would install (installed + 1)
-	shardStamp   uint64 // the generation stamp: later changes carry larger ones, so the shard orders them and ignores a delayed older one
-	shardLast    time.Time
-	shardVer     uint64
-	shardDone    uint64
-	shardKick    chan struct{}
-	statMu       sync.Mutex
-	deriveErr    string // the last derivation's refusal (an input this root lacks), empty once an intent derives
-	observeErr   int    // certified EVM blocks the observer gave up on since the last one it read
+	shardDesired   []string
+	shardEpoch     uint64 // the shard epoch the desired assignment would install (installed + 1)
+	shardStamp     uint64 // the generation stamp: later changes carry larger ones, so the shard orders them and ignores a delayed older one
+	shardLast      time.Time
+	shardPersisted uint64 // the stamp the counter file holds: a generation is sent only once its stamp is durable
+	shardVer       uint64
+	shardDone      uint64
+	shardKick      chan struct{}
+	statMu         sync.Mutex
+	deriveErr      string // the last derivation's refusal (an input this root lacks), empty once an intent derives
+	observeErr     int    // certified EVM blocks the observer gave up on since the last one it read
 	// incumbents is the installed committee's weighted roots without this one and its total weight (this root included), from ONE trust-base snapshot
 	incumbents func() ([]vrschedule.WeightedPeer, uint64)
 	// stageIntent keeps the members the derived intent names (its successors' EVM validators and roots) as the staged successor, from the
@@ -247,6 +249,7 @@ func (x *ConsensusManager) EnableVRHandoff(ctx context.Context, cfg VRHandoffCon
 		v.shardKick = make(chan struct{}, 1)
 		if cfg.ShardStampPath != "" {
 			v.shardStamp = readStamp(cfg.ShardStampPath) // continue above every stamp an earlier run issued
+			v.shardPersisted = v.shardStamp
 		}
 		v.setShardStaged(0, nil) // reconcile at start: the desired state is nothing staged until an intent derives
 		go v.shardStagedRun(ctx)
@@ -1103,11 +1106,6 @@ func (v *vrHandoff) setShardStaged(shardEpoch uint64, ids []string) {
 	v.shardDesired, v.shardEpoch = slices.Clone(ids), shardEpoch
 	v.shardVer++
 	v.shardStamp = max(uint64(time.Now().UnixNano()), v.shardStamp+1)
-	if v.cfg.ShardStampPath != "" {
-		if err := writeStamp(v.cfg.ShardStampPath, v.shardStamp); err != nil {
-			v.cfg.Log.Warn("VR handoff: the staging generation counter could not be persisted", "error", err)
-		}
-	}
 	select {
 	case v.shardKick <- struct{}{}:
 	default:
@@ -1134,9 +1132,21 @@ func (v *vrHandoff) shardStagedRun(ctx context.Context) {
 		}
 		v.stageMu.Lock()
 		ids, epoch, stamp, ver, done, last := slices.Clone(v.shardDesired), v.shardEpoch, v.shardStamp, v.shardVer, v.shardDone, v.shardLast
+		persisted := v.shardPersisted
 		v.stageMu.Unlock()
 		if ver == done && time.Since(last) < shardStagedResend {
 			continue
+		}
+		// the generation is durable before it is sent: a restart never issues a stamp at or below one the shard accepted. A failed write sends
+		// nothing and is retried at the next tick (an unchanged set does not skip it: persisted lags the stamp until a write succeeds).
+		if v.cfg.ShardStampPath != "" && persisted < stamp {
+			if err := writeStamp(v.cfg.ShardStampPath, stamp); err != nil {
+				v.cfg.Log.Warn("VR handoff: the staging generation counter could not be persisted; nothing is sent until it is (retried)", "error", err)
+				continue
+			}
+			v.stageMu.Lock()
+			v.shardPersisted = max(v.shardPersisted, stamp)
+			v.stageMu.Unlock()
 		}
 		c, cancel := context.WithTimeout(ctx, 3*time.Second)
 		err := v.cfg.ShardStaged(c, epoch, stamp, ids)
@@ -1184,5 +1194,12 @@ func writeStamp(path string, n uint64) error {
 	if err := errors.Join(f.Sync(), f.Close()); err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	d, err := os.Open(filepath.Dir(path)) // #nosec G304 -- the node's own home
+	if err != nil {
+		return err
+	}
+	return errors.Join(d.Sync(), d.Close())
 }
