@@ -788,7 +788,8 @@ func (x *ConsensusManager) stageVRCandidate(s vrschedule.Staged) error {
 		if !self {
 			return fmt.Errorf("%w: this node is not a member of the successor committee", ErrVRHandoff)
 		}
-		x.storeStagedEVM(b.Epoch, evmassign.Candidate{Identities: s.Identities}, b.Members)
+		ids, roots := devStagedExtras(s.Identities, b.Members)
+		x.storeStagedEVM(b.Epoch, evmassign.Candidate{Identities: ids}, roots)
 		x.q3Staged.Store(&Q3Staged{CandidateDigest: s.CandidateDigest, BodyID: b.Identity(), Attempt: s.Attempt, Config: b.Config.Identity()})
 		return nil
 	})
@@ -836,19 +837,24 @@ func (x *ConsensusManager) stageVRIntentMembers(epoch uint64, ids []evmassign.Id
 		if old := x.trustBase.Load(); old == nil || epoch != old.Epoch+1 {
 			return nil
 		}
-		// development test hook (scripts/vr-joiner-steps.sh): extra staged roots and EVM nodes, so that a joiner's following of the committed
-		// chain is tried before the Foundation's governance delays allow an admission
-		for _, id := range strings.Split(os.Getenv("UBFT_VR_DEV_STAGE_EXTRA_ROOTS"), ",") {
-			if id != "" {
-				roots = append(roots, evmroot.Member{NodeID: id, StakingID: id, Weight: 1})
-			}
-		}
-		for _, id := range strings.Split(os.Getenv("UBFT_VR_DEV_STAGE_EXTRA_EVM"), ",") {
-			if id != "" {
-				ids = append(ids[:len(ids):len(ids)], evmassign.Identity{EVMNodeID: id})
-			}
-		}
+		ids, roots = devStagedExtras(ids, roots)
 		x.storeStagedEVM(epoch, evmassign.Candidate{Identities: ids}, roots)
 		return nil
 	})
+}
+
+// devStagedExtras adds the development test hook's extra staged roots and EVM nodes (scripts/vr-joiner-steps.sh, UBFT_VR_DEV_STAGE_EXTRA_ROOTS
+// and _EVM): they let a joiner's following of the committed chain be tried before the Foundation's governance delays allow an admission.
+func devStagedExtras(ids []evmassign.Identity, roots []evmroot.Member) ([]evmassign.Identity, []evmroot.Member) {
+	for _, id := range strings.Split(os.Getenv("UBFT_VR_DEV_STAGE_EXTRA_ROOTS"), ",") {
+		if id != "" {
+			roots = append(roots[:len(roots):len(roots)], evmroot.Member{NodeID: id, StakingID: id, Weight: 1})
+		}
+	}
+	for _, id := range strings.Split(os.Getenv("UBFT_VR_DEV_STAGE_EXTRA_EVM"), ",") {
+		if id != "" {
+			ids = append(ids[:len(ids):len(ids)], evmassign.Identity{EVMNodeID: id})
+		}
+	}
+	return ids, roots
 }
