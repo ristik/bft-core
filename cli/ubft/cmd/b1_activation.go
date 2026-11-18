@@ -48,9 +48,12 @@ var (
 
 // b1ProfileFile is the JSON form of b1state.Profile: hashes are 0x-prefixed hex, never arrays of numbers.
 type b1ProfileFile struct {
-	Network             uint16      `json:"network"`
-	RootGenesisID       common.Hash `json:"rootGenesisId"`
-	ExecutionChainID    uint64      `json:"executionChainId"`
+	Network          uint16      `json:"network"`
+	RootGenesisID    common.Hash `json:"rootGenesisId"`
+	ExecutionChainID uint64      `json:"executionChainId"`
+	// ExecutionRevision is the execution revision (bft-core#1199): required, never omitted or defaulted. An absent field decodes to zero and is
+	// refused; an old binary's strict decoder refuses the unknown field, so a revision-carrying profile cannot be read by a pre-#1199 binary.
+	ExecutionRevision   uint64      `json:"executionRevision"`
 	RuntimeHash         common.Hash `json:"runtimeHash"`
 	CompilerHash        common.Hash `json:"compilerHash"`
 	MaxEpochsPerUpdate  uint64      `json:"maxEpochsPerUpdate"`
@@ -87,7 +90,7 @@ type b1ProfileFile struct {
 
 func (f b1ProfileFile) profile() b1state.Profile {
 	return b1state.Profile{
-		Network: f.Network, RootGenesisID: [32]byte(f.RootGenesisID), ExecutionChainID: f.ExecutionChainID,
+		Network: f.Network, RootGenesisID: [32]byte(f.RootGenesisID), ExecutionChainID: f.ExecutionChainID, ExecutionRevision: f.ExecutionRevision,
 		RuntimeHash: [32]byte(f.RuntimeHash), CompilerHash: [32]byte(f.CompilerHash),
 		MaxEpochsPerUpdate: f.MaxEpochsPerUpdate, DeltaEV: f.DeltaEV, DeltaHold: f.DeltaHold,
 		SystemGas: f.SystemGas, ForcedGas: f.ForcedGas, MaxGas: f.MaxGas, OrdinaryCapacity: f.OrdinaryCapacity,
@@ -116,7 +119,7 @@ func b1ProfileFileOf(p b1state.Profile) b1ProfileFile {
 	return b1ProfileFile{
 		RecordsCustody: addressPtr(p.RecordsCustody), HRecords: p.HRecords, HookRecordGas: p.HookRecordGas,
 		ElectionContract: addressPtr(p.ElectionContract), ElectGas: p.ElectGas,
-		Network: p.Network, RootGenesisID: common.Hash(p.RootGenesisID), ExecutionChainID: p.ExecutionChainID,
+		Network: p.Network, RootGenesisID: common.Hash(p.RootGenesisID), ExecutionChainID: p.ExecutionChainID, ExecutionRevision: p.ExecutionRevision,
 		RuntimeHash: common.Hash(p.RuntimeHash), CompilerHash: common.Hash(p.CompilerHash),
 		MaxEpochsPerUpdate: p.MaxEpochsPerUpdate, DeltaEV: p.DeltaEV, DeltaHold: p.DeltaHold,
 		SystemGas: p.SystemGas, ForcedGas: p.ForcedGas, MaxGas: p.MaxGas, OrdinaryCapacity: p.OrdinaryCapacity,
@@ -146,6 +149,10 @@ func readB1ProfileFile(path string) (b1state.Profile, b1ProfileFile, error) {
 		return b1state.Profile{}, b1ProfileFile{}, fmt.Errorf("decoding the b1 profile %q: trailing data", path)
 	}
 	p := f.profile()
+	// First, before any other check: a legacy or absent execution revision is a different network generation, not a malformed field.
+	if err := b1state.CheckExecutionRevision(p.ExecutionRevision); err != nil {
+		return b1state.Profile{}, b1ProfileFile{}, fmt.Errorf("%w: %v", ErrB1Profile, err)
+	}
 	if f.VRHookMeasurement != nil {
 		if err := checkRecordedVRHookGas(f, p); err != nil {
 			return b1state.Profile{}, b1ProfileFile{}, fmt.Errorf("%w: %v", ErrB1Profile, err)
@@ -263,6 +270,10 @@ func checkRecordedHookGas(f b1ProfileFile, p b1state.Profile) error {
 // bindB1Profile checks that the profile is this deployment's: the root history, network and chain it names are the trust base's and the
 // shard configuration's. It returns the verified history the registry genesis and the Update admission are derived from.
 func bindB1Profile(p b1state.Profile, tb *types.RootTrustBaseV1, conf *types.PartitionDescriptionRecord) (*q3format.History, error) {
+	// The execution revision first (bft-core#1199): a profile of another generation is refused whatever else it binds.
+	if err := b1state.CheckExecutionRevision(p.ExecutionRevision); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrB1Profile, err)
+	}
 	h, err := q3format.NewHistory(tb)
 	if err != nil {
 		return nil, fmt.Errorf("%w: the root trust base has no verifiable history: %v", ErrB1Profile, err)
@@ -289,7 +300,7 @@ func deriveB1Profile(tb *types.RootTrustBaseV1, conf *types.PartitionDescription
 		return b1state.Profile{}, fmt.Errorf("shard conf has no chain_id partition param")
 	}
 	p := b1state.Profile{
-		Network: uint16(conf.NetworkID), RootGenesisID: h.Genesis(), ExecutionChainID: chainID,
+		Network: uint16(conf.NetworkID), RootGenesisID: h.Genesis(), ExecutionChainID: chainID, ExecutionRevision: b1state.CurrentExecutionRevision,
 		RuntimeHash: [32]byte(common.HexToHash(b1registry.CodeHashHex)), CompilerHash: b1registry.CompilerHash(),
 		MaxEpochsPerUpdate: maxEpochs, DeltaEV: deltaEV, DeltaHold: deltaHold,
 		RestGas: b1registry.MinRestGas(maxEpochs), CompanionBytes: 1 << 20, OtherCompanionBytes: 65536, OrdinaryCapacity: ordinaryCapacity, GenesisUCTime: genesisUCTime,
