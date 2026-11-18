@@ -53,7 +53,7 @@ type VRHandoffConfig struct {
 	Log     *slog.Logger
 	// ShardStaged tells the paired shard node the EVM node ids of the derived intent's successor (nil: none given; an empty list when the
 	// intent died): the shard node then serves them as staged peers so a joiner can catch its EVM chain up (VT-09b). Retried until it succeeds.
-	ShardStaged func(ctx context.Context, ids []string) error
+	ShardStaged func(ctx context.Context, shardEpoch, stamp uint64, ids []string) error
 	// Member, when set, makes this node do every successor-member step itself (VT-09, design 5.3.3): its sticky possession proof, its
 	// readiness over a verified assembly with the support commitments, the staging and the pre-connection; no host-side drive.
 	Member *VRMemberConfig
@@ -93,14 +93,18 @@ type vrHandoff struct {
 	srcBusy    bool
 	// the successor's EVM node ids as the paired shard node should hold them: desired is set under stageMu with the active intent, version bumped
 	// on each change; the worker delivers the latest and records what it delivered
-	shardDesired []string
-	shardVer     uint64
-	shardDone    uint64
-	shardKick    chan struct{}
-	statMu       sync.Mutex
-	deriveErr    string           // the last derivation's refusal (an input this root lacks), empty once an intent derives
-	observeErr   int              // certified EVM blocks the observer gave up on since the last one it read
-	incumbents   func() []peer.ID // the installed committee's roots without this one
+	shardDesired  []string
+	shardEpoch    uint64 // the shard epoch the desired assignment would install (installed + 1)
+	shardStamp    uint64 // the generation stamp: later changes carry larger ones, so the shard orders them and ignores a delayed older one
+	shardLast     time.Time
+	shardVer      uint64
+	shardDone     uint64
+	shardKick     chan struct{}
+	statMu        sync.Mutex
+	deriveErr     string           // the last derivation's refusal (an input this root lacks), empty once an intent derives
+	observeErr    int              // certified EVM blocks the observer gave up on since the last one it read
+	incumbents    func() []peer.ID // the installed committee's roots without this one
+	committeeSize func() int       // the installed committee's size (this root included): the source quorum's basis
 	// stageIntent keeps the members the derived intent names (its successors' EVM validators and roots) as the staged successor, from the
 	// intent's derivation on; nil clears it
 	stageIntent  func(epoch uint64, ids []evmassign.Identity, roots []evmroot.Member) error
@@ -192,6 +196,7 @@ func (x *ConsensusManager) EnableVRHandoff(ctx context.Context, cfg VRHandoffCon
 	}
 	v.peers = func() []peer.ID { return x.vrPeers(v) }
 	v.stageIntent = x.stageVRIntentMembers
+	v.committeeSize = func() int { return len(x.Validators()) }
 	v.incumbents = func() []peer.ID {
 		var out []peer.ID
 		for _, id := range x.Validators() {
@@ -228,6 +233,7 @@ func (x *ConsensusManager) EnableVRHandoff(ctx context.Context, cfg VRHandoffCon
 	go v.queue.Run(ctx)
 	if cfg.ShardStaged != nil {
 		v.shardKick = make(chan struct{}, 1)
+		v.setShardStaged(0, nil) // reconcile at start: the desired state is nothing staged until an intent derives
 		go v.shardStagedRun(ctx)
 	}
 	if v.member != nil {
@@ -924,7 +930,13 @@ func (v *vrHandoff) stagedMembers(c vrschedule.Committed) {
 	defer v.stageMu.Unlock()
 	if !c.Derivable {
 		v.haveActive = false
-		v.setShardStaged(devShardExtras(nil)) // nothing, but in the vrdev build the development hook's extras
+		// nothing, but in the vrdev build the development hook's extras (for the first assignment: the dev lanes' shard epoch is 0)
+		extras := devShardExtras(nil)
+		var extraEpoch uint64
+		if len(extras) > 0 {
+			extraEpoch = 1
+		}
+		v.setShardStaged(extraEpoch, extras)
 		if v.intentStaged {
 			// cleared once the clearing is installed: a refused call is tried again at the next refresh
 			if v.stageIntent(0, nil, nil) == nil {
@@ -945,7 +957,7 @@ func (v *vrHandoff) stagedMembers(c vrschedule.Committed) {
 	for _, m := range cand.Identities {
 		evm = append(evm, m.EVMNodeID)
 	}
-	v.setShardStaged(devShardExtras(evm))
+	v.setShardStaged(cand.OldShardEpoch+1, devShardExtras(evm))
 	roots := make([]evmroot.Member, 0, len(cand.RootMembers))
 	for _, m := range cand.RootMembers {
 		roots = append(roots, evmroot.Member{NodeID: m.NodeID, StakingID: m.NodeID, ConsensusKey: m.Key, Weight: m.Weight})
@@ -996,7 +1008,7 @@ func (v *vrHandoff) fetchSource(ctx context.Context, r [32]byte) {
 	peers := v.incumbents()
 	go func() {
 		defer func() { v.srcMu.Lock(); v.srcBusy = false; v.srcMu.Unlock() }()
-		e, err := vrschedule.FetchSource(ctx, v.cfg.Opener, peers, r)
+		e, err := vrschedule.FetchSource(ctx, v.cfg.Opener, peers, r, v.committeeSize())
 		if err != nil {
 			v.cfg.Log.Debug("VR handoff: the source of a result is not available from the incumbents yet", "result", fmt.Sprintf("%x", r[:8]), "error", err)
 			return
@@ -1054,11 +1066,9 @@ func (v *vrHandoff) memberStatus(recovering bool, self string) VRMemberStatus {
 		reasons = append(reasons, v.deriveErr)
 	}
 	v.statMu.Unlock()
-	intent, view, _, ok := v.svc.Current()
+	intent, view, successor, ok := v.svc.SuccessorState(self)
 	if ok && len(reasons) == 0 {
-		st := VRMemberStatus{State: "ready", Intent: fmt.Sprintf("%x", intent[:]), CommitView: view}
-		_, st.Successor = v.svc.Members()[self]
-		return st
+		return VRMemberStatus{State: "ready", Intent: fmt.Sprintf("%x", intent[:]), CommitView: view, Successor: successor}
 	}
 	if len(reasons) > 0 {
 		return VRMemberStatus{State: "catching up", Reasons: reasons}
@@ -1066,24 +1076,32 @@ func (v *vrHandoff) memberStatus(recovering bool, self string) VRMemberStatus {
 	return VRMemberStatus{State: "idle"}
 }
 
-// setShardStaged records the successor's EVM node ids the paired shard node should hold (empty clears), under stageMu with the active intent.
-func (v *vrHandoff) setShardStaged(ids []string) {
+// setShardStaged records the successor's EVM node ids the paired shard node should hold, for the shard epoch that assignment would install
+// (empty clears), under stageMu with the active intent. Each change gets a larger generation stamp.
+func (v *vrHandoff) setShardStaged(shardEpoch uint64, ids []string) {
 	if v.shardKick == nil {
 		return
 	}
-	if slices.Equal(v.shardDesired, ids) {
+	if slices.Equal(v.shardDesired, ids) && v.shardEpoch == shardEpoch && v.shardVer > 0 {
 		return
 	}
-	v.shardDesired = slices.Clone(ids)
+	v.shardDesired, v.shardEpoch = slices.Clone(ids), shardEpoch
 	v.shardVer++
+	v.shardStamp = max(uint64(time.Now().UnixNano()), v.shardStamp+1)
 	select {
 	case v.shardKick <- struct{}{}:
 	default:
 	}
 }
 
-// shardStagedRun delivers the latest desired staged set to the paired shard node, retrying every few seconds until it is accepted. Delivery is
-// in order and latest-wins: a set an intent replaced or cleared meanwhile is never delivered after its replacement.
+// shardStagedResend is how often the desired set is delivered again although it was accepted: a shard node that restarted since holds nothing
+// until it is told again, and a root that restarted reconciles at its first tick (its desired state at start is "nothing staged").
+const shardStagedResend = 30 * time.Second
+
+// shardStagedRun delivers the desired staged set to the paired shard node, retrying every few seconds until it is accepted and again every
+// shardStagedResend (both sides reconcile after a restart: the root's first delivery is its desired state at start, a clear until an intent
+// derives). Delivery is in order and latest-wins by generation: a set an intent replaced or cleared meanwhile is never installed after its
+// replacement, even by a delayed request, because the shard checks the stamp.
 func (v *vrHandoff) shardStagedRun(ctx context.Context) {
 	t := time.NewTicker(5 * time.Second)
 	defer t.Stop()
@@ -1095,13 +1113,13 @@ func (v *vrHandoff) shardStagedRun(ctx context.Context) {
 		case <-v.shardKick:
 		}
 		v.stageMu.Lock()
-		ids, ver, done := slices.Clone(v.shardDesired), v.shardVer, v.shardDone
+		ids, epoch, stamp, ver, done, last := slices.Clone(v.shardDesired), v.shardEpoch, v.shardStamp, v.shardVer, v.shardDone, v.shardLast
 		v.stageMu.Unlock()
-		if ver == done {
+		if ver == done && time.Since(last) < shardStagedResend {
 			continue
 		}
 		c, cancel := context.WithTimeout(ctx, 3*time.Second)
-		err := v.cfg.ShardStaged(c, ids)
+		err := v.cfg.ShardStaged(c, epoch, stamp, ids)
 		cancel()
 		if err != nil {
 			v.cfg.Log.Debug("VR handoff: the paired shard node did not take the staged successor (retried)", "error", err)
@@ -1111,7 +1129,10 @@ func (v *vrHandoff) shardStagedRun(ctx context.Context) {
 		if v.shardDone < ver {
 			v.shardDone = ver
 		}
+		v.shardLast = time.Now()
 		v.stageMu.Unlock()
-		v.cfg.Log.Info("VR handoff: the paired shard node holds the staged successor", "evmNodes", len(ids))
+		if ver != done {
+			v.cfg.Log.Info("VR handoff: the paired shard node holds the staged successor", "evmNodes", len(ids))
+		}
 	}
 }

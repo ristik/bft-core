@@ -107,11 +107,48 @@ func TestAJoinerFetchesTheSourceFromAQuorumOfPeers(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	require.Equal(t, 2, SourceQuorum(4))
-	got, err := FetchSource(ctx, FromLibp2p(joiner), ids, r)
+	got, err := FetchSource(ctx, FromLibp2p(joiner), ids, r, 4)
 	require.NoError(t, err)
 	require.Equal(t, good, got)
 
 	// one honest, one liar, two that did not observe it: no quorum
-	_, err = FetchSource(ctx, FromLibp2p(joiner), []peer.ID{servers[0].ID(), servers[3].ID(), servers[4].ID(), servers[4].ID()}, r)
+	_, err = FetchSource(ctx, FromLibp2p(joiner), []peer.ID{servers[0].ID(), servers[3].ID(), servers[4].ID(), servers[4].ID()}, r, 4)
 	require.ErrorIs(t, err, ErrUnavailable)
+}
+
+// The quorum rests on the installed committee's size, not on how many peers were asked: a recovering incumbent that asks the three others of a
+// committee of four still needs two identical answers (one honest peer alone is not enough), and one peer asked twice counts once.
+func TestTheSourceQuorumRestsOnTheCommitteeNotOnThePeersAsked(t *testing.T) {
+	w := newWorld(t)
+	r := [32]byte{0x52}
+	e := SourceEntry{Source: vrhandoff.Source{ResultID: r[:], EVMBlockHash: bytes.Repeat([]byte{7}, 32), EVMBlockNumber: 77, CertRootRound: 400, OutputCommit: bytes.Repeat([]byte{9}, 32)}, CertUCTime: 4000}
+	joiner := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
+	serve := func(entry *SourceEntry) peer.ID {
+		p := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
+		joiner.Network().Peerstore().AddAddrs(p.ID(), p.MultiAddresses(), peerstore.PermanentAddrTTL)
+		src, err := NewSources("")
+		require.NoError(t, err)
+		if entry != nil {
+			_, err = src.Record(*entry)
+			require.NoError(t, err)
+		}
+		svc := w.service("x")
+		p.RegisterProtocolHandler(ProtocolID, NewServer(svc, NewQueue(svc, 0), func(peer.ID) bool { return true }).WithSources(src).Handler)
+		t.Cleanup(func() { p.RemoveProtocolHandler(ProtocolID) })
+		return p.ID()
+	}
+	honest, none1, none2 := serve(&e), serve(nil), serve(nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	// three peers asked of a committee of four: the quorum is 2, and a single honest answer is not it
+	_, err := FetchSource(ctx, FromLibp2p(joiner), []peer.ID{honest, none1, none2}, r, 4)
+	require.ErrorIs(t, err, ErrUnavailable)
+	// the same peer listed three times is one responder
+	_, err = FetchSource(ctx, FromLibp2p(joiner), []peer.ID{honest, honest, honest}, r, 4)
+	require.ErrorIs(t, err, ErrUnavailable)
+	// two distinct peers with the identical entry make it
+	second, third := serve(&e), serve(&e) // fresh servers: a server answers one peer at most once per StageInterval
+	got, err := FetchSource(ctx, FromLibp2p(joiner), []peer.ID{second, third, none1}, r, 4)
+	require.NoError(t, err)
+	require.Equal(t, e, got)
 }

@@ -73,6 +73,8 @@ type Server struct {
 	limits       Limits
 	allowed      map[peer.ID]struct{}
 	authorize    func(peer.ID) bool
+	// readOnly admits peers for read operations only (a staged joiner catching up): never for publication, which needs authorize
+	readOnly func(peer.ID) bool
 	mu           sync.Mutex
 	pending      int
 	byPeer       map[peer.ID]int
@@ -205,6 +207,16 @@ func (s *Server) SetBundleVerifier(v BundleVerifier) { s.bundleVerify = v }
 
 func (s *Server) SetLogger(log *slog.Logger) { s.log = log }
 
+// SetReadOnlyAuthorizer admits the peers the predicate names for read operations only: they may fetch, never publish (a staged successor's
+// joiner catches up from the archive but cannot make this node store anything). Call before Register.
+func (s *Server) SetReadOnlyAuthorizer(allowed func(peer.ID) bool) { s.readOnly = allowed }
+
+func (s *Server) readAuthorized(id peer.ID) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.readOnly != nil && s.readOnly(id)
+}
+
 // SetPeerAuthorizer makes the server authorize peers through the given predicate instead of the static set it was built with: the
 // validators of the ACTIVE assignment, which changes at every rotation. Call before Register.
 func (s *Server) SetPeerAuthorizer(allowed func(peer.ID) bool) { s.authorize = allowed }
@@ -239,7 +251,7 @@ func (s *Server) reservePending(id peer.ID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.authorize != nil {
-		if !s.authorize(id) {
+		if !s.authorize(id) && !(s.readOnly != nil && s.readOnly(id)) {
 			return ErrPeerNotAllowed
 		}
 	} else if _, ok := s.allowed[id]; !ok {
@@ -286,7 +298,7 @@ func (s *Server) handle(stream libp2pnetwork.Stream) {
 	defer stream.Close()
 	id := stream.Conn().RemotePeer()
 	_ = stream.SetDeadline(time.Now().Add(s.limits.Deadline))
-	if s.public != nil && !s.authorized(id) {
+	if s.public != nil && !s.authorized(id) && !s.readAuthorized(id) {
 		s.handlePublic(stream, id)
 		return
 	}
@@ -326,6 +338,12 @@ func (s *Server) handle(stream libp2pnetwork.Stream) {
 		return
 	}
 	operation := archiveOperation(frame[0])
+	if !readOperation(frame[0]) && !s.authorized(id) {
+		// a read-only peer (a staged joiner) may not publish: refused before anything is verified or stored
+		reserved = true
+		s.reject(stream, id, operation, fmt.Errorf("%w: a read-only peer may not publish", ErrPeerNotAllowed), true)
+		return
+	}
 	if err := s.reservePeer(id); err != nil {
 		reserved = false // reservePeer releases the global reservation on refusal.
 		s.reject(stream, id, operation, err, true)

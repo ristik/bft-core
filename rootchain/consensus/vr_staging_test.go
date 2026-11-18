@@ -106,6 +106,7 @@ func TestTheMemberReportsCatchingUpUntilItDerivesTheIntent(t *testing.T) {
 	require.Equal(t, "ready", st.State)
 	require.True(t, st.Successor)
 	require.False(t, v.memberStatus(false, "someone-else").Successor)
+	require.False(t, v.memberStatus(false, w.Members[4].Root).Successor, "an incumbent that is no successor is not labelled one")
 }
 
 // The paired shard node is told the successor's EVM validators from the intent's derivation on, the latest set wins, a refused delivery is
@@ -117,7 +118,7 @@ func TestThePairedShardNodeHoldsTheActiveIntentsSuccessor(t *testing.T) {
 	var delivered [][]string
 	fail := true
 	v := &vrHandoff{cfg: VRHandoffConfig{Log: slog.New(slog.DiscardHandler)}, shardKick: make(chan struct{}, 1)}
-	v.cfg.ShardStaged = func(_ context.Context, ids []string) error {
+	v.cfg.ShardStaged = func(_ context.Context, _, _ uint64, ids []string) error {
 		mu.Lock()
 		defer mu.Unlock()
 		if fail {
