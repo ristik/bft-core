@@ -150,10 +150,10 @@ type viewState struct {
 	// kready is the readiness of K members that are not successors (design 5.3.1 stage 4: support only), by root node id; it never counts toward
 	// completeness and carries the support commitments the K-support gate (7.3 b) reads from this intent's K-member readiness
 	kready    map[string]vrhandoff.Readiness
-	encodings  map[string][]byte
-	refused    map[string]int          // replacements spent by sender
-	evidence   map[string]Equivocation // the one conflict of each equivocating signer in this view
-	tried      bool                    // the complete set was checked as a certificate
+	encodings map[string][]byte
+	refused   map[string]int          // replacements spent by sender
+	evidence  map[string]Equivocation // the one conflict of each equivocating signer in this view
+	tried     bool                    // the complete set was checked as a certificate
 }
 
 type intentState struct {
@@ -1160,6 +1160,8 @@ func (s *Service) kReadinessLocked(st *intentState) []vrschema.Readiness {
 			out = append(out, r)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return bytes.Compare(out[i].Commitments[0].StakingID, out[j].Commitments[0].StakingID) < 0 })
+	sort.Slice(out, func(i, j int) bool {
+		return bytes.Compare(out[i].Commitments[0].StakingID, out[j].Commitments[0].StakingID) < 0
+	})
 	return out
 }

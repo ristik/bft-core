@@ -148,7 +148,9 @@ func (x *ConsensusManager) EnableVRHandoff(ctx context.Context, cfg VRHandoffCon
 	v.update = x.vrCommitted
 	v.now = time.Now
 	v.opening = func() (storage.VROpening, bool, error) { return x.blockStore().CommittedVROpening() }
-	v.queryAt = func(b *storage.ExecutedBlock) (storage.VRIntentQuery, bool, error) { return x.blockStore().VRQueryAt(b) }
+	v.queryAt = func(b *storage.ExecutedBlock) (storage.VRIntentQuery, bool, error) {
+		return x.blockStore().VRQueryAt(b)
+	}
 	v.derive = cfg.Intents.DeriveCached // the leader's checks never wait on the execution client (review #1188 B9)
 	v.leader = vrschedule.LeaderRecords
 	v.reject = x.preferRejection
