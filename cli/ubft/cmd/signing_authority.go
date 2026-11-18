@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -76,6 +77,9 @@ type signingAuthorityRunFlags struct {
 	ClientSocket       string
 	OperatorSocket     string
 	OperatorCredential string
+	// the automated root member's narrow channel: the handoff possession proof only (VT-09); both or neither
+	PoPSocket     string
+	PoPCredential string
 
 	// the registrations this authority may sign (VT-10); empty: none
 	RegistrationPolicy string
@@ -110,6 +114,8 @@ key exists: the authority starts pending and admits no client until complete-enr
 	cmd.Flags().StringVar(&flags.ClientSocket, "client-socket", "", "Unix socket the shard node connects to; its directory is restricted to the owner")
 	cmd.Flags().StringVar(&flags.OperatorSocket, "operator-socket", "", "Unix socket for the operator commands; its directory is restricted to the owner")
 	cmd.Flags().StringVar(&flags.OperatorCredential, "operator-credential", "", "path to the operator credential (see `signing-authority credential`)")
+	cmd.Flags().StringVar(&flags.PoPSocket, "pop-socket", "", "Unix socket of the automated root member (`root-node run --vr-evm-authority-socket`): it serves the handoff possession proof and nothing else; with --pop-credential")
+	cmd.Flags().StringVar(&flags.PoPCredential, "pop-credential", "", "path to the member's credential (see `signing-authority credential`); a credential of its own, not the operator's. The root process must run as the authority's uid to reach the socket (its directory is 0700), so keep the operator credential file unreadable by the root process: the member credential is then the only thing it can use")
 	cmd.Flags().StringVar(&flags.RegistrationPolicy, "registration-policy", "", "JSON file pinning the VR deployment and listing the registrations this authority may sign for its EVM key (VT-10): without it the authority signs none. Fixed for the authority's lifetime")
 	cmd.Flags().StringVar(&flags.AuthorityID, "authority-id", "", "operator-assigned name for this authority lifetime, for diagnostics")
 	cmd.Flags().StringVar(&flags.NodeID, "node-id", "", "the shard validator this authority signs for (`ubft node-id` on the shard node's key configuration)")
@@ -136,6 +142,15 @@ func signingAuthorityRun(ctx context.Context, flags *signingAuthorityRunFlags) e
 	operatorCredential, err := readCredentialFile(flags.OperatorCredential)
 	if err != nil {
 		return fmt.Errorf("loading the operator credential: %w", err)
+	}
+	if (flags.PoPSocket == "") != (flags.PoPCredential == "") {
+		return errors.New("--pop-socket and --pop-credential go together")
+	}
+	var popCredential []byte
+	if flags.PoPCredential != "" {
+		if popCredential, err = readCredentialFile(flags.PoPCredential); err != nil {
+			return fmt.Errorf("loading the possession-proof credential: %w", err)
+		}
 	}
 	trustBases, err := flags.loadTrustBases(flags.baseFlags)
 	if err != nil {
@@ -184,7 +199,7 @@ func signingAuthorityRun(ctx context.Context, flags *signingAuthorityRunFlags) e
 	}
 	defer authority.Close()
 
-	server, err := service.NewServer(authority, service.Config{OperatorCredential: operatorCredential, Log: log})
+	server, err := service.NewServer(authority, service.Config{OperatorCredential: operatorCredential, PoPCredential: popCredential, Log: log})
 	if err != nil {
 		return err
 	}
@@ -199,6 +214,14 @@ func signingAuthorityRun(ctx context.Context, flags *signingAuthorityRunFlags) e
 	}
 	defer func() { _ = operatorListener.Close() }()
 
+	var popListener net.Listener
+	if flags.PoPSocket != "" {
+		if popListener, err = service.ListenUnix(flags.PoPSocket); err != nil {
+			return fmt.Errorf("possession-proof socket: %w", err)
+		}
+		defer func() { _ = popListener.Close() }()
+	}
+
 	publicKey, err := authority.SigningPublicKey()
 	if err != nil {
 		return err
@@ -211,11 +234,17 @@ func signingAuthorityRun(ctx context.Context, flags *signingAuthorityRunFlags) e
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error { return server.Serve(clientListener, service.ClientEndpoint) })
 	g.Go(func() error { return server.Serve(operatorListener, service.OperatorEndpoint) })
+	if popListener != nil {
+		g.Go(func() error { return server.Serve(popListener, service.PoPEndpoint) })
+	}
 	g.Go(func() error {
 		<-gctx.Done()
 		server.Close()
 		_ = clientListener.Close()
 		_ = operatorListener.Close()
+		if popListener != nil {
+			_ = popListener.Close()
+		}
 		return nil
 	})
 	return g.Wait()

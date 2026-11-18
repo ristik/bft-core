@@ -69,6 +69,8 @@ type VRHandoffConfig struct {
 // rules it supports (nil: every rule of the committed schedule).
 type VRMemberConfig struct {
 	EVMSigner abcrypto.Signer
+	// EVMPoP, when set, is the possession-proof provider (the authority's): it takes the place of EVMSigner
+	EVMPoP    vrschedule.PoPProvider
 	EVMNodeID string // the node id of EVMSigner: checked against the EVM node the intent names for this node
 	Path      string
 	Supports  func(vrschema.Activation) bool
@@ -184,7 +186,7 @@ func (x *ConsensusManager) EnableVRHandoff(ctx context.Context, cfg VRHandoffCon
 		}
 	}
 	if cfg.Member != nil {
-		m, err := vrschedule.NewMember(v.svc, vrschedule.MemberConfig{Self: x.id.String(), RootSigner: cfg.Signer, EVMSigner: cfg.Member.EVMSigner,
+		m, err := vrschedule.NewMember(v.svc, vrschedule.MemberConfig{Self: x.id.String(), RootSigner: cfg.Signer, EVMSigner: cfg.Member.EVMSigner, EVMPoP: cfg.Member.EVMPoP,
 			Path: cfg.Member.Path, Send: func(m vrschedule.Message) { v.send(ctx, m) }, Supports: cfg.Member.Supports, Hold: cfg.Member.Hold, EVMNodeID: cfg.Member.EVMNodeID, Stage: x.stageVRCandidate, Log: cfg.Log})
 		if err != nil {
 			return err
