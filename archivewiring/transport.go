@@ -75,9 +75,9 @@ type Server struct {
 	authorize    func(peer.ID) bool
 	// readOnly admits peers for read operations only (a staged joiner catching up): never for publication, which needs authorize
 	readOnly func(peer.ID) bool
-	mu           sync.Mutex
-	pending      int
-	byPeer       map[peer.ID]int
+	mu       sync.Mutex
+	pending  int
+	byPeer   map[peer.ID]int
 	// defaultDigest names the representation of a block the default read (op 2) serves when this node adopted another valid representation of it (bft-core#876); the block's
 	// own record otherwise.
 	defaultDigest func(archive.Request) ([32]byte, bool)
