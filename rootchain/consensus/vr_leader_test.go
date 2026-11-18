@@ -16,6 +16,7 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/internal/testutils/vrhandofffix"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
@@ -443,4 +444,76 @@ func TestVRAByzantinePulledSet(t *testing.T) {
 	require.True(t, v.pullFrom(context.Background(), []peer.ID{good}, w.d, 0))
 	_, _, complete, _ := s.Current()
 	require.True(t, complete, "the honest peer's set completes the view")
+}
+
+type trustBaseMap map[uint64]*types.RootTrustBaseV1
+
+func (m trustBaseMap) GetByEpoch(e uint64) (*types.RootTrustBaseV1, error) {
+	if tb, ok := m[e]; ok {
+		return tb, nil
+	}
+	return nil, errors.New("no trust base of that epoch")
+}
+
+// astra's review of #1188, r5: the membership a committed state names is the committee of that state's epoch with its root facts; a
+// committee of another epoch or missing facts publish nothing (the service keeps its last good membership).
+func TestVRMembershipIsOfTheStatesEpochWithItsFacts(t *testing.T) {
+	tb := func(epoch uint64, ids ...string) *types.RootTrustBaseV1 {
+		out := &types.RootTrustBaseV1{Epoch: epoch}
+		for _, id := range ids {
+			out.RootNodes = append(out.RootNodes, &types.NodeInfo{NodeID: id, SigKey: []byte{1}})
+		}
+		return out
+	}
+	k := []evmassign.Identity{{RootNodeID: "k1"}}
+	facts := func() (storage.VRRootFacts, error) {
+		return storage.VRRootFacts{Lifecycle: evmassign.LifecycleContext{Incumbent: k}}, nil
+	}
+	q := storage.VRIntentQuery{Epoch: 3, Root: facts}
+
+	inc, f, err := vrMembership(q, tb(4, "live"), trustBaseMap{3: tb(3, "e3a", "e3b")})
+	require.NoError(t, err)
+	require.Len(t, inc, 2, "the stored committee of the state's epoch, not the live one")
+	require.Contains(t, inc, "e3a")
+	require.Equal(t, k, f.Lifecycle.Incumbent)
+
+	inc, _, err = vrMembership(q, tb(3, "live3"), trustBaseMap{})
+	require.NoError(t, err)
+	require.Contains(t, inc, "live3", "the live trust base only when it is of the state's epoch")
+
+	_, _, err = vrMembership(q, tb(4, "live4"), trustBaseMap{})
+	require.ErrorIs(t, err, ErrVRHandoff, "another epoch's committee is never used")
+	_, _, err = vrMembership(q, tb(4, "live4"), nil)
+	require.ErrorIs(t, err, ErrVRHandoff)
+
+	q.Root = nil
+	_, _, err = vrMembership(q, tb(3, "live3"), nil)
+	require.ErrorIs(t, err, ErrVRHandoff, "no facts: no membership")
+	q.Root = func() (storage.VRRootFacts, error) { return storage.VRRootFacts{}, errors.New("authority unavailable") }
+	_, _, err = vrMembership(q, tb(3, "live3"), nil)
+	require.ErrorIs(t, err, ErrVRHandoff, "a facts error is not an empty K")
+}
+
+// A refresh whose committed membership is not available keeps the service's last good membership.
+func TestVRRefreshKeepsTheLastGoodMembership(t *testing.T) {
+	w := newVRWorld(t)
+	svc := vrschedule.NewService(vrschedule.ServiceConfig{Self: "x"})
+	_, known := svc.Membership()
+	require.False(t, known, "no committed membership before the first refresh")
+	good := w.committed(0)
+	fail := false
+	v := &vrHandoff{svc: svc, cfg: VRHandoffConfig{Log: slog.New(slog.DiscardHandler)}, update: func() (vrschedule.Committed, error) {
+		if fail {
+			return vrschedule.Committed{}, ErrVRHandoff
+		}
+		return good, nil
+	}}
+	v.refresh(context.Background())
+	before, known := svc.Membership()
+	require.True(t, known)
+	require.NotEmpty(t, before)
+	fail = true
+	v.refresh(context.Background())
+	after, _ := svc.Membership()
+	require.Equal(t, before, after, "kept")
 }
