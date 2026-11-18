@@ -945,7 +945,7 @@ func (v *vrHandoff) stagedMembers(c vrschedule.Committed) {
 	for _, m := range cand.Identities {
 		evm = append(evm, m.EVMNodeID)
 	}
-	v.setShardStaged(evm)
+	v.setShardStaged(devShardExtras(evm))
 	roots := make([]evmroot.Member, 0, len(cand.RootMembers))
 	for _, m := range cand.RootMembers {
 		roots = append(roots, evmroot.Member{NodeID: m.NodeID, StakingID: m.NodeID, ConsensusKey: m.Key, Weight: m.Weight})

@@ -11,3 +11,6 @@ import (
 func devStagedExtras(ids []evmassign.Identity, roots []evmroot.Member) ([]evmassign.Identity, []evmroot.Member) {
 	return ids, roots
 }
+
+// devShardExtras is the development hook of the vrdev build; a production build has none.
+func devShardExtras(ids []string) []string { return ids }
