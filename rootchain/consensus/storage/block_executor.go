@@ -187,7 +187,7 @@ func newRootBlock(block *abdrc.CommittedBlock, hash crypto.Hash, orchestration O
 	if recovery {
 		// before anything is written: the head is consistent with the authenticated root and with itself
 		if block.GetRound() == rctypes.GenesisRootRound && localGenesis == nil {
-			if localGenesis, err = NewGenesisBlock(orchestration.NetworkID(), hash, profile); err != nil {
+			if localGenesis, err = NewGenesisBlockOf(orchestration, hash, profile); err != nil {
 				return nil, fmt.Errorf("local genesis: %w", err)
 			}
 		}

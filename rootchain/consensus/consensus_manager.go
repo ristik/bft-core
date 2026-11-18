@@ -296,7 +296,7 @@ func NewConsensusManager(
 	if b, err := bStore.Block(drctypes.GenesisRootRound); err == nil && b.Qc != nil {
 		genesisQC = b.Qc
 	} else {
-		genesis, err := storage.NewGenesisBlock(orchestration.NetworkID(), crypto.SHA256, cParams.NetworkProfileVersion)
+		genesis, err := storage.NewGenesisBlockOf(orchestration, crypto.SHA256, cParams.NetworkProfileVersion)
 		if err != nil {
 			return nil, fmt.Errorf("deriving the genesis QC: %w", err)
 		}
