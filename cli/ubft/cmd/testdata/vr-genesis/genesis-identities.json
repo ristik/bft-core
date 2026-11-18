@@ -1,0 +1,50 @@
+[
+  {
+    "stakingId": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE=",
+    "generation": 1,
+    "rootNodeId": "16Uiu2HAm1fcLChkojjKjUe84AmXdYYaQFLw1e2U2cZeoCYArbXDU",
+    "rootKey": "A9uP9lrbFn33xqFru57rwuwv0YfLFWnajmX//ppNGcgx",
+    "evmNodeId": "16Uiu2HAmLXEgwLc3qorVVgxnZ7DLXDjMc6Jing9UosDEgQasAPxh",
+    "evmKey": "AvsCIH44w/zlHppRAk5BC5aY+1L0juZPwiBk3YUgKApf",
+    "weight": 1,
+    "rawWeight": 1,
+    "operatorPayee": "O8+E3cIl10iI0bLsu0c2+qE9YCU=",
+    "exposureDigest": "2/qEF0FCd3KSC6MA4vPIRvL7KLzWknN2JscTBuDR20U="
+  },
+  {
+    "stakingId": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAI=",
+    "generation": 1,
+    "rootNodeId": "16Uiu2HAmAEZfaqNKyN3oDEm3A3kbApELdi6dwHcpPXcyPDbXNkwP",
+    "rootKey": "A8d7h6KI3KuyAxUhxZHW6syI7lzxXrDy4KIAUIjs0Ji6",
+    "evmNodeId": "16Uiu2HAmHvTtpc7iXs9QjNm9ky7HZ7Ua6XxVRoUfa96zEHf5os1r",
+    "evmKey": "Azujfz9HaA68w1szTMyxhKCLouPFSjvOy6iRSxm9iBhs",
+    "weight": 1,
+    "rawWeight": 1,
+    "operatorPayee": "kLMDWdLRYZd4/SI0xSQ5GUbVtjo=",
+    "exposureDigest": "w9ttdACSyW8L32gjIoZ03zWBkmoN9WYhds7P5d9Vgv4="
+  },
+  {
+    "stakingId": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAM=",
+    "generation": 1,
+    "rootNodeId": "16Uiu2HAmJT6rGJhKd9XmkL46zsQsGoyyg2k2RHZWZJY2SB5BURWn",
+    "rootKey": "AxY9c+Xb9ix6b2fjRYymtRc3hi+TyqlGSstAGfraFnQO",
+    "evmNodeId": "16Uiu2HAm4jkq6UryXWLhyvMdwB2RbUcrRhi4PtMqVPxnVRqvsWDJ",
+    "evmKey": "A7n43JUjg/zMJeu0joH2IMpdIdGisOt1GOh0Np+qO3q2",
+    "weight": 1,
+    "rawWeight": 1,
+    "operatorPayee": "3xRLZLT8WKs4REje4R/goRAOdbI=",
+    "exposureDigest": "FSxu65JiErgw8nd31BCKmY29EcOVDymE9x5snI3YYT8="
+  },
+  {
+    "stakingId": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQ=",
+    "generation": 1,
+    "rootNodeId": "16Uiu2HAmShoRjDXzoUvsCwYiBkgX5QbJRTtc5rQPtvktTbDTf3Th",
+    "rootKey": "A4eyy/ZUAif7PHDyF8hTR8nH9fmxM5+L62mBBg+Wgjia",
+    "evmNodeId": "16Uiu2HAm5oJj5CfPiZnECnrULfuUZeca75ZKAZQYUYJ65AwEBe6a",
+    "evmKey": "A4r3C6iDEikFV0fAs2JZEyBdgLNC9XnXRgSlw4mOp8gc",
+    "weight": 1,
+    "rawWeight": 1,
+    "operatorPayee": "0eO3yldphpUl6mVBVM+Wbe18q4I=",
+    "exposureDigest": "ma0hRG5k5PmUl7CNqNylTNaYk20y9KjM8+kNHxQY7OU="
+  }
+]
