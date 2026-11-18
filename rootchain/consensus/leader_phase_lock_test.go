@@ -66,7 +66,7 @@ func phaseLockProof(t *testing.T, c *q4bLive, r *q3Replica, hash []byte) *IRChan
 }
 
 func (c *q4bLive) certifiedHash(name string, hash []byte) bool {
-	si := c.nodes[c.idx(name)].r.manager.blockStore.ShardInfo(q3fixture.PartitionID, types.ShardID{})
+	si := c.nodes[c.idx(name)].r.manager.blockStore().ShardInfo(q3fixture.PartitionID, types.ShardID{})
 	return si != nil && si.LastCR != nil && bytes.Equal(si.LastCR.UC.InputRecord.Hash, hash)
 }
 
@@ -253,7 +253,7 @@ func TestRollingRestartCertifiesRetainedRequest(t *testing.T) {
 			}
 		}
 		lastUC := func() uint64 {
-			si := m(judge).blockStore.ShardInfo(q3fixture.PartitionID, types.ShardID{})
+			si := m(judge).blockStore().ShardInfo(q3fixture.PartitionID, types.ShardID{})
 			if si == nil || si.LastCR == nil {
 				return 0
 			}
@@ -309,7 +309,7 @@ func TestRollingRestartRepeatConsumesTheFirstLiveRun(t *testing.T) {
 	survivors := c.except(x, d)
 	m := func(name string) *ConsensusManager { return c.nodes[c.idx(name)].r.manager }
 	lastUC := func(name string) uint64 {
-		si := m(name).blockStore.ShardInfo(q3fixture.PartitionID, types.ShardID{})
+		si := m(name).blockStore().ShardInfo(q3fixture.PartitionID, types.ShardID{})
 		if si == nil || si.LastCR == nil {
 			return 0
 		}

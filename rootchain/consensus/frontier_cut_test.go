@@ -60,7 +60,7 @@ func TestFrontierCommittedCutFromRealLoopVerifiesAgainstLiveCandidate(t *testing
 
 	var cut *storage.FrontierCutSnapshot
 	require.Eventually(t, func() bool {
-		cut, err = cms[0].blockStore.ReadFrontierCutSnapshot(partitionID, shardID)
+		cut, err = cms[0].blockStore().ReadFrontierCutSnapshot(partitionID, shardID)
 		return err == nil && cut.RootRound >= candidate.Floor()
 	}, 5*time.Second, 20*time.Millisecond)
 	require.Less(t, cut.LastCR.UC.UnicitySeal.RootChainRoundNumber, cut.RootRound)

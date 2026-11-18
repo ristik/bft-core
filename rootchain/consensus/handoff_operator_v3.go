@@ -134,7 +134,7 @@ func (x *ConsensusManager) opPlanV3Candidate(next *types.RootTrustBaseV1, propos
 	if x.q3 == nil {
 		return V3Candidate{}, fmt.Errorf("%w: no Q3 history", ErrHandoffApproval)
 	}
-	state, err := x.blockStore.GetState()
+	state, err := x.blockStore().GetState()
 	if err != nil {
 		return V3Candidate{}, ErrHandoffApproval
 	}
@@ -214,7 +214,7 @@ func (x *ConsensusManager) opPlanHandoffV3(next *types.RootTrustBaseV1, proposal
 	if x.q3 == nil {
 		return abdrc.HandoffApprovalMsg{}, fmt.Errorf("%w: no Q3 history", ErrHandoffApproval)
 	}
-	state, err := x.blockStore.GetState()
+	state, err := x.blockStore().GetState()
 	if err != nil {
 		return abdrc.HandoffApprovalMsg{}, ErrHandoffApproval
 	}

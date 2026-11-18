@@ -17,7 +17,7 @@ import (
 
 // rejectionProposer is the RejectResult builder of this chain's P85 services, nil when it has none.
 func (x *ConsensusManager) rejectionProposer() storage.RejectProposer {
-	if svc := x.blockStore.PosServices(); svc != nil {
+	if svc := x.blockStore().PosServices(); svc != nil {
 		return svc.Rejections
 	}
 	return nil
@@ -30,7 +30,7 @@ func (x *ConsensusManager) prepareRejection(ctx context.Context, block *drctypes
 	if rp == nil || block == nil {
 		return
 	}
-	rc, ok, err := x.blockStore.RejectionParent(block.Round, block.Round+1)
+	rc, ok, err := x.blockStore().RejectionParent(block.Round, block.Round+1)
 	if err != nil {
 		x.log.DebugContext(ctx, "no rejection parent", "round", block.Round, "error", err)
 		return
@@ -48,7 +48,7 @@ func (x *ConsensusManager) forgetResolvedRejections() {
 		return
 	}
 	for _, id := range rp.Pending() {
-		if x.blockStore.RejectionCommitted(id) {
+		if x.blockStore().RejectionCommitted(id) {
 			rp.Resolved(id)
 		}
 	}
@@ -60,12 +60,12 @@ func (x *ConsensusManager) readyRejection(parentRound, round uint64) (storage.Pr
 	if rp == nil {
 		return storage.PreparedRejection{}, false
 	}
-	rc, ok, err := x.blockStore.RejectionParent(parentRound, round)
+	rc, ok, err := x.blockStore().RejectionParent(parentRound, round)
 	if err != nil || !ok {
 		return storage.PreparedRejection{}, false
 	}
 	p, ok := rp.Ready(rc)
-	if !ok || x.blockStore.RejectionResolved(parentRound, p.ResultID) {
+	if !ok || x.blockStore().RejectionResolved(parentRound, p.ResultID) {
 		return storage.PreparedRejection{}, false
 	}
 	return p, true
@@ -76,14 +76,14 @@ func (x *ConsensusManager) readyRejection(parentRound, round uint64) (storage.Pr
 func (x *ConsensusManager) rejectionCandidates(ctx context.Context, parentRound, round uint64) []drctypes.PosControl {
 	var out []drctypes.PosControl
 	if p, ok := x.readyRejection(parentRound, round); ok {
-		if err := x.blockStore.StoreWitness(p.Witness); err != nil {
+		if err := x.blockStore().StoreWitness(p.Witness); err != nil {
 			x.log.WarnContext(ctx, "rejection witness not retained", "error", err)
 		} else {
 			out = append(out, p.Control)
 		}
 	}
 	for _, s := range x.posQueue.pending(x.pacemaker.GetCurrentRound()) {
-		if s.control.Op == drctypes.OpRejectResult && x.blockStore.HasWitness(s.witness) {
+		if s.control.Op == drctypes.OpRejectResult && x.blockStore().HasWitness(s.witness) {
 			out = append(out, s.control)
 		}
 	}
@@ -94,7 +94,7 @@ func (x *ConsensusManager) rejectionCandidates(ctx context.Context, parentRound,
 // state accepts it in this very block (trial execution). A proposal that orders a handoff record takes none: the executor applies the record
 // first, and a live handoff is protected.
 func (x *ConsensusManager) orderRejection(ctx context.Context, block *drctypes.BlockData, parentRound uint64) bool {
-	return x.orderRejectionWith(ctx, block, parentRound, func(b *drctypes.BlockData) error { return x.blockStore.TrialExecute(b, x.irReqVerifier) })
+	return x.orderRejectionWith(ctx, block, parentRound, func(b *drctypes.BlockData) error { return x.blockStore().TrialExecute(b, x.irReqVerifier) })
 }
 
 func (x *ConsensusManager) orderRejectionWith(ctx context.Context, block *drctypes.BlockData, parentRound uint64, trialExecute func(*drctypes.BlockData) error) bool {
@@ -130,18 +130,18 @@ func (x *ConsensusManager) addRejection(ctx context.Context, block *drctypes.Blo
 // honest leader then orders it before starting another unsigned Prepare. Only a rejection the root state accepts in this very round wins, so
 // a rejection that is not valid can never hold a Prepare back.
 func (x *ConsensusManager) preferRejection(ctx context.Context, parentRound, round uint64, parentQC *drctypes.QuorumCert) bool {
-	return x.preferRejectionWith(ctx, parentRound, round, parentQC, func(b *drctypes.BlockData) error { return x.blockStore.TrialExecute(b, x.irReqVerifier) })
+	return x.preferRejectionWith(ctx, parentRound, round, parentQC, func(b *drctypes.BlockData) error { return x.blockStore().TrialExecute(b, x.irReqVerifier) })
 }
 
 func (x *ConsensusManager) preferRejectionWith(ctx context.Context, parentRound, round uint64, parentQC *drctypes.QuorumCert, trialExecute func(*drctypes.BlockData) error) bool {
 	if x.rejectionProposer() == nil && x.posQueue.len() == 0 {
 		return false
 	}
-	parent, err := x.blockStore.Block(parentRound)
+	parent, err := x.blockStore().Block(parentRound)
 	if err != nil {
 		return false
 	}
-	closures, err := x.blockStore.ClosureControls(parentRound, x.trustBase.Load().Epoch, round)
+	closures, err := x.blockStore().ClosureControls(parentRound, x.trustBase.Load().Epoch, round)
 	if err != nil {
 		return false
 	}

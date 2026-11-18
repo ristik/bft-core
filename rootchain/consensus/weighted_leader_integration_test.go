@@ -64,7 +64,7 @@ func TestWeightedLeaderHeavyPlusOneLightCommits(t *testing.T) {
 			requireWeightedSelector(t, c, 0)
 			require.Eventually(t, func() bool { return c.highQCRound(0) >= 12 && c.committedRound(0) >= 10 }, 90*time.Second, 100*time.Millisecond,
 				"QCs and commits with the heavy node and one light node (weight 7 of 9)")
-			qc := c.manager(0).blockStore.GetHighQc()
+			qc := c.manager(0).blockStore().GetHighQc()
 			require.Len(t, qc.Signatures, 2, "the QC is signed by exactly the two online members")
 			require.EqualValues(t, skewedThreshold, c.signedStake(func(yield func(string)) {
 				for id := range qc.Signatures {
@@ -89,7 +89,7 @@ func TestWeightedLeaderBelowThresholdMakesNoProgress(t *testing.T) {
 			for _, i := range online {
 				require.LessOrEqual(t, c.highQCRound(i), uint64(1), "no QC beyond the genesis QC")
 				require.EqualValues(t, 2, c.manager(i).pacemaker.GetCurrentRound(), "the round never advances: no QC and no TC")
-				tc, err := c.manager(i).blockStore.GetLastTC()
+				tc, err := c.manager(i).blockStore().GetLastTC()
 				require.NoError(t, err)
 				require.Nil(t, tc)
 				require.LessOrEqual(t, c.committedRound(i), uint64(1))
@@ -107,7 +107,7 @@ func TestWeightedLeaderHeavyOfflineWithQuorumLeftHasABoundedGap(t *testing.T) {
 	c.start(1, 2, 3, 4)
 	requireWeightedSelector(t, c, 1)
 	require.Eventually(t, func() bool { return c.committedRound(1) >= 6 }, 90*time.Second, 100*time.Millisecond, "commits with the heavy node offline")
-	tc, err := c.manager(1).blockStore.GetLastTC()
+	tc, err := c.manager(1).blockStore().GetLastTC()
 	require.NoError(t, err)
 	require.NotNil(t, tc, "the heavy node's rounds are left by a timeout certificate")
 	require.NoError(t, tc.Verify(c.nodes[1].tbStore))

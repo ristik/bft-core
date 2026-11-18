@@ -108,7 +108,7 @@ func TestLeaderRingStartsAtTheAnchorChild(t *testing.T) {
 	child := func(round uint64) *rctypes.BlockData {
 		return &rctypes.BlockData{Version: 3, Epoch: anchor.Epoch, Round: round, Anchor: anchor, Payload: &rctypes.Payload{Version: 3}}
 	}
-	store := c.replicas[0].manager.blockStore
+	store := c.replicas[0].manager.blockStore()
 	_, ring, sealed := store.LeaderHead()
 	require.Nil(t, ring, "the installed anchor holds no ring of the new epoch")
 	require.True(t, sealed, "and keeps the outgoing terminal control state")
@@ -120,7 +120,7 @@ func TestLeaderRingStartsAtTheAnchorChild(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, plain.ShardState.Leader, "another policy has no leaf")
 
-	other := c.replicas[1].manager.blockStore
+	other := c.replicas[1].manager.blockStore()
 	other.SetLeaderInputs(reputationInputs{committee: committee, reputation: true})
 	_, err = other.Add(child(anchor.Slot+1), c.replicas[1].manager.irReqVerifier)
 	require.NoError(t, err)
@@ -133,7 +133,7 @@ func TestLeaderRingStartsAtTheAnchorChild(t *testing.T) {
 	require.EqualValues(t, 20, early.ShardState.Leader.Lag, "4n+4 of the committee")
 	require.Equal(t, []rctypes.LeaderRecord{{Round: anchor.Slot}, {Round: anchor.Slot + 1}}, early.ShardState.Leader.Records)
 
-	third := c.replicas[2].manager.blockStore
+	third := c.replicas[2].manager.blockStore()
 	third.SetLeaderInputs(reputationInputs{committee: committee, reputation: true})
 	_, err = third.Add(child(anchor.Slot+40), c.replicas[2].manager.irReqVerifier)
 	require.NoError(t, err)
@@ -176,7 +176,7 @@ func TestUnknownLeaderRoundsAdvanceAtCertificateSpeed(t *testing.T) {
 	c.warm(3, c.all()...)
 	drop.Store(true)
 	head := func() uint64 {
-		round, _, _ := c.nodes[0].r.manager.blockStore.LeaderHead()
+		round, _, _ := c.nodes[0].r.manager.blockStore().LeaderHead()
 		return round
 	}
 	lag := uint64(4*len(c.nodes) + 4)
@@ -235,10 +235,10 @@ func TestStateRecoveryKeepsTheLeaderInputs(t *testing.T) {
 	c.start("c")
 	m := c.nodes[c.idx("c")].r.manager
 	require.Eventually(t, func() bool {
-		_, ring, _ := m.blockStore.LeaderHead()
+		_, ring, _ := m.blockStore().LeaderHead()
 		return ring != nil && len(ring.Records) > 3
 	}, 2*time.Minute, 50*time.Millisecond, "the recovered node goes on executing and committing blocks with a ring")
-	require.NotNil(t, m.blockStore.LeaderInputs())
+	require.NotNil(t, m.blockStore().LeaderInputs())
 
 	// and its selector reads the store the recovery put in place: beyond the bootstrap, at a cutoff no store before the recovery could
 	// answer, it names a peer's leader. The head compared is the recovered node's own, which every live peer has reached.
@@ -246,7 +246,7 @@ func TestStateRecoveryKeepsTheLeaderInputs(t *testing.T) {
 	lag := uint64(4*len(c.nodes) + 4)
 	start := m.epochAnchor.Slot + 1
 	require.Eventually(t, func() bool {
-		head, _, _ := m.blockStore.LeaderHead()
+		head, _, _ := m.blockStore().LeaderHead()
 		round := head + lag
 		if head < start || round < start+lag {
 			return false
@@ -291,9 +291,9 @@ func TestRecoveryRunFirstProposalCarriesNoTimeouts(t *testing.T) {
 			})
 			m.leaderSelector = recoveryRunLeader{constLeader: constLeader{leader: m.id, nodes: m.Validators()}, start: func(uint64) bool { return tc.start }}
 			ctx := context.Background()
-			high := m.blockStore.GetHighQc().GetRound()
+			high := m.blockStore().GetHighQc().GetRound()
 			m.pacemaker.startNewRound(ctx, high+1000) // far past every shard's T2, as after a stall
-			tcert := &rctypes.TimeoutCert{Timeout: rctypes.NewTimeout(high+999, m.trustBase.Load().Epoch, m.blockStore.GetHighQc())}
+			tcert := &rctypes.TimeoutCert{Timeout: rctypes.NewTimeout(high+999, m.trustBase.Load().Epoch, m.blockStore().GetHighQc())}
 			m.pacemaker.lastRoundTC = tcert
 			m.processNewRoundEvent(ctx)
 			select {
@@ -329,7 +329,7 @@ func TestRestartInAnUnknownLeaderRoundResendsTheRecordedTimeout(t *testing.T) {
 	h := c.nodes[c.idx("H")]
 	lag := uint64(4*len(c.nodes) + 4)
 	head := func() uint64 {
-		round, _, _ := h.r.manager.blockStore.LeaderHead()
+		round, _, _ := h.r.manager.blockStore().LeaderHead()
 		return round
 	}
 	require.Eventually(t, func() bool { return c.state("H").Round > head()+lag+1 }, 3*time.Minute, 20*time.Millisecond, "the covered rounds run out")

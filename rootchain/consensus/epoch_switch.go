@@ -288,7 +288,7 @@ func (x *ConsensusManager) checkEpochSwitch(ctx context.Context) error {
 	if x.switcher == nil || x.q3 == nil {
 		return nil
 	}
-	record, round, ok := x.blockStore.CommittedHandoff()
+	record, round, ok := x.blockStore().CommittedHandoff()
 	if !ok || round == x.switchCheckedRound {
 		return nil
 	}

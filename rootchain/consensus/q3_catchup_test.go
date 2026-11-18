@@ -49,7 +49,7 @@ func TestARestartedRootRecoversInAnActivatedEpochFromAPeersState(t *testing.T) {
 	for i := 0; i < 8; i++ {
 		leader, err := c.replicas[0].manager.leaderSelector.GetLeaderForRound(proposals[len(proposals)-1].Block.Round)
 		require.NoError(t, err)
-		st, err := c.byID(leader).manager.blockStore.GetState()
+		st, err := c.byID(leader).manager.blockStore().GetState()
 		require.NoError(t, err)
 		if st.CommittedHead.Anchor == nil && st.CommittedHead.Block.Anchor == nil {
 			state = st
@@ -66,7 +66,7 @@ func TestARestartedRootRecoversInAnActivatedEpochFromAPeersState(t *testing.T) {
 		require.NoError(t, root.rt.Recover(context.Background()))
 		require.NoError(t, recoverTo(t, root.manager, state))
 		require.False(t, root.manager.recovery.InRecovery())
-		adopted, err := root.manager.blockStore.GetState()
+		adopted, err := root.manager.blockStore().GetState()
 		require.NoError(t, err)
 		require.Equal(t, state.CommittedHead.Block.Round, adopted.CommittedHead.Block.Round)
 	})

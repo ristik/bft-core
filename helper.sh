@@ -124,6 +124,10 @@ function start_root_nodes() {
         # Q3 #50: the coupled runtime from genesis, and the PoA genesis committee's identity records the first coupled handoff names as K
         if [ "${P85_LANE:-0}" = 1 ]; then
           profileArgs+=(--q3-lane)   # the genesis committee's records are the contracts' (--pos-genesis-identities below)
+        elif [ "${VR_LANE:-0}" = 1 ]; then
+          # a VR generation (scripts/lib/vr-lib.sh): the genesis committee is the plan's (StakingID = the VR id), and VR-mode services wired
+          source scripts/lib/vr-lib.sh
+          profileArgs+=(--q3-lane $(vr_root_flags "$i" "http://127.0.0.1:$(( ${rethEthBase:-18545} + i - 1 ))"))
         else
           [ -s test-nodes/genesis-identities.json ] || q3_prepare_genesis_identities || exit 1
           profileArgs+=(--q3-lane --genesis-identities test-nodes/genesis-identities.json)

@@ -29,7 +29,7 @@ type shardCert struct {
 }
 
 func shardCertOf(m *ConsensusManager) *shardCert {
-	si := m.blockStore.ShardInfo(q3fixture.PartitionID, types.ShardID{})
+	si := m.blockStore().ShardInfo(q3fixture.PartitionID, types.ShardID{})
 	if si == nil || si.LastCR == nil {
 		return nil
 	}
@@ -54,7 +54,7 @@ func establishShardCertificate(t *testing.T, c *q4bLive, hash []byte) *shardCert
 
 // t2Rounds is the number of root rounds after which the shard's last certificate is eligible for a T2 repeat, as the proposal rule counts them.
 func t2Rounds(m *ConsensusManager) uint64 {
-	si := m.blockStore.ShardInfo(q3fixture.PartitionID, types.ShardID{})
+	si := m.blockStore().ShardInfo(q3fixture.PartitionID, types.ShardID{})
 	return t2TimeoutToRootRounds(si.T2Timeout, m.params.BlockRate/2)
 }
 
@@ -141,7 +141,7 @@ func TestIngressLossAfterTheSoleHolderRestarts(t *testing.T) {
 			}
 			// the loss boundary, read on H's own block tree: no branch ending at its latest block carries a change for the shard
 			tip := c.state("H").Round
-			require.Nil(t, h.blockStore.IsChangeInProgress(tip, q3fixture.PartitionID, types.ShardID{}), "the request is in no proposal of H's tree")
+			require.Nil(t, h.blockStore().IsChangeInProgress(tip, q3fixture.PartitionID, types.ShardID{}), "the request is in no proposal of H's tree")
 
 			u := shardCertOf(h)
 			require.Equal(t, last.seal, u.seal)
@@ -154,7 +154,7 @@ func TestIngressLossAfterTheSoleHolderRestarts(t *testing.T) {
 				require.Eventually(t, func() bool {
 					for _, name := range c.all() {
 						m := c.nodes[c.idx(name)].r.manager
-						if m.blockStore.IsChangeInProgress(c.state(name).Round, q3fixture.PartitionID, types.ShardID{}) != nil {
+						if m.blockStore().IsChangeInProgress(c.state(name).Round, q3fixture.PartitionID, types.ShardID{}) != nil {
 							seen = true
 						}
 					}

@@ -64,7 +64,7 @@ func startRoundClock(m *ConsensusManager) *roundClock {
 			if round == last {
 				continue
 			}
-			qc := m.blockStore.GetHighQc().GetRound()
+			qc := m.blockStore().GetHighQc().GetRound()
 			note(round)
 			c.mu.Lock()
 			for r := last; r < round; r++ {

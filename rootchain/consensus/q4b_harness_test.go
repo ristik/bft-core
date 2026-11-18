@@ -594,8 +594,8 @@ func (c *q4bLive) state(name string) q4bState {
 	m := c.nodes[c.idx(name)].r.manager
 	var s q4bState
 	s.Round = m.pacemaker.GetCurrentRound()
-	s.HighQC = m.blockStore.GetHighQc().GetRound()
-	if st, err := m.blockStore.GetState(); err == nil {
+	s.HighQC = m.blockStore().GetHighQc().GetRound()
+	if st, err := m.blockStore().GetState(); err == nil {
 		s.Committed = st.CommittedHead.Block.Round
 	}
 	return s
