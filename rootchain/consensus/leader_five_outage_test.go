@@ -81,7 +81,7 @@ func fiveRequest(t *testing.T, c *q4bLive, live []string, hash []byte, deadline 
 	t.Helper()
 	m := func(name string) *ConsensusManager { return c.nodes[c.idx(name)].r.manager }
 	lastUC := func(name string) uint64 {
-		si := m(name).blockStore.ShardInfo(q3fixture.PartitionID, types.ShardID{})
+		si := m(name).blockStore().ShardInfo(q3fixture.PartitionID, types.ShardID{})
 		if si == nil || si.LastCR == nil {
 			return 0
 		}
@@ -390,7 +390,7 @@ func ledCommit(c *q4bLive, selector *leader.EpochReputation, member, observer st
 	c.mu.Unlock()
 	slices.Sort(rounds)
 	for _, r := range rounds {
-		b, err := c.nodes[c.idx(observer)].r.manager.blockStore.Block(r)
+		b, err := c.nodes[c.idx(observer)].r.manager.blockStore().Block(r)
 		if err == nil && b.BlockData != nil && b.BlockData.Author == c.id(member).String() && !inRecoveryRun(selector, r) {
 			return r
 		}

@@ -61,7 +61,7 @@ signing:
 
 func certifiedParentState(t *testing.T, f *planFixture) *abdrc.StateMsg {
 	t.Helper()
-	state, err := f.cm.blockStore.GetState()
+	state, err := f.cm.blockStore().GetState()
 	require.NoError(t, err)
 	state.CommittedHead.ShardInfo = []abdrc.ShardInfo{{Partition: 8, IR: &types.InputRecord{BlockHash: f.parentHash}}}
 	return state
@@ -177,8 +177,8 @@ func TestV3FreezeBuiltByTheLeaderIsAcceptedByTheCommitteesAuthority(t *testing.T
 		require.NoError(t, err)
 		require.NoError(t, f.cm.onHandoffApprovalMsg(ctx, &signed))
 	}
-	parentQC := f.cm.blockStore.GetHighQc()
-	parentBlock, err := f.cm.blockStore.Block(parentQC.GetRound())
+	parentQC := f.cm.blockStore().GetHighQc()
+	parentBlock, err := f.cm.blockStore().Block(parentQC.GetRound())
 	require.NoError(t, err)
 	parentBlock.ShardState.Control = prepared.CommittedHead.Control
 	parentBlock.ShardState.States[types.PartitionShardID{PartitionID: 8, ShardID: (types.ShardID{}).Key()}] = &storage.ShardInfo{IR: &types.InputRecord{BlockHash: bytes.Clone(f.parentHash)}}
@@ -194,17 +194,17 @@ func TestV3FreezeBuiltByTheLeaderIsAcceptedByTheCommitteesAuthority(t *testing.T
 	require.Equal(t, plan.Body, companion.Body)
 
 	// the real genesis authority of this manager accepts exactly what the leader built, and refuses it with one thing changed
-	parent, err := f.cm.blockStore.VerifyFreezeCompanion(freeze, records[1])
+	parent, err := f.cm.blockStore().VerifyFreezeCompanion(freeze, records[1])
 	require.NoError(t, err)
 	require.Equal(t, f.parentHash, parent)
 	tampered := freeze
 	tampered.Attempt++
-	_, err = f.cm.blockStore.VerifyFreezeCompanion(tampered, records[1])
+	_, err = f.cm.blockStore().VerifyFreezeCompanion(tampered, records[1])
 	require.ErrorIs(t, err, storage.ErrHandoffRecord)
 	noReceipts, err := (storage.FreezeV3Authorization{Version: 3, Body: companion.Body, Parent: companion.Parent, Candidate: companion.Candidate,
 		Receipts: []byte{0x80}, Signatures: companion.Signatures}).Bytes()
 	require.NoError(t, err)
-	_, err = f.cm.blockStore.VerifyFreezeCompanion(freeze, noReceipts)
+	_, err = f.cm.blockStore().VerifyFreezeCompanion(freeze, noReceipts)
 	require.ErrorIs(t, err, storage.ErrFreezeV3Receipts, "receipts that are not a member set")
 }
 

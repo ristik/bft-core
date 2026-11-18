@@ -435,20 +435,20 @@ func frozenRetentionFixture(t *testing.T) (*ConsensusManager, *drctypes.IRChange
 	anchor := c.activateAll()
 	cm := r.manager
 	// two successor blocks and the QC of the second, as in TestQ3InstallPreservesSelectedRequestHistory: a high QC with a block, which the freeze check reads
-	parent, err := cm.blockStore.Block(anchor.Slot)
+	parent, err := cm.blockStore().Block(anchor.Slot)
 	require.NoError(t, err)
 	first := &drctypes.BlockData{Version: 3, Epoch: 2, Round: 7, Anchor: anchor, Payload: &drctypes.Payload{Version: 3}}
-	b7, err := parent.Extend(first, cm.irReqVerifier, r.orchestration, crypto.SHA256, cm.log, cm.blockStore.LeaderInputs())
+	b7, err := parent.Extend(first, cm.irReqVerifier, r.orchestration, crypto.SHA256, cm.log, cm.blockStore().LeaderInputs())
 	require.NoError(t, err)
 	second := &drctypes.BlockData{Version: 3, Epoch: 2, Round: 8, Payload: &drctypes.Payload{Version: 3},
 		Qc: &drctypes.QuorumCert{VoteInfo: &drctypes.RoundInfo{RoundNumber: 7, Epoch: 2, CurrentRootHash: b7.RootHash}, Signatures: map[string]hex.Bytes{r.id().String(): {1}}}}
-	b8, err := b7.Extend(second, cm.irReqVerifier, r.orchestration, crypto.SHA256, cm.log, cm.blockStore.LeaderInputs())
+	b8, err := b7.Extend(second, cm.irReqVerifier, r.orchestration, crypto.SHA256, cm.log, cm.blockStore().LeaderInputs())
 	require.NoError(t, err)
-	_, err = cm.blockStore.Add(first, cm.irReqVerifier)
+	_, err = cm.blockStore().Add(first, cm.irReqVerifier)
 	require.NoError(t, err)
-	_, err = cm.blockStore.Add(second, cm.irReqVerifier)
+	_, err = cm.blockStore().Add(second, cm.irReqVerifier)
 	require.NoError(t, err)
-	_, err = cm.blockStore.ProcessQc(&drctypes.QuorumCert{VoteInfo: &drctypes.RoundInfo{RoundNumber: 8, ParentRoundNumber: 7, Epoch: 2, CurrentRootHash: b8.RootHash},
+	_, err = cm.blockStore().ProcessQc(&drctypes.QuorumCert{VoteInfo: &drctypes.RoundInfo{RoundNumber: 8, ParentRoundNumber: 7, Epoch: 2, CurrentRootHash: b8.RootHash},
 		LedgerCommitInfo: &types.UnicitySeal{Version: 1, NetworkID: 5, Epoch: 2, Timestamp: 99, RootChainRoundNumber: 7, Hash: b7.RootHash}, Signatures: map[string]hex.Bytes{r.id().String(): {1}}})
 	require.NoError(t, err)
 	view, enabled, err := cm.RequestView(q3fixture.PartitionID, types.ShardID{})
@@ -474,13 +474,13 @@ func frozenRetentionFixture(t *testing.T) (*ConsensusManager, *drctypes.IRChange
 
 func freezeShardAtHighQC(t *testing.T, cm *ConsensusManager, key types.PartitionShardID) {
 	t.Helper()
-	block, err := cm.blockStore.Block(cm.blockStore.GetHighQc().GetRound())
+	block, err := cm.blockStore().Block(cm.blockStore().GetHighQc().GetRound())
 	require.NoError(t, err)
 	parent := bytes.Repeat([]byte{0x42}, 32)
 	block.ShardState.States[key].IR.BlockHash = parent
 	require.NotNil(t, block.ShardState.Control)
 	block.ShardState.Control.Phase, block.ShardState.Control.FrozenParent = "endorsed", parent
-	frozen, active, err := cm.blockStore.FrozenShardAt(block.GetRound())
+	frozen, active, err := cm.blockStore().FrozenShardAt(block.GetRound())
 	require.NoError(t, err)
 	require.True(t, active)
 	require.Equal(t, key, frozen)

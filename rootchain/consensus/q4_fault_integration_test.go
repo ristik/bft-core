@@ -349,7 +349,7 @@ func (run *q4Run) chainsAgree(names ...string) error {
 	heads := map[int]q4Block{}
 	rounds := map[int]uint64{}
 	for _, i := range indices {
-		state, err := run.c.manager(i).blockStore.GetState()
+		state, err := run.c.manager(i).blockStore().GetState()
 		if err != nil {
 			return fmt.Errorf("%w: %v", errQ4ChainMissing, err)
 		}
@@ -411,7 +411,7 @@ func (run *q4Run) requireChainsAgree(names ...string) {
 // the fixture key, the vote info hash matches, and the signed weight reaches the independently computed quorum.
 func (run *q4Run) requireQCWeight(name string) uint64 {
 	run.t.Helper()
-	qc := run.c.manager(run.idx(name)[0]).blockStore.GetHighQc()
+	qc := run.c.manager(run.idx(name)[0]).blockStore().GetHighQc()
 	require.NotNil(run.t, qc)
 	view := q4View(run.r, qc.VoteInfo.Epoch)
 	seal, err := qc.LedgerCommitInfo.SigBytes()
@@ -662,7 +662,7 @@ func TestQ4Fault(t *testing.T) {
 		base := run.mark()
 		run.startAll()
 		run.requireRecovery(base, q4RecoverRound, "l1", "l2", "l3", "l4")
-		tc, err := run.c.manager(run.idx("l1")[0]).blockStore.GetLastTC()
+		tc, err := run.c.manager(run.idx("l1")[0]).blockStore().GetLastTC()
 		require.NoError(t, err)
 		require.NotNil(t, tc, "the heavy identity's rounds are left by actual timeout certificates")
 		var weight uint64
@@ -859,7 +859,7 @@ func TestQ4FaultControls(t *testing.T) {
 		run.stopNode("a")
 		ai, hi := run.idx("a")[0], run.idx("H")[0]
 		round := run.c.committedRound(ai)
-		b, err := run.c.manager(ai).blockStore.Block(round)
+		b, err := run.c.manager(ai).blockStore().Block(round)
 		require.NoError(t, err)
 		before := slices.Clone(run.chains[ai][round].Hash)
 		base = run.mark()
@@ -867,7 +867,7 @@ func TestQ4FaultControls(t *testing.T) {
 		run.requireRecovery(base, 5, "H", "b")
 		run.stopNode("H")
 		run.stopNode("b")
-		_, err = run.c.manager(hi).blockStore.Block(round)
+		_, err = run.c.manager(hi).blockStore().Block(round)
 		require.ErrorContains(t, err, "not found", "premise only: the other store really pruned the old round")
 		require.NoError(t, run.chainsAgree("H", "a"), "control: different heads share finalized history")
 
@@ -994,7 +994,7 @@ func TestQ4AdmissionAudit(t *testing.T) {
 	signer := c.nodes[1]
 	const far = uint64(1) << 30
 	ctx := context.Background()
-	hqc := cm.blockStore.GetHighQc()
+	hqc := cm.blockStore().GetHighQc()
 
 	routes := map[string]func() error{
 		"vote for a far round": func() error {

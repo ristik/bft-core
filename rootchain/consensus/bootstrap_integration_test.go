@@ -79,8 +79,10 @@ func stoppedHandoffReplica(t *testing.T, source *anchorReplica) *ConsensusManage
 	cm, err := NewConsensusManager(id, trust, source.manager.orchestration, testnetwork.NewRootMockNetwork(),
 		source.oldSigners[id.String()], db, obs, WithConsensusParams(params), WithRecoveryProfile2(history))
 	require.NoError(t, err)
-	cm.blockStore, err = storage.NewFromCheckpoint(crypto.SHA256, source.oldHead, db, source.manager.orchestration, obs.Logger(), storage.ProfileHandoff)
+	var newStore *storage.BlockStore
+	newStore, err = storage.NewFromCheckpoint(crypto.SHA256, source.oldHead, db, source.manager.orchestration, obs.Logger(), storage.ProfileHandoff)
 	require.NoError(t, err)
+	cm.storeRef.Store(newStore)
 	return cm
 }
 
@@ -410,8 +412,10 @@ func newAnchorReplicasWith(t *testing.T, opts anchorOptions, commitSealRound uin
 		}
 		manager, err := NewConsensusManager(node.PeerConf.ID, trust, orchestration, net, node.Signer, rcDB, obs, WithConsensusParams(params), WithRecoveryProfile2(history))
 		require.NoError(t, err)
-		manager.blockStore, err = storage.NewFromCheckpoint(crypto.SHA256, head, rcDB, orchestration, obs.Logger(), storage.ProfileHandoff)
+		var newStore *storage.BlockStore
+		newStore, err = storage.NewFromCheckpoint(crypto.SHA256, head, rcDB, orchestration, obs.Logger(), storage.ProfileHandoff)
 		require.NoError(t, err)
+		manager.storeRef.Store(newStore)
 		installed, err := manager.InstallEpochGenesis(proof, head, body)
 		require.NoError(t, err)
 		served, err := manager.HandoffBundle(context.Background(), body.Epoch)
@@ -452,7 +456,7 @@ func TestEpochAnchorChangedCommitteeCommitsOnlyOrdinaryBlock(t *testing.T) {
 	ctx := context.Background()
 	oldQC := &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{Epoch: 1, RoundNumber: anchor.Slot + 1}}
 	firstReplica(replicas).manager.processQC(ctx, oldQC)
-	require.Equal(t, anchor, firstReplica(replicas).manager.blockStore.RootAnchor())
+	require.Equal(t, anchor, firstReplica(replicas).manager.blockStore().RootAnchor())
 	firstLeader, err := firstReplica(replicas).manager.leaderSelector.GetLeaderForRound(anchor.Slot + 1)
 	require.NoError(t, err)
 	replicas[firstLeader].manager.processNewRoundEvent(ctx)
@@ -474,7 +478,7 @@ func TestEpochAnchorChangedCommitteeCommitsOnlyOrdinaryBlock(t *testing.T) {
 	}
 	proposal = replicas[nextLeader].net.WaitRootProposal(t)
 	require.Nil(t, proposal.Block.Anchor)
-	require.Equal(t, anchor, replicas[nextLeader].manager.blockStore.RootAnchor(), "first QC cannot commit anchor")
+	require.Equal(t, anchor, replicas[nextLeader].manager.blockStore().RootAnchor(), "first QC cannot commit anchor")
 	require.EqualValues(t, anchor.Slot+2, proposal.Block.Round)
 	for _, replica := range replicas {
 		replica.net.ResetSentMessages(network.ProtocolRootVote)
@@ -491,7 +495,7 @@ func TestEpochAnchorChangedCommitteeCommitsOnlyOrdinaryBlock(t *testing.T) {
 		require.Len(t, votes, 1)
 		require.NoError(t, replicas[thirdLeader].manager.onVoteMsg(ctx, votes[0].Message.(*abdrc.VoteMsg)))
 	}
-	committed, err := replicas[thirdLeader].manager.blockStore.GetState()
+	committed, err := replicas[thirdLeader].manager.blockStore().GetState()
 	require.NoError(t, err)
 	require.EqualValues(t, anchor.Slot+1, committed.CommittedHead.Block.Round)
 	require.Nil(t, committed.CommittedHead.Anchor)
@@ -574,7 +578,7 @@ func TestEpochAnchorRestartKeepsSuccessorVoteLock(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, anchor, restarted.epochAnchor)
 	require.EqualValues(t, anchor.Slot+1, replica.db.GetHighestVotedRound())
-	block, err := restarted.blockStore.Block(anchor.Slot + 1)
+	block, err := restarted.blockStore().Block(anchor.Slot + 1)
 	require.NoError(t, err)
 	_, err = restarted.safety.MakeVote(proposal.Block, block.RootHash, nil, nil)
 	require.Error(t, err)
@@ -583,22 +587,22 @@ func TestEpochAnchorRestartKeepsSuccessorVoteLock(t *testing.T) {
 func TestEpochAnchorRecoveryVerifiesNativeSnapshotAndOldUC(t *testing.T) {
 	replicas, anchor, _ := newAnchorReplicas(t, 4)
 	replica := firstReplica(replicas)
-	state, err := replica.manager.blockStore.GetState()
+	state, err := replica.manager.blockStore().GetState()
 	require.NoError(t, err)
 	require.Equal(t, anchor, state.CommittedHead.Anchor)
 	history := replica.history
-	require.NoError(t, state.VerifyWithAnchor(crypto.SHA256, replica.manager.trustBase.Load(), history, replica.manager.blockStore))
+	require.NoError(t, state.VerifyWithAnchor(crypto.SHA256, replica.manager.trustBase.Load(), history, replica.manager.blockStore()))
 	corrupt := *state.CommittedHead
 	corrupt.ShardInfo = append([]abdrc.ShardInfo(nil), corrupt.ShardInfo...)
 	corrupt.ShardInfo[0].IRTR.Round++
 	require.Error(t, (&abdrc.StateMsg{CommittedHead: &corrupt}).VerifyWithAnchor(
-		crypto.SHA256, replica.manager.trustBase.Load(), history, replica.manager.blockStore))
+		crypto.SHA256, replica.manager.trustBase.Load(), history, replica.manager.blockStore()))
 	wrong := *anchor
 	wrong.GenesisID = bytes.Repeat([]byte{9}, 32)
 	corrupt = *state.CommittedHead
 	corrupt.Anchor = &wrong
 	require.Error(t, (&abdrc.StateMsg{CommittedHead: &corrupt}).VerifyWithAnchor(
-		crypto.SHA256, replica.manager.trustBase.Load(), history, replica.manager.blockStore))
+		crypto.SHA256, replica.manager.trustBase.Load(), history, replica.manager.blockStore()))
 }
 
 func TestEpochAnchorRecoveryRefusesOldEpochHeadWithoutChangingAnchor(t *testing.T) {
@@ -625,7 +629,7 @@ func TestEpochAnchorRecoveryRefusesOldEpochHeadWithoutChangingAnchor(t *testing.
 	require.NoError(t, err)
 	err = manager.onStateResponse(context.Background(), &abdrc.StateMsg{CommittedHead: oldHeadPtr})
 	require.ErrorIs(t, err, abdrc.ErrRecoveryEpoch)
-	require.Equal(t, anchor, manager.blockStore.RootAnchor())
+	require.Equal(t, anchor, manager.blockStore().RootAnchor())
 	after, err := replica.db.LoadBlocks()
 	require.NoError(t, err)
 	require.Equal(t, before, after)

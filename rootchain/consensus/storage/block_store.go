@@ -214,14 +214,7 @@ Changes in the other branches of the block tree do not count, at most one of the
 ends up being committed.
 */
 func (x *BlockStore) IsChangeInProgress(branch uint64, partition types.PartitionID, shard types.ShardID) *types.InputRecord {
-	k := types.PartitionShardID{PartitionID: partition, ShardID: shard.Key()}
-	// go through the blocks of the branch and make sure that there is no change in progress for this shard
-	for _, b := range x.tree().Branch(branch) {
-		if _, ok := b.ShardState.Changed[k]; ok {
-			return b.ShardState.States[k].IR
-		}
-	}
-	return nil
+	return x.tree().ChangeInProgress(branch, types.PartitionShardID{PartitionID: partition, ShardID: shard.Key()})
 }
 
 // ClosureControls are the CloseLiability controls a block proposed at round on the parent round's state must carry: one for every epoch

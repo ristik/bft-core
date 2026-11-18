@@ -123,7 +123,7 @@ func (x *ConsensusManager) opSubmitPosControl(ctx context.Context, control drcty
 	if err := x.checkSubmittable(control); err != nil {
 		return err
 	}
-	if err := x.blockStore.StoreWitness(witness); err != nil {
+	if err := x.blockStore().StoreWitness(witness); err != nil {
 		return fmt.Errorf("%w: %w", ErrPosSubmission, err)
 	}
 	epoch := x.trustBase.Load().Epoch
@@ -154,7 +154,7 @@ func (x *ConsensusManager) opSubmitPosControl(ctx context.Context, control drcty
 // checkSubmittable is the state-free check of a submitted control: an op validators submit, on this chain's deployment, with no ordering
 // position yet (the block that orders it stamps its own).
 func (x *ConsensusManager) checkSubmittable(c drctypes.PosControl) error {
-	svc := x.blockStore.PosServices()
+	svc := x.blockStore().PosServices()
 	switch {
 	case svc == nil || svc.Authority == nil:
 		return fmt.Errorf("%w: this root has no P85 deployment", ErrPosSubmission)
@@ -191,7 +191,7 @@ func (x *ConsensusManager) onPosControlSubmission(_ context.Context, msg *abdrc.
 	now := x.pacemaker.GetCurrentRound()
 	sub := posSubmission{control: msg.Control, signer: msg.Signer, witness: msg.Control.WitnessHash, epoch: msg.Epoch,
 		expires: now + posSubmissionTTL, key: domain}
-	store := x.blockStore
+	store := x.blockStore()
 	if store.HasWitness(sub.witness) {
 		return x.posQueue.add(sub, now)
 	}
@@ -246,7 +246,7 @@ func (x *ConsensusManager) prefetchPosWitness(store *storage.BlockStore, s posSu
 // block's position and executes the block as a trial: a control the state refuses (stale EVM state, already retired, ...) is dropped,
 // never proposed, so a bad submission cannot cost the round its proposal.
 func (x *ConsensusManager) orderSubmittedControl(ctx context.Context, block *drctypes.BlockData) {
-	x.orderSubmittedControlWith(ctx, block, func(b *drctypes.BlockData) error { return x.blockStore.TrialExecute(b, x.irReqVerifier) })
+	x.orderSubmittedControlWith(ctx, block, func(b *drctypes.BlockData) error { return x.blockStore().TrialExecute(b, x.irReqVerifier) })
 }
 
 func (x *ConsensusManager) orderSubmittedControlWith(ctx context.Context, block *drctypes.BlockData, trialExecute func(*drctypes.BlockData) error) {
@@ -256,7 +256,7 @@ func (x *ConsensusManager) orderSubmittedControlWith(ctx context.Context, block 
 		if trials == maxPosTrials {
 			return
 		}
-		if !x.blockStore.HasWitness(s.witness) {
+		if !x.blockStore().HasWitness(s.witness) {
 			continue // still being fetched (or dropped soon): not a candidate yet
 		}
 		trials++

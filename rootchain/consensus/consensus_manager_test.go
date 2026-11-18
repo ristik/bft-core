@@ -307,8 +307,8 @@ func TestIRChangeRequestFromRootValidator_RootTimeout(t *testing.T) {
 	lastProposalMsg = testutils.MockAwaitMessage[*abdrc.ProposalMsg](t, mockNet, network.ProtocolRootProposal)
 
 	// round 1 committed, round 2 quorum
-	require.Equal(t, uint64(1), cm.blockStore.GetHighQc().GetCommitRound())
-	require.Equal(t, uint64(2), cm.blockStore.GetHighQc().GetRound())
+	require.Equal(t, uint64(1), cm.blockStore().GetHighQc().GetCommitRound())
+	require.Equal(t, uint64(2), cm.blockStore().GetHighQc().GetRound())
 	require.Equal(t, uint64(3), cm.pacemaker.GetCurrentRound())
 	require.Equal(t, partitionID, lastProposalMsg.Block.Payload.Requests[0].Partition)
 	require.Equal(t, drctypes.Quorum, lastProposalMsg.Block.Payload.Requests[0].CertReason)
@@ -321,8 +321,8 @@ func TestIRChangeRequestFromRootValidator_RootTimeout(t *testing.T) {
 	lastProposalMsg = testutils.MockAwaitMessage[*abdrc.ProposalMsg](t, mockNet, network.ProtocolRootProposal)
 
 	// round 2 committed, round 3 quorum
-	require.Equal(t, uint64(2), cm.blockStore.GetHighQc().GetCommitRound())
-	require.Equal(t, uint64(3), cm.blockStore.GetHighQc().GetRound())
+	require.Equal(t, uint64(2), cm.blockStore().GetHighQc().GetCommitRound())
+	require.Equal(t, uint64(3), cm.blockStore().GetHighQc().GetRound())
 	require.Equal(t, uint64(4), cm.pacemaker.GetCurrentRound())
 	// no additional requests have been received, meaning payload is empty
 	require.True(t, lastProposalMsg.Block.Payload.IsEmpty())
@@ -340,8 +340,8 @@ func TestIRChangeRequestFromRootValidator_RootTimeout(t *testing.T) {
 	lastProposalMsg = testutils.MockAwaitMessage[*abdrc.ProposalMsg](t, mockNet, network.ProtocolRootProposal)
 
 	// round 2 committed, round 3 quorum - timeout cert didn't change that
-	require.Equal(t, uint64(2), cm.blockStore.GetHighQc().GetCommitRound())
-	require.Equal(t, uint64(3), cm.blockStore.GetHighQc().GetRound())
+	require.Equal(t, uint64(2), cm.blockStore().GetHighQc().GetCommitRound())
+	require.Equal(t, uint64(3), cm.blockStore().GetHighQc().GetRound())
 	require.Equal(t, uint64(4), lastProposalMsg.LastRoundTc.Timeout.Round)
 	require.Equal(t, uint64(5), lastProposalMsg.Block.Round)
 	require.Equal(t, uint64(5), cm.pacemaker.GetCurrentRound())
@@ -350,7 +350,7 @@ func TestIRChangeRequestFromRootValidator_RootTimeout(t *testing.T) {
 	// no changes in round 5, but...
 	require.True(t, lastProposalMsg.Block.Payload.IsEmpty())
 	// changes from round 3 are still in progress (uncommitted), since nothing gets committed with a timeout cert
-	require.Equal(t, irChReqMsg.IrChangeReq.Requests[0].InputRecord, cm.blockStore.IsChangeInProgress(cm.blockStore.GetHighQc().GetRound(), partitionID, shardID))
+	require.Equal(t, irChReqMsg.IrChangeReq.Requests[0].InputRecord, cm.blockStore().IsChangeInProgress(cm.blockStore().GetHighQc().GetRound(), partitionID, shardID))
 
 	// advance round
 	mockNet.WaitReceive(t, lastProposalMsg)
@@ -372,8 +372,8 @@ func TestIRChangeRequestFromRootValidator_RootTimeout(t *testing.T) {
 
 	// round 2 committed, round 5 quorum
 	// round 5 did not commit anything because round 4 was timeout, need two consecutive QC-s to commit
-	require.Equal(t, uint64(0), cm.blockStore.GetHighQc().GetCommitRound())
-	require.Equal(t, uint64(5), cm.blockStore.GetHighQc().GetRound())
+	require.Equal(t, uint64(0), cm.blockStore().GetHighQc().GetCommitRound())
+	require.Equal(t, uint64(5), cm.blockStore().GetHighQc().GetRound())
 	require.Equal(t, uint64(6), lastProposalMsg.Block.Round)
 	require.Equal(t, uint64(6), cm.pacemaker.GetCurrentRound())
 	require.Nil(t, lastProposalMsg.LastRoundTc)
@@ -398,7 +398,7 @@ func TestIRChangeRequestFromRootValidator_RootTimeout(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	require.Equal(t, partitionID, result.UnicityTreeCertificate.Partition)
-	require.Nil(t, cm.blockStore.IsChangeInProgress(cm.blockStore.GetHighQc().GetRound(), partitionID, shardID))
+	require.Nil(t, cm.blockStore().IsChangeInProgress(cm.blockStore().GetHighQc().GetRound(), partitionID, shardID))
 
 	// verify certificates have been updated when recovery query is sent
 	mockNet.WaitReceive(t, getStateMsg)
@@ -1449,7 +1449,7 @@ func Test_ConsensusManager_RestoreVote(t *testing.T) {
 		},
 	}
 	// store timeout vote to DB
-	require.NoError(t, cm.blockStore.GetDB().WriteVote(timeoutVote))
+	require.NoError(t, cm.blockStore().GetDB().WriteVote(timeoutVote))
 
 	// replace leader selector
 	allNodes := cm.Validators()
@@ -1517,7 +1517,7 @@ func TestIsShardValidatorFollowsAWeightedAssignmentsInstall(t *testing.T) {
 	}
 
 	// the first block past the boundary installs the weighted assignment on the shard (no unit request context); the committed state takes it
-	parent, err := r.manager.blockStore.Block(anchor.Slot)
+	parent, err := r.manager.blockStore().Block(anchor.Slot)
 	require.NoError(t, err)
 	block := &drctypes.BlockData{Version: 3, Epoch: 2, Round: 7, Anchor: anchor, Payload: &drctypes.Payload{Version: 3}}
 	executed, err := parent.Extend(block, r.manager.irReqVerifier, r.orchestration, crypto.SHA256, r.manager.log)
@@ -1528,7 +1528,7 @@ func TestIsShardValidatorFollowsAWeightedAssignmentsInstall(t *testing.T) {
 	require.NoError(t, err)
 	var root *storage.ExecutedBlock // the committed root: the block whose state the manager's ShardInfo is
 	for round := uint64(0); round <= anchor.Slot && root == nil; round++ {
-		if b, err := r.manager.blockStore.Block(round); err == nil && b.ShardState.States[key] == committed {
+		if b, err := r.manager.blockStore().Block(round); err == nil && b.ShardState.States[key] == committed {
 			root = b
 		}
 	}
@@ -1551,7 +1551,7 @@ TC is processed after the QC as the next proposal extends that block.
 */
 func Test_ConsensusManager_tcForCertifiedBlock(t *testing.T) {
 	cm, _, shardNodes := initConsensusManager(t, testnetwork.NewRootMockNetwork())
-	bs := cm.blockStore
+	bs := cm.blockStore()
 	req := &drctypes.IRChangeReq{
 		Partition:  partitionID,
 		Shard:      shardID,
@@ -1597,7 +1597,7 @@ the block which extends the previous round.
 */
 func Test_ConsensusManager_changeInTimeoutBlock(t *testing.T) {
 	cm, _, shardNodes := initConsensusManager(t, testnetwork.NewRootMockNetwork())
-	bs := cm.blockStore
+	bs := cm.blockStore()
 	req := &drctypes.IRChangeReq{
 		Partition:  partitionID,
 		Shard:      shardID,
@@ -1648,7 +1648,7 @@ func Test_ConsensusManager_changeInTimeoutBlock(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
 	// the peer has the genesis of the (test) network in its storage: a genesis head is accepted only if it is that one
-	localBlocks, err := cm.blockStore.GetDB().LoadBlocks()
+	localBlocks, err := cm.blockStore().GetDB().LoadBlocks()
 	require.NoError(t, err)
 	for _, b := range localBlocks {
 		if b.GetRound() == drctypes.GenesisRootRound {
@@ -1704,7 +1704,7 @@ checked (B6 was not valid), see docs/upgrade.md.
 */
 func Test_ConsensusManager_changeInCertifiedBlockOfOtherBranch(t *testing.T) {
 	cm, _, shardNodes := initConsensusManager(t, testnetwork.NewRootMockNetwork())
-	bs := cm.blockStore
+	bs := cm.blockStore()
 	req := &drctypes.IRChangeReq{
 		Partition:  partitionID,
 		Shard:      shardID,
@@ -1803,7 +1803,7 @@ func Test_ConsensusManager_staleRequestAfterCommit(t *testing.T) {
 	mockNet.WaitReceive(t, vote)
 	prop = testutils.MockAwaitMessage[*abdrc.ProposalMsg](t, mockNet, network.ProtocolRootProposal)
 	require.EqualValues(t, 5, prop.Block.Round)
-	require.EqualValues(t, 3, cm.blockStore.GetHighQc().GetCommitRound())
+	require.EqualValues(t, 3, cm.blockStore().GetHighQc().GetCommitRound())
 	require.Empty(t, prop.Block.Payload.Requests, "stale request must not be proposed")
 
 	// the proposal is valid, the node votes for it
@@ -1829,7 +1829,7 @@ func Test_ConsensusManager_staleRequestInBuffer(t *testing.T) {
 		}
 		t.Run(name, func(t *testing.T) {
 			cm, _, shardNodes := initConsensusManager(t, testnetwork.NewRootMockNetwork())
-			bs := cm.blockStore
+			bs := cm.blockStore()
 			req := &drctypes.IRChangeReq{
 				Partition:  partitionID,
 				Shard:      shardID,
@@ -1929,10 +1929,10 @@ func recoveryTreeSetup(t *testing.T) (*ConsensusManager, *abdrc.StateMsg, *drcty
 	ctxCancel()
 	<-done
 
-	qc4 := cm.blockStore.GetHighQc()
+	qc4 := cm.blockStore().GetHighQc()
 	require.EqualValues(t, 4, qc4.GetRound())
 	require.Zero(t, qc4.LedgerCommitInfo.RootChainRoundNumber, "QC(4) doesn't commit")
-	state, err := cm.blockStore.GetState()
+	state, err := cm.blockStore().GetState()
 	require.NoError(t, err)
 	require.Less(t, state.CommittedHead.CommitQc.GetRound(), qc4.GetRound())
 	for _, b := range state.Pending {
@@ -1972,14 +1972,14 @@ func Test_ConsensusManager_recoveryRestoresHighQc(t *testing.T) {
 			Author:  author,
 			Timeout: drctypes.NewTimeout(5, cm.trustBase.Load().Epoch, qc4),
 		})
-		require.EqualValues(t, 4, cm.blockStore.GetHighQc().GetRound())
+		require.EqualValues(t, 4, cm.blockStore().GetHighQc().GetRound())
 		require.EqualValues(t, 5, cm.pacemaker.GetCurrentRound())
 	})
 
 	t.Run("triggered by QC", func(t *testing.T) {
 		cm, state, qc4, _ := setup(t)
 		recoverFrom(t, cm, state, qc4)
-		require.EqualValues(t, 4, cm.blockStore.GetHighQc().GetRound())
+		require.EqualValues(t, 4, cm.blockStore().GetHighQc().GetRound())
 		require.EqualValues(t, 5, cm.pacemaker.GetCurrentRound())
 	})
 
@@ -1990,7 +1990,7 @@ func Test_ConsensusManager_recoveryRestoresHighQc(t *testing.T) {
 			VoteInfo: &drctypes.RoundInfo{RoundNumber: 5, ParentRoundNumber: 4, Epoch: qc4.VoteInfo.Epoch},
 			HighQc:   qc4,
 		})
-		require.EqualValues(t, 4, cm.blockStore.GetHighQc().GetRound())
+		require.EqualValues(t, 4, cm.blockStore().GetHighQc().GetRound())
 		require.EqualValues(t, 5, cm.pacemaker.GetCurrentRound())
 	})
 }
@@ -2020,7 +2020,7 @@ func Test_ConsensusManager_recoveryTipMustBeTheProposedBlock(t *testing.T) {
 		honest := &drctypes.BlockData{}
 		require.NoError(t, types.Cbor.Unmarshal(raw, honest))
 		change(state, tip)
-		tc, err := cm.blockStore.GetLastTC()
+		tc, err := cm.blockStore().GetLastTC()
 		require.NoError(t, err)
 
 		ctx, ctxCancel := context.WithCancel(context.Background())
@@ -2055,7 +2055,7 @@ func Test_ConsensusManager_recoveryTipMustBeTheProposedBlock(t *testing.T) {
 		cm, err, votes, honest := recoverWith(t, 3, true, nothing)
 		require.NoError(t, err)
 		require.Len(t, votes, 1)
-		stored, err := cm.blockStore.Block(4)
+		stored, err := cm.blockStore().Block(4)
 		require.NoError(t, err)
 		require.Equal(t, []byte(stored.RootHash), []byte(votes[0].Message.(*abdrc.VoteMsg).VoteInfo.CurrentRootHash))
 		require.EqualValues(t, honest.Round, cm.safety.storage.GetHighestVotedRound())
@@ -2067,7 +2067,7 @@ func Test_ConsensusManager_recoveryTipMustBeTheProposedBlock(t *testing.T) {
 		})
 		require.NoError(t, err)
 		require.Len(t, votes, 1)
-		stored, err := cm.blockStore.Block(4)
+		stored, err := cm.blockStore().Block(4)
 		require.NoError(t, err)
 		require.Equal(t, []byte(stored.RootHash), []byte(votes[0].Message.(*abdrc.VoteMsg).VoteInfo.CurrentRootHash))
 	})

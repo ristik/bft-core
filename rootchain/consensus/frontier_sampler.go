@@ -251,7 +251,7 @@ func (x *ConsensusManager) buildFrontierSample(req FrontierRequest) (*FrontierSa
 	if req.NetworkID != s.trust.NetworkID || x.orchestration.NetworkID() != s.trust.NetworkID {
 		return nil, fmt.Errorf("%w: network mismatch", ErrFrontierUnavailable)
 	}
-	view, err := x.blockStore.ReadFrontierStorageView(req.PartitionID, req.ShardID)
+	view, err := x.blockStore().ReadFrontierStorageView(req.PartitionID, req.ShardID)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrFrontierUnavailable, err)
 	}
