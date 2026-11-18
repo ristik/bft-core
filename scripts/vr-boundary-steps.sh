@@ -38,8 +38,8 @@ vrb_published() { # VR's open output is Published (state 2)
 }
 vrb_intent() { curl -sf -H 'Content-Type: application/json' "$1/api/v1/vr/intent"; }
 vrb_all_intents() { local r; for r in $(vrb_root_rpcs); do vrb_intent "$r" >/dev/null || return 1; done; }
-vrb_members_logged() { # every successor's root node (the four of this lane) logged the line
-  local i; for i in $(seq 1 "${validators:-4}"); do grep -q -- "$1" "test-nodes/root$i/debug.log" 2>/dev/null || return 1; done
+vrb_members_logged() { # every successor's root node (the four of this lane, and the joiner's) logged the line
+  local i; for i in $(seq 1 "${validators:-4}") $([ "${VR_JOINER:-0}" = 1 ] && echo 5); do grep -q -- "$1" "test-nodes/root$i/debug.log" 2>/dev/null || return 1; done
 }
 vrb_logs_have() { grep -l -- "$1" test-nodes/root*/debug.log >/dev/null 2>&1; }
 vrb_acked() { [ "$(cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'lastAcked()(bytes32)')" = "$vrb_result" ]; }
@@ -113,6 +113,11 @@ vrb_main() {
   vrb_log "roots: $(vrb_root_rpcs | tr '\n' ' ')"
   if [ "${VR_RESTART_BETWEEN:-0}" = 1 ]; then vrb_hold 1 || return 1; fi
   if [ "${VR_RESTART_EARLY:-0}" = 1 ]; then vrb_hold 2 || return 1; fi
+  if [ "${VR_JOINER:-0}" = 1 ]; then
+    # 1. (joiner) a fifth identity applies and the Foundation admits it: an Admitted joiner is the election's work
+    vrj_apply || return 1
+    vrj_admit || return 1
+  else
   # 1. an owner stages a new payee for identity 4: the election is due (a staged binding)
   keys=$VR_DIR/dev-keys/keys.json
   owner=$(python3 -c "import json;print(json.load(open('$keys'))['owners'][3]['privateKey'])")
@@ -135,6 +140,7 @@ vrb_main() {
 EOF
   build/ubft validator rotate --validator-config "$cfg/validator.json" --new-payee "$payee" 2>&1 | tee "$VR_EVIDENCE/rotate.log" || { vrb_log "FAIL: rotate"; return 1; }
   vrb_log "PASS: identity 4 staged a new payee $payee"
+  fi
   # 2. the PoA election publishes R
   vrb_wait 900 "VR's open output is Published" vrb_published || return 1
   vrb_result=$(vrb_open_output)
@@ -187,6 +193,7 @@ EOF
   cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'committee()' >"$VR_EVIDENCE/committee-after.hex"
   cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'identity(uint64)' 4 >"$VR_EVIDENCE/identity4-after.hex"
   vrb_log "PASS: the Boundary installed J"
+  if [ "${VR_JOINER:-0}" = 1 ]; then vrj_validates || return 1; fi
   for i in $(seq 1 "${validators:-4}"); do
     grep -E 'VR handoff|VR output published|root handoff outcome|switched|epoch' "test-nodes/root$i/debug.log" | tail -n 400 >"$VR_EVIDENCE/root$i-vr.log"
   done
