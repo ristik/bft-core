@@ -13,6 +13,8 @@ source scripts/lib/portable.sh
 log() { printf '%s run-t6: %s\n' "$(date -u +%FT%TZ)" "$*" | tee -a "$out/run-lane.log"; }
 die() { log "HARNESS FAILURE: $*"; rc=1; finalize; exit 1; }
 pins=scripts/ci/lane-pins.json
+# T6 builds the commit under test (T6_BFT_COMMIT below), never the pinned product: it runs only with the checkout's dependency set (bft-core#1139)
+[ "${LANE_PRODUCT:-checkout}" = checkout ] || { echo "run-t6: T6 does not run the pinned product (LANE_PRODUCT=$LANE_PRODUCT)" >&2; exit 2; }
 inject=${CI_INJECT_FAILURE:-none}; deadline=${T6_DEADLINE_MIN:-105}
 head=$(git rev-parse HEAD)
 export AGRE_ROOT=$work/agre DEVNET_LOCK_DIR=$work/agre/.devnet-lock
