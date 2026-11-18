@@ -40,6 +40,12 @@ elif [ -n "${POST_M2A_URETH_BIN:-}" ] || [ -n "${POST_M2A_URETH_COMMIT:-}" ]; th
   URETH_PIN_COMMIT=$POST_M2A_URETH_COMMIT
   M2_RUN_LOG_DIR=${M2_RUN_LOG_DIR:-/Users/risto/uni/agre/briefs/devnet-runs/m2-p2-$(date -u +%Y%m%dT%H%M%SZ)}
   echo "profile-2 logs: $M2_RUN_LOG_DIR"
+elif [ "${VR_LANE:-0}" = 1 ] && [ "${M2_PROFILE2:-0}" = 1 ]; then
+  # a VR generation runs the client of the combined lane (ureth main), the pin scripts/ci/lane-pins.json holds: an older client (the vt15 lane pin)
+  # fails engine-api's execution-profile check (bft-core#1200). POST_M2A_URETH_BIN and _COMMIT (above) still name another client explicitly.
+  URETH_PIN_COMMIT=$(python3 -I -c 'import json,sys;print(json.load(open(sys.argv[1]))["components"]["ureth"]["commit"])' scripts/ci/lane-pins.json) || { echo "the ureth pin of scripts/ci/lane-pins.json is unreadable" >&2; exit 2; }
+  M2_RUN_LOG_DIR=${M2_RUN_LOG_DIR:-/Users/risto/uni/agre/briefs/devnet-runs/m2-p2-$(date -u +%Y%m%dT%H%M%SZ)}
+  echo "profile-2 logs: $M2_RUN_LOG_DIR"
 elif [ "${M2_PROFILE2:-0}" = 1 ]; then
   URETH_PIN_COMMIT=ae6e6be94d6dc45d0df6574cb5fbedef398f5c2e
   M2_RUN_LOG_DIR=${M2_RUN_LOG_DIR:-/Users/risto/uni/agre/briefs/devnet-runs/m2-p2-$(date -u +%Y%m%dT%H%M%SZ)}
@@ -75,6 +81,11 @@ fi
 # skipped (or whose genesis path bypasses the VR plan and verify) is refused here, before setup wipes test-nodes; so are the restart and
 # restore probes the lane has not been run with.
 if [ "${VR_LANE:-0}" = 1 ]; then
+  # A long VR run (the Foundation's governance delay alone is 3600 s of certified time): the full-history journal of a shard node stops the chain after
+  # 256 blocks, so the archive stores are on (an archive-replica restore also needs them), the journal bounds are raised to the maximum the node accepts,
+  # and the shard node has an operator RPC (the root tells its paired shard node the staged successor there). Each can be overridden in the environment.
+  export VR_ARCHIVE=${VR_ARCHIVE:-1} EVM_OPERATOR_STATUS_RPC=${EVM_OPERATOR_STATUS_RPC:-1}
+  export EVM_EXTRA_ARGS=${EVM_EXTRA_ARGS---journal-candidates 4096 --journal-observations 8192 --journal-bytes 134217728}
   [ "${Q3_B1:-0}" = 1 ] && [ "${M2_PROFILE2:-0}" = 1 ] || { echo "VR_LANE=1 requires Q3_B1=1 and M2_PROFILE2=1" >&2; exit 2; }
   for vrConflict in P85_LANE P85_SHADOW Q4_LIVE_LANE H3_ASSIGNMENT_LANE Q3_WEIGHT_LANE H6_ABORT_LANE F8_MIXED_LANE ANYAGE_LANE UTB_LANE \
     D2C_RESTART_PROBE H4_RESTORE_PROBE M2A_FINAL_RESTORE FAUCET_PROBE POST_M2A_SKIP_HANDOFF; do
@@ -829,6 +840,9 @@ if [ "${F8_MIXED_LANE:-0}" = 1 ]; then f8_prepare; fi
 # publication before they stop validator 1; M2a restores it after Handoff 2.
 if [ "${H3_ASSIGNMENT_LANE:-0}" = 1 ] || [ "${P85_LANE:-0}" = 1 ]; then   # the P85 joiner restores from a retained validator's archive (as the H3 joiner)
   export EVM_ARCHIVE_ROOT=test-nodes/h3-archives
+  mkdir -p "$EVM_ARCHIVE_ROOT"
+elif [ "${VR_LANE:-0}" = 1 ] && [ "${VR_ARCHIVE:-0}" = 1 ]; then   # a long VR run (the joiner's): the journal is pruned by the archive replicas, and a joiner restores from an archive
+  export EVM_ARCHIVE_ROOT=test-nodes/vr-archives
   mkdir -p "$EVM_ARCHIVE_ROOT"
 elif [ "${H4_RESTORE_PROBE:-0}" = 1 ] || [ "${M2A_FINAL_RESTORE:-0}" = 1 ]; then
   export EVM_ARCHIVE_ROOT=test-nodes/h4-archives
