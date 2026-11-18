@@ -1,6 +1,14 @@
 package b1state
 
-import "errors"
+import (
+	"bytes"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"math"
+	"strings"
+)
 
 // The records hook's per-record reservation is not a hand-typed number either. The largest record the hook applies is the RecoveryAck that
 // also applies a pending closure (it derives K, an exposure per incumbent member, and closes J): its cost grows with the committee (nMax members
@@ -78,4 +86,239 @@ func CheckHookGas(p Profile, caps ElectCaps, recorded, fresh HookMeasurement) er
 		return err
 	}
 	return CheckHookRecordGas(p, caps, fresh)
+}
+
+// ---- the ValidatorRegistry (VR) records batch (VT-14, ristik/bft-core#1158) -------------------------------------------------------------
+//
+// A VR generation pins its hooks differently. CheckHookRecordGas above prices one P85 record and multiplies it by H; for VR that rule is
+// wrong in both directions (astra, urethhook r2, briefs/astra-review-urethhook-r2-answer.md): the worst record (a switching Boundary of
+// 17,977,590 at VR's caps) times 32 overprices the batch fivefold, while the ordinary records' module allowance is a batch property that a
+// per-record figure does not bound. The VR rule is a FIXED allowance for one records call of H records:
+//
+//	M_H = max(R_H + B, every combined fixture)      R_H: the full H-record delivery at VR's maximum callback caps
+//	                                                B:   the complete worst switching Boundary (adoption, detach, attach, 16 installed)
+//	H * HookRecordGas >= ceil(5 * M_H / 4)          HookRecordGas is the amortized encoding of the allowance, never a per-record price
+//	ElectGas          >= ceil(5 * E / 4)            E:   the maximum compound election
+//
+// It rests on VR's single-live-output invariant: one records call finalizes at most one nonterminal output and switches the pointer at
+// most once, and the (at most two) onRecords segments of a switch sum to at most H records. The measurement names that invariant, the
+// code it was taken at (VR's runtime hash, which covers its three facets through immutables, and the active module's), VR's callback caps
+// and the schema ceilings; a measurement of other code, caps or ceilings proves nothing about the deployment and is refused. A protocol
+// that permits more than one live output must replace this rule and remeasure.
+
+// VRSingleLiveOutput names the invariant the VR batch rule rests on (schema v1: at most one live output, marked outputs included).
+const VRSingleLiveOutput = "vr-v1-single-live-output"
+
+// VRCallbackCaps are VR's immutable per-call caps (unicity-pos-contracts src/vr/VRShared.sol CAP_*): a module's caps are min(its
+// gasBounds, these), so a measurement at these caps covers every module VR can activate.
+type VRCallbackCaps struct {
+	Elect    uint64 `json:"elect"`
+	Output   uint64 `json:"output"`
+	Record   uint64 `json:"record"`
+	Resolved uint64 `json:"resolved"`
+	Attach   uint64 `json:"attach"`
+	Detach   uint64 `json:"detach"`
+	Gov      uint64 `json:"gov"`
+	Adopt    uint64 `json:"adopt"`
+}
+
+// VRCaps are the caps of the VR v1 bytecode.
+var VRCaps = VRCallbackCaps{Elect: 4_000_000, Output: 1_000_000, Record: 1_500_000, Resolved: 500_000, Attach: 3_000_000, Detach: 500_000, Gov: 1_000_000, Adopt: 1_000_000}
+
+// VRCeilings are the legal bounds the worst cases were built at (schema v1 section 1; design section 3.5.4 and 10).
+type VRCeilings struct {
+	Committee      uint32 `json:"committee"`      // installed and captured members
+	BoundChanges   uint32 `json:"boundChanges"`   // changes bound to one output
+	BoundPayload   uint32 `json:"boundPayload"`   // their payload bytes
+	ChangePayload  uint32 `json:"changePayload"`  // one change's payload bytes (a SetModule's initData lives in it)
+	PendingChanges uint32 `json:"pendingChanges"` // changes pending at once
+	Activations    uint32 `json:"activations"`    // the activation table
+}
+
+// VRLimits are the ceilings of schema v1.
+var VRLimits = VRCeilings{Committee: 16, BoundChanges: 16, BoundPayload: 64 * 1024, ChangePayload: 16 * 1024, PendingChanges: 32, Activations: 64}
+
+// VRCombined is one combined fixture: a switching Boundary and ordinary records in one H-record call (astra's three: the switch at the
+// start, middle or end of 30 ordinary records), with the smallest records reservation at which the hook still lands on the reference state.
+type VRCombined struct {
+	Name        string `json:"name"`
+	Records     uint32 `json:"records"`
+	Reservation uint64 `json:"reservation"`
+}
+
+// VRHookMeasurement is the complete-path measurement of a VR generation's hooks: every figure is the smallest RESERVATION at which the
+// hook still reproduces the reference state (below it a contained step is BudgetShort or VR runs out of gas), not the gas spent. It is
+// taken by ureth's real block path over VR bytecode (ureth crates/unicity/execution/tests/vr_hook.rs, VR_HOOK_MEASUREMENT).
+type VRHookMeasurement struct {
+	Invariant        string         `json:"invariant"`
+	H                uint32         `json:"h"`
+	Registry         [20]byte       `json:"-"`
+	RegistryCodeHash [32]byte       `json:"-"`
+	ModuleCodeHash   [32]byte       `json:"-"`
+	Caps             VRCallbackCaps `json:"caps"`
+	Ceilings         VRCeilings     `json:"ceilings"`
+	Records          uint64         `json:"records"`  // R_H
+	Boundary         uint64         `json:"boundary"` // B
+	Combined         []VRCombined   `json:"combined"`
+	Elect            uint64         `json:"elect"` // E
+	Source           string         `json:"source"`
+}
+
+var (
+	// ErrVRHookMeasurement reports a measurement that is not a complete VR batch measurement of the deployment.
+	ErrVRHookMeasurement = errors.New("b1state: invalid VR hook measurement")
+	// ErrVRHookGas reports a VR profile whose fixed records allowance or election price does not cover the measurement with the margin.
+	ErrVRHookGas = errors.New("b1state: the VR hook envelope does not cover the measured complete path")
+)
+
+// VRCombinedFixtures are the combined fixtures every VR measurement must carry (permanent acceptance cases; astra urethhook r2).
+var VRCombinedFixtures = []string{"mixed-first", "mixed-middle", "mixed-last"}
+
+// Valid checks the measurement is complete and taken at VR v1's caps, ceilings and invariant.
+func (m VRHookMeasurement) Valid() error {
+	switch {
+	case m.Invariant != VRSingleLiveOutput:
+		return errors.Join(ErrVRHookMeasurement, errors.New("not measured under the single-live-output invariant"))
+	case m.H < 1 || m.H > HookMaxRecords:
+		return errors.Join(ErrVRHookMeasurement, errors.New("H outside 1..32"))
+	case m.Registry == ([20]byte{}) || m.RegistryCodeHash == ([32]byte{}) || m.ModuleCodeHash == ([32]byte{}):
+		return errors.Join(ErrVRHookMeasurement, errors.New("no registry, registry code hash or module code hash"))
+	case m.Caps != VRCaps:
+		return errors.Join(ErrVRHookMeasurement, errors.New("not measured at VR's callback caps"))
+	case m.Ceilings != VRLimits:
+		return errors.Join(ErrVRHookMeasurement, errors.New("not measured at the schema ceilings"))
+	case m.Records == 0 || m.Boundary == 0 || m.Elect == 0:
+		return errors.Join(ErrVRHookMeasurement, errors.New("a zero requirement"))
+	}
+	if len(m.Combined) != len(VRCombinedFixtures) {
+		return errors.Join(ErrVRHookMeasurement, errors.New("the combined fixtures are not exactly "+strings.Join(VRCombinedFixtures, ", ")))
+	}
+	for i, c := range m.Combined {
+		if c.Name != VRCombinedFixtures[i] || c.Records != m.H || c.Reservation == 0 {
+			return errors.Join(ErrVRHookMeasurement, fmt.Errorf("combined fixture %d is not %s over H records with a reservation", i, VRCombinedFixtures[i]))
+		}
+	}
+	return nil
+}
+
+// BatchRequirement is M_H: R_H + B, raised to any combined fixture that needs more.
+func (m VRHookMeasurement) BatchRequirement() (uint64, error) {
+	if err := m.Valid(); err != nil {
+		return 0, err
+	}
+	if m.Boundary > math.MaxUint64-m.Records {
+		return 0, ErrOverflow
+	}
+	mh := m.Records + m.Boundary
+	for _, c := range m.Combined {
+		mh = max(mh, c.Reservation)
+	}
+	return mh, nil
+}
+
+// VRRecordsAllowance is the fixed records allowance a measurement requires, ceil(5*M_H/4), and the smallest HookRecordGas that encodes
+// it at H, ceil(allowance/H).
+func VRRecordsAllowance(m VRHookMeasurement) (allowance, perRecord uint64, err error) {
+	mh, err := m.BatchRequirement()
+	if err != nil {
+		return 0, 0, err
+	}
+	if allowance, err = PinElectGas(mh); err != nil {
+		return 0, 0, err
+	}
+	h := uint64(m.H)
+	return allowance, allowance/h + min(allowance%h, 1), nil
+}
+
+// CheckVRHookGas is the VR profile check: both hooks are on VR at the measured address, H is the measured H, the measurement is of the
+// pinned VR code and the module the generation activates, H*HookRecordGas covers ceil(5*M_H/4) (checked without overflow), and
+// ElectGas covers ceil(5*E/4). The P85 per-record rule (CheckHookRecordGas) is not applied to a VR profile and stays unchanged for P85.
+func CheckVRHookGas(p Profile, registryCodeHash, moduleCodeHash [32]byte, m VRHookMeasurement) error {
+	allowance, _, err := VRRecordsAllowance(m)
+	if err != nil {
+		return err
+	}
+	switch {
+	case !p.HookEnabled() || !p.ElectionEnabled():
+		return errors.Join(ErrVRHookGas, errors.New("a VR profile carries both hooks"))
+	case p.RecordsCustody != m.Registry || p.ElectionContract != m.Registry:
+		return errors.Join(ErrVRHookGas, errors.New("the hooks are not on the measured registry"))
+	case p.HRecords != m.H:
+		return errors.Join(ErrVRHookGas, fmt.Errorf("the profile's H %d is not the measured H %d (never lower H while keeping the rate)", p.HRecords, m.H))
+	case registryCodeHash != m.RegistryCodeHash:
+		return errors.Join(ErrVRHookGas, errors.New("the measurement is of other VR code than the generation pins"))
+	case moduleCodeHash != m.ModuleCodeHash:
+		return errors.Join(ErrVRHookGas, errors.New("the measurement is of another module than the generation activates"))
+	case p.HookRecordGas == 0 || uint64(p.HRecords) > math.MaxUint64/p.HookRecordGas:
+		return ErrOverflow
+	case uint64(p.HRecords)*p.HookRecordGas < allowance:
+		return errors.Join(ErrVRHookGas, fmt.Errorf("H x HookRecordGas = %d is below ceil(5 x M_H / 4) = %d", uint64(p.HRecords)*p.HookRecordGas, allowance))
+	}
+	elect, err := PinElectGas(m.Elect)
+	if err != nil {
+		return err
+	}
+	if p.ElectGas < elect {
+		return errors.Join(ErrVRHookGas, fmt.Errorf("ElectGas %d is below ceil(5 x E / 4) = %d", p.ElectGas, elect))
+	}
+	return nil
+}
+
+// CheckVRHookGasFresh is the genesis re-check: the recorded measurement passes CheckVRHookGas, and so does a fresh complete-path
+// measurement of the same code at the final addresses. A fresh measurement that needs more than the recorded one fails here; the remedy
+// is to record the fresh one (raising M_H) and derive the profile again, never to keep the old pins.
+func CheckVRHookGasFresh(p Profile, registryCodeHash, moduleCodeHash [32]byte, recorded, fresh VRHookMeasurement) error {
+	if err := CheckVRHookGas(p, registryCodeHash, moduleCodeHash, recorded); err != nil {
+		return err
+	}
+	return CheckVRHookGas(p, registryCodeHash, moduleCodeHash, fresh)
+}
+
+type vrHookMeasurementWire struct {
+	Invariant        string         `json:"invariant"`
+	H                uint32         `json:"h"`
+	Registry         string         `json:"registry"`
+	RegistryCodeHash string         `json:"registryCodeHash"`
+	ModuleCodeHash   string         `json:"moduleCodeHash"`
+	Caps             VRCallbackCaps `json:"caps"`
+	Ceilings         VRCeilings     `json:"ceilings"`
+	Records          uint64         `json:"records"`
+	Boundary         uint64         `json:"boundary"`
+	Combined         []VRCombined   `json:"combined"`
+	Elect            uint64         `json:"elect"`
+	Source           string         `json:"source"`
+}
+
+// MarshalJSON writes the addresses and hashes as lowercase 0x-prefixed hex.
+func (m VRHookMeasurement) MarshalJSON() ([]byte, error) {
+	return json.Marshal(vrHookMeasurementWire{
+		Invariant: m.Invariant, H: m.H, Registry: "0x" + hex.EncodeToString(m.Registry[:]),
+		RegistryCodeHash: "0x" + hex.EncodeToString(m.RegistryCodeHash[:]), ModuleCodeHash: "0x" + hex.EncodeToString(m.ModuleCodeHash[:]),
+		Caps: m.Caps, Ceilings: m.Ceilings, Records: m.Records, Boundary: m.Boundary, Combined: m.Combined, Elect: m.Elect, Source: m.Source,
+	})
+}
+
+// UnmarshalJSON reads exactly the fields MarshalJSON writes: unknown fields and non-canonical hex are refused.
+func (m *VRHookMeasurement) UnmarshalJSON(b []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	var w vrHookMeasurementWire
+	if err := dec.Decode(&w); err != nil {
+		return errors.Join(ErrVRHookMeasurement, err)
+	}
+	out := VRHookMeasurement{Invariant: w.Invariant, H: w.H, Caps: w.Caps, Ceilings: w.Ceilings, Records: w.Records, Boundary: w.Boundary,
+		Combined: w.Combined, Elect: w.Elect, Source: w.Source}
+	for _, f := range []struct {
+		s   string
+		out []byte
+	}{{w.Registry, out.Registry[:]}, {w.RegistryCodeHash, out.RegistryCodeHash[:]}, {w.ModuleCodeHash, out.ModuleCodeHash[:]}} {
+		if len(f.s) != 2+2*len(f.out) || f.s[:2] != "0x" || strings.ToLower(f.s) != f.s {
+			return errors.Join(ErrVRHookMeasurement, fmt.Errorf("%q is not lowercase 0x-prefixed hex of %d bytes", f.s, len(f.out)))
+		}
+		if _, err := hex.Decode(f.out, []byte(f.s[2:])); err != nil {
+			return errors.Join(ErrVRHookMeasurement, err)
+		}
+	}
+	*m = out
+	return nil
 }

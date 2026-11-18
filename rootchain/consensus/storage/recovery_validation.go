@@ -178,7 +178,7 @@ func trustedGenesis(db PersistentStore, hashAlg crypto.Hash, orchestration Orche
 			}
 		}
 	}
-	return NewGenesisBlock(orchestration.NetworkID(), hashAlg, profile)
+	return NewGenesisBlockOf(orchestration, hashAlg, profile)
 }
 
 // validateGenesisHead: the genesis block is the same on every node and unsigned, so a genesis head is accepted

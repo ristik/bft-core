@@ -33,16 +33,20 @@ func TestAFrameHeaderAloneDoesNotAllocateTheDeclaredLength(t *testing.T) {
 func TestIngressBudgetReservesAndReleases(t *testing.T) {
 	b := NewIngressBudget(100, 60)
 	a, c := peer.ID("a"), peer.ID("c")
-	require.True(t, b.reserve(a, 50))
-	require.False(t, b.reserve(a, 20), "per peer")
-	require.True(t, b.reserve(c, 50))
-	require.False(t, b.reserve(c, 1), "global")
+	ca, ok := b.reserve(a, 50)
+	require.True(t, ok)
+	_, ok = b.reserve(a, 20)
+	require.False(t, ok, "per peer")
+	cc, ok := b.reserve(c, 50)
+	require.True(t, ok)
+	_, ok = b.reserve(c, 1)
+	require.False(t, ok, "global")
 	msg := &testStrMsg{Info: "x"}
-	b.queue(msg, a, 50)
+	b.queue(msg, ca)
 	require.True(t, b.delivered(msg))
 	require.False(t, b.delivered(msg), "released once")
 	require.EqualValues(t, 50, b.Used())
-	b.release(c, 50)
+	b.release(cc)
 	require.Zero(t, b.Used())
 }
 
@@ -100,8 +104,9 @@ func TestCloseReleasesForwardedAndQueuedReservations(t *testing.T) {
 	from := peer.ID("sender")
 	for i := range 3 { // the forwarder takes the first and blocks handing it over; two stay queued
 		msg := &testStrMsg{Info: string(rune('a' + i))}
-		require.True(t, budget.reserve(from, 10))
-		budget.queue(msg, from, 10)
+		c, ok := budget.reserve(from, 10)
+		require.True(t, ok)
+		budget.queue(msg, c)
 		require.NoError(t, nw.receivedMsg(from, "test/c", msg))
 	}
 	require.EqualValues(t, 30, budget.Used())
@@ -114,8 +119,9 @@ func TestCloseReleasesForwardedAndQueuedReservations(t *testing.T) {
 		t.Fatal("the consumer's channel was not closed")
 	}
 	late := &testStrMsg{Info: "late"}
-	require.True(t, budget.reserve(from, 10))
-	budget.queue(late, from, 10)
+	c, ok := budget.reserve(from, 10)
+	require.True(t, ok)
+	budget.queue(late, c)
 	require.Error(t, nw.receivedMsg(from, "test/c", late), "nothing is queued after Close")
 	budget.delivered(late) // the stream handler's release on a refused enqueue
 	require.Zero(t, budget.Used())
@@ -158,8 +164,9 @@ func TestBudgetedCloseBeforeReceivedChannel(t *testing.T) {
 		ProtocolID: "test/b", TypeFn: func() any { return &testStrMsg{} }, MaxFrameSize: 1 << 10, Ingress: budget,
 	}))
 	msg := &testStrMsg{Info: "a"}
-	require.True(t, budget.reserve(peer.ID("s"), 10))
-	budget.queue(msg, peer.ID("s"), 10)
+	c, ok := budget.reserve(peer.ID("s"), 10)
+	require.True(t, ok)
+	budget.queue(msg, c)
 	require.NoError(t, nw.receivedMsg(peer.ID("s"), "test/b", msg))
 	nw.Close()
 	require.Zero(t, budget.Used(), "the queued message is dropped and released")

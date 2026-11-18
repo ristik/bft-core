@@ -50,6 +50,7 @@ func (a *UnicityBFTApp) AddSubcommands() {
 	a.baseCmd.AddCommand(newRootCmd())
 	a.baseCmd.AddCommand(newQ3Cmd())
 	a.baseCmd.AddCommand(newGenesisIdentitiesCmd())
+	a.baseCmd.AddCommand(newVRGenesisCmd())
 	a.baseCmd.AddCommand(newPosRelayerCmd())
 	a.baseCmd.AddCommand(newEvidenceCmd())
 	a.baseCmd.AddCommand(newTrustBaseCmd(a.baseConfig))
@@ -58,6 +59,7 @@ func (a *UnicityBFTApp) AddSubcommands() {
 	a.baseCmd.AddCommand(newNodeIDCmd(a.baseConfig))
 	a.baseCmd.AddCommand(newEngineAPICmd(a.baseConfig))
 	a.baseCmd.AddCommand(newSigningAuthorityCmd(a.baseConfig))
+	a.baseCmd.AddCommand(newValidatorCmd(a.baseConfig))
 }
 
 func newBaseCmd(obsF Factory) (*cobra.Command, *baseFlags) {
