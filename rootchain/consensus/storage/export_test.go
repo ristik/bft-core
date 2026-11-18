@@ -93,3 +93,48 @@ func VRFreezeForTest(base *TestVRAuthority, svc *VRServices, r evmroot.OrderedHa
 	a := &vrFreezeAuthority{handoffAuthority: base, vr: &v, svc: svc}
 	return a.VerifyFreeze(r, companion)
 }
+
+// InstallCommittedForTest runs the committed-handoff install of an epoch switch (InstallEpochAnchor's and the startup repair's) over the
+// given retained artifacts: oldRoot is the old epoch's committed checkpoint block, record the committed H.
+func InstallCommittedForTest(artifacts interface {
+	HandoffBody([]byte) ([]byte, error)
+	HandoffCandidate([]byte) ([]byte, error)
+	HandoffVRCandidate([]byte) ([]byte, error)
+}, orch Orchestration, oldRoot *ExecutedBlock, record evmroot.OrderedHandoffRecord) error {
+	return installCommittedAssignmentFrom(testArtifacts{artifacts: artifacts}, orch, crypto.SHA256, oldRoot, record, record.OrderedRound)
+}
+
+// testArtifacts is a PersistentStore that holds only the retained handoff artifacts.
+type testArtifacts struct {
+	PersistentStore
+	artifacts interface {
+		HandoffBody([]byte) ([]byte, error)
+		HandoffCandidate([]byte) ([]byte, error)
+		HandoffVRCandidate([]byte) ([]byte, error)
+	}
+}
+
+func (a testArtifacts) HandoffBody(id []byte) ([]byte, error) { return a.artifacts.HandoffBody(id) }
+func (a testArtifacts) HandoffCandidate(id []byte) ([]byte, error) {
+	return a.artifacts.HandoffCandidate(id)
+}
+func (a testArtifacts) HandoffVRCandidate(id []byte) ([]byte, error) {
+	return a.artifacts.HandoffVRCandidate(id)
+}
+
+// ExpectedCommitTRForTest is the successor technical record hash a Commit of record must bind for the frozen shard state si.
+func ExpectedCommitTRForTest(candidates interface{ HandoffCandidate([]byte) ([]byte, error) }, record evmroot.OrderedHandoffRecord, si *ShardInfo) ([]byte, error) {
+	return expectedCommitSuccessorTR(candidates, record, si, crypto.SHA256)
+}
+
+// DerivedChangeShardsForTest names the existing shards the committed candidate of record replaces the configuration of, read from the
+// candidate source the executor is given.
+func DerivedChangeShardsForTest(candidates interface{ HandoffCandidate([]byte) ([]byte, error) }, record evmroot.OrderedHandoffRecord) (map[types.PartitionShardID]struct{}, error) {
+	return derivedChangeShards(candidates, record)
+}
+
+// RetainVRFreezeForTest retains what the executed Freeze v5 block admitted into the store, exactly as BlockStore.Add does on the
+// admitting root.
+func RetainVRFreezeForTest(s *BlockStore, block *rctypes.BlockData, executed *ExecutedBlock) error {
+	return s.retainVRFreeze(block, executed.vrFrozen)
+}

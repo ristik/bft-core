@@ -299,7 +299,8 @@ func (x *BlockStore) NewFromAnchorState(head *abdrc.CommittedBlock) (*BlockStore
 // RetainHandoffArtifacts stores the successor body and, for an EVM assignment,
 // the candidate preimage a peer's handoff bundle carried, so a root that did not
 // order the freeze can derive the same configuration. Different bytes under the
-// same body id are refused.
+// same body id are refused. A VR handoff's candidate v6 is stored as its Freeze v5
+// retains it (the v5 view and the v6 bytes).
 func (x *BlockStore) RetainHandoffArtifacts(bodyID, body, preimage []byte) error {
 	if archive, ok := x.storage.(interface{ StoreHandoffBody([]byte, []byte) error }); ok && len(body) != 0 {
 		if err := archive.StoreHandoffBody(bodyID, body); err != nil {
@@ -313,7 +314,21 @@ func (x *BlockStore) RetainHandoffArtifacts(bodyID, body, preimage []byte) error
 	if !ok {
 		return ErrAssignmentHistory
 	}
-	return archive.StoreHandoffCandidate(bodyID, preimage)
+	cc, err := resolveCommittedCandidate(preimage)
+	if err != nil {
+		return err
+	}
+	if cc.vr {
+		// a VR handoff's candidate v6 is retained as a Freeze v5 retains it: its v5 view under the candidate key, the v6 bytes beside it
+		vr, ok := x.storage.(interface{ StoreHandoffVRCandidate([]byte, []byte) error })
+		if !ok {
+			return ErrAssignmentHistory
+		}
+		if err := vr.StoreHandoffVRCandidate(bodyID, preimage); err != nil {
+			return err
+		}
+	}
+	return archive.StoreHandoffCandidate(bodyID, cc.view)
 }
 
 // installCommittedAssignment is the BlockStore form of installCommittedAssignmentFrom.
@@ -359,7 +374,7 @@ func installCommittedAssignmentFrom(db PersistentStore, orchestration Orchestrat
 		return errors.Join(ErrAssignmentHistory, err)
 	}
 	si := oldRoot.ShardState.States[key]
-	preimage, err := readHandoffArtifact(db, "candidate", record.NextBodyID)
+	preimage, err := retainedCommittedPreimage(db, record.NextBodyID)
 	if err != nil {
 		return errors.Join(ErrAssignmentHistory, err)
 	}
@@ -406,7 +421,7 @@ func (x *BlockStore) ValidateCommittedAssignment(head *abdrc.CommittedBlock, rec
 	if err != nil {
 		return err
 	}
-	c, err := evmassign.DecodeCandidate(preimage)
+	c, err := decodeCommittedCandidate(preimage)
 	if err != nil {
 		return err
 	}
@@ -488,12 +503,12 @@ func validateCommittedAssignment(orchestration Orchestration, hashAlg crypto.Has
 	record evmroot.OrderedHandoffRecord, body retainedBody, preimage []byte,
 	configs map[basetypes.PartitionShardID]*basetypes.PartitionDescriptionRecord, key basetypes.PartitionShardID) ([]*basetypes.PartitionDescriptionRecord, []byte, error) {
 	si := oldRoot.ShardState.States[key]
-	confs, provenance, _, err := deriveActivatedConfigs(record, body, preimage)
+	confs, provenance, _, err := deriveActivatedConfigs(record, body, preimage, oldRoot.ShardState.States, configs)
 	if err != nil {
 		return nil, nil, err
 	}
 	pdr := confs[0]
-	c, err := evmassign.DecodeCandidate(preimage)
+	c, err := decodeCommittedCandidate(preimage)
 	if err != nil {
 		return nil, nil, errors.Join(ErrAssignmentHistory, err)
 	}

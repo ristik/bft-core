@@ -400,6 +400,81 @@ func TestInstallDerivedShardConfigsIsAtomic(t *testing.T) {
 	require.NoError(t, o.InstallDerivedShardConfigs([]*types.PartitionDescriptionRecord{evmNext, aggNext}, provenance), "idempotent")
 }
 
+// VT-06d: a committed AddPartition installs the first configuration of a new non-EVM partition as a derived entry, at the activation
+// round and atomically with the rest of the handoff; nothing else starts a shard history without a predecessor, and the genesis set
+// stays fixed.
+func TestDerivedFirstConfigurationOfANewPartition(t *testing.T) {
+	provenance, err := testProvenance(t).Bytes()
+	require.NoError(t, err)
+	seeded := func(t *testing.T) (*Orchestration, *types.PartitionDescriptionRecord, *types.PartitionDescriptionRecord) {
+		o, err := NewOrchestration(5, filepath.Join(t.TempDir(), "orchestration.db"), logger.New(t))
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = o.Close() })
+		o.EnableHandoffProfile()
+		evm := createShardConf(t, 8, types.ShardID{}, 1)
+		evm.PartitionTypeID = evmassign.EVMPartitionTypeID
+		agg := createShardConf(t, 9, types.ShardID{}, 1)
+		require.NoError(t, o.InitGenesisShardConfigs(evm, agg))
+		return o, evm, agg
+	}
+	added := func(partition types.PartitionID, start uint64) *types.PartitionDescriptionRecord {
+		c := createShardConf(t, partition, types.ShardID{}, start)
+		c.PartitionTypeID = 11
+		return c
+	}
+	key := types.PartitionShardID{PartitionID: 10, ShardID: types.ShardID{}.Key()}
+
+	t.Run("installed with the handoff from the activation round, idempotently", func(t *testing.T) {
+		o, evm, _ := seeded(t)
+		evmNext := *evm
+		evmNext.Epoch, evmNext.EpochStart = 1, 7
+		evmNext.Validators = createShardConf(t, 8, types.ShardID{}, 7).Validators
+		batch := []*types.PartitionDescriptionRecord{&evmNext, added(10, 7)}
+		require.NoError(t, o.InstallDerivedShardConfigs(batch, provenance))
+		before, err := o.ShardConfigs(6)
+		require.NoError(t, err)
+		require.NotContains(t, before, key, "absent before the activation round")
+		after, err := o.ShardConfigs(7)
+		require.NoError(t, err)
+		require.Contains(t, after, key)
+		require.EqualValues(t, 0, after[key].Epoch)
+		byEpoch, err := o.ShardConfigByEpoch(10, types.ShardID{}, 0)
+		require.NoError(t, err)
+		require.NotNil(t, byEpoch, "the operator tooling reads it by epoch (ubft q3 shard-conf --partition 10 --epoch 0)")
+		require.NoError(t, o.InstallDerivedShardConfigs(batch, provenance), "idempotent")
+		require.ErrorIs(t, o.InitGenesisShardConfigs(evm, added(12, 1)), ErrDerivedOnly, "the genesis set stays fixed")
+	})
+	t.Run("refused: an existing partition, a new shard of it, the EVM type, a reserved partition, a later epoch", func(t *testing.T) {
+		o, _, _ := seeded(t)
+		again := added(9, 7)
+		require.ErrorIs(t, o.InstallDerivedShardConfigs([]*types.PartitionDescriptionRecord{again}, provenance), ErrDerivedConflict, "partition 9 exists")
+		split, _ := (types.ShardID{}).Split()
+		sibling := createShardConf(t, 9, split, 7)
+		require.ErrorIs(t, o.InstallDerivedShardConfigs([]*types.PartitionDescriptionRecord{sibling}, provenance), ErrDerivedConflict, "a new shard of an existing partition")
+		evmTyped := added(10, 7)
+		evmTyped.PartitionTypeID = evmassign.EVMPartitionTypeID
+		require.ErrorIs(t, o.InstallDerivedShardConfigs([]*types.PartitionDescriptionRecord{evmTyped}, provenance), ErrDerivedConflict)
+		require.ErrorIs(t, o.InstallDerivedShardConfigs([]*types.PartitionDescriptionRecord{added(0xFFFFFFFE, 7)}, provenance), ErrDerivedConflict)
+		require.ErrorIs(t, o.InstallDerivedShardConfigs([]*types.PartitionDescriptionRecord{added(10, 0)}, provenance), ErrDerivedConflict, "no activation round")
+		later := added(10, 7)
+		later.Epoch = 1
+		require.ErrorIs(t, o.InstallDerivedShardConfigs([]*types.PartitionDescriptionRecord{later}, provenance), ErrDerivedConflict, "a new partition starts at epoch 0")
+		half := added(10, 7)
+		half.ShardID, _ = types.ShardID{}.Split()
+		require.ErrorIs(t, o.InstallDerivedShardConfigs([]*types.PartitionDescriptionRecord{half}, provenance), ErrDerivedConflict, "a new partition is one unsplit shard (FD-30)")
+		confs, err := o.ShardConfigs(100)
+		require.NoError(t, err)
+		require.Len(t, confs, 2, "nothing was written")
+	})
+	t.Run("a different first configuration at the same key is a conflict", func(t *testing.T) {
+		o, _, _ := seeded(t)
+		require.NoError(t, o.InstallDerivedShardConfigs([]*types.PartitionDescriptionRecord{added(10, 7)}, provenance))
+		other := added(10, 7)
+		other.T2Timeout += time.Second
+		require.ErrorIs(t, o.InstallDerivedShardConfigs([]*types.PartitionDescriptionRecord{other}, provenance), ErrDerivedConflict)
+	})
+}
+
 // A weighted EVM assignment is derivable (the weighted rules of a verified Q3 activation); an aggregator configuration never is, and a
 // weight outside the bounds is refused for the EVM shard too. Each case differs from the accepted control in one thing, and a refused
 // batch leaves nothing behind.

@@ -124,7 +124,11 @@ func successorTechnicalRecordWith(si *ShardInfo, pdr *types.PartitionDescription
 // candidateActivatedPDR decodes a verified preimage and applies the committed
 // activation round.
 func candidateActivatedPDR(preimage []byte, activation uint64) (evmassign.Candidate, *types.PartitionDescriptionRecord, error) {
-	c, pdr, err := evmassign.ActivatedFromPreimage(preimage, activation)
+	view, _, err := ResolveCommittedCandidate(preimage) // a candidate v6 is read through its v5 view
+	if err != nil {
+		return evmassign.Candidate{}, nil, err
+	}
+	c, pdr, err := evmassign.ActivatedFromPreimage(view, activation)
 	if err != nil {
 		return c, nil, errors.Join(ErrAssignmentHistory, err)
 	}
@@ -147,12 +151,16 @@ func DeriveActivatedPDR(record evmroot.OrderedHandoffRecord, body evmroot.TrustB
 // ModeWeighted.
 func deriveActivatedPDR(record evmroot.OrderedHandoffRecord, bodyID []byte, bodyEpoch, earliest uint64, changeRecordHash, preimage []byte,
 	mode weightvalidation.Mode) (*types.PartitionDescriptionRecord, []byte, error) {
-	digest := sha256.Sum256(preimage)
+	// a VR handoff's body binds the candidate v6; its v5 view is what the rest of the derivation and the provenance index read
+	cc, err := resolveCommittedCandidate(preimage)
+	if err != nil {
+		return nil, nil, err
+	}
 	if !bytes.Equal(bodyID, record.NextBodyID) || bodyEpoch != record.Epoch+1 ||
-		!bytes.Equal(changeRecordHash, evmroot.D4CandidateContextHash(record.Network, record.PredecessorBodyID, record.Attempt, digest[:], earliest)) {
+		!bytes.Equal(changeRecordHash, evmroot.D4CandidateContextHash(record.Network, record.PredecessorBodyID, record.Attempt, cc.digest[:], earliest)) {
 		return nil, nil, ErrAssignmentHistory
 	}
-	c, pdr, err := candidateActivatedPDR(preimage, record.ActivationRound)
+	c, pdr, err := candidateActivatedPDR(cc.view, record.ActivationRound)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -169,8 +177,9 @@ func deriveActivatedPDR(record evmroot.OrderedHandoffRecord, bodyID []byte, body
 	if err := evmassign.VerifyKind(c, succ); err != nil {
 		return nil, nil, errors.Join(ErrAssignmentHistory, err)
 	}
+	digest := sha256.Sum256(cc.view)
 	provenance, err := evmassign.Provenance{RecordID: record.ID(), CandidateDigest: digest[:], RootEpoch: record.Epoch + 1,
-		Kind: c.Kind, Preimage: preimage}.Bytes()
+		Kind: c.Kind, Preimage: cc.view}.Bytes()
 	if err != nil {
 		return nil, nil, errors.Join(ErrAssignmentHistory, err)
 	}
@@ -221,7 +230,7 @@ func ActivationFromHandoff(committed CommittedHandoffs, record evmroot.OrderedHa
 	if err != nil {
 		return nil, err
 	}
-	c, err := evmassign.DecodeCandidate(preimage)
+	c, err := decodeCommittedCandidate(preimage)
 	if err != nil {
 		return nil, errors.Join(ErrAssignmentHistory, err)
 	}
@@ -262,7 +271,7 @@ func ActivationFromVerifiedV3(entry VerifiedActivation, record evmroot.OrderedHa
 	if err != nil {
 		return nil, err
 	}
-	c, err := evmassign.DecodeCandidate(preimage)
+	c, err := decodeCommittedCandidate(preimage)
 	if err != nil {
 		return nil, errors.Join(ErrAssignmentHistory, err)
 	}
@@ -328,7 +337,7 @@ func RequestContinuationFromVerifiedV3(previous *RequestActivation, entry Verifi
 		if _, err := ActivationFromVerifiedV3(entry, record, preimage, hashAlg, version); err != nil {
 			return nil, err
 		}
-		c, err := evmassign.DecodeCandidate(preimage)
+		c, err := decodeCommittedCandidate(preimage)
 		if err != nil {
 			return nil, errors.Join(ErrAssignmentHistory, err)
 		}
@@ -351,6 +360,12 @@ func RequestContinuationFromVerifiedV3(previous *RequestActivation, entry Verifi
 				return nil, fmt.Errorf("%w: epoch %d replaces the validators of this shard", ErrAssignmentHistory, entry.Epoch())
 			}
 		}
+		// a VR handoff's Accepted root-side changes are the other half of the candidate: none may touch this shard or its partition
+		if ch, ok, err := registryChangeOf(preimage, previous.pdr.PartitionID, previous.pdr.ShardID); err != nil {
+			return nil, err
+		} else if ok {
+			return nil, fmt.Errorf("%w: epoch %d changes the configuration of this shard (VR change %d of kind %d)", ErrAssignmentHistory, entry.Epoch(), ch.ID, ch.Kind)
+		}
 	}
 	own, err := clonePDR(previous.pdr)
 	if err != nil {
@@ -365,13 +380,21 @@ func RequestContinuationFromVerifiedV3(previous *RequestActivation, entry Verifi
 		trHash: bytes.Clone(previous.trHash), version: previous.version, continuation: true, predecessorRootBody: bytes.Clone(previous.rootBody)}, nil
 }
 
-// DeriveActivatedConfigs is DeriveActivatedPDR plus the aggregator validator replacements the same candidate commits: it
-// returns the EVM configuration first, then one activated configuration per change (sorted as committed), all verified
-// against the record, body and preimage, with the shared provenance. The state-dependent half (each change replaces exactly the
-// installed configuration of an existing non-EVM shard) is checked by the callers that hold the installed configurations.
-func DeriveActivatedConfigs(record evmroot.OrderedHandoffRecord, body evmroot.TrustBaseBodyV2, preimage, frozenParent []byte) ([]*types.PartitionDescriptionRecord, []byte, []evmassign.DecodedChange, error) {
-	id := body.Identity()
-	return deriveActivatedConfigs(record, retainedBody{id: id[:], epoch: body.Epoch, earliest: body.EarliestActivation, changeRecordHash: body.ChangeRecordHash, mode: weightvalidation.ModeUnit}, preimage)
+// DeriveActivatedConfigsAt is DeriveActivatedPDR, over a retained successor body of either version (rawBody), plus the configurations the same candidate installs with it: one per P85 aggregator
+// validator replacement (sorted as committed) and, for a VR handoff, one per shard its Accepted root-side changes touch, installed against
+// installed, the configurations in effect at the record's ordering round (the startup reconciliation of archived handoffs derives every
+// committed epoch again, so it passes the orchestration's configurations of each epoch's ordering round). The EVM configuration is first;
+// all are verified against the record, body and preimage, with the shared provenance. The state-dependent half of a P85 replacement (it
+// replaces exactly the installed configuration of an existing non-EVM shard) is checked by the callers that hold the shard states.
+func DeriveActivatedConfigsAt(record evmroot.OrderedHandoffRecord, rawBody, preimage []byte,
+	installed map[types.PartitionShardID]*types.PartitionDescriptionRecord) ([]*types.PartitionDescriptionRecord, []byte, error) {
+	body, err := decodeRetainedBody(rawBody)
+	if err != nil {
+		return nil, nil, err
+	}
+	// nil is "no configurations known", refused for a VR handoff's root-side changes; an empty map is a known empty set
+	confs, provenance, _, err := deriveActivatedConfigs(record, body, preimage, nil, installed)
+	return confs, provenance, err
 }
 
 // retainedBody is what the derivation needs of a retained successor body of either version: its identity, epoch, earliest activation and
@@ -415,12 +438,22 @@ func decodeRetainedBody(raw []byte) (retainedBody, error) {
 	return retainedBody{id: id[:], epoch: body.Epoch, earliest: body.EarliestActivation, changeRecordHash: body.ChangeRecordHash, mode: weightvalidation.ModeUnit}, nil
 }
 
-func deriveActivatedConfigs(record evmroot.OrderedHandoffRecord, body retainedBody, preimage []byte) ([]*types.PartitionDescriptionRecord, []byte, []evmassign.DecodedChange, error) {
+// deriveActivatedConfigs derives everything one committed handoff installs at its activation round: the EVM configuration first, then
+// one configuration per P85 aggregator replacement (sorted as committed), then, for a VR handoff, the configurations of its Accepted
+// root-side changes. The latter are state-dependent (vradmit.Install over installed, the configurations of the ordering round, and the
+// old checkpoint's shard states): a caller without them (nil installed) is refused a VR handoff that carries any, never given a partial
+// install.
+func deriveActivatedConfigs(record evmroot.OrderedHandoffRecord, body retainedBody, preimage []byte, states map[types.PartitionShardID]*ShardInfo,
+	installed map[types.PartitionShardID]*types.PartitionDescriptionRecord) ([]*types.PartitionDescriptionRecord, []byte, []evmassign.DecodedChange, error) {
 	evm, provenance, err := deriveActivatedPDR(record, body.id, body.epoch, body.earliest, body.changeRecordHash, preimage, body.mode)
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	c, err := evmassign.DecodeCandidate(preimage)
+	cc, err := resolveCommittedCandidate(preimage)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	c, err := evmassign.DecodeCandidate(cc.view)
 	if err != nil {
 		return nil, nil, nil, errors.Join(ErrAssignmentHistory, err)
 	}
@@ -438,6 +471,16 @@ func deriveActivatedConfigs(record evmroot.OrderedHandoffRecord, body retainedBo
 			return nil, nil, nil, errors.Join(ErrAssignmentHistory, err)
 		}
 		confs = append(confs, activated)
+	}
+	if len(cc.registry) != 0 {
+		if installed == nil {
+			return nil, nil, nil, fmt.Errorf("%w: a VR handoff's root-side changes need the installed configurations", ErrAssignmentHistory)
+		}
+		registry, err := installRegistryChanges(cc, c, record, evm.PartitionID, states, installed)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		confs = append(confs, registry...)
 	}
 	return confs, provenance, changes, nil
 }
@@ -549,23 +592,28 @@ func AssignmentSuccessorTRHash(si *ShardInfo, preimage []byte, activation uint64
 	return tr.Hash()
 }
 
-// derivedChangeShards names the aggregator shards the committed candidate of H replaces validators of.
+// derivedChangeShards names the existing shards the committed candidate of H replaces the configuration of: the aggregator shards of
+// its P85 validator replacements, or the shards of a VR handoff's Accepted kind 6 and 8 changes.
 func derivedChangeShards(candidates candidateSource, record evmroot.OrderedHandoffRecord) (map[types.PartitionShardID]struct{}, error) {
 	if candidates == nil {
 		return nil, nil
 	}
-	preimage, err := candidates.HandoffCandidate(record.NextBodyID)
+	preimage, err := retainedCommittedPreimage(candidates, record.NextBodyID)
 	if err != nil {
 		return nil, errors.Join(ErrAssignmentHistory, err)
 	}
 	if len(preimage) == 0 {
 		return nil, nil
 	}
-	c, err := evmassign.DecodeCandidate(preimage)
+	cc, err := resolveCommittedCandidate(preimage)
+	if err != nil {
+		return nil, err
+	}
+	c, err := evmassign.DecodeCandidate(cc.view)
 	if err != nil {
 		return nil, errors.Join(ErrAssignmentHistory, err)
 	}
-	out := make(map[types.PartitionShardID]struct{}, len(c.Changes))
+	out := make(map[types.PartitionShardID]struct{}, len(c.Changes)+len(cc.registry))
 	for _, ch := range c.Changes {
 		if ch.Kind != evmassign.ChangeReplaceShardValidators {
 			return nil, errors.Join(ErrAssignmentHistory, evmassign.ErrUnsupportedChange)
@@ -576,5 +624,6 @@ func derivedChangeShards(candidates candidateSource, record evmroot.OrderedHando
 		}
 		out[types.PartitionShardID{PartitionID: succ.PartitionID, ShardID: succ.ShardID.Key()}] = struct{}{}
 	}
+	vrDerivedShards(cc, out)
 	return out, nil
 }
