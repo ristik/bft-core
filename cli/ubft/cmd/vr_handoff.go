@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/rpc"
@@ -46,7 +48,7 @@ const vrSourcesFileName = "vr-sources.json"
 // enableVRHandoff wires the VR handoff root side of a VR-mode manager: the observer over the execution client at rpcURL (eth_getProof
 // and eth_call at the certified block hashes), the persisted sources, the intent provider and the Freeze witness builder.
 func enableVRHandoff(ctx context.Context, cm *consensus.ConsensusManager, dep vradmit.Deployment, pins vrstate.Pins, shardConfs []*types.PartitionDescriptionRecord,
-	rpcURL, home, evmKeys string, signer abcrypto.Signer, host *network.Peer) error {
+	rpcURL, home, evmKeys, shardRPC string, signer abcrypto.Signer, host *network.Peer) error {
 	if rpcURL == "" {
 		return fmt.Errorf("%w: a VR generation's roots read VR through --pos-evm-rpc", ErrVRHandoffCmd)
 	}
@@ -71,6 +73,10 @@ func enableVRHandoff(ctx context.Context, cm *consensus.ConsensusManager, dep vr
 	if err != nil {
 		return err
 	}
+	shard, err := vrShardSink(shardRPC)
+	if err != nil {
+		return err
+	}
 	reader := vrschedule.RPC{Client: client, Pins: pins}
 	var opener vrschedule.Opener
 	if host != nil {
@@ -83,9 +89,10 @@ func enableVRHandoff(ctx context.Context, cm *consensus.ConsensusManager, dep vr
 		Witness: func(ctx context.Context, blockHash, stateRoot [32]byte, result vrschema.Word) ([]byte, error) {
 			return reader.OutputState(ctx, blockHash, stateRoot, result)
 		},
-		Signer: signer,
-		Opener: opener,
-		Member: member,
+		Signer:      signer,
+		Opener:      opener,
+		Member:      member,
+		ShardStaged: shard,
 	}); err != nil {
 		return err
 	}
@@ -103,13 +110,13 @@ func enableVRHandoff(ctx context.Context, cm *consensus.ConsensusManager, dep vr
 // state authority over the pinned VR) are installed: it is the root side of every VR generation's handoff, replacing the P85 operator
 // script (handoff_drive.py) there. A root outside VR mode is unchanged. It must run after the VR services are installed (enableVRServices);
 // checkVRHandoffWired, before the root starts, refuses a VR-mode root whose root side is off. It reports whether the root side is on.
-func enableVRHandoffInVRMode(ctx context.Context, cm *consensus.ConsensusManager, shardConfs []*types.PartitionDescriptionRecord, rpcURL, home, evmKeys string,
+func enableVRHandoffInVRMode(ctx context.Context, cm *consensus.ConsensusManager, shardConfs []*types.PartitionDescriptionRecord, rpcURL, home, evmKeys, shardRPC string,
 	signer abcrypto.Signer, host *network.Peer) (bool, error) {
 	dep, pins, on, err := vrHandoffWiring(cm.VRServices(), rpcURL)
 	if err != nil || !on {
 		return false, err
 	}
-	if err := enableVRHandoff(ctx, cm, dep, pins, shardConfs, rpcURL, home, evmKeys, signer, host); err != nil {
+	if err := enableVRHandoff(ctx, cm, dep, pins, shardConfs, rpcURL, home, evmKeys, shardRPC, signer, host); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -666,4 +673,42 @@ func newVRHandoffDriveCmd() *cobra.Command {
 	cmd.Flags().DurationVar(&wait, "assembly-wait", 2*time.Minute, "how long to wait for the committed view's assembler root to assemble")
 	_ = cmd.MarkFlagRequired("root-rpc")
 	return cmd
+}
+
+// vrShardSink is the paired shard node's staged-successor endpoint (--vr-shard-rpc): the root posts the EVM node ids of the derived intent's
+// successor to it. The endpoint is the shard node's local operator RPC, so only a loopback address is accepted; an empty URL gives none.
+func vrShardSink(rawURL string) (func(ctx context.Context, ids []string) error, error) {
+	if rawURL == "" {
+		return nil, nil
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Scheme != "http" || u.Host == "" {
+		return nil, fmt.Errorf("%w: --vr-shard-rpc must be an http URL of the paired shard node's local RPC", ErrVRHandoffCmd)
+	}
+	if h := u.Hostname(); h != "127.0.0.1" && h != "localhost" && h != "::1" {
+		return nil, fmt.Errorf("%w: --vr-shard-rpc must be a loopback address (the shard node's operator RPC is local-only), got %s", ErrVRHandoffCmd, h)
+	}
+	target := strings.TrimRight(rawURL, "/") + "/api/v1/vr/staged"
+	client := &http.Client{Timeout: 3 * time.Second}
+	return func(ctx context.Context, ids []string) error {
+		body, err := json.Marshal(vrStagedRequest{IDs: ids})
+		if err != nil {
+			return err
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(body))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := client.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode/100 != 2 {
+			raw, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+			return fmt.Errorf("%w: the shard node refused the staged successor: %s: %s", ErrVRHandoffCmd, resp.Status, bytes.TrimSpace(raw))
+		}
+		return nil
+	}, nil
 }

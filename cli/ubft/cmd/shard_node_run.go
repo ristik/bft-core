@@ -1740,6 +1740,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error { return node.Run(gctx) })
 	var laneEndpoints []func(*http.ServeMux)
+	laneEndpoints = append(laneEndpoints, vrStagedEndpoint{stage: activePeers.Stage}.register) // the paired root's staged VR successor (VT-09b)
 	if q3rt != nil {
 		laneEndpoints = append(laneEndpoints, (&shardQ3Staging{cfg: q3rt.ProtocolConfig, self: peer.ID().String(), onStaged: activePeers.Stage, tip: func() (uint64, uint64, [32]byte, error) {
 			h := q3rt.History()

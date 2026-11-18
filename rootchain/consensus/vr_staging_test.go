@@ -1,8 +1,13 @@
 package consensus
 
 import (
+	"context"
 	"errors"
+	"log/slog"
+	"slices"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/evmassign"
@@ -101,4 +106,52 @@ func TestTheMemberReportsCatchingUpUntilItDerivesTheIntent(t *testing.T) {
 	require.Equal(t, "ready", st.State)
 	require.True(t, st.Successor)
 	require.False(t, v.memberStatus(false, "someone-else").Successor)
+}
+
+// The paired shard node is told the successor's EVM validators from the intent's derivation on, the latest set wins, a refused delivery is
+// retried, and an intent that dies clears it: the shard node never keeps a staged peer an intent no longer names.
+func TestThePairedShardNodeHoldsTheActiveIntentsSuccessor(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var mu sync.Mutex
+	var delivered [][]string
+	fail := true
+	v := &vrHandoff{cfg: VRHandoffConfig{Log: slog.New(slog.DiscardHandler)}, shardKick: make(chan struct{}, 1)}
+	v.cfg.ShardStaged = func(_ context.Context, ids []string) error {
+		mu.Lock()
+		defer mu.Unlock()
+		if fail {
+			return errors.New("not yet")
+		}
+		delivered = append(delivered, ids)
+		return nil
+	}
+	v.stageIntent = func(uint64, []evmassign.Identity, []evmroot.Member) error { return nil }
+	go v.shardStagedRun(ctx)
+	last := func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		if len(delivered) == 0 {
+			return []string{"none"}
+		}
+		return delivered[len(delivered)-1]
+	}
+
+	f := vrhandofffix.New(t)
+	in, _ := f.Intent()
+	c := vrschedule.Committed{Derived: vrschedule.Derived{VRIntent: storage.VRIntent{Digest: [32]byte{1}}, Intent: in, RootEpoch: 1}, Derivable: true}
+	v.stagedMembers(c)
+	var want []string
+	for _, m := range f.J {
+		want = append(want, m.EVMNodeID)
+	}
+	time.Sleep(200 * time.Millisecond)
+	require.Equal(t, []string{"none"}, last(), "a refused delivery is not recorded")
+	mu.Lock()
+	fail = false
+	mu.Unlock()
+	require.Eventually(t, func() bool { return slices.Equal(last(), want) }, 12*time.Second, 50*time.Millisecond, "retried until the shard node takes it")
+
+	v.stagedMembers(vrschedule.Committed{}) // the intent dies
+	require.Eventually(t, func() bool { return len(last()) == 0 }, 12*time.Second, 50*time.Millisecond, "an intent that died clears the shard node's staged set")
 }

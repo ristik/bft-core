@@ -125,7 +125,7 @@ export VR_ROOT_FLAGS_FN=vr_root_flags
 
 vr_root_flags() { # <i> <ureth rpc>: the VR-mode roots: the genesis committee, the VR deployment, and the execution client VT-05b's root side reads
   # VT-09: the node does its member steps itself; its EVM key (the possession proof) is its paired EVM shard node's, as the validator configuration names it
-  echo --genesis-identities "$VR_DIR/genesis-identities.json" --vr-deployment "$VR_DIR/vr-deployment.json" --pos-evm-rpc "$2" --vr-evm-keys "test-nodes/evm$1/keys.json"
+  echo --genesis-identities "$VR_DIR/genesis-identities.json" --vr-deployment "$VR_DIR/vr-deployment.json" --pos-evm-rpc "$2" --vr-evm-keys "test-nodes/evm$1/keys.json" --vr-shard-rpc "http://$(evm_validator_rpc_addr "$1")"
 }
 
 vr_readback() { # <ureth rpc>: VR's views at the latest block read back what the plan put there
