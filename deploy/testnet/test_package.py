@@ -155,9 +155,9 @@ class B1Layout(unittest.TestCase):
         source=(Path(__file__).parent/'bridge/build-bridge-image.py').read_text()
         self.assertIn("NODE_PINS['bft'] if name == 'bft'",source)
         self.assertNotIn("rev-parse', '--show-toplevel'",source)   # not the package's own checkout any more
-    def test_the_overlay_refuses_a_bridge_image_built_for_another_bft(self):
+    def test_the_tools_refuse_a_bridge_image_built_for_another_bft(self):
         import importlib.util
-        spec=importlib.util.spec_from_file_location('overlay',Path(__file__).parent/'bridge/overlay.py'); ov=importlib.util.module_from_spec(spec); spec.loader.exec_module(ov)
+        spec=importlib.util.spec_from_file_location('deploy_bridge',Path(__file__).parent/'bridge/deploy_bridge.py'); ov=importlib.util.module_from_spec(spec); spec.loader.exec_module(ov)
         image='sha256:'+'a'*64
         self.assertEqual(ov.bridge_image({'sources':{'bft':'f'*40},'images':{'bridge':image}},{'bft':'f'*40}),image)
         for record in ({'sources':{'bft':'e'*40},'images':{'bridge':image}},{'images':{'bridge':image}},{'sources':{'bft':'f'*40},'images':{'bridge':'tnops-bridge:verified'}}):
@@ -243,7 +243,7 @@ class ImageTags(unittest.TestCase):
             with self.assertRaises(SystemExit): imagetag.immutable_tag('node','92ed0ce8c1ab',bad)
     def test_nothing_runs_an_image_through_a_tag(self):
         here=Path(__file__).parent
-        for name in ('build-images.py','bridge/build-bridge-image.py','bridge/deploy_bridge.py','bridge/rehearse_bridge.py','bridge/bridge_pos.py','generate.py'):
+        for name in ('build-images.py','bridge/build-bridge-image.py','bridge/deploy_bridge.py','bridge/nb2/deploy_nb2.py','bridge/nb2/rehearse_nb2.py','bridge/sdk_clients.py','generate.py'):
             source=(here/name).read_text()
             self.assertNotIn(':verified',source,name)
             self.assertNotRegex(source,r"\bTAG\b",name)
@@ -265,12 +265,9 @@ class ImageTags(unittest.TestCase):
             new=Path(tmp)/'tn-new'; (new/'bridge').mkdir(parents=True)
             old=Path(tmp)/'tn-old'; (old/'bridge').mkdir(parents=True)
             (old/'bridge/bridge-image.json').write_text(json.dumps({'image':self.ID}))
-            legacy=Path(tmp)/'tn-legacy'; (legacy/'bridge').mkdir(parents=True)
-            (legacy/'compose.bridge.yaml').write_text(json.dumps({'services':{'lockproof':{'image':'sha256:'+'ef'*32}}}))
             with patch.object(db,'ARTIFACTS',art), patch.object(db.subprocess,'run',inspect(0)):
                 self.assertEqual(db.image(new),self.OTHER,'a generation being deployed takes the current record')
                 self.assertEqual(db.image(old),self.ID,'an older generation keeps its own image although a newer one is current')
-                self.assertEqual(db.image(legacy),'sha256:'+'ef'*32,'deployed before the record existed: its lock-proof image')
                 db.record_image(new,self.OTHER); db.record_image(new,self.ID)   # written once, at the deploy
                 self.assertEqual(json.loads((new/'bridge/bridge-image.json').read_text()),{'image':self.OTHER})
                 (old/'bridge/bridge-image.json').write_text(json.dumps({'image':'tnops-bridge:verified'}))
@@ -278,23 +275,8 @@ class ImageTags(unittest.TestCase):
             with patch.object(db,'ARTIFACTS',art), patch.object(db.subprocess,'run',inspect(1)):
                 with self.assertRaises(SystemExit) as e: db.image(new)
                 self.assertIn('not in the local image store',str(e.exception))
-        source=(Path(__file__).parent/'bridge/deploy_bridge.py').read_text()
-        self.assertIn('image(gen), *args]',source); self.assertIn('record_image(gen, bridge)',source)
-        for name in ('bridge/rehearse_bridge.py','bridge/bridge_pos.py'):
-            self.assertNotIn('bridge_image()',(Path(__file__).parent/name).read_text(),name)
-    def test_the_overlay_keeps_a_deployed_generations_image(self):
-        import importlib.util
-        spec=importlib.util.spec_from_file_location('overlay',Path(__file__).parent/'bridge/overlay.py'); ov=importlib.util.module_from_spec(spec); spec.loader.exec_module(ov)
-        with tempfile.TemporaryDirectory() as tmp:
-            gen=Path(tmp)/'tn-x'; (gen/'bridge').mkdir(parents=True); (gen/'network/handoff').mkdir(parents=True)
-            (gen/'manifest.json').write_text(json.dumps({'validators':4}))
-            (gen/'bridge/bridge-addresses.json').write_text(json.dumps({'BridgeVault':'0x'+'11'*20,'CFG':'0x'+'22'*32}))
-            (gen/'bridge/bridge-image.json').write_text(json.dumps({'image':self.ID}))
-            art=Path(tmp)/'artifacts'; art.mkdir(); (art/'bridge-images.json').write_text(json.dumps({'sources':{'bft':generate.PINS['bft']},'images':{'bridge':self.OTHER}}))
-            (Path(tmp)/'pins.json').write_text(json.dumps(generate.PINS))
-            with patch.object(ov,'HERE',Path(tmp)/'bridge'), patch.object(sys,'argv',['overlay.py',str(gen)]), patch('builtins.print'):
-                ov.main()
-            self.assertEqual(json.loads((gen/'compose.bridge.yaml').read_text())['services']['lockproof']['image'],self.ID)
+        self.assertIn('image(gen), *args]',(Path(__file__).parent/'bridge/deploy_bridge.py').read_text())
+        self.assertIn('record_image(gen, ',(Path(__file__).parent/'bridge/nb2/deploy_nb2.py').read_text())
 
 
 class UtbProfile(unittest.TestCase):
@@ -1941,63 +1923,6 @@ class TesterCheck(unittest.TestCase):
         self.assertEqual(self.run_check(self.serve(),'--chain-id','31337','--genesis-hash','0x12')[0],2)
         self.assertEqual(self.run_check('http://127.0.0.1:1/','--chain-id','31337','--genesis-hash',self.GEN)[0],2)
 
-class BridgeRelease(unittest.TestCase):
-    """bridge/release.py on a fake generation, with the image's files and the chain served by a stub of the tools image."""
-    CORPUS='9c'*32;VAULT='0x'+'aa'*20;VERIFIER='0x'+'bb'*20;IMAGE='sha256:'+'11'*32
-    def module(self):
-        import importlib.util
-        spec=importlib.util.spec_from_file_location('release',Path(__file__).parent/'bridge/release.py')
-        m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m);return m
-    def generation(self,tmp,image=None,vault=None):
-        gen=Path(tmp)/'gen';(gen/'bridge').mkdir(parents=True);(gen/'network').mkdir();art=Path(tmp)/'artifacts';art.mkdir()
-        (gen/'manifest.json').write_text(json.dumps({'generation':'tn-x','chain_id':31337,'genesis_hash':'0x'+'ab'*32,'validators':4,'artifacts':{'sources':{'ureth':'u'},'images':{'node':'n'}}}))
-        (art/'bridge-images.json').write_text(json.dumps({'sources':{'contracts':'c'*40,'native-bridge-plugins':'p'*40},'dnb_tool_sha256':'d'*64,'images':{'bridge':image or self.IMAGE}}))
-        (gen/'bridge/bridge-addresses.json').write_text(json.dumps({'BridgeVault':vault or self.VAULT,'TokenVerifier':self.VERIFIER,'CFG':'0x'+'cf'*32}))
-        txs=[{'contractName':'TokenVerifier','transactionType':'CREATE','contractAddress':self.VERIFIER,'hash':'0x01'},
-             {'contractName':'BridgeVault','transactionType':'CREATE','contractAddress':self.VAULT,'hash':'0x02'},
-             {'contractName':'BridgeVault','transactionType':'CALL','contractAddress':self.VAULT,'hash':'0x03'}]   # a later call to the vault is not its deployment
-        (gen/'bridge/bridge-broadcast.json').write_text(json.dumps({'transactions':txs,'receipts':[{'transactionHash':h,'blockNumber':hex(b)} for h,b in (('0x01',7),('0x02',8),('0x03',9))]}))
-        (gen/'network/b1-profile.json').write_text(json.dumps({'maxGas':269547540+60000000,'ordinaryCapacity':60000000}))
-        return gen,art
-    def tools(self,pinned=None):
-        files={'/opt/bridge/native-bridge-plugins/protocol/vectors/MANIFEST.sha256':self.CORPUS+'\n',
-               '/opt/bridge/contracts/script/bridge-golden/corpus-pin.json':json.dumps({'corpus':{'manifestSha256':pinned or self.CORPUS}}),
-               '/opt/bridge/native-bridge-plugins/node_modules/@unicitylabs/state-transition-sdk/package.json':json.dumps({'version':'4.0.0-utb.x'}),
-               '/opt/bridge/native-bridge-plugins/package-lock.json':json.dumps({'packages':{'node_modules/@unicitylabs/state-transition-sdk':{'resolved':'file:sdk.tgz','integrity':'sha512-x'}}}),
-               '/opt/bridge/native-bridge-plugins/node_modules/@unicitylabs/state-transition-sdk/lib/api/IBatchAggregatorClient.js':'export const BATCH_MAX_STATE_IDS = 256;\n'}
-        def run(*args):
-            if args[0]=='cat': return files[args[1]]
-            if args[:2]==('cast','codehash'): return '0x'+args[-1][2:4]*32+'\n'
-            raise AssertionError(args)
-        return run
-    def build(self,gen,art,tools=None,image=None):
-        m=self.module()
-        with patch.object(m,'ARTIFACTS',art):
-            return m.build(gen,tools or self.tools(),image or self.IMAGE,['unicity-reth','node','--rpc.eth-proof-window','64'],m.gateway_limits())
-    def test_the_manifest_joins_the_pins_the_deployment_the_profile_and_the_limits(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            r=self.build(*self.generation(tmp))
-        self.assertEqual(r['contracts']['BridgeVault'],{'address':self.VAULT,'transaction':'0x02','block':8,'codeHash':'0x'+'aa'*32})
-        self.assertEqual(r['contracts']['TokenVerifier']['block'],7);self.assertEqual(r['contracts']['commit'],'c'*40);self.assertEqual(r['contracts']['cfg'],'0x'+'cf'*32)
-        self.assertEqual((r['profile']['corpusDigest'],r['profile']['nativeBridgePlugins'],r['profile']['sdk']['version']),(self.CORPUS,'p'*40,'4.0.0-utb.x'))
-        limits={k:v['value'] for k,v in r['limits'].items()}
-        self.assertEqual((limits['D1envelopeBytes'],limits['D3ordinaryCapacity'],limits['blockGasLimit'],limits['proofWindowBlocks'],limits['gatewayMaxBodyBytes'],limits['aggregatorBatchStateIds']),
-                         (2097152,60000000,329547540,64,16384,256))
-        # the gateway's bounds are read from gateway.py, and a redemption up to D1 fits the raw-transaction one as hex with its framing
-        self.assertEqual((limits['gatewayMaxRawTxBodyBytes'],limits['gatewayAggregatorMaxBodyBytes']),(gateway.MAX_RAW_TX_BODY,gateway.AGG_MAX_BODY))
-        self.assertGreater(limits['gatewayMaxRawTxBodyBytes'],2*limits['D1envelopeBytes']+4096)
-        self.assertIn('at most 254 transfers',r['limits']['aggregatorBatchStateIds']['source'])
-        self.assertEqual((r['package']['generation'],r['bridge']['image']),('tn-x',self.IMAGE))
-    def test_another_image_than_the_recorded_one_is_refused(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            with self.assertRaisesRegex(SystemExit,'records'): self.build(*self.generation(tmp,image='sha256:'+'22'*32))
-    def test_plugins_whose_corpus_is_not_the_contracts_pin_are_refused(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            with self.assertRaisesRegex(SystemExit,'corpus'): self.build(*self.generation(tmp),tools=self.tools(pinned='00'*32))
-    def test_addresses_that_are_not_the_broadcast_deployments_are_refused(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            with self.assertRaisesRegex(SystemExit,'not bridge-addresses'): self.build(*self.generation(tmp,vault='0x'+'cc'*20))
-
 class NB2Release(unittest.TestCase):
     """bridge/nb2/release_nb2.py on a fake generation: the wallets' pins, the limits read where they are in force, and the refusals."""
     IMAGE='sha256:'+'11'*32
@@ -3040,285 +2965,9 @@ class PosSample(unittest.TestCase):
         for name,selector in pos_sample.SELECTORS.items():
             self.assertEqual(subprocess.run([cast,'sig',name+'()'],text=True,capture_output=True,check=True).stdout.strip(),selector,name)
 
-class BridgeLoad(unittest.TestCase):
-    """bridge/bridge_load.py without a network: docker stats' text, the summary, and a failed cycle's accounting against a fake rehearsal."""
-    def module(self):
-        sys.path.insert(0,str(Path(__file__).parent/'bridge'))
-        self.addCleanup(sys.path.pop,0)
-        import bridge_load
-        return bridge_load
-    def fake(self,tmp,fail=None,held=None):
-        class Fake:
-            gen=Path(tmp)
-            calls=[]
-            fail=None
-            def say(self,text): pass
-            def bridge_compose(self,*a): return ''
-            def cast_run(self,*a): return '0x'+'a'*40
-            def faucet_send(self,to,wei): pass
-            def call(self,method,params=()): return hex(7)
-            def vault_balance(self):
-                self.reads=getattr(self,'reads',0)+1
-                return 0 if self.reads==1 else self.held
-            def tester(self,*args,check=True,wallet=None,key=None):
-                self.calls.append(args[0])
-                (Path(tmp)/'bridge'/key).read_text()   # the worker's key exists while it runs
-                if args[0]==self.fail: return 1,'some output\nerror: 0xabc holds 5 wei, and this needs 9: get test ether from the faucet'
-                return 0,'ok'
-        (Path(tmp)/'bridge').mkdir()
-        made=Fake();made.fail,made.held,made.calls=fail,held,[]
-        return made
-    def run_load(self,bl,tmp,fake,max_failures=1):
-        out=Path(tmp)/'out';out.mkdir()
-        load=bl.Load(fake,out,duration=0.05,interval=60,max_failures=max_failures)
-        return load.run(1),json.loads((out/'summary.json').read_text()),out
-    def test_stats_line(self):
-        bl=self.module()
-        line=json.dumps({'Name':'x-ureth1-1','MemUsage':'184.5MiB / 1.5GiB','CPUPerc':'12.50%'})
-        self.assertEqual(bl.parse_stats(line),('x-ureth1-1',184.5*2**20,1.5*2**30,12.5))
-        with self.assertRaises(ValueError): bl.size_bytes('12 parsecs')
-    def test_summary(self):
-        bl=self.module()
-        step=lambda w,c,s,t,ok=True:{'worker':w,'cycle':c,'step':s,'seconds':t,'ok':ok}
-        steps=[step(1,1,'lock',1.0),step(1,1,'claim',2.0),step(1,2,'lock',3.0),step(1,2,'mint',9.0,False)]
-        c=lambda m,cpu:{'c':{'mem':m,'memLimit':2**30,'cpuPct':cpu}}
-        samples=[{'containers':c(2**20,50.0),'diskUsed':1000},{'containers':c(2**21,10.0),'diskUsed':4000}]
-        s=bl.summarize(steps,samples,60)
-        self.assertEqual((s['roundTrips'],s['failedCycles'],s['roundTripsPerMinute']),(1,1,1.0))
-        self.assertEqual(s['stepSeconds']['lock'],{'n':2,'p50':2.0,'p95':3.0,'max':3.0})
-        self.assertNotIn('mint',s['stepSeconds'],'a failed step is not a latency')
-        self.assertEqual(s['services']['c'],{'memPeakMiB':2.0,'memLimitMiB':1024,'cpuPeakPct':50.0})
-        self.assertEqual((s['diskGrowthBytes'],s['diskGrowthPerRoundTripBytes']),(3000,3000))
-    def test_clean_run_passes_and_leaves_no_key_or_wallet(self):
-        bl=self.module()
-        with tempfile.TemporaryDirectory() as tmp:
-            ok,s,out=self.run_load(bl,tmp,self.fake(tmp,held=0))
-            self.assertTrue(ok)
-            self.assertGreater(s['roundTrips'],0)
-            self.assertEqual(list((Path(tmp)/'bridge').iterdir()),[],'keys and finished wallets are removed')
-            self.assertNotIn('0x',(out/'cycles.jsonl').read_text().replace('"ok"',''),'no key in the evidence')
-    def test_failed_cycle_after_the_lock_keeps_its_wallet_and_counts_its_lock(self):
-        bl=self.module()
-        with tempfile.TemporaryDirectory() as tmp:
-            ok,s,_=self.run_load(bl,tmp,self.fake(tmp,fail='redeem',held=bl.TESTER_LOCK_WEI))
-            self.assertFalse(ok,'a failed cycle fails the run')
-            self.assertEqual(s['vault'],{'heldAfterRun':bl.TESTER_LOCK_WEI,'lockedByFailedCycles':bl.TESTER_LOCK_WEI})
-            self.assertEqual(len(list((Path(tmp)/'bridge').glob('load-*-w1-c1'))),1,'the failed wallet is kept')
-    def test_vault_mismatch_fails_a_clean_run(self):
-        bl=self.module()
-        with tempfile.TemporaryDirectory() as tmp:
-            ok,s,_=self.run_load(bl,tmp,self.fake(tmp,held=1))
-            self.assertEqual(s['failedCycles'],0)
-            self.assertFalse(ok,'the vault must hold exactly the locks of the failed cycles')
-    def test_no_round_trip_fails_the_run(self):
-        bl=self.module()
-        with tempfile.TemporaryDirectory() as tmp:
-            out=Path(tmp)/'out';out.mkdir()
-            load=bl.Load(self.fake(tmp,held=0),out,duration=0,interval=60,max_failures=1)
-            self.assertFalse(load.run(1))
-            self.assertEqual(json.loads((out/'summary.json').read_text())['roundTrips'],0)
-    def test_a_crashed_worker_fails_the_run_and_is_counted(self):
-        bl=self.module()
-        with tempfile.TemporaryDirectory() as tmp:
-            out=Path(tmp)/'out';out.mkdir()
-            load=bl.Load(self.fake(tmp,held=0),out,duration=60,interval=60,max_failures=1)
-            with patch.object(bl.shutil,'rmtree',side_effect=OSError('busy')):
-                self.assertFalse(load.run(2),'each worker completed a claim, then crashed: its round trip does not hide the crash')
-            self.assertEqual(json.loads((out/'summary.json').read_text())['workerCrashes'],2)
-    def test_a_kept_wallet_does_not_collide_with_a_later_run(self):
-        bl=self.module()
-        with tempfile.TemporaryDirectory() as tmp:
-            fake=self.fake(tmp,fail='redeem',held=bl.TESTER_LOCK_WEI)
-            out=Path(tmp)/'out';out.mkdir()
-            self.assertFalse(bl.Load(fake,out,duration=0.05,interval=60,max_failures=1).run(1))
-            fake.fail=None;fake.reads=0;fake.held=0
-            again=Path(tmp)/'again';again.mkdir()
-            self.assertTrue(bl.Load(fake,again,duration=0.05,interval=60,max_failures=1).run(1),'the second run finds the first run\'s wallet there')
-    def test_a_wallet_that_cannot_be_made_is_a_failed_cycle(self):
-        bl=self.module()
-        with tempfile.TemporaryDirectory() as tmp:
-            out=Path(tmp)/'out';out.mkdir()
-            load=bl.Load(self.fake(tmp,held=0),out,duration=60,interval=60,max_failures=1)
-            with patch.object(bl.Path,'mkdir',side_effect=OSError('no space')):
-                self.assertFalse(load.run(1))
-            summary=json.loads((out/'summary.json').read_text())
-            self.assertEqual((summary['failedCycles'],summary['workerCrashes']),(1,0))
-    def test_unparseable_stats_row_loses_only_that_row(self):
-        bl=self.module()
-        with tempfile.TemporaryDirectory() as tmp:
-            fake=self.fake(tmp,held=0)
-            fake.bridge_compose=lambda *a:'id1 id2'
-            good=json.dumps({'Name':'good','MemUsage':'1MiB / 1GiB','CPUPerc':'1.00%'})
-            bad=json.dumps({'Name':'bad','MemUsage':'-- / --','CPUPerc':'--'})
-            out=Path(tmp)/'out';out.mkdir()
-            load=bl.Load(fake,out,duration=0,interval=60,max_failures=1)
-            with patch.object(bl.subprocess,'run',return_value=subprocess.CompletedProcess([],0,stdout=good+'\n'+bad+'\n')):
-                load.sample_once()
-            load.cycles_file.close();load.samples_file.close()
-            self.assertEqual(list(load.samples[0]['containers']),['good'])
-    def test_a_failed_address_derivation_names_no_key(self):
-        bl=self.module()
-        with tempfile.TemporaryDirectory() as tmp:
-            fake=self.fake(tmp,held=0)
-            key='0x'+'c'*64
-            def boom(*a): raise subprocess.CalledProcessError(1,['cast',*a])
-            fake.cast_run=boom
-            out=Path(tmp)/'out';out.mkdir()
-            load=bl.Load(fake,out,duration=0,interval=60,max_failures=1)
-            with patch.object(bl.secrets,'token_hex',side_effect=lambda n:'c'*(2*n)):
-                with self.assertRaises(RuntimeError) as caught: load.run(1)
-            self.assertNotIn(key,str(caught.exception))
-            self.assertIsNone(caught.exception.__cause__,'a chained cause prints the command line, key included')
-            self.assertTrue(caught.exception.__suppress_context__)
-            self.assertEqual([p for p in (Path(tmp)/'bridge').iterdir()],[],'the key file is removed')
-            for f in out.iterdir(): self.assertNotIn(key,f.read_text())
-    def test_a_failed_step_records_the_testers_reason(self):
-        bl=self.module()
-        with tempfile.TemporaryDirectory() as tmp:
-            ok,s,out=self.run_load(bl,tmp,self.fake(tmp,fail='redeem',held=bl.TESTER_LOCK_WEI))
-            self.assertFalse(ok)
-            row=json.loads(next(l for l in (out/'cycles.jsonl').read_text().splitlines() if '"ok": false' in l))
-            self.assertIn('get test ether from the faucet',row['error'],'out of funds is the tool\'s budget, not the bridge: the reason must show')
-    def test_workers_are_funded_with_the_configured_amount(self):
-        bl=self.module()
-        with tempfile.TemporaryDirectory() as tmp:
-            fake=self.fake(tmp,held=0)
-            funded=[]
-            fake.faucet_send=lambda to,wei: funded.append(wei)
-            out=Path(tmp)/'out';out.mkdir()
-            bl.Load(fake,out,duration=0.05,interval=60,max_failures=1,funds=123).run(2)
-            self.assertEqual(funded,[123,123])
-            self.assertGreaterEqual(bl.WORKER_FUNDS,14*10**18,'twice the gas of a 20-minute run at M=8')
-            self.assertLessEqual(13*bl.WORKER_FUNDS,1000*10**18,'M=1, 4 and 8 fit one generation\'s faucet')
-    def test_main_passes_funds_to_the_load(self):
-        bl=self.module()
-        seen={}
-        class Spy:
-            def __init__(self,r,out,duration,interval,max_failures,funds): seen['funds']=funds
-            def run(self,workers): return True
-        with tempfile.TemporaryDirectory() as tmp,patch.object(bl,'Load',Spy),patch.object(bl,'BridgeRehearsal',lambda *a: object()),\
-             patch.object(sys,'argv',['bridge_load','--generation',tmp,'--out',tmp+'/o','--funds','123']):
-            self.assertEqual(bl.main(),0)
-        self.assertEqual(seen['funds'],123)
-    def test_the_gas_price_is_sampled_and_summarised(self):
-        bl=self.module()
-        with tempfile.TemporaryDirectory() as tmp:
-            fake=self.fake(tmp,held=0)
-            ok,s,out=self.run_load(bl,tmp,fake)
-            self.assertEqual(s['gasPriceWei']['peak'],7)
-            self.assertEqual(json.loads((out/'samples.jsonl').read_text().splitlines()[0])['gasPrice'],7)
-    def test_worker_stops_after_failures_in_a_row(self):
-        bl=self.module()
-        with tempfile.TemporaryDirectory() as tmp:
-            fake=self.fake(tmp,fail='init',held=0)
-            out=Path(tmp)/'out';out.mkdir()
-            load=bl.Load(fake,out,duration=60,interval=60,max_failures=3)
-            self.assertFalse(load.run(1))
-            self.assertEqual(fake.calls,['init']*3)
-
-
-class BridgePosGap(unittest.TestCase):
-    """bridge/bridge_pos.py pos-gap's checks without a network: the tester's update reported once (the SDK's TrustBaseUpdater follows the page cursors
-    itself), the recorded one-entry pages, and trust_recorder.mjs forwarding and recording against a stub upstream."""
-    def module(self):
-        for d in ('bridge','sdk-clients'):
-            sys.path.insert(0,str(Path(__file__).parent/d)); self.addCleanup(sys.path.remove,str(Path(__file__).parent/d))
-        import bridge_pos, utbcbor
-        return bridge_pos, utbcbor
-    def page(self,u,frm,maxe,epochs,nxt,http=200,snap=None,status=0):
-        entries=[u.encode(u.Tag(u.ENTRY_TAG,[2,3,e,e*10,[],1,b'\x11'*32,None,b'\x00'*32,None])) for e in epochs]
-        q=f'from={frm}&maxEntries={maxe}'+(f'&snapshotEnd={snap}&snapshotEntryId=0x{"ab"*32}' if snap else '')
-        return {'path':'/api/v1/trustbases?'+q,'http':http,'body':u.response(3,status,frm,3,b'\xab'*32,entries,nxt).hex() if http==200 else ''}
-    def test_one_aggregate_fetch_event(self):
-        bp,_=self.module()
-        new='  $ bridge-tester redeem\n  trust: fetched from epoch 2 (max 1): 2 appended, tip 1 -> 3\nredeemed'
-        old='  trust: fetched from epoch 2 (max 1): 1 appended, tip 1 -> 2\n  trust: fetched from epoch 3 (max 1): 1 appended, tip 2 -> 3'
-        self.assertEqual(bp.gap_fetches(new),bp.gap_fetches_want(1,3))
-        self.assertNotEqual(bp.gap_fetches(old),bp.gap_fetches_want(1,3))
-        self.assertNotEqual(bp.gap_fetches(new+'\n  trust: fetched from epoch 4 (max 1): 0 appended, tip 3 -> 3'),bp.gap_fetches_want(1,3))
-        self.assertEqual(bp.gap_fetches_want(2,4),['trust: fetched from epoch 3 (max 1): 2 appended, tip 2 -> 4'])
-    def test_one_entry_pages(self):
-        bp,u=self.module()
-        good=[self.page(u,2,1,[2],3),self.page(u,3,1,[3],None,snap=3)]
-        pages=bp.trust_pages(good)
-        self.assertEqual([(p['from'],p['maxEntries'],p['snapshotEnd'],p['epochs'],p['next']) for p in pages],[(2,1,None,[2],3),(3,1,3,[3],None)])
-        self.assertTrue(bp.one_entry_pages(pages,1,3))
-        for bad in ([self.page(u,2,2,[2,3],None)],                                   # one two-entry page: not one-entry pages
-                    [self.page(u,2,1,[2],3)],                                        # epoch 3 never requested
-                    good+[self.page(u,4,1,[],None)],                                 # an extra request
-                    [self.page(u,2,1,[2],3),self.page(u,3,2,[3],None)],              # the second page not capped at 1
-                    [self.page(u,2,1,[2],3),self.page(u,3,1,[],None)],               # answered without its entry
-                    [self.page(u,2,1,[2],3),self.page(u,3,1,[3],None,http=502)],     # not served
-                    [self.page(u,2,1,[2],3),self.page(u,3,1,[3],None,status=1)],     # served with a non-OK status
-                    [self.page(u,3,1,[3],None),self.page(u,2,1,[2],3)]):             # out of order
-            self.assertFalse(bp.one_entry_pages(bp.trust_pages(bad),1,3),json.dumps(bp.trust_pages(bad)))
-    def test_recorder_forwards_and_records(self):
-        if not shutil.which('node'): self.skipTest('node not installed')
-        body=bytes.fromhex('d99857')+b'page'
-        class Up(http.server.BaseHTTPRequestHandler):
-            def log_message(self,*a): pass
-            def do_GET(self):
-                self.send_response(200); self.send_header('Content-Type','application/cbor'); self.send_header('Content-Length',str(len(body))); self.end_headers(); self.wfile.write(body)
-            def do_POST(self):
-                n=int(self.headers['Content-Length']); d=self.rfile.read(n)
-                self.send_response(200); self.send_header('Content-Length',str(len(d))); self.end_headers(); self.wfile.write(d)
-        up=http.server.ThreadingHTTPServer(('127.0.0.1',0),Up); threading.Thread(target=up.serve_forever,daemon=True).start(); self.addCleanup(up.shutdown)
-        with tempfile.TemporaryDirectory() as tmp:
-            import socket
-            with socket.socket() as so: so.bind(('127.0.0.1',0)); port=so.getsockname()[1]
-            out=Path(tmp)/'pages.jsonl'
-            proc=subprocess.Popen(['node',str(Path(__file__).parent/'bridge/trust_recorder.mjs')],stdout=subprocess.PIPE,text=True,
-                                  env={**os.environ,'UPSTREAM':f'http://127.0.0.1:{up.server_port}','PORT':str(port),'OUT':str(out)})
-            self.addCleanup(proc.kill)
-            self.assertIn('listening',proc.stdout.readline())
-            c=http.client.HTTPConnection('127.0.0.1',port,timeout=10)
-            c.request('GET','/api/v1/trustbases?from=2&maxEntries=1'); r=c.getresponse()
-            self.assertEqual((r.status,r.read(),r.getheader('Content-Type')),(200,body,'application/cbor'))
-            c.request('POST','/aggregator',body=b'{"x":1}',headers={'Content-Type':'application/json'}); r=c.getresponse()
-            self.assertEqual(r.read(),b'{"x":1}')
-            c.request('GET','/api/v1/trustbases/other'); c.getresponse().read()
-            rec=[json.loads(l) for l in out.read_text().splitlines()]
-            self.assertEqual(rec,[{'path':'/api/v1/trustbases?from=2&maxEntries=1','http':200,'body':body.hex()}])
-
-
-class BridgePosEndpoint(unittest.TestCase):
-    """#996 without a network: the lock-proof endpoint's overlay reads the handoff directory instead of listing configurations, and pos-after-restart's
-    decoding of a lock proof's UC commitment and carried configuration (a LockProof encoded by Go: bridgeprofile.LockProof.Bytes, PDR of epoch 2)."""
-    LOCKPROOF='880158200000000000000000000000000000000000000000000000000000000000000000582000000000000000000000000000000000000000000000000000000000000000005819d998608f010308418008f60000f61a9502f900f6f60218c8f65840d998598701d9985a8a010002f6f6f600f600f6f6582043568fbecc1221e929aa3dc9e1b525d32abdd41f6ffcdafab6ff77d6c7a41761d9985b83014180f6f6f641c08080'
-    HASH='43568fbecc1221e929aa3dc9e1b525d32abdd41f6ffcdafab6ff77d6c7a41761'
-    def module(self):
-        for d in ('bridge','sdk-clients'):
-            sys.path.insert(0,str(Path(__file__).parent/d)); self.addCleanup(sys.path.remove,str(Path(__file__).parent/d))
-        import bridge_pos
-        return bridge_pos
-    def test_lockproof_conf(self):
-        bp=self.module()
-        c=bp.lockproof_conf(bytes.fromhex(self.LOCKPROOF))
-        self.assertEqual(c,{'ucShardConfHash':self.HASH,'pdrSha256':self.HASH,'pdrEpoch':2,'pdrPartition':8})
-        raw=bytearray(bytes.fromhex(self.LOCKPROOF)); i=raw.find(bytes.fromhex(self.HASH)); raw[i]^=1   # the UC's commitment altered
-        c=bp.lockproof_conf(bytes(raw))
-        self.assertNotEqual(c['ucShardConfHash'],c['pdrSha256'])
-    def test_overlay_reads_the_handoff_directory(self):
-        import importlib.util
-        spec=importlib.util.spec_from_file_location('overlay',Path(__file__).parent/'bridge/overlay.py'); ov=importlib.util.module_from_spec(spec); spec.loader.exec_module(ov)
-        with tempfile.TemporaryDirectory() as tmp:
-            gen=Path(tmp)/'tn-x'; (gen/'bridge').mkdir(parents=True); (gen/'network/handoff').mkdir(parents=True)
-            (gen/'network/handoff/shard-conf-1.json').write_text('{}')
-            (gen/'manifest.json').write_text(json.dumps({'validators':4}))
-            (gen/'bridge/bridge-addresses.json').write_text(json.dumps({'BridgeVault':'0x'+'11'*20,'CFG':'0x'+'22'*32}))
-            art=Path(tmp)/'artifacts'; art.mkdir(); (art/'bridge-images.json').write_text(json.dumps({'sources':{'bft':generate.PINS['bft']},'images':{'bridge':'sha256:'+'a'*64}}))
-            (Path(tmp)/'pins.json').write_text(json.dumps(generate.PINS))
-            with patch.object(ov,'HERE',Path(tmp)/'bridge'), patch.object(sys,'argv',['overlay.py',str(gen)]), patch('builtins.print'):
-                ov.main()
-            ep=json.loads((gen/'compose.bridge.yaml').read_text())['services']['lockproof']['entrypoint']
-        self.assertEqual(ep.count('--full-shard-conf'),1)
-        self.assertEqual(ep[ep.index('--full-shard-conf')+1],'/network/full-shard-conf.json')
-        self.assertEqual(ep[ep.index('--shard-conf-dir')+1],'/network/handoff')
-        self.assertFalse(any('shard-conf-1' in x for x in ep),'a handoff file is found by the endpoint, not listed by the overlay')
-
 class StagingKnobs(unittest.TestCase):
     """The staging generation's settings as generator options (2026-11-12 dev generation workarounds): the faucet's payout, genesis balance, daily cap and
-    per-IP limit; the faucet/edge subnets and their trusted proxies; the bridge's kept lock-proof endpoint (serve) and the public routes (public_routes.py)."""
+    per-IP limit; the faucet/edge subnets and their trusted proxies; the public routes (public_routes.py)."""
     def images(self): return {'node':'sha256:'+'1'*64,'rpc':'sha256:'+'2'*64,'guard':'sha256:'+'3'*64,'signer':'sha256:'+'4'*64}
     def topo(self,**kw):
         with tempfile.TemporaryDirectory() as d:
@@ -3370,42 +3019,12 @@ class StagingKnobs(unittest.TestCase):
         for extra,want in ((['--faucet-payout','0'],'--faucet-payout'),(['--faucet-balance','100'],'--faucet-balance'),(['--faucet-subnet','172.30.89.0/24'],'overlap'),(['--edge-subnet','8.8.8.0/24'],'--edge-subnet')):
             done=subprocess.run(base+extra,text=True,capture_output=True)
             self.assertEqual(done.returncode,2,extra); self.assertIn(want,done.stderr)
-    def overlay(self,manifest):
-        import importlib.util
-        spec=importlib.util.spec_from_file_location('overlay',Path(__file__).parent/'bridge/overlay.py'); ov=importlib.util.module_from_spec(spec); spec.loader.exec_module(ov)
-        with tempfile.TemporaryDirectory() as tmp:
-            gen=Path(tmp)/'tn-x'; (gen/'bridge').mkdir(parents=True)
-            (gen/'manifest.json').write_text(json.dumps(manifest))
-            (gen/'bridge/bridge-addresses.json').write_text(json.dumps({'BridgeVault':'0x'+'11'*20,'CFG':'0x'+'22'*32}))
-            art=Path(tmp)/'artifacts'; art.mkdir(); (art/'bridge-images.json').write_text(json.dumps({'sources':{'bft':generate.PINS['bft']},'images':{'bridge':'sha256:'+'a'*64}}))
-            (Path(tmp)/'pins.json').write_text(json.dumps(generate.PINS))
-            with patch.object(ov,'HERE',Path(tmp)/'bridge'), patch.object(sys,'argv',['overlay.py',str(gen)]), patch('builtins.print'):
-                ov.main()
-            ep=json.loads((gen/'compose.bridge.yaml').read_text())['services']['lockproof']['entrypoint']
-        return ep[ep.index('--trusted-proxy')+1]
-    def test_the_lockproof_endpoint_trusts_the_generation_edge_gateway(self):
-        self.assertEqual(self.overlay({'validators':4}),'172.30.89.1')   # a manifest from before the option
-        self.assertEqual(self.overlay({'validators':4,'networks':generate.bridged_subnets('172.30.90.0/24','172.30.91.0/24')}),'172.30.91.1')
-    def test_the_bridge_serve_stage_is_kept_and_opt_in(self):
-        sys.path.insert(0,str(Path(__file__).parent/'bridge')); self.addCleanup(sys.path.remove,str(Path(__file__).parent/'bridge'))
-        for d in ('sdk-clients',): sys.path.insert(0,str(Path(__file__).parent/d)); self.addCleanup(sys.path.remove,str(Path(__file__).parent/d))
-        import rehearse_bridge as rb
-        names=[n for n,_ in rb.STAGES]
-        self.assertEqual(names[:3],['deploy','serve','lockproof'])
-        r=rb.BridgeRehearsal.__new__(rb.BridgeRehearsal); r.gen=Path('/g'); calls=[]
-        r.bridge_compose=lambda *a,**k: calls.append(a); r.wait=lambda *a,**k: True; r.http=lambda *a: (200,''); r.say=lambda *a: None
-        r.proof=lambda *a,**k: (400,b''); r.expect=lambda ok,*a: self.assertTrue(ok)
-        with patch.object(rb.subprocess,'run') as run: r.serve()
-        self.assertEqual(calls,[('up','-d','--no-deps','lockproof')],'started without --force-recreate, nothing else touched')
-        self.assertIn('overlay.py',run.call_args.args[0][1])
-    def generation(self,tmp,bridge=True):
+    def generation(self,tmp):
         gen=Path(tmp)/'tn-pos-staging-x'; (gen/'bridge/public').mkdir(parents=True)
         (gen/'compose.yaml').write_text(json.dumps(self.topo()))
-        if bridge:
-            (gen/'compose.bridge.yaml').write_text(json.dumps({'services':{'lockproof':{'ports':['127.0.0.1:8090:8090']}}}))
-            (gen/'bridge/public/tester-config.json').write_text(json.dumps({'ethUrl':'http://rpc:8545','aggUrl':'http://rpc:8545/aggregator','lockProofUrl':'http://lockproof:8090',
-                'redeemEthUrl':'http://x','chainId':5587796,'vault':'0x'+'11'*20,'files':{'trustBundle':'trust-base.bundle.cbor'}}))
-            (gen/'bridge/public/trust-base.bundle.cbor').write_bytes(b'\xa0')
+        # a generation of the removed protocol 6/7 bridge: its overlay and tester files are not published any more (#1139)
+        (gen/'compose.bridge.yaml').write_text(json.dumps({'services':{'lockproof':{'ports':['127.0.0.1:8090:8090']}}}))
+        (gen/'bridge/public/tester-config.json').write_text(json.dumps({'ethUrl':'http://rpc:8545','lockProofUrl':'http://lockproof:8090'}))
         return gen
     def test_public_routes(self):
         import public_routes
@@ -3414,27 +3033,22 @@ class StagingKnobs(unittest.TestCase):
             with patch('builtins.print'): public_routes.main([str(gen),'--hostname','pos.staging.unicity.network'])
             routes=(gen/'public/nginx/routes.conf').read_text(); zones=(gen/'public/nginx/zones.conf').read_text()
             for loc in ('location = /rpc ','location = /aggregator ','location = /api/v1/trustbases ','location /faucet/ ','location = /api/network ','location = /api/claim ',
-                        'location /lockproof/ ','location /bridge/ ','location /demo/ '):
+                        'location /demo/ '):
                 self.assertIn(loc,routes)
-            self.assertIn('proxy_pass http://127.0.0.1:8545/;',routes); self.assertIn('proxy_pass http://127.0.0.1:8088/;',routes); self.assertIn('proxy_pass http://127.0.0.1:8090/;',routes)
-            self.assertIn('alias /var/www/pos-staging/bridge/;',routes); self.assertIn('alias /var/www/pos-staging/demo/;',routes)
+            self.assertIn('proxy_pass http://127.0.0.1:8545/;',routes); self.assertIn('proxy_pass http://127.0.0.1:8088/;',routes)
+            self.assertIn('alias /var/www/pos-staging/demo/;',routes)
+            self.assertNotIn('lockproof',routes+zones); self.assertNotIn('/bridge/',routes); self.assertFalse((gen/'public/bridge').exists())
             self.assertEqual(routes.count('{'),routes.count('}'))
             for zone in set(re.findall(r'zone=(\w+)',routes))|set(re.findall(r'limit_conn (\w+)',routes)):
                 self.assertIn(f'zone={zone}:',zones)
-            tester=json.loads((gen/'public/bridge/tester-config.json').read_text())
-            self.assertEqual((tester['ethUrl'],tester['aggUrl'],tester['lockProofUrl']),('https://pos.staging.unicity.network/rpc','https://pos.staging.unicity.network/aggregator','https://pos.staging.unicity.network/lockproof'))
-            self.assertNotIn('redeemEthUrl',tester); self.assertEqual(tester['vault'],'0x'+'11'*20)
-            self.assertEqual((gen/'public/bridge/trust-base.bundle.cbor').read_bytes(),b'\xa0')
-            self.assertIn('lockProofUrl": "http://lockproof:8090',(gen/'bridge/public/tester-config.json').read_text(),'the rehearsal\'s own config keeps the internal names')
             with self.assertRaises(SystemExit), patch('sys.stderr'): public_routes.main([str(gen),'--hostname','pos.staging.unicity.network'])   # never overwrites
-    def test_public_routes_without_the_bridge_and_bad_input(self):
+    def test_public_routes_web_root_and_bad_input(self):
         import public_routes
         with tempfile.TemporaryDirectory() as tmp:
-            gen=self.generation(tmp,bridge=False)
+            gen=self.generation(tmp)
             with patch('builtins.print'): public_routes.main([str(gen),'--hostname','pos.example.org','--web-root','/srv/www/'])
             routes=(gen/'public/nginx/routes.conf').read_text()
-            self.assertNotIn('lockproof',routes); self.assertNotIn('/bridge/',routes); self.assertIn('alias /srv/www/demo/;',routes)
-            self.assertFalse((gen/'public/bridge').exists())
+            self.assertIn('alias /srv/www/demo/;',routes)
             for args in (['--hostname','Pos.Example.org'],['--hostname','x;y'],['--hostname','a.org','--web-root','rel/dir'],['--hostname','a.org','--web-root','/a b'],['--hostname','a.org','--web-root','/a/../b']):
                 with self.assertRaises(SystemExit,msg=args), patch('sys.stderr'): public_routes.main([str(gen),*args,'--out',str(Path(tmp)/'o')])
             bad=json.loads((gen/'compose.yaml').read_text()); bad['services']['rpc']['ports']=['0.0.0.0:8545:8545']
