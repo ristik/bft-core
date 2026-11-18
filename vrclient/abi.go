@@ -47,7 +47,7 @@ func init() {
 
 // Call is decoded calldata: the contract it is for, the method and its named arguments in order.
 type Call struct {
-	Contract string // "ValidatorRegistry" or "PoaElection"
+	Contract string // "ValidatorRegistry", "PoaElection" or "FoundationMultisig"
 	Method   string
 	Args     []NamedValue
 }
@@ -66,7 +66,7 @@ func DecodeCall(data []byte) (Call, error) {
 	for _, c := range []struct {
 		name string
 		a    *abi.ABI
-	}{{"ValidatorRegistry", &VRABI}, {"PoaElection", &PoaABI}} {
+	}{{"ValidatorRegistry", &VRABI}, {"PoaElection", &PoaABI}, {"FoundationMultisig", &MultisigABI}} {
 		m, err := c.a.MethodById(data[:4])
 		if err != nil {
 			continue
@@ -109,6 +109,12 @@ func render(v any, indent string) string {
 		return fmt.Sprintf("%s (%d bytes)", hexutil.Encode(x), len(x))
 	case [32]byte:
 		return hexutil.Encode(x[:])
+	case [][]byte:
+		parts := make([]string, len(x))
+		for i, b := range x {
+			parts[i] = hexutil.Encode(b)
+		}
+		return "[" + strings.Join(parts, ", ") + "]"
 	case ethcommon.Address:
 		return x.Hex()
 	case string:
@@ -158,7 +164,7 @@ func DecodeRevert(data []byte) *RevertError {
 	if len(data) < 4 {
 		return nil
 	}
-	for _, a := range []*abi.ABI{&VRABI, &PoaABI} {
+	for _, a := range []*abi.ABI{&VRABI, &PoaABI, &MultisigABI} {
 		for _, e := range a.Errors {
 			if !bytes.Equal(e.ID[:4], data[:4]) {
 				continue
@@ -185,6 +191,16 @@ func revertReason(poa bool, name string, vals []any) string {
 	switch {
 	case name == "RegistrationRefused":
 		return RegistrationRefusal(code)
+	case name == "QueueRefused":
+		return QueueRefusal(code)
+	case name == "NotGovernor":
+		return "only the Foundation multisig (VR's governor) may queue or cancel changes"
+	case name == "NotCancellable":
+		return "only a Queued or Scheduled change can be cancelled"
+	case name == "BadSignatures":
+		return "the approvals are not three or more distinct signers' valid signatures in ascending address order, or the nonce moved"
+	case name == "CallFailed":
+		return "the approved call reverted (the multisig hides its reason; the preview simulates the call as the governor)"
 	case name == "NotOwner":
 		return "the sender is not the identity's owner"
 	case poa && name == "BadState":

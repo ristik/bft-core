@@ -101,6 +101,11 @@ type step struct {
 // runSteps previews each step and, unless dry, sends it. after is called with each receipt (apply reads the new id from it) and may
 // return the next steps.
 func runSteps(ctx context.Context, w io.Writer, s vrclient.Sender, dry bool, steps []step, after func(i int, r *vrclient.Receipt) ([]step, error)) error {
+	return runStepsAs(ctx, ErrValidator, w, s, dry, steps, after)
+}
+
+// runStepsAs is runSteps with the command group's own error (`ubft governance` has its own).
+func runStepsAs(ctx context.Context, base error, w io.Writer, s vrclient.Sender, dry bool, steps []step, after func(i int, r *vrclient.Receipt) ([]step, error)) error {
 	for i := 0; i < len(steps); i++ {
 		st := steps[i]
 		fmt.Fprintf(w, "[%d] %s\n", i+1, st.what)
@@ -115,18 +120,18 @@ func runSteps(ctx context.Context, w io.Writer, s vrclient.Sender, dry bool, ste
 		}
 		p, err := s.Plan(ctx, st.tx)
 		if err != nil {
-			return fmt.Errorf("%w: %s: %w", ErrValidator, st.what, err)
+			return fmt.Errorf("%w: %s: %w", base, st.what, err)
 		}
 		fmt.Fprint(w, p.String())
 		if p.SimErr != nil {
-			return fmt.Errorf("%w: %s would be refused: %w", ErrValidator, st.what, p.SimErr)
+			return fmt.Errorf("%w: %s would be refused: %w", base, st.what, p.SimErr)
 		}
 		if dry {
 			continue
 		}
 		h, r, err := s.Send(ctx, p)
 		if err != nil {
-			return fmt.Errorf("%w: %s: %w", ErrValidator, st.what, err)
+			return fmt.Errorf("%w: %s: %w", base, st.what, err)
 		}
 		fmt.Fprintf(w, "  sent: %s, included in block %d (gas used %d)\n", h.Hex(), r.BlockNumber, r.GasUsed)
 		if after != nil {
