@@ -92,7 +92,7 @@ func enableVRHandoff(ctx context.Context, cm *consensus.ConsensusManager, dep vr
 	if host != nil {
 		// the peer protocol: the installed root committee always, besides the current intent's members the service names
 		svc, queue := cm.VRService()
-		server := vrschedule.NewServer(svc, queue, func(id peer.ID) bool { return slices.Contains(cm.Validators(), id) })
+		server := vrschedule.NewServer(svc, queue, func(id peer.ID) bool { return slices.Contains(cm.Validators(), id) }).WithSources(sources)
 		host.RegisterProtocolHandler(vrschedule.ProtocolID, server.Handler)
 		go func() { <-ctx.Done(); host.RemoveProtocolHandler(vrschedule.ProtocolID) }()
 	}
@@ -175,6 +175,7 @@ type vrHandoffOperator interface {
 	SubmitVRCertificate(c vrschema.ViewCertificate) error
 	OfferVRMessage(m vrschedule.Message) error
 	VRStage(fromView uint64) (vrschedule.StageSet, [32]byte, error)
+	VRMemberStatus() consensus.VRMemberStatus
 }
 
 type vrMessageRequest struct {
@@ -295,6 +296,12 @@ func registerVRHandoffRoutes(mux *http.ServeMux, op vrHandoffOperator) {
 			return
 		}
 		w.WriteHeader(http.StatusAccepted)
+	})
+	mux.HandleFunc("GET /api/v1/vr/member", func(w http.ResponseWriter, r *http.Request) {
+		if !localOperatorRequest(w, r) {
+			return
+		}
+		writeVRJSON(w, op.VRMemberStatus())
 	})
 	mux.HandleFunc("GET /api/v1/vr/stage", func(w http.ResponseWriter, r *http.Request) {
 		if !localOperatorRequest(w, r) {

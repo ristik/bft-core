@@ -45,6 +45,8 @@ vrb_logs_have() { grep -l -- "$1" test-nodes/root*/debug.log >/dev/null 2>&1; }
 vrb_acked() { [ "$(cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'lastAcked()(bytes32)')" = "$vrb_result" ]; }
 vrb_root_epoch2() { local r n=0; for r in $(vrb_root_rpcs); do curl -sf -X POST -H 'Content-Type: application/json' -d '{}' "$r/api/v1/q3/status" | grep -q '"activeEpoch": *2' && n=$((n+1)); done; [ "$n" -ge 3 ]; }
 
+# The development hooks (the readiness hold, the joiner staging hook) exist only in a binary built with the vrdev build tag; the lane's `make build`
+# (setup-evm-nodes.sh) takes it from MAKEFLAGS=GO_BUILD_TAGS=-tags=vrdev. A production build has no such hook and no flag or variable enables one.
 # Restarts of a member (VT-09), each verified by the content of the member file and of the messages, not by log lines:
 #   VR_RESTART_BETWEEN=1  root1 is started before the election with the readiness hold hook (UBFT_VR_MEMBER_HOLD=1 and <home>/vr-member.hold, a
 #                         development test hook): its possession proof goes out and its readiness waits. Once the proof is persisted and no view

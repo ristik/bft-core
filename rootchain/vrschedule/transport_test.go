@@ -1,6 +1,7 @@
 package vrschedule
 
 import (
+	"bytes"
 	"context"
 	"testing"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 	testpeer "github.com/unicitynetwork/bft-core/internal/testutils/peer"
 	p2p "github.com/unicitynetwork/bft-core/network"
+	"github.com/unicitynetwork/bft-core/vrhandoff"
 )
 
 // The peer protocol over two real libp2p hosts: a pushed message reaches the receiving root's verification queue and its service, a
@@ -72,4 +74,44 @@ func TestGetStageIsThrottledPerPeer(t *testing.T) {
 	require.True(t, s.stageDue("b"), "another peer")
 	now = now.Add(StageInterval)
 	require.True(t, s.stageDue("a"))
+}
+
+// A root that joined after R's publication asks the peers for R's committed source: it takes an entry only when SourceQuorum of them give the
+// identical one (here three of four incumbents agree, one lies), and fewer identical answers than the quorum give nothing.
+func TestAJoinerFetchesTheSourceFromAQuorumOfPeers(t *testing.T) {
+	w := newWorld(t)
+	r := [32]byte{0x52}
+	good := SourceEntry{Source: vrhandoff.Source{ResultID: r[:], EVMBlockHash: bytes.Repeat([]byte{7}, 32), EVMBlockNumber: 77, CertRootRound: 400, OutputCommit: bytes.Repeat([]byte{9}, 32)}, CertUCTime: 4000}
+	bad := good
+	bad.EVMBlockNumber = 78
+	joiner := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
+	var servers []*p2p.Peer
+	var ids []peer.ID
+	for i, e := range []*SourceEntry{&good, &good, &good, &bad, nil} {
+		p := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
+		joiner.Network().Peerstore().AddAddrs(p.ID(), p.MultiAddresses(), peerstore.PermanentAddrTTL)
+		src, err := NewSources("")
+		require.NoError(t, err)
+		if e != nil {
+			_, err = src.Record(*e)
+			require.NoError(t, err)
+		}
+		svc := w.service("x")
+		p.RegisterProtocolHandler(ProtocolID, NewServer(svc, NewQueue(svc, 0), func(peer.ID) bool { return true }).WithSources(src).Handler)
+		t.Cleanup(func() { p.RemoveProtocolHandler(ProtocolID) })
+		servers = append(servers, p)
+		if i < 4 {
+			ids = append(ids, p.ID())
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	require.Equal(t, 2, SourceQuorum(4))
+	got, err := FetchSource(ctx, FromLibp2p(joiner), ids, r)
+	require.NoError(t, err)
+	require.Equal(t, good, got)
+
+	// one honest, one liar, two that did not observe it: no quorum
+	_, err = FetchSource(ctx, FromLibp2p(joiner), []peer.ID{servers[0].ID(), servers[3].ID(), servers[4].ID(), servers[4].ID()}, r)
+	require.ErrorIs(t, err, ErrUnavailable)
 }

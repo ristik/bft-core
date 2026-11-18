@@ -84,6 +84,14 @@ type vrHandoff struct {
 	fetching bool
 
 	member *vrschedule.Member
+	// source sync (VT-09b): a root that never observed a result's publication asks the incumbents for its committed source
+	srcMu      sync.Mutex
+	srcFetched map[[32]byte]time.Time
+	srcBusy    bool
+	statMu     sync.Mutex
+	deriveErr  string           // the last derivation's refusal (an input this root lacks), empty once an intent derives
+	observeErr int              // certified EVM blocks the observer gave up on since the last one it read
+	incumbents func() []peer.ID // the installed committee's roots without this one
 	// stageIntent keeps the members the derived intent names (its successors' EVM validators and roots) as the staged successor, from the
 	// intent's derivation on; nil clears it
 	stageIntent  func(epoch uint64, ids []evmassign.Identity, roots []evmroot.Member) error
@@ -175,6 +183,16 @@ func (x *ConsensusManager) EnableVRHandoff(ctx context.Context, cfg VRHandoffCon
 	}
 	v.peers = func() []peer.ID { return x.vrPeers(v) }
 	v.stageIntent = x.stageVRIntentMembers
+	v.incumbents = func() []peer.ID {
+		var out []peer.ID
+		for _, id := range x.Validators() {
+			if id != x.id {
+				out = append(out, id)
+			}
+		}
+		return out
+	}
+	cfg.Intents.MissingSource = func(r vrschema.Word) { v.fetchSource(ctx, [32]byte(r)) }
 	v.update = x.vrCommitted
 	v.now = time.Now
 	// through the accessor at each call: the manager replaces its block store (recovery, an epoch switch)
@@ -363,9 +381,15 @@ func (v *vrHandoff) observe(ctx context.Context, c vrschedule.CertifiedEVM) {
 	for try := 0; ; try++ {
 		err := v.observer.Observe(ctx, c)
 		if err == nil {
+			v.statMu.Lock()
+			v.observeErr = 0
+			v.statMu.Unlock()
 			return
 		}
 		if try >= 20 || ctx.Err() != nil {
+			v.statMu.Lock()
+			v.observeErr++
+			v.statMu.Unlock()
 			v.cfg.Log.Warn("VR handoff: observing a certified EVM block failed", "evmBlock", c.BlockNumber, "rootRound", c.RootRound, "error", err)
 			return
 		}
@@ -483,6 +507,7 @@ func (x *ConsensusManager) vrCommitted() (vrschedule.Committed, error) {
 		return c, err
 	}
 	d, ok, err := x.vr.cfg.Intents.Derive(q)
+	x.vr.noteDerive(err)
 	if err != nil {
 		return c, err
 	}
@@ -884,4 +909,96 @@ func (x *ConsensusManager) stageVRIntentMembers(epoch uint64, ids []evmassign.Id
 func (v *vrHandoff) planReady() bool {
 	_, ok := v.svc.Plan()
 	return ok
+}
+
+// SourceRetry is how often a root asks for a source it still lacks.
+const SourceRetry = 5 * time.Second
+
+// fetchSource asks the incumbents for the committed source of r (once at a time, retried every SourceRetry) and records it when
+// vrschedule.SourceQuorum of them give the identical entry. It never blocks the derivation that found the source missing.
+func (v *vrHandoff) fetchSource(ctx context.Context, r [32]byte) {
+	if v.cfg.Opener == nil {
+		return
+	}
+	v.srcMu.Lock()
+	if v.srcBusy || time.Since(v.srcFetched[r]) < SourceRetry {
+		v.srcMu.Unlock()
+		return
+	}
+	if v.srcFetched == nil {
+		v.srcFetched = map[[32]byte]time.Time{}
+	}
+	v.srcFetched[r], v.srcBusy = time.Now(), true
+	v.srcMu.Unlock()
+	peers := v.incumbents()
+	go func() {
+		defer func() { v.srcMu.Lock(); v.srcBusy = false; v.srcMu.Unlock() }()
+		e, err := vrschedule.FetchSource(ctx, v.cfg.Opener, peers, r)
+		if err != nil {
+			v.cfg.Log.Debug("VR handoff: the source of a result is not available from the incumbents yet", "result", fmt.Sprintf("%x", r[:8]), "error", err)
+			return
+		}
+		if _, err := v.cfg.Intents.Sources.Record(e); err != nil {
+			v.cfg.Log.Warn("VR handoff: recording a fetched source failed", "error", err)
+			return
+		}
+		v.cfg.Log.Info("VR handoff: the committed source of a result was fetched from the incumbents", "result", fmt.Sprintf("%x", r[:8]), "evmBlock", e.EVMBlockNumber, "certRootRound", e.CertRootRound)
+		v.wake()
+	}()
+}
+
+func (v *vrHandoff) noteDerive(err error) {
+	v.statMu.Lock()
+	defer v.statMu.Unlock()
+	if err != nil && errors.Is(err, vrschedule.ErrUnavailable) {
+		v.deriveErr = err.Error()
+		return
+	}
+	v.deriveErr = ""
+}
+
+// VRMemberStatus is what a node reports of its readiness to take part in a handoff: "catching up" while an input it needs is missing (it
+// derives no intent and signs nothing), "ready" once it derives the intent from its own committed state and its own VR reads, and "idle" when
+// there is no intent to derive.
+type VRMemberStatus struct {
+	State      string   `json:"state"` // "off", "idle", "catching up" or "ready"
+	Reasons    []string `json:"reasons,omitempty"`
+	Intent     string   `json:"intent,omitempty"`
+	Successor  bool     `json:"successor,omitempty"`
+	CommitView uint64   `json:"view,omitempty"`
+}
+
+// VRMemberStatus reports the member's state: catching up when this root is recovering the root chain, cannot read VR at the certified EVM blocks
+// through its own execution client (it has not synced the EVM chain), or lacks the committed source of the open result.
+func (x *ConsensusManager) VRMemberStatus() VRMemberStatus {
+	v := x.vr
+	if v == nil {
+		return VRMemberStatus{State: "off"}
+	}
+	return v.memberStatus(x.recovery.InRecovery(), x.id.String())
+}
+
+func (v *vrHandoff) memberStatus(recovering bool, self string) VRMemberStatus {
+	var reasons []string
+	if recovering {
+		reasons = append(reasons, "the root chain is being recovered from peers")
+	}
+	v.statMu.Lock()
+	if v.observeErr > 0 {
+		reasons = append(reasons, fmt.Sprintf("VR cannot be read at %d certified EVM blocks through this node's execution client: its EVM chain is not synced", v.observeErr))
+	}
+	if v.deriveErr != "" {
+		reasons = append(reasons, v.deriveErr)
+	}
+	v.statMu.Unlock()
+	intent, view, _, ok := v.svc.Current()
+	if ok && len(reasons) == 0 {
+		st := VRMemberStatus{State: "ready", Intent: fmt.Sprintf("%x", intent[:]), CommitView: view}
+		_, st.Successor = v.svc.Members()[self]
+		return st
+	}
+	if len(reasons) > 0 {
+		return VRMemberStatus{State: "catching up", Reasons: reasons}
+	}
+	return VRMemberStatus{State: "idle"}
 }

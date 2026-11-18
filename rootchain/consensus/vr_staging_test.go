@@ -68,3 +68,37 @@ func derivedFor(t *testing.T, digest [32]byte) vrschedule.Committed {
 	in, _ := vrhandofffix.New(t).Intent()
 	return vrschedule.Committed{Derived: vrschedule.Derived{VRIntent: storage.VRIntent{Digest: digest}, Intent: in, RootEpoch: 1}, Derivable: true}
 }
+
+// A node reports "catching up" while an input it needs is missing and derives nothing: the root chain being recovered, VR unreadable through
+// its own execution client, the open result's source never observed; "ready" only once it derives the intent itself.
+func TestTheMemberReportsCatchingUpUntilItDerivesTheIntent(t *testing.T) {
+	w := vrhandofffix.New(t)
+	in, d := w.Intent()
+	keys, _ := w.Incumbents()
+	svc := vrschedule.NewService(vrschedule.ServiceConfig{Self: "x"})
+	v := &vrHandoff{svc: svc}
+	require.Equal(t, "idle", v.memberStatus(false, "x").State)
+
+	st := v.memberStatus(true, "x")
+	require.Equal(t, "catching up", st.State)
+	require.Contains(t, st.Reasons[0], "recovered from peers")
+
+	v.observeErr = 3
+	st = v.memberStatus(false, "x")
+	require.Equal(t, "catching up", st.State)
+	require.Contains(t, st.Reasons[0], "EVM chain is not synced")
+	v.observeErr = 0
+
+	v.noteDerive(vrschedule.ErrUnavailable)
+	st = v.memberStatus(false, "x")
+	require.Equal(t, "catching up", st.State)
+	require.Contains(t, st.Reasons[0], "intent input not observed yet")
+	v.noteDerive(nil)
+
+	svc.Update(vrschedule.Committed{Derived: vrschedule.Derived{VRIntent: storage.VRIntent{Digest: d}, Intent: in, RootEpoch: w.RC.RootEpoch, Body: w.BC},
+		Derivable: true, Incumbents: keys, K: w.K})
+	st = v.memberStatus(false, w.J[0].RootNodeID)
+	require.Equal(t, "ready", st.State)
+	require.True(t, st.Successor)
+	require.False(t, v.memberStatus(false, "someone-else").Successor)
+}

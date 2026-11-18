@@ -1,6 +1,7 @@
 package vrschedule
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	libp2pnetwork "github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/unicitynetwork/bft-core/vrhandoff"
+	"github.com/unicitynetwork/bft-core/vrschema"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -35,6 +37,7 @@ const (
 	kindAssembly  = 2
 	kindReadiness = 3
 	kindGetStage  = 4
+	kindGetSource = 5
 )
 
 // ErrWire reports a malformed exchange.
@@ -48,6 +51,14 @@ type wireMessage struct {
 	Readiness *vrhandoff.Readiness
 	Intent    []byte
 	FromView  uint64
+	Result    []byte // kindGetSource: the result id whose committed source is asked for
+}
+
+// wireSource answers a GetSource: the committed source of the result when this root observed it.
+type wireSource struct {
+	_     struct{} `cbor:",toarray"`
+	Found bool
+	Entry SourceEntry
 }
 
 type wireStage struct {
@@ -130,6 +141,8 @@ type Server struct {
 	queue *Queue
 	// allowed adds the peers the caller always admits (the installed root committee); nil admits only the service's members.
 	allowed func(peer.ID) bool
+	// sources answers GetSource (nil: not served)
+	sources *Sources
 	now     func() time.Time
 
 	mu     sync.Mutex
@@ -141,6 +154,12 @@ func NewServer(svc *Service, queue *Queue, allowed func(peer.ID) bool) *Server {
 }
 
 // stageDue records a GetStage answer to from: false when it had one less than StageInterval ago.
+// WithSources makes the server answer GetSource from the root's observed sources.
+func (s *Server) WithSources(src *Sources) *Server {
+	s.sources = src
+	return s
+}
+
 func (s *Server) stageDue(from peer.ID) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -205,6 +224,18 @@ func (s *Server) Serve(from peer.ID, st Stream) {
 		set, _ := s.svc.Stage([32]byte(w.Intent), w.FromView)
 		b, err := types.Cbor.Marshal(wireStage{PoPs: set.PoPs, Assemblies: set.Assemblies, Readiness: set.Readiness})
 		if err != nil || len(b) > MaxStageBytes {
+			_ = st.Reset()
+			return
+		}
+		_ = writeFrame(st, b)
+	case kindGetSource:
+		if s.sources == nil || len(w.Result) != 32 || !s.stageDue(from) {
+			_ = st.Reset()
+			return
+		}
+		e, found := s.sources.Get(vrschema.Word(w.Result))
+		b, err := types.Cbor.Marshal(wireSource{Found: found, Entry: e})
+		if err != nil {
 			_ = st.Reset()
 			return
 		}
@@ -293,4 +324,76 @@ func (s StageSet) Offers() []Message {
 		out = append(out, Message{Readiness: &s.Readiness[i]})
 	}
 	return out
+}
+
+// GetSource asks one peer for the committed source it observed of a result (stage 0 of a handoff this root joined after its publication).
+func GetSource(ctx context.Context, opener Opener, p peer.ID, result [32]byte) (SourceEntry, bool, error) {
+	ctx, cancel := context.WithTimeout(ctx, StreamDeadline)
+	defer cancel()
+	st, err := opener.CreateStream(ctx, p, ProtocolID)
+	if err != nil {
+		return SourceEntry{}, false, err
+	}
+	defer func() { _ = st.Close() }()
+	_ = st.SetDeadline(time.Now().Add(StreamDeadline))
+	b, err := types.Cbor.Marshal(wireMessage{Kind: kindGetSource, Result: result[:]})
+	if err != nil {
+		return SourceEntry{}, false, err
+	}
+	if err := writeFrame(st, b); err != nil {
+		_ = st.Reset()
+		return SourceEntry{}, false, err
+	}
+	if err := st.CloseWrite(); err != nil {
+		return SourceEntry{}, false, err
+	}
+	raw, err := readFrame(st, MaxMessageBytes)
+	if err != nil {
+		return SourceEntry{}, false, err
+	}
+	var w wireSource
+	if err := types.Cbor.Unmarshal(raw, &w); err != nil {
+		return SourceEntry{}, false, errors.Join(ErrWire, err)
+	}
+	return w.Entry, w.Found, nil
+}
+
+// SourceQuorum is how many identical answers of authenticated roots a joiner needs for a source: strictly more than the f Byzantine roots of
+// n incumbents (f = (n-1)/3), so at least one honest root observed exactly this source.
+func SourceQuorum(n int) int { return (n-1)/3 + 1 }
+
+// FetchSource asks the peers for the source of result and returns it once SourceQuorum(len(peers)) of them give the identical entry. Answers
+// that differ do not combine; a peer that did not observe it, or does not answer, counts for nothing. Honest incumbents observed the same
+// first Published block, so honest answers are identical (stage 0 is fixed by committed history).
+func FetchSource(ctx context.Context, opener Opener, peers []peer.ID, result [32]byte) (SourceEntry, error) {
+	type ans struct {
+		e  SourceEntry
+		ok bool
+	}
+	res := make(chan ans, len(peers))
+	for _, p := range peers {
+		go func(p peer.ID) {
+			e, ok, err := GetSource(ctx, opener, p, result)
+			res <- ans{e, ok && err == nil}
+		}(p)
+	}
+	need := SourceQuorum(len(peers))
+	counts := map[string]int{}
+	entries := map[string]SourceEntry{}
+	for range peers {
+		a := <-res
+		if !a.ok || a.e.ResultID == nil || !bytes.Equal(a.e.ResultID, result[:]) {
+			continue
+		}
+		k, err := types.Cbor.Marshal(a.e)
+		if err != nil {
+			continue
+		}
+		counts[string(k)]++
+		entries[string(k)] = a.e
+		if counts[string(k)] >= need {
+			return a.e, nil
+		}
+	}
+	return SourceEntry{}, fmt.Errorf("%w: no %d identical answers for the source of %x", ErrUnavailable, need, result[:8])
 }
