@@ -56,7 +56,7 @@ func TestThePoPEndpointServesNothingElse(t *testing.T) {
 	f := newFixture(t)
 	dial, credential := f.popFixture(t)
 	for _, o := range []op{opReplaceSession, opStatus, opEnrollment, opCompleteEnrollment, opAdvanceEpoch, opAdvanceWithProof, opSignElectionPoP,
-		opSignDelegationPossession, opReserve, opSign, opRestoreStatus} {
+		opSignDelegationPossession, opSignRegistration, opReloadRegistrationPolicy, opReserve, opSign, opRestoreStatus} {
 		answer, err := rawCall(t, dial, wireRequest{Version: protocolVersion, Op: uint64(o), Credential: credential})
 		require.NoError(t, err)
 		require.Equal(t, errWrongEndpoint.Error(), answer.Refusal, o.String())
