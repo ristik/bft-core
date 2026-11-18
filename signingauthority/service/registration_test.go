@@ -79,7 +79,7 @@ func TestTheOperatorReloadsTheRegistrationPolicyOverTheWire(t *testing.T) {
 	require.NoError(t, err)
 	other := depl
 	other.Registry[0] ^= 1
-	require.ErrorIs(t, f.operator.ReloadRegistrationPolicy(ctx, other, nil), signingauthority.ErrRegistrationUnauthorized, "a policy for another deployment is refused over the wire")
+	require.ErrorIs(t, f.operator.ReloadRegistrationPolicy(ctx, other, nil), signingauthority.ErrRegistrationDeployment, "a policy for another deployment is refused over the wire")
 	_, err = f.operator.SignRegistration(ctx, req)
 	require.NoError(t, err, "and what was authorized stays")
 	_, key, err := f.operator.Enrollment(ctx)

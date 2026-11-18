@@ -99,7 +99,7 @@ func (a *Authority) ReloadRegistrationAuthorizations(expect RegistrationDeployme
 		return fmt.Errorf("%w: this authority was started without a registration policy (no deployment pin)", ErrRegistrationUnauthorized)
 	}
 	if expect != a.registration.Deployment {
-		return fmt.Errorf("%w: the policy is for another deployment (network, chain id or registry) than this authority's pin", ErrRegistrationUnauthorized)
+		return fmt.Errorf("%w: the policy is for another deployment (network, chain id or registry) than this authority's pin", ErrRegistrationDeployment)
 	}
 	a.registration = &RegistrationPolicy{Deployment: a.registration.Deployment, Authorized: auth}
 	return nil

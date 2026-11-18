@@ -1,14 +1,17 @@
 package cmd
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/stretchr/testify/require"
 
 	"github.com/unicitynetwork/bft-core/vrschema"
+	"github.com/unicitynetwork/bft-go-base/types"
 )
 
 const policyKey = "0x0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
@@ -56,4 +59,50 @@ func TestValidatorConfigRefusesBothEVMHolders(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(home, validatorConfigFile), b, 0o600))
 	out, err = runValidator(t, home, "status")
 	require.ErrorContains(t, err, "two holders", out)
+}
+
+// init selects an authority-held EVM key: no EVM key file is made, the config names the authority, --force keeps it, and an explicit
+// --evm-keys switches back; two holders are refused.
+func TestValidatorInitWithAnAuthority(t *testing.T) {
+	dir := t.TempDir()
+	info := filepath.Join(dir, "node-info.json")
+	k, err := ethcrypto.GenerateKey()
+	require.NoError(t, err)
+	ni, err := json.Marshal(&types.NodeInfo{NodeID: "auth-node", SigKey: ethcrypto.CompressPubkey(&k.PublicKey), Stake: 1})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(info, ni, 0o600))
+	cred := filepath.Join(dir, "operator.cred")
+	require.NoError(t, os.WriteFile(cred, []byte(strings.Repeat("ab", 32)), 0o600))
+	sock := filepath.Join(dir, "op.sock")
+	home := t.TempDir()
+	auth := []string{"--evm-authority-socket", sock, "--evm-authority-credential", cred, "--evm-authority-node-info", info}
+
+	out, err := runValidator(t, home, append([]string{"init", "--rpc", "http://127.0.0.1:1"}, auth...)...)
+	require.NoError(t, err, out)
+	_, statErr := os.Stat(filepath.Join(home, "evm"))
+	require.True(t, os.IsNotExist(statErr), "no EVM key file is created")
+	c := readConfig(t, home)
+	require.Equal(t, &evmAuthorityConfig{Socket: sock, Credential: cred, NodeInfo: info}, c.EVMAuthority)
+	require.Empty(t, c.EVMKeys)
+	require.NotContains(t, out, "EVM shard node")
+
+	// --force without a holder keeps the authority
+	out, err = runValidator(t, home, "init", "--rpc", "http://127.0.0.1:1", "--force")
+	require.NoError(t, err, out)
+	require.Equal(t, &evmAuthorityConfig{Socket: sock, Credential: cred, NodeInfo: info}, readConfig(t, home).EVMAuthority)
+	_, statErr = os.Stat(filepath.Join(home, "evm"))
+	require.True(t, os.IsNotExist(statErr))
+
+	// two holders, or half an authority, are refused
+	_, err = runValidator(t, home, append([]string{"init", "--rpc", "http://127.0.0.1:1", "--force", "--evm-keys", "evm/keys.json"}, auth...)...)
+	require.ErrorIs(t, err, ErrValidator)
+	_, err = runValidator(t, home, "init", "--rpc", "http://127.0.0.1:1", "--force", "--evm-authority-socket", sock)
+	require.ErrorIs(t, err, ErrValidator)
+
+	// an explicit --evm-keys switches back to a key file
+	out, err = runValidator(t, home, "init", "--rpc", "http://127.0.0.1:1", "--force", "--evm-keys", "evm/keys.json")
+	require.NoError(t, err, out)
+	c = readConfig(t, home)
+	require.Nil(t, c.EVMAuthority)
+	require.Equal(t, "evm/keys.json", c.EVMKeys)
 }

@@ -584,6 +584,14 @@ func readJWT(path string) error {
 	return nil
 }
 
+// evmKeyCount is how many of init's node key files exist: the root node's, and the EVM shard node's unless a signing authority holds that key.
+func evmKeyCount(auth *evmAuthorityConfig) int {
+	if auth != nil {
+		return 1
+	}
+	return 2
+}
+
 type validatorInitFlags struct {
 	validatorFlags
 	LocalRPC    string
@@ -597,6 +605,8 @@ type validatorInitFlags struct {
 	DataDir     string
 	Ports       []int
 	Force       bool
+	// the EVM key held by a signing authority (VT-10) instead of EVMKeys
+	AuthoritySocket, AuthorityCredential, AuthorityNodeInfo string
 }
 
 func validatorInitCmd(base *baseFlags) *cobra.Command {
@@ -625,6 +635,9 @@ The payee (where rewards and withdrawals go) is a plain EVM address; it defaults
 	cmd.Flags().StringVar(&f.OperatorKey, "operator-key", "operator/key", "operator account key file (0x-hex)")
 	cmd.Flags().StringVar(&f.DataDir, "data-dir", ".", "where the services keep their data (doctor checks its disk)")
 	cmd.Flags().IntSliceVar(&f.Ports, "ports", defaultValidatorPorts, "the services' listen ports (root p2p, shard p2p, ureth devp2p)")
+	cmd.Flags().StringVar(&f.AuthoritySocket, "evm-authority-socket", "", "the EVM key is held by a signing authority: its operator socket (instead of --evm-keys; needs --evm-authority-credential and --evm-authority-node-info). No EVM key file is created")
+	cmd.Flags().StringVar(&f.AuthorityCredential, "evm-authority-credential", "", "the authority's operator credential file")
+	cmd.Flags().StringVar(&f.AuthorityNodeInfo, "evm-authority-node-info", "", "the authority's node info (`signing-authority node-info`): its enrolled EVM node and public key")
 	cmd.Flags().BoolVar(&f.Force, "force", false, "rewrite an existing validator config (keys are still never replaced)")
 	return cmd
 }
@@ -638,12 +651,31 @@ func validatorInit(cmd *cobra.Command, f *validatorInitFlags) error {
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		return err
 	}
+	// the holder of the EVM key: flags select an authority; --force keeps the authority an existing config selected unless --evm-keys was
+	// given explicitly (a deliberate switch back to a key file)
+	var auth *evmAuthorityConfig
+	if f.AuthoritySocket != "" || f.AuthorityCredential != "" || f.AuthorityNodeInfo != "" {
+		auth = &evmAuthorityConfig{Socket: f.AuthoritySocket, Credential: f.AuthorityCredential, NodeInfo: f.AuthorityNodeInfo}
+		if err := auth.validate(); err != nil {
+			return err
+		}
+		if cmd.Flags().Changed("evm-keys") {
+			return fmt.Errorf("%w: --evm-keys and --evm-authority-* are two holders of the EVM key: give one", ErrValidator)
+		}
+	} else if f.Force && !cmd.Flags().Changed("evm-keys") {
+		if old, err := (&validatorFlags{baseFlags: f.baseFlags, Config: f.Config}).load(); err == nil && old.cfg.EVMAuthority != nil {
+			auth = old.cfg.EVMAuthority
+		}
+	}
 	if f.RPC == "" {
 		return fmt.Errorf("%w: --rpc (the public JSON-RPC endpoint) is required", ErrValidator)
 	}
 	v := &loadedValidator{path: path, home: home, cfg: validatorConfig{Format: validatorConfigFormat, RPC: f.RPC, LocalRPC: f.LocalRPC,
 		Registry: f.Registry, ChainID: f.ChainID, RootKeys: f.RootKeys, EVMKeys: f.EVMKeys, UrethKey: f.UrethKey, JWT: f.JWT,
 		OperatorKey: f.OperatorKey, ID: f.ID, DataDir: f.DataDir, Ports: f.Ports}}
+	if auth != nil {
+		v.cfg.EVMAuthority, v.cfg.EVMKeys = auth, ""
+	}
 	if v.cfg.Registry == "" {
 		v.cfg.Registry = strings.ToLower(vrclient.DefaultRegistry.Hex())
 	}
@@ -661,7 +693,7 @@ func validatorInit(cmd *cobra.Command, f *validatorInitFlags) error {
 	for _, s := range []struct {
 		name string
 		path string
-	}{{"root node", v.abs(f.RootKeys)}, {"EVM shard node", v.abs(f.EVMKeys)}} {
+	}{{"root node", v.abs(f.RootKeys)}, {"EVM shard node", v.abs(f.EVMKeys)}}[:evmKeyCount(auth)] {
 		kc, created, err := ensureKeyConf(s.path)
 		if err != nil {
 			return fmt.Errorf("%w: %s keys: %w", ErrValidator, s.name, err)
@@ -695,14 +727,20 @@ func validatorInit(cmd *cobra.Command, f *validatorInitFlags) error {
 		return err
 	}
 	// node infos only for keys that passed the separation check
-	for i, p := range []string{v.abs(f.RootKeys), v.abs(f.EVMKeys)} {
+	for i, p := range []string{v.abs(f.RootKeys), v.abs(f.EVMKeys)}[:evmKeyCount(auth)] {
 		if err := writeNodeInfo(p, kcs[i]); err != nil {
 			return err
 		}
 	}
 	operator := ethcrypto.PubkeyToAddress(keys.Operator.PublicKey)
-	out[2].public = "enode public key " + hex.EncodeToString(ethcrypto.FromECDSAPub(&keys.Ureth.PublicKey)[1:])
-	out[4].public = operator.Hex()
+	for i := range out {
+		switch out[i].name {
+		case "ureth devp2p":
+			out[i].public = "enode public key " + hex.EncodeToString(ethcrypto.FromECDSAPub(&keys.Ureth.PublicKey)[1:])
+		case "operator account":
+			out[i].public = operator.Hex()
+		}
+	}
 	v.cfg.Payee = f.Payee
 	if v.cfg.Payee == "" {
 		v.cfg.Payee = operator.Hex()
