@@ -48,8 +48,10 @@ func restartedRoot(t *testing.T, source *anchorReplica) *ConsensusManager {
 	cm, err := NewConsensusManager(source.manager.id, trust, source.manager.orchestration, testnetwork.NewRootMockNetwork(),
 		source.manager.safety.signer, db, obs, WithConsensusParams(params), WithRecoveryProfile2(history))
 	require.NoError(t, err)
-	cm.blockStore, err = storage.NewFromCheckpoint(crypto.SHA256, source.oldHead, db, source.manager.orchestration, obs.Logger(), storage.ProfileHandoff)
+	var newStore *storage.BlockStore
+	newStore, err = storage.NewFromCheckpoint(crypto.SHA256, source.oldHead, db, source.manager.orchestration, obs.Logger(), storage.ProfileHandoff)
 	require.NoError(t, err)
+	cm.storeRef.Store(newStore)
 	_, err = cm.InstallEpochGenesis(source.proof, source.oldHead, source.body)
 	require.NoError(t, err)
 	t.Cleanup(cm.pacemaker.Stop)
@@ -114,7 +116,7 @@ func (c *anchorCluster) state() *abdrc.StateMsg {
 	last := c.proposals[len(c.proposals)-1]
 	leader, err := firstReplica(c.replicas).manager.leaderSelector.GetLeaderForRound(last.Block.Round)
 	require.NoError(c.t, err)
-	state, err := c.replicas[leader].manager.blockStore.GetState()
+	state, err := c.replicas[leader].manager.blockStore().GetState()
 	require.NoError(c.t, err)
 	return state
 }
@@ -186,7 +188,7 @@ func TestRolledRootsRejoinFromStatesWithQCsThatCommitNothing(t *testing.T) {
 	// While the committed head is the anchor itself recovery works as before (an anchor head). The first block after the anchor carries the
 	// anchor instead of a QC; recovering from it is a typed wait, and nothing changes.
 	wait := restartedRoot(t, firstReplica(c.replicas))
-	before := wait.blockStore.RootAnchor()
+	before := wait.blockStore().RootAnchor()
 	sawFirstSuccessor := false
 	for i := 0; i < 6 && !(c.state().CommittedHead.Anchor == nil && c.state().CommittedHead.Block.Anchor == nil); i++ {
 		if state := c.state(); state.CommittedHead.Anchor == nil && state.CommittedHead.Block.Anchor != nil && state.CommittedHead.Block.Qc == nil {
@@ -194,7 +196,7 @@ func TestRolledRootsRejoinFromStatesWithQCsThatCommitNothing(t *testing.T) {
 			err := recoverTo(t, wait, state)
 			require.ErrorIs(t, err, abdrc.ErrRecoveryEpoch, "a head that is the first successor of the anchor is a wait")
 			require.True(t, wait.recovery.InRecovery())
-			require.Equal(t, before, wait.blockStore.RootAnchor())
+			require.Equal(t, before, wait.blockStore().RootAnchor())
 		}
 		c.advance()
 	}
@@ -216,7 +218,7 @@ func TestRolledRootsRejoinFromStatesWithQCsThatCommitNothing(t *testing.T) {
 		err := recoverTo(t, root, state)
 		require.NoError(t, err, "root %s must recover from a state that contains a QC that commits nothing", id)
 		require.False(t, root.recovery.InRecovery(), "root %s", id)
-		adopted, err := root.blockStore.GetState()
+		adopted, err := root.blockStore().GetState()
 		require.NoError(t, err)
 		require.Equal(t, state.CommittedHead.Block.Round, adopted.CommittedHead.Block.Round, "root %s adopted the peers' committed head", id)
 		require.Equal(t, len(state.Pending), len(adopted.Pending), "root %s adopted the peers' pending blocks", id)
@@ -284,14 +286,14 @@ func TestRecoveryStillRefusesStateOfAnotherEpochWithTypedErrors(t *testing.T) {
 			head.Block = &blk
 			bad.CommittedHead = &head
 			mutate(&bad)
-			before := root.blockStore.RootAnchor()
+			before := root.blockStore().RootAnchor()
 			err := recoverTo(t, root, &bad)
 			require.Error(t, err)
 			if name != "a head block of another epoch" { // that one is refused earlier, as an inconsistent control checkpoint
 				require.ErrorIs(t, err, abdrc.ErrRecoveryEpoch)
 			}
 			require.True(t, root.recovery.InRecovery(), "a refused state leaves the root in recovery")
-			require.Equal(t, before, root.blockStore.RootAnchor(), "and its anchor unchanged")
+			require.Equal(t, before, root.blockStore().RootAnchor(), "and its anchor unchanged")
 		})
 	}
 }

@@ -31,7 +31,16 @@ m2_start_root() { # node installEpoch bootnode  (an empty install epoch starts a
   local -a bootArgs=() installArgs=()
   [ "$epoch" -lt 2 ] || installArgs=(--install-handoff-epoch "$epoch")   # the flag is refused below epoch 2: a root started at the genesis epoch (the joiner's follower) takes none
   [ -z "$boot" ] || bootArgs=(--bootnodes "$boot")   # the first root of a cold network has no bootnode, as at genesis
-  if [ "${Q3_B1:-0}" = 1 ] && [ "${P85_LANE:-0}" != 1 ]; then shardConfArgs+=(--q3-lane --genesis-identities test-nodes/genesis-identities.json); fi   # Q3 #50: the coupled runtime (verified history, install journal, V3 handoffs)
+  if [ "${Q3_B1:-0}" = 1 ] && [ "${P85_LANE:-0}" != 1 ] && [ "${VR_LANE:-0}" != 1 ]; then shardConfArgs+=(--q3-lane --genesis-identities test-nodes/genesis-identities.json); fi   # Q3 #50: the coupled runtime (verified history, install journal, V3 handoffs)
+  if [ "${VR_LANE:-0}" = 1 ]; then   # a restarted root of a VR generation keeps VR mode: the VR identities, --vr-deployment and its ureth (scripts/lib/vr-lib.sh)
+    # the flags come from the VR library through the name it exports (VR_ROOT_FLAGS_FN), as P85's do through M2_ROOT_FLAGS_FN: the other lanes
+    # that source this file (the Q4 dry run resolves every command by name) need not carry the VR library
+    declare -F "${VR_ROOT_FLAGS_FN:-}" >/dev/null || source scripts/lib/vr-lib.sh || { echo "m2_start_root: VR_LANE needs scripts/lib/vr-lib.sh" >&2; return 1; }
+    declare -F "${VR_ROOT_FLAGS_FN:-}" >/dev/null || { echo "m2_start_root: the VR lane's VR_ROOT_FLAGS_FN is not a defined function" >&2; return 1; }
+    [ -s "${VR_DIR:-test-nodes/vr}/vr-deployment.json" ] && [ -s "${VR_DIR:-test-nodes/vr}/genesis-identities.json" ] ||
+      { echo "m2_start_root: the VR generation's deployment or identities are missing: refusing to restart root $node outside VR mode" >&2; return 1; }
+    shardConfArgs+=(--q3-lane $("$VR_ROOT_FLAGS_FN" "$node" "http://127.0.0.1:$(( ${rethEthBase:-18545} + node - 1 ))"))
+  fi
   if [ "${P85_LANE:-0}" = 1 ]; then   # a restarted root of the proof-of-stake lane runs the same coupled runtime and P85 executor
     # the flags come from the P85 library (its steps file sources it), called through a name the lane exports: the other lanes that source this
     # file (the Q4 dry run resolves every command by name) need not carry the P85 library

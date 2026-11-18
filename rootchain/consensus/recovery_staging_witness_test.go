@@ -33,7 +33,7 @@ func TestRecoveryFetchesThePendingWitnessesBeforeTheStaging(t *testing.T) {
 	pending := &tip
 	state = &abdrc.StateMsg{CommittedHead: state.CommittedHead, Pending: append(append([]*drctypes.BlockData(nil), state.Pending[:len(state.Pending)-1]...), pending)}
 	head := state.CommittedHead.Block
-	require.False(t, cm.blockStore.HasWitness(hash), "premise: the root does not hold the witness")
+	require.False(t, cm.blockStore().HasWitness(hash), "premise: the root does not hold the witness")
 
 	fetched := 0
 	cm.witnesses = func(_ context.Context, h [32]byte, _ []peer.ID, _ int) ([]byte, error) {
@@ -44,7 +44,7 @@ func TestRecoveryFetchesThePendingWitnessesBeforeTheStaging(t *testing.T) {
 	errStop := errors.New("staging reached")
 	var heldAtStaging bool
 	cm.stageRecovery = func(*abdrc.StateMsg) error {
-		heldAtStaging = cm.blockStore.HasWitness(hash)
+		heldAtStaging = cm.blockStore().HasWitness(hash)
 		return errStop
 	}
 	_, err := cm.recovery.Set(&drctypes.QuorumCert{VoteInfo: &drctypes.RoundInfo{RoundNumber: pending.Round, ParentRoundNumber: pending.Round - 1, Epoch: head.Epoch}})

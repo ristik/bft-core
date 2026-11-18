@@ -89,7 +89,7 @@ func weightedRequestCertifies(t *testing.T, c *q4bLive, live []string) {
 			return true
 		}
 		for _, name := range live[:2] { // the default two ingress roots
-			si := m(name).blockStore.ShardInfo(q3fixture.PartitionID, types.ShardID{})
+			si := m(name).blockStore().ShardInfo(q3fixture.PartitionID, types.ShardID{})
 			under := uint64(0)
 			if si != nil && si.LastCR != nil {
 				under = si.LastCR.UC.UnicitySeal.RootChainRoundNumber

@@ -199,7 +199,7 @@ func runFrontierRequesterIntegration(t *testing.T, scenario string) {
 				}
 				var cut *storage.FrontierCutSnapshot
 				for {
-					cut, decodeErr = manager.blockStore.ReadFrontierCutSnapshot(request.Context.PartitionID, shard)
+					cut, decodeErr = manager.blockStore().ReadFrontierCutSnapshot(request.Context.PartitionID, shard)
 					if decodeErr == nil && cut.RootRound >= request.Floor {
 						break
 					}

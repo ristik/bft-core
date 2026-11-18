@@ -326,7 +326,7 @@ func Test_recoverState(t *testing.T) {
 				return cmPeer.pacemaker.GetCurrentRound() == cmLate.pacemaker.GetCurrentRound()
 			},
 			2*time.Second, 25*time.Millisecond, "waiting for sleepy consensus manager to catch up with the peers")
-		require.Same(t, posServices, cmLate.blockStore.PosServices(), "the recovered block store keeps the control collaborators")
+		require.Same(t, posServices, cmLate.blockStore().PosServices(), "the recovered block store keeps the control collaborators")
 
 		// now cut off one of the other peers from the network - this means that in order to make progress
 		// the late CM we wake up must participate in the consensus now. keep track of number of proposals

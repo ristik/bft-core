@@ -62,7 +62,7 @@ type vrHandoff struct {
 // EnableVRHandoff installs the VR handoff root side on a VR-mode manager: the intent provider into the executor's VR services, the commit
 // observer, and its worker (stopped with ctx). It must be called before the manager starts.
 func (x *ConsensusManager) EnableVRHandoff(ctx context.Context, cfg VRHandoffConfig) error {
-	svc := x.blockStore.PosServices()
+	svc := x.blockStore().PosServices()
 	if svc == nil || svc.Registry == nil || cfg.Intents == nil || cfg.Reader == nil || cfg.Witness == nil {
 		return fmt.Errorf("%w: the VR services, the intent provider, the VR reader and the witness builder are required", ErrVRHandoff)
 	}
@@ -79,7 +79,7 @@ func (x *ConsensusManager) EnableVRHandoff(ctx context.Context, cfg VRHandoffCon
 	svc.Registry.Intents = cfg.Intents
 	x.vr = &vrHandoff{cfg: cfg, queue: make(chan []vrschedule.CertifiedEVM, 1024),
 		observer: &vrschedule.Observer{Reader: cfg.Reader, Sources: cfg.Intents.Sources, Outputs: cfg.Intents.Outputs, Log: cfg.Log}}
-	x.blockStore.SetCommitObserver(x.vr.onCommit)
+	x.blockStore().SetCommitObserver(x.vr.onCommit)
 	go x.vr.run(ctx)
 	return nil
 }
@@ -149,7 +149,7 @@ func (x *ConsensusManager) vrDerived() (vrschedule.Derived, map[string][]byte, e
 	if x.vr == nil {
 		return vrschedule.Derived{}, nil, fmt.Errorf("%w: not enabled", ErrVRHandoff)
 	}
-	q, on, err := x.blockStore.CommittedVRQuery()
+	q, on, err := x.blockStore().CommittedVRQuery()
 	if err != nil || !on {
 		return vrschedule.Derived{}, nil, errors.Join(ErrVRHandoff, errors.New("no committed VR state"), err)
 	}
@@ -180,7 +180,7 @@ func (x *ConsensusManager) VRIntent() (VRIntentView, error) {
 		ids = append(ids, id)
 	}
 	view := uint64(0)
-	if s, ok, _ := x.blockStore.CommittedVRState(); ok && bytes.Equal(s.Backoff.Intent, d.Digest[:]) {
+	if s, ok, _ := x.blockStore().CommittedVRState(); ok && bytes.Equal(s.Backoff.Intent, d.Digest[:]) {
 		view = s.Backoff.LastView
 	}
 	order := vrhandoff.AssemblerOrder(d.Digest, ids)
@@ -215,7 +215,7 @@ func (x *ConsensusManager) SubmitVRCertificate(c vrschema.ViewCertificate) error
 		return err
 	}
 	committedView := uint64(0)
-	if s, ok, _ := x.blockStore.CommittedVRState(); ok && bytes.Equal(s.Backoff.Intent, d.Digest[:]) {
+	if s, ok, _ := x.blockStore().CommittedVRState(); ok && bytes.Equal(s.Backoff.Intent, d.Digest[:]) {
 		committedView = s.Backoff.LastView
 	}
 	p, err := vrschedule.VerifyPlan(d, keys, committedView, c)

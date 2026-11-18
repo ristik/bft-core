@@ -74,11 +74,11 @@ func newTimeoutScale(t *testing.T, n int) *timeoutScale {
 			}
 		}
 	}()
-	cm.pacemaker.Reset(ctx, cm.blockStore.GetHighQc().GetRound(), nil, nil)
+	cm.pacemaker.Reset(ctx, cm.blockStore().GetHighQc().GetRound(), nil, nil)
 	t.Cleanup(cm.pacemaker.Stop)
 	require.EqualValues(t, 2, cm.pacemaker.GetCurrentRound())
 
-	hqc := cm.blockStore.GetHighQc()
+	hqc := cm.blockStore().GetHighQc()
 	sign := func(node *testutils.TestNode, round uint64, lastTC *drctypes.TimeoutCert) *abdrc.TimeoutMsg {
 		msg := abdrc.NewTimeoutMsg(drctypes.NewTimeout(round, trust.Epoch, hqc), node.PeerConf.ID.String(), lastTC)
 		require.NoError(t, msg.Sign(node.Signer))

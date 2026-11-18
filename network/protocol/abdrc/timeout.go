@@ -84,10 +84,17 @@ func (x *TimeoutMsg) UnmarshalCBOR(data []byte) error {
 // messages with the same wire digest were decoded from the same bytes and have the same content; that is the only claim it supports, and only
 // for a message that nothing changed after decoding. The consensus loop takes it when it first handles a received message, before anything
 // else can touch the message; any later handling of the same object (a replay) encodes the message instead.
+//
+// A message without a digest is not written to: a message built in memory is shared by reference (the network loops a node's own vote
+// back as the same object, and the node keeps and resends it), and its readers must not see a write from a receiver (#1191). Only the
+// first take of a decoded message writes, and a decoded message has one owner (see the invariant on the wire field).
 func (x *TimeoutMsg) TakeWireDigest() (digest [sha256.Size]byte, ok bool) {
-	digest, ok = x.wire, x.hasWire
+	if !x.hasWire {
+		return digest, false
+	}
+	digest = x.wire
 	x.wire, x.hasWire = [sha256.Size]byte{}, false
-	return digest, ok
+	return digest, true
 }
 
 func (x *TimeoutMsg) signingScheme() uint64 {

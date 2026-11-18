@@ -115,7 +115,7 @@ func TestInProcessSwitchJoinerAcquiresAndTheSuccessorCommitsWithoutATimeout(t *t
 				require.NoError(t, r.rt.Recover(context.Background()))
 			}
 			require.EqualValues(t, 1, joiner.manager.InstalledRootEpoch())
-			_, _, held := joiner.manager.blockStore.CommittedHandoff()
+			_, _, held := joiner.manager.blockStore().CommittedHandoff()
 			require.False(t, held, "the joiner does not hold the commit")
 			if tc.staged {
 				joiner.manager.storeStagedEVM(2, evmassign.Candidate{}, c.f.Members)
@@ -478,7 +478,7 @@ func TestInProcessSwitchAbortAfterTheSwitchIsTooLate(t *testing.T) {
 // abortTargetOf is the abort target of the handoff the replica's committed head holds.
 func abortTargetOf(t *testing.T, r *q3Replica) abdrc.HandoffAbortTarget {
 	t.Helper()
-	state, err := r.manager.blockStore.GetState()
+	state, err := r.manager.blockStore().GetState()
 	require.NoError(t, err)
 	require.NotNil(t, state.CommittedHead.Control)
 	record, err := storage.DecodeOrderedHandoffRecord(state.CommittedHead.Control.RecordBytes)
