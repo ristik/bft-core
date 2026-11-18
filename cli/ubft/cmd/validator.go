@@ -13,7 +13,7 @@ package cmd
 //	rotate   VR.proposeBinding: new node keys or payee, effective at the next boundary
 //
 // Every state-changing command shows a decoded, simulated preview and takes --dry-run. Only public JSON-RPC is used; nothing here needs
-// an operator endpoint of a node. Governance (Admit, ConfirmExit, Remove) is the Foundation multisig's and is not here.
+// an operator endpoint of a node. Governance (Admit, ConfirmExit, Remove) is the Foundation multisig's: `ubft governance`.
 
 import (
 	"bytes"

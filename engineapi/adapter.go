@@ -52,8 +52,8 @@ var (
 // everything else (types.go, client.go, params.go, codec.go) is pure
 // Engine-API-facing machinery Adapter composes.
 type Adapter struct {
-	// unicityPrecompiles: the execution profile check expects the B1/B2 native precompiles (ExpectUnicityPrecompiles).
-	unicityPrecompiles bool
+	// unicityPrecompiles: the native precompiles of the B1 profile's execution revision the profile check expects (ExpectUnicityPrecompiles); nil means none.
+	unicityPrecompiles map[string]string
 	engine             *Client
 	eth                *EthClient
 	log                *slog.Logger
