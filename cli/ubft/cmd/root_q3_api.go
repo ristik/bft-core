@@ -76,8 +76,11 @@ func (a rootQ3API) register(mux *http.ServeMux) {
 			}
 		}
 		pdr, err := a.ShardConfig(types.PartitionID(in.Partition), shard, in.Epoch)
-		if err != nil || pdr == nil {
-			return nil, fmt.Errorf("no configuration for partition %d shard epoch %d: %v", in.Partition, in.Epoch, err)
+		if err != nil {
+			return nil, q3ServerError{fmt.Errorf("reading the configuration of partition %d shard epoch %d: %w", in.Partition, in.Epoch, err)}
+		}
+		if pdr == nil { // a successful lookup that found nothing: the only 422 of this route besides invalid input
+			return nil, fmt.Errorf("no configuration for partition %d shard epoch %d", in.Partition, in.Epoch)
 		}
 		return pdr, nil
 	}))
@@ -198,6 +201,11 @@ func (a rootQ3API) signers() (q3SignersResponse, error) {
 	return out, nil
 }
 
+// q3ServerError marks a failure of the read itself (a store error), as opposed to invalid input or a clean miss (both 422).
+type q3ServerError struct{ error }
+
+func (e q3ServerError) Unwrap() error { return e.error }
+
 // q3Endpoint wraps a read function as a local-operator JSON endpoint.
 func q3Endpoint(f func(ctx context.Context, body json.RawMessage) (any, error)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -210,7 +218,11 @@ func q3Endpoint(f func(ctx context.Context, body json.RawMessage) (any, error)) 
 		}
 		out, err := f(r.Context(), body)
 		if err != nil {
-			http.Error(w, fmt.Sprint(err), http.StatusUnprocessableEntity)
+			status := http.StatusUnprocessableEntity
+			if errors.As(err, new(q3ServerError)) {
+				status = http.StatusInternalServerError // the read itself failed: a reader retries, it does not conclude the answer is "none"
+			}
+			http.Error(w, fmt.Sprint(err), status)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")

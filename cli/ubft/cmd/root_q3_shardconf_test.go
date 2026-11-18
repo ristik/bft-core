@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -110,8 +111,25 @@ func TestShardConfEndpointIsShardAwareAndSourceGuarded(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
 	require.True(t, got.ShardID.Equal(right))
 	require.Equal(t, http.StatusUnprocessableEntity, ask("127.0.0.1:1", q3ShardConfRequest{Partition: 8, Epoch: 1, Shard: string(rightText)}).Code, "the sibling has no epoch 1")
+	require.Equal(t, http.StatusUnprocessableEntity, ask("127.0.0.1:1", q3ShardConfRequest{Partition: 8, Epoch: 2, Shard: string(leftText)}).Code, "the next epoch is a clean miss")
+	require.Equal(t, http.StatusUnprocessableEntity, ask("127.0.0.1:1", q3ShardConfRequest{Partition: 8, Epoch: 99, Shard: string(leftText)}).Code)
 	require.Equal(t, http.StatusUnprocessableEntity, ask("127.0.0.1:1", q3ShardConfRequest{Partition: 8, Epoch: 0}).Code, "the unsplit shard is not this partition's")
 	require.Equal(t, http.StatusUnprocessableEntity, ask("127.0.0.1:1", q3ShardConfRequest{Partition: 8, Epoch: 0, Shard: "zz"}).Code)
 	require.Equal(t, http.StatusUnprocessableEntity, ask("127.0.0.1:1", q3ShardConfRequest{Partition: 8, Epoch: 0, Shard: strings.Repeat("a", maxShardTextLen+1)}).Code, "the shard text is bounded")
 	require.Equal(t, http.StatusForbidden, ask("203.0.113.9:4000", q3ShardConfRequest{Partition: 8, Epoch: 1, Shard: string(leftText)}).Code, "a peer that is not an operator source")
+}
+
+// 422 on this route is a successful lookup that found nothing (or invalid input); a failing store is a server error, so a reader retries
+// instead of concluding that the configuration does not exist.
+func TestShardConfEndpointReportsAStoreFailureAsAServerError(t *testing.T) {
+	failing := rootQ3API{ShardConfig: func(types.PartitionID, types.ShardID, uint64) (*types.PartitionDescriptionRecord, error) {
+		return nil, errors.New("bolt: database not open")
+	}}
+	rec := callQ3(t, failing, "/api/v1/q3/shard-conf", "127.0.0.1:1", q3ShardConfRequest{Partition: 8, Epoch: 1})
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	clean := rootQ3API{ShardConfig: func(types.PartitionID, types.ShardID, uint64) (*types.PartitionDescriptionRecord, error) {
+		return nil, nil
+	}}
+	require.Equal(t, http.StatusUnprocessableEntity, callQ3(t, clean, "/api/v1/q3/shard-conf", "127.0.0.1:1", q3ShardConfRequest{Partition: 8, Epoch: 1}).Code)
+	require.Equal(t, http.StatusUnprocessableEntity, callQ3(t, clean, "/api/v1/q3/shard-conf", "127.0.0.1:1", q3ShardConfRequest{Partition: 8, Epoch: 1, Shard: "zz"}).Code, "invalid input")
 }
