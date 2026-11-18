@@ -2,7 +2,6 @@ package vrschedule
 
 import (
 	"context"
-	"sort"
 	"sync"
 	"time"
 
@@ -10,18 +9,23 @@ import (
 )
 
 // The verification service (design section 5.3.4, premise PV in 8.3). Every admitted message is verified off the service's lock by one
-// worker, served round-robin by sender with a sender whose signed message failed verification seated last for the rest of the intent. The
-// queue is bounded to (1 + n_s) x 4 views x 2 intents entries (n_s = MAX_COMMITTEE while no intent is derived here). Admission is fair: at
-// the bound a sender holding fewer messages than the longest queue displaces that queue's newest message, so a few admitted Byzantine peers
-// cannot starve honest senders (review #1188 B3); a sender holds at most MaxQueuedPerPeer.
+// worker, in bounded service rounds: a round serves every sender with a queued message once, a sender whose signed message failed
+// verification after the others (seated last for the rest of the intent), so no sender waits behind another's backlog for more than a round
+// (astra review of #1188, P2). The queue is bounded to (1 + n_s) x 4 views x 2 intents entries (n_s = MAX_COMMITTEE while no intent is
+// derived here). Admission is fair: at the bound a sender holding fewer messages than the longest queue displaces that queue's newest
+// message, so a few admitted Byzantine peers cannot starve honest senders (review #1188 B3); a sender holds at most MaxQueuedPerPeer.
 //
 // PiMax is a cost bound, not a wall-clock verdict (review #1188 B4): every message's verification work is bounded before it is verified
 // (the frame size, at most SupportRules commitments in a readiness, one conflict per signer and view, one replacement per sender), and a
-// verification's result is always kept; one that takes longer than PiMax on the wall clock is only logged.
+// verification's result is always kept; one that takes longer than PiMax on the wall clock is only logged. PiMax covers one service: the
+// message's verification and the work its admission triggers (this root's assembly, a complete set's certificate check), each at most once
+// per view. That it holds on the host is an operating premise, measured, not enforced.
 //
-// Q_max, the premise PV's bound, follows from these admission bounds: with B = (1 + n_s) * 4 * 2 queued messages, PiMax each, and one
-// worker, a message admitted behind a full queue is verified within B * PiMax of its arrival (QMax). At n_s = 16 and PiMax = 100 ms that
-// is 13.6 s, well inside the 4 T >= 40 s the adequacy condition D + delta + Q_max < 4 T needs at T(0, 0) = 10 s.
+// Q_max, the premise PV's bound, follows from the scheduler: a message that arrives as the j-th queued message of its sender is served
+// within the current round and j more, each serving at most S senders, so within (j + 1) * S * PiMax of its arrival (QMax), whatever the
+// other senders keep sending. S is at most the admitted senders: the incumbents, the successors' roots and K's roots, 3 * MAX_COMMITTEE = 48.
+// An honest sender has at most 2 messages queued at a root (a proof and a readiness, or an assembly): at S = 48 and PiMax = 100 ms that is
+// 14.4 s, inside the 4 T >= 40 s the adequacy condition D + delta + Q_max < 4 T needs at T(0, 0) = 10 s.
 
 // DefaultPiMax is the default verification cost bound per message.
 const DefaultPiMax = 100 * time.Millisecond
@@ -29,9 +33,10 @@ const DefaultPiMax = 100 * time.Millisecond
 // QueueBound is (1 + n_s) * 4 views * 2 intents.
 func QueueBound(successors int) int { return (1 + successors) * RetainedViews * 2 }
 
-// QMax is the queueing bound of premise PV for the admission bounds: a full queue served by one worker at PiMax each.
-func QMax(successors int, piMax time.Duration) time.Duration {
-	return time.Duration(QueueBound(successors)) * piMax
+// QMax is the queueing bound of premise PV for a message that arrives as the j-th queued message of its sender, with at most senders
+// senders queued: (j + 1) service rounds of at most senders services, PiMax each.
+func QMax(senders, j int, piMax time.Duration) time.Duration {
+	return time.Duration((j+1)*senders) * piMax
 }
 
 type queued struct {
@@ -50,8 +55,8 @@ type Queue struct {
 
 	mu    sync.Mutex
 	per   map[string][]queued
-	ring  []string
-	next  int
+	ring  []string // the senders with queued messages, in arrival order
+	round []string // the senders still to serve in the current round
 	n     int
 	ready chan struct{}
 }
@@ -122,41 +127,53 @@ func (q *Queue) Len() int {
 	return q.n
 }
 
-// pop takes the next message round-robin by sender, the senders the service seated last after every other.
+// pop takes the next message in bounded service rounds (astra review of #1188, P2): a round serves every sender that had a queued message
+// when it began exactly once, the senders the service seated last after the others, and a sender that arrives during a round waits for the
+// next one. So a seated-last sender is served within one round of any length the other senders keep their queues at, never starved.
 func (q *Queue) pop() (queued, bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if q.n == 0 {
 		return queued{}, false
 	}
-	last := q.svc.lastSeats()
-	order := make([]int, 0, len(q.ring))
-	for i := range q.ring {
-		order = append(order, (q.next+i)%len(q.ring))
-	}
-	sort.SliceStable(order, func(a, b int) bool { return !last[q.ring[order[a]]] && last[q.ring[order[b]]] })
-	for _, i := range order {
-		sender := q.ring[i]
-		if len(q.per[sender]) == 0 {
-			continue
-		}
-		m := q.per[sender][0]
-		q.per[sender] = q.per[sender][1:]
-		q.n--
-		if len(q.per[sender]) == 0 {
-			// the sender after it moves into its place: serve it next (review #1188 B11)
-			delete(q.per, sender)
-			q.ring = append(q.ring[:i], q.ring[i+1:]...)
-			q.next = 0
-			if len(q.ring) > 0 {
-				q.next = i % len(q.ring)
+	for {
+		for len(q.round) > 0 {
+			sender := q.round[0]
+			q.round = q.round[1:]
+			if len(q.per[sender]) == 0 {
+				continue // displaced meanwhile
 			}
-		} else {
-			q.next = (i + 1) % len(q.ring)
+			m := q.per[sender][0]
+			q.per[sender] = q.per[sender][1:]
+			q.n--
+			if len(q.per[sender]) == 0 {
+				delete(q.per, sender)
+				for i, s := range q.ring {
+					if s == sender {
+						q.ring = append(q.ring[:i], q.ring[i+1:]...)
+						break
+					}
+				}
+			}
+			return m, true
 		}
-		return m, true
+		q.newRound()
 	}
-	return queued{}, false
+}
+
+// newRound orders the senders with queued messages for one service round: in their arrival order, the senders seated last after the
+// others.
+func (q *Queue) newRound() {
+	last := q.svc.lastSeats()
+	var first, later []string
+	for _, s := range q.ring {
+		if last[s] {
+			later = append(later, s)
+		} else {
+			first = append(first, s)
+		}
+	}
+	q.round = append(first, later...)
 }
 
 // Step verifies one queued message; false when the queue is empty.

@@ -327,9 +327,54 @@ func TestTheCertificateStageRechecksTheSupport(t *testing.T) {
 	require.False(t, ok)
 }
 
-// A change of the committed schedule or support table under a live intent restarts the intent's protocol state: no verdict of another
-// basis survives (review #1188 r2).
-func TestAScheduleChangeRestartsTheIntent(t *testing.T) {
+// astra's op-4 reproduction (review of #1188, P1): an ordinary RuleSupport control, support for a scheduled future rule by a K member, changes
+// the committed support table under a live intent. The intent, its view and everything verified for it stay at every root: the proofs, the
+// assembly, the readiness, I-RET and the plan; a replacement commitment changes the table again, with the same result.
+func TestASupportUpdateKeepsTheLiveIntent(t *testing.T) {
+	w := newWorld(t)
+	rule, release := vrschema.Word{0x51}, vrschema.Word{0x52}
+	sch := []vrschema.Activation{{RuleID: rule, ReleaseDigest: release, RootEpoch: 100, State: vrschema.ActActive, ChangeID: 1}}
+	w.RC.Fold.Schedule = sch
+	w.in, w.d = w.Intent()
+	c := w.committed(0)
+	c.Schedule = sch
+	roots := []*Service{w.service("x"), w.service("y")}
+	for _, s := range roots {
+		s.Update(c)
+		offerAll(t, s, w.messages(0))
+		_, ok := s.Plan()
+		require.True(t, ok)
+	}
+	member := w.K[0]
+	signer := w.ByStaking(member.StakingID).RK.Signer
+	for _, rel := range []vrschema.Word{release, {0x53}} {
+		cm, err := vrhandoff.SignCommitment(w.in.Network, member, rule, rel, signer)
+		require.NoError(t, err)
+		before := supportBasis(sch, c.Table)
+		c.Table, err = vradmit.ApplyRuleSupport(c.Table, w.in.Network, []vrschema.SupportCommitment{cm}, w.K, sch)
+		require.NoError(t, err, "a valid op-4 support update for a future rule")
+		require.NotEqual(t, before, supportBasis(sch, c.Table))
+		for _, s := range roots {
+			s.Update(c)
+			digest, view, complete, ok := s.Current()
+			require.True(t, ok)
+			require.Equal(t, w.d, digest)
+			require.Zero(t, view)
+			require.True(t, complete, "I-RET is kept")
+			stage, ok := s.Stage(w.d, 0)
+			require.True(t, ok)
+			require.Len(t, stage.PoPs, len(w.J))
+			require.Len(t, stage.Assemblies, 1)
+			require.Len(t, stage.Readiness, len(w.J))
+			_, ok = s.Plan()
+			require.True(t, ok, "the plan holds over the new table")
+		}
+	}
+}
+
+// A changed basis under which the held certificate no longer meets gate (a) releases it, and only it: the intent's proofs, assembly and
+// readiness stay, and a later complete set that meets the new basis may be held.
+func TestABasisTheHeldCertificateFailsReleasesOnlyIt(t *testing.T) {
 	w := newWorld(t)
 	s := w.service("x")
 	s.Update(w.committed(0))
@@ -341,12 +386,97 @@ func TestAScheduleChangeRestartsTheIntent(t *testing.T) {
 	s.Update(c)
 	intent, _, complete, ok := s.Current()
 	require.True(t, ok)
-	require.Equal(t, w.d, intent, "the same intent")
-	require.False(t, complete, "its certificate, admitted under the old schedule, is gone")
+	require.Equal(t, w.d, intent, "the same live intent")
+	require.False(t, complete, "the certificate lacks the support now required")
 	set, _ := s.Stage(w.d, 0)
-	require.Empty(t, set.PoPs, "its state restarted")
+	require.Len(t, set.PoPs, len(w.J), "its proofs stay")
+	require.Len(t, set.Assemblies, 1)
+	require.Len(t, set.Readiness, len(w.J))
 	o, _, _ := s.Offer("peer", w.messages(0)[0])
-	require.Equal(t, Retained, o, "the intent is current again, not dead")
+	require.Equal(t, Duplicate, o, "a sticky proof stays sticky")
+}
+
+// astra's starvation reproduction (review of #1188, P2): a seated-last sender's valid replacement is served within one round while another
+// sender keeps its queue replenished with duplicates.
+func TestASeatedLastReplacementIsServedWithinARound(t *testing.T) {
+	w := newWorld(t)
+	s := w.service("x")
+	s.Update(w.committed(0))
+	p := w.PoPs(w.in)[0]
+	bad := p
+	bad.PoP.Signature = append([]byte(nil), p.PoP.Signature...)
+	bad.PoP.Signature[3] ^= 1
+	o, _, _ := s.Offer("recovering-peer", Message{PoP: &bad})
+	require.Equal(t, Refused, o)
+	q := NewQueue(s, 0)
+	require.True(t, q.Submit("recovering-peer", Message{PoP: &p}))
+	other := w.PoPs(w.in)[1]
+	o, _, _ = s.Offer("other-peer", Message{PoP: &other})
+	require.Equal(t, Retained, o)
+	held := func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		_, ok := s.cur.pops[p.EVMNodeID]
+		return ok
+	}
+	steps := 0
+	for ; steps < 1000 && !held(); steps++ {
+		require.True(t, q.Submit("other-peer", Message{PoP: &other}))
+		require.True(t, q.Step())
+	}
+	require.True(t, held(), "the replacement is retained")
+	require.LessOrEqual(t, steps, 2, "within one round of two senders")
+}
+
+// Continuously replenished arrivals: with S senders each keeping its queue full, a message that arrives as its sender's j-th queued message
+// is served within (j + 1) * S services (QMax's bound), seated-last senders included.
+func TestServiceRoundsBoundTheWaitUnderReplenishedArrivals(t *testing.T) {
+	w := newWorld(t)
+	s := w.service("x")
+	s.Update(w.committed(0))
+	s.mu.Lock()
+	s.lastSeat["late-1"], s.lastSeat["late-2"] = true, true
+	s.mu.Unlock()
+	q := NewQueue(s, 0)
+	q.bound = func() int { return 1 << 20 }
+	senders := []string{"a", "b", "c", "d", "late-1", "late-2"}
+	const depth = 3
+	type tagged struct {
+		sender string
+		at     int
+	}
+	var pending []tagged
+	p := w.PoPs(w.in)[0]
+	submit := func(sender string, now int) {
+		require.True(t, q.Submit(sender, Message{PoP: &p}))
+		pending = append(pending, tagged{sender, now})
+	}
+	for _, x := range senders {
+		for i := 0; i < depth; i++ {
+			submit(x, 0)
+		}
+	}
+	served := map[string]int{}
+	worst := 0
+	for step := 1; step <= 600; step++ {
+		m, ok := q.pop()
+		require.True(t, ok)
+		// the sender's oldest outstanding message is the one served (FIFO per sender)
+		for i, tg := range pending {
+			if tg.sender == m.sender {
+				worst = max(worst, step-tg.at)
+				pending = append(pending[:i], pending[i+1:]...)
+				break
+			}
+		}
+		served[m.sender]++
+		submit(m.sender, step) // every sender keeps its queue at depth
+	}
+	bound := (depth + 1) * len(senders)
+	require.LessOrEqual(t, worst, bound, "no message waits longer than (j + 1) * S services")
+	for _, x := range senders {
+		require.InDelta(t, 100, served[x], 1, "every sender, seated last or not, is served once per round")
+	}
 }
 
 // B11: when the served sender's queue empties, the next sender is served next, not skipped.

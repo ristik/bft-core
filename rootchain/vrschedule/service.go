@@ -151,9 +151,12 @@ type viewState struct {
 	// completeness and carries the support commitments the K-support gate (7.3 b) reads from this intent's K-member readiness
 	kready    map[string]vrhandoff.Readiness
 	encodings map[string][]byte
-	refused   map[string]int          // replacements spent by sender
-	evidence  map[string]Equivocation // the one conflict of each equivocating signer in this view
-	tried     bool                    // the complete set was checked as a certificate
+	refused   map[string]int // replacements spent by sender
+	// supportWait counts readiness refused by sender only for lacking the support the gate needs: bounded like refused, and reset when the
+	// support basis changes (the same readiness may then be admitted)
+	supportWait map[string]int
+	evidence    map[string]Equivocation // the one conflict of each equivocating signer in this view
+	tried       bool                    // the complete set was checked as a certificate
 }
 
 type intentState struct {
@@ -281,12 +284,7 @@ func (s *Service) updateLocked(c Committed) followUp {
 	}
 	basis := supportBasis(c.Schedule, c.Table)
 	if s.cur != nil && s.cur.digest == c.Derived.Digest && s.cur.basis != basis {
-		// a readiness's support verdict and I-RET's gate (a) rest on the committed schedule and support table, which the intent digest does
-		// not cover: they are fixed for an intent's life (they change at epoch installs, which kill the intent). Should they change anyway,
-		// the intent's protocol state restarts rather than keep verdicts of another basis (review #1188 r2).
-		s.log().Warn("VR handoff: the committed schedule or support table changed under the intent; its protocol state restarts",
-			"intent", fmt.Sprintf("%x", s.cur.digest[:8]))
-		s.cur = nil
+		s.rebaseLocked(s.cur, basis)
 	}
 	if s.cur == nil || s.cur.digest != c.Derived.Digest {
 		if s.cur != nil {
@@ -341,11 +339,39 @@ func (s *Service) pruneBuffered() {
 	}
 }
 
+// rebaseLocked carries a live intent over a change of the committed support table or schedule (astra review of #1188, P1): a RuleSupport
+// control adds or replaces table entries under a live intent, which stays the same intent. Everything intent-bound stays (the sticky proofs,
+// the assemblies, every retained readiness, the evidence, the replacement accounting); only the verdicts that rest on the support basis are
+// judged again: the held certificate is kept unless gate (a) of 7.3 no longer holds for one of its successors under the new basis, the
+// complete sets of the retained views are checked again, and readiness refused only for missing support may be sent again. Gate (b) is
+// Plan's, judged on every call.
+func (s *Service) rebaseLocked(st *intentState, basis [32]byte) {
+	st.basis = basis
+	for _, vs := range st.views {
+		vs.tried = false
+		vs.supportWait = map[string]int{}
+	}
+	if st.iret == nil {
+		return
+	}
+	for i, r := range st.iret.Certificate.Readiness {
+		if i >= len(st.successors) {
+			break
+		}
+		if err := vradmit.VerifySuccessorSupport(s.sch, st.d.RootEpoch+1, st.d.Intent.Network, s.tab, st.successors[i], r.Commitments); err != nil {
+			s.log().Warn("VR handoff: the held certificate lacks support the changed basis requires; a later complete set may replace it",
+				"intent", fmt.Sprintf("%x", st.digest[:8]), "error", err)
+			st.iret = nil
+			return
+		}
+	}
+}
+
 // supportBasis is the digest of the committed schedule and support table.
 func supportBasis(sch []vrschema.Activation, tab vradmit.SupportTable) [32]byte {
 	b, err := types.Cbor.Marshal([]any{sch, tab.Entries})
 	if err != nil {
-		return [32]byte{0xff} // never equal to a real basis's digest twice in a row by accident: the state restarts
+		return [32]byte{0xff} // the verdicts are judged again
 	}
 	return sha256.Sum256(b)
 }
@@ -527,7 +553,7 @@ func (s *Service) prepareLocked(sender string, m Message) Job {
 			j.Outcome = s.buffer(sender, m) // verified once the view's assembly is held
 			return j
 		}
-		if vs.refused[sender] > MaxReplacements {
+		if vs.refused[sender] > MaxReplacements || vs.supportWait[sender] > MaxReplacements {
 			j.Outcome = Dropped
 			return j
 		}
@@ -691,7 +717,7 @@ func (st *intentState) viewOf(v uint64) *viewState {
 	vs := st.views[v]
 	if vs == nil {
 		vs = &viewState{readiness: map[string]vrhandoff.Readiness{}, kready: map[string]vrhandoff.Readiness{}, encodings: map[string][]byte{}, refused: map[string]int{},
-			evidence: map[string]Equivocation{}}
+			supportWait: map[string]int{}, evidence: map[string]Equivocation{}}
 		st.views[v] = vs
 	}
 	return vs
@@ -700,10 +726,12 @@ func (st *intentState) viewOf(v uint64) *viewState {
 // refuse counts a failed message against its sender's replacement allowance for the view and seats the sender last for the intent; a
 // readiness that only lacks the support the gate needs keeps its sender's seat (its member has not upgraded yet).
 func (s *Service) refuse(vs *viewState, sender string, err error) (Outcome, error) {
-	vs.refused[sender]++
-	if !errors.Is(err, vradmit.ErrSupportWait) {
-		s.lastSeat[sender] = true
+	if errors.Is(err, vradmit.ErrSupportWait) {
+		vs.supportWait[sender]++
+		return Refused, err
 	}
+	vs.refused[sender]++
+	s.lastSeat[sender] = true
 	return Refused, err
 }
 
@@ -1156,7 +1184,8 @@ func (s *Service) kReadinessLocked(st *intentState) []vrschema.Readiness {
 	}
 	var out []vrschema.Readiness
 	for id, r := range byRoot {
-		if inK[id] && len(r.Commitments) > 0 {
+		// a commitment of a rule the committed schedule no longer holds (the basis changed under the intent) would invalidate the Freeze
+		if inK[id] && len(r.Commitments) > 0 && vradmit.CommitmentsInScope(s.sch, st.d.Intent.Network, r.Commitments) == nil {
 			out = append(out, r)
 		}
 	}

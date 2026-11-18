@@ -326,7 +326,7 @@ func TestTheVerificationQueue(t *testing.T) {
 	s := w.service("x")
 	s.Update(w.committed(0))
 	require.Equal(t, 40, QueueBound(4))
-	require.Equal(t, 40*100*time.Millisecond, QMax(4, 100*time.Millisecond))
+	require.Equal(t, 14400*time.Millisecond, QMax(3*vrschema.MaxCommittee, 2, 100*time.Millisecond), "the honest bound at S = 48")
 	q := NewQueue(s, 100*time.Millisecond)
 	var order []string
 	q.Delivered = func(Outcome, []Message, error) {}
