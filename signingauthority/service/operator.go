@@ -180,6 +180,34 @@ func (o *OperatorClient) SignDelegationPossession(ctx context.Context, req signi
 	return o.ex.call(ctx, opSignDelegationPossession, payload)
 }
 
+// SignRegistration asks the authority for the EVM possession signature of a VR registration or binding proposal (see
+// signingauthority.SignRegistration). It carries the typed fields, never a digest; the authority computes the digest from its pinned
+// deployment.
+func (o *OperatorClient) SignRegistration(ctx context.Context, req signingauthority.RegistrationRequest) ([]byte, error) {
+	r := req.Registration
+	payload, err := types.Cbor.Marshal(registrationPayload{Domain: req.Domain, Owner: req.Owner[:], ID: req.ID, RootNodeID: r.RootNodeID, RootKey: r.RootKey,
+		EVMNodeID: r.EVMNodeID, EVMKey: r.EVMKey, Payee: r.Payee[:], Nonce: r.Nonce})
+	if err != nil {
+		return nil, err
+	}
+	return o.ex.call(ctx, opSignRegistration, payload)
+}
+
+// ReloadRegistrationPolicy replaces the authorized registrations of the running authority (see
+// signingauthority.ReloadRegistrationAuthorizations); the deployment pin, the key and the signing record are untouched.
+func (o *OperatorClient) ReloadRegistrationPolicy(ctx context.Context, expect signingauthority.RegistrationDeployment, list []signingauthority.RegistrationAuthorization) error {
+	w := registrationPolicyPayload{Network: expect.Network[:], ChainID: expect.ChainID[:], Registry: expect.Registry[:], Authorized: []authorizedRegistration{}}
+	for _, x := range list {
+		w.Authorized = append(w.Authorized, authorizedRegistration{Domain: x.Domain, Owner: x.Owner[:], ID: x.ID, RootNodeID: x.RootNodeID, RootKey: x.RootKey, Payee: x.Payee[:]})
+	}
+	payload, err := types.Cbor.Marshal(w)
+	if err != nil {
+		return err
+	}
+	_, err = o.ex.call(ctx, opReloadRegistrationPolicy, payload)
+	return err
+}
+
 // Status reports what the authority is holding.
 func (o *OperatorClient) Status(ctx context.Context) (signingauthority.Status, error) {
 	answer, err := o.ex.call(ctx, opStatus, nil)
