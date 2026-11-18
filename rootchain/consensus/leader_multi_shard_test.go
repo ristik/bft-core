@@ -146,7 +146,7 @@ func signedShardRequest(t *testing.T, r *q3Replica, s liveShard, view *storage.R
 }
 
 func shardHash(m *ConsensusManager, s liveShard) []byte {
-	si := m.blockStore.ShardInfo(s.partition, s.shard)
+	si := m.blockStore().ShardInfo(s.partition, s.shard)
 	if si == nil || si.LastCR == nil {
 		return nil
 	}
@@ -306,7 +306,7 @@ func TestGate9RescueTraceWithRealShards(t *testing.T) {
 		return err == nil
 	}
 	seal := func(p liveShard) uint64 {
-		si := m(watch).blockStore.ShardInfo(p.partition, p.shard)
+		si := m(watch).blockStore().ShardInfo(p.partition, p.shard)
 		if si == nil || si.LastCR == nil {
 			return 0
 		}
@@ -593,7 +593,7 @@ func TestGate9ThreeEnvelopesInOneProposal(t *testing.T) {
 	watch := all[0]
 	m := c.nodes[c.idx(watch)].r.manager
 	seal := func(p liveShard) uint64 {
-		si := m.blockStore.ShardInfo(p.partition, p.shard)
+		si := m.blockStore().ShardInfo(p.partition, p.shard)
 		if si == nil || si.LastCR == nil {
 			return 0
 		}

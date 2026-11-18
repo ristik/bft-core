@@ -532,12 +532,12 @@ func (c *skewedCluster) manager(i int) *ConsensusManager {
 
 // highQCRound is the round of the highest QC the node has formed or received.
 func (c *skewedCluster) highQCRound(i int) uint64 {
-	return c.manager(i).blockStore.GetHighQc().GetRound()
+	return c.manager(i).blockStore().GetHighQc().GetRound()
 }
 
 // committedRound is the round of the node's latest committed block.
 func (c *skewedCluster) committedRound(i int) uint64 {
-	state, err := c.manager(i).blockStore.GetState()
+	state, err := c.manager(i).blockStore().GetState()
 	if err != nil {
 		return 0
 	}
@@ -592,7 +592,7 @@ func TestSkewedWeightHeavyPlusOneLightDependsOnThePlaceInTheSchedule(t *testing.
 		var tc *drctypes.TimeoutCert
 		require.Eventually(t, func() bool {
 			var err error
-			tc, err = c.manager(0).blockStore.GetLastTC()
+			tc, err = c.manager(0).blockStore().GetLastTC()
 			return err == nil && tc != nil
 		}, 10*time.Second, 100*time.Millisecond, "a timeout certificate formed (the offline members' rounds time out)")
 		require.Len(t, tc.Signatures, 2, "the TC is signed by exactly the two online members")
@@ -616,7 +616,7 @@ func TestSkewedWeightHeavyPlusOneLightDependsOnThePlaceInTheSchedule(t *testing.
 		require.Eventually(t, func() bool { return c.manager(0).pacemaker.GetCurrentRound() >= 6 }, 30*time.Second, 100*time.Millisecond,
 			"the pacemaker advances on TCs formed by weight 7")
 		require.LessOrEqual(t, c.highQCRound(0), uint64(1), "no QC beyond genesis: the leaders of two consecutive rounds are never both online")
-		tc, err := c.manager(0).blockStore.GetLastTC()
+		tc, err := c.manager(0).blockStore().GetLastTC()
 		require.NoError(t, err)
 		require.NotNil(t, tc)
 		require.Len(t, tc.Signatures, 2)
@@ -654,7 +654,7 @@ func TestSkewedWeightBelowThresholdMakesNoProgress(t *testing.T) {
 			for _, i := range online {
 				require.LessOrEqual(t, c.highQCRound(i), uint64(1), "no QC beyond the genesis QC")
 				require.EqualValues(t, 2, c.manager(i).pacemaker.GetCurrentRound(), "the round never advances: no QC and no TC")
-				tc, err := c.manager(i).blockStore.GetLastTC()
+				tc, err := c.manager(i).blockStore().GetLastTC()
 				require.NoError(t, err)
 				require.Nil(t, tc, "no timeout certificate forms below the threshold weight")
 				require.LessOrEqual(t, c.committedRound(i), uint64(1))
@@ -704,7 +704,7 @@ func TestSkewedWeightRestartMidRoundKeepsOneDecisionAndNeverDoubleSigns(t *testi
 	restarted := c.manager(victim)
 	require.GreaterOrEqual(t, restarted.safety.storage.GetHighestVotedRound(), highWater, "the restarted node reads the durable decision")
 	// a second statement for a round already voted is refused by the restarted safety module
-	parent, err := restarted.blockStore.Block(highWater - 1)
+	parent, err := restarted.blockStore().Block(highWater - 1)
 	require.NoError(t, err)
 	conflicting := &drctypes.BlockData{Round: highWater, Epoch: 1, Timestamp: parent.BlockData.Timestamp + 1, Qc: &drctypes.QuorumCert{VoteInfo: &drctypes.RoundInfo{RoundNumber: highWater - 1}}}
 	_, err = restarted.safety.MakeVote(conflicting, bytes.Repeat([]byte{0xee}, 32), nil, nil)
@@ -810,7 +810,7 @@ func TestSkewedWeightEpochBoundaryScheme1To2(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Run("epoch 2 QCs are paired-signature QCs counted at unit weight", func(t *testing.T) {
-		qc := hr.manager.blockStore.GetHighQc()
+		qc := hr.manager.blockStore().GetHighQc()
 		require.EqualValues(t, 2, qc.VoteInfo.Epoch)
 		require.EqualValues(t, votesig.SchemeDomainBound, qc.Scheme)
 		require.NoError(t, qc.VerifyWith(store))
@@ -970,8 +970,10 @@ func TestSkewedWeightScheme2TCFormsAfterTwoRestarts(t *testing.T) {
 		r.manager.safety = restarted
 		// the block store is over the reopened file too: a vote is stored as the last vote before it is sent, and one that cannot be
 		// stored is not sent (bft-core#585), so a manager left on the closed handle would send nothing
-		r.manager.blockStore, err = storage.New(crypto.SHA256, reopened, r.manager.orchestration, r.manager.log, storage.ProfileHandoff)
+		var newStore *storage.BlockStore
+		newStore, err = storage.New(crypto.SHA256, reopened, r.manager.orchestration, r.manager.log, storage.ProfileHandoff)
 		require.NoError(t, err)
+		r.manager.storeRef.Store(newStore)
 		r.manager.pacemaker.timeoutVote = nil
 		r.manager.epochAnchor = nil // what it would build now is not the statement it recorded
 		r.net.ResetSentMessages(network.ProtocolRootTimeout)

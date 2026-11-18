@@ -119,7 +119,7 @@ func newOperatorAssignmentFixture(t *testing.T, extra ...*types.PartitionDescrip
 	require.NoError(t, err)
 	next.RootNodes[3] = &types.NodeInfo{NodeID: replacement.PeerConf.ID.String(), SigKey: rkey, Stake: 1}
 	f.next = &next
-	f.state, err = f.cm.blockStore.GetState()
+	f.state, err = f.cm.blockStore().GetState()
 	require.NoError(t, err)
 	f.state.CommittedHead.ShardInfo = []abdrc.ShardInfo{{Partition: 8, IR: &types.InputRecord{BlockHash: f.parent}}}
 	f.predecessor, err = f.cm.handoffPredecessor()

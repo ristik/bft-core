@@ -117,7 +117,7 @@ func fiveOnLibp2p(t *testing.T, names []string, deadAt int) {
 		flows[i] = &fiveFlow{s: s, seen: len(transport.receipts(s, 0))}
 	}
 	lastCR := func(f *fiveFlow) (uint64, []byte) {
-		si := m(watch).blockStore.ShardInfo(f.s.partition, f.s.shard)
+		si := m(watch).blockStore().ShardInfo(f.s.partition, f.s.shard)
 		if si == nil || si.LastCR == nil {
 			return 0, nil
 		}

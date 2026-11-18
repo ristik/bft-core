@@ -99,7 +99,7 @@ func (x *ConsensusManager) serveCut(ctx context.Context, request frontiertranspo
 	}
 	var committed uint64
 	for {
-		cut, readErr := x.blockStore.ReadFrontierCutSnapshot(request.Context.PartitionID, shard)
+		cut, readErr := x.blockStore().ReadFrontierCutSnapshot(request.Context.PartitionID, shard)
 		if readErr == nil {
 			committed = cut.RootRound
 		}

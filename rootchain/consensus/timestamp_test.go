@@ -180,8 +180,8 @@ func TestManagerTimestampBuilderAndEarlyRefusal(t *testing.T) {
 	// to queue even when a mutation lets invalid proposals reach processQC.
 	cm.ucSink = make(chan []*certification.CertificationResponse, 4)
 	ctx := context.Background()
-	qc := cm.blockStore.GetHighQc()
-	parent, err := cm.blockStore.Block(qc.GetRound())
+	qc := cm.blockStore().GetHighQc()
+	parent, err := cm.blockStore().Block(qc.GetRound())
 	require.NoError(t, err)
 	before := basetypes.NewTimestamp()
 	cm.pacemaker.Reset(ctx, qc.GetRound(), nil, nil)
@@ -203,7 +203,7 @@ func TestManagerTimestampBuilderAndEarlyRefusal(t *testing.T) {
 			require.NoError(t, proposal.Sign(node.Signer))
 			err := cm.onProposalMsg(ctx, proposal)
 			require.ErrorIs(t, err, tc.want)
-			_, err = cm.blockStore.Block(proposal.Block.Round)
+			_, err = cm.blockStore().Block(proposal.Block.Round)
 			require.Error(t, err, "invalid proposal must not enter executed storage")
 		})
 	}
@@ -223,9 +223,9 @@ func TestManagerTimestampRecoveryUsesReplacementStore(t *testing.T) {
 			net := testnetwork.NewRootMockNetwork()
 			cm, node, _ := initConsensusManager(t, net)
 			ctx := context.Background()
-			state, err := cm.blockStore.GetState()
+			state, err := cm.blockStore().GetState()
 			require.NoError(t, err)
-			cm.pacemaker.Reset(ctx, cm.blockStore.GetHighQc().GetRound(), nil, nil)
+			cm.pacemaker.Reset(ctx, cm.blockStore().GetHighQc().GetRound(), nil, nil)
 			cm.processNewRoundEvent(ctx)
 			proposal := net.WaitRootProposal(t)
 			if tc.invalid {
@@ -237,16 +237,16 @@ func TestManagerTimestampRecoveryUsesReplacementStore(t *testing.T) {
 			require.NoError(t, proposal.Sign(node.Signer))
 			_, err = cm.recovery.Set(proposal)
 			require.NoError(t, err)
-			previous := cm.blockStore
+			previous := cm.blockStore()
 			err = cm.onStateResponse(ctx, state)
 			if tc.invalid {
 				require.ErrorIs(t, err, ErrTimestampTooFarAhead)
-				_, missing := cm.blockStore.Block(proposal.Block.Round)
+				_, missing := cm.blockStore().Block(proposal.Block.Round)
 				require.Error(t, missing, "future recovery trigger must not enter executed storage")
 			} else {
 				require.NoError(t, err)
 			}
-			require.NotSame(t, previous, cm.blockStore)
+			require.NotSame(t, previous, cm.blockStore())
 			// Change only the retired store's parent; live validation must read the replacement.
 			oldParent, e := previous.Block(proposal.Block.GetParentRound())
 			require.NoError(t, e)
