@@ -207,6 +207,10 @@ type SupportInput struct {
 }
 
 // requiredRules lists every effective rule with E <= e_J + 1, the epoch J's recovery would reach.
+// RequiredRules are the rules a successor readiness must support for a successor at root epoch e: the effective ones (latched included)
+// with E <= e + 1, ascending by rule id.
+func RequiredRules(schedule []vrschema.Activation, e uint64) []vrschema.Activation { return requiredRules(schedule, e) }
+
 func requiredRules(schedule []vrschema.Activation, e uint64) []vrschema.Activation {
 	var out []vrschema.Activation
 	for _, a := range vrschema.Effective(schedule) {

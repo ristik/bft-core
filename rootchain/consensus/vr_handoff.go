@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/q3format"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
@@ -49,6 +50,17 @@ type VRHandoffConfig struct {
 	Opener  vrschedule.Opener // nil: the protocol's messages are not sent (a test, or a single root)
 	PiMax   time.Duration
 	Log     *slog.Logger
+	// Member, when set, makes this node do every successor-member step itself (VT-09, design 5.3.3): its sticky possession proof, its
+	// readiness over a verified assembly with the support commitments, the staging and the pre-connection; no host-side drive.
+	Member *VRMemberConfig
+}
+
+// VRMemberConfig is this node's member participation: its EVM key (the possession proof), the file its signed state persists in and the
+// rules it supports (nil: every rule of the committed schedule).
+type VRMemberConfig struct {
+	EVMSigner abcrypto.Signer
+	Path      string
+	Supports  func(vrschema.Activation) bool
 }
 
 type vrHandoff struct {
@@ -67,6 +79,9 @@ type vrHandoff struct {
 		payload []byte
 	}
 	fetching bool
+
+	member *vrschedule.Member
+	kick   chan struct{}
 
 	// the stage pull (GetStage): a (re)started root rebuilds its view state from its peers until one answers; while the current intent
 	// holds no complete certificate it pulls again from one peer at a time every PullInterval, the re-send path for messages its queue or
@@ -112,10 +127,22 @@ func (x *ConsensusManager) EnableVRHandoff(ctx context.Context, cfg VRHandoffCon
 		observer: &vrschedule.Observer{Reader: cfg.Reader, Sources: cfg.Intents.Sources, Outputs: cfg.Intents.Outputs, Log: cfg.Log}}
 	v.svc = vrschedule.NewService(vrschedule.ServiceConfig{Self: x.id.String(), Signer: cfg.Signer, Log: cfg.Log, Send: func(m vrschedule.Message) { v.send(ctx, m) }})
 	v.queue = vrschedule.NewQueue(v.svc, cfg.PiMax)
+	v.kick = make(chan struct{}, 1)
 	v.queue.Delivered = func(o vrschedule.Outcome, _ []vrschedule.Message, err error) {
 		if err != nil && o != vrschedule.Duplicate {
 			cfg.Log.Debug("VR handoff: a message is not retained", "outcome", o.String(), "error", err)
 		}
+		if o == vrschedule.Retained {
+			v.wake() // an assembly may be the member's cue
+		}
+	}
+	if cfg.Member != nil {
+		m, err := vrschedule.NewMember(v.svc, vrschedule.MemberConfig{Self: x.id.String(), RootSigner: cfg.Signer, EVMSigner: cfg.Member.EVMSigner,
+			Path: cfg.Member.Path, Send: func(m vrschedule.Message) { v.send(ctx, m) }, Supports: cfg.Member.Supports, Stage: x.stageVRCandidate, Log: cfg.Log})
+		if err != nil {
+			return err
+		}
+		v.member = m
 	}
 	v.peers = func() []peer.ID { return x.vrPeers(v) }
 	v.update = x.vrCommitted
@@ -139,7 +166,40 @@ func (x *ConsensusManager) EnableVRHandoff(ctx context.Context, cfg VRHandoffCon
 	go v.run(ctx)
 	go v.prefetchRun(ctx)
 	go v.queue.Run(ctx)
+	if v.member != nil {
+		go v.memberRun(ctx)
+	}
 	return nil
+}
+
+func (v *vrHandoff) wake() {
+	select {
+	case v.kick <- struct{}{}:
+	default:
+	}
+}
+
+// memberRun does the node's member steps whenever the committed state or a retained message gives a cue, and every second (the re-sends).
+func (v *vrHandoff) memberRun(ctx context.Context) {
+	t := time.NewTicker(time.Second)
+	defer t.Stop()
+	var last string
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		case <-v.kick:
+		}
+		if err := v.member.Step(); err != nil {
+			if e := err.Error(); e != last {
+				last = e
+				v.cfg.Log.Warn("VR handoff member: a step failed (retried)", "error", err)
+			}
+		} else {
+			last = ""
+		}
+	}
 }
 
 // onExecuted queues VR's output at an executed block's certified EVM state for prefetching (never blocking consensus).
@@ -291,6 +351,7 @@ func (v *vrHandoff) refresh(ctx context.Context) {
 		return
 	}
 	v.svc.Update(c)
+	v.wake()
 	if c.Prepared && c.FrozenParent != ([32]byte{}) {
 		if p, ok := v.svc.Prepared(); ok {
 			// in the background: the commit worker never waits on the execution client (review #1188 B8); fetchWitness de-duplicates
@@ -684,4 +745,36 @@ func (x *ConsensusManager) orderHandoffViewWith(ctx context.Context, block *rcty
 	}
 	block.Payload = trial.Payload
 	x.log.InfoContext(ctx, "VR handoff: proposing HandoffView", "intent", fmt.Sprintf("%x", intent[:8]), "view", view)
+}
+
+// stageVRCandidate stages the candidate of a verified assembly of the current intent on this node (VT-09): the successor body, its candidate
+// digest and attempt, and the successor's EVM validators and roots, so that a joiner keeps the successor committee connected before the
+// commit (#1133, #1086) and the node reports what it has staged. The service has verified the assembly in full and derived the body from the
+// intent; here only what this chain's epoch makes of it is checked: the next epoch of this chain, its protocol configuration, and this node
+// among the successors. Staging never signs and never activates.
+func (x *ConsensusManager) stageVRCandidate(s vrschedule.Staged) error {
+	return x.operator(func() error {
+		if x.q3 == nil {
+			return fmt.Errorf("%w: no Q3 history to stage into", ErrVRHandoff)
+		}
+		cfg, err := x.q3.ProtocolConfig()
+		if err != nil {
+			return errors.Join(ErrVRHandoff, err)
+		}
+		old := x.trustBase.Load()
+		b := s.Body
+		if old == nil || b.Config != cfg || b.Network != uint64(old.NetworkID) || b.Epoch != old.Epoch+1 {
+			return fmt.Errorf("%w: the candidate is not the next epoch of this chain", ErrVRHandoff)
+		}
+		self := false
+		for _, m := range b.Members {
+			self = self || m.NodeID == x.id.String()
+		}
+		if !self {
+			return fmt.Errorf("%w: this node is not a member of the successor committee", ErrVRHandoff)
+		}
+		x.storeStagedEVM(b.Epoch, evmassign.Candidate{Identities: s.Identities}, b.Members)
+		x.q3Staged.Store(&Q3Staged{CandidateDigest: s.CandidateDigest, BodyID: b.Identity(), Attempt: s.Attempt, Config: b.Config.Identity()})
+		return nil
+	})
 }
