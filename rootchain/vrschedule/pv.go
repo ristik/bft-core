@@ -75,7 +75,7 @@ type Queue struct {
 	// Admission is the set of senders admitted under one committed membership version (the transport's admission, and the local operator),
 	// taken once per round: a round never serves a sender outside it, and their queued messages are dropped when the round begins, so a
 	// round holds at most one version's admitted senders whatever the membership was when they queued, or changes to while the round is
-	// built (astra review of #1188, r3, r4). Nil admits every sender.
+	// built (astra review of #1188, r3, r4). Nil, or a nil snapshot (no committed membership known yet), prunes nothing.
 	Admission func() map[string]bool
 
 	mu    sync.Mutex
@@ -203,6 +203,13 @@ func (q *Queue) pop() (queued, bool) {
 	}
 }
 
+func (q *Queue) admission() map[string]bool {
+	if q.Admission == nil {
+		return nil
+	}
+	return q.Admission()
+}
+
 // forget drops a message that leaves the queue from its sender's coalescing set.
 func (q *Queue) forget(m queued) {
 	delete(q.keys[m.sender], m.key)
@@ -214,8 +221,7 @@ func (q *Queue) forget(m queued) {
 // newRound orders the senders with queued messages for one service round: in their arrival order, the senders seated last after the
 // others.
 func (q *Queue) newRound() {
-	if q.Admission != nil {
-		admitted := q.Admission() // one snapshot for the whole round
+	if admitted := q.admission(); admitted != nil { // one snapshot for the whole round; none known yet: nothing is pruned
 		kept := q.ring[:0]
 		for _, s := range q.ring {
 			if admitted[s] {
