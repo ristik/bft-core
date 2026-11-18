@@ -3,11 +3,14 @@ package engineapi
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/unicitynetwork/bft-core/b1state"
 )
 
 /*
@@ -116,25 +119,40 @@ func (a *Adapter) CheckExecutionProfile(ctx context.Context, wantChainID uint64)
 	if err != nil {
 		return ExecutionProfile{}, fmt.Errorf("engineapi: reading eth_config (EIP-7910) over the plain connection: %w", err)
 	}
-	if a.unicityPrecompiles {
-		return checkProfileWith(raw, wantChainID, unicityNativePrecompiles)
+	if a.unicityPrecompiles != nil {
+		return checkProfileWith(raw, wantChainID, a.unicityPrecompiles)
 	}
 	return checkProfile(raw, wantChainID)
 }
 
-// unicityNativePrecompiles is what a B1/B2 deployment's client adds to the pinned Cancun set (ureth's Unicity EVM factory): the one certificate operation
-// CERT_BATCH_V2 at 0x0100 (the any-age batch, protocol 4; 0x0101 stays unregistered), the stateless RSMT membership check at 0x0102 and the B2 native
-// token kernel at 0x0104. 0x0103 (S1) stays unregistered. 0x0105 (BRIDGE_COMPOSE_V2, the protocol 6/7 bridge) is unregistered since ureth#97 removed
-// that bridge (bft-core#1106, #1139); a client that still registers it is refused as an unexpected precompile. Nothing else may differ.
-var unicityNativePrecompiles = map[string]string{
-	"unicity-b1-cert-batch-v2": "0x0000000000000000000000000000000000000100",
-	"unicity-b1-membership":    "0x0000000000000000000000000000000000000102",
-	"unicity-b2-sdk3":          "0x0000000000000000000000000000000000000104",
+// unicityNativePrecompiles is what a B1/B2 deployment's client adds to the pinned Cancun set for an execution-profile revision (ureth's Unicity EVM
+// factory), taken from b1state.ExecutionRevisionNatives so that the set the profile hash commits and the set the startup check enforces are one table:
+// the CERT_BATCH_V2 certificate operation at 0x0100, the RSMT membership check at 0x0102 and the B2 native token kernel at 0x0104 for revision 2.
+// 0x0105 (BRIDGE_COMPOSE_V2, the protocol 6/7 bridge) is unregistered since ureth#97 (bft-core#1106, #1139); a client that still registers it is
+// refused as an unexpected precompile. Nothing else may differ. A revision this binary does not implement has no set and is refused.
+func unicityNativePrecompiles(rev uint64) (map[string]string, error) {
+	if err := b1state.CheckExecutionRevision(rev); err != nil {
+		return nil, err
+	}
+	set, _ := b1state.ExecutionRevisionNatives(rev)
+	m := make(map[string]string, len(set))
+	for _, p := range set {
+		m[p.Name] = "0x" + hex.EncodeToString(p.Address[:])
+	}
+	return m, nil
 }
 
-// ExpectUnicityPrecompiles makes the profile check require exactly the B1/B2 native precompiles in addition to the pinned Cancun set. It is for a
-// fresh-B1 deployment; without it any extra precompile is refused.
-func (a *Adapter) ExpectUnicityPrecompiles() { a.unicityPrecompiles = true }
+// ExpectUnicityPrecompiles makes the profile check require exactly the native precompiles of the B1 profile's execution revision in addition to the
+// pinned Cancun set. It is for a fresh-B1 deployment; without it any extra precompile is refused. A revision this binary does not implement is
+// refused here, before the node can participate.
+func (a *Adapter) ExpectUnicityPrecompiles(rev uint64) error {
+	m, err := unicityNativePrecompiles(rev)
+	if err != nil {
+		return err
+	}
+	a.unicityPrecompiles = m
+	return nil
+}
 
 func checkProfile(raw json.RawMessage, wantChainID uint64) (ExecutionProfile, error) {
 	return checkProfileWith(raw, wantChainID, nil)

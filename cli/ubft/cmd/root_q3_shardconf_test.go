@@ -3,10 +3,12 @@ package cmd
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,9 +29,7 @@ func TestShardConfEndpointAndCommandReturnTheConfigurationTheRootHoldsForAShardE
 	pdr := &types.PartitionDescriptionRecord{Version: 1, NetworkID: 5, PartitionID: 8, PartitionTypeID: 99, ShardID: types.ShardID{}, UnitIDLen: 256, TypeIDLen: 32,
 		T2Timeout: 2500 * time.Millisecond, Epoch: 0, EpochStart: 1, Validators: []*types.NodeInfo{node.NodeInfo(t)}}
 	require.NoError(t, o.AddShardConfig(pdr))
-	api := rootQ3API{ShardConfig: func(p types.PartitionID, epoch uint64) (*types.PartitionDescriptionRecord, error) {
-		return o.ShardConfigByEpoch(p, types.ShardID{}, epoch)
-	}}
+	api := rootQ3API{ShardConfig: o.ShardConfigByEpoch}
 	want, err := o.ShardConfigByEpoch(8, types.ShardID{}, 0)
 	require.NoError(t, err)
 	wantJSON, err := json.Marshal(want)
@@ -72,4 +72,89 @@ func TestShardConfEndpointAndCommandReturnTheConfigurationTheRootHoldsForAShardE
 		require.Equal(t, os.FileMode(0o600), info.Mode().Perm())
 		require.Error(t, run("9"))
 	})
+}
+
+// A shard's aggregator follows a kind 6 or 8 change by reading the successor configuration of its own shard over the root's loopback RPC: the
+// source-guarded endpoint is shard-aware (the split shards of a partition hold separate histories), bounds its input, and answers only what is stored.
+func TestShardConfEndpointIsShardAwareAndSourceGuarded(t *testing.T) {
+	o, err := partitions.NewOrchestration(5, filepath.Join(t.TempDir(), "orchestration.db"), logger.New(t))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = o.Close() })
+	node := testutils.NewTestNode(t)
+	left, right := types.ShardID{}.Split()
+	mk := func(shard types.ShardID, epoch uint64, timeout time.Duration) *types.PartitionDescriptionRecord {
+		start := uint64(1)
+		if epoch > 0 {
+			start = 100 * epoch
+		}
+		return &types.PartitionDescriptionRecord{Version: 1, NetworkID: 5, PartitionID: 8, PartitionTypeID: 99, ShardID: shard, UnitIDLen: 256, TypeIDLen: 32,
+			T2Timeout: timeout, Epoch: epoch, EpochStart: start, Validators: []*types.NodeInfo{node.NodeInfo(t)}}
+	}
+	for _, p := range []*types.PartitionDescriptionRecord{mk(left, 0, 2*time.Second), mk(right, 0, 3*time.Second), mk(left, 1, 4*time.Second)} {
+		require.NoError(t, o.AddShardConfig(p))
+	}
+	api := rootQ3API{ShardConfig: o.ShardConfigByEpoch}
+	leftText, _ := left.MarshalText()
+	rightText, _ := right.MarshalText()
+	ask := func(remote string, req q3ShardConfRequest) *httptest.ResponseRecorder {
+		return callQ3(t, api, "/api/v1/q3/shard-conf", remote, req)
+	}
+	var got types.PartitionDescriptionRecord
+	rec := ask("127.0.0.1:1", q3ShardConfRequest{Partition: 8, Epoch: 1, Shard: string(leftText)})
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.EqualValues(t, 1, got.Epoch)
+	require.True(t, got.ShardID.Equal(left))
+	require.Equal(t, 4*time.Second, got.T2Timeout)
+	rec = ask("127.0.0.1:1", q3ShardConfRequest{Partition: 8, Epoch: 0, Shard: string(rightText)})
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.True(t, got.ShardID.Equal(right))
+	require.Equal(t, http.StatusUnprocessableEntity, ask("127.0.0.1:1", q3ShardConfRequest{Partition: 8, Epoch: 1, Shard: string(rightText)}).Code, "the sibling has no epoch 1")
+	require.Equal(t, http.StatusUnprocessableEntity, ask("127.0.0.1:1", q3ShardConfRequest{Partition: 8, Epoch: 2, Shard: string(leftText)}).Code, "the next epoch is a clean miss")
+	require.Equal(t, http.StatusUnprocessableEntity, ask("127.0.0.1:1", q3ShardConfRequest{Partition: 8, Epoch: 99, Shard: string(leftText)}).Code)
+	require.Equal(t, http.StatusUnprocessableEntity, ask("127.0.0.1:1", q3ShardConfRequest{Partition: 8, Epoch: 0}).Code, "the unsplit shard is not this partition's")
+	require.Equal(t, http.StatusUnprocessableEntity, ask("127.0.0.1:1", q3ShardConfRequest{Partition: 8, Epoch: 0, Shard: "zz"}).Code)
+	require.Equal(t, http.StatusUnprocessableEntity, ask("127.0.0.1:1", q3ShardConfRequest{Partition: 8, Epoch: 0, Shard: strings.Repeat("a", maxShardTextLen+1)}).Code, "the shard text is bounded")
+	require.Equal(t, http.StatusForbidden, ask("203.0.113.9:4000", q3ShardConfRequest{Partition: 8, Epoch: 1, Shard: string(leftText)}).Code, "a peer that is not an operator source")
+}
+
+// 422 on this route is a successful lookup that found nothing (or invalid input); a failing store is a server error, so a reader retries
+// instead of concluding that the configuration does not exist.
+func TestShardConfEndpointReportsAStoreFailureAsAServerError(t *testing.T) {
+	failing := rootQ3API{ShardConfig: func(types.PartitionID, types.ShardID, uint64) (*types.PartitionDescriptionRecord, error) {
+		return nil, errors.New("bolt: database not open")
+	}}
+	rec := callQ3(t, failing, "/api/v1/q3/shard-conf", "127.0.0.1:1", q3ShardConfRequest{Partition: 8, Epoch: 1})
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	clean := rootQ3API{ShardConfig: func(types.PartitionID, types.ShardID, uint64) (*types.PartitionDescriptionRecord, error) {
+		return nil, nil
+	}}
+	require.Equal(t, http.StatusUnprocessableEntity, callQ3(t, clean, "/api/v1/q3/shard-conf", "127.0.0.1:1", q3ShardConfRequest{Partition: 8, Epoch: 1}).Code)
+	require.Equal(t, http.StatusUnprocessableEntity, callQ3(t, clean, "/api/v1/q3/shard-conf", "127.0.0.1:1", q3ShardConfRequest{Partition: 8, Epoch: 1, Shard: "zz"}).Code, "invalid input")
+}
+
+// A missing or invalid body is a 400, never a lookup of partition 0.
+func TestShardConfEndpointRefusesAMissingOrInvalidBody(t *testing.T) {
+	called := false
+	api := rootQ3API{ShardConfig: func(types.PartitionID, types.ShardID, uint64) (*types.PartitionDescriptionRecord, error) {
+		called = true
+		return nil, errors.New("must not be reached")
+	}}
+	mux := http.NewServeMux()
+	api.register(mux)
+	post := func(body string) int {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/q3/shard-conf", strings.NewReader(body))
+		req.RemoteAddr = "127.0.0.1:1"
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	for _, body := range []string{"", "not json", "{}", `{"partition":8}`, `{"epoch":1}`, `[1,2]`, `{"partition":8,"epoch":0} garbage`, `{"partition":8,"epoch":0}{"partition":9,"epoch":0}`} {
+		require.Equal(t, http.StatusBadRequest, post(body), "body %q", body)
+	}
+	require.False(t, called, "no lookup for a request that is not well formed")
+	require.Equal(t, http.StatusInternalServerError, post(`{"partition":8,"epoch":0}`), "a well-formed request reaches the lookup")
+	require.Equal(t, http.StatusInternalServerError, post("{\"partition\":8,\"epoch\":0}\n  \n"), "trailing whitespace is allowed")
 }

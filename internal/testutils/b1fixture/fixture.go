@@ -52,7 +52,7 @@ func newFixture(t *testing.T, other, start uint64) *Fixture {
 	require.NoError(t, c.TrustBase.Sign(c.TrustBase.RootNodes[0].NodeID, c.Signer))
 	h, err := q3format.NewHistory(c.TrustBase)
 	require.NoError(t, err)
-	p := b1state.Profile{Network: 5, RootGenesisID: h.Genesis(), ExecutionChainID: 1337, RuntimeHash: [32]byte(common.HexToHash(b1registry.CodeHashHex)), CompilerHash: b1registry.CompilerHash(), MaxEpochsPerUpdate: b, DeltaEV: 1, DeltaHold: 2, RestGas: b1registry.MinRestGas(b), CompanionBytes: 1 << 20, OtherCompanionBytes: other, OrdinaryCapacity: 7000000, GenesisUCTime: 1000}
+	p := b1state.Profile{Network: 5, RootGenesisID: h.Genesis(), ExecutionChainID: 1337, ExecutionRevision: b1state.CurrentExecutionRevision, RuntimeHash: [32]byte(common.HexToHash(b1registry.CodeHashHex)), CompilerHash: b1registry.CompilerHash(), MaxEpochsPerUpdate: b, DeltaEV: 1, DeltaHold: 2, RestGas: b1registry.MinRestGas(b), CompanionBytes: 1 << 20, OtherCompanionBytes: other, OrdinaryCapacity: 7000000, GenesisUCTime: 1000}
 	p.SystemGas, err = p.RequiredSystemGas()
 	require.NoError(t, err)
 	p.MaxGas = p.SystemGas + p.OrdinaryCapacity

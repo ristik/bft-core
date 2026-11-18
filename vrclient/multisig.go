@@ -9,6 +9,8 @@ import (
 	"math/big"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	ethcommon "github.com/ethereum/go-ethereum/common"
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
@@ -199,6 +201,8 @@ func DescribeChange(kind uint8, payload []byte) string {
 			name = names[i]
 		}
 		switch x := v.(type) {
+		case string:
+			parts = append(parts, fmt.Sprintf("%s=%q", name, Clean(x)))
 		case [20]byte:
 			parts = append(parts, fmt.Sprintf("%s=%s", name, ethcommon.Address(x).Hex()))
 		case vrschema.Word:
@@ -214,6 +218,26 @@ func DescribeChange(kind uint8, payload []byte) string {
 		}
 	}
 	return fmt.Sprintf("%s(%s)", ChangeKind(kind), strings.Join(parts, ", "))
+}
+
+// Clean makes text from a file or a payload safe to print on a terminal: every rune that is not printable (the C0 and C1 controls, ESC,
+// CR, the line and paragraph separators, unassigned and format runes) is written as an escape, so a printed field can never move the
+// cursor or repaint the lines around it.
+func Clean(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r == utf8.RuneError:
+			b.WriteString(`\ufffd`)
+		case unicode.IsPrint(r):
+			b.WriteRune(r)
+		case r < 0x10000:
+			fmt.Fprintf(&b, `\u%04x`, r)
+		default:
+			fmt.Fprintf(&b, `\U%08x`, r)
+		}
+	}
+	return b.String()
 }
 
 // QueueRefusal reads a QueueRefused code (src/vr/VRChanges.sol).

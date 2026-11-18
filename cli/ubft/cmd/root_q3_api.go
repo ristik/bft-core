@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 
@@ -26,7 +27,7 @@ type rootQ3API struct {
 	Trust  func(epoch uint64) (*types.RootTrustBaseV1, error)
 	// ShardConfig is the shard configuration this root's derived index holds for a shard epoch of the (whole-partition) shard of a partition: the file an
 	// authority is advanced into (`signing-authority advance-epoch --shard-conf`). Nil: the endpoint refuses.
-	ShardConfig func(partition types.PartitionID, epoch uint64) (*types.PartitionDescriptionRecord, error)
+	ShardConfig func(partition types.PartitionID, shard types.ShardID, epoch uint64) (*types.PartitionDescriptionRecord, error)
 }
 
 func (a rootQ3API) register(mux *http.ServeMux) {
@@ -58,24 +59,45 @@ func (a rootQ3API) register(mux *http.ServeMux) {
 		return q3HistoryResponse{Entries: entries}, err
 	}))
 	mux.HandleFunc("POST /api/v1/q3/signers", q3Endpoint(func(context.Context, json.RawMessage) (any, error) { return a.signers() }))
-	mux.HandleFunc("POST /api/v1/q3/shard-conf", q3Endpoint(func(_ context.Context, raw json.RawMessage) (any, error) {
-		var in q3ShardConfRequest
-		if err := json.Unmarshal(raw, &in); err != nil {
-			return nil, err
+	mux.HandleFunc("POST /api/v1/q3/shard-conf", q3BodyEndpoint(func(_ context.Context, raw json.RawMessage) (any, error) {
+		var req struct {
+			Partition *uint32 `json:"partition"`
+			Shard     string  `json:"shard"`
+			Epoch     *uint64 `json:"epoch"`
 		}
+		if err := json.Unmarshal(raw, &req); err != nil || req.Partition == nil || req.Epoch == nil {
+			return nil, q3BadRequest{errors.New("the body must be a JSON object with partition and epoch (and optionally shard)")}
+		}
+		in := q3ShardConfRequest{Partition: *req.Partition, Shard: req.Shard, Epoch: *req.Epoch}
 		if a.ShardConfig == nil {
 			return nil, errors.New("this root serves no shard configurations")
 		}
-		pdr, err := a.ShardConfig(types.PartitionID(in.Partition), in.Epoch)
-		if err != nil || pdr == nil {
-			return nil, fmt.Errorf("no configuration for partition %d shard epoch %d: %v", in.Partition, in.Epoch, err)
+		var shard types.ShardID
+		if in.Shard != "" {
+			if len(in.Shard) > maxShardTextLen {
+				return nil, fmt.Errorf("shard: more than %d characters", maxShardTextLen)
+			}
+			if err := shard.UnmarshalText([]byte(in.Shard)); err != nil {
+				return nil, fmt.Errorf("shard: %w", err)
+			}
+		}
+		pdr, err := a.ShardConfig(types.PartitionID(in.Partition), shard, in.Epoch)
+		if err != nil {
+			return nil, q3ServerError{fmt.Errorf("reading the configuration of partition %d shard epoch %d: %w", in.Partition, in.Epoch, err)}
+		}
+		if pdr == nil { // a successful lookup that found nothing: the only 422 of this route besides invalid input
+			return nil, fmt.Errorf("no configuration for partition %d shard epoch %d", in.Partition, in.Epoch)
 		}
 		return pdr, nil
 	}))
 }
 
+// maxShardTextLen bounds the hex text of a ShardID a request carries (the longest id is far shorter; the bound is before any decoding).
+const maxShardTextLen = 128
+
 type q3ShardConfRequest struct {
 	Partition uint32 `json:"partition"`
+	Shard     string `json:"shard,omitempty"` // the ShardID in hex text form; empty: the unsplit shard
 	Epoch     uint64 `json:"epoch"`
 }
 
@@ -185,19 +207,58 @@ func (a rootQ3API) signers() (q3SignersResponse, error) {
 	return out, nil
 }
 
-// q3Endpoint wraps a read function as a local-operator JSON endpoint.
+// q3ServerError marks a failure of the read itself (a store error), as opposed to invalid input or a clean miss (both 422).
+type q3ServerError struct{ error }
+
+func (e q3ServerError) Unwrap() error { return e.error }
+
+// q3BadRequest marks a request that is not well formed (a missing or invalid body): 400, not a lookup.
+type q3BadRequest struct{ error }
+
+func (e q3BadRequest) Unwrap() error { return e.error }
+
+// q3Endpoint wraps a read function as a local-operator JSON endpoint; a missing or invalid body is read as an empty object.
 func q3Endpoint(f func(ctx context.Context, body json.RawMessage) (any, error)) http.HandlerFunc {
+	return q3Handler(f, false)
+}
+
+// q3BodyEndpoint is q3Endpoint for a read that needs its body: a missing or invalid one is a 400.
+func q3BodyEndpoint(f func(ctx context.Context, body json.RawMessage) (any, error)) http.HandlerFunc {
+	return q3Handler(f, true)
+}
+
+func q3Handler(f func(ctx context.Context, body json.RawMessage) (any, error), bodyRequired bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !localOperatorRequest(w, r) {
 			return
 		}
 		var body json.RawMessage
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(&body); err != nil {
+		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16))
+		err := dec.Decode(&body)
+		if err == nil && bodyRequired {
+			// exactly one JSON value: anything after it (but whitespace) makes the request malformed
+			var extra json.RawMessage
+			if again := dec.Decode(&extra); again != io.EOF {
+				err = errors.New("trailing data after the JSON body")
+			}
+		}
+		if err != nil {
+			if bodyRequired {
+				http.Error(w, "the request body is missing, is not JSON, or has data after the JSON value", http.StatusBadRequest)
+				return
+			}
 			body = json.RawMessage(`{}`)
 		}
 		out, err := f(r.Context(), body)
 		if err != nil {
-			http.Error(w, fmt.Sprint(err), http.StatusUnprocessableEntity)
+			status := http.StatusUnprocessableEntity
+			switch {
+			case errors.As(err, new(q3ServerError)):
+				status = http.StatusInternalServerError // the read itself failed: a reader retries, it does not conclude the answer is "none"
+			case errors.As(err, new(q3BadRequest)):
+				status = http.StatusBadRequest
+			}
+			http.Error(w, fmt.Sprint(err), status)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
