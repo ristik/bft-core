@@ -1,6 +1,7 @@
 package vrschedule
 
 import (
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"os"
@@ -34,7 +35,7 @@ func (w *world) swarm(t *testing.T, sch []vrschema.Activation) *swarm {
 	s := &swarm{w: w, svcs: map[string]*Service{}, members: map[string]*Member{}, paths: map[string]string{}, sentKind: map[string]int{}, sch: sch}
 	dir := t.TempDir()
 	for i := uint64(1); i <= 5; i++ {
-		s.start(t, w.Members[i].Root, filepath.Join(dir, w.Members[i].Root+".json"), i != 4)
+		s.start(t, w.Members[i].Root, filepath.Join(dir, w.Members[i].Root+".json"), true)
 	}
 	return s
 }
@@ -119,7 +120,7 @@ func TestMembersCompleteTheViewWithoutAHarness(t *testing.T) {
 		require.True(t, ok)
 		require.True(t, complete, "%s holds a complete verified certificate (I-RET)", id)
 		set, _ := svc.Stage(w.d, 0)
-		require.Len(t, set.Readiness, 4)
+		require.Len(t, set.Readiness, 5, "four successors and the K member that leaves")
 		for _, r := range set.Readiness {
 			require.Len(t, r.Commitments, 1, "the readiness carries the effective rule's support commitment")
 			require.Equal(t, rule.RuleID[:], r.Commitments[0].RuleID)
@@ -245,3 +246,67 @@ func TestACorruptMemberFileRefusesToStart(t *testing.T) {
 	_, err := NewMember(NewService(ServiceConfig{}), MemberConfig{Self: "x", RootSigner: w.Members[1].RK.Signer, Path: path})
 	require.ErrorIs(t, err, ErrMember)
 }
+
+// A K member that is no successor (identity 4 leaves) sends readiness for rule support only, on its own: every root retains it beside the
+// certificate, and the Prepare plan's rule-support evidence carries every K member's readiness (the J readiness of K members that stay, the
+// support-only readiness of the one that leaves), ascending by stakingID, so the K-support gate of the activation rule holds over all of K.
+func TestAKMemberThatLeavesSendsSupportReadinessAndThePlanCarriesIt(t *testing.T) {
+	w := newWorld(t)
+	rule := vrschema.Activation{RuleID: vrschema.RuleID("rule-a"), ReleaseDigest: vrschema.Word{0xaa}, RootEpoch: 2, State: vrschema.ActActive, ChangeID: 1}
+	s := w.swarm(t, []vrschema.Activation{rule})
+	s.update(0)
+	s.run(t)
+	leaver := w.Members[4].Root
+	for id, svc := range s.svcs {
+		p, ok := svc.Plan()
+		require.True(t, ok, "%s: the K-support gate holds from this intent's K-member readiness", id)
+		require.Len(t, p.RuleSupport.KReadiness, 4)
+		var prev []byte
+		have := false
+		for _, r := range p.RuleSupport.KReadiness {
+			sid := r.Commitments[0].StakingID
+			require.Greater(t, string(sid), string(prev))
+			prev = sid
+			have = have || string(sid) == string(vrhandoffStaking(4))
+		}
+		require.True(t, have, "the leaving member's readiness is part of the evidence")
+		_, ok = svc.Prepared()
+		require.True(t, ok)
+	}
+	require.Len(t, readFile(t, s.paths[leaver]).Intents[0].Views, 1, "it signed its one view")
+}
+
+func vrhandoffStaking(id uint64) []byte { w := vrschema.U64(id); return w[:] }
+
+// A K member's readiness is support only: without a commitment it is refused, and a readiness of a node that is neither a successor nor in
+// K is dropped.
+func TestAKMembersReadinessNeedsACommitmentAndOutsidersAreDropped(t *testing.T) {
+	w := newWorld(t)
+	s := w.swarm(t, nil) // no rule: nothing for a K member to support
+	s.update(0)
+	s.run(t)
+	leaver := w.Members[4].Root
+	_, err := os.Stat(s.paths[leaver])
+	require.True(t, os.IsNotExist(err), "no rule needs its support: it signed and sent nothing")
+	svc := s.svcs[w.Members[1].Root]
+	set, _ := svc.Stage(w.d, 0)
+	require.Len(t, set.Readiness, 4)
+
+	// a K member's readiness without a commitment (built by hand over the held assembly) is refused
+	a := set.Assemblies[0]
+	body, err := vrhandoff.DeriveBody(w.in, w.RC.RootEpoch, sha256sum(a.Candidate), w.BC)
+	require.NoError(t, err)
+	_, tb, err := vrhandoff.TrustBase(w.in, w.RC.RootEpoch)
+	require.NoError(t, err)
+	r, err := vrhandoff.SignReadiness(w.in, a, body, leaver, tb, nil, w.Members[4].RK.Signer)
+	require.NoError(t, err)
+	o, _, _ := svc.Offer("peer", Message{Readiness: &r})
+	require.Equal(t, Refused, o)
+	// a node outside K and J
+	r2, err := vrhandoff.SignReadiness(w.in, a, body, "outsider", tb, nil, w.Members[4].RK.Signer)
+	require.NoError(t, err)
+	o, _, _ = svc.Offer("peer", Message{Readiness: &r2})
+	require.Equal(t, Dropped, o)
+}
+
+func sha256sum(b []byte) [32]byte { return sha256.Sum256(b) }

@@ -403,6 +403,17 @@ func MaterializeJ(t SupportTable, readiness []vrschema.Readiness, keep []evmassi
 	return t.Prune(keep).Add(cs...)
 }
 
+// CommitmentsInScope requires every commitment to be for the root network and a rule of the committed schedule (latched entries included).
+func CommitmentsInScope(schedule []vrschema.Activation, network uint64, cs []vrschema.SupportCommitment) error {
+	eff := vrschema.Effective(schedule)
+	for i, c := range cs {
+		if err := commitmentInScope(c, network, eff); err != nil {
+			return fmt.Errorf("commitment %d: %w", i, err)
+		}
+	}
+	return nil
+}
+
 // commitmentInScope requires a commitment for the root network and for a rule of the committed schedule (latched entries included).
 func commitmentInScope(c vrschema.SupportCommitment, network uint64, eff map[vrschema.Word]vrschema.Activation) error {
 	if c.Network != network {

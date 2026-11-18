@@ -171,6 +171,7 @@ type memberState struct {
 	rootEpoch  uint64
 	self       evmassign.Identity
 	successor  bool
+	kOnly      bool // a K member that is no successor: it sends readiness for rule support only
 	popHeld    bool
 	view       uint64
 	prepared   bool
@@ -196,6 +197,14 @@ func (s *Service) memberState(self string) (memberState, bool) {
 		trustBase: st.trustBase, schedule: s.sch, table: s.tab, successors: st.successors}
 	ms.self, ms.successor = st.byRoot[self]
 	if !ms.successor {
+		if m, ok := st.kOnly[self]; ok {
+			ms.self, ms.kOnly = m, true
+			if vs := st.views[st.view]; vs != nil && vs.assembly != nil {
+				a := *vs.assembly
+				ms.assembly, ms.body, ms.candidate = &a, vs.body, vs.candidate
+				_, ms.readyHeld = vs.kready[self]
+			}
+		}
 		return ms, true
 	}
 	_, ms.popHeld = st.pops[ms.self.EVMNodeID]
@@ -213,14 +222,16 @@ func (s *Service) memberState(self string) (memberState, bool) {
 // every retained message and on a timer. It returns the first error of its steps (logged by the caller; a later Step retries).
 func (m *Member) Step() error {
 	st, ok := m.svc.memberState(m.cfg.Self)
-	if !ok || !st.successor || st.prepared {
+	if !ok || !(st.successor || st.kOnly) || st.prepared {
 		return nil
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var errs []error
-	if err := m.stepPoP(st); err != nil {
-		errs = append(errs, err)
+	if st.successor {
+		if err := m.stepPoP(st); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	if st.assembly != nil {
 		if err := m.stepReadiness(st); err != nil {
@@ -306,8 +317,10 @@ func (m *Member) commitments(st memberState) ([]vrhandoff.SupportCommitment, err
 func (m *Member) stepReadiness(st memberState) error {
 	mi := m.intent(st.digest)
 	cd := sha256.Sum256(st.assembly.Candidate)
-	if err := m.stage(st, cd); err != nil {
-		m.log().Warn("VR handoff member: staging the candidate failed", "error", err)
+	if st.successor {
+		if err := m.stage(st, cd); err != nil {
+			m.log().Warn("VR handoff member: staging the candidate failed", "error", err)
+		}
 	}
 	if pv := mi.view(st.view); pv != nil {
 		// a persisted view is never signed again; its readiness is re-sent and re-offered
@@ -328,6 +341,9 @@ func (m *Member) stepReadiness(st memberState) error {
 	cs, err := m.commitments(st)
 	if err != nil {
 		return fmt.Errorf("%w: support commitments: %w", ErrMember, err)
+	}
+	if st.kOnly && len(cs) == 0 {
+		return nil // a K member that is no successor has nothing else to send: no rule needs its support
 	}
 	r, err := vrhandoff.SignReadiness(st.intent, *st.assembly, body, m.cfg.Self, st.trustBase, cs, m.cfg.RootSigner)
 	if err != nil {

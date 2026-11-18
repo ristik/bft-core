@@ -147,6 +147,9 @@ type viewState struct {
 	candidate  [32]byte // the held assembly's candidate digest and body identity: what its readiness names
 	bodyID     [32]byte
 	readiness  map[string]vrhandoff.Readiness
+	// kready is the readiness of K members that are not successors (design 5.3.1 stage 4: support only), by root node id; it never counts toward
+	// completeness and carries the support commitments the K-support gate (7.3 b) reads from this intent's K-member readiness
+	kready    map[string]vrhandoff.Readiness
 	encodings  map[string][]byte
 	refused    map[string]int          // replacements spent by sender
 	evidence   map[string]Equivocation // the one conflict of each equivocating signer in this view
@@ -161,6 +164,7 @@ type intentState struct {
 	successors []evmassign.Identity
 	byRoot     map[string]evmassign.Identity
 	byEVM      map[string]evmassign.Identity
+	kOnly      map[string]evmassign.Identity // K members that are not successors, by root node id
 	trustBase  []byte
 	pops       map[string]vrhandoff.PoPOffer
 	popRefused map[string]int // failed proofs by sender and successor
@@ -368,6 +372,12 @@ func newIntentState(c Committed) (*intentState, error) {
 	for _, m := range cand.Identities {
 		st.byRoot[m.RootNodeID], st.byEVM[m.EVMNodeID] = m, m
 	}
+	st.kOnly = map[string]evmassign.Identity{}
+	for _, m := range c.K {
+		if _, succ := st.byRoot[m.RootNodeID]; !succ {
+			st.kOnly[m.RootNodeID] = m
+		}
+	}
 	return st, nil
 }
 
@@ -498,9 +508,9 @@ func (s *Service) prepareLocked(sender string, m Message) Job {
 	case m.Readiness != nil:
 		r := *m.Readiness
 		vs := st.viewOf(r.Slot)
-		member, ok := s.readinessMember(st, r)
+		member, kOnly, ok := s.readinessBy(st, r)
 		if !ok {
-			j.Outcome, j.Err = Dropped, errors.New("vrschedule: readiness of no successor")
+			j.Outcome, j.Err = Dropped, errors.New("vrschedule: readiness of no successor or K member")
 			return j
 		}
 		enc, err := r.Encode()
@@ -538,6 +548,20 @@ func (s *Service) prepareLocked(sender string, m Message) Job {
 			return j
 		}
 		sch, tab, epoch := s.sch, s.tab, st.d.RootEpoch
+		if kOnly {
+			// a K member that is no successor sends readiness for rule support only (design 5.3.1 stage 4, 7.3): the same verification of its
+			// envelope, receipt and commitments, the commitments' scope, and at least one commitment (there is nothing else it could support)
+			j.Verify = func() error {
+				if len(r.Commitments) == 0 {
+					return errors.New("vrschedule: a K member's readiness without a support commitment")
+				}
+				if err := vrhandoff.VerifyReadiness(in, a, body, member, tb, r); err != nil {
+					return err
+				}
+				return vradmit.CommitmentsInScope(sch, in.Network, r.Commitments)
+			}
+			return j
+		}
 		j.Verify = func() error {
 			if err := vrhandoff.VerifyReadiness(in, a, body, member, tb, r); err != nil {
 				return err
@@ -620,7 +644,7 @@ func (s *Service) applyLocked(j Job, verr error) (Outcome, error) {
 		if verr != nil {
 			return s.refuse(vs, j.sender, verr)
 		}
-		member, _ := s.readinessMember(st, r)
+		member, kOnly, _ := s.readinessBy(st, r)
 		enc, err := r.Encode()
 		if err != nil {
 			return s.refuse(vs, j.sender, err)
@@ -633,6 +657,10 @@ func (s *Service) applyLocked(j Job, verr error) (Outcome, error) {
 		}
 		if j.conflict {
 			return Dropped, nil
+		}
+		if kOnly {
+			vs.kready[member.RootNodeID], vs.encodings[member.RootNodeID] = r, enc
+			return Retained, nil
 		}
 		vs.readiness[member.RootNodeID], vs.encodings[member.RootNodeID] = r, enc
 		return Retained, nil
@@ -662,7 +690,7 @@ func (s *Service) buffer(sender string, m Message) Outcome {
 func (st *intentState) viewOf(v uint64) *viewState {
 	vs := st.views[v]
 	if vs == nil {
-		vs = &viewState{readiness: map[string]vrhandoff.Readiness{}, encodings: map[string][]byte{}, refused: map[string]int{},
+		vs = &viewState{readiness: map[string]vrhandoff.Readiness{}, kready: map[string]vrhandoff.Readiness{}, encodings: map[string][]byte{}, refused: map[string]int{},
 			evidence: map[string]Equivocation{}}
 		st.views[v] = vs
 	}
@@ -681,12 +709,23 @@ func (s *Service) refuse(vs *viewState, sender string, err error) (Outcome, erro
 
 // readinessMember is the successor a readiness is by: the singleton receipt names it.
 func (s *Service) readinessMember(st *intentState, r vrhandoff.Readiness) (evmassign.Identity, bool) {
+	m, _, ok := s.readinessBy(st, r)
+	return m, ok
+}
+
+// readinessBy is the member a readiness is by and whether it is a K member that is not a successor (its readiness is support only).
+func (s *Service) readinessBy(st *intentState, r vrhandoff.Readiness) (m evmassign.Identity, kOnly, ok bool) {
 	for id, m := range st.byRoot {
 		if _, err := vrschema.ReadinessReceipt(r.Receipt, id); err == nil {
-			return m, true
+			return m, false, true
 		}
 	}
-	return evmassign.Identity{}, false
+	for id, m := range st.kOnly {
+		if _, err := vrschema.ReadinessReceipt(r.Receipt, id); err == nil {
+			return m, true, true
+		}
+	}
+	return evmassign.Identity{}, false, false
 }
 
 // followLocked is the work the current state makes judgeable.
@@ -911,6 +950,7 @@ type planInput struct {
 	sch  []vrschema.Activation
 	tab  vradmit.SupportTable
 	k    []evmassign.Identity
+	kr   []vrschema.Readiness // this intent's K-member readiness (support evidence)
 	st   *intentState
 }
 
@@ -921,7 +961,7 @@ func (s *Service) held(planning bool) (planInput, bool) {
 	if st == nil || st.iret == nil || (planning && st.prepared) {
 		return planInput{}, false
 	}
-	return planInput{plan: *st.iret, sch: s.sch, tab: s.tab, k: s.k, st: st}, true
+	return planInput{plan: *st.iret, sch: s.sch, tab: s.tab, k: s.k, kr: s.kReadinessLocked(st), st: st}, true
 }
 
 // Plan is the Prepare a leader may order (design 5.3.1 stage 5): the current intent's I-RET certificate with the rule-support evidence the
@@ -934,6 +974,7 @@ func (s *Service) Plan() (PreparePlan, bool) {
 	}
 	p := h.plan
 	p.RuleSupport = supportEvidence(h.sch, h.tab, h.k)
+	p.RuleSupport.KReadiness = h.kr
 	st := h.st
 	if err := vradmit.VerifyRuleSupport(vradmit.SupportInput{Network: st.d.Intent.Network, SuccessorEpoch: st.d.RootEpoch + 1, Schedule: h.sch, Table: h.tab,
 		Evidence: p.RuleSupport, Readiness: p.Certificate.Readiness, IntentDigest: st.digest[:], J: st.successors, K: h.k}); err != nil {
@@ -951,6 +992,7 @@ func (s *Service) Prepared() (PreparePlan, bool) {
 	}
 	p := h.plan
 	p.RuleSupport = supportEvidence(h.sch, h.tab, h.k)
+	p.RuleSupport.KReadiness = h.kr
 	return p, true
 }
 
@@ -1013,6 +1055,14 @@ func (s *Service) Stage(intent [32]byte, fromView uint64) (StageSet, bool) {
 		for _, id := range ids {
 			out.Readiness = append(out.Readiness, vs.readiness[id])
 		}
+		kids := make([]string, 0, len(vs.kready))
+		for id := range vs.kready {
+			kids = append(kids, id)
+		}
+		sort.Strings(kids)
+		for _, id := range kids {
+			out.Readiness = append(out.Readiness, vs.kready[id])
+		}
 	}
 	return out, true
 }
@@ -1073,4 +1123,43 @@ func encodeAssembly(a vrhandoff.Assembly) ([]byte, error) {
 		return nil, err
 	}
 	return types.Cbor.Marshal(a)
+}
+
+// kReadinessLocked is this intent's K-member readiness, the evidence of K's rule support in a Freeze v5 (design 5.1, 7.3): for each K member
+// at most one verified readiness that carries a commitment, ascending by its stakingID. A K member that is also a successor is represented
+// by its readiness in the retained certificate (a J readiness is a K readiness of the same intent, signed by the same root key); a K member
+// that is not is represented by the readiness it sent for support only, from the earliest retained view that holds one.
+func (s *Service) kReadinessLocked(st *intentState) []vrschema.Readiness {
+	byRoot := map[string]vrschema.Readiness{}
+	if st.iret != nil {
+		for _, r := range st.iret.Certificate.Readiness {
+			if m, kOnly, ok := s.readinessBy(st, r); ok && !kOnly {
+				byRoot[m.RootNodeID] = r
+			}
+		}
+	}
+	views := make([]uint64, 0, len(st.views))
+	for v := range st.views {
+		views = append(views, v)
+	}
+	sort.Slice(views, func(i, j int) bool { return views[i] < views[j] })
+	for _, v := range views {
+		for id, r := range st.views[v].kready {
+			if _, have := byRoot[id]; !have {
+				byRoot[id] = r
+			}
+		}
+	}
+	inK := map[string]bool{}
+	for _, m := range s.k {
+		inK[m.RootNodeID] = true
+	}
+	var out []vrschema.Readiness
+	for id, r := range byRoot {
+		if inK[id] && len(r.Commitments) > 0 {
+			out = append(out, r)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return bytes.Compare(out[i].Commitments[0].StakingID, out[j].Commitments[0].StakingID) < 0 })
+	return out
 }

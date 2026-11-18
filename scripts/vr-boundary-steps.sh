@@ -48,14 +48,20 @@ vrb_root_epoch2() { local r n=0; for r in $(vrb_root_rpcs); do curl -sf -X POST 
 # VR_RESTART_MEMBER=1: one member (identity 1's root) is stopped once every member has signed and the assembly is held, and restarted mid-protocol,
 # before the Prepare: it resumes from its persisted state, signs nothing again, and the handoff still completes.
 vrb_restart_member() {
-  local node=1 before after boot
+  local node=1 before after boot rc
   declare -F m2_start_root >/dev/null || source scripts/lib/m2-handoff-lib.sh || { vrb_log "FAIL: the root restart library"; return 1; }
   before=$(grep -c 'VR handoff member: readiness' "test-nodes/root$node/debug.log")
   vrb_log "restarting root$node mid-protocol"
   boot=$(m2_root_addr 2)
   stop_pidfile "test-nodes/root$node/pid" 'ubft root-node' || { vrb_log "FAIL: stopping root$node"; return 1; }
   cp "test-nodes/root$node/vr-member.json" "$VR_EVIDENCE/root$node-vr-member-before-restart.json" 2>/dev/null || true
-  m2_start_root "$node" 1 "$boot" || { vrb_log "FAIL: restarting root$node"; return 1; }
+  { set -x; m2_start_root "$node" 1 "$boot"; rc=$?; set +x; } 2>"$VR_EVIDENCE/restart-trace.log"
+  # m2_start_root's readiness check needs lsof, which a host without it (the dev server) fails: the root is up when its RPC answers
+  if [ "$rc" != 0 ]; then
+    local pid; pid=$(cat "test-nodes/root$node/pid")
+    vrb_wait 60 "root$node answers on its RPC after the restart" curl -sf "http://127.0.0.1:$(m2_rpc_port "$node")/api/v1/roundInfo" && kill -0 "$pid" 2>/dev/null ||
+      { vrb_log "FAIL: restarting root$node (rc=$rc, boot=$boot)"; return 1; }
+  fi
   sleep 10
   after=$(grep -c 'VR handoff member: readiness' "test-nodes/root$node/debug.log")
   [ "$before" = "$after" ] || { vrb_log "FAIL: root$node signed a view again after its restart"; return 1; }
