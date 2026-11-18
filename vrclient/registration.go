@@ -2,6 +2,7 @@ package vrclient
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"errors"
 	"fmt"
@@ -23,6 +24,32 @@ type NodeKeys struct {
 // Public is the 33-byte compressed signing key.
 func (k NodeKeys) Public() []byte { return ethcrypto.CompressPubkey(&k.Key.PublicKey) }
 
+// Node is the node id.
+func (k NodeKeys) Node() string { return k.NodeID }
+
+// Prove signs the registration digest with the key in this process.
+func (k NodeKeys) Prove(_ context.Context, req ProofRequest) ([]byte, error) {
+	return SignDigest(k.Key, req.Digest)
+}
+
+// Prover makes one service key's registration proof of possession: a key in this process (NodeKeys) or one held by a signing authority,
+// which computes the digest itself from the typed request (VT-10).
+type Prover interface {
+	Node() string
+	Public() []byte
+	Prove(ctx context.Context, req ProofRequest) ([]byte, error)
+}
+
+// ProofRequest is the typed registration a prover signs: the digest's inputs, with the digest the caller computed for them. A prover that
+// holds the key itself signs Digest; one that does not (an authority) ignores it and computes its own, which the caller then verifies.
+type ProofRequest struct {
+	Binding      bool
+	Sender       ethcommon.Address
+	ID           uint64
+	Registration Registration
+	Digest       [32]byte
+}
+
 // Signed is a registration with both proofs of possession.
 type Signed struct {
 	Registration Registration
@@ -39,8 +66,8 @@ type Domain struct {
 }
 
 // NewRegistration builds a registration of the root node and the EVM shard node with payee and nonce, checked as VR checks its shape.
-func NewRegistration(root, evm NodeKeys, payee ethcommon.Address, nonce uint64) (Registration, error) {
-	r := Registration{RootNodeID: root.NodeID, RootKey: root.Public(), EvmNodeID: evm.NodeID, EvmKey: evm.Public(), Payee: payee, Nonce: nonce}
+func NewRegistration(root NodeKeys, evm Prover, payee ethcommon.Address, nonce uint64) (Registration, error) {
+	r := Registration{RootNodeID: root.NodeID, RootKey: root.Public(), EvmNodeID: evm.Node(), EvmKey: evm.Public(), Payee: payee, Nonce: nonce}
 	if err := toSchema(r).ValidShape(); err != nil {
 		return r, fmt.Errorf("%w: %v", ErrVR, err)
 	}
@@ -69,6 +96,49 @@ func Sign(d Domain, sender ethcommon.Address, binding bool, id uint64, r Registr
 		return Signed{}, err
 	}
 	return Signed{Registration: r, RootPoP: rp, EvmPoP: ep, Digest: digest}, nil
+}
+
+// SignWith is Sign with the EVM key behind a Prover (a signing authority). The root key signs here; the EVM proof is the prover's, made over
+// the same typed registration. Both proofs are then verified against the digest this function computed (each recovers its registration key),
+// so a prover that signed another digest, or another key's, is caught before anything is submitted.
+func SignWith(ctx context.Context, d Domain, sender ethcommon.Address, binding bool, id uint64, r Registration, root NodeKeys, evm Prover) (Signed, error) {
+	if !bytes.Equal(root.Public(), r.RootKey) || !bytes.Equal(evm.Public(), r.EvmKey) || evm.Node() != r.EvmNodeID {
+		return Signed{}, fmt.Errorf("%w: the signing keys are not the registration's keys", ErrVR)
+	}
+	if d.ChainID == nil || d.ChainID.Sign() < 0 || d.ChainID.BitLen() > 256 {
+		return Signed{}, fmt.Errorf("%w: chain id", ErrVR)
+	}
+	var chain vrschema.Word
+	d.ChainID.FillBytes(chain[:])
+	digest := vrschema.RegistrationDigest(binding, d.Network, chain, d.Registry, sender, id, toSchema(r))
+	rp, err := root.Prove(ctx, ProofRequest{Binding: binding, Sender: sender, ID: id, Registration: r, Digest: digest})
+	if err != nil {
+		return Signed{}, fmt.Errorf("%w: the root node's proof: %v", ErrVR, err)
+	}
+	ep, err := evm.Prove(ctx, ProofRequest{Binding: binding, Sender: sender, ID: id, Registration: r, Digest: digest})
+	if err != nil {
+		return Signed{}, fmt.Errorf("%w: the EVM shard node's proof: %w", ErrVR, err)
+	}
+	if err := errors.Join(VerifyProof(digest, r.RootKey, rp), VerifyProof(digest, r.EvmKey, ep)); err != nil {
+		return Signed{}, fmt.Errorf("%w: %v", ErrVR, err)
+	}
+	return Signed{Registration: r, RootPoP: rp, EvmPoP: ep, Digest: digest}, nil
+}
+
+// VerifyProof checks a proof in the contracts' format (KeyLib.verify): 65 bytes r || s || v, low s, v 27 or 28, recovering key from digest.
+func VerifyProof(digest [32]byte, key, sig []byte) error {
+	if len(sig) != 65 || (sig[64] != 27 && sig[64] != 28) {
+		return errors.New("a proof is 65 bytes r||s||v with v 27 or 28")
+	}
+	if new(big.Int).SetBytes(sig[32:64]).Cmp(new(big.Int).Rsh(ethcrypto.S256().Params().N, 1)) > 0 {
+		return errors.New("a proof has a high s")
+	}
+	rec := append(append([]byte(nil), sig[:64]...), sig[64]-27)
+	pub, err := ethcrypto.SigToPub(digest[:], rec)
+	if err != nil || !bytes.Equal(ethcrypto.CompressPubkey(pub), key) {
+		return errors.New("a proof does not recover the registration's key over the registration digest")
+	}
+	return nil
 }
 
 // SignDigest is the contracts' signature format (KeyLib.verify): r || s || v over the digest itself, v = 27/28, low s.

@@ -46,7 +46,7 @@ const vrSourcesFileName = "vr-sources.json"
 // enableVRHandoff wires the VR handoff root side of a VR-mode manager: the observer over the execution client at rpcURL (eth_getProof
 // and eth_call at the certified block hashes), the persisted sources, the intent provider and the Freeze witness builder.
 func enableVRHandoff(ctx context.Context, cm *consensus.ConsensusManager, dep vradmit.Deployment, pins vrstate.Pins, shardConfs []*types.PartitionDescriptionRecord,
-	rpcURL, home string, signer abcrypto.Signer, host *network.Peer) error {
+	rpcURL, home, evmKeys string, signer abcrypto.Signer, host *network.Peer) error {
 	if rpcURL == "" {
 		return fmt.Errorf("%w: a VR generation's roots read VR through --pos-evm-rpc", ErrVRHandoffCmd)
 	}
@@ -67,6 +67,10 @@ func enableVRHandoff(ctx context.Context, cm *consensus.ConsensusManager, dep vr
 	if err != nil {
 		return err
 	}
+	member, err := vrMemberConfig(home, evmKeys)
+	if err != nil {
+		return err
+	}
 	reader := vrschedule.RPC{Client: client, Pins: pins}
 	var opener vrschedule.Opener
 	if host != nil {
@@ -81,6 +85,7 @@ func enableVRHandoff(ctx context.Context, cm *consensus.ConsensusManager, dep vr
 		},
 		Signer: signer,
 		Opener: opener,
+		Member: member,
 	}); err != nil {
 		return err
 	}
@@ -98,16 +103,44 @@ func enableVRHandoff(ctx context.Context, cm *consensus.ConsensusManager, dep vr
 // state authority over the pinned VR) are installed: it is the root side of every VR generation's handoff, replacing the P85 operator
 // script (handoff_drive.py) there. A root outside VR mode is unchanged. It must run after the VR services are installed (enableVRServices);
 // checkVRHandoffWired, before the root starts, refuses a VR-mode root whose root side is off. It reports whether the root side is on.
-func enableVRHandoffInVRMode(ctx context.Context, cm *consensus.ConsensusManager, shardConfs []*types.PartitionDescriptionRecord, rpcURL, home string,
+func enableVRHandoffInVRMode(ctx context.Context, cm *consensus.ConsensusManager, shardConfs []*types.PartitionDescriptionRecord, rpcURL, home, evmKeys string,
 	signer abcrypto.Signer, host *network.Peer) (bool, error) {
 	dep, pins, on, err := vrHandoffWiring(cm.VRServices(), rpcURL)
 	if err != nil || !on {
 		return false, err
 	}
-	if err := enableVRHandoff(ctx, cm, dep, pins, shardConfs, rpcURL, home, signer, host); err != nil {
+	if err := enableVRHandoff(ctx, cm, dep, pins, shardConfs, rpcURL, home, evmKeys, signer, host); err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+// vrMemberFileName is the node's persisted member state (sticky proofs, signed views) in its home.
+const vrMemberFileName = "vr-member.json"
+
+// vrMemberConfig is the node's member participation (VT-09): every VR-mode node does the successor-member steps itself when an intent names
+// it. The possession proof is signed by its EVM key, read from the EVM shard node's keys.json (--vr-evm-keys, the key the validator
+// configuration names as evmKeys); without one the node signs readiness but cannot send its proof. The root process then holds that EVM
+// validator key (and the file's auth key): a compromised root process compromises the EVM validator too, so give the flag only on a host that
+// already holds both. The member refuses to sign when the key is not the EVM node the intent names for this node.
+func vrMemberConfig(home, evmKeys string) (*consensus.VRMemberConfig, error) {
+	m := &consensus.VRMemberConfig{Path: filepath.Join(home, vrMemberFileName)}
+	m.Hold = devMemberHold(home)
+	if evmKeys == "" {
+		return m, nil
+	}
+	dir := filepath.Dir(evmKeys)
+	if filepath.Base(evmKeys) != keyConfFileName {
+		return nil, fmt.Errorf("%w: --vr-evm-keys must name a %s", ErrVRHandoffCmd, keyConfFileName)
+	}
+	ks, err := homeKeys([]string{dir})
+	if err != nil || len(ks) != 1 {
+		return nil, fmt.Errorf("%w: --vr-evm-keys: %v (%d keys)", ErrVRHandoffCmd, err, len(ks))
+	}
+	for id, s := range ks { // exactly one entry: the file's own key
+		m.EVMNodeID, m.EVMSigner = id, s
+	}
+	return m, nil
 }
 
 // vrHandoffWiring is what the installed VR services and --pos-evm-rpc decide: off outside VR mode; in VR mode the generation's deployment

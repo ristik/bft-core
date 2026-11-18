@@ -77,6 +77,7 @@ type (
 		PosDeploymentFile        string
 		VRDeploymentFile         string
 		PosEVMRPC                string
+		VRMemberEVMKeys          string
 		TrustHistoryDBFile       string
 		UTBGenesisFile           string // the canonical genesis entry of the signed trust-base chain (utb-genesis); enables the UTB profile
 		UTBGenesisID             string // its EntryID, the pin
@@ -173,6 +174,7 @@ func rootNodeRunCmd(baseFlags *baseFlags) *cobra.Command {
 		"proof-of-stake: JSON pinning the custody deployment (networkWord, chainId, custody). Turns on the P85 control executor and the mandatory CloseLiability duty (profile 2 only); refused together with --genesis-identities")
 	cmd.Flags().StringVar(&flags.VRDeploymentFile, "vr-deployment", "",
 		"validator-registry generation (VT-14): the roots' VR deployment `ubft vr-genesis verify --out-root-deployment` wrote. Wires the VR-mode control executor (the Freeze v5 witness verifier, the VR-domain closure duty); the genesis EVM PDR must pin the same VR, and the genesis committee comes from --genesis-identities. Profile 3 only; refused together with --pos-deployment")
+	cmd.Flags().StringVar(&flags.VRMemberEVMKeys, "vr-evm-keys", "", "VR mode: the keys.json of this node's EVM shard node: its EVM key signs the possession proof this node sends when an intent names it a successor member (VT-09). The root process then holds the EVM validator key too. vr-member.json in the home is a safety store: preserve it")
 	cmd.Flags().StringVar(&flags.PosEVMRPC, "pos-evm-rpc", "",
 		"proof-of-stake: JSON-RPC URL of the execution client that serves eth_getProof and custody's logs; required when the deployment pins an election (the root then builds the storage-proof witness of a primary candidate's Freeze). With it every root also builds the Retirement controls of the identities whose owner requested one (the request cursor and pending set persist in "+posRetirementStateFileName+")")
 	cmd.Flags().StringVar(&flags.OrchestrationDBFile, "orchestration-db", "",
@@ -507,9 +509,12 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		defer stopWitnesses()
 	}
 	// VT-05b: the VR handoff root side of a VR-mode root (observer, intent, the staged protocol, the leader path), after its VR services
-	vrHandoffOn, err := enableVRHandoffInVRMode(ctx, cm, shardConfs, flags.PosEVMRPC, flags.PathWithDefault("", ""), signer, host)
+	vrHandoffOn, err := enableVRHandoffInVRMode(ctx, cm, shardConfs, flags.PosEVMRPC, flags.PathWithDefault("", ""), flags.VRMemberEVMKeys, signer, host)
 	if err != nil {
 		return err
+	}
+	if flags.VRMemberEVMKeys != "" && !vrHandoffOn {
+		return fmt.Errorf("%w: --vr-evm-keys needs a VR-mode root (--vr-deployment, --pos-evm-rpc): the flag would be ignored", ErrVRHandoffCmd)
 	}
 	if flags.HandoffProfile {
 		// The record fetcher is installed and the bootstrap peers are dialled before the Q3 recovery: an installation interrupted before
@@ -685,8 +690,8 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 				mux.HandleFunc("POST /api/v1/handoff/q3-stage", rootQ3StageHandler(cm))
 				rootQ3API{Status: cm.Q3Status, Rt: q3rt, Bundle: q3BundleProvider{cm: cm, rt: q3rt}.Q3Bundle, State: cm.GetState,
 					Trust: func(epoch uint64) (*types.RootTrustBaseV1, error) { return trustBaseStore.GetByEpoch(epoch) },
-					ShardConfig: func(partition types.PartitionID, epoch uint64) (*types.PartitionDescriptionRecord, error) {
-						return orchestration.ShardConfigByEpoch(partition, types.ShardID{}, epoch)
+					ShardConfig: func(partition types.PartitionID, shard types.ShardID, epoch uint64) (*types.PartitionDescriptionRecord, error) {
+						return orchestration.ShardConfigByEpoch(partition, shard, epoch)
 					}}.register(mux)
 			}
 			if flags.PosDeploymentFile != "" || flags.VRDeploymentFile != "" {
