@@ -131,7 +131,7 @@ func NewBlockTree(bDB PersistentStore, orchestration Orchestration, networkProfi
 	}
 	if len(blocks) == 0 {
 		// must be system bootstrap - init tree with genesis block
-		genesisBlock, err := NewGenesisBlock(orchestration.NetworkID(), crypto.SHA256, profile)
+		genesisBlock, err := NewGenesisBlockOf(orchestration, crypto.SHA256, profile)
 		if err != nil {
 			return nil, fmt.Errorf("creating genesis block for empty DB: %w", err)
 		}
