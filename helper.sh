@@ -645,6 +645,7 @@ function start_one_evm_validator() {
     ${executorArgs[@]+"${executorArgs[@]}"} ${rpcArgs[@]+"${rpcArgs[@]}"} \
     ${signingArgs[@]+"${signingArgs[@]}"} \
     ${profileArgs[@]+"${profileArgs[@]}"} ${layoutArgs[@]+"${layoutArgs[@]}"} \
+    ${EVM_EXTRA_ARGS:-} \
     >> "test-nodes/evm$i/debug.log" 2>&1 &
   echo $! > "test-nodes/evm$i/pid"
 }
