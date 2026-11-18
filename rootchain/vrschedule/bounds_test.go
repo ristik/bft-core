@@ -716,3 +716,32 @@ func TestARoundIsBuiltAgainstOneMembershipSnapshot(t *testing.T) {
 	require.Len(t, q.round, 0, "the round held exactly the snapshot's 49 senders")
 	require.Equal(t, old, served, "every sender of the snapshot was served, none of another version")
 }
+
+// astra's review of #1188, r5: the queue starts before the first committed membership is known; until then a round prunes nothing.
+func TestNoRoundPrunesBeforeAMembershipIsKnown(t *testing.T) {
+	w := newWorld(t)
+	s := w.service("x")
+	_, known := s.Membership()
+	require.False(t, known)
+	q := NewQueue(s, 0)
+	q.Admission = func() map[string]bool {
+		m, ok := s.Membership()
+		if !ok {
+			return nil
+		}
+		return m
+	}
+	p := w.PoPs(w.in)[0]
+	require.True(t, q.Submit("installed-validator", Message{PoP: &p}))
+	m, ok := q.pop()
+	require.True(t, ok, "kept: no membership is known yet")
+	require.Equal(t, "installed-validator", m.sender)
+
+	s.Update(w.committed(0))
+	members, known := s.Membership()
+	require.True(t, known)
+	require.True(t, q.Submit("stranger", variant(p, 1)))
+	_, ok = q.pop()
+	require.False(t, ok, "once known, a sender outside it is pruned")
+	require.NotContains(t, members, "stranger")
+}

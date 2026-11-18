@@ -166,7 +166,10 @@ func (x *ConsensusManager) EnableVRHandoff(ctx context.Context, cfg VRHandoffCon
 	// a service round serves only the senders of one membership snapshot: the service's members of its last committed update (the installed
 	// committee, K and the current intent's successors) and the local operator
 	v.queue.Admission = func() map[string]bool {
-		m := v.svc.Members()
+		m, ok := v.svc.Membership()
+		if !ok {
+			return nil // no committed membership yet (the queue starts before the first commit): nothing is pruned
+		}
 		m[vrOperator] = true
 		return m
 	}
@@ -483,26 +486,18 @@ func (x *ConsensusManager) vrCommitted() (vrschedule.Committed, error) {
 	if err != nil {
 		return c, err
 	}
-	// the membership the protocol admits is of this one committed state, derivable or not: the committee of its epoch and K
-	tb := x.trustBase.Load()
+	// the membership the protocol admits is of this one committed state, derivable or not: the committee of its epoch and K. Without both,
+	// complete and of the state's epoch, nothing is published, and the service keeps its last good membership (astra review of #1188, r5)
+	var facts storage.VRRootFacts
+	var store trustBasesByEpoch
 	if x.trustBaseStore != nil {
-		if byEpoch, tbErr := x.trustBaseStore.GetByEpoch(q.Epoch); tbErr == nil && byEpoch != nil {
-			tb = byEpoch
-		}
+		store = x.trustBaseStore
 	}
-	c.Incumbents = map[string][]byte{}
-	for _, n := range tb.RootNodes {
-		c.Incumbents[n.NodeID] = bytes.Clone(n.SigKey)
+	c.Incumbents, facts, err = vrMembership(q, x.trustBase.Load(), store)
+	if err != nil {
+		return c, err
 	}
-	if q.Root != nil {
-		facts, ferr := q.Root()
-		if ferr != nil && ok {
-			return c, ferr
-		}
-		if ferr == nil {
-			c.K, c.Schedule = facts.Lifecycle.Incumbent, facts.Fold.Schedule
-		}
-	}
+	c.K, c.Schedule = facts.Lifecycle.Incumbent, facts.Fold.Schedule
 	c.Table = s.Support
 	c.Derived, c.Derivable = d, ok
 	if !ok {
@@ -516,6 +511,40 @@ func (x *ConsensusManager) vrCommitted() (vrschedule.Committed, error) {
 		c.FrozenParent, c.FrozenRoot = [32]byte(q.Control.FrozenParent), q.LatestEVMRoot
 	}
 	return c, nil
+}
+
+// trustBasesByEpoch is the trust-base store's lookup.
+type trustBasesByEpoch interface {
+	GetByEpoch(epoch uint64) (*types.RootTrustBaseV1, error)
+}
+
+// vrMembership is the membership a committed VR state names: the root committee of its epoch (from the store, or the live trust base only
+// when it is of that epoch) and its root facts (K, the schedule). It fails rather than guess a committee of another epoch or an empty K.
+func vrMembership(q storage.VRIntentQuery, live *types.RootTrustBaseV1, store trustBasesByEpoch) (map[string][]byte, storage.VRRootFacts, error) {
+	var tb *types.RootTrustBaseV1
+	if store != nil {
+		if byEpoch, err := store.GetByEpoch(q.Epoch); err == nil && byEpoch != nil {
+			tb = byEpoch
+		}
+	}
+	if tb == nil && live != nil && live.Epoch == q.Epoch {
+		tb = live
+	}
+	if tb == nil || tb.Epoch != q.Epoch {
+		return nil, storage.VRRootFacts{}, fmt.Errorf("%w: no root committee of epoch %d", ErrVRHandoff, q.Epoch)
+	}
+	if q.Root == nil {
+		return nil, storage.VRRootFacts{}, fmt.Errorf("%w: no root facts of the committed state", ErrVRHandoff)
+	}
+	facts, err := q.Root()
+	if err != nil {
+		return nil, storage.VRRootFacts{}, errors.Join(ErrVRHandoff, err)
+	}
+	incumbents := map[string][]byte{}
+	for _, n := range tb.RootNodes {
+		incumbents[n.NodeID] = bytes.Clone(n.SigKey)
+	}
+	return incumbents, facts, nil
 }
 
 // VRIntentView is the intent this root derives over its committed state, for the operator: the intent, its digest, the root epoch it

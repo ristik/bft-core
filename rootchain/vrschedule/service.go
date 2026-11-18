@@ -194,6 +194,8 @@ type Service struct {
 	// current intent's members they are one membership version (Members)
 	incumbents map[string][]byte
 	k          []evmassign.Identity
+	// membership is set by the first update: until then no committed membership is known (Membership)
+	membership bool
 	tab        vradmit.SupportTable
 	sch        []vrschema.Activation
 	// buffered messages by sender (at most BufferPerPeer each): for a future view of the current intent, or for an intent not derived
@@ -277,7 +279,7 @@ func (s *Service) isDead(d []byte) bool {
 
 func (s *Service) updateLocked(c Committed) followUp {
 	s.updates++
-	s.k, s.tab, s.sch, s.incumbents = c.K, c.Table, c.Schedule, c.Incumbents
+	s.k, s.tab, s.sch, s.incumbents, s.membership = c.K, c.Table, c.Schedule, c.Incumbents, true
 	defer s.pruneBuffered()
 	if !c.Derivable {
 		if s.cur != nil {
@@ -1151,8 +1153,19 @@ func (s *Service) Current() (intent [32]byte, view uint64, complete, ok bool) {
 // Members are the node ids the peer protocol admits, all of one committed update (one membership version): the installed root committee,
 // K's roots and the current intent's successors' roots. The map is a fresh snapshot.
 func (s *Service) Members() map[string]bool {
+	m, _ := s.Membership()
+	return m
+}
+
+// Membership is Members, and false until the first committed update named a membership: the caller then knows none yet (an empty map is
+// not "nobody is admitted").
+func (s *Service) Membership() (map[string]bool, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.membersLocked(), s.membership
+}
+
+func (s *Service) membersLocked() map[string]bool {
 	out := map[string]bool{}
 	for id := range s.incumbents {
 		out[id] = true
