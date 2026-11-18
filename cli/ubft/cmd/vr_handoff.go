@@ -8,9 +8,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/rpc"
@@ -23,6 +25,7 @@ import (
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	"github.com/unicitynetwork/bft-core/rootchain/vrschedule"
 	"github.com/unicitynetwork/bft-core/rootchain/vrstate"
+	"github.com/unicitynetwork/bft-core/signingauthority/service"
 	"github.com/unicitynetwork/bft-core/vradmit"
 	"github.com/unicitynetwork/bft-core/vrhandoff"
 	"github.com/unicitynetwork/bft-core/vrschema"
@@ -46,7 +49,7 @@ const vrSourcesFileName = "vr-sources.json"
 // enableVRHandoff wires the VR handoff root side of a VR-mode manager: the observer over the execution client at rpcURL (eth_getProof
 // and eth_call at the certified block hashes), the persisted sources, the intent provider and the Freeze witness builder.
 func enableVRHandoff(ctx context.Context, cm *consensus.ConsensusManager, dep vradmit.Deployment, pins vrstate.Pins, shardConfs []*types.PartitionDescriptionRecord,
-	rpcURL, home string, signer abcrypto.Signer, host *network.Peer) error {
+	rpcURL, home, evmKeys, shardRPC string, signer abcrypto.Signer, host *network.Peer, authority ...vrEVMAuthority) error {
 	if rpcURL == "" {
 		return fmt.Errorf("%w: a VR generation's roots read VR through --pos-evm-rpc", ErrVRHandoffCmd)
 	}
@@ -67,6 +70,14 @@ func enableVRHandoff(ctx context.Context, cm *consensus.ConsensusManager, dep vr
 	if err != nil {
 		return err
 	}
+	member, err := vrMemberConfig(home, evmKeys, authority...)
+	if err != nil {
+		return err
+	}
+	shard, err := vrShardSink(shardRPC)
+	if err != nil {
+		return err
+	}
 	reader := vrschedule.RPC{Client: client, Pins: pins}
 	var opener vrschedule.Opener
 	if host != nil {
@@ -79,15 +90,18 @@ func enableVRHandoff(ctx context.Context, cm *consensus.ConsensusManager, dep vr
 		Witness: func(ctx context.Context, blockHash, stateRoot [32]byte, result vrschema.Word) ([]byte, error) {
 			return reader.OutputState(ctx, blockHash, stateRoot, result)
 		},
-		Signer: signer,
-		Opener: opener,
+		Signer:         signer,
+		Opener:         opener,
+		Member:         member,
+		ShardStaged:    shard,
+		ShardStampPath: filepath.Join(home, "vr-shard-stamp"),
 	}); err != nil {
 		return err
 	}
 	if host != nil {
 		// the peer protocol: the installed root committee always, besides the current intent's members the service names
 		svc, queue := cm.VRService()
-		server := vrschedule.NewServer(svc, queue, func(id peer.ID) bool { return slices.Contains(cm.Validators(), id) })
+		server := vrschedule.NewServer(svc, queue, func(id peer.ID) bool { return slices.Contains(cm.Validators(), id) }).WithSources(sources)
 		host.RegisterProtocolHandler(vrschedule.ProtocolID, server.Handler)
 		go func() { <-ctx.Done(); host.RemoveProtocolHandler(vrschedule.ProtocolID) }()
 	}
@@ -98,16 +112,69 @@ func enableVRHandoff(ctx context.Context, cm *consensus.ConsensusManager, dep vr
 // state authority over the pinned VR) are installed: it is the root side of every VR generation's handoff, replacing the P85 operator
 // script (handoff_drive.py) there. A root outside VR mode is unchanged. It must run after the VR services are installed (enableVRServices);
 // checkVRHandoffWired, before the root starts, refuses a VR-mode root whose root side is off. It reports whether the root side is on.
-func enableVRHandoffInVRMode(ctx context.Context, cm *consensus.ConsensusManager, shardConfs []*types.PartitionDescriptionRecord, rpcURL, home string,
-	signer abcrypto.Signer, host *network.Peer) (bool, error) {
+func enableVRHandoffInVRMode(ctx context.Context, cm *consensus.ConsensusManager, shardConfs []*types.PartitionDescriptionRecord, rpcURL, home, evmKeys, shardRPC string,
+	signer abcrypto.Signer, host *network.Peer, authority ...vrEVMAuthority) (bool, error) {
 	dep, pins, on, err := vrHandoffWiring(cm.VRServices(), rpcURL)
 	if err != nil || !on {
 		return false, err
 	}
-	if err := enableVRHandoff(ctx, cm, dep, pins, shardConfs, rpcURL, home, signer, host); err != nil {
+	if err := enableVRHandoff(ctx, cm, dep, pins, shardConfs, rpcURL, home, evmKeys, shardRPC, signer, host, authority...); err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+// vrEVMAuthority is the node's signing authority as the member reaches it: its possession-proof socket and the member's credential.
+type vrEVMAuthority struct{ Socket, Credential string }
+
+func (a vrEVMAuthority) empty() bool { return a.Socket == "" && a.Credential == "" }
+
+// vrMemberFileName is the node's persisted member state (sticky proofs, signed views) in its home.
+const vrMemberFileName = "vr-member.json"
+
+// vrMemberConfig is the node's member participation (VT-09): every VR-mode node does the successor-member steps itself when an intent names
+// it. The possession proof is signed by its EVM key, read from the EVM shard node's keys.json (--vr-evm-keys, the key the validator
+// configuration names as evmKeys); without one the node signs readiness but cannot send its proof. The root process then holds that EVM
+// validator key (and the file's auth key): a compromised root process compromises the EVM validator too, so give the flag only on a host that
+// already holds both. The member refuses to sign when the key is not the EVM node the intent names for this node.
+func vrMemberConfig(home, evmKeys string, authority ...vrEVMAuthority) (*consensus.VRMemberConfig, error) {
+	m := &consensus.VRMemberConfig{Path: filepath.Join(home, vrMemberFileName)}
+	m.Hold = devMemberHold(home)
+	if len(authority) > 0 && !authority[0].empty() {
+		// the EVM key stays in the node's signing authority: the member reaches its possession-proof endpoint (VT-09, #1201)
+		a := authority[0]
+		if evmKeys != "" {
+			return nil, fmt.Errorf("%w: --vr-evm-keys and --vr-evm-authority-socket are two holders of the EVM key: give one", ErrVRHandoffCmd)
+		}
+		if a.Socket == "" || a.Credential == "" {
+			return nil, fmt.Errorf("%w: --vr-evm-authority-socket needs --vr-evm-authority-credential", ErrVRHandoffCmd)
+		}
+		credential, err := readCredentialFile(a.Credential)
+		if err != nil {
+			return nil, fmt.Errorf("%w: loading the possession-proof credential: %v", ErrVRHandoffCmd, err)
+		}
+		c, err := service.NewPoPClient(service.ClientConfig{Dial: service.UnixDialer(a.Socket), Credential: credential, Timeout: vrschedule.AuthorityPoPTimeout})
+		if err != nil {
+			return nil, fmt.Errorf("%w: %v", ErrVRHandoffCmd, err)
+		}
+		m.EVMPoP = vrschedule.AuthorityPoP{Client: c}
+		return m, nil
+	}
+	if evmKeys == "" {
+		return m, nil
+	}
+	dir := filepath.Dir(evmKeys)
+	if filepath.Base(evmKeys) != keyConfFileName {
+		return nil, fmt.Errorf("%w: --vr-evm-keys must name a %s", ErrVRHandoffCmd, keyConfFileName)
+	}
+	ks, err := homeKeys([]string{dir})
+	if err != nil || len(ks) != 1 {
+		return nil, fmt.Errorf("%w: --vr-evm-keys: %v (%d keys)", ErrVRHandoffCmd, err, len(ks))
+	}
+	for id, s := range ks { // exactly one entry: the file's own key
+		m.EVMNodeID, m.EVMSigner = id, s
+	}
+	return m, nil
 }
 
 // vrHandoffWiring is what the installed VR services and --pos-evm-rpc decide: off outside VR mode; in VR mode the generation's deployment
@@ -142,6 +209,7 @@ type vrHandoffOperator interface {
 	SubmitVRCertificate(c vrschema.ViewCertificate) error
 	OfferVRMessage(m vrschedule.Message) error
 	VRStage(fromView uint64) (vrschedule.StageSet, [32]byte, error)
+	VRMemberStatus() consensus.VRMemberStatus
 }
 
 type vrMessageRequest struct {
@@ -262,6 +330,12 @@ func registerVRHandoffRoutes(mux *http.ServeMux, op vrHandoffOperator) {
 			return
 		}
 		w.WriteHeader(http.StatusAccepted)
+	})
+	mux.HandleFunc("GET /api/v1/vr/member", func(w http.ResponseWriter, r *http.Request) {
+		if !localOperatorRequest(w, r) {
+			return
+		}
+		writeVRJSON(w, op.VRMemberStatus())
 	})
 	mux.HandleFunc("GET /api/v1/vr/stage", func(w http.ResponseWriter, r *http.Request) {
 		if !localOperatorRequest(w, r) {
@@ -626,4 +700,46 @@ func newVRHandoffDriveCmd() *cobra.Command {
 	cmd.Flags().DurationVar(&wait, "assembly-wait", 2*time.Minute, "how long to wait for the committed view's assembler root to assemble")
 	_ = cmd.MarkFlagRequired("root-rpc")
 	return cmd
+}
+
+// vrShardSink is the paired shard node's staged-successor endpoint (--vr-shard-rpc): the root posts the EVM node ids of the derived intent's
+// successor to it, with the shard epoch it would install and a generation stamp. The endpoint is the shard node's local operator RPC, so only a
+// loopback address is accepted, and redirects are never followed: the destination is the configured one throughout. An empty URL gives none.
+func vrShardSink(rawURL string) (func(ctx context.Context, shardEpoch, stamp uint64, ids []string) error, error) {
+	if rawURL == "" {
+		return nil, nil
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Scheme != "http" || u.Host == "" {
+		return nil, fmt.Errorf("%w: --vr-shard-rpc must be an http URL of the paired shard node's local RPC", ErrVRHandoffCmd)
+	}
+	if h := u.Hostname(); h != "127.0.0.1" && h != "localhost" && h != "::1" {
+		return nil, fmt.Errorf("%w: --vr-shard-rpc must be a loopback address (the shard node's operator RPC is local-only), got %s", ErrVRHandoffCmd, h)
+	}
+	target := strings.TrimRight(rawURL, "/") + "/api/v1/vr/staged"
+	client := &http.Client{Timeout: 3 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	return func(ctx context.Context, shardEpoch, stamp uint64, ids []string) error {
+		if ids == nil {
+			ids = []string{} // an explicit empty list: the only way to clear
+		}
+		body, err := json.Marshal(vrStagedRequest{ShardEpoch: &shardEpoch, Stamp: &stamp, IDs: &ids})
+		if err != nil {
+			return err
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(body))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := client.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode/100 != 2 {
+			raw, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+			return fmt.Errorf("%w: the shard node refused the staged successor: %s: %s", ErrVRHandoffCmd, resp.Status, bytes.TrimSpace(raw))
+		}
+		return nil
+	}, nil
 }

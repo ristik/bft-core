@@ -62,6 +62,10 @@ func (o *fixtureOperator) SubmitVRCertificate(c vrschema.ViewCertificate) error 
 
 func (o *fixtureOperator) OfferVRMessage(vrschedule.Message) error { return nil }
 
+func (o *fixtureOperator) VRMemberStatus() consensus.VRMemberStatus {
+	return consensus.VRMemberStatus{State: "ready"}
+}
+
 func (o *fixtureOperator) VRStage(uint64) (vrschedule.StageSet, [32]byte, error) {
 	return vrschedule.StageSet{}, o.d.Digest, nil
 }

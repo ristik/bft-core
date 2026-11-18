@@ -30,11 +30,18 @@ const (
 	ClientEndpoint Endpoint = iota
 	// OperatorEndpoint serves the operator: session replacement, status, enrollment.
 	OperatorEndpoint
+	// PoPEndpoint serves the automated root member the one operation its handoff duty needs, the possession proof of the authority's own
+	// key (opSignHandoffPoP), under its own credential. It serves nothing else: not session replacement, not epoch administration, not
+	// registration signing, not a status or an enrollment.
+	PoPEndpoint
 )
 
 func (e Endpoint) String() string {
-	if e == OperatorEndpoint {
+	switch e {
+	case OperatorEndpoint:
 		return "operator"
+	case PoPEndpoint:
+		return "pop"
 	}
 	return "client"
 }
@@ -45,6 +52,10 @@ type Config struct {
 	// the process, and the server neither generates nor stores it anywhere else. At least
 	// CredentialBytes of entropy.
 	OperatorCredential []byte
+
+	// PoPCredential admits the possession-proof endpoint (PoPEndpoint), the automated member's narrow channel. Optional: empty serves
+	// nothing there. At least CredentialBytes of entropy and not the operator credential.
+	PoPCredential []byte
 
 	// MaxConnections bounds concurrent connections per endpoint. Bounding the queue is the
 	// transport's job, not the authority's, which serialises behind one mutex.
@@ -122,6 +133,14 @@ func NewServer(authority *signingauthority.Authority, cfg Config) (*Server, erro
 	if len(cfg.OperatorCredential) < CredentialBytes {
 		return nil, fmt.Errorf("service: the operator credential must be at least %d bytes", CredentialBytes)
 	}
+	if len(cfg.PoPCredential) != 0 {
+		if len(cfg.PoPCredential) < CredentialBytes {
+			return nil, fmt.Errorf("service: the possession-proof credential must be at least %d bytes", CredentialBytes)
+		}
+		if subtle.ConstantTimeCompare(cfg.PoPCredential, cfg.OperatorCredential) == 1 {
+			return nil, errors.New("service: the possession-proof credential must not be the operator credential")
+		}
+	}
 	defaults := DefaultConfig()
 	if cfg.MaxConnections <= 0 {
 		cfg.MaxConnections = defaults.MaxConnections
@@ -140,6 +159,7 @@ func NewServer(authority *signingauthority.Authority, cfg Config) (*Server, erro
 		log = slog.New(slog.DiscardHandler)
 	}
 	cfg.OperatorCredential = append([]byte(nil), cfg.OperatorCredential...)
+	cfg.PoPCredential = append([]byte(nil), cfg.PoPCredential...)
 	lifetime, end := context.WithCancel(context.Background())
 	return &Server{
 		authority: authority, cfg: cfg, log: log, closed: make(chan struct{}),
@@ -310,6 +330,14 @@ func (s *Server) dispatch(ctx context.Context, endpoint Endpoint, req wireReques
 			return nil, fmt.Errorf("%w: %s is not an operator operation", errWrongEndpoint, operation)
 		}
 		if subtle.ConstantTimeCompare(req.Credential, s.cfg.OperatorCredential) != 1 {
+			return nil, errOperatorUnauthenticated
+		}
+		return s.operatorOp(ctx, operation, req.Payload)
+	case PoPEndpoint:
+		if !operation.servedToPoP() {
+			return nil, fmt.Errorf("%w: %s is not served on the possession-proof endpoint", errWrongEndpoint, operation)
+		}
+		if len(s.cfg.PoPCredential) == 0 || subtle.ConstantTimeCompare(req.Credential, s.cfg.PoPCredential) != 1 {
 			return nil, errOperatorUnauthenticated
 		}
 		return s.operatorOp(ctx, operation, req.Payload)

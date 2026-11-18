@@ -206,6 +206,12 @@ type SupportInput struct {
 	J, K         []evmassign.Identity
 }
 
+// RequiredRules are the rules a successor readiness must support for a successor at root epoch e: the effective ones (latched included)
+// with E <= e + 1, ascending by rule id.
+func RequiredRules(schedule []vrschema.Activation, e uint64) []vrschema.Activation {
+	return requiredRules(schedule, e)
+}
+
 // requiredRules lists every effective rule with E <= e_J + 1, the epoch J's recovery would reach.
 func requiredRules(schedule []vrschema.Activation, e uint64) []vrschema.Activation {
 	var out []vrschema.Activation
@@ -397,6 +403,17 @@ func MaterializeJ(t SupportTable, readiness []vrschema.Readiness, keep []evmassi
 		}
 	}
 	return t.Prune(keep).Add(cs...)
+}
+
+// CommitmentsInScope requires every commitment to be for the root network and a rule of the committed schedule (latched entries included).
+func CommitmentsInScope(schedule []vrschema.Activation, network uint64, cs []vrschema.SupportCommitment) error {
+	eff := vrschema.Effective(schedule)
+	for i, c := range cs {
+		if err := commitmentInScope(c, network, eff); err != nil {
+			return fmt.Errorf("commitment %d: %w", i, err)
+		}
+	}
+	return nil
 }
 
 // commitmentInScope requires a commitment for the root network and for a rule of the committed schedule (latched entries included).

@@ -77,6 +77,9 @@ type (
 		PosDeploymentFile        string
 		VRDeploymentFile         string
 		PosEVMRPC                string
+		VRMemberEVMKeys          string
+		VRMemberAuthority        vrEVMAuthority
+		VRShardRPC               string
 		TrustHistoryDBFile       string
 		UTBGenesisFile           string // the canonical genesis entry of the signed trust-base chain (utb-genesis); enables the UTB profile
 		UTBGenesisID             string // its EntryID, the pin
@@ -173,6 +176,10 @@ func rootNodeRunCmd(baseFlags *baseFlags) *cobra.Command {
 		"proof-of-stake: JSON pinning the custody deployment (networkWord, chainId, custody). Turns on the P85 control executor and the mandatory CloseLiability duty (profile 2 only); refused together with --genesis-identities")
 	cmd.Flags().StringVar(&flags.VRDeploymentFile, "vr-deployment", "",
 		"validator-registry generation (VT-14): the roots' VR deployment `ubft vr-genesis verify --out-root-deployment` wrote. Wires the VR-mode control executor (the Freeze v5 witness verifier, the VR-domain closure duty); the genesis EVM PDR must pin the same VR, and the genesis committee comes from --genesis-identities. Profile 3 only; refused together with --pos-deployment")
+	cmd.Flags().StringVar(&flags.VRMemberEVMKeys, "vr-evm-keys", "", "VR mode: the keys.json of this node's EVM shard node: its EVM key signs the possession proof this node sends when an intent names it a successor member (VT-09). The root process then holds the EVM validator key too. vr-member.json in the home is a safety store: preserve it")
+	cmd.Flags().StringVar(&flags.VRMemberAuthority.Socket, "vr-evm-authority-socket", "", "VR mode: the possession-proof socket of this node's EVM signing authority (`signing-authority run --pop-socket`), instead of --vr-evm-keys: the EVM key stays in the authority, which signs only the structured handoff proof and keeps its enrollment checks. With --vr-evm-authority-credential")
+	cmd.Flags().StringVar(&flags.VRMemberAuthority.Credential, "vr-evm-authority-credential", "", "VR mode: the member's credential for --vr-evm-authority-socket (the authority's --pop-credential): it reaches the possession proof and nothing else")
+	cmd.Flags().StringVar(&flags.VRShardRPC, "vr-shard-rpc", "", "VR mode: the local operator RPC (loopback http URL) of this node's paired EVM shard node: the root tells it the EVM validators of the derived handoff intent's successor, which it then serves as staged peers so a joiner's shard node can catch its EVM chain up (VT-09b)")
 	cmd.Flags().StringVar(&flags.PosEVMRPC, "pos-evm-rpc", "",
 		"proof-of-stake: JSON-RPC URL of the execution client that serves eth_getProof and custody's logs; required when the deployment pins an election (the root then builds the storage-proof witness of a primary candidate's Freeze). With it every root also builds the Retirement controls of the identities whose owner requested one (the request cursor and pending set persist in "+posRetirementStateFileName+")")
 	cmd.Flags().StringVar(&flags.OrchestrationDBFile, "orchestration-db", "",
@@ -507,9 +514,12 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		defer stopWitnesses()
 	}
 	// VT-05b: the VR handoff root side of a VR-mode root (observer, intent, the staged protocol, the leader path), after its VR services
-	vrHandoffOn, err := enableVRHandoffInVRMode(ctx, cm, shardConfs, flags.PosEVMRPC, flags.PathWithDefault("", ""), signer, host)
+	vrHandoffOn, err := enableVRHandoffInVRMode(ctx, cm, shardConfs, flags.PosEVMRPC, flags.PathWithDefault("", ""), flags.VRMemberEVMKeys, flags.VRShardRPC, signer, host, flags.VRMemberAuthority)
 	if err != nil {
 		return err
+	}
+	if (flags.VRMemberEVMKeys != "" || flags.VRShardRPC != "" || !flags.VRMemberAuthority.empty()) && !vrHandoffOn {
+		return fmt.Errorf("%w: --vr-evm-keys, --vr-evm-authority-socket and --vr-shard-rpc need a VR-mode root (--vr-deployment, --pos-evm-rpc): the flag would be ignored", ErrVRHandoffCmd)
 	}
 	if flags.HandoffProfile {
 		// The record fetcher is installed and the bootstrap peers are dialled before the Q3 recovery: an installation interrupted before

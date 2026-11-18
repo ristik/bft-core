@@ -89,6 +89,9 @@ func (o op) servedToClient() bool {
 	return false
 }
 
+// servedToPoP is the whole of the automated member's channel: the handoff possession proof and nothing else.
+func (o op) servedToPoP() bool { return o == opSignHandoffPoP }
+
 func (o op) servedToOperator() bool {
 	switch o {
 	case opReplaceSession, opStatus, opEnrollment, opCompleteEnrollment, opAdvanceEpoch, opSignHandoffPoP, opSignElectionPoP, opSignDelegationPossession,

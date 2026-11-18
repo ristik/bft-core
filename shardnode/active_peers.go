@@ -1,6 +1,8 @@
 package shardnode
 
 import (
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"sort"
@@ -12,6 +14,9 @@ import (
 
 // ErrActivePeersConflict refuses to install a different validator set for a shard epoch that already has one.
 var ErrActivePeersConflict = errors.New("shardnode: a different validator set is already installed for this shard epoch")
+
+// ErrActivePeersStale refuses a staged set of an older generation or for an assignment that is not the next one.
+var ErrActivePeersStale = errors.New("shardnode: the staged set is stale")
 
 // ErrActivePeersInvalid refuses a validator set that cannot be a peer set (a nil validator or a node id that is not a peer id).
 var ErrActivePeersInvalid = errors.New("shardnode: invalid validator for the active peer set")
@@ -30,6 +35,10 @@ type ActivePeers struct {
 	// readiness (it can only stage a candidate that is the successor of the history it has caught up to). Replaced by the next stage and
 	// cleared by the next install; never consulted for anything but inbound authorization.
 	staged map[peer.ID]struct{}
+	// stageStamp is the generation stamp of the staged set: a later stage must carry a stamp at least as new (an older, delayed one is stale)
+	stageStamp uint64
+	// stagePayload binds the stamp: the same stamp again is accepted only for the same (epoch, ids), never for a different update
+	stagePayload [32]byte
 	// held is set from process start until the persisted verified assignment steps have been replayed into the set: until then the set
 	// is only the genesis one, which may still name a validator that a later step retired. A held set authorizes nobody (a peer refused
 	// in that window retries; see archivewiring.ErrPeerNotAllowed) rather than authorizing a stale set.
@@ -184,6 +193,99 @@ func (a *ActivePeers) Allowed(id peer.ID) bool {
 	}
 	_, ok := a.staged[id]
 	return ok
+}
+
+// AllowedInstalled is Allowed without the staged successor: the validators of the installed assignment only.
+func (a *ActivePeers) AllowedInstalled(id peer.ID) bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.held {
+		return false
+	}
+	_, ok := a.set[id]
+	return ok
+}
+
+// AllowedStagedOnly reports whether the peer is in the staged successor set and not an installed validator (never this node itself): it may
+// read what a staged joiner needs to catch up, and nothing else.
+func (a *ActivePeers) AllowedStagedOnly(id peer.ID) bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.held {
+		return false
+	}
+	if _, ok := a.set[id]; ok {
+		return false
+	}
+	_, ok := a.staged[id]
+	return ok
+}
+
+// StageGeneration is Stage bound to a generation: the staged set is replaced only by one whose stamp is not older than the held one's, and a
+// non-empty set only for the NEXT assignment (epoch must be the installed shard epoch + 1), so a delayed request of an earlier intent, or one for
+// an assignment that has since been installed, cannot repopulate what a newer one revoked or the install cleared. An empty set clears (any epoch)
+// under the same stamp rule. The same stamp again is idempotent (a re-delivery after a restart).
+func (a *ActivePeers) StageGeneration(shardEpoch, stamp uint64, ids []string) error {
+	set, err := a.stagedSet(ids)
+	if err != nil {
+		return err
+	}
+	if stamp == 0 {
+		return fmt.Errorf("%w: a generation stamp is never zero", ErrActivePeersInvalid)
+	}
+	payload := stagePayloadOf(shardEpoch, ids)
+	a.mu.Lock()
+	// the next-assignment condition is on the SUBMITTED list (a non-empty list of only this node, filtered to nothing, is not a clear)
+	if stamp < a.stageStamp || (stamp == a.stageStamp && payload != a.stagePayload) || (len(ids) > 0 && shardEpoch != a.epoch+1) {
+		a.mu.Unlock()
+		return ErrActivePeersStale
+	}
+	a.staged, a.stageStamp, a.stagePayload = set, stamp, payload
+	hook := a.onStage
+	a.mu.Unlock()
+	a.tell(hook, set)
+	return nil
+}
+
+// stagePayloadOf identifies an update: its epoch and its ids, order-independent.
+func stagePayloadOf(shardEpoch uint64, ids []string) [32]byte {
+	sorted := append([]string(nil), ids...)
+	sort.Strings(sorted)
+	h := sha256.New()
+	_ = binary.Write(h, binary.BigEndian, shardEpoch)
+	for _, id := range sorted {
+		_, _ = h.Write([]byte(id))
+		_, _ = h.Write([]byte{0})
+	}
+	var out [32]byte
+	copy(out[:], h.Sum(nil))
+	return out
+}
+
+// stagedSet validates node ids into a peer set (never this node itself).
+func (a *ActivePeers) stagedSet(ids []string) (map[peer.ID]struct{}, error) {
+	set := make(map[peer.ID]struct{}, len(ids))
+	for _, raw := range ids {
+		id, err := peer.Decode(raw)
+		if err != nil {
+			return nil, fmt.Errorf("%w: node id %q: %v", ErrActivePeersInvalid, raw, err)
+		}
+		if id != a.self {
+			set[id] = struct{}{}
+		}
+	}
+	return set, nil
+}
+
+func (a *ActivePeers) tell(hook func([]peer.ID), set map[peer.ID]struct{}) {
+	if hook == nil {
+		return
+	}
+	ids := make([]peer.ID, 0, len(set))
+	for id := range set {
+		ids = append(ids, id)
+	}
+	hook(ids)
 }
 
 // Stage records the validators of a staged successor assignment as peers this node serves, in place of any earlier staged set. This node
