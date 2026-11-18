@@ -2056,6 +2056,9 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 
 	sendTo := make(map[peer.ID]struct{})
 	addAll(sendTo, x.Validators())
+	// the roots of the staged successor follow the committed chain from the intent's derivation on (a joiner derives the handoff intent from
+	// committed state itself, VT-09): they are sent the proposals too, and sign nothing
+	addAll(sendTo, x.stagedRootPeers())
 	if profile != storage.ProfileHandoff && round == x.trustBase.Load().EpochStart {
 		// New epoch was activated in this round. Also send the proposal to previous epoch
 		// validators so that they can generae UCs for the round they voted to commit.
@@ -2508,6 +2511,24 @@ func (x *ConsensusManager) StagedCommittee() (uint64, []string) {
 	}
 	slices.Sort(out)
 	return staged.epoch, out
+}
+
+// stagedRootPeers are the roots of the successor staged on this root, while it is the next epoch (without this root itself).
+func (x *ConsensusManager) stagedRootPeers() []peer.ID {
+	staged := x.pendingStaged()
+	if staged == nil {
+		return nil
+	}
+	var out []peer.ID
+	for id := range staged.roots {
+		if id == x.id.String() {
+			continue
+		}
+		if p, err := peer.Decode(id); err == nil {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // pendingStaged is the staged candidate's members while its epoch is the next one, nil otherwise.

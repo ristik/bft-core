@@ -39,7 +39,7 @@ vrb_published() { # VR's open output is Published (state 2)
 vrb_intent() { curl -sf -H 'Content-Type: application/json' "$1/api/v1/vr/intent"; }
 vrb_all_intents() { local r; for r in $(vrb_root_rpcs); do vrb_intent "$r" >/dev/null || return 1; done; }
 vrb_members_logged() { # every successor's root node (the four of this lane, and the joiner's) logged the line
-  local i; for i in $(seq 1 "${validators:-4}") $([ "${VR_JOINER:-0}" = 1 ] && echo 5); do grep -q -- "$1" "test-nodes/root$i/debug.log" 2>/dev/null || return 1; done
+  local i; for i in $(seq 1 "${validators:-4}") $([ "${VR_JOINER:-0}" = 1 ] && [ "${VR_JOINER_FOLLOW:-0}" != 1 ] && echo 5); do grep -q -- "$1" "test-nodes/root$i/debug.log" 2>/dev/null || return 1; done
 }
 vrb_logs_have() { grep -l -- "$1" test-nodes/root*/debug.log >/dev/null 2>&1; }
 vrb_acked() { [ "$(cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'lastAcked()(bytes32)')" = "$vrb_result" ]; }
@@ -104,6 +104,7 @@ vrb_main() {
   if [ "${VR_JOINER:-0}" = 1 ]; then
     source scripts/vr-joiner-steps.sh
     vrj_start_nodes || return 1
+    if [ "${VR_JOINER_FOLLOW:-0}" = 1 ]; then vrj_dev_follow || return 1; fi
     if [ "${VR_JOINER_ONLY:-0}" = 1 ]; then
       sleep 60
       for i in 5; do curl -sf -X POST -H 'Content-Type: application/json' -d '{}' "http://127.0.0.1:$(m2_rpc_port $i)/api/v1/q3/status" >"$VR_EVIDENCE/joiner-root-status.json"; done
@@ -114,7 +115,7 @@ vrb_main() {
   vrb_log "roots: $(vrb_root_rpcs | tr '\n' ' ')"
   if [ "${VR_RESTART_BETWEEN:-0}" = 1 ]; then vrb_hold 1 || return 1; fi
   if [ "${VR_RESTART_EARLY:-0}" = 1 ]; then vrb_hold 2 || return 1; fi
-  if [ "${VR_JOINER:-0}" = 1 ]; then
+  if [ "${VR_JOINER:-0}" = 1 ] && [ "${VR_JOINER_FOLLOW:-0}" != 1 ]; then
     # 1. (joiner) a fifth identity applies and the Foundation admits it: an Admitted joiner is the election's work
     vrj_apply || return 1
     vrj_admit || return 1

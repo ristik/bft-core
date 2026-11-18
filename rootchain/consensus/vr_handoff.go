@@ -8,7 +8,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -833,6 +835,18 @@ func (x *ConsensusManager) stageVRIntentMembers(epoch uint64, ids []evmassign.Id
 		}
 		if old := x.trustBase.Load(); old == nil || epoch != old.Epoch+1 {
 			return nil
+		}
+		// development test hook (scripts/vr-joiner-steps.sh): extra staged roots and EVM nodes, so that a joiner's following of the committed
+		// chain is tried before the Foundation's governance delays allow an admission
+		for _, id := range strings.Split(os.Getenv("UBFT_VR_DEV_STAGE_EXTRA_ROOTS"), ",") {
+			if id != "" {
+				roots = append(roots, evmroot.Member{NodeID: id, StakingID: id, Weight: 1})
+			}
+		}
+		for _, id := range strings.Split(os.Getenv("UBFT_VR_DEV_STAGE_EXTRA_EVM"), ",") {
+			if id != "" {
+				ids = append(ids[:len(ids):len(ids)], evmassign.Identity{EVMNodeID: id})
+			}
 		}
 		x.storeStagedEVM(epoch, evmassign.Candidate{Identities: ids}, roots)
 		return nil

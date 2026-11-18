@@ -99,3 +99,14 @@ import json,sys
 d=json.load(sys.stdin)
 sys.exit(0 if d.get('activeEpoch')==2 and not d.get('follower') else 1)"
 }
+
+# VR_JOINER_FOLLOW=1 (development, fast loop): tries the joiner's following of the committed chain without the Foundation's governance delays. The
+# incumbents are restarted with the development staging hook naming the joiner's root and EVM node as extra staged members; the lane then runs
+# the payee election of the plain lane, and every root, the joiner's included, must derive the same intent from its own committed state.
+vrj_dev_follow() {
+  local rid eid n
+  rid=$(build/ubft node-id --home "test-nodes/root$vrj_id" | tail -n1); eid=$(build/ubft node-id --home "test-nodes/evm$vrj_id" | tail -n1)
+  export UBFT_VR_DEV_STAGE_EXTRA_ROOTS=$rid UBFT_VR_DEV_STAGE_EXTRA_EVM=$eid
+  for n in 1 2 3 4; do vrb_restart_root "$n" "with the development staging hook" || return 1; sleep 3; done
+  vrj_log "PASS: the incumbents run with the joiner staged (development hook)"
+}
