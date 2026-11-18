@@ -333,7 +333,7 @@ h3_restore_validator() {
   # A staging-only joiner (H3_STAGING_JOINER=1, #520) or a restore before the Commit (H3_RESTORE_NO_SESSION=1) takes no session: its authority is
   # pending and issues none, and the node reads the credential lazily, when a verified install binds its key. The restore after the Commit enrolls
   # the authority and takes the session.
-  if [ "${H3_STAGING_JOINER:-0}" != 1 ] && [ -z "${H3_RESTORE_NO_SESSION:-}" ]; then
+  if [ "${SIGNING:-local}" = authority ] && [ "${H3_STAGING_JOINER:-0}" != 1 ] && [ -z "${H3_RESTORE_NO_SESSION:-}" ]; then
     build/ubft signing-authority replace-session --operator-socket "test-nodes/auth$i/operator.sock" \
       --operator-credential "test-nodes/auth$i/operator.cred" --out "test-nodes/auth$i/client.cred" || return 1
   fi
@@ -350,6 +350,8 @@ h3_restore_validator() {
   bootnodes=$(evm_bootnodes_for_peers "$rootBoot" "$i" $H3_ONLINE) || return 1
   # exactly two replicas: each is two array elements (the flag and the node id)
   for p in $H3_ONLINE; do [ "$p" = "$i" ] || [ "${#peers[@]}" -ge 4 ] || peers+=(--archive-replica "$(evm_validator_id "$p")"); done
+  local -a signingArgs=()   # a local-signing lane (the VR lane) has no authority: the node signs with its own key
+  if [ "${SIGNING:-local}" = authority ]; then signingArgs=(--signing-authority-socket "test-nodes/auth$i/client.sock" --signing-authority-credential "test-nodes/auth$i/client.cred"); fi
   local -a layoutArgs=(--registry-layout "$(registry_layout)")
   [ -z "${EVM_B1_PROFILE:-}" ] || layoutArgs=(--b1-profile "$EVM_B1_PROFILE")   # a fresh-B1 deployment: the profile selects registry layout 3
   local -a utbArgs=()
@@ -364,7 +366,7 @@ h3_restore_validator() {
     --eth-url "http://127.0.0.1:$((rethEthBase+i-1))" --jwt-secret "$evidence/jwt.hex" \
     --engine-fee-collector "$EVM_ENGINE_FEE_COLLECTOR" --execution-journal "$journal" \
     --archive-store "$H3_ARCHIVES/evm$i" --archive-prune --trust-history-profile-2 --journal-candidates "${EVM_JOURNAL_CANDIDATES:-32}" \
-    --signing-authority-socket "test-nodes/auth$i/client.sock" --signing-authority-credential "test-nodes/auth$i/client.cred" \
+    ${signingArgs[@]+"${signingArgs[@]}"} \
     "${peers[@]}" --tip-uc "$evidence/tip.uc.cbor" --tip-tr "$evidence/tip.tr.cbor" --trust-body-id "$bodyID" \
     $([ "${Q3_B1:-0}" != 1 ] || echo --q3-lane --rpc-server-address "$(evm_validator_rpc_addr "$i")") \
     ${utbArgs[@]+"${utbArgs[@]}"} \
