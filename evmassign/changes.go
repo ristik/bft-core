@@ -8,12 +8,14 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
-// Change kinds carried in Candidate.Changes. Only ChangeReplaceShardValidators is defined: the other numbers are reserved
-// tag numbers only (no payload layout is fixed) and are rejected as unsupported, so a later definition is additive.
+// Change kinds carried in Candidate.Changes. Only ChangeReplaceShardValidators has a payload layout here: the other numbers are the
+// candidate change kinds a validator-registry candidate v6 derives from its Accepted VR changes of kinds 7 (AddPartition) and 8
+// (UpdatePartition) (vrschema.DerivedChangeKind; design section 6), which are carried only as RegistryChanges and never in this list, so
+// they are refused as unsupported here.
 const (
 	ChangeReplaceShardValidators uint64 = 1
-	ChangeAddPartition           uint64 = 2 // reserved
-	ChangeSplitShard             uint64 = 3 // reserved
+	ChangeAddPartition           uint64 = 2
+	ChangeUpdatePartition        uint64 = 3
 )
 
 // MaxChanges bounds the aggregator changes of one handoff.
@@ -25,7 +27,7 @@ const changePayloadVersion uint64 = 1
 var (
 	// ErrChange reports a malformed, duplicated, oversized or unsupported change.
 	ErrChange = errors.New("evmassign: invalid shard change")
-	// ErrUnsupportedChange refuses a change kind that is reserved but not implemented (AddPartition, SplitShard, unknown).
+	// ErrUnsupportedChange refuses a change kind this list does not carry (AddPartition, UpdatePartition, unknown).
 	ErrUnsupportedChange = errors.New("evmassign: unsupported shard change kind")
 	// ErrSourceRef refuses a non-empty SourceRef: the contract-driven source is reserved and not accepted yet.
 	ErrSourceRef = errors.New("evmassign: source reference is reserved and must be empty")

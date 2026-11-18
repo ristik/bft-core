@@ -88,6 +88,11 @@ type vxFixture struct {
 	vrExtra, sealExtra map[[32]byte][32]byte
 	holder             *evmstatetest.Contract
 
+	// extraChanges are bound after the CommitteeLimits change; extraShards are non-EVM shards installed and acknowledged next to the EVM
+	// shard (the live partition configuration tests, VT-06d/e).
+	extraChanges []vrschema.RegistryChange
+	extraShards  []*types.PartitionDescriptionRecord
+
 	auth       *storage.TestVRAuthority
 	intents    *vxIntents
 	svc        *storage.PosServices
@@ -211,7 +216,7 @@ func (f *vxFixture) build() {
 	require.NoError(t, err)
 	f.cand = vrschema.CandidateV6{Version: vrschema.CandidateV6Version, Kind: evmassign.KindPrimary, Network: vxNetwork, Predecessor: f.body[:], Attempt: f.attempt,
 		RootMembers: vxRoots(f.j), OldShardEpoch: f.current.Epoch, OldActiveHash: old[:], Assignment: assignment, PoPs: pops, Bindings: bindings,
-		Identities: f.j, Authorization: auth, SourceRef: f.r[:], RegistryChanges: []vrschema.RegistryChange{{ID: 4, Kind: uint64(vrschema.KindCommitteeLimits), Payload: limits}}}
+		Identities: f.j, Authorization: auth, SourceRef: f.r[:], RegistryChanges: append([]vrschema.RegistryChange{{ID: 4, Kind: uint64(vrschema.KindCommitteeLimits), Payload: limits}}, f.extraChanges...)}
 	f.candRaw, err = f.cand.Encode()
 	require.NoError(t, err)
 	f.state = vradmit.OutputState{ResultID: f.r, Network: f.dep.NetworkWord, OpenOutput: f.r, LastAcked: vrschema.GenesisResult,
@@ -249,7 +254,11 @@ func (f *vxFixture) build() {
 	f.svc = &storage.PosServices{Authority: vxNoClosures{}, Witnesses: f.witnesses,
 		Registry: &storage.VRServices{Deployment: f.dep, State: vrstate.Authority{Pins: f.pins}, Intents: f.intents}}
 	f.orch = storage.NewMockOrchestrationForTest(func(uint64) (map[types.PartitionShardID]*types.PartitionDescriptionRecord, error) {
-		return map[types.PartitionShardID]*types.PartitionDescriptionRecord{vxShard: f.current}, nil
+		confs := map[types.PartitionShardID]*types.PartitionDescriptionRecord{vxShard: f.current}
+		for _, p := range f.extraShards {
+			confs[types.PartitionShardID{PartitionID: p.PartitionID, ShardID: p.ShardID.Key()}] = p
+		}
+		return confs, nil
 	}, func() ([]evmassign.Identity, [32]byte) { return f.k, f.baseHash })
 }
 
@@ -371,6 +380,13 @@ func (f *vxFixture) genesis() *storage.ExecutedBlock {
 	require.NoError(t, err)
 	ctl := &evmroot.ControlState{Network: vxNetwork, Epoch: 1, PredecessorBodyID: f.body[:], Phase: "idle", Pos: rootrecords.NewState(1, 1).Bytes(), VR: vr}
 	state := storage.ShardStates{States: map[types.PartitionShardID]*storage.ShardInfo{vxShard: si}, Changed: storage.ShardSet{}, Control: ctl}
+	for _, p := range f.extraShards {
+		x, err := storage.NewShardInfo(p, crypto.SHA256)
+		require.NoError(t, err)
+		x.IR = &types.InputRecord{Version: 1, RoundNumber: x.TR.Round - 1, Epoch: x.TR.Epoch, Hash: bytes.Repeat([]byte{0x44}, 32), BlockHash: bytes.Repeat([]byte{0x45}, 32),
+			PreviousHash: bytes.Repeat([]byte{0x46}, 32), SummaryValue: []byte{}, Timestamp: 900}
+		state.States[types.PartitionShardID{PartitionID: p.PartitionID, ShardID: p.ShardID.Key()}] = x
+	}
 	ut, _, err := state.UnicityTree(crypto.SHA256)
 	require.NoError(t, err)
 	return &storage.ExecutedBlock{BlockData: &rctypes.BlockData{Version: rctypes.VersionHandoff, Round: 10, Epoch: 1, Timestamp: 1_000,

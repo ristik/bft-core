@@ -878,12 +878,22 @@ func TestIngressLossWithRealShardsRecoversThroughTheDuplicateResend(t *testing.T
 	w.waitFor("the real shard certifies", 2*time.Minute, func() bool { return w.certCount() >= 4 })
 
 	marker := []byte("pending-976-dup")
+	head, _ := w.shards[w.ids[0]].exec.Head(context.Background())
+	expected := executortest.ExpectedBlock(head, marker)
 	w.setDrop(func(*certification.BlockCertificationRequest) bool { return true })
 	armed := time.Now()
 	w.addPending(marker)
+	// What must be lost is each validator's attempt that carries the pending block. Requests that were already in flight when the drop was armed (a re-send of
+	// the previous round's heartbeat, whose certificate is still on its way) are not that attempt: if the drop ended on one of them the shard would simply
+	// receive the next certificate and build its first block attempt unhindered, and no duplicate-triggered re-send would be needed (#1193).
 	var lostEvents []requestEvent
-	w.waitFor("every validator's attempt is dropped", 2*time.Minute, func() bool {
-		lostEvents = w.requestsSince(armed)
+	w.waitFor("every validator's attempt carrying the pending block is dropped", 2*time.Minute, func() bool {
+		lostEvents = lostEvents[:0]
+		for _, e := range w.requestsSince(armed) {
+			if e.dropped && bytes.Equal(e.blockHash, expected.Hash) {
+				lostEvents = append(lostEvents, e)
+			}
+		}
 		return len(w.distinctNodes(lostEvents)) == len(w.ids)
 	})
 	opened := time.Now() // before the drop ends: a re-send delivered the instant it lifts must not fall between the two
@@ -891,11 +901,8 @@ func TestIngressLossWithRealShardsRecoversThroughTheDuplicateResend(t *testing.T
 	u := w.lastCert()
 	lost := map[[32]byte]bool{}
 	for _, e := range lostEvents {
-		require.True(t, e.dropped)
 		lost[e.fp] = true
 	}
-	head, _ := w.shards[w.ids[0]].exec.Head(context.Background())
-	expected := executortest.ExpectedBlock(head, marker)
 	eligible := u.seal + t2Rounds(w.h)
 
 	var fresh certSample
