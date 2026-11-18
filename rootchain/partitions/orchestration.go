@@ -453,10 +453,46 @@ func (o *Orchestration) ShardConfigByEpoch(partitionID types.PartitionID, shardI
 		if bucket == nil {
 			return nil
 		}
-		return bucket.ForEach(func(_, v []byte) error {
+		// Keys sort by epoch start and epochs increase with it, so the last entry holds the newest epoch: a later epoch is a miss decided by
+		// decoding that one entry. Epochs are sequential from zero, so the stored configuration of epoch e is the (e+1)-th entry: step to it
+		// without decoding the ones before. Only a store whose entry at that position is not epoch e (not contiguous) is scanned.
+		c := bucket.Cursor()
+		lastKey, lastVal := c.Last()
+		if lastKey == nil {
+			return nil
+		}
+		decode := func(v []byte) (*types.PartitionDescriptionRecord, error) {
 			var conf *types.PartitionDescriptionRecord
 			if err := json.Unmarshal(v, &conf); err != nil {
-				return fmt.Errorf("failed to unmarshal shard conf: %w", err)
+				return nil, fmt.Errorf("failed to unmarshal shard conf: %w", err)
+			}
+			return conf, nil
+		}
+		last, err := decode(lastVal)
+		if err != nil {
+			return err
+		}
+		if epoch > last.Epoch {
+			return nil
+		}
+		k, v := c.First()
+		for i := uint64(0); k != nil && i < epoch; i++ {
+			k, v = c.Next()
+		}
+		if k != nil {
+			conf, err := decode(v)
+			if err != nil {
+				return err
+			}
+			if conf.Epoch == epoch {
+				found = conf
+				return nil
+			}
+		}
+		return bucket.ForEach(func(_, v []byte) error {
+			conf, err := decode(v)
+			if err != nil {
+				return err
 			}
 			if conf.Epoch == epoch {
 				found = conf

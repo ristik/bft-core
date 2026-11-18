@@ -55,7 +55,7 @@ func newThreeEpochs(t *testing.T) *threeEpochs {
 	require.NoError(t, rt.Activate(ctx, process.Bundle()))
 	require.NoError(t, rt.Activate(ctx, q3active.Bundle{Envelope: second.EnvelopeBytes, Snapshot: second.Snapshot}))
 	c := certifiedchain.New(t, 5, 0)
-	p := b1state.Profile{Network: 5, RootGenesisID: first.Genesis, ExecutionChainID: 1337, RuntimeHash: [32]byte(common.HexToHash(b1registry.CodeHashHex)), CompilerHash: b1registry.CompilerHash(), MaxEpochsPerUpdate: b1state.MinEpochsPerUpdate, DeltaEV: 1, DeltaHold: 2, RestGas: b1registry.MinRestGas(b1state.MinEpochsPerUpdate), CompanionBytes: 1 << 20, OtherCompanionBytes: 65536, OrdinaryCapacity: 7000000, GenesisUCTime: 1000}
+	p := b1state.Profile{ExecutionRevision: b1state.CurrentExecutionRevision, Network: 5, RootGenesisID: first.Genesis, ExecutionChainID: 1337, RuntimeHash: [32]byte(common.HexToHash(b1registry.CodeHashHex)), CompilerHash: b1registry.CompilerHash(), MaxEpochsPerUpdate: b1state.MinEpochsPerUpdate, DeltaEV: 1, DeltaHold: 2, RestGas: b1registry.MinRestGas(b1state.MinEpochsPerUpdate), CompanionBytes: 1 << 20, OtherCompanionBytes: 65536, OrdinaryCapacity: 7000000, GenesisUCTime: 1000}
 	var err error
 	p.SystemGas, err = p.RequiredSystemGas()
 	require.NoError(t, err)

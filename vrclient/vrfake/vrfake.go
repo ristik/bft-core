@@ -220,6 +220,8 @@ func (c *Chain) dispatch(req request) (any, *rpcError) {
 		return false, nil
 	case "eth_getBlockByNumber":
 		return map[string]any{"number": hexutil.Uint64(c.Head), "timestamp": hexutil.Uint64(c.HeadTime), "baseFeePerGas": (*hexutil.Big)(c.BaseFee)}, nil
+	case "eth_getCode":
+		return hexutil.Bytes{}, nil
 	case "eth_getBalance":
 		var a ethcommon.Address
 		_ = json.Unmarshal(req.Params[0], &a)
@@ -333,6 +335,9 @@ func pack(a abi.ABI, method string, vals ...any) []byte {
 
 func (c *Chain) exec(from, to ethcommon.Address, data []byte, write bool) ([]byte, *rpcError) {
 	if len(data) < 4 {
+		if to != c.Registry && to != c.Module && to != c.Seal && to != c.Governor {
+			return nil, nil // a call to an account with no code succeeds and does nothing
+		}
 		return nil, &rpcError{Code: 3, Message: "execution reverted"}
 	}
 	var a abi.ABI

@@ -175,7 +175,7 @@ func TestCheckProfile_UnicityPrecompilesOfAB1Deployment(t *testing.T) {
 	withNative := func(mutate func(p map[string]any)) json.RawMessage {
 		m := loadConfig(t, "eth_config_cancun_at_genesis.json")
 		p := current(m)["precompiles"].(map[string]any)
-		for k, v := range unicityNativePrecompiles {
+		for k, v := range nativeRev2 {
 			p[k] = v
 		}
 		if mutate != nil {
@@ -184,7 +184,7 @@ func TestCheckProfile_UnicityPrecompilesOfAB1Deployment(t *testing.T) {
 		return mustJSON(t, m)
 	}
 	t.Run("expected set accepted", func(t *testing.T) {
-		_, err := checkProfileWith(withNative(nil), 31337, unicityNativePrecompiles)
+		_, err := checkProfileWith(withNative(nil), 31337, nativeRev2)
 		require.NoError(t, err)
 	})
 	t.Run("the plain profile still refuses them", func(t *testing.T) {
@@ -192,30 +192,30 @@ func TestCheckProfile_UnicityPrecompilesOfAB1Deployment(t *testing.T) {
 		require.ErrorContains(t, err, "unexpected unicity-b1-cert-batch-v2, unicity-b1-membership")
 	})
 	t.Run("a B1 deployment refuses a client without B2", func(t *testing.T) {
-		_, err := checkProfileWith(withNative(func(p map[string]any) { delete(p, "unicity-b2-sdk3") }), 31337, unicityNativePrecompiles)
+		_, err := checkProfileWith(withNative(func(p map[string]any) { delete(p, "unicity-b2-sdk3") }), 31337, nativeRev2)
 		require.ErrorContains(t, err, "missing unicity-b2-sdk3")
 	})
 	t.Run("a B1 deployment refuses a client that still registers the removed bridge composition", func(t *testing.T) {
 		// ureth#97 removed BRIDGE_COMPOSE_V2 (0x0105); a client from before it is the wrong pin.
-		_, err := checkProfileWith(withNative(func(p map[string]any) { p["unicity-bridge-compose-v2"] = "0x0000000000000000000000000000000000000105" }), 31337, unicityNativePrecompiles)
+		_, err := checkProfileWith(withNative(func(p map[string]any) { p["unicity-bridge-compose-v2"] = "0x0000000000000000000000000000000000000105" }), 31337, nativeRev2)
 		require.ErrorContains(t, err, "unexpected unicity-bridge-compose-v2")
 	})
 	t.Run("a B1 deployment refuses a moved verifier", func(t *testing.T) {
-		_, err := checkProfileWith(withNative(func(p map[string]any) { p["unicity-b1-cert-batch-v2"] = "0x0000000000000000000000000000000000000200" }), 31337, unicityNativePrecompiles)
+		_, err := checkProfileWith(withNative(func(p map[string]any) { p["unicity-b1-cert-batch-v2"] = "0x0000000000000000000000000000000000000200" }), 31337, nativeRev2)
 		require.ErrorContains(t, err, "moved unicity-b1-cert-batch-v2")
 	})
 	t.Run("a B1 deployment refuses the retired v1 verifiers", func(t *testing.T) {
 		for name, addr := range map[string]string{"unicity-b1-Uc": "0x0000000000000000000000000000000000000100", "unicity-b1-Shared": "0x0000000000000000000000000000000000000101"} {
-			_, err := checkProfileWith(withNative(func(p map[string]any) { p[name] = addr }), 31337, unicityNativePrecompiles)
+			_, err := checkProfileWith(withNative(func(p map[string]any) { p[name] = addr }), 31337, nativeRev2)
 			require.ErrorContains(t, err, "unexpected "+name)
 		}
 	})
 	t.Run("a B1 deployment refuses a client without CERT_BATCH_V2", func(t *testing.T) {
-		_, err := checkProfileWith(withNative(func(p map[string]any) { delete(p, "unicity-b1-cert-batch-v2") }), 31337, unicityNativePrecompiles)
+		_, err := checkProfileWith(withNative(func(p map[string]any) { delete(p, "unicity-b1-cert-batch-v2") }), 31337, nativeRev2)
 		require.ErrorContains(t, err, "missing unicity-b1-cert-batch-v2")
 	})
 	t.Run("a B1 deployment refuses S1 at 0x0103", func(t *testing.T) {
-		_, err := checkProfileWith(withNative(func(p map[string]any) { p["unicity-s1"] = "0x0000000000000000000000000000000000000103" }), 31337, unicityNativePrecompiles)
+		_, err := checkProfileWith(withNative(func(p map[string]any) { p["unicity-s1"] = "0x0000000000000000000000000000000000000103" }), 31337, nativeRev2)
 		require.ErrorContains(t, err, "unexpected unicity-s1")
 	})
 }

@@ -34,6 +34,9 @@ L_MAX = 512 << 10
 GAS_RESERVE = 500_000   # spec section 12.4, fixed by #1098
 RETURN_RESERVE_SEGMENTS = 64   # spec section 12.5 default (PARAM, #1105)
 STATE_READ_ONLY = False   # the lanes use seal receipts (section 12.2); a plain state() read is not evidence here
+# The chain's native gas schedules as the plug-ins' default gas estimate names them (native-bridge-plugins gas.ts NATIVE_GAS_SCHEDULE,
+# bft-core#1179): the pinned ureth's crates/unicity/b1 batch.rs batch_gas and rsmt.rs, and Cancun's SHA-256. A ureth repricing changes it.
+NATIVE_GAS_SCHEDULE = 'CERT_BATCH_V2 61100+16C+500K(K-1)+29900E+7200Q+2000A+250P; RSMT 2000+16L+250(1+S); SHA256 60+12W'
 # ureth flags that would stop a gateway node serving the wallet evidence (section 12.7 "Retention"): any of them makes the manifest refuse
 NOT_PROOF_SOURCE = ('--unicity.no-proof-source', '--unicity.companion-retention-depth', '--prune.receipts.distance', '--prune.receipts.before',
                     '--prune.receiptslogfilter', '--prune.bodies.distance', '--prune.bodies.pre-merge', '--full')
@@ -210,7 +213,7 @@ def build(gen, record, image_id, services):
     pins = {
         'gamma': primary['gamma'], 'build': primary['build'], 'vaultRuntimeCodeHash': primary['vault']['runtimeCodeHash'], 'maxEncodedTxBytes': lmax,
         'userGasLimit': str(b1['ordinaryCapacity']), 'gasReserve': str(GAS_RESERVE), 'returnReserveSegments': RETURN_RESERVE_SEGMENTS,
-        'deploymentBlock': primary['vault']['block'], 'stateReadOnly': STATE_READ_ONLY,
+        'deploymentBlock': primary['vault']['block'], 'stateReadOnly': STATE_READ_ONLY, 'nativeGasSchedule': NATIVE_GAS_SCHEDULE,
     }
     return {
         'schema': 'unicity-nb2-release', 'version': 1,

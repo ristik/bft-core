@@ -550,10 +550,11 @@ func newQ3Cmd() *cobra.Command {
 			return writeJSONFile(out, resp.Signers)
 		}}
 	var shardPartition uint32
+	var shardID string
 	shardConf := &cobra.Command{Use: "shard-conf", Short: "The shard configuration a root holds for a shard epoch (the file `signing-authority advance-epoch --shard-conf` takes)",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			var resp json.RawMessage
-			if err := firstPost(cmd.Context(), splitList(rootRPCs), "/api/v1/q3/shard-conf", q3ShardConfRequest{Partition: shardPartition, Epoch: epoch}, &resp); err != nil {
+			if err := firstPost(cmd.Context(), splitList(rootRPCs), "/api/v1/q3/shard-conf", q3ShardConfRequest{Partition: shardPartition, Shard: shardID, Epoch: epoch}, &resp); err != nil {
 				return err
 			}
 			var check types.PartitionDescriptionRecord
@@ -564,6 +565,7 @@ func newQ3Cmd() *cobra.Command {
 		}}
 	shardConf.Flags().Uint64Var(&epoch, "epoch", 0, "the shard epoch")
 	shardConf.Flags().Uint32Var(&shardPartition, "partition", 8, "partition id")
+	shardConf.Flags().StringVar(&shardID, "shard", "", "the shard id in hex text form (default: the unsplit shard)")
 	_ = shardConf.MarkFlagRequired("epoch")
 	for _, c := range []*cobra.Command{history, envelope, signers, shardConf} {
 		common(c)
