@@ -924,7 +924,7 @@ func (v *vrHandoff) stagedMembers(c vrschedule.Committed) {
 	defer v.stageMu.Unlock()
 	if !c.Derivable {
 		v.haveActive = false
-		v.setShardStaged(nil)
+		v.setShardStaged(devShardExtras(nil)) // nothing, but in the vrdev build the development hook's extras
 		if v.intentStaged {
 			// cleared once the clearing is installed: a refused call is tried again at the next refresh
 			if v.stageIntent(0, nil, nil) == nil {
