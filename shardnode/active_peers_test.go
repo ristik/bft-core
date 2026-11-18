@@ -179,3 +179,29 @@ func TestActivePeersReportTheStagedPeersUntilTheInstall(t *testing.T) {
 	require.NoError(t, peers.Install(1, validatorsOf(self, j)))
 	require.Empty(t, peers.StagedPeers(), "an install clears the stage")
 }
+
+// A staged set is bound to a generation: a delayed older request cannot repopulate what a newer one revoked, a set for an assignment that is
+// not the next one (already installed) is stale, an empty set clears under the same ordering, and the same stamp again is idempotent.
+func TestAStagedSetIsBoundToItsGeneration(t *testing.T) {
+	self := newPeerID(t)
+	other := newPeerID(t)
+	a, err := NewActivePeers(self, nil)
+	require.NoError(t, err)
+	next := a.Epoch() + 1
+	require.NoError(t, a.StageGeneration(next, 10, []string{other.String()}))
+	require.True(t, a.AllowedStagedOnly(other))
+	require.False(t, a.AllowedInstalled(other))
+	require.NoError(t, a.StageGeneration(next, 10, []string{other.String()}), "the same generation again is idempotent")
+
+	require.NoError(t, a.StageGeneration(0, 11, []string{})) // the intent died: cleared
+	require.False(t, a.AllowedStagedOnly(other))
+	require.ErrorIs(t, a.StageGeneration(next, 10, []string{other.String()}), ErrActivePeersStale, "a delayed older request cannot repopulate it")
+	require.False(t, a.AllowedStagedOnly(other))
+	require.ErrorIs(t, a.StageGeneration(next+1, 12, []string{other.String()}), ErrActivePeersStale, "not the next assignment")
+	require.ErrorIs(t, a.StageGeneration(next, 5, []string{}), ErrActivePeersStale, "an old clear is stale too")
+
+	require.NoError(t, a.StageGeneration(next, 13, []string{other.String()}))
+	require.NoError(t, a.Install(next, nil)) // the assignment installs: the set is cleared
+	require.False(t, a.AllowedStagedOnly(other))
+	require.ErrorIs(t, a.StageGeneration(next, 14, []string{other.String()}), ErrActivePeersStale, "a request for the installed assignment cannot restage it")
+}

@@ -362,25 +362,35 @@ func GetSource(ctx context.Context, opener Opener, p peer.ID, result [32]byte) (
 // n incumbents (f = (n-1)/3), so at least one honest root observed exactly this source.
 func SourceQuorum(n int) int { return (n-1)/3 + 1 }
 
-// FetchSource asks the peers for the source of result and returns it once SourceQuorum(len(peers)) of them give the identical entry. Answers
-// that differ do not combine; a peer that did not observe it, or does not answer, counts for nothing. Honest incumbents observed the same
-// first Published block, so honest answers are identical (stage 0 is fixed by committed history).
-func FetchSource(ctx context.Context, opener Opener, peers []peer.ID, result [32]byte) (SourceEntry, error) {
+// FetchSource asks the peers for the source of result and returns it once SourceQuorum(committee) distinct authenticated peers give the identical
+// entry, where committee is the size of the INSTALLED committee (this root included when it is one), not the number of peers asked: a root that
+// excludes itself from the dial list, or asks fewer peers, needs no fewer answers. Each peer counts once, whatever it sends; answers that differ
+// do not combine; a peer that did not observe it, or does not answer, counts for nothing. Honest incumbents observed the same first Published
+// block, so honest answers are identical (stage 0 is fixed by committed history).
+func FetchSource(ctx context.Context, opener Opener, peers []peer.ID, result [32]byte, committee int) (SourceEntry, error) {
 	type ans struct {
-		e  SourceEntry
-		ok bool
+		from peer.ID
+		e    SourceEntry
+		ok   bool
 	}
-	res := make(chan ans, len(peers))
+	seen := map[peer.ID]bool{}
+	var distinct []peer.ID
 	for _, p := range peers {
+		if !seen[p] {
+			seen[p] = true
+			distinct = append(distinct, p)
+		}
+	}
+	res := make(chan ans, len(distinct))
+	for _, p := range distinct {
 		go func(p peer.ID) {
 			e, ok, err := GetSource(ctx, opener, p, result)
-			res <- ans{e, ok && err == nil}
+			res <- ans{p, e, ok && err == nil}
 		}(p)
 	}
-	need := SourceQuorum(len(peers))
+	need := SourceQuorum(max(committee, len(distinct)))
 	counts := map[string]int{}
-	entries := map[string]SourceEntry{}
-	for range peers {
+	for range distinct {
 		a := <-res
 		if !a.ok || a.e.ResultID == nil || !bytes.Equal(a.e.ResultID, result[:]) {
 			continue
@@ -389,8 +399,7 @@ func FetchSource(ctx context.Context, opener Opener, peers []peer.ID, result [32
 		if err != nil {
 			continue
 		}
-		counts[string(k)]++
-		entries[string(k)] = a.e
+		counts[string(k)]++ // one answer per distinct peer: the channel carries exactly one per peer queried
 		if counts[string(k)] >= need {
 			return a.e, nil
 		}

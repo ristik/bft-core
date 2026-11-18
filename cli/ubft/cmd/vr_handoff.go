@@ -702,8 +702,9 @@ func newVRHandoffDriveCmd() *cobra.Command {
 }
 
 // vrShardSink is the paired shard node's staged-successor endpoint (--vr-shard-rpc): the root posts the EVM node ids of the derived intent's
-// successor to it. The endpoint is the shard node's local operator RPC, so only a loopback address is accepted; an empty URL gives none.
-func vrShardSink(rawURL string) (func(ctx context.Context, ids []string) error, error) {
+// successor to it, with the shard epoch it would install and a generation stamp. The endpoint is the shard node's local operator RPC, so only a
+// loopback address is accepted, and redirects are never followed: the destination is the configured one throughout. An empty URL gives none.
+func vrShardSink(rawURL string) (func(ctx context.Context, shardEpoch, stamp uint64, ids []string) error, error) {
 	if rawURL == "" {
 		return nil, nil
 	}
@@ -715,9 +716,12 @@ func vrShardSink(rawURL string) (func(ctx context.Context, ids []string) error, 
 		return nil, fmt.Errorf("%w: --vr-shard-rpc must be a loopback address (the shard node's operator RPC is local-only), got %s", ErrVRHandoffCmd, h)
 	}
 	target := strings.TrimRight(rawURL, "/") + "/api/v1/vr/staged"
-	client := &http.Client{Timeout: 3 * time.Second}
-	return func(ctx context.Context, ids []string) error {
-		body, err := json.Marshal(vrStagedRequest{IDs: ids})
+	client := &http.Client{Timeout: 3 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	return func(ctx context.Context, shardEpoch, stamp uint64, ids []string) error {
+		if ids == nil {
+			ids = []string{} // an explicit empty list: the only way to clear
+		}
+		body, err := json.Marshal(vrStagedRequest{ShardEpoch: shardEpoch, Stamp: stamp, IDs: &ids})
 		if err != nil {
 			return err
 		}

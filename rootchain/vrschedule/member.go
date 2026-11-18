@@ -678,6 +678,18 @@ func (s *Service) underToken(t stateToken, fn func() error) (bool, error) {
 	return true, fn()
 }
 
+// SuccessorState is the current intent, its committed view and whether self is one of its successors, read in one snapshot (an incumbent or a
+// K member that is no successor is not one).
+func (s *Service) SuccessorState(self string) (intent [32]byte, view uint64, successor, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cur == nil {
+		return intent, 0, false, false
+	}
+	_, successor = s.cur.byRoot[self]
+	return s.cur.digest, s.cur.view, successor, true
+}
+
 // ExchangeOpen is whether this root's readiness exchange is still open, so that it keeps pulling stage sets: while no certificate is held, or
 // one is held but the Prepare plan still waits for K support. After a committed Prepare it is open only for a root that does not hold the
 // certificate (it needs recovery), never for one that does.

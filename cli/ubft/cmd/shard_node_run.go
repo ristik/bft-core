@@ -1087,7 +1087,8 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			// a joiner must be able to restore before it can acknowledge, and a retired validator must not keep access. The one
 			// exception is archive-only: a retired replica that still holds copies this node promised (a retained holder of the
 			// replica policy) keeps this service until the current replicas hold them; it gets no journal, evidence or consensus access.
-			archiveServer.SetPeerAuthorizer(func(id libp2ppeer.ID) bool { return activePeers.Allowed(id) || replicaPolicy.Holder(id) })
+			archiveServer.SetPeerAuthorizer(func(id libp2ppeer.ID) bool { return activePeers.AllowedInstalled(id) || replicaPolicy.Holder(id) })
+			archiveServer.SetReadOnlyAuthorizer(activePeers.AllowedStagedOnly) // a staged joiner fetches to catch up; it publishes nothing before its assignment installs
 			archiveServer.SetLogger(flags.observe.Logger())
 			if flags.ArchivePublicReads {
 				// non-active followers read (never write) under their own budget, apart from the validators' slots
@@ -1740,7 +1741,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error { return node.Run(gctx) })
 	var laneEndpoints []func(*http.ServeMux)
-	laneEndpoints = append(laneEndpoints, vrStagedEndpoint{stage: activePeers.Stage}.register) // the paired root's staged VR successor (VT-09b)
+	laneEndpoints = append(laneEndpoints, vrStagedEndpoint{stage: activePeers.StageGeneration}.register) // the paired root's staged VR successor (VT-09b)
 	if q3rt != nil {
 		laneEndpoints = append(laneEndpoints, (&shardQ3Staging{cfg: q3rt.ProtocolConfig, self: peer.ID().String(), onStaged: activePeers.Stage, tip: func() (uint64, uint64, [32]byte, error) {
 			h := q3rt.History()
