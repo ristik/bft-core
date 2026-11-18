@@ -6,10 +6,10 @@
 #                                                      UTB_SDK_JS, M2_URETH_COMMIT + M2_URETH_BIN's reported commit, FOUNDRY) against the manifest; prints one line each
 #   scripts/ci/check-pins.sh env-core                  the same for a lane without the aggregator and the SDK (ureth, contracts, Foundry)
 #   scripts/ci/check-pins.sh selftest                  chain-free tests: a right pin is accepted, a wrong one, a short one and an unknown component are refused
-# PINS=<file> selects another manifest (the self-test uses it). Exit status 0 only when everything checked matches.
+# PINS=<file> selects another manifest (the self-test uses it); without it the manifest of LANE_PRODUCT (scripts/ci/lane-product.sh manifest). Exit status 0 only when everything checked matches.
 set -uo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-PINS=${PINS:-$here/lane-pins.json}
+PINS=${PINS:-$("$here/lane-product.sh" manifest)}   # LANE_PRODUCT=pinned: the frozen product's dependency set (lane-product.sh)
 bad=0
 say() { printf '%s\n' "$*"; }
 pin_of() { jq -er --arg n "$1" '.components[$n].commit // empty' "$PINS" 2>/dev/null; }

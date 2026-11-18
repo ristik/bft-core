@@ -5,7 +5,8 @@
 name: testnet-bridge-pos
 on:
   pull_request:
-    paths: ['deploy/testnet/bridge/nb2/**', 'scripts/nb2-evidence/**', 'nb2ref/**', 'deploy/testnet/bridge/sdk_clients.py', 'deploy/testnet/bridge/deploy_bridge.py',
+    paths: ['deploy/testnet/bridge/nb2/**', 'scripts/nb2-evidence/**', 'nb2ref/**', 'deploy/testnet/bridge/sdk_clients.py', 'deploy/testnet/bridge/deploy_bridge.py', 'deploy/testnet/bridge/build-bridge-image.py',
+            'deploy/testnet/bridge/Dockerfile.tools',
             'deploy/testnet/bridge/pins.json', 'deploy/testnet/sdk-clients/**', 'scripts/dnb-tool/**', '.github/workflows/testnet-bridge-pos.yml',
             # bft-core#1091: the only --utb generation CI builds, and its pos-advance is the authorities' proof-verified advance on a UTB chain; a bft pin or a
             # change of how authorities are generated is exercised here too (the hosted rehearsal's package is the one without UTB)
@@ -161,7 +162,7 @@ jobs:
       - name: 6. The pods restarted at epoch 3 (each entity's execution client, root and shard node)
         run: sudo -E env "PATH=$PATH" python3 deploy/testnet/rehearse.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/6-restart-2" --ubft pinned-bft/build/ubft --stages pos-restart-2
       - name: 7. The public SDK clients (JS, Rust, Java main; cold, warm, restart; typed negatives with controls)
-        run: sudo -E env "PATH=$PATH" python3 deploy/testnet/bridge/rehearse_bridge.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/7-sdk-clients" --ubft pinned-bft/build/ubft --stages pos-sdk-clients
+        run: sudo -E env "PATH=$PATH" python3 deploy/testnet/bridge/nb2/rehearse_nb2.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/7-sdk-clients" --nb2-evidence /tmp/nb2-evidence --ubft pinned-bft/build/ubft --stages pos-sdk-clients
       - name: 8. The roots' signed history (utb-live)
         run: sudo -E env "PATH=$PATH" python3 deploy/testnet/rehearse.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/8-utb-live" --ubft pinned-bft/build/ubft --stages utb-live
       - name: The tester wallets' key removed (whichever step stopped)
@@ -174,7 +175,7 @@ jobs:
           sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/evidence"
           docker stats --no-stream --format 'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.PIDs}}' > "$RUNNER_TEMP/evidence/docker-stats.txt" || true
           df -h / > "$RUNNER_TEMP/evidence/df.txt" || true
-          sudo bash -c "cd /srv/tn-bridge-pos && F='-f compose.yaml'; [ -f compose.bridge.yaml ] && F=\"\$F -f compose.bridge.yaml\"; docker compose \$F ps -a > '$RUNNER_TEMP/evidence/compose-ps.txt' && docker compose \$F logs --no-color --timestamps --tail 600 > '$RUNNER_TEMP/evidence/compose-logs.txt'" || true
+          sudo bash -c "cd /srv/tn-bridge-pos && docker compose -f compose.yaml ps -a > '$RUNNER_TEMP/evidence/compose-ps.txt' && docker compose -f compose.yaml logs --no-color --timestamps --tail 600 > '$RUNNER_TEMP/evidence/compose-logs.txt'" || true
           sudo PYTHONDONTWRITEBYTECODE=1 python3 deploy/testnet/redact_evidence.py /srv/tn-bridge-pos "$RUNNER_TEMP/evidence/compose-logs.txt" || sudo bash -c "echo '[log withheld: redaction did not finish]' > '$RUNNER_TEMP/evidence/compose-logs.txt'"
           sudo cp /srv/tn-bridge-pos/manifest.json "$RUNNER_TEMP/evidence/manifest.json" || true
           sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/evidence" || true

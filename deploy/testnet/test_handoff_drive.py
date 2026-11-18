@@ -341,13 +341,13 @@ class Source(unittest.TestCase):
         self.assertNotIn("'down'", self.text)
         self.assertNotIn('prune', self.text)
 
-    def test_force_recreate_is_only_for_roots_and_the_lock_proof_endpoint(self):
+    def test_force_recreate_is_only_for_roots(self):
         for line in self.text.splitlines():
             if '--force-recreate' in line and 'subprocess.run' in line:
-                self.assertTrue("f'root{i}'" in line or "'lockproof'" in line, line.strip())
+                self.assertIn("f'root{i}'", line, line.strip())
 
     def test_the_steps_are_the_documented_sequence(self):
-        self.assertEqual(hd.STEPS, ('preflight', 'trust-base', 'proposal', 'propose', 'install', 'advance', 'lockproof', 'verify'))
+        self.assertEqual(hd.STEPS, ('preflight', 'trust-base', 'proposal', 'propose', 'install', 'advance', 'verify'))
         self.assertEqual(hd.WINDOW_STEPS, {'trust-base', 'proposal', 'propose'})
 
 
