@@ -387,3 +387,137 @@ func TestUrethArgumentsParseBothFormsAndRefuseRepeats(t *testing.T) {
 	_, err = parseUrethArgs("--unicity.max-gas=5 stray")
 	require.ErrorIs(t, err, ErrVRGenesis)
 }
+
+// ---- dev funding: the premine of a development generation (testdata/vr-genesis-dev: vr_genesis.py --dev-fund) ----------------------------
+
+const vrDevGeneration = "gen-devfund"
+
+func vrDevFixtureInput(t *testing.T) vrVerifyInput {
+	t.Helper()
+	dir := func(n string) string { return filepath.Join("testdata", "vr-genesis-dev", n) }
+	var v vrVerifyInput
+	var err error
+	require.NoError(t, vrStrictJSON(dir("input.json"), &v.input))
+	require.NoError(t, vrStrictJSON(dir("deployment.json"), &v.deployment))
+	v.genesis, err = os.ReadFile(dir("genesis.json"))
+	require.NoError(t, err)
+	v.full, err = readShardConf(dir("full-shard-conf.json"))
+	require.NoError(t, err)
+	v.tb, err = readTrustBase(dir("trust-base.json"))
+	require.NoError(t, err)
+	v.profile, v.profileFile, err = readB1ProfileFile(dir("b1-profile.json"))
+	require.NoError(t, err)
+	v.identities, _, err = readIdentities(dir("genesis-identities.json"))
+	require.NoError(t, err)
+	v.fresh, err = readVRHookMeasurement(dir("vr-hook-measurement-fresh.json"))
+	require.NoError(t, err)
+	flags, err := os.ReadFile(dir("ureth-flags.txt"))
+	require.NoError(t, err)
+	v.urethFlags, v.feeCollector = strings.TrimSpace(string(flags)), "0x00000000000000000000000000000000000000fe"
+	var funded map[string]string
+	require.NoError(t, vrStrictJSON(dir("dev-funded-accounts.json"), &funded))
+	v.funded = map[common.Address]vrschema.Word{}
+	for k, b := range funded {
+		w, ok := bigWord(b)
+		require.True(t, ok)
+		v.funded[common.HexToAddress(k)] = w
+	}
+	v.devGeneration = vrDevGeneration
+	return v
+}
+
+// deleteAlloc removes an account from the fixture's genesis.
+func deleteAlloc(t *testing.T, v *vrVerifyInput, a common.Address) {
+	editGenesis(t, v, func(g map[string]any) {
+		alloc := g["alloc"].(map[string]any)
+		for k := range alloc {
+			if strings.EqualFold(k, a.Hex()) || strings.EqualFold("0x"+strings.TrimPrefix(k, "0x"), a.Hex()) {
+				delete(alloc, k)
+			}
+		}
+	})
+}
+
+func TestADevGenerationsPremineIsExpectedNeverAHole(t *testing.T) {
+	_, err := vrVerify(vrDevFixtureInput(t))
+	require.NoError(t, err, "the dev generation with its premine verifies")
+	owner := common.HexToAddress(vrDevFixtureInput(t).input.Identities[0].Owner)
+	signer := common.HexToAddress(vrDevFixtureInput(t).input.GovernorSigners[0])
+	for name, c := range map[string]struct {
+		edit func(*vrVerifyInput)
+		msg  string
+	}{
+		"no dev generation":             {func(v *vrVerifyInput) { v.devGeneration = "" }, "funded accounts are a development generation's premine only"},
+		"another dev generation's name": {func(v *vrVerifyInput) { v.devGeneration = "gen-other" }, "is not the network word of development generation"},
+		// the owner and the signer are removed from the premine list AND from the alloc: only the funding rule can refuse them
+		"an owner not funded": {func(v *vrVerifyInput) { delete(v.funded, owner); deleteAlloc(t, v, owner) }, "dev funding does not fund " + owner.Hex()},
+		"a signer not funded": {func(v *vrVerifyInput) { delete(v.funded, signer); deleteAlloc(t, v, signer) }, "dev funding does not fund " + signer.Hex()},
+		"a listed premine not allocated": {func(v *vrVerifyInput) {
+			v.funded[common.HexToAddress("0x000000000000000000000000000000000000beef")] = vrschema.U64(1)
+		}, "is not allocated"},
+		"a premine balance changed": {func(v *vrVerifyInput) {
+			editGenesis(t, v, func(g map[string]any) { allocOf(g, owner)["balance"] = "0x1" })
+		}, "which the plan does not"},
+		"an unlisted premine": {func(v *vrVerifyInput) {
+			editGenesis(t, v, func(g map[string]any) {
+				g["alloc"].(map[string]any)["0x000000000000000000000000000000000000cafe"] = map[string]any{"balance": "0x3635c9adc5dea00000"}
+			})
+		}, "which the plan does not"},
+		"a premine with code": {func(v *vrVerifyInput) {
+			editGenesis(t, v, func(g map[string]any) { allocOf(g, owner)["code"] = "0x00" })
+		}, "which the plan does not"},
+		"a dev generation without its premine list": {func(v *vrVerifyInput) {
+			v.funded = nil
+			for a := range vrDevFixtureInput(t).funded {
+				deleteAlloc(t, v, a)
+			}
+		}, "and none is listed"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			v := vrDevFixtureInput(t)
+			c.edit(&v)
+			_, err := vrVerify(v)
+			require.ErrorIs(t, err, ErrVRGenesis)
+			require.ErrorContains(t, err, c.msg)
+		})
+	}
+	// a non-dev generation takes no funding at all: the account is allocated, so only the dev rule can refuse it
+	beef := common.HexToAddress("0x000000000000000000000000000000000000beef")
+	v := vrFixtureInput(t)
+	v.funded = map[common.Address]vrschema.Word{beef: vrschema.U64(123)}
+	editGenesis(t, &v, func(g map[string]any) { g["alloc"].(map[string]any)[beef.Hex()] = map[string]any{"balance": "0x7b"} })
+	_, err = vrVerify(v)
+	require.ErrorContains(t, err, "funded accounts are a development generation's premine only")
+	v.devGeneration = "gen-dev1"
+	_, err = vrVerify(v)
+	require.ErrorContains(t, err, "is not the network word of development generation", "a testnet network word is not a dev generation's")
+}
+
+// The CLI wiring of --funded-accounts and --dev-generation: the dev generation verifies and writes its root deployment; without
+// --dev-generation the same files are refused.
+func TestTheVerifyCommandTakesADevPremine(t *testing.T) {
+	dir := func(n string) string { return filepath.Join("testdata", "vr-genesis-dev", n) }
+	flags, err := os.ReadFile(dir("ureth-flags.txt"))
+	require.NoError(t, err)
+	run := func(extra ...string) (string, error) {
+		out := filepath.Join(t.TempDir(), "vr-deployment.json")
+		cmd := newVRGenesisVerifyCmd()
+		cmd.SetOut(new(strings.Builder))
+		cmd.SetArgs(append([]string{"--input", dir("input.json"), "--deployment", dir("deployment.json"), "--genesis", dir("genesis.json"),
+			"--shard-conf", dir("full-shard-conf.json"), "--trust-base", dir("trust-base.json"), "--b1-profile", dir("b1-profile.json"),
+			"--genesis-identities", dir("genesis-identities.json"), "--vr-hook-measurement", dir("vr-hook-measurement-fresh.json"),
+			"--ureth-flags", strings.TrimSpace(string(flags)), "--fee-collector", "0x00000000000000000000000000000000000000fe",
+			"--funded-accounts", dir("dev-funded-accounts.json"), "--out-root-deployment", out}, extra...))
+		return out, cmd.Execute()
+	}
+	out, err := run("--dev-generation", vrDevGeneration)
+	require.NoError(t, err)
+	var got, want vrRootDeployment
+	require.NoError(t, vrStrictJSON(out, &got))
+	require.NoError(t, vrStrictJSON(dir("vr-deployment.json"), &want))
+	require.Equal(t, want, got)
+	_, err = run()
+	require.ErrorContains(t, err, "premine only")
+	_, err = run("--dev-generation", "gen-other")
+	require.ErrorContains(t, err, "is not the network word")
+}

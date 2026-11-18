@@ -124,7 +124,7 @@ func TestTheRequestHistoryServesAVRActivationsPartitionChanges(t *testing.T) {
 
 	t.Run("a certification request of a changed shard is judged under its new configuration from the boundary", func(t *testing.T) {
 		for _, p := range []types.PartitionID{vrUpdated, vrReplaced} {
-			parent := r.manager.blockStore.ShardInfo(p, types.ShardID{})
+			parent := r.manager.blockStore().ShardInfo(p, types.ShardID{})
 			require.NotNil(t, parent)
 			view, err := storage.ResolveParentView(hist, nil, parent, []byte("verified parent block"), 7, crypto.SHA256, storage.PurposeCertify, nil)
 			require.NoError(t, err, "partition %d", p)

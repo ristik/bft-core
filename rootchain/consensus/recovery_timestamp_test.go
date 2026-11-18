@@ -42,14 +42,14 @@ func TestRecoveryAuthenticatesTimestampBeforeInstallingParent(t *testing.T) {
 				}
 				require.True(t, found, "reviewer's certified pending-parent premise")
 			}
-			previous := root.blockStore
+			previous := root.blockStore()
 			err := recoverTo(t, root, &bad)
 			require.ErrorIs(t, err, abdrc.ErrRecoveryTimestamp)
-			require.Same(t, previous, root.blockStore)
+			require.Same(t, previous, root.blockStore())
 			require.False(t, root.frontier.faulted.Load())
 			root.recovery.Clear()
 			require.NoError(t, recoverTo(t, root, state), "original signed history remains replayable")
-			parent, err := root.blockStore.Block(root.blockStore.GetHighQc().GetRound())
+			parent, err := root.blockStore().Block(root.blockStore().GetHighQc().GetRound())
 			require.NoError(t, err)
 			require.GreaterOrEqual(t, proposalTimestamp(basetypes.NewTimestamp(), parent.BlockData.Timestamp), parent.BlockData.Timestamp)
 		})
@@ -95,7 +95,7 @@ func TestScheme2RecoveryAuthenticatesPendingAndCommittedTime(t *testing.T) {
 	for i := 0; i < 8; i++ {
 		id, err := c.replicas[0].manager.leaderSelector.GetLeaderForRound(proposals[len(proposals)-1].Block.Round)
 		require.NoError(t, err)
-		st, err := c.byID(id).manager.blockStore.GetState()
+		st, err := c.byID(id).manager.blockStore().GetState()
 		require.NoError(t, err)
 		if st.CommittedHead.Anchor == nil && st.CommittedHead.Block.Anchor == nil {
 			state = st
@@ -135,9 +135,9 @@ func TestScheme2RecoveryAuthenticatesPendingAndCommittedTime(t *testing.T) {
 			}
 			require.True(t, found)
 		}
-		before := r.manager.blockStore
+		before := r.manager.blockStore()
 		require.ErrorIs(t, recoverTo(t, r.manager, &bad), abdrc.ErrRecoveryTimestamp)
-		require.Same(t, before, r.manager.blockStore)
+		require.Same(t, before, r.manager.blockStore())
 		r.manager.recovery.Clear()
 	}
 	require.NoError(t, recoverTo(t, r.manager, &wire))
@@ -166,8 +166,8 @@ func TestLiveQCAuthenticatesExecutedParentTimestamp(t *testing.T) {
 	state := c.pastTheFirstSuccessor()
 	root := latchProbe(t, c)
 	require.NoError(t, recoverTo(t, root, state))
-	qc := root.blockStore.GetHighQc()
-	parent, err := root.blockStore.Block(qc.GetRound())
+	qc := root.blockStore().GetHighQc()
+	parent, err := root.blockStore().Block(qc.GetRound())
 	require.NoError(t, err)
 	parent.BlockData.Timestamp++
 	require.ErrorIs(t, root.checkRecoveryNeeded(qc), rctypes.ErrTimestampProof)

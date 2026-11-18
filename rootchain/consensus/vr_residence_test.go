@@ -99,7 +99,7 @@ func TestResidenceViewZeroIsBoundToTheDerivedIntentsAnchorCommit(t *testing.T) {
 // arrives: the opening is observed when the commit is learned, not when the proposal arrives.
 func TestResidenceAnAlreadyMatureCommitDoesNotRestartTheWait(t *testing.T) {
 	x := newPlanFixture(t).cm
-	head, err := x.blockStore.Block(x.blockStore.GetHighQc().GetRound())
+	head, err := x.blockStore().Block(x.blockStore().GetHighQc().GetRound())
 	require.NoError(t, err)
 	intent := [32]byte{7}
 	s := vradmit.GenesisRootState(1, 4)

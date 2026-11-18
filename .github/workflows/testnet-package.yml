@@ -33,6 +33,7 @@ jobs:
           TN_REQUIRE_COMPOSE: '1'
       - run: python3 -m unittest discover -s deploy/testnet -p test_handoff_drive.py -v
       - run: python3 -m unittest discover -s deploy/testnet -p test_remote_joiner.py -v
+      - run: python3 -m unittest discover -s deploy/testnet -p test_vr_genesis.py -v
       - run: python3 -m unittest discover -s deploy/testnet/faucet -v
       - uses: actions/checkout@v4
         with:

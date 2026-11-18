@@ -71,6 +71,19 @@ if [ "${M2_PROFILE2:-0}" = 1 ] && [ "$validators" -ne 4 ]; then
   echo "profile-2 handoff lane requires four validators" >&2
   exit 2
 fi
+# VR_LANE=1 (VT-14, scripts/lib/vr-lib.sh): a validator-registry generation. Its handoffs are VT-05b's, so every lane whose steps would be
+# skipped (or whose genesis path bypasses the VR plan and verify) is refused here, before setup wipes test-nodes; so are the restart and
+# restore probes the lane has not been run with.
+if [ "${VR_LANE:-0}" = 1 ]; then
+  [ "${Q3_B1:-0}" = 1 ] && [ "${M2_PROFILE2:-0}" = 1 ] || { echo "VR_LANE=1 requires Q3_B1=1 and M2_PROFILE2=1" >&2; exit 2; }
+  for vrConflict in P85_LANE P85_SHADOW Q4_LIVE_LANE H3_ASSIGNMENT_LANE Q3_WEIGHT_LANE H6_ABORT_LANE F8_MIXED_LANE ANYAGE_LANE UTB_LANE \
+    D2C_RESTART_PROBE H4_RESTORE_PROBE M2A_FINAL_RESTORE FAUCET_PROBE POST_M2A_SKIP_HANDOFF; do
+    [ "${!vrConflict:-0}" = 0 ] || { echo "VR_LANE=1 refuses $vrConflict=${!vrConflict}: its steps do not run on a VR generation" >&2; exit 2; }
+  done
+  [ -z "$postM2aMode" ] || { echo "VR_LANE=1 refuses POST_M2A_MODE=$postM2aMode: the manifest genesis path bypasses the VR plan and verify" >&2; exit 2; }
+  source scripts/lib/vr-lib.sh || exit 2
+  vr_check_inputs || exit 2
+fi
 if [ "${M2A_FINAL_RESTORE:-0}" = 1 ] && { [ "${M2_PROFILE2:-0}" != 1 ] || [ "${SIGNING:-local}" != authority ] || [ "$validators" -ne 4 ]; }; then
   echo "M2a final restore requires M2_PROFILE2=1, SIGNING=authority and four validators" >&2
   exit 2
@@ -272,6 +285,11 @@ rootValidators=3
 if [ "${M2_PROFILE2:-0}" = 1 ]; then rootValidators=4; fi
 ./setup-evm-nodes.sh -r "$rootValidators" -v "$validators" -c "$postM2aChainID" >/dev/null || { echo "setup failed" >&2; exit 1; }
 registry_layout_require || exit 1
+# VR_LANE=1 (VT-14, scripts/lib/vr-lib.sh): a validator-registry generation. The EVM shard configuration pins VR before the profile and the
+# genesis are derived from it; the roots start in VR mode from that pin.
+if [ "${VR_LANE:-0}" = 1 ]; then
+  vr_lane_conf || { echo "vr: pinning VR in the shard configuration failed" >&2; exit 1; }
+fi
 if [ "${Q3_B1:-0}" = 1 ]; then
   # the stock generated genesis is built with the legacy registry artifact; the fresh-B1 profile below replaces the registry (layout 3)
   echo "base genesis registry artifact (layout $(registry_layout), replaced by the B1 profile's registry genesis below) sha256=$(shasum -a 256 "$(registry_artifact)" | cut -d' ' -f1)"
@@ -291,9 +309,11 @@ if [ "${Q3_B1:-0}" = 1 ]; then
     p85_prepare_genesis || { echo "p85 genesis preparation failed" >&2; exit 1; }
     p85ProfileArgs=($(p85_profile_args))
   fi
+  if [ "${VR_LANE:-0}" = 1 ]; then p85ProfileArgs=($(vr_profile_args)); fi
   build/ubft engine-api b1-profile --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" --trust-base test-nodes/trust-base.json \
     --max-epochs-per-update "${Q3_B1_MAX_EPOCHS:-2}" --delta-ev "${Q3_B1_DELTA_EV:-16}" --delta-hold "${Q3_B1_DELTA_HOLD:-17}" --out test-nodes/b1-profile.json ${p85ProfileArgs[@]+"${p85ProfileArgs[@]}"} | tee test-nodes/b1-profile.out || { echo "b1-profile failed" >&2; exit 1; }
   if [ "${P85_LANE:-0}" = 1 ]; then p85_write_pos_deployment test-nodes/b1-profile.json || exit 1; p85_check_hook_gas test-nodes/b1-profile.json || exit 1; fi
+  if [ "${VR_LANE:-0}" = 1 ]; then vr_prepare_genesis || { echo "vr: genesis preparation failed" >&2; exit 1; }; fi
   b1GasLimit=$(python3 -c "import json;print(json.load(open('test-nodes/b1-profile.json'))['maxGas'])")
   export EVM_B1_PROFILE=test-nodes/b1-profile.json URETH_B1_PROFILE_OUT=test-nodes/b1-profile.out URETH_BUILDER_GASLIMIT=$b1GasLimit
 fi
@@ -326,6 +346,7 @@ if [ "${P85_LANE:-0}" = 1 ]; then
   p85_reconcile_genesis_assignment test-nodes/evm-genesis-funded.json || exit 1   # before the P85 accounts are added: the genesis assignment id comes from the full configuration
   p85_merge_alloc test-nodes/evm-genesis-funded.json || exit 1
 fi
+if [ "${VR_LANE:-0}" = 1 ]; then vr_merge_alloc test-nodes/evm-genesis-funded.json || exit 1; fi
 fundedSHA=$(shasum -a 256 test-nodes/evm-genesis-funded.json | cut -d' ' -f1)
 echo "funded genesis source sha256=$fundedSHA"
 # The funding edit replaces alloc, so finalize it again through U5a. That inserts the pinned
@@ -343,6 +364,11 @@ build/ubft engine-api genesis --shard-conf "test-nodes/shard-conf-${partitionID}
 fi
 echo "finalized funded genesis sha256=$(shasum -a 256 "$chainSpec" | cut -d' ' -f1)"
 if [ "${P85_LANE:-0}" = 1 ]; then p85_assert_full_conf "$fullShardConf" || exit 1; fi
+if [ "${VR_LANE:-0}" = 1 ]; then
+  # the ureth vector verify certifies is the one every ureth launch evaluates: the same genesis spec, computed once
+  export URETH_GENESIS_SPEC=$chainSpec
+  vr_verify "$chainSpec" "$fullShardConf" || exit 1
+fi
 fi
 if [ "${SIGNING:-local}" = authority ]; then
   # The full configuration is the one the root chain will certify, so enroll against it rather
@@ -944,7 +970,14 @@ if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
   pass "three aggregator shards certified alongside the EVM partition; UC/TR/EVM trace recorded"
 fi
 
-if [ "${M2_PROFILE2:-0}" = 1 ] && [ "${POST_M2A_SKIP_HANDOFF:-0}" != 1 ]; then
+if [ "${VR_LANE:-0}" = 1 ]; then
+  # a VR generation: the genesis committee reads back from VR through ureth; its handoffs are VT-05b's (the P85/Q3 operator handoffs do not
+  # apply in VR mode), so the profile-2 handoff steps are skipped
+  vr_readback "http://127.0.0.1:$rethEthBase" || { fail "the VR views do not read back the genesis committee"; exit 1; }
+  pass "VR reads back the genesis committee, the PoA module and GENESIS_RESULT through ureth"
+  echo "  info: VR lane: the profile-2 operator handoffs do not apply to a VR generation (its handoffs are VT-05b's); skipped"
+fi
+if [ "${M2_PROFILE2:-0}" = 1 ] && [ "${POST_M2A_SKIP_HANDOFF:-0}" != 1 ] && [ "${VR_LANE:-0}" != 1 ]; then
   echo "=== M2 profile-2: two certified root handoffs with paid execution ==="
   if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
     f8_slow_stop_resume_evm || { fail "EVM delay/stop/resume probe failed"; exit 1; }

@@ -482,7 +482,7 @@ func newShardWorld(t *testing.T, cfg shardWorldConfig) *shardWorld {
 	}
 	slices.Sort(w.ids)
 	w.transport.introduceShards()
-	if si := w.h.blockStore.ShardInfo(q3fixture.PartitionID, types.ShardID{}); si != nil && si.LastCR != nil {
+	if si := w.h.blockStore().ShardInfo(q3fixture.PartitionID, types.ShardID{}); si != nil && si.LastCR != nil {
 		require.EqualValues(t, liveShardEpoch, si.LastCR.Technical.Epoch, "the live certificates name the shard epoch the shards have a configuration for")
 	}
 	// sample the shard's certificate at the watched root
@@ -594,7 +594,7 @@ func addRealShards(t *testing.T, x *liveTransport, c *q4bLive, opts shardnode.BF
 	t.Helper()
 	f := c.nodes[0].r.f
 	m := c.nodes[0].r.manager
-	si := m.blockStore.ShardInfo(q3fixture.PartitionID, types.ShardID{})
+	si := m.blockStore().ShardInfo(q3fixture.PartitionID, types.ShardID{})
 	require.NotNil(t, si)
 	luc := si.LastCR.UC
 	genesis := shardnode.BlockRef{Number: 0, Hash: shardnode.Hash(luc.InputRecord.BlockHash), StateRoot: shardnode.Hash(luc.InputRecord.Hash)}
@@ -676,7 +676,7 @@ func (w *shardWorld) dump(what string) {
 		t.Logf("request at %s from %s at %s: shard round %d block=%x dropped=%v", e.at.Format("15:04:05.000"), shortID(e.node), e.root, e.round, e.blockHash, e.dropped)
 	}
 	for _, n := range w.c.nodes {
-		si := n.r.manager.blockStore.ShardInfo(q3fixture.PartitionID, types.ShardID{})
+		si := n.r.manager.blockStore().ShardInfo(q3fixture.PartitionID, types.ShardID{})
 		if si != nil && si.LastCR != nil {
 			t.Logf("root %s: root round %d, shard LastCR seal %d, technical round %d epoch %d leader %s, IR round %d", n.name, w.c.state(n.name).Round, si.LastCR.UC.UnicitySeal.RootChainRoundNumber, si.LastCR.Technical.Round, si.LastCR.Technical.Epoch, shortID(si.LastCR.Technical.Leader), si.LastCR.UC.InputRecord.RoundNumber)
 		}
@@ -700,7 +700,7 @@ func (w *shardWorld) stallAfterLoss(marker []byte) (u certSample, armed time.Tim
 			return false
 		}
 		for _, name := range w.c.all() {
-			if w.c.nodes[w.c.idx(name)].r.manager.blockStore.IsChangeInProgress(w.c.state(name).Round, q3fixture.PartitionID, types.ShardID{}) != nil {
+			if w.c.nodes[w.c.idx(name)].r.manager.blockStore().IsChangeInProgress(w.c.state(name).Round, q3fixture.PartitionID, types.ShardID{}) != nil {
 				return false
 			}
 		}
@@ -744,7 +744,7 @@ func TestIngressLossWithRealShardsRecoversThroughTheT2Repeat(t *testing.T) {
 	}
 	require.NotEmpty(t, lost, "premise: the shard's attempt was sent and dropped")
 	for _, name := range w.c.all() {
-		if ch := w.c.nodes[w.c.idx(name)].r.manager.blockStore.IsChangeInProgress(w.c.state(name).Round, q3fixture.PartitionID, types.ShardID{}); ch != nil {
+		if ch := w.c.nodes[w.c.idx(name)].r.manager.blockStore().IsChangeInProgress(w.c.state(name).Round, q3fixture.PartitionID, types.ShardID{}); ch != nil {
 			// the only change that may be in flight is the roots' own T2 repeat of u (it needs no request); anything else is a request that got into a proposal
 			same, err := types.EqualIR(u.ir, ch)
 			require.NoError(t, err)

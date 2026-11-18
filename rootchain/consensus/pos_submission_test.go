@@ -61,7 +61,7 @@ func TestSubmitPosControlSignsRetainsTheWitnessAndQueues(t *testing.T) {
 	c := retirement(witness)
 	require.NoError(t, cms[0].SubmitPosControl(context.Background(), c, witness))
 	require.Equal(t, 1, cms[0].posQueue.len())
-	require.True(t, cms[0].blockStore.HasWitness(c.WitnessHash), "the submitter retains the witness the others pull")
+	require.True(t, cms[0].blockStore().HasWitness(c.WitnessHash), "the submitter retains the witness the others pull")
 	// the same submission again changes nothing
 	require.NoError(t, cms[0].SubmitPosControl(context.Background(), c, witness))
 	require.Equal(t, 1, cms[0].posQueue.len())
@@ -166,7 +166,7 @@ func orderingFixture(t *testing.T, controls ...drctypes.PosControl) (*ConsensusM
 	var subs []posSubmission
 	for i, c := range controls {
 		w := []byte{byte(i)}
-		require.NoError(t, x.blockStore.StoreWitness(w))
+		require.NoError(t, x.blockStore().StoreWitness(w))
 		c.WitnessHash = sha256.Sum256(w)
 		require.NoError(t, x.onPosControlSubmission(context.Background(), signed(t, cms[i%2], c)))
 		subs = append(subs, posSubmission{})
@@ -276,7 +276,7 @@ func TestThePrefetchStoresTheWitnessWithinTheOpsBoundAndTheSubmissionBecomesACan
 	}
 	c := retirement(witness)
 	require.NoError(t, x.onPosControlSubmission(context.Background(), signed(t, cms[0], c)))
-	require.Eventually(t, func() bool { return x.blockStore.HasWitness(c.WitnessHash) }, 3*time.Second, 10*time.Millisecond)
+	require.Eventually(t, func() bool { return x.blockStore().HasWitness(c.WitnessHash) }, 3*time.Second, 10*time.Millisecond)
 	require.EqualValues(t, storage.MaxEVMWitnessBytes, bound.Load(), "a Retirement witness is bounded by the EVM proof bound, not the closure's")
 	require.Equal(t, cms[0].id, asked.Load().([]peer.ID)[0], "the submitter is asked first")
 	require.Equal(t, 1, x.posQueue.len())
@@ -289,7 +289,7 @@ func TestThePrefetchStoresTheWitnessWithinTheOpsBoundAndTheSubmissionBecomesACan
 	x.witnesses = func(context.Context, [32]byte, []peer.ID, int) ([]byte, error) { return []byte("forged"), nil }
 	require.NoError(t, x.onPosControlSubmission(context.Background(), signed(t, cms[0], other)))
 	require.Eventually(t, func() bool { return x.posQueue.len() == 1 }, 3*time.Second, 10*time.Millisecond)
-	require.False(t, x.blockStore.HasWitness(other.WitnessHash))
+	require.False(t, x.blockStore().HasWitness(other.WitnessHash))
 }
 
 func TestWithoutAFetcherOrTheWitnessTheIntakeRefusesAndTheFetchesInFlightAreBounded(t *testing.T) {

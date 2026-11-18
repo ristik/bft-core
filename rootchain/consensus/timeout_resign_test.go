@@ -26,14 +26,14 @@ func TestALocalTimeoutAfterARecoveryResendsTheTimeoutVoteAlreadySignedForTheRoun
 	cm, _, _ := initConsensusManager(t, mockNet)
 	ctx := context.Background()
 
-	genesisQC := cm.blockStore.GetHighQc()
+	genesisQC := cm.blockStore().GetHighQc()
 	require.EqualValues(t, 1, genesisQC.GetRound())
 	// round 2: a block on genesis, executed and stored
-	rh2, err := cm.blockStore.Add(&drctypes.BlockData{Version: 1, Round: 2, Epoch: genesisQC.VoteInfo.Epoch, Timestamp: genesisQC.VoteInfo.Timestamp + 1, Payload: &drctypes.Payload{}, Qc: genesisQC}, cm.irReqVerifier)
+	rh2, err := cm.blockStore().Add(&drctypes.BlockData{Version: 1, Round: 2, Epoch: genesisQC.VoteInfo.Epoch, Timestamp: genesisQC.VoteInfo.Timestamp + 1, Payload: &drctypes.Payload{}, Qc: genesisQC}, cm.irReqVerifier)
 	require.NoError(t, err)
 	// round 2 times out: its block stays in the tree, and the pacemaker enters round 3 under the TC
 	tc2 := &drctypes.TimeoutCert{Timeout: &drctypes.Timeout{Round: 2, Epoch: genesisQC.VoteInfo.Epoch, HighQc: genesisQC}}
-	require.NoError(t, cm.blockStore.ProcessTc(tc2))
+	require.NoError(t, cm.blockStore().ProcessTc(tc2))
 	cm.pacemaker.Reset(ctx, genesisQC.GetRound(), tc2, nil)
 	t.Cleanup(cm.pacemaker.Stop)
 	require.EqualValues(t, 3, cm.pacemaker.GetCurrentRound())
@@ -51,12 +51,12 @@ func TestALocalTimeoutAfterARecoveryResendsTheTimeoutVoteAlreadySignedForTheRoun
 	}
 	qc2.LedgerCommitInfo.PreviousHash, err = qc2.VoteInfo.Hash(crypto.SHA256)
 	require.NoError(t, err)
-	_, err = cm.blockStore.ProcessQc(qc2)
+	_, err = cm.blockStore().ProcessQc(qc2)
 	require.NoError(t, err)
-	require.EqualValues(t, 2, cm.blockStore.GetHighQc().GetRound())
+	require.EqualValues(t, 2, cm.blockStore().GetHighQc().GetRound())
 	// what a recovery does to the pacemaker when it completes (sendRecoveryRequests' handler): reset to the recovered high QC's
 	// round, with no vote handed over
-	cm.pacemaker.Reset(ctx, cm.blockStore.GetHighQc().GetRound(), nil, nil)
+	cm.pacemaker.Reset(ctx, cm.blockStore().GetHighQc().GetRound(), nil, nil)
 	require.EqualValues(t, 3, cm.pacemaker.GetCurrentRound(), "premise: the recovery came back to the round already timed out in")
 	require.Nil(t, cm.pacemaker.GetTimeoutVote(), "premise: the pacemaker no longer remembers the vote")
 
@@ -64,17 +64,17 @@ func TestALocalTimeoutAfterARecoveryResendsTheTimeoutVoteAlreadySignedForTheRoun
 	second := testutils.MockAwaitMessage[*abdrc.TimeoutMsg](t, mockNet, network.ProtocolRootTimeout)
 	require.EqualValues(t, 3, second.Timeout.Round)
 	require.Equal(t, firstID, timeoutMessageID(second), "one timeout vote per round: the stored one is sent again (it carried high QC round %d; a newly signed one would carry %d)",
-		first.Timeout.GetHqcRound(), cm.blockStore.GetHighQc().GetRound())
+		first.Timeout.GetHqcRound(), cm.blockStore().GetHighQc().GetRound())
 
 	// once the stored round has passed, the stored vote is of an older round and a new one is signed for the new round
 	tc3 := &drctypes.TimeoutCert{Timeout: &drctypes.Timeout{Round: 3, Epoch: genesisQC.VoteInfo.Epoch, HighQc: qc2}}
-	cm.pacemaker.Reset(ctx, cm.blockStore.GetHighQc().GetRound(), tc3, nil)
+	cm.pacemaker.Reset(ctx, cm.blockStore().GetHighQc().GetRound(), tc3, nil)
 	require.EqualValues(t, 4, cm.pacemaker.GetCurrentRound())
 	cm.onLocalTimeout(ctx)
 	next := testutils.MockAwaitMessage[*abdrc.TimeoutMsg](t, mockNet, network.ProtocolRootTimeout)
 	require.EqualValues(t, 4, next.Timeout.Round, "a new vote for the new round, not the stored one of round 3")
 	require.NotEqual(t, firstID, timeoutMessageID(next))
-	stored, err := cm.blockStore.ReadLastVote()
+	stored, err := cm.blockStore().ReadLastVote()
 	require.NoError(t, err)
 	require.Equal(t, timeoutMessageID(next), timeoutMessageID(stored.(*abdrc.TimeoutMsg)), "and it is now the stored last vote")
 }
@@ -87,12 +87,12 @@ func TestStoredTimeoutVoteIsOnlyThisRootsVoteForExactlyTheEpochAndRound(t *testi
 	ctx := context.Background()
 	self := cm.id.String()
 	timeoutVote := func(epoch, round uint64, author string) *abdrc.TimeoutMsg {
-		return &abdrc.TimeoutMsg{Timeout: &drctypes.Timeout{Epoch: epoch, Round: round, HighQc: cm.blockStore.GetHighQc()}, Author: author, Signature: []byte{1}}
+		return &abdrc.TimeoutMsg{Timeout: &drctypes.Timeout{Epoch: epoch, Round: round, HighQc: cm.blockStore().GetHighQc()}, Author: author, Signature: []byte{1}}
 	}
 
 	require.Nil(t, cm.storedTimeoutVote(ctx, 1, 7), "an empty store")
 
-	require.NoError(t, cm.blockStore.StoreLastVote(timeoutVote(1, 7, self)))
+	require.NoError(t, cm.blockStore().StoreLastVote(timeoutVote(1, 7, self)))
 	got := cm.storedTimeoutVote(ctx, 1, 7)
 	require.NotNil(t, got, "this root's timeout vote for the epoch and round")
 	require.EqualValues(t, 7, got.Timeout.Round)
@@ -107,11 +107,11 @@ func TestStoredTimeoutVoteIsOnlyThisRootsVoteForExactlyTheEpochAndRound(t *testi
 		require.Nil(t, cm.storedTimeoutVote(ctx, ask[0], ask[1]), name)
 	}
 
-	require.NoError(t, cm.blockStore.StoreLastVote(timeoutVote(1, 7, "another-root")))
+	require.NoError(t, cm.blockStore().StoreLastVote(timeoutVote(1, 7, "another-root")))
 	require.Nil(t, cm.storedTimeoutVote(ctx, 1, 7), "another author's vote")
 
-	require.NoError(t, cm.blockStore.StoreLastVote(timeoutVote(1, 7, self)))
+	require.NoError(t, cm.blockStore().StoreLastVote(timeoutVote(1, 7, self)))
 	require.NotNil(t, cm.storedTimeoutVote(ctx, 1, 7), "(premise for the next case: the timeout vote is back)")
-	require.NoError(t, cm.blockStore.StoreLastVote(&abdrc.VoteMsg{VoteInfo: &drctypes.RoundInfo{RoundNumber: 7, Epoch: 1}, Author: self}))
+	require.NoError(t, cm.blockStore().StoreLastVote(&abdrc.VoteMsg{VoteInfo: &drctypes.RoundInfo{RoundNumber: 7, Epoch: 1}, Author: self}))
 	require.Nil(t, cm.storedTimeoutVote(ctx, 1, 7), "a vote for a proposal of the same round is not a timeout vote")
 }

@@ -169,7 +169,12 @@ func (x *Pacemaker) GetVoted() *abdrc.VoteMsg {
 }
 
 // SetTimeoutVote - remember timeout vote sent in this view
+//
+// The vote is this node's own message: it is kept, sent again and looped back to this node as the same object. A vote read back from
+// storage (a restart, a recorded decision) was decoded, so its wire digest is dropped here, before the vote is shared: a receiver
+// taking it would write to an object other receivers and the network read (#1191).
 func (x *Pacemaker) SetTimeoutVote(vote *abdrc.TimeoutMsg) {
+	vote.TakeWireDigest()
 	if vote.Timeout.Round == x.currentRound.Load() {
 		x.timeoutVote = vote
 	}

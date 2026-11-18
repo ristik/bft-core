@@ -39,6 +39,7 @@ import subprocess
 import sys
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
 NETWORK_ID, PARTITION, CHAIN_ID = 3, 8, 3
 FEE_COLLECTOR = '0x00000000000000000000000000000000000000fe'   # generate.py FEE: the shard nodes' --engine-fee-collector
 CONTINUITY = '1/2'                                                # generate.py EVM_CONTINUITY_MAX_DISTANCE
@@ -55,6 +56,22 @@ def run(*args, cwd=None, env=None):
     if done.returncode != 0:
         raise VRGenesisError(' '.join(map(str, args[:4])) + ' failed\n' + done.stdout + done.stderr)
     return done.stdout
+
+
+# A development generation's premine (--dev-fund): each identity owner and governor signer, whose keys the plan generates, holds this many
+# wei, so they can send the transactions an election needs (an owner's proposeBinding, a multisig queue and execute).
+DEV_FUND_WEI = 1000 * 10**18
+
+
+def dev_network_word(generation):
+    """The network word of a development generation; `ubft vr-genesis verify --dev-generation` accepts dev funding only under it."""
+    return '0x' + hashlib.sha256(('unicity.dev.vr.' + generation).encode()).hexdigest()
+
+
+def dev_keys(out, n, new_key=None):
+    """Fresh keys for n owners and the five governor signers (DEV only), in out/dev-keys/ (vr_dev_keys: keys.json 0600, O_EXCL)."""
+    import vr_dev_keys
+    return vr_dev_keys.write(out / 'dev-keys', n, **({'new_key': new_key} if new_key else {}))
 
 
 def network_word(generation):
@@ -171,15 +188,24 @@ def plan(a):
 
     (out / 'genesis-bindings.json').write_text(json.dumps([{'rootNodeId': roots[i], 'evmNodeId': evms[i]} for i in range(a.validators)], indent=1) + '\n')
     signers = a.governor_signers.split(',') if a.governor_signers else dev_signers(generation)
+    owners_file, funded, word = (Path(a.owners).resolve() if a.owners else None), {}, a.network_word or network_word(generation)
+    if a.dev_fund:
+        keys = dev_keys(out, a.validators)
+        # ids follow ascending root node id (vr-genesis plan); owners.json is in id order, one generated key per identity, payee = owner
+        owners_file = out / 'dev-keys/owners.json'
+        signers = [k['address'] for k in keys['signers']]
+        funded = {k['address']: hex(DEV_FUND_WEI) for k in keys['owners'] + keys['signers']}
+        word = dev_network_word(generation)
+        (out / 'dev-funded-accounts.json').write_text(json.dumps(funded, indent=1) + '\n')
     run(ubft, 'vr-genesis', 'plan', '--trust-base', trust, '--shard-conf', conf, '--bindings', out / 'genesis-bindings.json',
-        '--b1-profile', out / 'b1-profile.json', '--network-word', a.network_word or network_word(generation), '--governor-signers', ','.join(signers),
+        '--b1-profile', out / 'b1-profile.json', '--network-word', word, '--governor-signers', ','.join(signers),
         '--limits', a.limits, '--fee-collector', FEE_COLLECTOR, '--out-input', out / 'vr/input.json', '--out-identities', out / 'genesis-identities.json',
-        *(['--owners', Path(a.owners).resolve()] if a.owners else []))
+        *(['--owners', owners_file] if owners_file else []))
     run(contracts / 'script/vr-genesis.sh', out / 'vr/input.json', out / 'vr', cwd=contracts)
 
-    funded = funded_base_genesis(a.chain_id, int(profile['maxGas']), secrets.token_hex(32))
-    merge_alloc(funded, json.loads((out / 'vr/alloc.json').read_text()))
-    (home / 'funded.json').write_text(json.dumps(funded, indent=2) + '\n')
+    merge_alloc(funded_genesis := funded_base_genesis(a.chain_id, int(profile['maxGas']), secrets.token_hex(32)), json.loads((out / 'vr/alloc.json').read_text()))
+    merge_alloc(funded_genesis, {addr: {'balance': bal} for addr, bal in funded.items()})
+    (home / 'funded.json').write_text(json.dumps(funded_genesis, indent=2) + '\n')
     print(run(ubft, 'engine-api', 'genesis', '--shard-conf', conf, '--trust-base', trust, '--b1-profile', out / 'b1-profile.json',
               '--alloc-source', home / 'funded.json', '--out', out / 'genesis.json', '--full-shard-conf', out / 'full-shard-conf.json',
               '--identities-out', out / 'b1-identities.json'))
@@ -193,11 +219,12 @@ def plan(a):
     verified = run(ubft, 'vr-genesis', 'verify', '--input', out / 'vr/input.json', '--deployment', out / 'vr/deployment.json', '--genesis', out / 'genesis.json',
                    '--shard-conf', out / 'full-shard-conf.json', '--trust-base', trust, '--b1-profile', out / 'b1-profile.json',
                    '--genesis-identities', out / 'genesis-identities.json', '--vr-hook-measurement', fresh,
-                   '--ureth-flags', ureth, '--fee-collector', FEE_COLLECTOR, '--out-root-deployment', out / 'vr-deployment.json')
+                   '--ureth-flags', ureth, '--fee-collector', FEE_COLLECTOR, '--out-root-deployment', out / 'vr-deployment.json',
+                   *(['--funded-accounts', out / 'dev-funded-accounts.json', '--dev-generation', generation] if a.dev_fund else []))
     print(verified.strip())
     summary = {'generation': generation, 'validators': a.validators, 'chainId': a.chain_id, 'networkId': NETWORK_ID,
                'deployment': json.loads((out / 'vr/deployment.json').read_text()), 'profile': {k: profile[k] for k in ('hRecords', 'hookRecordGas', 'electGas', 'systemGas', 'maxGas')},
-               'ureth': ureth, 'roots': roots, 'evms': evms, 'freshMeasurement': provenance}
+               'ureth': ureth, 'roots': roots, 'evms': evms, 'freshMeasurement': provenance, 'devFunded': funded}
     (out / 'vr-genesis-summary.json').write_text(json.dumps(summary, indent=1) + '\n')
     return summary
 
@@ -216,10 +243,14 @@ def main():
     p.add_argument('--governor-signers', help='the FoundationMultisig signers, five comma-separated addresses (default: DEV keyless signers)')
     p.add_argument('--owners', help='JSON [{owner, payee}] per identity in ascending root node id (default: DEV keyless addresses)')
     p.add_argument('--limits', default='4,4,16', help='CommitteeLimits nMin,nTarget,nMax')
+    p.add_argument('--dev-fund', action='store_true', help='DEVELOPMENT ONLY: generate keys for every owner and governor signer, fund them in the genesis '
+                   '(the premine verify checks), and use the dev network word; refused with --network-word, --owners or --governor-signers')
     p.add_argument('--out', required=True)
     a = p.parse_args()
     if not 1 <= a.validators <= 16:
         p.error('--validators must be 1..16')
+    if a.dev_fund and (a.network_word or a.owners or a.governor_signers):
+        p.error('--dev-fund generates the owners and signers and uses the dev network word: it excludes --network-word, --owners and --governor-signers')
     if bool(a.ureth) == bool(a.fresh_measurement):
         p.error('the fresh measurement is a generation step: pass --ureth (run it now) or --fresh-measurement (an external one), exactly one')
     try:
