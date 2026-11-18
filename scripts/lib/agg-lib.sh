@@ -51,6 +51,7 @@ start_agg() { # K (1-based): one aggregator-go shard
     SMT_BACKEND=memory SHARDING_MODE=$(agg_mode) LOG_LEVEL=info LOG_FORMAT=text LOG_ENABLE_JSON=false LOG_FILE_PATH="$PWD/$d/logs/aggregator.log" \
     SIGNING_KEY_FILE="$PWD/$d/keys.json" BFT_ENABLED=true BFT_ADDRESS=/ip4/127.0.0.1/tcp/$((29100 + k)) BFT_RPC_ADDRESS=http://127.0.0.1:$rootRpcPort \
     BFT_SHARD_CONF_FILE="$PWD/$(agg_conf "$k")" BFT_TRUST_BASE_FILES="$PWD/test-nodes/trust-base.json" \
+    BFT_SHARD_CONF_CHECKPOINT_FILE="$PWD/$d/shard-conf-checkpoint.json" \
     BFT_BOOTSTRAP_ADDRESSES="$boot" \
     ${utbEnv[@]+"${utbEnv[@]}"} "$AGG_BIN" >"$d/stdout.log" 2>&1 &
   echo $! >"$d/pid"

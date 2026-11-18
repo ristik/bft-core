@@ -161,6 +161,8 @@ def aggregator_environment(root_boot, rpc_bind, utb=None, utb_aggregator='integr
         'BFT_ENABLED':'true','BFT_ADDRESS':'/ip4/0.0.0.0/tcp/%d'%AGGREGATOR_BFT_PORT,'BFT_ANNOUNCE_ADDRESSES':'/dns4/aggregator/tcp/%d'%AGGREGATOR_BFT_PORT,
         'BFT_BOOTSTRAP_ADDRESSES':root_boot,'BFT_RPC_ADDRESS':'http://'+operator_rpc.listen(rpc_bind,operator_rpc.ROOT_PORT),
         'BFT_SHARD_CONF_FILE':'/network/aggregator-conf.json','BFT_TRUST_BASE_FILES':'/network/trust-base.json',
+        # the newest shard configuration after a live validator-registry change, with its certificate, on the aggregator's own writable mount: a restart resumes from it
+        'BFT_SHARD_CONF_CHECKPOINT_FILE':AGGREGATOR_CONF_DIR+'/shard-conf-checkpoint.json',
         # the integration aggregator's UTB mode (enabled by the pin; the genesis entry file is the fresh chain's history; its own append-only store). In this mode it uses neither the V1
         # trust-base files nor root REST for authority: the history it verifies and routes from comes from the roots (V3 attachments and GetTrustBase)
         **(utb_aggregator_environment(utb,utb_aggregator) if utb else {})}
@@ -193,6 +195,7 @@ def write(path, obj):
 
 UTB_GENESIS_FILE = '/network/utb-genesis.cbor'   # the mounted genesis entry; the pin below is passed separately, never read from it at runtime
 UTB_ENTRIES_DB = '/state/utb-entries.db'
+AGGREGATOR_CONF_DIR = '/shardconf'   # the aggregator's writable checkpoint mount (./aggregator-conf)
 UTB_AGGREGATOR_DIR = '/utb'   # the aggregator's own writable store (its /state is the read-only key mount)
 
 def utb_node_flags(pin):
@@ -297,7 +300,7 @@ def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, wit
     services['mongo']['pids_limit']=256   # mongod runs ~85 threads idle, plus one per connection (the aggregator's pool is 20)
     services['mongo']['tmpfs'].append('/data/configdb:size=1m,mode=1777')   # the image declares it a volume: unused here, and no anonymous volume per recreate
     services['mongo']['stop_grace_period']='30s'   # a clean mongod shutdown before backup.py archives the stopped generation
-    service('aggregator',node,['aggregator'],['./aggregator:/state:ro',network]+(['./aggregator-utb:'+UTB_AGGREGATOR_DIR] if utb and utb_aggregator == 'integration' else []),memory='512m',cpu=0.75,pod='pod1',
+    service('aggregator',node,['aggregator'],['./aggregator:/state:ro',network,'./aggregator-conf:'+AGGREGATOR_CONF_DIR]+(['./aggregator-utb:'+UTB_AGGREGATOR_DIR] if utb and utb_aggregator == 'integration' else []),memory='512m',cpu=0.75,pod='pod1',
         environment=aggregator_environment(root_boot,rpc_bind,utb,utb_aggregator),depends_on={'mongo':{'condition':'service_healthy'}})
     service('rpc',images['rpc'],['python3','-u','gateway.py'],[network],memory='128m',networks=['validators','edge'],environment={'TRUSTED_PROXY_IP':subnets['edge']['gateway']},
         ports=['127.0.0.1:8545:8545'],healthcheck={'test':['CMD','python3','-c',"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8545/healthz', timeout=10)"],'interval':'30s','timeout':'12s','retries':3})
@@ -428,6 +431,7 @@ def main():
                     shutil.copy2(home/'utb/utb-bundle.cbor',out/'network/utb-bundle.cbor')
                 else:
                     (out/'aggregator-utb').mkdir()   # the aggregator's append-only history store (its other mount is read-only)
+            (out/'aggregator-conf').mkdir()   # the aggregator's shard configuration checkpoint (its /state is read-only)
             cli('shard-node','init','--home',out/'aggregator','--generate')
             for i in range(1,a.validators+1):
                 (out/f'validator{i}').mkdir()
