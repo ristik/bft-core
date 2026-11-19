@@ -631,8 +631,11 @@ class InstallAtOnce(unittest.TestCase):
         self.commits_at[3] = 0   # root 3 never commits it itself
         self.drive.step_install(self.journal)
         three = self.events.index(('install', 3))
-        self.assertTrue(any(kind == 'install' and i in (1, 2, 4) for kind, i in self.events[:three]), 'after another root has installed')
-        self.assertIn(self.journal.value('install', 'evidence', sub='root3'), {'root1', 'root2', 'root4', 'root5'})
+        # The joiner (5) installs before any incumbent is stopped, so by the time root 3 is stopped the installed source may be the joiner or an
+        # incumbent: which one depends on thread scheduling, so assert on completed installs (the evidence root 3 needs), not on install starts.
+        done_before = {i for kind, i in self.events[:three] if kind == 'done' and i != 3}
+        self.assertTrue(done_before, 'after another root has installed')
+        self.assertIn(self.journal.value('install', 'evidence', sub='root3'), {f'root{i}' for i in done_before})
 
     def test_a_failed_joiner_install_leaves_every_incumbent_running(self):
         real = self.drive.remote[5].install
