@@ -161,3 +161,96 @@ func TestLaggingLeaderProposesAfterRecovery(t *testing.T) {
 	require.NoError(t, s.follower.manager.onProposalMsg(ctx, prop))
 	require.NotEmpty(t, s.follower.net.SentMessages(network.ProtocolRootVote))
 }
+
+// The high QC of a carried certificate: one not newer than the high QC is not looked at (its block may be pruned), a newer one whose block
+// is missing starts no recovery and leaves the root without a parent for a proposal, a newer one whose block is present is processed.
+func TestAdmitTheParentOfACarriedTC(t *testing.T) {
+	s := newLaggingLeader(t)
+	m := s.leader.manager
+	qc1 := s.missed[1].Block.Qc // the high QC of the timeout votes, carried by the second proposal
+	require.NotNil(t, qc1)
+	ctx := context.Background()
+	tcOf := func(qc *drctypes.QuorumCert) *drctypes.TimeoutCert {
+		return &drctypes.TimeoutCert{Timeout: &drctypes.Timeout{Epoch: qc.VoteInfo.Epoch, Round: s.round, HighQc: qc}}
+	}
+	high := m.blockStore().GetHighQc().GetRound()
+
+	known, err := m.admitTCParent(ctx, tcOf(qc1))
+	require.NoError(t, err, "no failure and no recovery for a missing block")
+	require.False(t, known, "the newer QC has no block here: no parent to propose on")
+	require.False(t, m.recovery.InRecovery(), "and none is started for it")
+	require.Equal(t, high, m.blockStore().GetHighQc().GetRound())
+
+	known, err = m.admitTCParent(ctx, nil)
+	require.NoError(t, err)
+	require.True(t, known)
+
+	require.NoError(t, m.onProposalMsg(ctx, s.missed[0])) // the block qc1 certifies
+	known, err = m.admitTCParent(ctx, tcOf(qc1))
+	require.NoError(t, err)
+	require.True(t, known, "the block is here: the QC is processed")
+	require.Equal(t, qc1.GetRound(), m.blockStore().GetHighQc().GetRound())
+
+	// a QC older than the high QC is not looked at: its block is not here (pruned, or never seen)
+	old := &drctypes.QuorumCert{VoteInfo: &drctypes.RoundInfo{RoundNumber: 1}}
+	_, err = m.blockStore().Block(old.GetRound())
+	require.Error(t, err, "premise: no block of that round")
+	known, err = m.admitTCParent(ctx, tcOf(old))
+	require.NoError(t, err)
+	require.True(t, known)
+	require.False(t, m.recovery.InRecovery())
+}
+
+// A root signs one proposal for a round as long as the process lives: when a recovery or the like lowers the round and the certificate
+// ends it again, no second proposal for that round is signed (#1210).
+func TestNoSecondProposalForARoundAlreadySigned(t *testing.T) {
+	s := newLaggingLeader(t)
+	ctx := context.Background()
+	for _, p := range s.missed {
+		require.NoError(t, s.leader.manager.onProposalMsg(ctx, p))
+	}
+	require.NoError(t, s.leader.manager.onTimeoutMsg(ctx, s.next))
+	sent := len(s.leader.net.SentMessages(network.ProtocolRootProposal))
+	require.NotZero(t, sent, "the leader proposed in the round after the certificate")
+
+	// the round is lowered (what a recovery's reset does) and the certificate is processed again
+	s.leader.manager.pacemaker.Reset(ctx, s.round-1, nil, nil)
+	require.Equal(t, s.round, s.leader.manager.pacemaker.GetCurrentRound())
+	_ = s.leader.manager.onTimeoutMsg(ctx, recodeTimeout(t, s.next))
+	require.Equal(t, s.round+1, s.leader.manager.pacemaker.GetCurrentRound(), "premise: the certificate advanced the round again")
+	require.Len(t, s.leader.net.SentMessages(network.ProtocolRootProposal), sent, "but no second proposal")
+}
+
+// Timeouts at the start of an epoch carry no high QC at all, nor does the certificate: the carried certificate takes the leader into its
+// round and it proposes on the epoch anchor, with no panic.
+func TestTimeoutWithoutAHighQCCarryingATC(t *testing.T) {
+	byID, anchor, _ := newAnchorReplicas(t, 4)
+	ctx := context.Background()
+	leaderID, err := firstReplica(byID).manager.leaderSelector.GetLeaderForRound(anchor.Slot + 2)
+	require.NoError(t, err)
+	var leader, collector *anchorReplica
+	var votes []*abdrc.TimeoutMsg
+	for id, r := range byID {
+		r.manager.onLocalTimeout(ctx)
+		votes = append(votes, r.net.SentMessages(network.ProtocolRootTimeout)[0].Message.(*abdrc.TimeoutMsg))
+		require.Nil(t, votes[len(votes)-1].Timeout.HighQc, "premise: no high QC at the epoch start")
+		if id == leaderID {
+			leader = r
+		} else {
+			collector = r
+		}
+	}
+	for _, v := range votes {
+		_ = collector.manager.onTimeoutMsg(ctx, recodeTimeout(t, v)) // the vote after the quorum is stale
+	}
+	require.Equal(t, anchor.Slot+2, collector.manager.pacemaker.GetCurrentRound(), "the collector formed the certificate")
+	collector.net.ResetSentMessages(network.ProtocolRootTimeout)
+	collector.manager.onLocalTimeout(ctx)
+	next := collector.net.SentMessages(network.ProtocolRootTimeout)[0].Message.(*abdrc.TimeoutMsg)
+	require.NotNil(t, next.LastTC)
+
+	leader.net.ResetSentMessages(network.ProtocolRootProposal)
+	require.NotPanics(t, func() { require.NoError(t, leader.manager.onTimeoutMsg(ctx, next)) })
+	require.Equal(t, anchor.Slot+2, leader.manager.pacemaker.GetCurrentRound())
+	require.NotEmpty(t, leader.net.SentMessages(network.ProtocolRootProposal))
+}
