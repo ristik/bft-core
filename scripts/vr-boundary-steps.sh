@@ -140,9 +140,15 @@ vrb_main() {
   cfg=$(mktemp -d)
   printf '%s\n' "$owner" >"$cfg/operator.key"; chmod 600 "$cfg/operator.key"
   openssl rand -hex 32 >"$cfg/ureth.key"
+  local evmHolder="\"evmKeys\":\"$PWD/$ehome/keys.json\""
+  if [ "${SIGNING:-local}" = authority ]; then   # the EVM key is the authority's: the registration proof is its typed operation, the payee the one its policy lists
+    local an=${ehome#test-nodes/evm}
+    evmHolder="\"evmAuthority\":{\"socket\":\"$PWD/test-nodes/auth$an/operator.sock\",\"credential\":\"$PWD/test-nodes/auth$an/operator.cred\",\"nodeInfo\":\"$PWD/test-nodes/auth$an/node-info.json\"}"
+    payee=$(python3 -c "import json;print(json.load(open('$VR_DIR/rotate-payees.json'))['$an'])")
+  fi
   cat >"$cfg/validator.json" <<EOF
 {"format":"unicity.validator.config.v1","rpc":"$vrb_rpc","registry":"$vrb_vr","rootKeys":"$PWD/$rhome/keys.json",
- "evmKeys":"$PWD/$ehome/keys.json","urethKey":"$cfg/ureth.key","jwt":"$cfg/none","operatorKey":"$cfg/operator.key",
+ $evmHolder,"urethKey":"$cfg/ureth.key","jwt":"$cfg/none","operatorKey":"$cfg/operator.key",
  "payee":"$(python3 -c "import json;print(json.load(open('$keys'))['owners'][3]['address'])")","id":4}
 EOF
   build/ubft validator rotate --validator-config "$cfg/validator.json" --new-payee "$payee" 2>&1 | tee "$VR_EVIDENCE/rotate.log" || { vrb_log "FAIL: rotate"; return 1; }
@@ -197,6 +203,10 @@ EOF
   vrb_wait 300 "a leader ordered the Freeze v5" vrb_logs_have 'VR handoff: ordering the freeze' || return 1
   vrb_wait 300 "a leader ordered H" vrb_logs_have 'VR handoff: ordering the commit' || return 1
   vrb_wait 600 "the roots switched to J (epoch 2)" vrb_root_epoch2 || return 1
+  if [ "${SIGNING:-local}" = authority ]; then   # each authority signs for one scope: the incumbents' and the joiner's move into J's (root epoch 2, shard epoch 1) before the shard acknowledges
+    [ "${VR_JOINER:-0}" = 1 ] || source scripts/vr-joiner-steps.sh
+    vrj_advance_authorities || return 1
+  fi
   vrb_wait 900 "the EVM shard acknowledged and VR applied the Boundary (lastAcked = R)" vrb_acked || return 1
   cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'committee()' >"$VR_EVIDENCE/committee-after.hex"
   cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'identity(uint64)' 4 >"$VR_EVIDENCE/identity4-after.hex"

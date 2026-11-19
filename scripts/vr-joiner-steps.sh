@@ -26,6 +26,9 @@ vrj_start_nodes() {
   generate_log_configuration "test-nodes/root$i/"
   h3_spare_identity "$i" || { vrj_log "FAIL: the joiner's shard node identity"; return 1; }
   h3_start_reth "$i" || { vrj_log "FAIL: the joiner's execution client"; return 1; }
+  if [ "${SIGNING:-local}" = authority ]; then   # its EVM key is its authority's, pending at shard epoch 1 until J's configuration names it
+    h3_spare_authority "$i" 1 1 trust-base.json || { vrj_log "FAIL: the joiner's signing authority"; return 1; }
+  fi
   boot=$(m2_root_addr 1)
   { m2_start_root "$i" 1 "$boot"; } >/dev/null 2>&1 || true   # its readiness check needs lsof: the RPC is the check
   vrb_wait 90 "the joiner's root answers on its RPC" curl -sf "http://127.0.0.1:$(m2_rpc_port "$i")/api/v1/roundInfo" || return 1
@@ -50,9 +53,11 @@ vrj_apply() {
   d=$(mktemp -d); vrj_cfg=$d; keys=$VR_DIR/dev-keys/keys.json
   vrj_owner_key >"$d/operator.key"; chmod 600 "$d/operator.key"
   openssl rand -hex 32 >"$d/ureth.key"
+  local evmAuth="\"evmKeys\":\"$PWD/test-nodes/evm$vrj_id/keys.json\","
+  [ "${SIGNING:-local}" != authority ] || evmAuth="\"evmAuthority\":{\"socket\":\"$PWD/test-nodes/auth$vrj_id/operator.sock\",\"credential\":\"$PWD/test-nodes/auth$vrj_id/operator.cred\",\"nodeInfo\":\"$PWD/test-nodes/auth$vrj_id/node-info.json\"},"
   cat >"$d/validator.json" <<JSON
 {"format":"unicity.validator.config.v1","rpc":"$vrb_rpc","registry":"$vrb_vr","rootKeys":"$PWD/test-nodes/root$vrj_id/keys.json",
- "evmKeys":"$PWD/test-nodes/evm$vrj_id/keys.json","urethKey":"$d/ureth.key","jwt":"$d/none","operatorKey":"$d/operator.key",
+ $evmAuth"urethKey":"$d/ureth.key","jwt":"$d/none","operatorKey":"$d/operator.key",
  "payee":"$(python3 -c "import json;print(json.load(open('$keys'))['signers'][0]['address'])")"}
 JSON
   build/ubft validator apply --validator-config "$d/validator.json" 2>&1 | tee "$VR_EVIDENCE/joiner-apply.log" || { vrj_log "FAIL: validator apply"; return 1; }
@@ -93,7 +98,7 @@ vrj_admit() {
 vrj_validates() {
   local i=$vrj_id
   vrb_wait 600 "the joiner's root is a member of epoch 2 (not a follower)" vrj_root_member || return 1
-  vrb_wait 300 "the joiner's shard node activated root epoch 2" grep -Eq 'handoff activated rootEpoch=2' "test-nodes/evm$i/debug.log" || return 1
+  vrb_wait 300 "the joiner's shard node activated root epoch 2" grep -Fq 'msg="handoff activated" rootEpoch=2' "test-nodes/evm$i/debug.log" || return 1
   local ids; ids=$(cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'committeeIds()(uint64[])')
   vrj_log "VR's committee after the Boundary: $ids"
   case "$ids" in *"$i"*) vrj_log "PASS: identity $i is in VR's committee" ;; *) vrj_log "FAIL: identity $i is not in VR's committee"; return 1 ;; esac
@@ -142,3 +147,28 @@ vrj_restore_evm5() {
   vrj_log "PASS: the joiner's shard node is restored from evm1's archive and serves its status"
 }
 vrj_incumbents_staged() { grep -q 'paired shard node holds the staged successor" node_id=[^ ]* evmNodes=[1-9]' test-nodes/root1/debug.log; }
+
+# SIGNING=authority: after the roots switched to J (root epoch 2, shard epoch 1) the authorities move into its scope. The trust base of epoch 2 and the
+# shard configuration of epoch 1 come from the root that holds them; the incumbents advance (their nodes restart under a new session), the joiner's
+# authority (pending since it started, at shard epoch 1 and root epoch 1) completes its enrollment against that configuration, advances and takes a session.
+vrj_advance_authorities() {
+  local root1 pdr i
+  vrj_source_libs || return 1
+  root1="http://127.0.0.1:$(m2_rpc_port 1)"
+  for i in $(seq 1 "${validators:-4}"); do
+    vrb_wait 300 "evm$i activated root epoch 2" grep -Fq 'msg="handoff activated" rootEpoch=2' "test-nodes/evm$i/debug.log" || return 1
+  done
+  build/ubft q3 trust-base --root-rpc "$root1" --epoch 2 --out test-nodes/trust-base-epoch2.json || { vrj_log "FAIL: the trust base of epoch 2"; return 1; }
+  cp "test-nodes/trust-base-epoch2.json" "$VR_EVIDENCE/trust-base-epoch2.json"
+  pdr=$(h3_pdr_file 1) || { vrj_log "FAIL: the shard configuration of epoch 1"; return 1; }
+  cp "$pdr" "$VR_EVIDENCE/shard-conf-epoch1.json"
+  if [ "${VR_JOINER:-0}" = 1 ]; then
+    local op=(--operator-socket "test-nodes/auth$vrj_id/operator.sock" --operator-credential "test-nodes/auth$vrj_id/operator.cred")
+    build/ubft signing-authority complete-enrollment "${op[@]}" --shard-conf "$pdr" || { vrj_log "FAIL: the joiner's enrollment"; return 1; }
+    build/ubft signing-authority advance-epoch "${op[@]}" --trust-base test-nodes/trust-base-epoch2.json --shard-conf "$pdr" || { vrj_log "FAIL: the joiner's advance"; return 1; }
+    build/ubft signing-authority replace-session "${op[@]}" --out "test-nodes/auth$vrj_id/client.cred" || { vrj_log "FAIL: the joiner's session"; return 1; }
+    vrj_log "PASS: the joiner's authority is enrolled against shard epoch 1, advanced to root epoch 2 and has a session"
+  fi
+  H3_ONLINE="$(seq -s ' ' 1 "${validators:-4}")" M2_ADVANCE_NO_REPLICA_WAIT=1 h3_advance_authorities 2 1 $(seq -s ' ' 1 "${validators:-4}") || { vrj_log "FAIL: the incumbents' authority advance"; return 1; }
+  vrj_log "PASS: the incumbents' authorities advanced into root epoch 2 / shard epoch 1 and their shard nodes restarted under new sessions"
+}
