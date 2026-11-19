@@ -1436,7 +1436,12 @@ func (x *ConsensusManager) onTimeoutMsg(ctx context.Context, vote *abdrc.Timeout
 	// when there is multiple consecutive timeout rounds and instance is in one of the previous round
 	// (ie haven't got enough timeout votes for the latest round quorum) recovery is not triggered as
 	// the highQC is the same for both rounds. So checking the lastTC helps the instance into latest TO round.
-	x.processTC(ctx, vote.LastTC)
+	if x.processTC(ctx, vote.LastTC) {
+		// #1194: this root has entered a new round by a certificate it did not collect itself; as the leader of that round it proposes
+		// now, as it would had it collected the certificate: only the votes of a collector would otherwise end the round, and with
+		// exactly a quorum live and lossy links the leader's round only timed out
+		x.proposeIfLeader(ctx)
+	}
 
 	// the register remembers the exact message once it is verified, counted and its weight accounted (before processTC below can end the round)
 	var remember []timeoutMemo
@@ -1458,19 +1463,24 @@ func (x *ConsensusManager) onTimeoutMsg(ctx context.Context, vote *abdrc.Timeout
 	// process timeout certificate to advance to next the view/round
 	x.processTC(ctx, tc)
 	// if this node is the leader in this round then issue a proposal
+	x.proposeIfLeader(ctx)
+	return nil
+}
+
+// proposeIfLeader issues the proposal of the current round when this root is its leader.
+func (x *ConsensusManager) proposeIfLeader(ctx context.Context) {
 	l, err := x.leaderSelector.GetLeaderForRound(x.pacemaker.GetCurrentRound())
 	if err != nil {
 		if !errors.Is(err, drctypes.ErrHistoryUnavailable) { // the loop's entry action times this round out
 			x.log.WarnContext(ctx, "could not determine leader for new round, waiting for proposal", logger.Error(err))
 		}
-		return nil
+		return
 	}
 	if l == x.id {
 		x.processNewRoundEvent(ctx)
 	} else {
 		x.log.LogAttrs(ctx, logger.LevelTrace, fmt.Sprintf("new leader is %s, waiting for proposal", l.String()))
 	}
-	return nil
 }
 
 /*
@@ -1669,15 +1679,15 @@ func shouldSendCertificateBatch(profile uint64, certs []*certification.Certifica
 	return len(certs) > 0 || profile != storage.ProfileHandoff
 }
 
-// processTC - handles timeout certificate
-func (x *ConsensusManager) processTC(ctx context.Context, tc *drctypes.TimeoutCert) {
+// processTC - handles timeout certificate, reports whether it advanced the round
+func (x *ConsensusManager) processTC(ctx context.Context, tc *drctypes.TimeoutCert) bool {
 	_, span := x.tracer.Start(ctx, "ConsensusManager.processTC")
 	defer span.End()
 	if tc == nil {
-		return
+		return false
 	}
 	if x.validateTimeoutCert(tc) != nil {
-		return
+		return false
 	}
 	if err := x.blockStore().ProcessTc(tc); err != nil {
 		// the TC is used anyway, only storing it failed
@@ -1686,7 +1696,9 @@ func (x *ConsensusManager) processTC(ctx context.Context, tc *drctypes.TimeoutCe
 	if x.pacemaker.AdvanceRoundTC(ctx, tc) {
 		// Round was advanced, we could have a new trust base.
 		x.updateTrustBase()
+		return true
 	}
+	return false
 }
 
 /*

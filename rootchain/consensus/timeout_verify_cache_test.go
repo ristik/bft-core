@@ -472,3 +472,44 @@ func TestWeightFailureAfterAddRemembersNothing(t *testing.T) {
 	require.NotContains(t, r.timeoutCert.Signatures, "stranger", "the certificate is left as it was")
 	require.False(t, r.VerifiedTimeoutHit("stranger", 5, 1, [32]byte{7}, ctx), "and nothing was remembered")
 }
+
+// #1194: the leader of the round after a timeout round that learns of the timeout certificate from the last TC of another root's next
+// timeout vote (not by collecting the votes itself) enters its round as the leader and has to propose then. With exactly the quorum live
+// and lossy links this was the usual way to the new round: the leader moved on without proposing, its round only timed out, and the next
+// proposal came only from a root that had collected the certificate locally, one round in four.
+func TestLeaderEnteringItsRoundThroughTheLastTCProposes(t *testing.T) {
+	replicas, votes, round := realQCTimeouts(t)
+	ctx := context.Background()
+	leaderID, err := replicas[0].manager.leaderSelector.GetLeaderForRound(round + 1)
+	require.NoError(t, err)
+	var leader, collector *anchorReplica
+	for _, r := range replicas {
+		switch {
+		case r.manager.id == leaderID:
+			leader = r
+		case collector == nil:
+			collector = r
+		}
+	}
+	require.NotNil(t, leader)
+	require.NotNil(t, collector)
+	require.Equal(t, round, leader.manager.pacemaker.GetCurrentRound())
+	// the collector forms the certificate of the round from the votes of the others
+	for _, v := range votes {
+		if v.Author != collector.manager.id.String() {
+			require.NoError(t, collector.manager.onTimeoutMsg(ctx, recodeTimeout(t, v)))
+		}
+	}
+	require.NotNil(t, collector.manager.pacemaker.lastRoundTC, "the collector formed the certificate")
+	require.Equal(t, round+1, collector.manager.pacemaker.GetCurrentRound())
+	// it times out the next round: its vote carries the last TC
+	collector.net.ResetSentMessages(network.ProtocolRootTimeout)
+	collector.manager.onLocalTimeout(ctx)
+	next := collector.net.SentMessages(network.ProtocolRootTimeout)[0].Message.(*abdrc.TimeoutMsg)
+	require.NotNil(t, next.LastTC)
+
+	leader.net.ResetSentMessages(network.ProtocolRootProposal)
+	require.NoError(t, leader.manager.onTimeoutMsg(ctx, next))
+	require.Equal(t, round+1, leader.manager.pacemaker.GetCurrentRound(), "the leader moved on through the last TC")
+	require.NotEmpty(t, leader.net.SentMessages(network.ProtocolRootProposal), "and, as the leader of that round, proposed")
+}
