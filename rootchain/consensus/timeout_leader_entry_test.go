@@ -12,6 +12,7 @@ import (
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	drctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
+	"github.com/unicitynetwork/bft-go-base/types"
 )
 
 // tcFailStore is a replica's store whose write of the timeout certificate can be made to fail.
@@ -213,12 +214,36 @@ func TestNoSecondProposalForARoundAlreadySigned(t *testing.T) {
 	sent := len(s.leader.net.SentMessages(network.ProtocolRootProposal))
 	require.NotZero(t, sent, "the leader proposed in the round after the certificate")
 
+	// a request arrives after the first proposal: a suppressed duplicate must not take it out of the buffer
+	psID := types.PartitionShardID{PartitionID: partitionID, ShardID: shardID.Key()}
+	buf := s.leader.manager.irReqBuffer
+	buf.irChgReqBuffer[psID] = &irChange{Req: &drctypes.IRChangeReq{Partition: partitionID, Shard: shardID, CertReason: drctypes.Quorum}}
+	require.True(t, buf.IsChangeInBuffer(partitionID, shardID))
+
 	// the round is lowered (what a recovery's reset does) and the certificate is processed again
 	s.leader.manager.pacemaker.Reset(ctx, s.round-1, nil, nil)
 	require.Equal(t, s.round, s.leader.manager.pacemaker.GetCurrentRound())
 	_ = s.leader.manager.onTimeoutMsg(ctx, recodeTimeout(t, s.next))
 	require.Equal(t, s.round+1, s.leader.manager.pacemaker.GetCurrentRound(), "premise: the certificate advanced the round again")
 	require.Len(t, s.leader.net.SentMessages(network.ProtocolRootProposal), sent, "but no second proposal")
+	require.True(t, s.leader.manager.irReqBuffer.IsChangeInBuffer(partitionID, shardID), "and the request is still buffered for the next one")
+}
+
+// The guard is scoped to the epoch: a successor epoch's first leader that signed an overlapping round of the old epoch (the suffix rounds
+// of the old epoch overlap the first rounds of the successor) still proposes in the successor.
+func TestGuardIsScopedToTheEpoch(t *testing.T) {
+	s := newLaggingLeader(t)
+	ctx := context.Background()
+	for _, p := range s.missed {
+		require.NoError(t, s.leader.manager.onProposalMsg(ctx, p))
+	}
+	m := s.leader.manager
+	m.lastProposedEpoch.Store(m.trustBase.Load().Epoch - 1)
+	m.lastProposedRound.Store(s.round + 10) // an old-epoch round above the successor's first rounds
+	require.NoError(t, m.onTimeoutMsg(ctx, s.next))
+	require.NotEmpty(t, s.leader.net.SentMessages(network.ProtocolRootProposal), "the successor's leader proposes")
+	require.Equal(t, m.trustBase.Load().Epoch, m.lastProposedEpoch.Load())
+	require.Equal(t, s.round+1, m.lastProposedRound.Load())
 }
 
 // Timeouts at the start of an epoch carry no high QC at all, nor does the certificate: the carried certificate takes the leader into its
