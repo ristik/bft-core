@@ -255,7 +255,19 @@ function init_evm_authorities() {
     chmod 700 "$home"
     nodeID=$(evm_validator_id "$i") || return 1
     build/ubft signing-authority credential --out "$home/operator.cred" || return 1
-    build/ubft signing-authority run --home "$home" \
+    # VR lane under SIGNING=authority: the root member signs the handoff possession proof through the authority's own socket (a credential of its own), and
+    # the authority may sign the one registration or binding the lane's validator command needs (scripts/vr-authority-policy.py)
+    local -a vrArgs=()
+    if [ "${VR_LANE:-0}" = 1 ]; then
+      build/ubft signing-authority credential --out "$home/pop.cred" || return 1
+      if [ "$i" -le "${VR_INCUMBENTS:-4}" ]; then
+        python3 scripts/vr-authority-policy.py "$home/registration-policy.json" binding "$i" "${VR_INCUMBENTS:-4}" || return 1
+      else
+        python3 scripts/vr-authority-policy.py "$home/registration-policy.json" register "$i" || return 1
+      fi
+      vrArgs=(--pop-socket "$home/pop.sock" --pop-credential "$home/pop.cred" --registration-policy "$home/registration-policy.json")
+    fi
+    build/ubft signing-authority run --home "$home" ${vrArgs[@]+"${vrArgs[@]}"} \
       --client-socket "$home/client.sock" --operator-socket "$home/operator.sock" \
       --operator-credential "$home/operator.cred" --authority-id "paired-evm-$i" \
       --node-id "$nodeID" --network-id 3 --partition-id "$partitionID" --shard-id 0x80 \

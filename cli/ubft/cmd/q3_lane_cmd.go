@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -568,17 +569,33 @@ func newQ3Cmd() *cobra.Command {
 	shardConf.Flags().StringVar(&shardID, "shard", "", "the shard id in hex text form (default: the unsplit shard)")
 	_ = shardConf.MarkFlagRequired("epoch")
 	trustBase := &cobra.Command{Use: "trust-base", Short: "The root trust base a root holds for an epoch, as a file (the one `signing-authority advance-epoch --trust-base` takes)",
+		Long: "Fetches one epoch's root trust base from a root's RPC and writes it as a file. The response is not authenticated: it is " +
+			"operator input, and only an authority without a lineage pin (the operator-trusted advance, #1085) installs it unverified. " +
+			"A lineage-pinned authority refuses `advance-epoch` and advances by `advance-with-proof` instead. Fetch from a root you operate, " +
+			"over loopback or an authenticated channel. Every root listed in --root-rpc must return the same trust base.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			var errs []error
+			// every listed root must answer, and with the same trust base: a single disagreeing or failing root fails the command
+			var first *types.RootTrustBaseV1
+			var firstHash []byte
 			for _, e := range splitList(rootRPCs) {
 				tb, err := fetchTrustBase(cmd.Context(), strings.TrimRight(e, "/"), epoch)
 				if err != nil {
-					errs = append(errs, err)
-					continue
+					return err
 				}
-				return writeJSONFile(out, tb)
+				h, err := tb.Hash(crypto.SHA256)
+				if err != nil {
+					return err
+				}
+				if first == nil {
+					first, firstHash = tb, h
+				} else if !bytes.Equal(h, firstHash) {
+					return fmt.Errorf("%s: trust base of epoch %d differs from the first root's", e, epoch)
+				}
 			}
-			return errors.Join(errs...)
+			if first == nil {
+				return errors.New("no root RPC given")
+			}
+			return writeJSONFile(out, first)
 		}}
 	trustBase.Flags().Uint64Var(&epoch, "epoch", 0, "the root epoch")
 	_ = trustBase.MarkFlagRequired("epoch")
@@ -604,9 +621,13 @@ func fetchTrustBase(ctx context.Context, root string, epoch uint64) (*types.Root
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("%s: trust base of epoch %d: %s", root, epoch, resp.Status)
 	}
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	const maxTrustBase = 1 << 20
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxTrustBase+1))
 	if err != nil {
 		return nil, err
+	}
+	if len(raw) > maxTrustBase {
+		return nil, fmt.Errorf("%s: trust base response exceeds %d bytes", root, maxTrustBase)
 	}
 	var out TrustBasesResponse
 	if err := types.Cbor.Unmarshal(raw, &out); err != nil {
