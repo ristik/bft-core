@@ -201,20 +201,29 @@ func realQCTimeouts(t *testing.T) (replicas []*anchorReplica, votes []*abdrc.Tim
 // QC certifies. It is returned apart (not among replicas or votes), with the two proposals it missed.
 func realQCTimeoutsWith(t *testing.T, lag bool) (replicas []*anchorReplica, votes []*abdrc.TimeoutMsg, round uint64, lagger *anchorReplica, missed []*abdrc.ProposalMsg) {
 	t.Helper()
-	byID, anchor, _ := newAnchorReplicas(t, 4)
+	return realQCTimeoutsFull(t, lag, false, anchorOptions{})
+}
+
+// realQCTimeoutsFull is realQCTimeoutsWith with the replicas' options; laggerLeads makes the lagger the leader of the round after the
+// timeout round (it must be neither of the two leaders of the proposals).
+func realQCTimeoutsFull(t *testing.T, lag, laggerLeads bool, opts anchorOptions) (replicas []*anchorReplica, votes []*abdrc.TimeoutMsg, round uint64, lagger *anchorReplica, missed []*abdrc.ProposalMsg) {
+	t.Helper()
+	byID, anchor, _ := newAnchorReplicasWith(t, opts, 4)
 	ctx := context.Background()
 	firstLeader, err := firstReplica(byID).manager.leaderSelector.GetLeaderForRound(anchor.Slot + 1)
 	require.NoError(t, err)
 	nextLeader, err := firstReplica(byID).manager.leaderSelector.GetLeaderForRound(anchor.Slot + 2)
 	require.NoError(t, err)
 	if lag {
+		third, err := firstReplica(byID).manager.leaderSelector.GetLeaderForRound(anchor.Slot + 3)
+		require.NoError(t, err)
 		for id, r := range byID {
-			if id != firstLeader && id != nextLeader {
+			if id != firstLeader && id != nextLeader && (!laggerLeads || id == third) {
 				lagger = r
 				break
 			}
 		}
-		require.NotNil(t, lagger)
+		require.NotNil(t, lagger, "the leader of the round after the timeout round is neither of the first two leaders")
 	}
 	byID[firstLeader].manager.processNewRoundEvent(ctx)
 	proposal := byID[firstLeader].net.WaitRootProposal(t)

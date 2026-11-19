@@ -1436,6 +1436,20 @@ func (x *ConsensusManager) onTimeoutMsg(ctx context.Context, vote *abdrc.Timeout
 	// when there is multiple consecutive timeout rounds and instance is in one of the previous round
 	// (ie haven't got enough timeout votes for the latest round quorum) recovery is not triggered as
 	// the highQC is the same for both rounds. So checking the lastTC helps the instance into latest TO round.
+	// the high QC of the carried certificate is admitted as any QC (recovery included) before the certificate is used: a leader entering its
+	// round through it extends that QC, never an older block (#1210)
+	if tc := vote.LastTC; tc != nil && tc.Timeout != nil && tc.Timeout.HighQc != nil {
+		if err := x.checkRecoveryNeeded(tc.Timeout.HighQc); err != nil {
+			err = fmt.Errorf("timeout certificate of the timeout vote triggers recovery: %w", err)
+			if e := x.sendRecoveryRequests(ctx, vote); e != nil {
+				err = errors.Join(err, fmt.Errorf("sending recovery requests failed: %w", e))
+			}
+			return err
+		}
+		if err := x.processQC(ctx, tc.Timeout.HighQc); err != nil {
+			return fmt.Errorf("timeout certificate high QC: %w", err)
+		}
+	}
 	if x.processTC(ctx, vote.LastTC) {
 		// #1194: this root has entered a new round by a certificate it did not collect itself; as the leader of that round it proposes
 		// now, as it would had it collected the certificate: only the votes of a collector would otherwise end the round, and with
@@ -1460,10 +1474,10 @@ func (x *ConsensusManager) onTimeoutMsg(ctx context.Context, vote *abdrc.Timeout
 		return nil
 	}
 	x.log.DebugContext(ctx, fmt.Sprintf("timeout quorum for round %d achieved", vote.Timeout.Round))
-	// process timeout certificate to advance to next the view/round
-	x.processTC(ctx, tc)
-	// if this node is the leader in this round then issue a proposal
-	x.proposeIfLeader(ctx)
+	// process timeout certificate to advance to next the view/round; the leader of the new round proposes when it was entered by this certificate
+	if x.processTC(ctx, tc) {
+		x.proposeIfLeader(ctx)
+	}
 	return nil
 }
 
@@ -1679,8 +1693,10 @@ func shouldSendCertificateBatch(profile uint64, certs []*certification.Certifica
 	return len(certs) > 0 || profile != storage.ProfileHandoff
 }
 
-// processTC - handles timeout certificate, reports whether it advanced the round
-func (x *ConsensusManager) processTC(ctx context.Context, tc *drctypes.TimeoutCert) bool {
+// processTC - handles timeout certificate. It reports whether the round was advanced by it and the certificate is durable: only then may
+// this root act as the leader of the entered round (a proposal signed on a round entry that a restart would forget could be followed by
+// another one for the same round, #1210). The round is advanced regardless of a failed write, as before.
+func (x *ConsensusManager) processTC(ctx context.Context, tc *drctypes.TimeoutCert) (entered bool) {
 	_, span := x.tracer.Start(ctx, "ConsensusManager.processTC")
 	defer span.End()
 	if tc == nil {
@@ -1689,14 +1705,19 @@ func (x *ConsensusManager) processTC(ctx context.Context, tc *drctypes.TimeoutCe
 	if x.validateTimeoutCert(tc) != nil {
 		return false
 	}
+	durable := true
 	if err := x.blockStore().ProcessTc(tc); err != nil {
 		// the TC is used anyway, only storing it failed
+		durable = false
 		x.log.WarnContext(ctx, "processing timeout certificate", logger.Error(err))
 	}
 	if x.pacemaker.AdvanceRoundTC(ctx, tc) {
 		// Round was advanced, we could have a new trust base.
 		x.updateTrustBase()
-		return true
+		if !durable {
+			x.log.WarnContext(ctx, "not proposing on a round entered by a timeout certificate that was not stored", "round", x.pacemaker.GetCurrentRound())
+		}
+		return durable
 	}
 	return false
 }
@@ -2307,7 +2328,15 @@ func (x *ConsensusManager) completeRecovery(ctx context.Context, triggerMsg any)
 		}
 		// timeout vote carries last round TC, if not nil, use it to advance pacemaker to correct round
 		// todo: timeout votes are not buffered
-		x.processTC(ctx, tmo.LastTC)
+		if tc := tmo.LastTC; tc != nil && tc.Timeout != nil && tc.Timeout.HighQc != nil {
+			if err := x.processQC(ctx, tc.Timeout.HighQc); err != nil {
+				return false, fmt.Errorf("timeout certificate high QC after recovery: %w", err)
+			}
+		}
+		if x.processTC(ctx, tmo.LastTC) {
+			// the lagging leader of the round the certificate ended proposes now (#1210): a retransmission carries a stale certificate
+			x.proposeIfLeader(ctx)
+		}
 	}
 	if qc, ok := triggerMsg.(*drctypes.QuorumCert); ok {
 		// the QC which failed to be processed, its block should be there now
