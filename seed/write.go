@@ -18,19 +18,23 @@ func WriteDir(dir string, payload map[string][]byte, manifest []byte, replace bo
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(stage) // after an exchange it holds the old directory; after a rename it is gone
 	for _, n := range PayloadFiles {
 		if err := writeNew(filepath.Join(stage, n), payload[n]); err != nil {
+			_ = os.RemoveAll(stage)
 			return err
 		}
 	}
 	if err := writeNew(filepath.Join(stage, ManifestName), manifest); err != nil {
+		_ = os.RemoveAll(stage)
 		return err
 	}
 	if err := os.Chmod(stage, 0o755); err != nil {
+		_ = os.RemoveAll(stage)
 		return err
 	}
-	return publishDir(stage, dir, replace)
+	err = publishDir(stage, dir, replace)
+	cleanStage(stage, err) // after a rename it is gone; after a failed publication it is ours to remove; a version that could not be retained is kept
+	return err
 }
 
 // writeNew creates a file that must not exist.

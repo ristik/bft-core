@@ -114,7 +114,8 @@ func (t *ImportTxn) Commit(sources []string, now time.Time) (*ImportRecord, erro
 	if err != nil {
 		return nil, err
 	}
-	defer os.RemoveAll(tmp)
+	var cerr error
+	defer func() { cleanStage(tmp, cerr) }()
 	for _, n := range PayloadFiles {
 		if err := writeNew(filepath.Join(tmp, n), v.Files[n]); err != nil {
 			return nil, err
@@ -138,8 +139,8 @@ func (t *ImportTxn) Commit(sources []string, now time.Time) (*ImportRecord, erro
 	if err := writeNew(filepath.Join(tmp, ImportRecordName), append(raw, '\n')); err != nil {
 		return nil, err
 	}
-	if err := publishLocked(tmp, filepath.Join(home, ImportDir), t.replacing); err != nil {
-		return nil, err
+	if cerr = publishLocked(tmp, filepath.Join(home, ImportDir), t.replacing); cerr != nil {
+		return nil, cerr
 	}
 	return rec, nil
 }

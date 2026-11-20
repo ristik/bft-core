@@ -799,14 +799,20 @@ func TestAReaderKeepsItsVersionAcrossAReplacement(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, ManifestDigest(g.manifest), v.ManifestDigest)
 	// replaced versions are removed only after the grace period, by a later publication
-	old, _ := filepath.Glob(dst + ".old.*")
+	old, _ := os.ReadDir(versionsDir(dst))
 	require.NotEmpty(t, old)
 	prev := oldVersionGrace
 	oldVersionGrace = 0
 	defer func() { oldVersionGrace = prev }()
 	require.NoError(t, WriteDir(dst, g.files, g.manifest, true))
-	left, _ := filepath.Glob(dst + ".old.*")
-	require.Len(t, left, 1, "the older versions are collected once past the grace period; only the version this replacement displaced remains")
+	left, _ := os.ReadDir(versionsDir(dst))
+	n := 0
+	for _, e := range left {
+		if e.Name() != versionsMarker {
+			n++
+		}
+	}
+	require.Equal(t, 1, n, "the older versions are collected once past the grace period; only the version this replacement displaced remains")
 }
 
 func TestSourcesWithAQueryOrFragmentAreRefused(t *testing.T) {
@@ -814,4 +820,84 @@ func TestSourcesWithAQueryOrFragmentAreRefused(t *testing.T) {
 		_, err := normalize(u)
 		require.ErrorIs(t, err, ErrSeed, u)
 	}
+}
+
+// Retention collects only from the directory this tool owns, never among the parent's siblings.
+func TestRetentionNeverDeletesOutsideItsOwnDirectory(t *testing.T) {
+	f := newFixture(t)
+	parent := t.TempDir()
+	dst := filepath.Join(parent, "out")
+	require.NoError(t, WriteDir(dst, f.files, f.manifest, false))
+	if !canExchange(parent) {
+		t.Skip("no atomic exchange here")
+	}
+	// siblings that merely look like retained versions
+	for _, n := range []string{"out.old.1", "out.old.123456789", "out.versions.bak"} {
+		require.NoError(t, os.MkdirAll(filepath.Join(parent, n), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(parent, n, "keep"), []byte("x"), 0o644))
+	}
+	prev := oldVersionGrace
+	oldVersionGrace = 0
+	defer func() { oldVersionGrace = prev }()
+	for i := 0; i < 3; i++ {
+		require.NoError(t, WriteDir(dst, f.files, f.manifest, true))
+	}
+	for _, n := range []string{"out.old.1", "out.old.123456789", "out.versions.bak"} {
+		require.FileExists(t, filepath.Join(parent, n, "keep"), "a sibling the tool did not create is never touched")
+	}
+	// a versions directory the tool did not mark is not used and not collected from
+	g := newFixture(t)
+	parent2 := t.TempDir()
+	dst2 := filepath.Join(parent2, "out")
+	require.NoError(t, WriteDir(dst2, g.files, g.manifest, false))
+	require.NoError(t, os.MkdirAll(filepath.Join(versionsDir(dst2), "1"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(versionsDir(dst2), "1", "keep"), []byte("x"), 0o644))
+	err := WriteDir(dst2, g.files, g.manifest, true)
+	var re *RetentionError
+	require.ErrorAs(t, err, &re)
+	require.FileExists(t, filepath.Join(versionsDir(dst2), "1", "keep"))
+	require.FileExists(t, filepath.Join(re.Stage, ManifestName), "the old version is kept")
+}
+
+// A failing move into retention reports the error and keeps the old version at the stage path: readers do not lose their version.
+func TestAFailingRetentionKeepsTheOldVersion(t *testing.T) {
+	f := newFixture(t)
+	parent := t.TempDir()
+	dst := filepath.Join(parent, "out")
+	require.NoError(t, WriteDir(dst, f.files, f.manifest, false))
+	if !canExchange(parent) {
+		t.Skip("no atomic exchange here")
+	}
+	d, err := openSeedDir(dst)
+	require.NoError(t, err)
+	defer d.Close()
+	prev := retainMove
+	retainMove = func(string, string) error { return fmt.Errorf("disk full") }
+	defer func() { retainMove = prev }()
+	g := newFixture(t)
+	err = WriteDir(dst, g.files, g.manifest, true)
+	var re *RetentionError
+	require.ErrorAs(t, err, &re)
+	require.ErrorContains(t, err, "disk full")
+	// the new version is in place ...
+	v, verr := VerifyDir(dst, Pins{GenesisID: g.pin})
+	require.NoError(t, verr)
+	require.Equal(t, ManifestDigest(g.manifest), v.ManifestDigest)
+	// ... the old one is intact at the reported stage path, and the reader that opened it still reads it
+	old, verr := VerifyDir(re.Stage, Pins{GenesisID: f.pin})
+	require.NoError(t, verr)
+	require.Equal(t, ManifestDigest(f.manifest), old.ManifestDigest)
+	b, rerr := d.read(UTBFile, fileLimits[UTBFile])
+	require.NoError(t, rerr)
+	require.Equal(t, f.files[UTBFile], b)
+	// the same through import: its staging directory is kept too
+	home := filepath.Join(t.TempDir(), "h")
+	vf, _ := VerifyDir(f.dir, Pins{GenesisID: f.pin})
+	_, err = Import(vf, home, nil, false, time.Now())
+	require.NoError(t, err)
+	other := *vf
+	other.ManifestDigest = "0xfeed"
+	_, err = Import(&other, home, nil, true, time.Now())
+	require.ErrorAs(t, err, &re)
+	require.FileExists(t, filepath.Join(re.Stage, ImportRecordName), "the previous import is kept, not deleted")
 }

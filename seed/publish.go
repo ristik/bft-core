@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"time"
 )
 
@@ -51,10 +50,11 @@ func publishLocked(stage, dir string, replace bool) error {
 	if ok, err := exchangeDirs(stage, dir); ok || err != nil {
 		if ok {
 			// stage now holds the OLD version. A reader that opened the old directory still has its descriptor on it, so the old entries must survive:
-			// the version is kept beside the destination (dir.old.<unix nano>) and removed only after oldVersionGrace, by a later publication
-			kept := fmt.Sprintf("%s.old.%d", dir, time.Now().UnixNano())
-			_ = os.Rename(stage, kept)
-			gcOldVersions(dir, kept)
+			// the version moves into <dir>.versions/, a directory this tool owns (marked), and is removed only after oldVersionGrace, by a later
+			// publication, and only from there. If the move fails the old version STAYS at the stage path and the error says so: it is never deleted.
+			if rerr := retainOldVersion(stage, dir); rerr != nil {
+				return &RetentionError{Stage: stage, Err: rerr}
+			}
 		}
 		return err
 	}
@@ -63,30 +63,78 @@ func publishLocked(stage, dir string, replace bool) error {
 	return refuse("replacing %s atomically is not supported on this system; nothing was changed: remove it first and publish again", dir)
 }
 
+// versionsMarker marks a directory as this tool's retention directory: only a marked directory is ever collected from.
+const versionsMarker = ".unicity-seed-versions"
+
+// retainMove moves the replaced version into retention (a variable so a test can make it fail).
+var retainMove = os.Rename
+
+// RetentionError reports that a replacement took effect but the replaced version could not be moved into retention. The old version is intact at
+// Stage; callers must not remove Stage.
+type RetentionError struct {
+	Stage string
+	Err   error
+}
+
+func (e *RetentionError) Error() string {
+	return fmt.Sprintf("the replacement is in place, but the previous version could not be retained (%v): it is kept at %s", e.Err, e.Stage)
+}
+func (e *RetentionError) Unwrap() error { return e.Err }
+
+// cleanStage removes a staging directory unless it holds a version that could not be retained.
+func cleanStage(stage string, err error) {
+	var re *RetentionError
+	if errors.As(err, &re) {
+		return
+	}
+	_ = os.RemoveAll(stage)
+}
+
+func versionsDir(dir string) string { return dir + ".versions" }
+
+// retainOldVersion moves a replaced version to <dir>.versions/<unix nano> and collects what is past the grace period from there.
+func retainOldVersion(stage, dir string) error {
+	vd := versionsDir(dir)
+	if err := os.Mkdir(vd, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		return err
+	}
+	marker := filepath.Join(vd, versionsMarker)
+	if _, err := os.Lstat(marker); err != nil {
+		// an existing directory of that name that this tool did not mark is not ours: nothing is moved into it and nothing is collected from it
+		if ents, rerr := os.ReadDir(vd); rerr != nil || len(ents) > 0 {
+			return refuse("%s exists and is not this tool's version directory", vd)
+		}
+		if err := os.WriteFile(marker, nil, 0o600); err != nil {
+			return err
+		}
+	}
+	kept := filepath.Join(vd, strconv.FormatInt(time.Now().UnixNano(), 10))
+	if err := retainMove(stage, kept); err != nil {
+		return err
+	}
+	gcOldVersions(vd, kept)
+	return nil
+}
+
 // oldVersionGrace is how long a replaced version stays on disk for readers that opened it before the replacement (a verification or an HTTP response
 // in flight holds a descriptor on one version and reads its files relative to it).
 var oldVersionGrace = 10 * time.Minute
 
-// gcOldVersions removes the replaced versions of dir (siblings named <dir>.old.<unix nano>) that are older than the grace period (never the one just displaced, keep). Only names of exactly
-// that form are touched.
-func gcOldVersions(dir, keep string) {
-	parent, base := filepath.Split(dir)
-	if parent == "" {
-		parent = "."
+// gcOldVersions removes versions older than the grace period (never keep, the one just retained) from the marked retention directory vd, and only
+// entries named by a timestamp that this tool wrote. Nothing outside vd is ever touched.
+func gcOldVersions(vd, keep string) {
+	if _, err := os.Lstat(filepath.Join(vd, versionsMarker)); err != nil {
+		return
 	}
-	ents, err := os.ReadDir(parent)
+	ents, err := os.ReadDir(vd)
 	if err != nil {
 		return
 	}
 	for _, e := range ents {
-		rest, ok := strings.CutPrefix(e.Name(), base+".old.")
-		if !ok {
+		ns, err := strconv.ParseInt(e.Name(), 10, 64)
+		if err != nil || !e.IsDir() || filepath.Join(vd, e.Name()) == keep || time.Since(time.Unix(0, ns)) < oldVersionGrace {
 			continue
 		}
-		ns, err := strconv.ParseInt(rest, 10, 64)
-		if filepath.Join(parent, e.Name()) == keep || err != nil || time.Since(time.Unix(0, ns)) < oldVersionGrace {
-			continue
-		}
-		_ = os.RemoveAll(filepath.Join(parent, e.Name()))
+		_ = os.RemoveAll(filepath.Join(vd, e.Name()))
 	}
 }
