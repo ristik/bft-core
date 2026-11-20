@@ -7,6 +7,7 @@ import (
 
 	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/evmroot"
+	"github.com/unicitynetwork/bft-core/internal/weightvalidation"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	"github.com/unicitynetwork/bft-core/vradmit"
@@ -103,11 +104,23 @@ func (x *ConsensusManager) vrRecoveryEligibleAt(parent *storage.ExecutedBlock, c
 	}
 	// a distributed plan's supersession is compared with this root's own committed chain, as the executor does (storage.verifySupersession), and
 	// a recovery is change-free: nothing is spent on a Prepare whose Freeze the executor would refuse
-	chain, err := storage.CommittedChain(x.orchestration, si.PartitionID, si.ShardID, si.IR.Epoch)
+	if err := storage.VerifySupersessionAt(c.Supersedes, si, x.orchestration); err != nil {
+		return errors.Join(ErrVRRecoveryIneligible, err)
+	}
+	// the candidate replaces exactly the installed configuration, under the weighted rules, as the endorsers check it
+	succ, err := c.Successor()
 	if err != nil {
 		return errors.Join(ErrVRRecoveryIneligible, err)
 	}
-	if err := evmassign.VerifyChain(c.Supersedes, chain); err != nil {
+	old := x.trustBase.Load()
+	if old == nil {
+		return ErrVRRecoveryIneligible
+	}
+	currentRoot, err := rootMembers(old.RootNodes)
+	if err != nil {
+		return errors.Join(ErrVRRecoveryIneligible, err)
+	}
+	if err := evmassign.VerifyInstalledWith(weightvalidation.EVMRules(weightvalidation.ModeWeighted), c, succ, installed, currentRoot); err != nil {
 		return errors.Join(ErrVRRecoveryIneligible, err)
 	}
 	if len(c.Changes) != 0 {
@@ -184,7 +197,13 @@ func (x *ConsensusManager) vrRecoveryRoute(parent *storage.ExecutedBlock, contro
 	lapsed := storage.PrepareLapsed(control, round)
 	switch {
 	case control.Phase == "endorsed", control.Phase == "prepared" && !lapsed:
-		held := x.heldRecoveryBody(control) || (control.Phase == "endorsed" && x.committedRecoveryPreimage(control) != nil)
+		// once the Freeze is committed the retained candidate is authoritative: a missing one orders nothing, whatever plan is cached
+		var held bool
+		if control.Phase == "endorsed" {
+			held = x.committedRecoveryPreimage(control) != nil
+		} else {
+			held = x.heldRecoveryBody(control)
+		}
 		if held {
 			x.log.Info("VR recovery: the leader follows the exact recovery", "round", round, "phase", control.Phase, "attempt", control.Attempt)
 		}

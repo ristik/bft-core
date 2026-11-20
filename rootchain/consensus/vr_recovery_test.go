@@ -181,6 +181,8 @@ func TestVRRecoveryRouteFollowsTheCommittedPrepare(t *testing.T) {
 	require.True(t, x.vrRecoveryRoute(w.block, prepared, 12), "the Freeze and H of a held recovery's Prepare, whatever the eligibility says now: the EVM is frozen")
 	endorsed := *prepared
 	endorsed.Phase = "endorsed"
+	require.False(t, x.vrRecoveryRoute(w.block, &endorsed, 13), "endorsed: the retained candidate decides, a cached plan does not")
+	x.vr.retained = func([]byte) ([]byte, error) { return w.second.Candidate, nil }
 	require.True(t, x.vrRecoveryRoute(w.block, &endorsed, 13))
 
 	x.handoffPlans[id].plan.CandidatePreimage = nil // another plan under the same body: not a recovery
@@ -328,6 +330,11 @@ func TestVRRecoveryLeaderOrdersPrepareFreezeAndH(t *testing.T) {
 	endorsed := control
 	endorsed.Phase, endorsed.OrderedRound, endorsed.RecordBytes = "endorsed", freeze.OrderedRound, records[0]
 	parent.ShardState.Control = &endorsed
+	x.vr.retained = func([]byte) ([]byte, error) { return nil, nil }
+	records, err = x.handoffRecordsForRound(freeze.OrderedRound+2, qc)
+	require.NoError(t, err)
+	require.Empty(t, records, "no retained recovery candidate, a quorum-ready plan still cached: nothing is ordered")
+	x.vr.retained = func([]byte) ([]byte, error) { return plan.CandidatePreimage, nil }
 	records, err = x.handoffRecordsForRound(freeze.OrderedRound+2, qc)
 	require.NoError(t, err)
 	require.False(t, vrPathUsed)
@@ -365,6 +372,9 @@ func TestVRRecoveryRefusesASupersessionThatIsNotTheCommittedChain(t *testing.T) 
 	sup.ChainCommitment = bytes.Repeat([]byte{0xee}, 32)
 	bad.Supersedes = &sup
 	require.ErrorIs(t, x.vrRecoveryEligibleAt(w.block, bad), ErrVRRecoveryIneligible)
+	bad = w.candidate
+	bad.OldShardEpoch++
+	require.ErrorIs(t, x.vrRecoveryEligibleAt(w.block, bad), ErrVRRecoveryIneligible, "it replaces another installed configuration")
 	bad = w.candidate
 	bad.Supersedes = nil
 	require.ErrorIs(t, x.vrRecoveryEligibleAt(w.block, bad), ErrVRRecoveryIneligible)

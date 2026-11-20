@@ -823,6 +823,12 @@ func verifySupersession(s *evmassign.Supersession, si *ShardInfo, orchestration 
 	return verifySupersessionChain(s, si, chain)
 }
 
+// VerifySupersessionAt is the executor's state-dependent supersession check (pending state, installed tip, committed chain and base), for a
+// proposer that judges a candidate at a parent block before it spends a Prepare on it.
+func VerifySupersessionAt(s *evmassign.Supersession, si *ShardInfo, orchestration Orchestration) error {
+	return verifySupersession(s, si, orchestration)
+}
+
 func verifySupersessionChain(s *evmassign.Supersession, si *ShardInfo, chain evmassign.Chain) error {
 	if si.TR.Epoch == si.IR.Epoch {
 		return errors.Join(ErrHandoffRecord, ErrSupersessionInvalid, ErrNothingToSupersede)
