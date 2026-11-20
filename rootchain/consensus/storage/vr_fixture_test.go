@@ -64,6 +64,7 @@ type vxMember struct {
 
 type vxFixture struct {
 	t        *testing.T
+	schedule []vrschema.Activation // the committed schedule of the genesis root state
 	dep      vradmit.Deployment
 	pins     vrstate.Pins
 	members  map[uint64]vxMember
@@ -382,7 +383,9 @@ func (f *vxFixture) genesis() *storage.ExecutedBlock {
 	root := f.world.Root()
 	si.IR = &types.InputRecord{Version: 1, RoundNumber: si.TR.Round - 1, Epoch: si.TR.Epoch, Hash: root[:], BlockHash: bytes.Clone(f.parentEV),
 		PreviousHash: bytes.Repeat([]byte{0x33}, 32), SummaryValue: []byte{}, Timestamp: 900}
-	vr, err := vradmit.GenesisRootState(1, 4).Encode()
+	gs := vradmit.GenesisRootState(1, 4)
+	gs.Schedule = f.schedule
+	vr, err := gs.Encode()
 	require.NoError(t, err)
 	pred := f.body[:]
 	if f.zeroGenesisPred {

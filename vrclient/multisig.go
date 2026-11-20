@@ -177,6 +177,11 @@ func FeeParamsPayload(baseFeeFloor, changeDenominator uint64, collector ethcommo
 	return vrschema.EncodeChange(KindFeeParams, baseFeeFloor, changeDenominator, [20]byte(collector))
 }
 
+// ScheduleActivationPayload is the kind 9 payload: ScheduleActivation(ruleId, releaseDigest, rootEpoch, notBeforeUcTime, label).
+func ScheduleActivationPayload(ruleID, releaseDigest [32]byte, rootEpoch, notBeforeUcTime uint64, label string) ([]byte, error) {
+	return vrschema.EncodeChange(KindScheduleActivation, vrschema.Word(ruleID), vrschema.Word(releaseDigest), rootEpoch, notBeforeUcTime, label)
+}
+
 // ForceRemovePayload is the kind 10 payload.
 func ForceRemovePayload(id uint64) ([]byte, error) { return vrschema.EncodeChange(KindForceRemove, id) }
 

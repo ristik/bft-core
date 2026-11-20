@@ -16,6 +16,7 @@ import (
 	"github.com/unicitynetwork/bft-core/q3format"
 	"github.com/unicitynetwork/bft-core/vradmit"
 	"github.com/unicitynetwork/bft-core/vrhandoff"
+	"github.com/unicitynetwork/bft-core/vrrules"
 	"github.com/unicitynetwork/bft-core/vrschema"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -526,7 +527,9 @@ func (m *Member) supports(a vrschema.Activation) bool {
 	if m.cfg.Supports != nil {
 		return m.cfg.Supports(a)
 	}
-	return ImplementedRules[[2]vrschema.Word{a.RuleID, a.ReleaseDigest}]
+	// rule support decides; the release digest is advisory (design section 7.4): a rule of this binary's compiled-in set (vrrules) is supported
+	// whatever release digest the schedule names
+	return vrrules.Known().Has(a.RuleID) || ImplementedRules[[2]vrschema.Word{a.RuleID, a.ReleaseDigest}]
 }
 
 // commitments are the support commitments of every effective or latched rule the gate needs for a successor of this root epoch (strictly

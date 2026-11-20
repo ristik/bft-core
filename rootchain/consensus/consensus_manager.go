@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"github.com/unicitynetwork/bft-core/vrrules"
 	"log/slog"
 	"maps"
 	"math"
@@ -184,6 +185,8 @@ type (
 		origins         MessageOrigins // the network's authenticated senders, tracked while the manager may switch epoch in process
 		acq             acquisition    // loop-owned: an activation this root fetches from a root peer (acquire.go, PR 2)
 		switchPublished func()         // test seam: runs after a switch published its successor, before the successor's worker starts
+		rules           vrrules.Set    // the rules this binary supports; nil is vrrules.Known() (test seam, VT-07a)
+		upgrades        upgradeWatch   // the unsupported scheduled rules last seen in the committed schedule (warning and gauge)
 
 		log    *slog.Logger
 		tracer trace.Tracer
@@ -489,6 +492,9 @@ func NewConsensusManager(
 func (x *ConsensusManager) initMetrics(observe Observability) (err error) {
 	m := observe.Meter("cm.distributed")
 
+	if err = x.registerUpgradeMetric(m); err != nil {
+		return fmt.Errorf("creating the upgrade-required gauge: %w", err)
+	}
 	_, err = m.Int64ObservableCounter("round", metric.WithDescription("current round"),
 		metric.WithInt64Callback(func(ctx context.Context, io metric.Int64Observer) error {
 			io.Observe(int64(x.pacemaker.GetCurrentRound())) /* #nosec G115 its unlikely that value of current round exceeds int64 max value */
@@ -607,6 +613,10 @@ func (x *ConsensusManager) Run(ctx context.Context) error {
 			x.frontier.runState.Store(2)
 			x.frontier.stopOnce.Do(func() { close(x.frontier.stopped) })
 		}()
+	}
+	// the activation schedule's fence: never run an epoch whose committed schedule needs a rule this binary lacks (VT-07a)
+	if err := x.upgradeFence(x.InstalledRootEpoch()); err != nil {
+		return err
 	}
 	// A committed activation that this root switches into in process (#1086) ends the worker; the successor's worker is started by the
 	// same code, from the durable state the install left. Any failure of the switch ends Run: the process exits to its recovery.

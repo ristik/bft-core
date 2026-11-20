@@ -567,6 +567,7 @@ func (x *ConsensusManager) vrCommitted() (vrschedule.Committed, error) {
 		return c, err
 	}
 	c.K, c.Schedule = facts.Lifecycle.Incumbent, facts.Fold.Schedule
+	x.noteSchedule(c.Schedule, q.Epoch) // the warning and the gauge, from the moment the committed schedule holds an entry this binary lacks
 	c.Table = s.Support
 	c.Derived, c.Derivable = d, ok
 	if !ok {

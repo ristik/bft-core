@@ -68,16 +68,12 @@ func TestVRHolderRetirementThroughTheExecutor(t *testing.T) {
 	require.ErrorIs(t, err, vrschema.ErrRetNotReq)
 }
 
-type vxSchedule []vrschema.Activation
-
-func (s vxSchedule) Committed(uint64) ([]vrschema.Activation, error) { return s, nil }
-
 // RuleSupport through the executor: commitments by exact bindings of the acknowledged committee for a scheduled rule enter the committed
 // table; a commitment by a binding outside the committee, or for an unscheduled rule, is refused.
 func TestVRRuleSupportThroughTheExecutor(t *testing.T) {
 	f := newVXFixture(t)
 	rule := vrschema.RuleID("fork-a")
-	f.svc.Registry.Schedule = vxSchedule{{RuleID: rule, ReleaseDigest: vrschema.Keccak([]byte("release")), RootEpoch: 9, State: vrschema.ActActive, ChangeID: 2}}
+	f.schedule = []vrschema.Activation{{RuleID: rule, ReleaseDigest: vrschema.Keccak([]byte("release")), RootEpoch: 9, State: vrschema.ActActive, ChangeID: 2}}
 	g := f.genesis()
 	support := func(cs ...vrschema.SupportCommitment) rctypes.PosControl {
 		var out []rctypes.SupportCommitment
