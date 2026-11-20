@@ -378,7 +378,10 @@ if [ "${P85_LANE:-0}" = 1 ]; then
   p85_reconcile_genesis_assignment test-nodes/evm-genesis-funded.json || exit 1   # before the P85 accounts are added: the genesis assignment id comes from the full configuration
   p85_merge_alloc test-nodes/evm-genesis-funded.json || exit 1
 fi
-if [ "${VR_LANE:-0}" = 1 ]; then vr_merge_alloc test-nodes/evm-genesis-funded.json || exit 1; fi
+if [ "${VR_LANE:-0}" = 1 ]; then
+  vr_pos_reconcile test-nodes/evm-genesis-funded.json || exit 1   # a PoS generation: the genesis assignment id comes from the full configuration, before the accounts are added
+  vr_merge_alloc test-nodes/evm-genesis-funded.json || exit 1
+fi
 fundedSHA=$(shasum -a 256 test-nodes/evm-genesis-funded.json | cut -d' ' -f1)
 echo "funded genesis source sha256=$fundedSHA"
 # The funding edit replaces alloc, so finalize it again through U5a. That inserts the pinned

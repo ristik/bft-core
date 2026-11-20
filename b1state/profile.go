@@ -131,10 +131,18 @@ func (p Profile) RequiredSystemGas() (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	if p.RestGas > math.MaxUint64-UpdateGasBase-ImportEnvelopeGas-hook || k > (math.MaxUint64-UpdateGasBase-p.RestGas-ImportEnvelopeGas-hook)/PerEpochGas() {
+	// every addition is checked before it is made (no unsigned subtraction of a term that was not shown to fit)
+	epochs, ok := mulU64(PerEpochGas(), k)
+	if !ok {
 		return 0, ErrOverflow
 	}
-	return UpdateGasBase + PerEpochGas()*k + p.RestGas + ImportEnvelopeGas + hook, nil
+	total := UpdateGasBase
+	for _, term := range []uint64{epochs, p.RestGas, ImportEnvelopeGas, hook} {
+		if total, ok = addU64(total, term); !ok {
+			return 0, ErrOverflow
+		}
+	}
+	return total, nil
 }
 func (p Profile) Validate() error {
 	if err := CheckExecutionRevision(p.ExecutionRevision); err != nil {
@@ -214,4 +222,30 @@ func SystemGas(budget, admit, open, imp, finalize, hooks uint64) (uint64, error)
 		return 0, ErrBudget
 	}
 	return admit + open + imp + finalize + hooks, nil
+}
+
+func addU64(a, b uint64) (uint64, bool) {
+	if a > math.MaxUint64-b {
+		return 0, false
+	}
+	return a + b, true
+}
+
+func mulU64(a, b uint64) (uint64, bool) {
+	if a != 0 && b > math.MaxUint64/a {
+		return 0, false
+	}
+	return a * b, true
+}
+
+// MaxGasFor is SystemGas + ForcedGas + ordinary capacity with every addition checked.
+func MaxGasFor(systemGas, forcedGas, ordinaryCapacity uint64) (uint64, error) {
+	t, ok := addU64(systemGas, forcedGas)
+	if ok {
+		t, ok = addU64(t, ordinaryCapacity)
+	}
+	if !ok {
+		return 0, ErrOverflow
+	}
+	return t, nil
 }

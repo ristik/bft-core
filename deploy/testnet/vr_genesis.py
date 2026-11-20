@@ -46,6 +46,15 @@ CONTINUITY = '1/2'                                                # generate.py 
 MAX_EPOCHS, DELTA_EV, DELTA_HOLD = 2, 16, 17                      # generate.py
 VR = '0xff00000000000000000000000000000000000003'
 
+# The PoS prototype's choices (VT-04; deploy/testnet/pos.py's lane values). The committee ceiling and the identity pool are the contracts'
+# measured deployment limit (script/VRPosGenesis.s.sol): nMax 5, an index of 8 identities of one lot each.
+POS_BOND_UNIT = 100 * 10**18
+POS_TREASURY = '0x00000000000000000000000000000000000000ee'
+POS_REWARD_FUNDING = 10_000 * 10**18
+POS_REWARD_RATE = 10**18
+POS_CADENCE = (400, 300)
+POS_LIMITS = '4,5,5'   # nMin,nTarget,nMax: nTarget 5 so the fifth identity (the joiner) is elected
+
 
 class VRGenesisError(RuntimeError):
     pass
@@ -124,7 +133,7 @@ def git_commit(path):
     return done.stdout.strip() + (' (modified)' if dirty else '')
 
 
-def fresh_measurement(a, out):
+def fresh_measurement(a, out, module_hash=None):
     """The paired ureth's complete-path measurement, run now (cargo test of the ignored vr_hook_measurement), or an explicit external one."""
     if a.fresh_measurement:
         fresh = Path(a.fresh_measurement).resolve()
@@ -135,7 +144,8 @@ def fresh_measurement(a, out):
                                                         'host': socket.gethostname(),
                                                         'receivedUtc': datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds')}
     target = out / 'vr-hook-measurement-fresh.json'
-    env = dict(os.environ, VR_HOOK_MEASUREMENT=str(target))
+    # a PoS generation (a module hash is given) is measured on the PoS-capable build: its fixture, caps and H (ureth VR_HOOK_BUILD=pos)
+    env = dict(os.environ, VR_HOOK_MEASUREMENT=str(target), **({'VR_HOOK_MODULE_CODE_HASH': module_hash, 'VR_HOOK_BUILD': 'pos'} if module_hash else {}))
     command = ['cargo', 'test', '-p', 'reth-unicity-execution', '--features', 'test-utils', '--test', 'vr_hook', '--', '--ignored', '--exact',
                'vr_hook_measurement', '--nocapture']
     started = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds')
@@ -147,12 +157,62 @@ def fresh_measurement(a, out):
                     'host': socket.gethostname(), 'startedUtc': started, 'log': str(out / 'vr-hook-measurement-fresh.log')}
 
 
+def check_fixture_copies(contracts, ureth):
+    """ureth's testdata/vr-hook*.json are verbatim copies of the contracts checkout's test/vr/fixtures/vr-hook*.json: the measurement is taken over
+    ureth's copy, so a copy that differs from the contracts the generation allocates measures other code (VT-04b: a stale copy pinned wrong numbers)."""
+    for name in ('vr-hook.json', 'vr-hook-pos.json'):
+        c, u = contracts / 'test/vr/fixtures' / name, ureth / 'crates/unicity/execution/testdata' / name
+        for f in (c, u):
+            if not f.is_file():
+                raise VRGenesisError(f'{f} is missing: both fixture files must exist before the copies are compared')
+        if c.read_bytes() != u.read_bytes():
+            raise VRGenesisError(f'ureth {u} is not the contracts checkout\'s {c}: regenerate and copy the fixture before measuring')
+
+
+def pos_module_hash(contracts, work):
+    """The PosElectionAdapter's runtime code hash at 0xff..07: its immutables (VR, the election and the custody, both CREATE addresses of fixed
+    deployers) are constants of the contracts build, so the contracts genesis of the sample plan names the same module as every generation's."""
+    sample = json.loads((contracts / 'test/vr/fixtures/vr-genesis-input.json').read_text())
+    sample['limits'].update(nMax=5, vMax=8, lMax=1, rMax=4)
+    sample['pos'] = {'bondUnit': str(POS_BOND_UNIT), 'treasury': POS_TREASURY, 'rootNetwork': 3, 'rootGenesis': '0x' + '11' * 32,
+                     'assignmentId': '0x' + '22' * 32, 'rewardFunding': str(POS_REWARD_FUNDING), 'rewardRate': str(POS_REWARD_RATE),
+                     'cadenceRounds': POS_CADENCE[0], 'cadenceSeconds': POS_CADENCE[1]}
+    work.mkdir(parents=True)
+    (work / 'sample-input.json').write_text(json.dumps(sample))
+    run(contracts / 'script/vr-pos-genesis.sh', work / 'sample-input.json', work / 'out', cwd=contracts)
+    return json.loads((work / 'out/deployment.json').read_text())['moduleCodeHash']
+
+
+def pos_measurement(a, out, module_hash, name):
+    """ureth's complete-path measurement with the PoS module's code hash (VR_HOOK_MODULE_CODE_HASH; every module path of the measurement is the
+    cap-bounded test module, so the numbers are the generation's; VR_HOOK_BUILD=pos selects the PoS-capable VR build's fixture, caps and H = 16).
+    Taken twice: the recorded one the profile is pinned from, the fresh one verify holds
+    the generation to."""
+    target = out / name
+    env = dict(os.environ, VR_HOOK_MEASUREMENT=str(target), VR_HOOK_MODULE_CODE_HASH=module_hash, VR_HOOK_BUILD='pos')
+    log = run('cargo', 'test', '-p', 'reth-unicity-execution', '--features', 'test-utils', '--test', 'vr_hook', '--', '--ignored', '--exact',
+              'vr_hook_measurement', '--nocapture', cwd=Path(a.ureth).resolve(), env=env)
+    (out / (name + '.log')).write_text(log)
+    return target
+
+
 def plan(a):
     out = Path(a.out).resolve()
     if out.exists():
         raise VRGenesisError(f'{out} exists: a generation is never regenerated in place')
     ubft, contracts = str(Path(a.ubft).resolve()), Path(a.contracts).resolve()
-    measurement_path = Path(a.measurement).resolve()
+    pos_hash = None
+    if a.ureth:
+        check_fixture_copies(contracts, Path(a.ureth).resolve())
+    if a.pos:
+        if not (contracts / 'script/vr-pos-genesis.sh').is_file():
+            raise VRGenesisError(f'{contracts} has no script/vr-pos-genesis.sh: not a PoS-capable contracts checkout')
+        if not a.ureth:
+            raise VRGenesisError('a PoS generation takes its measurements with --ureth (the module hash is the adapter\'s)')
+        pos_hash = pos_module_hash(contracts, out / 'pos-sample')
+        measurement_path = pos_measurement(a, out, pos_hash, 'vr-hook-measurement-pos-recorded.json')
+    else:
+        measurement_path = Path(a.measurement).resolve()
     measurement = json.loads(measurement_path.read_text())
     if measurement.get('registry') != VR:
         raise VRGenesisError(f'the measurement is of a registry at {measurement.get("registry")}, not {VR}')
@@ -160,7 +220,7 @@ def plan(a):
         raise VRGenesisError(f'{contracts} is not a unicity-pos-contracts checkout with script/vr-genesis.sh')
     generation = a.generation or out.name
     home = out / 'home'
-    (out / 'vr').mkdir(parents=True)
+    (out / 'vr').mkdir(parents=True, exist_ok=True)
     home.mkdir()
     shutil.copy2(measurement_path, out / 'vr-hook-measurement.json')
 
@@ -197,21 +257,56 @@ def plan(a):
         funded = {k['address']: hex(DEV_FUND_WEI) for k in keys['owners'] + keys['signers']}
         word = dev_network_word(generation)
         (out / 'dev-funded-accounts.json').write_text(json.dumps(funded, indent=1) + '\n')
-    run(ubft, 'vr-genesis', 'plan', '--trust-base', trust, '--shard-conf', conf, '--bindings', out / 'genesis-bindings.json',
-        '--b1-profile', out / 'b1-profile.json', '--network-word', word, '--governor-signers', ','.join(signers),
-        '--limits', a.limits, '--fee-collector', FEE_COLLECTOR, '--out-input', out / 'vr/input.json', '--out-identities', out / 'genesis-identities.json',
-        '--utb-genesis', out / 'utb-genesis.cbor', '--utb-genesis-id', out / 'utb-genesis.id',   # the signed trust-base history's genesis entry and its pin
-        *(['--owners', owners_file] if owners_file else []))
-    run(contracts / 'script/vr-genesis.sh', out / 'vr/input.json', out / 'vr', cwd=contracts)
+    def plan_cmd(assignment):
+        pos_args = []
+        if a.pos:
+            root_genesis = re.search(r'^root genesis id +(0x[0-9a-f]{64})$', run(ubft, 'trust-base', 'utb-manifest', '--trust-base', trust, '--out-dir', out / 'root-identity'), re.M)
+            if not root_genesis:
+                raise VRGenesisError('the manifest tool printed no root genesis id')
+            pos_args = ['--pos', '--pos-bond-unit', str(POS_BOND_UNIT), '--pos-treasury', POS_TREASURY, '--pos-root-genesis', root_genesis.group(1),
+                        '--pos-assignment-id', assignment, '--pos-reward-funding', str(POS_REWARD_FUNDING), '--pos-reward-rate', str(POS_REWARD_RATE),
+                        '--pos-cadence-rounds', str(POS_CADENCE[0]), '--pos-cadence-seconds', str(POS_CADENCE[1])]
+        run(ubft, 'vr-genesis', 'plan', '--trust-base', trust, '--shard-conf', conf, '--bindings', out / 'genesis-bindings.json',
+            '--b1-profile', out / 'b1-profile.json', '--network-word', word, '--governor-signers', ','.join(signers),
+            '--limits', POS_LIMITS if a.pos else a.limits, '--fee-collector', FEE_COLLECTOR, '--out-input', out / 'vr/input.json',
+            '--out-identities', out / 'genesis-identities.json',
+            '--utb-genesis', out / 'utb-genesis.cbor', '--utb-genesis-id', out / 'utb-genesis.id',   # the signed trust-base history's genesis entry and its pin
+            *(['--owners', owners_file] if owners_file else []), *pos_args)
 
-    merge_alloc(funded_genesis := funded_base_genesis(a.chain_id, int(profile['maxGas']), secrets.token_hex(32)), json.loads((out / 'vr/alloc.json').read_text()))
+    reconciled = None
+    if a.pos:
+        # The custody genesis names the genesis assignment id of the FULL shard configuration (base + seal_registry_genesis), which the roots
+        # close (deploy/testnet/pos.py): a reconciling genesis without the contracts' accounts gives the full configuration, `vr-genesis
+        # assignment` the id, and the final genesis must leave the full configuration unchanged.
+        plan_cmd('0x' + '11' * 32)
+        pre = funded_base_genesis(a.chain_id, int(profile['maxGas']), secrets.token_hex(32))
+        merge_alloc(pre, {addr: {'balance': bal} for addr, bal in funded.items()})
+        (home / 'reconcile.json').write_text(json.dumps(pre, indent=2) + '\n')
+        run(ubft, 'engine-api', 'genesis', '--shard-conf', conf, '--trust-base', trust, '--b1-profile', out / 'b1-profile.json',
+            '--alloc-source', home / 'reconcile.json', '--out', home / 'reconcile-genesis.json', '--full-shard-conf', home / 'reconcile-full-shard-conf.json',
+            '--identities-out', home / 'reconcile-identities.json')
+        said = re.search(r'genesis assignment id (0x[0-9a-f]{64})', run(ubft, 'vr-genesis', 'assignment', '--shard-conf', home / 'reconcile-full-shard-conf.json',
+                                                                         '--genesis-identities', out / 'genesis-identities.json'))
+        if not said:
+            raise VRGenesisError('vr-genesis assignment printed no id')
+        reconciled = said.group(1)
+        plan_cmd(reconciled)
+        genesis_extra = pre['extraData']
+    else:
+        plan_cmd('')
+    run(contracts / ('script/vr-pos-genesis.sh' if a.pos else 'script/vr-genesis.sh'), out / 'vr/input.json', out / 'vr', cwd=contracts)
+
+    funded_genesis = funded_base_genesis(a.chain_id, int(profile['maxGas']), pre['extraData'].removeprefix('0x') if a.pos else secrets.token_hex(32))
+    merge_alloc(funded_genesis, json.loads((out / 'vr/alloc.json').read_text()))
     merge_alloc(funded_genesis, {addr: {'balance': bal} for addr, bal in funded.items()})
     (home / 'funded.json').write_text(json.dumps(funded_genesis, indent=2) + '\n')
     print(run(ubft, 'engine-api', 'genesis', '--shard-conf', conf, '--trust-base', trust, '--b1-profile', out / 'b1-profile.json',
               '--alloc-source', home / 'funded.json', '--out', out / 'genesis.json', '--full-shard-conf', out / 'full-shard-conf.json',
               '--identities-out', out / 'b1-identities.json'))
     genesis = json.loads((out / 'genesis.json').read_text())
-    fresh, provenance = fresh_measurement(a, out)
+    if a.pos and (out / 'full-shard-conf.json').read_bytes() != (home / 'reconcile-full-shard-conf.json').read_bytes():
+        raise VRGenesisError('the full shard configuration changed after the genesis assignment was fixed (the contracts accounts moved seal_registry_genesis?)')
+    fresh, provenance = fresh_measurement(a, out, pos_hash)
     provenance['sha256'] = hashlib.sha256(fresh.read_bytes()).hexdigest()
     ureth = flags[0] + f' --unicity.genesis-commitment={genesis_commitment(genesis)} --unicity.fee-collector={FEE_COLLECTOR}'
     (out / 'ureth-flags.txt').write_text(ureth + '\n')
@@ -235,7 +330,8 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--ubft', default=str(HERE.parents[1] / 'build/ubft'))
     p.add_argument('--contracts', required=True, help='a unicity-pos-contracts checkout with script/vr-genesis.sh (forge, cast and python3 on PATH)')
-    p.add_argument('--measurement', required=True, help='the complete-path VR hook measurement the profile is pinned from')
+    p.add_argument('--measurement', help='the complete-path VR hook measurement the profile is pinned from (not with --pos: a PoS generation takes it with --ureth)')
+    p.add_argument('--pos', action='store_true', help='the PoS-prototype generation (VT-04): the module is the PosElectionAdapter, the P85 stack its holder; limits 4,4,6')
     p.add_argument('--ureth', help='a ureth checkout at the pin (cargo on PATH): the plan runs its complete-path measurement as the fresh one')
     p.add_argument('--fresh-measurement', help='instead of --ureth: an externally taken fresh measurement (never the recorded file)')
     p.add_argument('--validators', type=int, default=4)
@@ -253,6 +349,10 @@ def main():
         p.error('--validators must be 1..16')
     if a.dev_fund and (a.network_word or a.owners or a.governor_signers):
         p.error('--dev-fund generates the owners and signers and uses the dev network word: it excludes --network-word, --owners and --governor-signers')
+    if a.pos == bool(a.measurement):
+        p.error('exactly one of --measurement (a PoA generation) and --pos (which measures itself, with --ureth)')
+    if a.pos and a.fresh_measurement:
+        p.error('--pos takes both measurements with --ureth')
     if bool(a.ureth) == bool(a.fresh_measurement):
         p.error('the fresh measurement is a generation step: pass --ureth (run it now) or --fresh-measurement (an external one), exactly one')
     try:

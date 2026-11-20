@@ -232,6 +232,7 @@ func registration(v *loadedValidator, keys *validatorKeys, nonce uint64) (vrclie
 
 func validatorApplyCmd(base *baseFlags) *cobra.Command {
 	f := &txFlags{validatorFlags: validatorFlags{baseFlags: base}}
+	pf := &posFlags{}
 	cmd := &cobra.Command{
 		Use:   "apply",
 		Short: "Register the validator in VR and apply to the PoA committee (VR.register + PoaElection.submitApplication)",
@@ -239,18 +240,23 @@ func validatorApplyCmd(base *baseFlags) *cobra.Command {
 to a new identity owned by the operator account; PoaElection.submitApplication(id) applies it to the committee. An identity this
 operator already registered with exactly these keys is reused, so a second apply only applies. After applying, the Foundation
 multisig admits the validator (ModuleAction Admit), and it joins at a later boundary.`,
-		RunE: func(cmd *cobra.Command, _ []string) error { return validatorApply(cmd, f) },
+		RunE: func(cmd *cobra.Command, _ []string) error { return validatorApply(cmd, f, pf) },
 	}
 	f.add(cmd)
+	pf.add(cmd)
 	return cmd
 }
 
-func validatorApply(cmd *cobra.Command, f *txFlags) error {
+func validatorApply(cmd *cobra.Command, f *txFlags, pf *posFlags) error {
 	ctx := cmd.Context()
 	w := cmd.OutOrStdout()
 	v, keys, ch, s, err := openTx(cmd, f)
 	if err != nil {
 		return err
+	}
+	if ch.isPoS() { // the PoS adapter: register, bond and admit the delegation (design 3.5.6)
+		ch.close()
+		return validatorApplyPoS(cmd, f, pf)
 	}
 	defer ch.close()
 	module, err := ch.poa()
@@ -368,6 +374,10 @@ func ownerAction(cmd *cobra.Command, f *txFlags, choose func(id uint64, state ui
 	v, _, ch, s, err := openTx(cmd, f)
 	if err != nil {
 		return err
+	}
+	if ch.isPoS() && cmd.Name() == "exit" {
+		ch.close()
+		return validatorExitPoS(cmd, f)
 	}
 	defer ch.close()
 	module, err := ch.poa()

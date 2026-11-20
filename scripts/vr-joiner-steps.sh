@@ -61,7 +61,14 @@ vrj_apply() {
  "payee":"$(python3 -c "import json;print(json.load(open('$keys'))['signers'][0]['address'])")"}
 JSON
   build/ubft validator apply --validator-config "$d/validator.json" 2>&1 | tee "$VR_EVIDENCE/joiner-apply.log" || { vrj_log "FAIL: validator apply"; return 1; }
-  local st; st=$(cast call --rpc-url "$vrb_rpc" 0xff00000000000000000000000000000000000007 'status(uint64)(uint8,uint64)' "$vrj_id" 2>&1 | head -1)
+  if [ "${VR_POS:-0}" = 1 ]; then   # the PoS module has no PoA status: vrp_apply checks the election's live index
+    vrj_log "identity $vrj_id: validator apply completed (PoS: registered, bonded, delegation admitted; checked by vrp_apply)"
+    return 0
+  fi
+  local st; st=$(cast call --rpc-url "$vrb_rpc" 0xff00000000000000000000000000000000000007 'status(uint64)(uint8,uint64)' "$vrj_id" 2>&1) \
+    || { vrj_log "FAIL: the PoA status of identity $vrj_id could not be read ($st)"; return 1; }
+  st=$(echo "$st" | head -1)
+  [ "$st" = 1 ] || { vrj_log "FAIL: identity $vrj_id is in PoA state $st, not Applied (1)"; return 1; }
   vrj_log "PASS: identity $vrj_id applied (PoA state $st; 1 = Applied)"
 }
 

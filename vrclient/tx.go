@@ -18,6 +18,8 @@ import (
 type Tx struct {
 	To   ethcommon.Address
 	Data []byte
+	// Value is the native value of a payable call (custody.bond); nil is zero.
+	Value *big.Int
 }
 
 // Plan is a transaction as it would be sent: decoded, simulated and priced at the current head.
@@ -71,6 +73,9 @@ func (s Sender) Plan(ctx context.Context, tx Tx) (Plan, error) {
 		p.FeeCap.Add(new(big.Int).Mul(p.BaseFee, big.NewInt(2)), p.Tip)
 	}
 	est := map[string]any{"from": p.From, "to": tx.To, "data": hexutil.Bytes(tx.Data)}
+	if tx.Value != nil && tx.Value.Sign() > 0 {
+		est["value"] = (*hexutil.Big)(tx.Value)
+	}
 	for attempt := 0; attempt < 6; attempt++ {
 		var gas hexutil.Uint64
 		err = s.RPC.CallContext(ctx, &gas, "eth_estimateGas", est)
@@ -137,7 +142,7 @@ func (s Sender) Send(ctx context.Context, p Plan) (ethcommon.Hash, *Receipt, err
 	}
 	to := p.Tx.To
 	tx, err := types.SignNewTx(s.Key, types.LatestSignerForChainID(s.ChainID), &types.DynamicFeeTx{ChainID: s.ChainID, Nonce: uint64(nonce),
-		GasTipCap: p.Tip, GasFeeCap: p.FeeCap, Gas: p.Gas * 13 / 10, To: &to, Data: p.Tx.Data})
+		GasTipCap: p.Tip, GasFeeCap: p.FeeCap, Gas: p.Gas * 13 / 10, To: &to, Data: p.Tx.Data, Value: p.Tx.Value})
 	if err != nil {
 		return ethcommon.Hash{}, nil, err
 	}
