@@ -119,6 +119,9 @@ vrs_long() {
     grep -hE 'upgrade\.required|upgrade\.refused|UpgradeRequired' test-nodes/evm4/debug.log | cut -c1-420 | tail -5 >"$d/evm4-upgrade-lines-epoch$i.txt"
   done
   curl -s "http://$(evm_validator_rpc_addr 4)/api/v1/metrics" | grep -i 'upgrade_required' >"$d/evm4-metric.txt" 2>/dev/null
+  for i in 1 2 3 4; do grep -hE 'activation\.latched|activation\.active' "test-nodes/root$i/debug.log" | cut -c1-400 >"$d/root$i-activation-events.txt"; done
+  local nl=0; for i in 1 2 3 4; do grep -q 'activation.latched' "$d/root$i-activation-events.txt" && nl=$((nl+1)); done
+  [ "$nl" -ge 3 ] && vrb_log "PASS: $nl roots logged activation.latched (and activation.active) for the schedule" || vrb_log "FAIL: only $nl roots logged activation.latched"
   grep -q 'Latched' "$d/upgrade-epoch$E.txt" && vrb_log "PASS: VR latched the schedule at the Boundary into epoch $E" || vrb_log "FAIL: the schedule is not Latched after epoch $E"
   grep -q 'UpgradeRequired' test-nodes/evm4/debug.log && vrb_log "PASS: the no_test_rule shard node 4 refused epoch $E: $(grep -h 'UpgradeRequired' test-nodes/evm4/debug.log | tail -1 | cut -c1-300)" || vrb_log "FAIL: shard node 4 did not refuse with UpgradeRequired"
   vrb_log "ureth rules at epoch $E: $(cut -c1-400 "$d/ureth-rules-epoch$E.json")"
