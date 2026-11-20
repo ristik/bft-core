@@ -55,7 +55,7 @@ func TestStatusExitCode(t *testing.T) {
 // TestJudge: the findings and the verdict they make.
 func TestJudge(t *testing.T) {
 	ok := func() *validatorStatusReport {
-		return &validatorStatusReport{Health: "Healthy", PublicHeadTime: uint64(time.Now().Unix()), LocalRPC: "x", LocalSync: "in sync"}
+		return &validatorStatusReport{Health: "Healthy", PublicHead: ptrU(100), PublicHeadTime: uint64(time.Now().Unix()), LocalRPC: "x", LocalSync: "in sync"}
 	}
 	r := ok()
 	r.judge(statusThresholds{})
