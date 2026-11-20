@@ -102,6 +102,8 @@ vrp_utb() {
 # first live run: its timing and the harness helpers it borrows (q3-flow-lib) are what the run fixes.
 
 vrp_source_q3() {
+  declare -F vrj_source_libs >/dev/null || source scripts/vr-joiner-steps.sh || return 1
+  vrj_source_libs || return 1   # m2, h3 and reth-peers libraries; H3_DIR
   declare -F q3_trust_base_v3 >/dev/null || source scripts/lib/q3-lib.sh || return 1
   declare -F q3_attempt >/dev/null || source scripts/lib/q3-flow-lib.sh || return 1
   Q3_DIR=${Q3_DIR:-$H3_DIR}; mkdir -p "$Q3_DIR"
