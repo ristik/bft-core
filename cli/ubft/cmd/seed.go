@@ -106,7 +106,7 @@ func seedExportCmd() *cobra.Command {
 			return nil
 		}}
 	cmd.Flags().StringVar(&bundleURL, "bundle-url", "", "base URL of the root's isolated read-only bundle listener (the root's --utb-bundle-address), not its operator RPC")
-	cmd.Flags().BoolVar(&replace, "replace", false, "replace an existing --out directory (published by an atomic swap)")
+	cmd.Flags().BoolVar(&replace, "replace", false, "replace an existing --out directory (an atomic exchange on Linux; elsewhere the replacement is refused and nothing is changed: remove the directory first)")
 	cmd.Flags().StringVar(&utbFile, "utb-bundle", "", "a trust-base history bundle file instead of --bundle-url (`ubft trust-base utb-export`)")
 	cmd.Flags().StringVar(&genesisID, "utb-genesis-id", "", "the pinned EntryID of the UTB genesis entry (0x-prefixed): the export is checked against it")
 	cmd.Flags().StringVar(&archiveDir, "archive", "", "the shard node's archive directory")
@@ -261,7 +261,7 @@ func seedFetchCmd() *cobra.Command {
 	cmd.Flags().StringArrayVar(&from, "from", nil, "a seed source base URL (repeat for several: they are compared, and any disagreement refuses)")
 	cmd.Flags().StringVar(&out, "out", "seed", "the directory to write the verified seed to")
 	cmd.Flags().IntVar(&minSources, "min-sources", 1, "how many sources must answer with the same manifest (equivalent URL spellings count once; choose mirrors that are independent of each other: two names of one machine are not two sources)")
-	cmd.Flags().BoolVar(&fetchReplace, "replace", false, "replace an existing --out directory (published by an atomic swap)")
+	cmd.Flags().BoolVar(&fetchReplace, "replace", false, "replace an existing --out directory (an atomic exchange on Linux; elsewhere the replacement is refused and nothing is changed: remove the directory first)")
 	pf.add(cmd)
 	return cmd
 }
@@ -290,9 +290,12 @@ func seedImportCmd(base *baseFlags) *cobra.Command {
 				return errors.New("--root-utb-db and --shard-utb-db need --utb-genesis")
 			}
 			// 0. the destination first: a refused replacement must change nothing, so it is decided before any store is touched
-			if _, err := seed.CheckImportDestination(home, v, replace); err != nil {
+			// (and the destination lock is held until the record is published, so two imports of this home cannot interleave)
+			txn, err := seed.BeginImport(home, v, replace)
+			if err != nil {
 				return err
 			}
+			defer txn.Close()
 			// 1. open every requested store (this validates the genesis file and the pin), 2. install the history into each (the store's own authenticated
 			// appends, idempotent: a retry resumes), 3. only then publish the import record. A failure before step 3 leaves no record, and the same seed
 			// can be imported again without --replace.
@@ -324,7 +327,7 @@ func seedImportCmd(base *baseFlags) *cobra.Command {
 				}
 				fmt.Fprintf(cmd.OutOrStdout(), "%s: added %d trust-base entries; tip epoch %d\n", o.path, added, o.store.Tip().Epoch)
 			}
-			rec, err := seed.Import(v, home, sources, replace, time.Now())
+			rec, err := txn.Commit(sources, time.Now())
 			if err != nil {
 				return err
 			}

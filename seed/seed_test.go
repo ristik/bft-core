@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,8 +16,11 @@ import (
 	"testing"
 	"time"
 
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-go-base/types"
+
+	"github.com/unicitynetwork/bft-core/archive"
 
 	"github.com/unicitynetwork/bft-core/rootchain/testutils/ucfixture"
 )
@@ -450,10 +454,11 @@ func TestHandlerServesOnlyTheDeclaredSizeAndStaysInsideTheDirectory(t *testing.T
 func TestSourceCanonicalPathsDecodeUnreservedEscapes(t *testing.T) {
 	for in, want := range map[string]string{
 		"http://h/%7Euser/seed": "http://h/~user/seed",
-		"http://h/a%2Fb/seed":   "http://h/a%2Fb/seed",
+		"http://h/a%2fb/seed":   "http://h/a%2Fb/seed",
 		"http://h/%2e%2e/seed":  "http://h/seed",
 		"http://h/s%65ed":       "http://h/seed",
 		"http://h/a%20b":        "http://h/a%20b",
+		"http://h/a;b:c@d=e/s":  "http://h/a;b:c@d=e/s", // literal reserved characters are left exactly as written
 	} {
 		got, err := normalize(in)
 		require.NoError(t, err)
@@ -461,26 +466,180 @@ func TestSourceCanonicalPathsDecodeUnreservedEscapes(t *testing.T) {
 	}
 }
 
-func TestCheckImportDestinationDecidesBeforeAnyStoreIsTouched(t *testing.T) {
+func TestImportTxnHoldsTheLockAndDecidesBeforeAnyStoreIsTouched(t *testing.T) {
+	f := newFixture(t)
+	v, err := VerifyDir(f.dir, Pins{GenesisID: f.pin})
+	require.NoError(t, err)
+	other := *v
+	other.ManifestDigest = "0xdeadbeef"
+	home := filepath.Join(t.TempDir(), "h")
+
+	// many concurrent imports of different seeds: while one holds the lock the others are refused before they could advance any store
+	var wg sync.WaitGroup
+	var storeWrites, begun atomic.Int32
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			seedv := v
+			if i%2 == 1 {
+				seedv = &other
+			}
+			txn, err := BeginImport(home, seedv, false)
+			if err != nil {
+				return
+			}
+			defer txn.Close()
+			begun.Add(1)
+			storeWrites.Add(1) // "the store installs": only a successful Begin reaches them
+			time.Sleep(20 * time.Millisecond)
+			_, err = txn.Commit(nil, time.Now())
+			require.NoError(t, err)
+		}(i)
+	}
+	wg.Wait()
+	require.Equal(t, begun.Load(), storeWrites.Load())
+	rec, err := ReadImportRecord(home)
+	require.NoError(t, err)
+	require.NotNil(t, rec)
+	// after the dust settles, another seed needs --replace, and is refused before any store write
+	loser := v
+	if rec.ManifestDigest == v.ManifestDigest {
+		loser = &other
+	}
+	_, err = BeginImport(home, loser, false)
+	require.ErrorContains(t, err, "already holds")
+	// the same seed resumes: Begin succeeds, Commit publishes nothing
+	same := v
+	if rec.ManifestDigest != v.ManifestDigest {
+		same = &other
+	}
+	txn, err := BeginImport(home, same, false)
+	require.NoError(t, err)
+	got, err := txn.Commit(nil, time.Now())
+	require.NoError(t, err)
+	require.Equal(t, rec, got)
+	// the lock is held until Close
+	_, err = BeginImport(home, same, false)
+	require.ErrorContains(t, err, "in progress")
+	txn.Close()
+	_, err = BeginImport(home, same, false)
+	require.NoError(t, err)
+}
+
+func TestReplacingAnImportNeverLeavesItAbsent(t *testing.T) {
 	f := newFixture(t)
 	v, err := VerifyDir(f.dir, Pins{GenesisID: f.pin})
 	require.NoError(t, err)
 	home := filepath.Join(t.TempDir(), "h")
-	replacing, err := CheckImportDestination(home, v, false)
-	require.NoError(t, err)
-	require.False(t, replacing)
 	_, err = Import(v, home, nil, false, time.Now())
 	require.NoError(t, err)
-	// the same seed: a resume; another seed without --replace: refused by the check, which the CLI runs before opening any entry store
-	replacing, err = CheckImportDestination(home, v, false)
+	if !canExchange(home) {
+		// no atomic exchange on this system: the replacement is refused up front and the import is untouched
+		other := *v
+		other.ManifestDigest = "0xfeed"
+		_, err = Import(&other, home, nil, true, time.Now())
+		require.ErrorContains(t, err, "not supported")
+		rec, err := ReadImportRecord(home)
+		require.NoError(t, err)
+		require.NotNil(t, rec)
+		return
+	}
+	stop := make(chan struct{})
+	var absent atomic.Int32
+	var rwg sync.WaitGroup
+	rwg.Add(1)
+	go func() {
+		defer rwg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if rec, err := ReadImportRecord(home); err != nil || rec == nil {
+				absent.Add(1)
+			}
+		}
+	}()
+	for i := 0; i < 30; i++ {
+		other := *v
+		other.ManifestDigest = fmt.Sprintf("0x%064x", i+1)
+		_, err = Import(&other, home, nil, true, time.Now())
+		require.NoError(t, err)
+	}
+	close(stop)
+	rwg.Wait()
+	require.EqualValues(t, 0, absent.Load(), "import.json was absent during a replacement")
+}
+
+func TestShardConfEpochComesFromTheTechnicalRecord(t *testing.T) {
+	p, err := ucfixture.New(ucfixture.Config{Partition: 1, ShardBits: 0})
 	require.NoError(t, err)
-	require.True(t, replacing)
-	other := *v
-	other.ManifestDigest = "0xdeadbeef"
-	_, err = CheckImportDestination(home, &other, false)
-	require.ErrorContains(t, err, "already holds")
-	_, err = CheckImportDestination(home, &other, true)
+	conf := *p.Shards()[0].Config
+	net, part, shard := types.NetworkID(conf.NetworkID), conf.PartitionID, conf.ShardID
+	hash := func(c types.PartitionDescriptionRecord) []byte {
+		h, err := c.Hash(crypto.SHA256)
+		require.NoError(t, err)
+		return h
+	}
+	old := conf
+	old.Epoch = 1
+	next := conf
+	next.Epoch = 2
+	// an assignment transition checkpoint: the input record still names epoch 1, but the technical record and the UC's configuration hash name epoch 2
+	// (this node's configuration is the successor's): accepted; the old configuration's hash would be wrong
+	require.NoError(t, checkShardConf(&next, net, part, shard, 2, hash(next)))
+	// a transition checkpoint against the OLD configuration of the same epoch number is a mismatch: refused
+	require.ErrorContains(t, checkShardConf(&next, net, part, shard, 2, hash(old)), "another shard configuration")
+	// a checkpoint older than this node's configuration is refused; a newer one is not compared (the restore resolves it from the handoffs)
+	require.ErrorContains(t, checkShardConf(&next, net, part, shard, 1, hash(old)), "older than")
+	require.NoError(t, checkShardConf(&old, net, part, shard, 2, hash(next)))
+	require.NoError(t, checkShardConf(nil, net, part, shard, 0, nil))
+}
+
+func TestScanArchiveTipSkipsAMalformedNewerRecord(t *testing.T) {
+	f := newFixture(t)
+	var uc types.UnicityCertificate
+	require.NoError(t, types.Cbor.Unmarshal(f.files[TipUCFile], &uc))
+	dir := filepath.Join(t.TempDir(), "archive")
+	st, err := archive.Open(dir)
 	require.NoError(t, err)
+	put := func(header string, u types.UnicityCertificate, tr []byte) archive.Request {
+		raw, err := types.Cbor.Marshal(&u)
+		require.NoError(t, err)
+		rec := &archive.Record{Header: []byte(header), Body: []byte("b"), CanonicalRootInput: []byte("i"), OriginalUC: []byte("o"), OriginalTR: []byte("o"),
+			ResultingUC: raw, ResultingTR: tr, Companion: []byte("c")}
+		var shard types.ShardID
+		require.NoError(t, shard.UnmarshalText([]byte("0x010203040580")))
+		q := archive.Request{Context: archive.Context{NetworkID: 1, PartitionID: 2, ShardID: shard, ShardEpoch: 4, RootEpoch: 5, ExecutionIdentity: []byte("identity-v1")}}
+		q.Context.FullShardConfHash[0] = 6
+		q.Context.RegistryAddress[0] = 7
+		q.Context.RegistryCodeHash[0] = 8
+		q.Context.GenesisCommitment[0] = 9
+		q.Context.EVMGenesisHash[0] = 10
+		copy(q.BlockHash[:], ethcrypto.Keccak256(rec.Header))
+		require.NoError(t, st.Put(q, rec))
+		return q
+	}
+	good := put(string([]byte{0xc1, 0x80}), uc, f.files[TipTRFile])
+	// a NEWER root round whose certificate has no unicity tree certificate: it must not win, and must not break the scan
+	bad := uc
+	seal := *uc.UnicitySeal
+	seal.RootChainRoundNumber += 100
+	bad.UnicitySeal = &seal
+	bad.UnicityTreeCertificate = nil
+	put(string([]byte{0xc2, 0x80, 0x01}), bad, f.files[TipTRFile])
+	// ... nor one whose TR does not match its UC
+	wrongTR := uc
+	seal2 := *uc.UnicitySeal
+	seal2.RootChainRoundNumber += 200
+	wrongTR.UnicitySeal = &seal2
+	put(string([]byte{0xc2, 0x80, 0x02}), wrongTR, bytes.Clone(f.files[TipTRFile][:len(f.files[TipTRFile])-1]))
+	tip, err := ScanArchiveTip(dir)
+	require.NoError(t, err)
+	require.Equal(t, good.BlockHash, tip.Request.BlockHash)
+	require.Equal(t, uc.GetRootRoundNumber(), tip.Round)
 }
 
 func TestUCShapeCheckIsSharedAndStrict(t *testing.T) {
@@ -499,4 +658,55 @@ func TestUCShapeCheckIsSharedAndStrict(t *testing.T) {
 		mut(&c)
 		require.ErrorIs(t, checkUCShape(&c), ErrSeed, name)
 	}
+}
+
+func TestRequestsGoToTheOperatorsURLAsGiven(t *testing.T) {
+	f := newFixture(t)
+	var seen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.URL.EscapedPath())
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	_, err := Fetch(context.Background(), []string{srv.URL + "/m;v=1/%7Euser/"}, FetchOptions{Pins: Pins{GenesisID: f.pin}})
+	require.Error(t, err)
+	require.Equal(t, []string{"/m;v=1/%7Euser/manifest.json"}, seen, "the request keeps the reserved characters and escapes as written")
+}
+
+func TestSymlinksAreRefusedAtEveryLevel(t *testing.T) {
+	f := newFixture(t)
+	// the seed directory itself is a symlink
+	link := filepath.Join(t.TempDir(), "link")
+	require.NoError(t, os.Symlink(f.dir, link))
+	_, err := VerifyDir(link, Pins{GenesisID: f.pin})
+	require.ErrorIs(t, err, ErrSeed)
+	// the manifest is a symlink
+	g := newFixture(t)
+	real := filepath.Join(t.TempDir(), "m.json")
+	require.NoError(t, os.WriteFile(real, g.manifest, 0o644))
+	require.NoError(t, os.Remove(filepath.Join(g.dir, ManifestName)))
+	require.NoError(t, os.Symlink(real, filepath.Join(g.dir, ManifestName)))
+	_, err = VerifyDir(g.dir, Pins{GenesisID: g.pin})
+	require.ErrorIs(t, err, ErrSeed)
+	rec := httptest.NewRecorder()
+	Handler(g.dir).ServeHTTP(rec, httptest.NewRequest("GET", "/"+ManifestName, nil))
+	require.Equal(t, 404, rec.Code)
+	// ReadFileBounded refuses a symlinked file too
+	_, err = ReadFileBounded(filepath.Join(g.dir, ManifestName), MaxManifestBytes)
+	require.ErrorIs(t, err, ErrSeed)
+}
+
+// One verification reads one directory version: swapping the path for another seed while it runs cannot mix the two.
+func TestVerifyDirReadsOneDirectoryVersion(t *testing.T) {
+	f := newFixture(t)
+	d, err := openSeedDir(f.dir)
+	require.NoError(t, err)
+	defer d.Close()
+	// the path is replaced after the directory was opened
+	other := newFixture(t)
+	require.NoError(t, os.Rename(f.dir, f.dir+".old"))
+	require.NoError(t, os.Rename(other.dir, f.dir))
+	m, err := d.read(ManifestName, MaxManifestBytes)
+	require.NoError(t, err)
+	require.Equal(t, f.manifest, m, "the opened directory still yields the version it was opened at")
 }

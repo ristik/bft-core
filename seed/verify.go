@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -57,17 +56,18 @@ func ParseGenesisID(s string) ([types.TrustBaseV2IDLen]byte, error) {
 // manifest is parsed first and its validated sizes bound the payload reads; every file is opened without following a symlink and checked on the
 // opened descriptor.
 func VerifyDir(dir string, p Pins) (*Verified, error) {
-	mraw, err := ReadFileBounded(filepath.Join(dir, ManifestName), MaxManifestBytes)
+	d, err := openSeedDir(dir) // once: every file below is read relative to this one directory, from one version of it
+	if err != nil {
+		return nil, refuse("opening the seed directory: %v", err)
+	}
+	defer d.Close()
+	mraw, m, err := d.readManifest()
 	if err != nil {
 		return nil, refuse("reading the manifest: %v", err)
 	}
-	m, err := DecodeManifest(mraw)
-	if err != nil {
-		return nil, err
-	}
 	files := map[string][]byte{}
 	for _, f := range m.Files {
-		b, err := ReadFileBounded(filepath.Join(dir, f.Name), f.Size)
+		b, err := d.read(f.Name, f.Size)
 		if err != nil {
 			if os.IsNotExist(err) {
 				return nil, refuse("the seed has no %s", f.Name)
@@ -190,26 +190,8 @@ func Verify(manifestRaw []byte, files map[string][]byte, p Pins) (v *Verified, e
 		return nil, refuse("the checkpoint is of another shard than this node's")
 	}
 
-	if c := p.ShardConf; c != nil {
-		if uint64(c.NetworkID) != uint64(bundle.Network) {
-			return nil, refuse("the checkpoint is of network %d, this node's shard configuration is of network %d", bundle.Network, c.NetworkID)
-		}
-		if c.PartitionID != partition || !bytes.Equal(c.ShardID.Bytes(), shard.Bytes()) {
-			return nil, refuse("the checkpoint is of partition %d shard %x, this node's shard configuration is of partition %d shard %x (a seed for another shard)",
-				partition, shard.Bytes(), c.PartitionID, c.ShardID.Bytes())
-		}
-		switch ep := uc.GetShardEpoch(); {
-		case ep < c.Epoch:
-			return nil, refuse("the checkpoint is of shard epoch %d, older than this node's shard configuration (epoch %d)", ep, c.Epoch)
-		case ep == c.Epoch:
-			h, err := c.Hash(crypto.SHA256)
-			if err != nil {
-				return nil, refuse("hashing this node's shard configuration: %v", err)
-			}
-			if !bytes.Equal(h, uc.ShardConfHash) {
-				return nil, refuse("the checkpoint certifies another shard configuration than this node's at shard epoch %d", ep)
-			}
-		}
+	if err := checkShardConf(p.ShardConf, bundle.Network, partition, shard, tr.Epoch, uc.ShardConfHash); err != nil {
+		return nil, err
 	}
 
 	// 3. the manifest's claims are what the verified bytes say
@@ -249,6 +231,37 @@ func checkUCShape(uc *types.UnicityCertificate) error {
 		return refuse("the checkpoint UC's block hash is not 32 bytes")
 	case len(uc.TRHash) != 32 || len(uc.ShardConfHash) != 32:
 		return refuse("the checkpoint UC's TR hash or shard configuration hash is not 32 bytes")
+	}
+	return nil
+}
+
+// checkShardConf binds a checkpoint to the target's own full shard configuration c (nil: no binding). The configuration epoch is the authenticated
+// TECHNICAL RECORD's epoch, as restore selects it (rootinput: the authorized epoch), never the input record's: at an assignment transition the input
+// record still names the old epoch while the technical record and the UC's configuration hash name the successor. The checkpoint must be of c's
+// network, partition and shard; not of an epoch before c's; and at c's own epoch it must certify exactly c's hash. A later epoch's configuration comes
+// from the verified handoffs, which only the restore itself can resolve, so no hash is compared for it here.
+func checkShardConf(c *types.PartitionDescriptionRecord, network types.NetworkID, partition types.PartitionID, shard types.ShardID, trEpoch uint64, ucConfHash []byte) error {
+	if c == nil {
+		return nil
+	}
+	if uint64(c.NetworkID) != uint64(network) {
+		return refuse("the checkpoint is of network %d, this node's shard configuration is of network %d", network, c.NetworkID)
+	}
+	if c.PartitionID != partition || !bytes.Equal(c.ShardID.Bytes(), shard.Bytes()) {
+		return refuse("the checkpoint is of partition %d shard %x, this node's shard configuration is of partition %d shard %x (a seed for another shard)",
+			partition, shard.Bytes(), c.PartitionID, c.ShardID.Bytes())
+	}
+	switch {
+	case trEpoch < c.Epoch:
+		return refuse("the checkpoint's technical record is of shard epoch %d, older than this node's shard configuration (epoch %d)", trEpoch, c.Epoch)
+	case trEpoch == c.Epoch:
+		h, err := c.Hash(crypto.SHA256)
+		if err != nil {
+			return refuse("hashing this node's shard configuration: %v", err)
+		}
+		if !bytes.Equal(h, ucConfHash) {
+			return refuse("the checkpoint certifies another shard configuration than this node's at shard epoch %d", trEpoch)
+		}
 	}
 	return nil
 }

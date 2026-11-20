@@ -80,9 +80,15 @@ is built once per trust-base tip and reused, with at most four requests in servi
 format's own limit** (`MaxUTBBytes`, for `--utb-bundle` and the manifest): a history beyond it cannot be put in a seed in v1, and a follower of such a network
 syncs its trust-base history over the GetTrustBase stream instead. `--utb-bundle FILE` exports from a file (`ubft trust-base utb-export`) under the same limit. Put a cache or a static mirror in front for a public service.
 
-`seed import` first decides whether the destination may take the seed (no import yet, the same seed again, or another seed with `--replace`), before any
+`seed import` first takes the destination lock (`<home>/seed.lock`, held until the record is published, so two imports of one home cannot interleave) and decides whether the destination may take the seed (no import yet, the same seed again, or another seed with `--replace`), before any
 store is touched; then it installs the history into each requested entry store (the store's own authenticated appends, idempotent) and writes `<home>/seed/import.json`
-last: a failure leaves no import record, and importing the same seed again resumes without `--replace`.
+last: a failure leaves no import record, and importing the same seed again resumes without `--replace`. A failure part way leaves the entry stores at their last
+authenticated entry (they only ever extend), so the retry continues from there. Replacing an existing import needs `--replace` and, so that `import.json` is never
+absent, an atomic directory exchange (Linux `renameat2`); on a system without it the replacement is refused before anything changes and the old import is
+removed by hand. A crash leaves at most a lock file, named in the next refusal.
+
+The seed directory is opened once per verification or request (a symlink, for the directory or any file in it, is refused), and every file is read relative to
+that descriptor, so a concurrent replacement of the path cannot mix two versions.
 
 **Restore from the seed: preflight first.** `ubft seed restore-pin --dir ./seed --utb-genesis-id 0xPIN --full-shard-conf full-shard-conf.json --trust-base trust-base.json [--bundle epoch2.cbor ...] --out PREFIX`
 verifies the seed (and that its checkpoint is of **this node's** network, partition and shard, not older than the configuration's shard epoch, and at the

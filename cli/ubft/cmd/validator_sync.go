@@ -17,7 +17,9 @@ import (
 type syncView struct {
 	LocalHead  *uint64 `json:"localHead,omitempty"`
 	PublicHead uint64  `json:"publicHead"`
-	Behind     *int64  `json:"behind,omitempty"`
+	// PublicHeadUnknown: the public head could not be read; no behind-count, rate or ETA is computed.
+	PublicHeadUnknown bool   `json:"publicHeadUnknown,omitempty"`
+	Behind            *int64 `json:"behind,omitempty"`
 	// RateBlocksPerSec is how fast the local head moved over the sample window; HeadRateBlocksPerSec how fast the public head did.
 	RateBlocksPerSec     *float64 `json:"rateBlocksPerSec,omitempty"`
 	HeadRateBlocksPerSec *float64 `json:"headRateBlocksPerSec,omitempty"`
@@ -57,6 +59,10 @@ func buildSyncView(ctx context.Context, v *loadedValidator, r *validatorStatusRe
 		s.Seed = rec
 		s.Sources = append(s.Sources, fmt.Sprintf("seed %s (%s)", rec.ManifestDigest, strings.Join(rec.Sources, ", ")))
 	}
+	if r.PublicHeadUnknown {
+		s.PublicHeadUnknown, s.ETA = true, "unknown (the public head is unavailable)"
+		return s
+	}
 	if r.LocalHead == nil {
 		return s
 	}
@@ -92,6 +98,9 @@ func (s *syncView) text(w io.Writer) {
 		return
 	}
 	line := fmt.Sprintf("catch-up: public head %d", s.PublicHead)
+	if s.PublicHeadUnknown {
+		line = "catch-up: public head unknown"
+	}
 	if s.LocalHead != nil {
 		line += fmt.Sprintf(", local head %d", *s.LocalHead)
 	}

@@ -7,6 +7,7 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/bft-core/activationproof"
+	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/utb"
 )
 
@@ -56,6 +57,10 @@ func ResolveRestorePin(v *Verified, genesis *types.RootTrustBaseV1, utbDeploymen
 	}
 	pin := &RestorePin{UC: bytes.Clone(v.Files[TipUCFile]), TR: bytes.Clone(v.Files[TipTRFile]), RootEpoch: epoch}
 	if epoch == 1 {
+		// whatever the deployment's profile, the checkpoint must verify against the supplied native genesis trust base itself
+		if err := v.UC.Verify(quorumweight.Checked(genesis), crypto.SHA256, v.UC.GetPartitionID(), v.UC.GetShardID(), v.UC.ShardConfHash); err != nil {
+			return nil, refuse("the checkpoint does not verify against the supplied genesis trust base: %v", err)
+		}
 		raw, err := genesis.Hash(crypto.SHA256)
 		if err != nil {
 			return nil, err

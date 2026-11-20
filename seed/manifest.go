@@ -18,7 +18,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"syscall"
 )
 
 const (
@@ -176,55 +175,35 @@ func (m *Manifest) file(name string) File {
 	return File{}
 }
 
-// ReadFileBounded opens a file without following a symlink, checks on the OPENED descriptor that it is a regular file of at most max bytes, and
-// reads it through a limit: the type and size that were checked are the ones read, whatever happens to the path meanwhile.
+// ReadFileBounded reads one file: its directory is opened, then the file relative to it with O_NOFOLLOW (a symlink is refused), and type and size are
+// checked on the opened descriptor.
 func ReadFileBounded(path string, max int64) ([]byte, error) {
-	f, st, err := openRegular(path, max)
+	dir, name := filepath.Split(path)
+	if dir == "" {
+		dir = "."
+	}
+	fd, err := os.Open(dir)
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
-	b, err := io.ReadAll(io.LimitReader(f, max+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(b)) != st.Size() {
-		return nil, refuse("%s changed while it was read", filepath.Base(path))
-	}
-	return b, nil
+	defer fd.Close()
+	d := &seedDir{fd: int(fd.Fd())}
+	return d.read(name, max)
 }
 
-// openRegular opens the file `path` names inside its directory through a root handle (os.OpenRoot): the name is resolved only within that directory,
-// never through a symlink (O_NOFOLLOW), and without blocking on a FIFO or device (O_NONBLOCK, then the descriptor's own type is checked). It checks on
-// the OPENED descriptor that the file is regular and at most max bytes.
+// openRegular opens path (directory then file, as ReadFileBounded does).
 func openRegular(path string, max int64) (*os.File, os.FileInfo, error) {
 	dir, name := filepath.Split(path)
 	if dir == "" {
 		dir = "."
 	}
-	root, err := os.OpenRoot(dir)
+	fd, err := os.Open(dir)
 	if err != nil {
 		return nil, nil, err
 	}
-	defer root.Close()
-	f, err := root.OpenFile(name, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
-	if err != nil {
-		return nil, nil, err
-	}
-	st, err := f.Stat()
-	if err != nil {
-		f.Close()
-		return nil, nil, err
-	}
-	if !st.Mode().IsRegular() {
-		f.Close()
-		return nil, nil, refuse("%s is not a regular file", name)
-	}
-	if st.Size() > max {
-		f.Close()
-		return nil, nil, refuse("%s is %d bytes (limit %d)", name, st.Size(), max)
-	}
-	return f, st, nil
+	defer fd.Close()
+	d := &seedDir{fd: int(fd.Fd())}
+	return d.openRegular(name, max)
 }
 
 func readBounded(path string, max int64) ([]byte, error) { return ReadFileBounded(path, max) }

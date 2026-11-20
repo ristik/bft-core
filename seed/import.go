@@ -48,43 +48,68 @@ func ReadImportRecord(home string) (*ImportRecord, error) {
 	return &r, nil
 }
 
-// CheckImportDestination decides, BEFORE anything is written anywhere, whether importing v into home is allowed: no import yet (a fresh start), the
-// same seed again (a resume), or another seed with replace. Call it before touching any entry store, so a refused replacement changes nothing. It
-// reports whether the destination exists (the publication then replaces it).
-func CheckImportDestination(home string, v *Verified, replace bool) (replacing bool, err error) {
-	final := filepath.Join(home, ImportDir)
-	old, err := ReadImportRecord(home)
-	switch {
-	case err != nil && !replace:
-		return false, err
-	case old != nil && old.ManifestDigest != v.ManifestDigest && !replace:
-		return false, refuse("%s already holds an import of seed %s; pass --replace to replace it with %s", home, old.ManifestDigest, v.ManifestDigest)
-	case old != nil:
-		return true, nil
-	}
-	if _, err := os.Lstat(final); err == nil {
-		if !replace {
-			return false, refuse("%s exists and is not a seed import; pass --replace to replace it", final)
-		}
-		return true, nil
-	}
-	return false, nil
+// ImportTxn is one import of a seed into a home, holding the destination lock from the first check until Close: two imports of the same home cannot
+// interleave, so the decision made at Begin is the one Commit publishes under, and no store is advanced by an import that another one is deciding.
+type ImportTxn struct {
+	v         *Verified
+	home      string
+	unlock    func()
+	existing  *ImportRecord // an import of the same seed is already complete
+	replacing bool
 }
 
-// Import places a verified seed in a validator home: <home>/seed/{manifest.json, the payload files, import.json}. The files are what Verify
-// returned (never re-read from a source). Call it LAST, after every requested store install has succeeded: the record is the statement that the
-// import is complete. Importing the same seed again is a resume (it republishes the identical files); another seed over an existing import needs
-// replace, so a start from one seed is never silently changed to another. The directory is staged privately (exclusive creation) and swapped in by
-// rename; the previous import stays in place until the new one is.
-func Import(v *Verified, home string, sources []string, replace bool, now time.Time) (*ImportRecord, error) {
-	final := filepath.Join(home, ImportDir)
-	replacing, err := CheckImportDestination(home, v, replace)
-	if err != nil {
-		return nil, err
-	}
+// BeginImport takes the home's import lock and decides, before anything is written anywhere, whether v may be imported: no import yet (a fresh start),
+// the same seed again (a resume: the stores may be completed, the published import stays as it is), or another seed with replace. A refused
+// import returns before any store is touched. The caller installs into its entry stores, then Commit publishes, then Close releases the lock.
+func BeginImport(home string, v *Verified, replace bool) (*ImportTxn, error) {
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		return nil, err
 	}
+	final := filepath.Join(home, ImportDir)
+	unlock, err := lockDir(final)
+	if err != nil {
+		return nil, err
+	}
+	t := &ImportTxn{v: v, home: home, unlock: unlock}
+	old, err := ReadImportRecord(home)
+	switch {
+	case err != nil && !replace:
+		unlock()
+		return nil, err
+	case old != nil && old.ManifestDigest == v.ManifestDigest:
+		t.existing = old
+		return t, nil
+	case old != nil && !replace:
+		unlock()
+		return nil, refuse("%s already holds an import of seed %s; pass --replace to replace it with %s", home, old.ManifestDigest, v.ManifestDigest)
+	case old != nil:
+		t.replacing = true
+	default:
+		if _, err := os.Lstat(final); err == nil {
+			if !replace {
+				unlock()
+				return nil, refuse("%s exists and is not a seed import; pass --replace to replace it", final)
+			}
+			t.replacing = true
+		}
+	}
+	// a replacement must be atomic (the published import.json is never absent): refuse it BEFORE any store is touched where it cannot be
+	if t.replacing && !canExchange(home) {
+		unlock()
+		return nil, refuse("replacing an import atomically is not supported on this system: remove %s by hand and import again", final)
+	}
+	return t, nil
+}
+
+// Close releases the lock.
+func (t *ImportTxn) Close() { t.unlock() }
+
+// Commit publishes the import: the staged directory with the record last. Importing the same seed again (a complete import exists) publishes nothing.
+func (t *ImportTxn) Commit(sources []string, now time.Time) (*ImportRecord, error) {
+	if t.existing != nil {
+		return t.existing, nil
+	}
+	v, home := t.v, t.home
 	tmp, err := os.MkdirTemp(home, ".seed-import-")
 	if err != nil {
 		return nil, err
@@ -103,6 +128,7 @@ func Import(v *Verified, home string, sources []string, replace bool, now time.T
 		UTBGenesisID: v.Manifest.Network.UTBGenesisID, UTBTipEpoch: v.Manifest.Network.UTBTipEpoch, RootEpoch: cp.RootEpoch, RootRound: cp.RootRound,
 		ShardRound: cp.ShardRound, BlockHash: cp.BlockHash}
 	if v.Manifest.Ureth != nil {
+		// the exporter's claimed execution head: an observation nothing verified, for status only
 		rec.UnverifiedUrethHead = v.Manifest.Ureth.HeadNumber
 	}
 	raw, err := json.MarshalIndent(rec, "", "  ")
@@ -112,8 +138,18 @@ func Import(v *Verified, home string, sources []string, replace bool, now time.T
 	if err := writeNew(filepath.Join(tmp, ImportRecordName), append(raw, '\n')); err != nil {
 		return nil, err
 	}
-	if err := publishDir(tmp, final, replacing); err != nil {
+	if err := publishLocked(tmp, filepath.Join(home, ImportDir), t.replacing); err != nil {
 		return nil, err
 	}
 	return rec, nil
+}
+
+// Import is BeginImport, Commit and Close for a caller that has no stores to install into.
+func Import(v *Verified, home string, sources []string, replace bool, now time.Time) (*ImportRecord, error) {
+	t, err := BeginImport(home, v, replace)
+	if err != nil {
+		return nil, err
+	}
+	defer t.Close()
+	return t.Commit(sources, now)
 }

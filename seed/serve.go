@@ -3,7 +3,6 @@ package seed
 import (
 	"io"
 	"net/http"
-	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -23,22 +22,13 @@ func Handler(dir string) http.Handler {
 			return
 		}
 		name := strings.TrimPrefix(r.URL.Path, "/")
-		limit, ok := int64(0), false
-		if name == ManifestName {
-			limit, ok = MaxManifestBytes, true
-		} else if _, listed := fileLimits[name]; listed {
-			// a payload is served at exactly the size the directory's own manifest declares for it, never more
-			m, err := DecodeManifestFile(dir)
-			if err != nil {
+		if name != ManifestName {
+			if _, listed := fileLimits[name]; !listed {
 				http.NotFound(w, r)
 				return
 			}
-			limit, ok = m.file(name).Size, m.file(name).Size > 0
 		}
-		if !ok || strings.ContainsAny(name, "/\\") {
-			http.NotFound(w, r)
-			return
-		}
+		// the serving slot covers everything below, the manifest read included
 		select {
 		case sem <- struct{}{}:
 			defer func() { <-sem }()
@@ -46,8 +36,25 @@ func Handler(dir string) http.Handler {
 			http.Error(w, "busy", http.StatusServiceUnavailable)
 			return
 		}
-		// opened inside the seed directory only, no symlink followed, type and size checked on the descriptor that is served
-		f, st, err := openRegular(filepath.Join(dir, name), limit)
+		// one directory version for the whole request: the directory is opened once (no symlink followed) and the manifest and the payload are read
+		// relative to it
+		d, err := openSeedDir(dir)
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		defer d.Close()
+		limit := int64(MaxManifestBytes)
+		if name != ManifestName {
+			// a payload is served at exactly the size the directory's own manifest declares for it, never more
+			_, m, err := d.readManifest()
+			if err != nil || m.file(name).Size <= 0 {
+				http.NotFound(w, r)
+				return
+			}
+			limit = m.file(name).Size
+		}
+		f, st, err := d.openRegular(name, limit)
 		if err != nil || (name != ManifestName && st.Size() != limit) {
 			if f != nil {
 				f.Close()

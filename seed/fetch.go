@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -57,23 +58,35 @@ func normalize(src string) (string, error) {
 	return scheme + "://" + host + canonicalPath(u.EscapedPath()), nil
 }
 
-// canonicalPath decodes every segment (so "%7Euser" and "~user" are one), removes dot segments (also "%2e%2e"), and re-encodes each segment with
-// only the unreserved characters left bare and all others as upper-case %XX. An encoded slash stays inside its segment; it is not a separator.
+// canonicalPath is the comparison form of a URL path: escapes of unreserved characters are decoded ("%7E" is "~", "%2e" is "."), the hex of every other
+// escape is upper-cased, literal reserved characters (";", ":", "@", "=", ...) are left exactly as written, and dot segments are removed. It is used
+// to COUNT sources only; the request goes to the operator's URL as given.
 func canonicalPath(escaped string) string {
-	var out []string
-	for _, seg := range strings.Split(escaped, "/") {
-		d, err := url.PathUnescape(seg)
-		if err != nil {
-			d = seg
+	var b strings.Builder
+	for i := 0; i < len(escaped); i++ {
+		c := escaped[i]
+		if c == '%' && i+2 < len(escaped) && isHex(escaped[i+1]) && isHex(escaped[i+2]) {
+			v, _ := strconv.ParseUint(escaped[i+1:i+3], 16, 8)
+			if isUnreserved(byte(v)) {
+				b.WriteByte(byte(v))
+			} else {
+				fmt.Fprintf(&b, "%%%02X", v)
+			}
+			i += 2
+			continue
 		}
-		switch d {
+		b.WriteByte(c)
+	}
+	var out []string
+	for _, seg := range strings.Split(b.String(), "/") {
+		switch seg {
 		case "", ".":
 		case "..":
 			if len(out) > 0 {
 				out = out[:len(out)-1]
 			}
 		default:
-			out = append(out, encodeSegment(d))
+			out = append(out, seg)
 		}
 	}
 	if len(out) == 0 {
@@ -82,17 +95,12 @@ func canonicalPath(escaped string) string {
 	return "/" + strings.Join(out, "/")
 }
 
-func encodeSegment(s string) string {
-	var b strings.Builder
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '.' || c == '_' || c == '~' {
-			b.WriteByte(c)
-		} else {
-			fmt.Fprintf(&b, "%%%02X", c)
-		}
-	}
-	return b.String()
+func isHex(c byte) bool {
+	return c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F'
+}
+
+func isUnreserved(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '.' || c == '_' || c == '~'
 }
 
 func get(ctx context.Context, c *http.Client, base, name string, max int64) ([]byte, error) {
@@ -131,16 +139,17 @@ func Fetch(ctx context.Context, sources []string, opt FetchOptions) (*Sourced, e
 	if opt.MinSources < 1 {
 		opt.MinSources = 1
 	}
+	// canonical forms decide which sources are the same (for counting); the requests go to the URLs as the operator wrote them
 	var bases []string
 	seen := map[string]bool{}
 	for _, s := range sources {
-		b, err := normalize(s)
+		canon, err := normalize(s)
 		if err != nil {
 			return nil, err
 		}
-		if !seen[b] {
-			seen[b] = true
-			bases = append(bases, b)
+		if !seen[canon] {
+			seen[canon] = true
+			bases = append(bases, strings.TrimRight(strings.TrimSpace(s), "/"))
 		}
 	}
 
