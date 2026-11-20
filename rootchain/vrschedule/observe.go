@@ -212,8 +212,7 @@ type CertifiedEVM struct {
 	RootRound, ParentRound, RootUCTime uint64
 	BlockHash, StateRoot               [32]byte
 	// ShardRound is the certified block's shard round (IR.RoundNumber). It is NOT an EVM block height (a skipped shard round makes the two
-	// differ): it is a label, copied into Source.EVMBlockNumber, which the frozen schema names a block number (schema-v1 section 9) and
-	// which no reader uses as a height. Every read is by BlockHash.
+	// differ): it is a label for logs. Source.EVMBlockNumber is the true height, resolved by BlockHash (HeaderReader). Every read is by BlockHash.
 	ShardRound uint64
 }
 
@@ -221,6 +220,12 @@ type CertifiedEVM struct {
 // output, or nil when VR has no open Published output there.
 type Reader interface {
 	OpenOutput(ctx context.Context, blockHash, stateRoot [32]byte) (*vrhandoff.Output, error)
+}
+
+// HeaderReader is the optional read of a certified block's true EVM number by its hash (RPC implements it, verifying the header's hash).
+// A Reader without it records the shard round, which is only right while no shard round was skipped: production readers implement it.
+type HeaderReader interface {
+	HeaderNumber(ctx context.Context, blockHash [32]byte) (uint64, error)
 }
 
 // QueuedReader is the optional read of the ScheduleActivation changes VR still holds at a certified block, bound into an output or not
@@ -296,8 +301,19 @@ func (o *Observer) Observe(ctx context.Context, c CertifiedEVM) error {
 	if !continuous || prev == r {
 		return nil
 	}
+	// the true EVM block number of the first certified block publishing R, from its header by hash. An unavailable header observes nothing:
+	// the run is restored and the worker retries this very block, exactly as for a source that is not durable
+	number := c.ShardRound
+	if hr, ok := o.Reader.(HeaderReader); ok {
+		n, herr := hr.HeaderNumber(ctx, c.BlockHash)
+		if herr != nil {
+			o.primed, o.lastRound, o.prev = primed, lastRound, prev
+			return herr
+		}
+		number = n
+	}
 	recorded, err := o.Sources.Record(SourceEntry{Source: vrhandoff.Source{ResultID: bytes.Clone(r[:]), EVMBlockHash: bytes.Clone(c.BlockHash[:]),
-		EVMBlockNumber: c.ShardRound, CertRootRound: c.RootRound, OutputCommit: bytes.Clone(out.State.Output.OutputCommit[:])}, CertUCTime: c.RootUCTime})
+		EVMBlockNumber: number, CertRootRound: c.RootRound, OutputCommit: bytes.Clone(out.State.Output.OutputCommit[:])}, CertUCTime: c.RootUCTime})
 	if err != nil {
 		// not durable: this block is not observed (the store kept nothing), so the worker's retry of it records the same first source
 		o.primed, o.lastRound, o.prev = primed, lastRound, prev
