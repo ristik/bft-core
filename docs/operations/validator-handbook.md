@@ -20,15 +20,19 @@ read -rp 'Public seed URL: ' SEED_URL
 read -rp 'Pinned UTB genesis EntryID: ' GENESIS_PIN
 read -rp 'Release SHA256SUMS digest: ' RELEASE_DIGEST
 install -d -m 700 release logs
-curl -fsS "${RELEASE_URL%/}/SHA256SUMS" -o release/SHA256SUMS
-printf '%s  %s\n' "$RELEASE_DIGEST" release/SHA256SUMS | sha256sum -c -
-while read -r digest name; do
-  curl -fsS "${RELEASE_URL%/}/$name" -o "release/$name" || break
-done < release/SHA256SUMS
-(cd release && sha256sum -c SHA256SUMS) &&
+install_release() (
+  set -eo pipefail
+  curl -fsS "${RELEASE_URL%/}/SHA256SUMS" -o release/SHA256SUMS
+  printf '%s  %s\n' "$RELEASE_DIGEST" release/SHA256SUMS | sha256sum -c -
+  while read -r digest name; do
+    curl -fsS "${RELEASE_URL%/}/$name" -o "release/$name"
+  done < release/SHA256SUMS
+  (cd release && sha256sum -c SHA256SUMS)
   install -m 755 release/ubft release/unicity-reth "$HOME/.local/bin/"
-ubft validator --help
-unicity-reth --version
+  ubft validator --help
+  unicity-reth --version
+)
+install_release
 ```
 
 Continue after all manifest entries verify. The commands below use free local ports 26652 (root), 28152 (shard), 30303 (ureth devp2p), 8545 (Ethereum RPC), 8551 (Engine), 25852 (root status) and 28352 (shard status). Adapt the ports together if these are in use.
@@ -110,14 +114,14 @@ unicity-reth node --chain "$UBFT_HOME/release/genesis.json" --datadir "$UBFT_HOM
   --authrpc.addr 127.0.0.1 --authrpc.port 8551 --authrpc.jwtsecret "$UBFT_HOME/jwt/jwt.hex" \
   "${URETH_FLAGS[@]}" >logs/ureth.log 2>&1 &
 ubft root-node run --home "$UBFT_HOME/root" --address /ip4/127.0.0.1/tcp/26652 \
-  --bootnodes "$ROOT_PEERS" --rpc-server-address 127.0.0.1:25852 \
+  --bootnodes "$ROOT_PEERS" --metrics prometheus --rpc-server-address 127.0.0.1:25852 \
   --trust-base release/trust-base.json --shard-conf release/full-shard-conf.json --profile-3 --q3-lane --b1-registry \
   --genesis-identities release/genesis-identities.json --vr-deployment release/vr-deployment.json \
   --pos-evm-rpc "$RPC_URL" --vr-shard-rpc http://127.0.0.1:28352 \
   --vr-evm-authority-socket "$UBFT_HOME/authority/pop.sock" \
   --vr-evm-authority-credential "$UBFT_HOME/authority/pop.cred" "${UTB[@]}" >logs/root.log 2>&1 &
 SHARD_ARGS=(--home "$UBFT_HOME/evm" --address /ip4/127.0.0.1/tcp/28152
-  --bootnodes "$ROOT_PEERS,$SHARD_PEERS" --rpc-server-address 127.0.0.1:28352
+  --bootnodes "$ROOT_PEERS,$SHARD_PEERS" --metrics prometheus --rpc-server-address 127.0.0.1:28352
   --trust-base release/trust-base.json --full-shard-conf release/full-shard-conf.json
   --executor engine-api --genesis release/genesis.json --b1-profile release/b1-profile.json
   --engine-url http://127.0.0.1:8551 --eth-url http://127.0.0.1:8545
@@ -131,7 +135,7 @@ ubft shard-node restore "${SHARD_ARGS[@]}" --tip-uc seed-pin.uc.cbor --tip-tr se
   --trust-body-id "$TRUST_BODY_ID" >logs/shard.log 2>&1 &
 ```
 
-The root follows from genesis. The shard and ureth replay certified data from archive peers. If the archive only serves staged members, the shard can finish catching up once the election publishes and the roots stage the successor. Keep all three services running through application. After a successful restore, supervise subsequent shard starts with `ubft shard-node run "${SHARD_ARGS[@]}"`. Preserve the databases, sessions and high-water records across restarts.
+The root starts from genesis, and the shard and ureth replay certified data from archive peers to the seed checkpoint. Before the roots stage your identity, your shard may retry its handshake and the local head may trail the network. Keep the services running through application and check for catch-up once the election publishes and the roots stage the successor. After a successful restore, supervise subsequent shard starts with `ubft shard-node run "${SHARD_ARGS[@]}"`. Preserve the databases, sessions and high-water records across restarts.
 
 ## 4. Apply, stake and join
 
