@@ -172,7 +172,8 @@ vrj_advance_authorities() {
   if [ "${VR_JOINER:-0}" = 1 ]; then
     local op=(--operator-socket "test-nodes/auth$vrj_id/operator.sock" --operator-credential "test-nodes/auth$vrj_id/operator.cred")
     build/ubft signing-authority complete-enrollment "${op[@]}" --shard-conf "$pdr" || { vrj_log "FAIL: the joiner's enrollment"; return 1; }
-    build/ubft signing-authority advance-epoch "${op[@]}" --trust-base test-nodes/trust-base-epoch2.json --shard-conf "$pdr" || { vrj_log "FAIL: the joiner's advance"; return 1; }
+    source helper.sh
+    authority_advance_scope "$vrj_id" 2 test-nodes/trust-base-epoch2.json "$pdr" || { vrj_log "FAIL: the joiner's advance"; return 1; }
     build/ubft signing-authority replace-session "${op[@]}" --out "test-nodes/auth$vrj_id/client.cred" || { vrj_log "FAIL: the joiner's session"; return 1; }
     vrj_log "PASS: the joiner's authority is enrolled against shard epoch 1, advanced to root epoch 2 and has a session"
   fi

@@ -86,8 +86,8 @@ h3_advance_authorities() { # root epoch, shard epoch, ids...
   # is bound from the verified handoff history), under its advanced authority.
   for i in ${joiners[@]+"${joiners[@]}"}; do
     stop_one_evm_validator "$i" 2>/dev/null || true
-    build/ubft signing-authority advance-epoch --operator-socket "test-nodes/auth$i/operator.sock" \
-      --operator-credential "test-nodes/auth$i/operator.cred" --trust-base "test-nodes/trust-base-epoch${rootEpoch}.json" --shard-conf "$pdr" || return 1
+    source helper.sh
+    authority_advance_scope "$i" "$rootEpoch" "test-nodes/trust-base-epoch${rootEpoch}.json" "$pdr" || return 1
     h3_restore_validator "$i" 2 || return 1
     echo "joiner $i advanced to root epoch $rootEpoch and restored"
   done

@@ -465,3 +465,43 @@ func TestSigningAuthorityRefusesToStartOnAVRGenerationWithoutTheFence(t *testing
 	require.ErrorIs(t, err, errVRFenceRequired)
 	require.NoFileExists(t, clientSocket)
 }
+
+// A P85 --pos-policy alone pins the standalone election of a pre-VR generation, which has no VR registry: it is not evidence of a VR
+// generation, so that authority starts without any fence input.
+func TestSigningAuthorityWithAP85PolicyAloneIsNotAVRGeneration(t *testing.T) {
+	logF := testobserve.NewFactory(t)
+	sockets := authoritySocketDir(t)
+	home := t.TempDir()
+	clientSocket := filepath.Join(sockets, "client", "client.sock")
+	operatorSocket := filepath.Join(sockets, "operator", "operator.sock")
+	operatorCredential := filepath.Join(home, "operator.cred")
+	run := func(ctx context.Context, args ...string) error {
+		c := New(logF)
+		c.baseCmd.SetOut(io.Discard)
+		c.baseCmd.SetArgs(args)
+		return c.Execute(ctx)
+	}
+	keyConf, err := (&keyConfFlags{KeyConfFile: filepath.Join(home, keyConfFileName)}).loadKeyConf(&baseFlags{}, true)
+	require.NoError(t, err)
+	nodeID, err := keyConf.NodeID()
+	require.NoError(t, err)
+	rootSigner, err := abcrypto.NewInMemorySecp256K1Signer()
+	require.NoError(t, err)
+	tb, ok := testtrustbase.NewTrustBase(t, rootSigner).(*types.RootTrustBaseV1)
+	require.True(t, ok)
+	trustBasePath := filepath.Join(home, "trust-base.json")
+	require.NoError(t, util.WriteJsonFile(trustBasePath, tb))
+	require.NoError(t, run(context.Background(), "signing-authority", "credential", "--out", operatorCredential))
+	pin := filepath.Join(home, "pos.json")
+	require.NoError(t, os.WriteFile(pin, []byte(`{"network":"0x`+strings.Repeat("22", 32)+`","chainId":3,"election":"0x00000000000000000000000000000000000000aa","ids":[1]}`), 0o600))
+
+	ctx, stop := context.WithTimeout(context.Background(), 3*time.Second)
+	defer stop()
+	err = run(ctx, "signing-authority", "run", "--home", home,
+		"--client-socket", clientSocket, "--operator-socket", operatorSocket, "--operator-credential", operatorCredential,
+		"--trust-base", trustBasePath, "--authority-id", "authority-1", "--node-id", nodeID.String(),
+		"--network-id", "5", "--partition-id", "7", "--shard-epoch", "0", "--root-epoch", strconv.FormatUint(tb.GetEpoch(), 10),
+		"--pos-policy", pin)
+	require.NotErrorIs(t, err, errVRFenceRequired)
+	require.NoError(t, err, "it started (and stopped with its context) with no VR fence input")
+}

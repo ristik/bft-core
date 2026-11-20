@@ -391,7 +391,11 @@ fullShardConf=test-nodes/evm-full-shard-conf-v2.json
 if [ "${Q3_B1:-0}" = 1 ]; then
   build/ubft engine-api genesis --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" --trust-base test-nodes/trust-base.json \
     --b1-profile test-nodes/b1-profile.json --alloc-source test-nodes/evm-genesis-funded.json --out "$chainSpec" \
-    --full-shard-conf "$fullShardConf" --identities-out test-nodes/b1-identities.json || { echo "finalized funded B1 genesis failed" >&2; exit 1; }
+    --full-shard-conf "$fullShardConf" --identities-out test-nodes/b1-identities.json >test-nodes/genesis.out || { cat test-nodes/genesis.out >&2; echo "finalized funded B1 genesis failed" >&2; exit 1; }
+  cat test-nodes/genesis.out
+  # the execution genesis block hash, from the generation's own artifacts: the pin an authority's activation fence holds its source to
+  awk '/^block hash:/{print $3}' test-nodes/genesis.out >test-nodes/execution-genesis-hash
+  [ -s test-nodes/execution-genesis-hash ] || { echo "no block hash in the genesis output" >&2; exit 1; }
 else
 build/ubft engine-api genesis --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" \
   --alloc-source test-nodes/evm-genesis-funded.json --out "$chainSpec" \
@@ -412,6 +416,10 @@ if [ "${SIGNING:-local}" = authority ]; then
   cp "$fullShardConf" "test-nodes/shard-conf-${partitionID}_0.json"
   enroll_evm_authorities "$validators" "$partitionID" || exit 1
   echo "enrolled $validators independent signing authorities against the full shard configuration"
+  if [ "${VR_LANE:-0}" = 1 ]; then
+    for i in $(seq 1 "$validators"); do provision_authority_fence "$i" || exit 1; done
+    echo "provisioned the activation fence of $validators signing authorities"
+  fi
   if [ "${VR_POS:-0}" = 1 ]; then
     for i in $(seq 1 "$validators"); do M2_CHAIN_ID="$postM2aChainID" vr_pos_pin_authority "$i" || exit 1; done
   fi

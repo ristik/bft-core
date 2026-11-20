@@ -237,10 +237,10 @@ func signingAuthorityRun(ctx context.Context, flags *signingAuthorityRunFlags) e
 		opts = append(opts, signingauthority.WithRequirePosPolicy())
 	}
 	// Whether this deployment is a VR generation comes from trusted enrollment data, never from an opt-in: the enrolled b1 profile carries
-	// the VR hook measurement (as the shard node's does), or the authority is given a VR registration or P85 policy. On a VR generation the
+	// the VR hook measurement (as the shard node's does), or the authority is given a VR registration policy (not a P85 --pos-policy). On a VR generation the
 	// fence is mandatory and the authority refuses to start without its activation source and generation pins. --vr-generation can only add
 	// to that (it cannot disable it).
-	fenceGen := vrFence{VR: flags.VRGeneration || flags.RegistrationPolicy != "" || len(flags.PosPolicies) > 0}
+	fenceGen := vrFence{VR: flags.VRGeneration || flags.RegistrationPolicy != ""} // never from --pos-policy: that also pins the standalone P85 election of a pre-VR generation
 	if flags.B1Profile != "" {
 		_, pf, perr := readB1ProfileFile(flags.B1Profile)
 		if perr != nil {
