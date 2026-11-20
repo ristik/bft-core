@@ -964,12 +964,10 @@ func vrVerify(v vrVerifyInput) (vrRootDeployment, error) {
 	if hashes["governanceFacet"] == hashes["repairFacet"] || hashes["repairFacet"] == hashes["recordsFacet"] || hashes["governanceFacet"] == hashes["recordsFacet"] {
 		return fail("two facet roles carry the same code")
 	}
-	// a known build's cap tuple is bound to its runtime AND its facets (astra's caps ruling, item 3): the caps are compile-time constants in the core
-	// and the facets, so the measurement's tuple means nothing for a core that delegates to other facets
-	if gov, rep, rec, known := b1state.VRFacetsFor(hashes["registry"]); known {
-		if hashes["governanceFacet"] != gov || hashes["repairFacet"] != rep || hashes["recordsFacet"] != rec {
-			return fail("the allocated facets are not the ones the PoS-capable VR build binds to its caps")
-		}
+	// the reviewed builds are enumerated: the caps are compile-time constants of the core and the facets, so an unknown core is refused, and the
+	// allocated build must be the one the plan selects (PoS plan: the PoS-capable build; PoA plan: the PoA build)
+	if err := b1state.CheckVRBuildRoles(hashes["registry"], hashes["governanceFacet"], hashes["repairFacet"], hashes["recordsFacet"], in.Pos != nil); err != nil {
+		return fail("%v", err)
 	}
 	composerHash, governorHash := hashes["composer"], hashes["governor"]
 	if in.Pos == nil && (lowerHex(composerHash[:]) != vrReviewedComposerCodeHash || !inertCode(codes["composer"])) {

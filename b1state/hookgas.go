@@ -130,8 +130,8 @@ var VRCaps = VRCallbackCaps{Elect: 4_000_000, Output: 1_000_000, Record: 1_500_0
 var VRCapsPos = VRCallbackCaps{Elect: 5_000_000, Output: 1_500_000, Record: 2_500_000, Resolved: 500_000, Attach: 3_000_000, Detach: 500_000, Gov: 1_000_000, Adopt: 1_000_000}
 
 // VRBuild binds a cap tuple to the code that enforces it: the compile-time constants of a VR build live in its core and its three facets, so a
-// tuple is only meaningful for exactly those runtimes (astra's ruling, item 3). The hashes are the runtimes at the genesis addresses
-// 0xff..03 to 0xff..06 (the VR hook fixtures of unicity-pos-contracts, test/vr/fixtures/vr-hook*.json).
+// tuple is only meaningful for exactly those runtimes (astra's ruling, item 3; #1217 r1 item 4). The hashes are the runtimes at the genesis
+// addresses 0xff..03 to 0xff..06 (the VR hook fixtures of unicity-pos-contracts, test/vr/fixtures/vr-hook*.json).
 type VRBuild struct {
 	Name             string
 	Caps             VRCallbackCaps
@@ -141,16 +141,26 @@ type VRBuild struct {
 	RecordsFacet     [32]byte
 }
 
-// VRBuildPos is the PoS-capable build. Every other VR runtime is a PoA-build generation (the mapping that was in force before this build: a VR
-// runtime that is not the PoS-capable one carries VRCaps), so its measurement is held to VRCaps and a measurement at the PoS caps of any other
-// runtime is refused. Retired generations keep their mapping by this default.
-var VRBuildPos = VRBuild{
-	Name: "pos", Caps: VRCapsPos,
-	RegistryCodeHash: mustHash32("b0c89f13324f81cf743578ac2180661d9fbd69f1f291d19fd3967b4f8adfd4f8"),
-	GovernanceFacet:  mustHash32("43e7dedbae009bbb1caa1dc58e191877e35869e72f4fc80d73e85e086e7728b7"),
-	RepairFacet:      mustHash32("f6ca6bba00e97a6736334b0c3f77bb4515ab7a816cb93a5995964e261d532418"),
-	RecordsFacet:     mustHash32("46a2a1b9f58fe9955ddc9bf6cfa20612dd5ba566ab91c527a33a083fb0d04743"),
-}
+// The two reviewed builds. A VR core that is in neither is refused: the caps are compile-time constants of the core and facets, and an
+// agreement among a PDR, an allocation and a measurement identifies the deployed bytes without establishing their callback ceilings.
+var (
+	VRBuildPoA = VRBuild{
+		Name: "poa", Caps: VRCaps,
+		RegistryCodeHash: mustHash32("19094777cb74c783f82392439d1f6c79fe62b6b57c2915790f00a9e16ee490e9"),
+		GovernanceFacet:  mustHash32("9bab91fbab48ab8099d5992975bbc613f2e685f249907d09181b9d5986270db1"),
+		RepairFacet:      mustHash32("f6ca6bba00e97a6736334b0c3f77bb4515ab7a816cb93a5995964e261d532418"),
+		RecordsFacet:     mustHash32("0fb689f1df19530291691b9a702cdfcbf31fb7f93d33f493686fc88fe5e38f0f"),
+	}
+	VRBuildPos = VRBuild{
+		Name: "pos", Caps: VRCapsPos,
+		RegistryCodeHash: mustHash32("b0c89f13324f81cf743578ac2180661d9fbd69f1f291d19fd3967b4f8adfd4f8"),
+		GovernanceFacet:  mustHash32("43e7dedbae009bbb1caa1dc58e191877e35869e72f4fc80d73e85e086e7728b7"),
+		RepairFacet:      mustHash32("f6ca6bba00e97a6736334b0c3f77bb4515ab7a816cb93a5995964e261d532418"),
+		RecordsFacet:     mustHash32("46a2a1b9f58fe9955ddc9bf6cfa20612dd5ba566ab91c527a33a083fb0d04743"),
+	}
+	// VRBuilds enumerates every reviewed build.
+	VRBuilds = []VRBuild{VRBuildPoA, VRBuildPos}
+)
 
 func mustHash32(s string) (h [32]byte) {
 	b, err := hex.DecodeString(s)
@@ -161,20 +171,30 @@ func mustHash32(s string) (h [32]byte) {
 	return h
 }
 
-// VRCapsFor is the cap tuple a VR runtime enforces: the PoS-capable build's, or the PoA build's.
-func VRCapsFor(registryCodeHash [32]byte) VRCallbackCaps {
-	if registryCodeHash == VRBuildPos.RegistryCodeHash {
-		return VRBuildPos.Caps
+// VRBuildFor is the reviewed build whose core runtime this is; ok is false for any other core (never a default).
+func VRBuildFor(registryCodeHash [32]byte) (VRBuild, bool) {
+	for _, b := range VRBuilds {
+		if b.RegistryCodeHash == registryCodeHash {
+			return b, true
+		}
 	}
-	return VRCaps
+	return VRBuild{}, false
 }
 
-// VRFacetsFor are the facet runtimes a known build binds (ok false for a runtime that is not the PoS-capable build: the PoA mapping pins none).
-func VRFacetsFor(registryCodeHash [32]byte) (governance, repair, records [32]byte, ok bool) {
-	if registryCodeHash != VRBuildPos.RegistryCodeHash {
-		return governance, repair, records, false
+// CheckVRBuildRoles is the allocation check: the three facets are exactly the reviewed build's, and the build is the one the plan selects
+// (pos true for a PoS-prototype plan).
+func CheckVRBuildRoles(registryCodeHash, governance, repair, records [32]byte, pos bool) error {
+	b, ok := VRBuildFor(registryCodeHash)
+	if !ok {
+		return errors.Join(ErrVRHookMeasurement, errors.New("the VR core is not a reviewed build"))
 	}
-	return VRBuildPos.GovernanceFacet, VRBuildPos.RepairFacet, VRBuildPos.RecordsFacet, true
+	if (b.Name == VRBuildPos.Name) != pos {
+		return errors.Join(ErrVRHookMeasurement, fmt.Errorf("the plan is %s but the allocated VR core is the %s build", map[bool]string{true: "a PoS plan", false: "a PoA plan"}[pos], b.Name))
+	}
+	if governance != b.GovernanceFacet || repair != b.RepairFacet || records != b.RecordsFacet {
+		return errors.Join(ErrVRHookMeasurement, fmt.Errorf("the allocated facets are not the %s build's", b.Name))
+	}
+	return nil
 }
 
 // VRCeilings are the legal bounds the worst cases were built at (schema v1 section 1; design section 3.5.4 and 10).
@@ -235,7 +255,9 @@ func (m VRHookMeasurement) Valid() error {
 		return errors.Join(ErrVRHookMeasurement, errors.New("H outside 1..32"))
 	case m.Registry == ([20]byte{}) || m.RegistryCodeHash == ([32]byte{}) || m.ModuleCodeHash == ([32]byte{}):
 		return errors.Join(ErrVRHookMeasurement, errors.New("no registry, registry code hash or module code hash"))
-	case m.Caps != VRCapsFor(m.RegistryCodeHash):
+	case !m.knownBuild():
+		return errors.Join(ErrVRHookMeasurement, errors.New("the measured VR core is not a reviewed build"))
+	case m.Caps != mustBuild(m.RegistryCodeHash).Caps:
 		return errors.Join(ErrVRHookMeasurement, errors.New("not measured at the callback caps of the VR build whose runtime it names"))
 	case m.Ceilings != VRLimits:
 		return errors.Join(ErrVRHookMeasurement, errors.New("not measured at the schema ceilings"))
@@ -373,4 +395,14 @@ func (m *VRHookMeasurement) UnmarshalJSON(b []byte) error {
 	}
 	*m = out
 	return nil
+}
+
+func (m VRHookMeasurement) knownBuild() bool {
+	_, ok := VRBuildFor(m.RegistryCodeHash)
+	return ok
+}
+
+func mustBuild(h [32]byte) VRBuild {
+	b, _ := VRBuildFor(h)
+	return b
 }
