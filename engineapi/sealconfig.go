@@ -7,6 +7,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/unicitynetwork/bft-core/m2contract"
+	"github.com/unicitynetwork/bft-core/vrschema"
 )
 
 var (
@@ -21,13 +22,17 @@ var (
 // sealConfigWire is returned by ureth from the same node-owned configuration
 // its payload builder and importer use. It is read on the JWT Engine endpoint.
 type sealConfigWire struct {
-	Version           uint64 `json:"version"`
-	MaxGas            uint64 `json:"maxGas"`
-	SystemGas         uint64 `json:"systemGas"`
-	BaseFeeFloor      uint64 `json:"baseFeeFloor"`
-	Elasticity        uint64 `json:"elasticity"`
-	ChangeDenominator uint64 `json:"changeDenominator"`
-	FeeCollector      string `json:"feeCollector"`
+	Version                  uint64 `json:"version"`
+	MaxGas                   uint64 `json:"maxGas"`
+	SystemGas                uint64 `json:"systemGas"`
+	BaseFeeFloor             uint64 `json:"baseFeeFloor"`
+	Elasticity               uint64 `json:"elasticity"`
+	ChangeDenominator        uint64 `json:"changeDenominator"`
+	FeeCollector             string `json:"feeCollector"`
+	EffectiveBlock           uint64 `json:"effectiveBlock"`
+	GenesisBaseFeeFloor      uint64 `json:"genesisBaseFeeFloor"`
+	GenesisChangeDenominator uint64 `json:"genesisChangeDenominator"`
+	GenesisFeeCollector      string `json:"genesisFeeCollector"`
 	pairConfigWire
 }
 
@@ -116,6 +121,21 @@ func (a *Adapter) readExecutionConfig(ctx context.Context, legacy [32]byte) (m2c
 	actual := [20]byte(common.HexToAddress(got.FeeCollector))
 	if actual == ([20]byte{}) {
 		return m2contract.ExecutionConfigV2{}, ErrUnsetCollector
+	}
+	// The journal and archive identity commits to the generation's bootstrap fees.
+	// Live payload checks independently prove the exact parent's VR state.
+	if a.resolveCollector != nil {
+		if err := vrschema.ValidateProfile(got.MaxGas, got.SystemGas, vrschema.FeeParams{
+			BaseFeeFloor: got.BaseFeeFloor, ChangeDenominator: got.ChangeDenominator, FeeCollector: actual,
+		}); err != nil {
+			return m2contract.ExecutionConfigV2{}, fmt.Errorf("%w: %w", ErrSealConfigProfile, err)
+		}
+		if !common.IsHexAddress(got.GenesisFeeCollector) {
+			return m2contract.ExecutionConfigV2{}, ErrSealConfigCollector
+		}
+		actual = [20]byte(common.HexToAddress(got.GenesisFeeCollector))
+		got.BaseFeeFloor = got.GenesisBaseFeeFloor
+		got.ChangeDenominator = got.GenesisChangeDenominator
 	}
 	if actual != a.feeCollector {
 		return m2contract.ExecutionConfigV2{}, ErrSealConfigCollector

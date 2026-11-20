@@ -41,6 +41,11 @@ type blockHeaderJSON struct {
 	Timestamp  quantity `json:"timestamp"`
 }
 
+// CallContext makes the local execution transport available to proof readers.
+func (c *EthClient) CallContext(ctx context.Context, result any, method string, args ...any) error {
+	return c.call(ctx, method, args, result)
+}
+
 func (c *EthClient) call(ctx context.Context, method string, params []any, out any) error {
 	reqBody, err := json.Marshal(rpcRequest{JSONRPC: "2.0", ID: 1, Method: method, Params: params})
 	if err != nil {
