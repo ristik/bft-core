@@ -26,6 +26,7 @@ vrs_serve() { # <dir> <port>
 vrs_archive_ready() { [ -n "$(find "$EVM_ARCHIVE_ROOT/evm1" -type f -name '*' 2>/dev/null | head -1)" ] && build/ubft seed export --root-rpc "$(vrb_rpc_of 1)" --utb-genesis-id "$(vrs_pin)" --archive "$EVM_ARCHIVE_ROOT/evm1" --out "$vrs_dir/probe" >/dev/null 2>&1; }
 
 vrs_export() {
+  declare -F m2_rpc_port >/dev/null || vrj_source_libs || return 1   # m2_rpc_port, evm_validator_rpc_addr: the lane libraries
   rm -rf "$vrs_dir"; mkdir -p "$vrs_dir"
   vrb_wait 600 "validator 1's archive holds a certified record and its seed verifies" vrs_archive_ready || return 1
   build/ubft seed export --root-rpc "$(vrb_rpc_of 1)" --utb-genesis-id "$(vrs_pin)" --archive "$EVM_ARCHIVE_ROOT/evm1" \
@@ -108,6 +109,7 @@ vrs_epoch_ready() { # the exported seed's checkpoint is of root epoch >= 2 and i
     && python3 -c "import json,sys;m=json.load(open('$vrs_dir/export2/manifest.json'));sys.exit(0 if m['checkpoint']['rootEpoch']>=2 and m['network']['utbTipEpoch']>=2 else 1)"
 }
 vrs_second() {
+  declare -F m2_rpc_port >/dev/null || vrj_source_libs || return 1
   local pin d=$vrs_dir/second; pin=$(vrs_pin); mkdir -p "$vrs_dir" "$d"
   vrb_wait 900 "validator 1's archive holds a root epoch 2 certified record and the history tip is epoch 2" vrs_epoch_ready || return 1
   build/ubft seed export --root-rpc "$(vrb_rpc_of 1)" --utb-genesis-id "$pin" --archive "$EVM_ARCHIVE_ROOT/evm1" --out "$vrs_dir/export2" 2>&1 | tee "$VR_EVIDENCE/seed2-export.log"
