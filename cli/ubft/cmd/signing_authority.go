@@ -85,6 +85,8 @@ type signingAuthorityRunFlags struct {
 	// the automated root member's narrow channel: the handoff possession proof only (VT-09); both or neither
 	PoPSocket     string
 	PoPCredential string
+	// MetricsAddress, when set, serves the authority's read-only status gauges (unicity_authority_*) as Prometheus metrics on a loopback address
+	MetricsAddress string
 
 	// the registrations this authority may sign (VT-10); empty: none
 	RegistrationPolicy string
@@ -127,6 +129,7 @@ key exists: the authority starts pending and admits no client until complete-enr
 	cmd.Flags().StringVar(&flags.OperatorCredential, "operator-credential", "", "path to the operator credential (see `signing-authority credential`)")
 	cmd.Flags().StringVar(&flags.PoPSocket, "pop-socket", "", "Unix socket of the automated root member (`root-node run --vr-evm-authority-socket`): it serves the handoff possession proof and nothing else; with --pop-credential")
 	cmd.Flags().StringVar(&flags.PoPCredential, "pop-credential", "", "path to the member's credential (see `signing-authority credential`); a credential of its own, not the operator's. The root process must run as the authority's uid to reach the socket (its directory is 0700), so keep the operator credential file unreadable by the root process: the member credential is then the only thing it can use")
+	cmd.Flags().StringVar(&flags.MetricsAddress, "metrics-address", "", "serve the authority's read-only status (enrolled, faulted, retired, session, signatures, epochs) as Prometheus metrics (unicity_authority_*) on this loopback host:port; no key, request or response bytes are in it. Off by default")
 	cmd.Flags().StringVar(&flags.RegistrationPolicy, "registration-policy", "", "JSON file pinning the VR deployment and listing the registrations this authority may sign for its EVM key (VT-10): without it the authority signs none. Fixed for the authority's lifetime")
 	cmd.Flags().StringArrayVar(&flags.PosPolicies, "pos-policy", nil, "JSON file pinning the P85 election (network word, chain id, ElectionPolicy address) and the identity ids this authority's EVM key may sign possession proofs for (#1216): without a pin the authority signs no P85 assignment possession. Fixed for the authority's lifetime; `signing-authority pos-policy` pins it once on a running authority")
 	cmd.Flags().BoolVar(&flags.RequirePosPolicy, "require-pos-policy", false, "refuse every P85 possession signature (election, delegation, assignment) until the P85 pin is set; with --pos-policy the pin is fixed from startup")
@@ -266,6 +269,12 @@ func signingAuthorityRun(ctx context.Context, flags *signingAuthorityRunFlags) e
 	g.Go(func() error { return server.Serve(operatorListener, service.OperatorEndpoint) })
 	if popListener != nil {
 		g.Go(func() error { return server.Serve(popListener, service.PoPEndpoint) })
+	}
+	if flags.MetricsAddress != "" {
+		if err := checkAuthorityMetricsAddress(flags.MetricsAddress); err != nil {
+			return err
+		}
+		g.Go(func() error { return serveAuthorityMetrics(gctx, log, flags.MetricsAddress, authority) })
 	}
 	g.Go(func() error {
 		<-gctx.Done()

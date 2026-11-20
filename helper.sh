@@ -269,6 +269,8 @@ function init_evm_authorities() {
     fi
     # the PoS lane pins the election after the genesis (DEVELOPMENT opt-in; production gives --pos-policy at startup and --require-pos-policy)
     [ "${VR_POS:-0}" != 1 ] || vrArgs+=(--dev-allow-late-pos-policy)
+    # MONITORING=1 (VT-12): the authority serves its read-only status gauges (unicity_authority_*) on loopback, port MON_AUTH_PORT_BASE+i-1
+    [ "${MONITORING:-0}" != 1 ] || vrArgs+=(--metrics-address "127.0.0.1:$(( ${MON_AUTH_PORT_BASE:-29301} + i - 1 ))")
     build/ubft signing-authority run --home "$home" ${vrArgs[@]+"${vrArgs[@]}"} \
       --client-socket "$home/client.sock" --operator-socket "$home/operator.sock" \
       --operator-credential "$home/operator.cred" --authority-id "paired-evm-$i" \
@@ -616,6 +618,8 @@ function start_one_evm_validator() {
   local rpcArgs=()
   if [ "$exposeRPC" == "rpc" ]; then
     rpcArgs=(--rpc-server-address "$(evm_validator_rpc_addr "$i")")
+    # MONITORING=1 (VT-12): the shard node serves its Prometheus metrics on that address too
+    [ "${MONITORING:-0}" != 1 ] || rpcArgs+=(--metrics prometheus)
   fi
 
   local signingArgs=()

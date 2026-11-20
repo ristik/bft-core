@@ -11,6 +11,7 @@ import (
 
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/unicitynetwork/bft-core/evmassign"
+	"github.com/unicitynetwork/bft-core/monitoring"
 	"github.com/unicitynetwork/bft-core/q3format"
 	"github.com/unicitynetwork/bft-core/vradmit"
 	"github.com/unicitynetwork/bft-core/vrhandoff"
@@ -261,7 +262,7 @@ func (s *Service) send(out []Message) {
 }
 
 func (s *Service) markDead(d [32]byte) {
-	s.log().Info("VR handoff: the intent died", "intent", fmt.Sprintf("%x", d[:8]))
+	s.log().Info("VR handoff: the intent died", "intent", fmt.Sprintf("%x", d[:8]), monitoring.Event(monitoring.EvVRIntentDied))
 	s.dead = append(s.dead, d)
 	if len(s.dead) > DeadIntents {
 		s.dead = s.dead[len(s.dead)-DeadIntents:]
@@ -312,7 +313,7 @@ func (s *Service) updateLocked(c Committed) followUp {
 			}
 		}
 		s.log().Info("VR handoff: intent", "intent", fmt.Sprintf("%x", st.digest[:8]), "attempt", st.d.Intent.Attempt, "anchorRound", st.d.Intent.AnchorRound,
-			"assembler0", vrschema.Assembler(st.order, 0))
+			"assembler0", vrschema.Assembler(st.order, 0), monitoring.Event(monitoring.EvVRIntentDerived))
 	}
 	st := s.cur
 	st.prepared = c.Prepared
@@ -919,7 +920,7 @@ func (s *Service) runAssembly(t *assemblyTask) (Message, followUp, bool) {
 		s.log().Warn("VR handoff: this root's own assembly is not retained", "outcome", o.String(), "error", err)
 		return Message{}, f, false
 	}
-	s.log().Info("VR handoff: assembled", "intent", fmt.Sprintf("%x", a.IntentDigest[:8]), "view", t.view)
+	s.log().Info("VR handoff: assembled", "intent", fmt.Sprintf("%x", a.IntentDigest[:8]), "view", t.view, monitoring.Event(monitoring.EvVRHandoffAssembled))
 	return m, f, true
 }
 
@@ -993,7 +994,7 @@ func (s *Service) runCertificate(t *certTask) {
 	}
 	plan := t.plan
 	st.iret = &plan
-	s.log().Info("VR handoff: a complete verified certificate is held (I-RET)", "intent", fmt.Sprintf("%x", st.digest[:8]), "view", t.view)
+	s.log().Info("VR handoff: a complete verified certificate is held (I-RET)", "intent", fmt.Sprintf("%x", st.digest[:8]), "view", t.view, monitoring.Event(monitoring.EvVRHandoffCertified))
 }
 
 type planInput struct {

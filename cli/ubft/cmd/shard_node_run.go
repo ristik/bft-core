@@ -32,6 +32,7 @@ import (
 
 	"github.com/unicitynetwork/bft-go-base/types"
 
+	"github.com/unicitynetwork/bft-core/monitoring"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/zkverifier"
 
 	"github.com/unicitynetwork/bft-core/archive"
@@ -1251,7 +1252,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 					if err := historicalTrust.ActivateHandoff(bundle.Body.Epoch); err != nil {
 						return err
 					}
-					flags.observe.Logger().Info("handoff activated", "rootEpoch", bundle.Body.Epoch)
+					flags.observe.Logger().Info("handoff activated", "rootEpoch", bundle.Body.Epoch, monitoring.Event(monitoring.EvShardHandoffActive))
 					refreshArchivePolicy()
 					return nil
 				}}
@@ -1322,7 +1323,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				InstallEVMTransition: executor.(*engineapi.Adapter).InstallEpochTransition,
 				Activate:             q3Trust.ActivateQ3,
 				Log: func(epoch uint64) {
-					flags.observe.Logger().Info("handoff activated", "rootEpoch", epoch, "q3", true)
+					flags.observe.Logger().Info("handoff activated", "rootEpoch", epoch, "q3", true, monitoring.Event(monitoring.EvShardHandoffActive))
 					if tb, tbErr := q3Trust.Verified().GetByEpoch(ctx, epoch); tbErr == nil {
 						follower.addRoots(tb)
 					}
@@ -1729,6 +1730,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		return fmt.Errorf("creating metrics: %w", err)
 	}
 	node.SetMetrics(metrics)
+	registerShardMonitoring(ctx, flags, flags.observe.Logger(), peer, node, executor, func() []libp2ppeer.ID { return activePeers.Peers() }, nil)
 
 	if err := peer.BootstrapConnect(ctx, flags.observe.Logger()); err != nil {
 		return fmt.Errorf("bootstrap connect: %w", err)

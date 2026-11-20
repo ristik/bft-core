@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/unicitynetwork/bft-core/monitoring"
 	"github.com/unicitynetwork/bft-core/vrhandoff"
 	"github.com/unicitynetwork/bft-core/vrschema"
 	"github.com/unicitynetwork/bft-go-base/types/hex"
@@ -276,7 +277,7 @@ func (o *Observer) Observe(ctx context.Context, c CertifiedEVM) error {
 		return err
 	}
 	if recorded && o.Log != nil {
-		o.Log.Info("VR output published: source recorded", "result", fmt.Sprintf("%x", r[:8]), "evmBlock", c.BlockNumber, "certRootRound", c.RootRound)
+		o.Log.Info("VR output published: source recorded", "result", fmt.Sprintf("%x", r[:8]), "evmBlock", c.BlockNumber, "certRootRound", c.RootRound, monitoring.Event(monitoring.EvVROutputPublished))
 	}
 	return nil
 }

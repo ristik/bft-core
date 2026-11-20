@@ -23,6 +23,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/crypto"
 
+	"github.com/unicitynetwork/bft-core/monitoring"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootchain/evmstate"
@@ -335,7 +336,7 @@ func (s *Service) Poll(ctx context.Context) error {
 			return fmt.Errorf("posretire: %d requests pending, the set is full", len(s.pending))
 		}
 		s.pending = append(s.pending, pendingItem{Key: r.Key})
-		s.log.Info("retirement requested", "id", r.ID, "generation", r.Generation, "evmBlock", r.Block)
+		s.log.Info("retirement requested", "id", r.ID, "generation", r.Generation, "evmBlock", r.Block, monitoring.Event(monitoring.EvExitRetirementReq))
 	}
 	s.cursor = max(s.cursor, to)
 	s.persistLocked()
@@ -428,7 +429,7 @@ func (s *Service) collect(ck cacheKey, fetchAt [32]byte) {
 	case !facts.NotImported:
 		// the registry retired the generation: complete (a generation only advances after its predecessor was retired, so a superseded
 		// request ends here too)
-		s.log.Info("retirement request complete (the generation is retired in the registry)", "id", ck.key.ID, "generation", ck.key.Generation)
+		s.log.Info("retirement request complete (the generation is retired in the registry)", "id", ck.key.ID, "generation", ck.key.Generation, monitoring.Event(monitoring.EvExitRetirementDone))
 		s.removeLocked(ck.key, true)
 		return
 	case !facts.Requested || !facts.NoLiveExposures || !facts.NoLotReferences || !facts.RecordsCaughtUp:
@@ -463,7 +464,7 @@ func (s *Service) collect(ck cacheKey, fetchAt [32]byte) {
 		s.cache = s.cache[len(s.cache)-MaxCache:]
 	}
 	s.log.Info("retirement proof ready", "id", ck.key.ID, "generation", ck.key.Generation, "latencyMs", s.cfg.Now().Sub(started).Milliseconds(),
-		"parentRoot", fmt.Sprintf("%x", ck.parent.StateRoot), "parentBlock", fmt.Sprintf("%x", ck.parent.BlockHash), "witnessBytes", len(witness))
+		"parentRoot", fmt.Sprintf("%x", ck.parent.StateRoot), "parentBlock", fmt.Sprintf("%x", ck.parent.BlockHash), "witnessBytes", len(witness), monitoring.Event(monitoring.EvExitRetirementProof))
 }
 
 // Ready implements storage.RetirementProposer.

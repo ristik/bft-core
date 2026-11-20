@@ -8,6 +8,7 @@ import (
 	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/internal/weightvalidation"
+	"github.com/unicitynetwork/bft-core/monitoring"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	"github.com/unicitynetwork/bft-core/vradmit"
@@ -199,7 +200,7 @@ func (x *ConsensusManager) vrRecoveryRoute(parent *storage.ExecutedBlock, contro
 	case control.Phase == "prepared" && !lapsed:
 		held := x.heldRecoveryBody(control)
 		if held {
-			x.log.Info("VR recovery: the leader follows the exact recovery", "round", round, "phase", control.Phase, "attempt", control.Attempt)
+			x.log.Info("VR recovery: the leader follows the exact recovery", "round", round, "phase", control.Phase, "attempt", control.Attempt, monitoring.Event(monitoring.EvVRRecoveryFollowed))
 		}
 		return held
 	case control.Phase != "idle" && control.Phase != "aborted" && !lapsed:
@@ -230,11 +231,11 @@ func (x *ConsensusManager) vrRecoveryRoute(parent *storage.ExecutedBlock, contro
 		eligible = x.vr.recoveryEligible
 	}
 	if err := eligible(parent, c); err != nil {
-		x.log.Info("VR recovery: the request is dropped", "round", round, "attempt", attempt, "reason", err)
+		x.log.Info("VR recovery: the request is dropped", "round", round, "attempt", attempt, "reason", err, monitoring.Event(monitoring.EvVRRecoveryDropped))
 		x.dropRecoveryIntent(gen)
 		return false
 	}
-	x.log.Info("VR recovery: the leader orders the Prepare of the exact recovery", "round", round, "attempt", attempt)
+	x.log.Info("VR recovery: the leader orders the Prepare of the exact recovery", "round", round, "attempt", attempt, monitoring.Event(monitoring.EvVRRecoveryOrdered))
 	return true
 }
 

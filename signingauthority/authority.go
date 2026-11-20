@@ -11,6 +11,7 @@ import (
 	"github.com/unicitynetwork/bft-core/activationproof"
 	"math"
 	"sync"
+	"time"
 
 	"github.com/unicitynetwork/bft-core/handoff"
 	"github.com/unicitynetwork/bft-core/internal/quorumweight"
@@ -53,6 +54,9 @@ type Authority struct {
 	generation uint64
 	// state latches faulted on a detected inconsistency and never recovers within this lifetime.
 	state health
+	// signs and lastSign are the diagnostic activity counters behind Activity (monitoring only; never consulted by a decision).
+	signs    uint64
+	lastSign time.Time
 	// rec is the one reservation this authority holds.
 	rec          record
 	scopeVersion uint64
@@ -585,7 +589,18 @@ func (a *Authority) Sign(s Session) error {
 		return fmt.Errorf("%w: the signed record would be %d bytes, limit is %d", ErrRequestTooLarge, size, MaxRecordBytes)
 	}
 	a.rec = candidate
+	a.signs++
+	a.lastSign = time.Now()
 	return nil
+}
+
+// Activity is the diagnostic count of signatures this authority lifetime made and when the last one was made (the zero time when none).
+// It is read by the monitoring endpoint and says nothing about what was signed. It is a function, not a method, so the authority's method
+// surface (pinned by TestAuthorityOffersNoGenericSigningOrKeyImport) stays what it was.
+func Activity(a *Authority) (signs uint64, last time.Time) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.signs, a.lastSign
 }
 
 // RetainResponse makes the signed response replayable before any of it can leave.

@@ -1,0 +1,312 @@
+# VT-12 validator alert pack (bft-core#1152). One file; every alert has a runbook in docs/operations/monitoring/runbooks.md.
+# Metrics: docs/operations/monitoring/metrics-catalogue.md. The label `validator` is set by the scrape configuration (prometheus-validator.yml).
+# Check with: promtool check rules validator-alerts.yml
+groups:
+  - name: unicity-validator
+    rules:
+      - alert: UnicityTargetDown
+        expr: up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'A validator scrape target is down.'
+          description: 'Prometheus cannot scrape {{ $labels.job }} on {{ $labels.instance }} (validator {{ $labels.validator }}): the process is down, hung or unreachable.'
+          runbook: docs/operations/monitoring/runbooks.md#unicitytargetdown
+      - alert: UnicityRootStalled
+        expr: changes(unicity_root_committed_round[3m]) == 0 and on(instance) unicity_root_member == 1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'The root chain has committed nothing for 3 minutes.'
+          description: 'Root {{ $labels.validator }} sees no new committed root block: the committee has lost quorum or this node is cut off.'
+          runbook: docs/operations/monitoring/runbooks.md#unicityrootstalled
+      - alert: UnicityRootRoundLag
+        expr: unicity_root_round_lag > 30
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'The root round runs far ahead of the committed head.'
+          description: 'Round {{ $value }} rounds ahead of the committed block on root {{ $labels.validator }}: rounds time out, or this node is behind.'
+          runbook: docs/operations/monitoring/runbooks.md#unicityrootroundlag
+      - alert: UnicityRootVotesMissed
+        expr: increase(unicity_root_votes_missed_total{reason="no_vote"}[5m]) > 10 and on(instance) unicity_root_member == 1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'A committee root ended more than 10 rounds without voting in 5 minutes.'
+          description: 'Root {{ $labels.validator }} is a committee member and signed nothing in {{ $value }} rounds.'
+          runbook: docs/operations/monitoring/runbooks.md#unicityrootvotesmissed
+      - alert: UnicityRootRoundTimeouts
+        expr: increase(unicity_root_round_timeouts_total[5m]) > 20
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Root rounds keep timing out.'
+          description: 'The round timer of root {{ $labels.validator }} fired {{ $value }} times in 5 minutes: leaders are missing or the network is partitioned.'
+          runbook: docs/operations/monitoring/runbooks.md#unicityrootroundtimeouts
+      - alert: UnicityRootNotMember
+        expr: unicity_root_member == 0 and on(validator) unicity_vr_identity_state == 4
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'An Active identity runs a root that is not in the committee.'
+          description: 'VR says the identity is Active but its root is a follower; it joins only at a boundary, so a long-lasting state is wrong.'
+          runbook: docs/operations/monitoring/runbooks.md#unicityrootnotmember
+      - alert: UnicityPeersLow
+        expr: unicity_peers_connected < unicity_peers_expected and unicity_peers_connected > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Fewer peers connected than expected.'
+          description: '{{ $labels.job }} on validator {{ $labels.validator }} has {{ $value }} {{ $labels.network }} peers connected, fewer than the committee.'
+          runbook: docs/operations/monitoring/runbooks.md#unicitypeerslow
+      - alert: UnicityNoPeers
+        expr: unicity_peers_connected == 0 and unicity_peers_expected > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'No peers connected.'
+          description: '{{ $labels.job }} on validator {{ $labels.validator }} reaches none of the {{ $labels.network }} peers: it is isolated.'
+          runbook: docs/operations/monitoring/runbooks.md#unicitynopeers
+      - alert: UnicityShardNotCertifying
+        expr: unicity_shard_certified_lag_rounds > 5 or ab_shardnode_certification_no_progress_age_seconds > 120
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'The shard node submits work the roots do not certify.'
+          description: 'Shard node of validator {{ $labels.validator }}: submitted rounds run ahead of certified ones, or there has been no certification progress for 2 minutes.'
+          runbook: docs/operations/monitoring/runbooks.md#unicityshardnotcertifying
+      - alert: UnicityShardNotVoting
+        expr: unicity_shard_voting == 0 or unicity_shard_executor_ok == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'The shard node withholds certification or its executor fails.'
+          description: 'Shard node of validator {{ $labels.validator }} is not voting, or its Engine API calls fail.'
+          runbook: docs/operations/monitoring/runbooks.md#unicityshardnotvoting
+      - alert: UnicityShardExecutionCatchUp
+        expr: unicity_shard_execution_ready == 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'The shard node is still catching its executor up.'
+          description: 'Execution recovery on validator {{ $labels.validator }} has not finished after 10 minutes.'
+          runbook: docs/operations/monitoring/runbooks.md#unicityshardexecutioncatchup
+      - alert: UnicityEvmHeadLag
+        expr: unicity_evm_head_lag_blocks > 5
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'The local execution client trails the public head.'
+          description: 'Validator {{ $labels.validator }}: ureth is {{ $value }} blocks behind the public head.'
+          runbook: docs/operations/monitoring/runbooks.md#unicityevmheadlag
+      - alert: UnicityEvmUnreachable
+        expr: unicity_evm_local_up == 0 or unicity_evm_unreachable == 1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'The local execution client does not answer.'
+          description: 'Validator {{ $labels.validator }}: the VR exporter or the shard node cannot read ureth.'
+          runbook: docs/operations/monitoring/runbooks.md#unicityevmunreachable
+      - alert: UnicityChainStalled
+        expr: unicity_evm_public_head_age_seconds > 120
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'No EVM block was produced for 2 minutes.'
+          description: 'The public head is {{ $value }} seconds old: eligible blocks are not being produced.'
+          runbook: docs/operations/monitoring/runbooks.md#unicitychainstalled
+      - alert: UnicityBlockCadenceLow
+        expr: rate(unicity_evm_public_head_number[5m]) * 60 < 3
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'The EVM block cadence is below plan.'
+          description: 'Fewer than 3 blocks per minute over 5 minutes (plan: about 6 at a 10 s interval).'
+          runbook: docs/operations/monitoring/runbooks.md#unicityblockcadencelow
+      - alert: UnicityDiskLow
+        expr: unicity_disk_free_ratio < 0.10
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Less than 10 percent of the disk is free.'
+          description: 'Volume {{ $labels.volume }} of {{ $labels.job }} on validator {{ $labels.validator }} has {{ $value | humanizePercentage }} free.'
+          runbook: docs/operations/monitoring/runbooks.md#unicitydisklow
+      - alert: UnicityDiskCritical
+        expr: unicity_disk_free_ratio < 0.03 or unicity_disk_stat_error == 1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'Less than 3 percent of the disk is free, or it cannot be read.'
+          description: 'Volume {{ $labels.volume }} of {{ $labels.job }} on validator {{ $labels.validator }} is nearly full: the node will fail to write its state.'
+          runbook: docs/operations/monitoring/runbooks.md#unicitydiskcritical
+      - alert: UnicityAuthorityFaulted
+        expr: unicity_authority_faulted == 1 or unicity_authority_key_lost == 1
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'The signing authority latched faulted or lost its key.'
+          description: 'Authority of validator {{ $labels.validator }} signs nothing further until it is restarted and re-enrolled.'
+          runbook: docs/operations/monitoring/runbooks.md#unicityauthorityfaulted
+      - alert: UnicityAuthorityRetired
+        expr: unicity_authority_retired == 1
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'The signing authority is retired.'
+          description: 'The validator was removed from the committee; its authority signs nothing further.'
+          runbook: docs/operations/monitoring/runbooks.md#unicityauthorityretired
+      - alert: UnicityAuthorityNoSession
+        expr: unicity_authority_enrolled == 1 and unicity_authority_session_issued == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'No client session on an enrolled authority.'
+          description: 'The shard node of validator {{ $labels.validator }} has no session to sign through: replace-session is needed.'
+          runbook: docs/operations/monitoring/runbooks.md#unicityauthoritynosession
+      - alert: UnicityAuthoritySigningStalled
+        expr: unicity_authority_last_signature_age_seconds > 120 and on(validator) unicity_shard_active == 1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'The authority has signed nothing for 2 minutes while the shard node is active.'
+          description: 'Authority of validator {{ $labels.validator }}: last signature {{ $value }} seconds ago.'
+          runbook: docs/operations/monitoring/runbooks.md#unicityauthoritysigningstalled
+      - alert: UnicityVRModuleUnhealthy
+        expr: unicity_vr_module_health > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'VR reports its election module unhealthy.'
+          description: 'VR module health is {{ $value }} (1 Faulted, 2 Stalled, 3 Inconsistent): elections are not running.'
+          runbook: docs/operations/monitoring/runbooks.md#unicityvrmoduleunhealthy
+      - alert: UnicityVRExporterDown
+        expr: unicity_vr_up == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'The VR exporter cannot read VR.'
+          description: 'The exporter of validator {{ $labels.validator }} could not read VR through its RPC for 2 minutes.'
+          runbook: docs/operations/monitoring/runbooks.md#unicityvrexporterdown
+      - alert: UnicityRecordApplicationLag
+        expr: unicity_vr_record_application_lag > 128
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'VR applies root records slower than they are imported.'
+          description: 'Application lag {{ $value }} on validator {{ $labels.validator }} persists after a burst.'
+          runbook: docs/operations/monitoring/runbooks.md#unicityrecordapplicationlag
+      - alert: UnicityRecordImportLag
+        expr: unicity_vr_record_import_lag > 128
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'The SealRegistry imports root records slower than the root projects them.'
+          description: 'Import lag {{ $value }} on validator {{ $labels.validator }} persists after a burst.'
+          runbook: docs/operations/monitoring/runbooks.md#unicityrecordimportlag
+      - alert: UnicityRecordCursorStuck
+        expr: changes(unicity_vr_record_cursor[10m]) == 0 and unicity_vr_record_application_lag > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'VR''s record cursor does not move while records are waiting.'
+          description: 'Records are imported but VR applies none: the records hook is not running.'
+          runbook: docs/operations/monitoring/runbooks.md#unicityrecordcursorstuck
+      - alert: UnicityCustodyBehind
+        expr: unicity_vr_custody_cursor_minus_vr_cursor < 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Custody is persistently behind the prefix VR delivered.'
+          description: 'Custody cursor trails VR by {{ $value }} on validator {{ $labels.validator }}; a custody lead alone needs no action.'
+          runbook: docs/operations/monitoring/runbooks.md#unicitycustodybehind
+      - alert: UnicityRecordArrivalLimit
+        expr: increase(unicity_vr_record_root_target[5m]) > 7.2 * increase(unicity_vr_read_block[5m]) + 32
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'Root records arrive faster than the operating limit.'
+          description: 'More than 72 projected records per ten eligible blocks plus one burst: pace record-producing operations.'
+          runbook: docs/operations/monitoring/runbooks.md#unicityrecordarrivallimit
+      - alert: UnicityOutputExpired
+        expr: unicity_vr_open_output_progress_left < 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'VR''s open output is past its expiry.'
+          description: 'The open output is expired and has not been replaced: the election is stuck.'
+          runbook: docs/operations/monitoring/runbooks.md#unicityoutputexpired
+      - alert: UnicityIdentityParked
+        expr: unicity_vr_identity_state == 9
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'The validator identity is Parked.'
+          description: 'Identity is Parked: it is not electable until its owner or the governance acts.'
+          runbook: docs/operations/monitoring/runbooks.md#unicityidentityparked
+      - alert: UnicityKeysMismatch
+        expr: unicity_vr_identity_known == 1 and unicity_vr_identity_local_keys == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'The local keys do not match the binding in VR.'
+          description: 'The node keys of validator {{ $labels.validator }} match neither the current nor the staged binding.'
+          runbook: docs/operations/monitoring/runbooks.md#unicitykeysmismatch
+      - alert: UnicityUpgradeRequired
+        expr: unicity_upgrade_required == 1 or ab_unicity_upgrade_required{state="effective"} == 1
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'The activation schedule needs a release this binary lacks.'
+          description: 'Upgrade validator {{ $labels.validator }} before root epoch {{ with query "min(unicity_upgrade_activation_epoch)" }}{{ . | first | value }}{{ end }}.'
+          runbook: docs/operations/monitoring/runbooks.md#unicityupgraderequired
+      - alert: UnicityUpgradePending
+        expr: ab_unicity_upgrade_required{state="pending"} == 1
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: 'A pending activation needs a release this binary lacks.'
+          description: 'A ScheduleActivation bound into VR''s open output names rule {{ $labels.rule }} for root epoch {{ $labels.epoch }}, which this binary does not implement: upgrade validator {{ $labels.validator }} ahead of the epoch.'
+          runbook: docs/operations/monitoring/runbooks.md#unicityupgradepending
+      - alert: UnicityUpgradeImminent
+        expr: unicity_upgrade_required == 1 and on(instance) (unicity_upgrade_activation_epoch - unicity_root_epoch) <= 2
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: 'An unsupported rule activates within two epochs.'
+          description: 'This node will refuse to run past the activation; upgrade now.'
+          runbook: docs/operations/monitoring/runbooks.md#unicityupgradeimminent

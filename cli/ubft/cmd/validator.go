@@ -803,7 +803,7 @@ apply (deposit) -> the Foundation admits (activation at the next boundary) -> ex
 Reads and transactions go to a public JSON-RPC endpoint only. Every transaction is previewed decoded and simulated first;
 --dry-run stops there.`,
 	}
-	cmd.AddCommand(validatorInitCmd(base), validatorDoctorCmd(base), validatorStatusCmd(base), validatorApplyCmd(base),
+	cmd.AddCommand(validatorInitCmd(base), validatorDoctorCmd(base), validatorStatusCmd(base), validatorExporterCmd(base), validatorApplyCmd(base),
 		validatorExitCmd(base), validatorRejoinCmd(base), validatorRotateCmd(base), validatorClaimCmd(base), validatorPosPublishCmd(base))
 	return cmd
 }

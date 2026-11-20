@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/unicitynetwork/bft-core/evmassign"
+	"github.com/unicitynetwork/bft-core/monitoring"
 	"github.com/unicitynetwork/bft-core/q3format"
 	"github.com/unicitynetwork/bft-core/vradmit"
 	"github.com/unicitynetwork/bft-core/vrhandoff"
@@ -504,7 +505,7 @@ func (m *Member) stepPoP(st memberState) error {
 			mi.PoP = ""
 			return fmt.Errorf("%w: persisting the possession proof: %w", ErrMember, err)
 		}
-		m.log().Info("VR handoff member: possession proof", "intent", fmt.Sprintf("%x", st.digest[:8]), "evm", st.self.EVMNodeID)
+		m.log().Info("VR handoff member: possession proof", "intent", fmt.Sprintf("%x", st.digest[:8]), "evm", st.self.EVMNodeID, monitoring.Event(monitoring.EvVRMemberPossession))
 	}
 	// released only over the committed state this step started from, and sent only if the service admitted it (or already holds it)
 	o, err := m.svc.releaseOwn(st.tok, m.cfg.Self, Message{PoP: &p})
@@ -602,8 +603,9 @@ func (m *Member) stepReadiness(st memberState) error {
 						m.upgrade = map[vrschema.Word]bool{}
 					}
 					m.upgrade[a.RuleID] = true
+					monitoring.Upgrades.Require(monitoring.UpgradeRule{RuleID: a.RuleID, ReleaseDigest: a.ReleaseDigest, RootEpoch: a.RootEpoch})
 					m.log().Warn("VR handoff member: UpgradeRequired: the committed schedule holds a rule this binary does not implement; this node signs no readiness (it does not support it)",
-						"ruleId", fmt.Sprintf("%x", a.RuleID[:8]), "releaseDigest", fmt.Sprintf("%x", a.ReleaseDigest[:8]), "rootEpoch", a.RootEpoch)
+						"ruleId", fmt.Sprintf("%x", a.RuleID[:8]), "releaseDigest", fmt.Sprintf("%x", a.ReleaseDigest[:8]), "rootEpoch", a.RootEpoch, monitoring.Event(monitoring.EvVRUpgradeRequired))
 				}
 			}
 			return nil
@@ -653,7 +655,7 @@ func (m *Member) stepReadiness(st memberState) error {
 	if err != nil {
 		return err
 	}
-	m.log().Info("VR handoff member: readiness", "intent", fmt.Sprintf("%x", st.digest[:8]), "view", st.view, "commitments", len(cs))
+	m.log().Info("VR handoff member: readiness", "intent", fmt.Sprintf("%x", st.digest[:8]), "view", st.view, "commitments", len(cs), monitoring.Event(monitoring.EvVRMemberReady))
 	m.lastRd = time.Time{}
 	if err := m.release(st, r); err != nil {
 		return err
@@ -776,6 +778,6 @@ func (m *Member) stage(st memberState, body q3format.BodyV3, cd [32]byte) error 
 		return err
 	}
 	m.staged = cd
-	m.log().Info("VR handoff member: candidate staged", "intent", fmt.Sprintf("%x", st.digest[:8]), "view", st.view, "body", fmt.Sprintf("%x", body.Identity()))
+	m.log().Info("VR handoff member: candidate staged", "intent", fmt.Sprintf("%x", st.digest[:8]), "view", st.view, "body", fmt.Sprintf("%x", body.Identity()), monitoring.Event(monitoring.EvVRMemberStaged))
 	return nil
 }

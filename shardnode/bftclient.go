@@ -19,6 +19,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 
 	"github.com/unicitynetwork/bft-core/internal/quorumweight"
+	"github.com/unicitynetwork/bft-core/monitoring"
 	"github.com/unicitynetwork/bft-core/network"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/network/protocol/handshake"
@@ -1751,7 +1752,7 @@ func (c *BFTClient) reportPending(ctx context.Context) {
 	if due {
 		c.log.WarnContext(ctx, "certification work has not progressed: the roots have not certified what this shard submitted (in-memory figures, reset by a restart)",
 			slog.Bool("pending", d.Pending), slog.Duration("outstandingAge", d.OutstandingAge.Round(time.Second)),
-			slog.Int("consecutiveRepeats", d.ConsecutiveRepeats), slog.Duration("noProgressAge", d.NoProgressAge.Round(time.Second)))
+			slog.Int("consecutiveRepeats", d.ConsecutiveRepeats), slog.Duration("noProgressAge", d.NoProgressAge.Round(time.Second)), monitoring.Event(monitoring.EvShardNoProgress))
 	}
 }
 

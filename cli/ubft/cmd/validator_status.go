@@ -61,13 +61,51 @@ type validatorStatusReport struct {
 	LocalRPC      string   `json:"localRpc,omitempty"`
 	LocalHead     *uint64  `json:"localHead,omitempty"`
 	LocalSync     string   `json:"localSync,omitempty"` // "in sync", "syncing …", "behind by …", "unreachable: …" or "unknown: …"
+	// The numeric form of what the text fields say, for scripts and the VR exporter (VT-12). Codes are the contract's enums
+	// (vrclient.Poa*, OutputState, Health); they are stable.
+	HealthCode      uint8         `json:"healthCode"`
+	PoaStateCode    *uint8        `json:"poaStateCode,omitempty"`
+	OpenOutput      *statusOutput `json:"openOutput,omitempty"`
+	PendingBoundary bool          `json:"pendingBoundary"`
+	// EarliestBoundaryProgress is the progress at which the next election may be reserved (the epoch's start plus the epoch gap).
+	EarliestBoundaryProgress uint64 `json:"earliestBoundaryProgress"`
+	PublicHeadTime           uint64 `json:"publicHeadTime"`
+	// CustodyCursor is custody's recordCursor (--custody; a PoS generation), RecordRootTarget the records the root has projected
+	// (--root-metrics: the root's unicity_root_records_projected); both nil when not asked for. The four counters of the catch-up
+	// runbook (root target, imported count = RecordCount, VR cursor = RecordCursor, custody cursor) are read at the same pinned block.
+	CustodyCursor    *uint64 `json:"custodyCursor,omitempty"`
+	RecordRootTarget *uint64 `json:"recordRootTarget,omitempty"`
+
+	// Verdict is the status as a script reads it: "ok", "warning", "critical" or "unknown" (some read failed), with the findings behind it.
+	// `status --exit-code` exits 0, 1, 2 or 3 accordingly.
+	Verdict  string    `json:"verdict"`
+	Findings []Finding `json:"findings,omitempty"`
+
 	// Unknown lists every read that failed; status then exits with an error after printing what it could read.
 	Unknown []string `json:"unknown,omitempty"`
 }
 
+// statusOutput is VR's open output in numbers.
+type statusOutput struct {
+	ID                string `json:"id"`
+	State             string `json:"state"`
+	StateCode         uint8  `json:"stateCode"`
+	Members           int    `json:"members"`
+	Attempt           uint64 `json:"attempt"`
+	ReservedProgress  uint64 `json:"reservedProgress"`
+	ExpiresAtProgress uint64 `json:"expiresAtProgress"`
+	ProgressLeft      int64  `json:"progressLeft"`
+}
+
 type validatorStatusFlags struct {
 	validatorFlags
-	JSON bool
+	JSON     bool
+	ExitCode bool
+	// Custody is the PoS custody contract (holder 0) whose recordCursor joins the record counters; RootMetrics the root's metrics URL its
+	// projected-record count is read from. Both optional.
+	Custody     string
+	RootMetrics string
+	Thresholds  statusThresholds
 }
 
 func validatorStatusCmd(base *baseFlags) *cobra.Command {
@@ -78,6 +116,9 @@ func validatorStatusCmd(base *baseFlags) *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			r, err := validatorStatus(cmd.Context(), f)
 			if r == nil {
+				if f.ExitCode && err != nil {
+					return &ExitCodeError{Code: ExitUnknown, Err: err}
+				}
 				return err
 			}
 			if f.JSON {
@@ -89,11 +130,18 @@ func validatorStatusCmd(base *baseFlags) *cobra.Command {
 			} else {
 				r.text(cmd.OutOrStdout())
 			}
+			if f.ExitCode {
+				return exitForVerdict(r, err)
+			}
 			return err
 		},
 	}
 	f.validatorFlags.add(cmd)
-	cmd.Flags().BoolVar(&f.JSON, "json", false, "print the status as JSON")
+	cmd.Flags().BoolVar(&f.JSON, "json", false, "print the status as JSON (it carries the numeric fields, the verdict and its findings)")
+	cmd.Flags().BoolVar(&f.ExitCode, "exit-code", false, "exit with the verdict: 0 ok, 1 warning, 2 critical, 3 unknown (a read failed); for scripts and alerting. Without it status exits 0 unless a read failed")
+	cmd.Flags().StringVar(&f.Custody, "custody", "", "PoS generation: the custody contract (holder 0) whose recordCursor is read with the other record counters")
+	cmd.Flags().StringVar(&f.RootMetrics, "root-metrics", "", "the root's metrics URL (http://host:port/api/v1/metrics): its projected-record count joins the record counters")
+	f.Thresholds.add(cmd)
 	return cmd
 }
 
@@ -209,6 +257,8 @@ func validatorStatus(ctx context.Context, f *validatorStatusFlags) (*validatorSt
 				return nil, err
 			}
 			r.PoaState, r.PoaSince = vrclient.PoaState(s), since
+			code := uint8(s)
+			r.PoaStateCode = &code
 		}
 	}
 	clock, err := vr.Clock(ctx)
@@ -216,6 +266,8 @@ func validatorStatus(ctx context.Context, f *validatorStatusFlags) (*validatorSt
 		return nil, err
 	}
 	r.Progress, r.UcTime, r.RecordCursor, r.RecordCount = clock.Progress, clock.UcTime, clock.RecordCursor, clock.RecordCount
+	r.HealthCode, r.EarliestBoundaryProgress = ch.module.Health, ch.cfg.EpochStartProgress+vrclient.MinEpochGap
+	r.readCounters(ctx, f, vr)
 
 	// governance in flight that names this identity
 	pending, err := vr.PendingChanges(ctx)
@@ -260,6 +312,7 @@ func validatorStatus(ctx context.Context, f *validatorStatusFlags) (*validatorSt
 	}
 	switch {
 	case pair != ([32]byte{}):
+		r.PendingBoundary = true
 		r.NextBoundary = fmt.Sprintf("output %x is acknowledged; its Boundary record is awaited (the committee changes when it is applied)", pair)
 	case open != ([32]byte{}):
 		o, err := vr.Output(ctx, open)
@@ -273,6 +326,8 @@ func validatorStatus(ctx context.Context, f *validatorStatusFlags) (*validatorSt
 			}
 		}
 		left := int64(o.ExpiresAtProgress) - int64(clock.Progress)
+		r.OpenOutput = &statusOutput{ID: fmt.Sprintf("%x", open), State: vrclient.OutputState(o.State), StateCode: o.State, Members: len(o.Members), Attempt: o.Attempt,
+			ReservedProgress: o.ReservedProgress, ExpiresAtProgress: o.ExpiresAtProgress, ProgressLeft: left}
 		r.NextBoundary = fmt.Sprintf("output %x is %s (%d members, attempt %d), reserved at progress %d, expires at %d (%d to go)%s; its boundary comes when the roots commit its handoff",
 			open, vrclient.OutputState(o.State), len(o.Members), o.Attempt, o.ReservedProgress, o.ExpiresAtProgress, left, in)
 	default:
@@ -304,6 +359,7 @@ func validatorStatus(ctx context.Context, f *validatorStatusFlags) (*validatorSt
 		return nil, err
 	}
 	r.PublicHead = n
+	r.PublicHeadTime = ts
 	r.PublicHeadAge = time.Since(time.Unix(int64(ts), 0)).Round(time.Second).String()
 	if busy, err := syncing(ctx, ch.rpc); err != nil {
 		r.Unknown = append(r.Unknown, "public sync: eth_syncing: "+err.Error())
@@ -319,6 +375,7 @@ func validatorStatus(ctx context.Context, f *validatorStatusFlags) (*validatorSt
 			r.Unknown = append(r.Unknown, "local sync: "+strings.TrimPrefix(r.LocalSync, "unknown: "))
 		}
 	}
+	r.judge(f.Thresholds)
 	if len(r.Unknown) > 0 {
 		return r, fmt.Errorf("%w: status is incomplete: %s", ErrValidator, strings.Join(r.Unknown, "; "))
 	}
@@ -411,5 +468,9 @@ func (r *validatorStatusReport) text(w io.Writer) {
 	fmt.Fprintln(w)
 	for _, u := range r.Unknown {
 		fmt.Fprintf(w, "UNKNOWN: %s\n", u)
+	}
+	fmt.Fprintf(w, "verdict: %s\n", r.Verdict)
+	for _, f := range r.Findings {
+		fmt.Fprintf(w, "  %s %s: %s\n", strings.ToUpper(f.Severity), f.Code, f.Message)
 	}
 }
