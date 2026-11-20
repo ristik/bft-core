@@ -4,6 +4,7 @@
 #
 # The caller defines (before calling a function): info (optional), and runs from the repository root (test-nodes/, build/ubft). UBFT overrides build/ubft.
 
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lane-slot.sh"   # LANE_SLOT: ports below are shifted into the lane's slot
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/portable.sh"
 UBFT=${UBFT:-build/ubft}
 UTB_DIR=${UTB_DIR:-test-nodes/utb}
@@ -47,7 +48,7 @@ utb_agg_env() { # K (1-based)
 }
 # The aggregator's read-only binary history range (design 11.3 item 4): GET /api/v1/trustbases?from=E[&to=E]..., the PR6 response codec. The same endpoint serves the
 # lane's reference client; port is the aggregator's (agg_port from scripts/lib/agg-lib.sh when it is loaded).
-utb_agg_history_url() { local k=${1:-1} port=${AGG_PORT:-3001}; echo "http://127.0.0.1:$((port + k - 1))/api/v1/trustbases"; }
+utb_agg_history_url() { local k=${1:-1} port=${AGG_PORT:-$((3001+LANE_PORT_OFFSET))}; echo "http://127.0.0.1:$((port + k - 1))/api/v1/trustbases"; }
 
 # The aggregator is ristik/aggregator-go integration/enshrined-evm at a pinned commit (AGG_COMMIT, 40 hex), built from a clean clone by utb_agg_build, never from a local patch.
 # Its provenance directory builds/aggregator-<sha8>/ records the commit, the go.mod pins of bft-core and bft-go-base, the toolchain and the digest of the binary.

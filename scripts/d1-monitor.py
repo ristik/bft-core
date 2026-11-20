@@ -296,7 +296,7 @@ def check_fault_rejoins(nodes, scenario, final_height, final_hash, recovery_star
             block = None
             head_error = None
             try:
-                port = 18544 + validator
+                port = 18544 + int(os.environ.get('LANE_PORT_OFFSET', '0')) + validator
                 head = int(rpc(port, "eth_blockNumber", []), 16)
                 block = rpc(port, "eth_getBlockByNumber", [hex(final_height), False])
             except (OSError, ValueError, RuntimeError) as exc:
@@ -439,7 +439,7 @@ def main():
                         "missing-body", "wrong-genesis", "hostile-builder", "hostile-fee-recipient"), default="")
     parser.add_argument("--capture-t4-traces", type=Path,
                         help="capture each certified block trace immediately into this directory")
-    parser.add_argument("--trace-rpc-base", type=int, default=18545,
+    parser.add_argument("--trace-rpc-base", type=int, default=18545 + int(os.environ.get('LANE_PORT_OFFSET', '0')),
                         help="first validator's HTTP RPC port for incremental T4 traces")
     args = parser.parse_args()
     if args.validators != 4 or args.blocks < 10:

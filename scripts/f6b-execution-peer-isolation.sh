@@ -31,6 +31,7 @@
 # Needs:  a pinned reth, curl, openssl, python3, go, and a built ./build/ubft. Run from the repo root.
 
 set -uo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/lane-slot.sh" || exit 2   # LANE_SLOT: every port below is shifted into this lane's slot
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 selfTest=false
@@ -39,10 +40,10 @@ if [ "${1:-}" = "--self-test" ]; then selfTest=true; shift; fi
 validators=${1:-3}
 partitionID=8
 chainID=31337
-rethEngineBase=18551
-rethEthBase=18545
-rethP2PBase=30401
-rootBootPort=26662
+rethEngineBase=$((18551+LANE_PORT_OFFSET))
+rethEthBase=$((18545+LANE_PORT_OFFSET))
+rethP2PBase=$((30401+LANE_PORT_OFFSET))
+rootBootPort=$((26662+LANE_PORT_OFFSET))
 
 failures=0
 reached="startup"

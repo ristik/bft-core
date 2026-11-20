@@ -63,7 +63,7 @@ at 0.5 the staging roots were throttled after 34 handoffs). On the shared 16 GiB
 N=3 only when memory is available. Never build Rust while rehearsing the cluster.
 Monitor disks: retention bounds metrics/logs but does not bound chain databases.
 
-Only public RPC (8545), faucet (8088) and Prometheus (9090) bind **host loopback**.
+Only public RPC (8545), faucet (8088) and Prometheus (9090) bind **host loopback** (`generate.py --port-offset N` adds N to all three, so a second generation can share the host; lane slots use 1000 per slot, docs/lane-slots.md).
 No root admin, shard admin, authority or Engine endpoint has a published port.
 The validator network is internal (each ureth serves `eth,net,web3,debug` there: the shard node needs `debug_getRawHeader`; the public gateway allow-lists methods and has no `debug_*`). The faucet's isolated signer has Internet
 access for hCaptcha but cannot reach validators; only its relay bridges networks.

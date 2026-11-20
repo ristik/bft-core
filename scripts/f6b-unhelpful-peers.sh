@@ -33,6 +33,7 @@
 # Needs:  a pinned reth, curl, openssl, python3, go, and a built ./build/ubft. Run from the repo root.
 
 set -uo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/lane-slot.sh" || exit 2   # LANE_SLOT: every port below is shifted into this lane's slot
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 selfTest=false
@@ -42,12 +43,12 @@ validators=${1:-3}
 bystanders=2
 partitionID=8
 chainID=31337
-rethEngineBase=18551
-rethEthBase=18545
-rethP2PBase=30401
-bystEthBase=18565
-bystP2PBase=30421
-rootBootPort=26662
+rethEngineBase=$((18551+LANE_PORT_OFFSET))
+rethEthBase=$((18545+LANE_PORT_OFFSET))
+rethP2PBase=$((30401+LANE_PORT_OFFSET))
+bystEthBase=$((18565+LANE_PORT_OFFSET))
+bystP2PBase=$((30421+LANE_PORT_OFFSET))
+rootBootPort=$((26662+LANE_PORT_OFFSET))
 
 failures=0
 reached="startup"
@@ -183,7 +184,7 @@ for i in $(seq 1 "$bystanders"); do
   registry_layout_require || exit 1
   "$URETH_BIN" node --chain "$chainSpec" --datadir "test-nodes/byst$i/dd" \
     --authrpc.jwtsecret "test-nodes/byst$i/jwt.hex" \
-    --authrpc.addr 127.0.0.1 --authrpc.port $((18581 + i - 1)) \
+    --authrpc.addr 127.0.0.1 --authrpc.port $(((18581+LANE_PORT_OFFSET) + i - 1)) \
     --http --http.addr 127.0.0.1 --http.port $((bystEthBase + i - 1)) \
     --http.api eth,net,web3,admin \
     --port $((bystP2PBase + i - 1)) --disable-discovery --ipcdisable --no-persist-peers \

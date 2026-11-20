@@ -13,9 +13,10 @@ from pathlib import Path
 
 
 ROOT = Path.cwd()
-ETH_BASE = 18545
-ENGINE_BASE = 18551
-P2P_BASE = 30401
+LANE_PORT_OFFSET = int(os.environ.get('LANE_PORT_OFFSET', '0'))   # the lane slot (scripts/lib/lane-slot.sh)
+ETH_BASE = 18545 + LANE_PORT_OFFSET
+ENGINE_BASE = 18551 + LANE_PORT_OFFSET
+P2P_BASE = 30401 + LANE_PORT_OFFSET
 SCENARIO, CERTIFIED, LAST_ROUND = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
 
 

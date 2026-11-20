@@ -62,6 +62,7 @@
 # checkout as its working directory (helper.sh owned_pid). There is no name-based sweep.
 
 set -u -o pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/lane-slot.sh" || exit 2   # LANE_SLOT: every port below is shifted into this lane's slot
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 # shellcheck source=../helper.sh
 source helper.sh
@@ -70,10 +71,10 @@ partitionID=8
 networkID=3
 # The owner's test floor is 5000ms. Production T2 must be sized well above normal round timing.
 t2Millis=5000
-rootP2PPort=36662
-rootRPCPort=36866
-shardP2PPort=36111
-shardRPCPort=36311
+rootP2PPort=$((36662+LANE_PORT_OFFSET))
+rootRPCPort=$((36866+LANE_PORT_OFFSET))
+shardP2PPort=$((36111+LANE_PORT_OFFSET))
+shardRPCPort=$((36311+LANE_PORT_OFFSET))
 # How long a negative window may take to acquire its first line. Every log it is used on is written
 # continuously while the cluster runs.
 windowTimeout=60

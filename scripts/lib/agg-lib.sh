@@ -4,6 +4,7 @@
 # The caller defines (before calling a function): info, rpc, root_alive, boot_node (helper.sh), stop_pidfile (helper.sh), and the variables
 # validators, partitionID, chainID, rethEthBase, rootRpcPort, rootPortStart (helper.sh). Optional: aggPartition (7), DNB_AGG_SHARDS (1).
 
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lane-slot.sh"   # LANE_SLOT: ports below are shifted into the lane's slot
 aggPartition=${aggPartition:-7}
 # DNB_AGG_SHARDS=2 runs the aggregator partition as the depth-1 topology of the B3 profile: two aggregator-go shards, 0x40 and 0xc0 (the
 # top bit of a state ID picks the shard), each its own BFT shard of the one root chain. 1 (default) is the single full-range shard 0x80.
@@ -16,7 +17,7 @@ ANYAGE_SHARD_CONF_FN=agg_conf   # the callback scripts/lib/m2-handoff-lib.sh m2_
 # aggregator-go (internal/config/config.go Validate): a shard conf with a non-empty shard ID REQUIRES SHARDING_MODE=bft-shard (with BFT_ENABLED,
 # the shard's own conf/PDR and signing key, and SHARDING_CHILD_SHARD_ID unset); the empty shard 0x80 of a one-shard partition REQUIRES standalone.
 agg_mode() { if [ "$aggShards" = 1 ]; then echo standalone; else echo bft-shard; fi; }
-agg_port() { echo $((${AGG_PORT:-3001} + $1 - 1)); }
+agg_port() { echo $((${AGG_PORT:-$((3001+LANE_PORT_OFFSET))} + $1 - 1)); }
 
 # The aggregator shard configurations, written under test-nodes/ BEFORE the roots start (the roots register every test-nodes/shard-conf-* file).
 # The root's aggregator_rsmt_v1 verifier demands an SMT consistency proof with every non-empty certification request; aggregator-go ae08165
@@ -39,7 +40,7 @@ start_agg() { # K (1-based): one aggregator-go shard
   local k=${1:-1} d port
   d=$(agg_dir "$k"); port=$(agg_port "$k")
   : "${AGG_BIN:?set AGG_BIN to the pinned aggregator-go binary}"
-  : "${AGG_MONGO:=mongodb://127.0.0.1:27117/aggregator?replicaSet=rs0&directConnection=true}"
+  : "${AGG_MONGO:=mongodb://127.0.0.1:$((27117+LANE_PORT_OFFSET))/aggregator?replicaSet=rs0&directConnection=true}"
   local boot
   boot=$(boot_node test-nodes/root1 "$rootPortStart")
   mkdir -p "$d/logs"
@@ -55,7 +56,7 @@ start_agg() { # K (1-based): one aggregator-go shard
   env PORT=$port HOST=127.0.0.1 ENABLE_DOCS=false ENABLE_CORS=true \
     MONGODB_URI="$AGG_MONGO" MONGODB_DATABASE="$(cat "$d/dbname" 2>/dev/null || { n=dnb_agg${k}_$(date +%s); echo $n | tee "$d/dbname"; })" DISABLE_HIGH_AVAILABILITY=true USE_REDIS_FOR_COMMITMENTS=false \
     SMT_BACKEND=memory SHARDING_MODE=$(agg_mode) LOG_LEVEL=info LOG_FORMAT=text LOG_ENABLE_JSON=false LOG_FILE_PATH="$PWD/$d/logs/aggregator.log" \
-    SIGNING_KEY_FILE="$PWD/$d/keys.json" BFT_ENABLED=true BFT_ADDRESS=/ip4/127.0.0.1/tcp/$((29100 + k)) BFT_RPC_ADDRESS=http://127.0.0.1:$rootRpcPort \
+    SIGNING_KEY_FILE="$PWD/$d/keys.json" BFT_ENABLED=true BFT_ADDRESS=/ip4/127.0.0.1/tcp/$(((29100+LANE_PORT_OFFSET) + k)) BFT_RPC_ADDRESS=http://127.0.0.1:$rootRpcPort \
     BFT_SHARD_CONF_FILE="$PWD/$(agg_conf "$k")" BFT_TRUST_BASE_FILES="$PWD/test-nodes/trust-base.json" \
     BFT_SHARD_CONF_CHECKPOINT_FILE="$PWD/$d/shard-conf-checkpoint.json" \
     BFT_BOOTSTRAP_ADDRESSES="$boot" \

@@ -44,6 +44,7 @@
 #   scripts/lib/reth-pin.sh). An explicitly supplied binary is still verified against the pin.
 
 set -u -o pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/lane-slot.sh" || exit 2   # LANE_SLOT: every port below is shifted into this lane's slot
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 chainID=31337
@@ -59,13 +60,13 @@ partitionID=8
 networkID=3
 t2Millis=5000
 validators=2
-rootP2PPort=46662
-rootRPCPort=46866
-valP2PBase=46111
-valRPCBase=46311
-rethEngineBase=48551
-rethEthBase=48545
-rethP2PBase=40401
+rootP2PPort=$((46662+LANE_PORT_OFFSET))
+rootRPCPort=$((46866+LANE_PORT_OFFSET))
+valP2PBase=$((46111+LANE_PORT_OFFSET))
+valRPCBase=$((46311+LANE_PORT_OFFSET))
+rethEngineBase=$((48551+LANE_PORT_OFFSET))
+rethEthBase=$((48545+LANE_PORT_OFFSET))
+rethP2PBase=$((40401+LANE_PORT_OFFSET))
 recoveryFlag="--evidence-recover"
 
 arms=()
