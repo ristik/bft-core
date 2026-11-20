@@ -61,6 +61,7 @@ import (
 	"github.com/unicitynetwork/bft-core/rootchain/consensus"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
+	"github.com/unicitynetwork/bft-core/rootchain/vrstate"
 	"github.com/unicitynetwork/bft-core/rootinput"
 	"github.com/unicitynetwork/bft-core/shardnode"
 	"github.com/unicitynetwork/bft-core/shardnode/executortest"
@@ -2111,12 +2112,22 @@ func buildExecutor(ctx context.Context, flags *shardNodeRunFlags, shardConf *typ
 			return nil, fmt.Errorf("parsing JWT secret %q: %w", jwtPath, err)
 		}
 
+		registry, registryCode, vr, err := vrstate.PinsFromPDR(shardConf)
+		if err != nil {
+			return nil, err
+		}
+		var resolveCollector engineapi.FeeCollectorResolver
+		if vr {
+			resolveCollector = vrFeeCollectorResolver(registry, registryCode)
+		}
+
 		adapter := engineapi.NewAdapter(engineapi.Config{
-			EngineURL:    flags.EngineURL,
-			EthURL:       flags.EthURL,
-			Secret:       secret,
-			FeeCollector: [20]byte(common.HexToAddress(flags.EngineFeeCollector)),
-			Verifier:     verifier,
+			EngineURL:        flags.EngineURL,
+			EthURL:           flags.EthURL,
+			Secret:           secret,
+			FeeCollector:     [20]byte(common.HexToAddress(flags.EngineFeeCollector)),
+			ResolveCollector: resolveCollector,
+			Verifier:         verifier,
 		}, flags.observe.Logger())
 
 		// The build path now runs through the seal siblings, so a client that lacks them fails

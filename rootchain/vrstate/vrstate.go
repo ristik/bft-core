@@ -110,6 +110,20 @@ func (r Reader) CommitteeLimits() (vrschema.CommitteeLimits, error) {
 	return l, wrap(err)
 }
 
+// Fees reads and decodes V+11..V+15.
+func (r Reader) Fees() (vrschema.Fees, error) {
+	var words [5]vrschema.Word
+	for i := range words {
+		word, err := r.Scalar(vrschema.SlotFeesPrevious + uint64(i))
+		if err != nil {
+			return vrschema.Fees{}, err
+		}
+		words[i] = word
+	}
+	fees, err := vrschema.DecodeFees(words)
+	return fees, wrap(err)
+}
+
 // Output reads and decodes the 11 words of outputs[R].
 func (r Reader) Output(resultID vrschema.Word) (vrschema.OutputRecord, error) {
 	var ws [vrschema.OutputWords]vrschema.Word

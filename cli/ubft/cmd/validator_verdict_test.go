@@ -14,22 +14,35 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 
 	"github.com/unicitynetwork/bft-core/seed"
+	"github.com/unicitynetwork/bft-core/vrclient"
 	"github.com/unicitynetwork/bft-core/vrclient/vrfake"
 )
 
 // TestStatusExitCode: --exit-code turns the verdict into the exit status and --json carries the verdict and the numeric fields.
 func TestStatusExitCode(t *testing.T) {
 	chain, url := fakeNetwork(t)
+	fees := validatorFeeState{
+		Previous:       validatorFeeSet{BaseFeeFloor: 100, ChangeDenominator: 8, FeeCollector: common.HexToAddress("0x1234")},
+		Current:        validatorFeeSet{BaseFeeFloor: 200, ChangeDenominator: 16, FeeCollector: common.HexToAddress("0x5678")},
+		EffectiveBlock: 12,
+	}
+	chain.With(func(c *vrfake.Chain) {
+		c.Config.FeesPrevious = vrclient.FeeSet(fees.Previous)
+		c.Config.FeesCurrent = vrclient.FeeSet(fees.Current)
+		c.Config.FeesEffectiveBlock = fees.EffectiveBlock
+	})
 	home := initHome(t, url)
 
 	out, err := runValidator(t, home, "status", "--json", "--exit-code")
 	var rep validatorStatusReport
 	require.NoError(t, json.Unmarshal([]byte(out), &rep), out)
 	require.NotEmpty(t, rep.Verdict)
+	require.Equal(t, fees, rep.Fees)
 	want := map[string]int{"ok": ExitOK, "warning": ExitWarning, "critical": ExitCritical}[rep.Verdict]
 	if want == ExitOK {
 		require.NoError(t, err)
@@ -50,9 +63,11 @@ func TestStatusExitCode(t *testing.T) {
 	chain.With(func(c *vrfake.Chain) { c.FailSyncing = false })
 
 	// without --exit-code the exit status is unchanged
-	_, err = runValidator(t, home, "status")
+	out, err = runValidator(t, home, "status")
 	var c2 *ExitCodeError
 	require.False(t, errors.As(err, &c2))
+	require.Contains(t, out, "fees: current floor 200, denominator 16, collector "+fees.Current.FeeCollector.Hex()+" (effective block 12)")
+	require.Contains(t, out, "fees: previous floor 100, denominator 8, collector "+fees.Previous.FeeCollector.Hex())
 }
 
 func TestStatusVerdictIncludesSeedRecordError(t *testing.T) {

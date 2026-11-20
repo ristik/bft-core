@@ -225,7 +225,7 @@ func isParentWitnessAcquisitionError(err error) bool {
 
 // TransientVerify lets the round retry only a transport/absence failure. The wrapper preserves
 // errors.Is for diagnostics while avoiding an engineapi import from shardnode.
-type transientParentWitnessError struct{ error }
+type transientProofError struct{ error }
 
-func (e transientParentWitnessError) Unwrap() error         { return e.error }
-func (e transientParentWitnessError) TransientVerify() bool { return true }
+func (e transientProofError) Unwrap() error         { return e.error }
+func (e transientProofError) TransientVerify() bool { return true }

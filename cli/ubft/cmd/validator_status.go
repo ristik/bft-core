@@ -19,6 +19,18 @@ import (
 	"github.com/unicitynetwork/bft-core/vrschema"
 )
 
+type validatorFeeSet struct {
+	BaseFeeFloor      uint64         `json:"baseFeeFloor"`
+	ChangeDenominator uint64         `json:"changeDenominator"`
+	FeeCollector      common.Address `json:"feeCollector"`
+}
+
+type validatorFeeState struct {
+	Previous       validatorFeeSet `json:"previous"`
+	Current        validatorFeeSet `json:"current"`
+	EffectiveBlock uint64          `json:"effectiveBlock"`
+}
+
 // validatorStatusReport is `validator status`, as text or --json.
 type validatorStatusReport struct {
 	RPC      string `json:"rpc"`
@@ -41,24 +53,25 @@ type validatorStatusReport struct {
 	} `json:"staged,omitempty"`
 	LocalKeys string `json:"localKeys,omitempty"` // "current", "staged", "other" or empty when the keys are not readable
 
-	PoaState     string   `json:"poaState,omitempty"`
-	PoaSince     uint64   `json:"poaSinceProgress,omitempty"`
-	Member       bool     `json:"member"`
-	Pending      []string `json:"pendingGovernance,omitempty"`
-	Module       string   `json:"module"`
-	ModuleTag    string   `json:"moduleTag"`
-	Health       string   `json:"health"`
-	Epoch        uint64   `json:"rootEpoch"`
-	EpochStart   uint64   `json:"epochStartProgress"`
-	Committee    []uint64 `json:"committee"`
-	Limits       string   `json:"limits"`
-	Progress     uint64   `json:"progress"`
-	UcTime       uint64   `json:"ucTime"`
-	RecordCursor uint64   `json:"recordCursor"`
-	RecordCount  uint64   `json:"recordCount"`
-	NextBoundary string   `json:"nextBoundary"`
-	Activations  []string `json:"activations,omitempty"`
-	PublicHead   *uint64  `json:"publicHead"` // null when the public head could not be read, never 0
+	PoaState     string            `json:"poaState,omitempty"`
+	PoaSince     uint64            `json:"poaSinceProgress,omitempty"`
+	Member       bool              `json:"member"`
+	Pending      []string          `json:"pendingGovernance,omitempty"`
+	Module       string            `json:"module"`
+	ModuleTag    string            `json:"moduleTag"`
+	Health       string            `json:"health"`
+	Epoch        uint64            `json:"rootEpoch"`
+	EpochStart   uint64            `json:"epochStartProgress"`
+	Committee    []uint64          `json:"committee"`
+	Limits       string            `json:"limits"`
+	Fees         validatorFeeState `json:"fees"`
+	Progress     uint64            `json:"progress"`
+	UcTime       uint64            `json:"ucTime"`
+	RecordCursor uint64            `json:"recordCursor"`
+	RecordCount  uint64            `json:"recordCount"`
+	NextBoundary string            `json:"nextBoundary"`
+	Activations  []string          `json:"activations,omitempty"`
+	PublicHead   *uint64           `json:"publicHead"` // null when the public head could not be read, never 0
 	// PublicHeadUnknown: the public head could not be read, so PublicHead is not a measurement (see Unknown).
 	PublicHeadUnknown bool    `json:"publicHeadUnknown,omitempty"`
 	PublicHeadAge     string  `json:"publicHeadAge"`
@@ -211,11 +224,15 @@ func validatorStatus(ctx context.Context, f *validatorStatusFlags) (*validatorSt
 		return nil, err
 	}
 	defer ch.close()
-	vr, head := ch.vr, ch.head
-	r := &validatorStatusReport{RPC: v.cfg.RPC, ChainID: ch.chainID.String(), Block: head, Registry: vr.Registry.Hex(),
+	vr, head, cfg := ch.vr, ch.head, ch.cfg
+	r := &validatorStatusReport{Fees: validatorFeeState{
+		Previous:       validatorFeeSet(cfg.FeesPrevious),
+		Current:        validatorFeeSet(cfg.FeesCurrent),
+		EffectiveBlock: cfg.FeesEffectiveBlock,
+	}, RPC: v.cfg.RPC, ChainID: ch.chainID.String(), Block: head, Registry: vr.Registry.Hex(),
 		Module: ch.module.Module.Hex(), ModuleTag: fmt.Sprintf("%x", ch.module.Meta.ModuleTag), Health: vrclient.Health(ch.module.Health),
-		Epoch: ch.cfg.KnownRootEpoch, EpochStart: ch.cfg.EpochStartProgress,
-		Limits: fmt.Sprintf("nMin %d, nTarget %d, nMax %d", ch.cfg.NMin, ch.cfg.NTarget, ch.cfg.NMax)}
+		Epoch: cfg.KnownRootEpoch, EpochStart: cfg.EpochStartProgress,
+		Limits: fmt.Sprintf("nMin %d, nTarget %d, nMax %d", cfg.NMin, cfg.NTarget, cfg.NMax)}
 
 	// the identity: --id or the config's, else the operator account's from VR's logs. Only a lookup that succeeded says "none".
 	var keys *validatorKeys
@@ -506,6 +523,10 @@ func (r *validatorStatusReport) text(w io.Writer) {
 		}
 	}
 	fmt.Fprintf(w, "committee: root epoch %d, %d members %v (%s)\n", r.Epoch, len(r.Committee), r.Committee, r.Limits)
+	fmt.Fprintf(w, "fees: current floor %d, denominator %d, collector %s (effective block %d)\n",
+		r.Fees.Current.BaseFeeFloor, r.Fees.Current.ChangeDenominator, r.Fees.Current.FeeCollector.Hex(), r.Fees.EffectiveBlock)
+	fmt.Fprintf(w, "fees: previous floor %d, denominator %d, collector %s\n",
+		r.Fees.Previous.BaseFeeFloor, r.Fees.Previous.ChangeDenominator, r.Fees.Previous.FeeCollector.Hex())
 	fmt.Fprintf(w, "module: %s (tag %s), health %s\n", r.Module, r.ModuleTag, r.Health)
 	fmt.Fprintf(w, "clock: progress %d, UC time %d, epoch started at progress %d; root records %d of %d imported\n", r.Progress, r.UcTime, r.EpochStart,
 		r.RecordCursor, r.RecordCount)

@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common/hexutil"
-	"github.com/ethereum/go-ethereum/rpc"
 
 	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
@@ -204,7 +203,9 @@ func encodeAccounts(readers ...*recordingReader) ([]byte, error) {
 
 // RPCProofSource is a ProofSource over an execution client's eth_getProof at one block hash.
 type RPCProofSource struct {
-	Client    *rpc.Client
+	Client interface {
+		CallContext(ctx context.Context, result any, method string, args ...any) error
+	}
 	BlockHash [32]byte
 }
 
