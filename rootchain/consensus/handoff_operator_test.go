@@ -236,7 +236,7 @@ func TestOperatorHandoffPreparesBeforeEndorsement(t *testing.T) {
 
 	cm.handoffPlans = make(map[[32]byte]*pendingHandoff)
 	for i := byte(1); i <= 4; i++ {
-		cm.handoffPlans[[32]byte{i}] = &pendingHandoff{signatures: make(map[string]hex.Bytes)}
+		cm.handoffPlans[[32]byte{i}] = &pendingHandoff{signatures: make(map[string]hex.Bytes), body: planBody{epoch: 2}} // live plans of the next epoch: pruning spares them
 	}
 	require.NoError(t, cm.endorseHandoffAtState(ctx, plan, prepared))
 	require.Len(t, cm.handoffPlans, 4)
