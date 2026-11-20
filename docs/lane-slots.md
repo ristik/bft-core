@@ -15,7 +15,7 @@ python helpers (`d1-monitor.py`, `d2c-fault-control.py`, `m1-fee-accounting.py`,
 | D2C proxies, section-3 negative rethS, F8 HTTP, f6b/f6c acceptance lanes | see `scripts/lib/lane-slot.sh` | +1000 |
 | docker testnet package (`deploy/testnet/generate.py --port-offset 1000`) | 8545 / 8088 / 9090 | 9545 / 9088 / 10090 |
 
-`scripts/lane-slot.sh selftest` checks that no port collides within a slot, across slots 0..3, or with the docker package's 8545/8088/8090/9090.
+`scripts/lane-slot.sh selftest` also starts the same command lines in two scratch trees and checks that every process lookup (`owned_pids`: command and cwd) sees only its own tree, and that no lane library or step file uses a bare `pgrep -f` pattern. It checks that no port collides within a slot, across slots 0..3, or with the docker package's 8545/8088/8090/9090.
 Per-validator counts are 6 (reth, shard) and 8 (roots); a lane with more must stay on slot 0. Linux hands out ephemeral ports from 32768, so slot 3's
 devp2p ports (33xxx) can meet an outgoing connection: prefer slots 0..2.
 
