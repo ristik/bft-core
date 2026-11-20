@@ -99,3 +99,39 @@ PY
   vrs_log "PASS: the joiner caught up from the seed, applied (PoA) and reports its sync state"
   vrs_cleanup
 }
+
+# vrs_second (VR_SEED2=1, after the Boundary): a seed whose trust-base history has two entries and whose checkpoint is of root epoch 2, fetched and
+# imported into a fresh home and fresh entry stores: the cross-epoch verification live. A history cut back to epoch 1 under the same checkpoint is refused.
+vrs_epoch_ready() { # the exported seed's checkpoint is of root epoch >= 2 and its history tip is >= 2
+  rm -rf "$vrs_dir/export2"
+  build/ubft seed export --root-rpc "$(vrb_rpc_of 1)" --utb-genesis-id "$(vrs_pin)" --archive "$EVM_ARCHIVE_ROOT/evm1" --out "$vrs_dir/export2" >/dev/null 2>&1 \
+    && python3 -c "import json,sys;m=json.load(open('$vrs_dir/export2/manifest.json'));sys.exit(0 if m['checkpoint']['rootEpoch']>=2 and m['network']['utbTipEpoch']>=2 else 1)"
+}
+vrs_second() {
+  local pin d=$vrs_dir/second; pin=$(vrs_pin); mkdir -p "$vrs_dir" "$d"
+  vrb_wait 900 "validator 1's archive holds a root epoch 2 certified record and the history tip is epoch 2" vrs_epoch_ready || return 1
+  build/ubft seed export --root-rpc "$(vrb_rpc_of 1)" --utb-genesis-id "$pin" --archive "$EVM_ARCHIVE_ROOT/evm1" --out "$vrs_dir/export2" 2>&1 | tee "$VR_EVIDENCE/seed2-export.log"
+  cp "$vrs_dir/export2/manifest.json" "$VR_EVIDENCE/seed2-manifest.json"
+  vrs_serve "$vrs_dir/export2" "$vrs_port_a" || return 1
+  vrs_serve "$vrs_dir/export2" "$vrs_port_b" || return 1
+  build/ubft seed fetch --from "http://127.0.0.1:$vrs_port_a" --from "http://127.0.0.1:$vrs_port_b" --min-sources 2 --out "$d/fetched" --utb-genesis-id "$pin" \
+    --full-shard-conf test-nodes/evm-full-shard-conf-v2.json 2>&1 | tee "$VR_EVIDENCE/seed2-fetch.log" || { vrs_log "FAIL: second seed fetch"; return 1; }
+  build/ubft seed import --dir "$d/fetched" --home "$d/home" --utb-genesis test-nodes/utb-genesis.cbor --utb-genesis-id "$pin" \
+    --root-utb-db "$d/root-utb-entries.db" --shard-utb-db "$d/shard-utb-entries.db" 2>&1 | tee "$VR_EVIDENCE/seed2-import.log" || { vrs_log "FAIL: second seed import"; return 1; }
+  grep -q 'tip epoch [2-9]' "$VR_EVIDENCE/seed2-import.log" || { vrs_log "FAIL: the entry stores did not reach epoch 2"; return 1; }
+  vrs_log "PASS: a seed with trust-base tip epoch >= 2 and a root epoch >= 2 checkpoint was fetched from two sources, verified from the pinned genesis and imported (entry stores at epoch >= 2)"
+  # a history cut back to the pre-Boundary tip (epoch 1 entry only) under this checkpoint: refused
+  # (the manifest is re-written consistently, so only the checkpoint-newer-than-history check can refuse it)
+  rm -rf "$d/cut"; cp -r "$vrs_dir/export2" "$d/cut"; cp "$vrs_dir/export/utb-bundle.cbor" "$d/cut/utb-bundle.cbor"
+  python3 - "$d/cut" "$vrs_dir/export/manifest.json" <<'PY'
+import json,sys,hashlib,os
+d,old=sys.argv[1:3]; m=json.load(open(d+'/manifest.json')); o=json.load(open(old))
+for f in m['files']:
+    b=open(d+'/'+f['name'],'rb').read(); f['size']=len(b); f['sha256']=hashlib.sha256(b).hexdigest()
+m['network']['utbTipEpoch']=o['network']['utbTipEpoch']; m['network']['utbTipId']=o['network']['utbTipId']
+open(d+'/manifest.json','w').write(json.dumps(m,indent=2)+'\n')
+PY
+  vrs_serve "$d/cut" "$vrs_port_c" || return 1
+  vrs_refused history-older-than-checkpoint-epoch "history ends at epoch" build/ubft seed fetch --from "http://127.0.0.1:$vrs_port_c" --out "$d/out" --utb-genesis-id "$pin" || return 1
+  vrs_cleanup
+}

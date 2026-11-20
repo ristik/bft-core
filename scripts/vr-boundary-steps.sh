@@ -219,6 +219,7 @@ EOF
   cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'committee()' >"$VR_EVIDENCE/committee-after.hex"
   cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'identity(uint64)' 4 >"$VR_EVIDENCE/identity4-after.hex"
   vrb_log "PASS: the Boundary installed J"
+  if [ "${VR_SEED2:-0}" = 1 ]; then source scripts/vr-seed-steps.sh; vrs_second || return 1; fi   # VT-11: a seed after the Boundary (trust-base tip epoch 2)
   if [ "${VR_JOINER:-0}" = 1 ]; then vrj_validates || return 1; fi
   if [ "${VR_POS:-0}" = 1 ]; then
     vrp_rotated || return 1
