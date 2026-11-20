@@ -472,7 +472,7 @@ func validatorPosPublishCmd(base *baseFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			pub, err := vrclient.PosCalldata(vrclient.VRABI, "publish", rid)
+			pub, err := vrclient.PosCalldata(vrclient.PosPublishABI, "publish", rid)
 			if err != nil {
 				return err
 			}

@@ -55,7 +55,8 @@ var PosPublishABI = mustABI(`[
  {"type":"function","name":"popDigest","stateMutability":"view","inputs":[{"name":"resultID","type":"bytes32"},{"name":"id","type":"uint64"},{"name":"evmKeyHash","type":"bytes32"}],"outputs":[{"name":"","type":"bytes32"}]},
  {"type":"function","name":"frozenMembers","stateMutability":"view","inputs":[{"name":"resultID","type":"bytes32"}],"outputs":[{"name":"","type":"tuple[]","components":[{"name":"id","type":"uint64"},{"name":"generation","type":"uint64"},{"name":"weight","type":"uint64"},{"name":"raw","type":"uint64"},{"name":"bindingHash","type":"bytes32"}]}]},
  {"type":"function","name":"submitAssignmentPoPs","stateMutability":"nonpayable","inputs":[{"name":"resultID","type":"bytes32"},{"name":"pops","type":"tuple[]","components":[{"name":"id","type":"uint64"},{"name":"evmKey","type":"bytes"},{"name":"signature","type":"bytes"}]}],"outputs":[]},
- {"type":"function","name":"finalizeCandidate","stateMutability":"nonpayable","inputs":[{"name":"resultID","type":"bytes32"}],"outputs":[]}]`)
+ {"type":"function","name":"finalizeCandidate","stateMutability":"nonpayable","inputs":[{"name":"resultID","type":"bytes32"}],"outputs":[]},
+ {"type":"function","name":"publish","stateMutability":"nonpayable","inputs":[{"name":"resultId","type":"bytes32"}],"outputs":[{"name":"status","type":"uint8"}]}]`)
 
 // PoPInput is one member's possession proof (ElectionPolicy.PoPInput).
 type PoPInput struct {
