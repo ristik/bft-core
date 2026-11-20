@@ -311,7 +311,10 @@ vrs_advance_authorities() {
 }
 vrs_handoff() { # target epoch, E: rotate, wait for the new output, the roots' switch, the authorities' advance (SIGNING=authority) and VR's Boundary
   local n=$1 E=$2
-  vrs_rotate || return 1
+  # The handoff is driven by governance itself: executing a change binds it into the next election's output, so the election is due at once (the run
+  # of 2026-11-20 showed the output published and the roots switching 5 s after the execute, before any rotation could be mined). A rotation
+  # (VRS_ROTATE=1) would race the handoff and stall on its own receipt while the shard waits for the authorities' advance.
+  if [ "${VRS_ROTATE:-0}" = 1 ]; then vrs_rotate || return 1; fi
   vrb_wait 900 "VR's open output is Published (towards epoch $n)" vrb_published || return 1
   vrb_result=$(vrb_open_output)
   vrb_wait 900 "the roots switched to epoch $n" vrs_roots_at "$n" || return 1
