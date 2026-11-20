@@ -139,15 +139,18 @@ vrs_second() {
     --root-utb-db "$d/root-utb-entries.db" --shard-utb-db "$d/shard-utb-entries.db" 2>&1 | tee "$VR_EVIDENCE/seed2-import.log" || { vrs_log "FAIL: second seed import"; return 1; }
   grep -q 'tip epoch [2-9]' "$VR_EVIDENCE/seed2-import.log" || { vrs_log "FAIL: the entry stores did not reach epoch 2"; return 1; }
   vrs_log "PASS: a seed with trust-base tip epoch >= 2 and a root epoch >= 2 checkpoint was fetched from two sources, verified from the pinned genesis and imported (entry stores at epoch >= 2)"
-  # a history cut back to the pre-Boundary tip (epoch 1 entry only) under this checkpoint: refused
-  # (the manifest is re-written consistently, so only the checkpoint-newer-than-history check can refuse it)
-  rm -rf "$d/cut"; cp -r "$vrs_dir/export2" "$d/cut"; cp "$vrs_dir/export/utb-bundle.cbor" "$d/cut/utb-bundle.cbor"
-  python3 - "$d/cut" "$vrs_dir/export/manifest.json" <<'PY'
-import json,sys,hashlib,os
-d,old=sys.argv[1:3]; m=json.load(open(d+'/manifest.json')); o=json.load(open(old))
+  # a history cut back to the pre-Boundary tip (the epoch-1 entry only) under the epoch-2 checkpoint: refused. The manifest is re-written consistently, so
+  # only the "checkpoint newer than its history" check can refuse it. The epoch-1 history is what a fresh entry store (genesis only) exports.
+  build/ubft trust-base utb-export --utb-genesis test-nodes/utb-genesis.cbor --utb-genesis-id "$pin" --utb-entries-db "$d/genesis-only.db" --out "$d/epoch1-bundle.cbor" \
+    >"$VR_EVIDENCE/seed2-epoch1-export.log" 2>&1 || { vrs_log "FAIL: the epoch-1 history export"; return 1; }
+  build/ubft trust-base utb-verify --bundle "$d/epoch1-bundle.cbor" --utb-genesis-id "$pin" >"$d/epoch1-verify.txt" 2>&1 || { vrs_log "FAIL: the epoch-1 history does not verify"; return 1; }
+  rm -rf "$d/cut"; cp -r "$vrs_dir/export2" "$d/cut"; cp "$d/epoch1-bundle.cbor" "$d/cut/utb-bundle.cbor"
+  python3 - "$d/cut" "$d/epoch1-verify.txt" <<'PY'
+import json,sys,hashlib,re
+d,v=sys.argv[1:3]; m=json.load(open(d+'/manifest.json'))
 for f in m['files']:
     b=open(d+'/'+f['name'],'rb').read(); f['size']=len(b); f['sha256']=hashlib.sha256(b).hexdigest()
-m['network']['utbTipEpoch']=o['network']['utbTipEpoch']; m['network']['utbTipId']=o['network']['utbTipId']
+m['network']['utbTipEpoch']=1; m['network']['utbTipId']=re.search(r'tip (0x[0-9a-f]+)',open(v).read()).group(1)
 open(d+'/manifest.json','w').write(json.dumps(m,indent=2)+'\n')
 PY
   vrs_serve "$d/cut" "$vrs_port_c" || return 1
