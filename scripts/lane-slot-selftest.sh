@@ -98,7 +98,9 @@ rel 0 --token e0
 
 # 6. the bind preflight probes by an actual bind: it refuses a port held by a listening socket AND one that is only bound, and does not need LANE_SLOT (set -u)
 hold() { python3 -c 'import socket,sys,time
-s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(("127.0.0.1", int(sys.argv[1])))
+s=socket.socket()
+if sys.argv[2] == "listen": s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)   # (a holder that is merely bound, without SO_REUSEADDR, blocks a later bind too)
+s.bind(("127.0.0.1", int(sys.argv[1])))
 if sys.argv[2] == "listen": s.listen(1)
 time.sleep(30)' "$1" "$2" & }
 for mode in listen bound; do
