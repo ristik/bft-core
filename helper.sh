@@ -557,6 +557,7 @@ function start_one_evm_validator() {
   local i=$1 n=$2 partitionID=$3 rootBoot=$4 executor=$5 exposeRPC=${6:-}
   local port=$((evmValidatorPortStart + i - 1))
   lane_port_preflight "$port" "shard node $i p2p" || return 1
+  [ "${6:-}" != rpc ] || lane_port_preflight "$((evmRPCPortStart + i - 1))" "shard node $i rpc" || return 1
 
   local bootnodes="$rootBoot"
   if [ "$#" -ge 7 ]; then

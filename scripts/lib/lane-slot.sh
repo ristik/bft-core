@@ -25,15 +25,24 @@ lane_slot_init() {
 }
 lane_slot_init || { return 2 2>/dev/null || exit 2; }
 
-# lane_port_preflight PORT LABEL: refuse, clearly, to start a listener on a port something already listens on (another lane, a stale process), instead of
-# colliding silently. A node just stopped may still hold its port for a moment: it is retried for 5 s. Called right before each listener starts.
-lane_port_listening() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
+# lane_port_bindable PORT: the port can be bound on 127.0.0.1 right now, probed by an actual bind (TCP, SO_REUSEADDR as the Go and Rust listeners set it). A connect
+# probe misses a socket that is bound but not listening. The lanes pass --disable-discovery to reth, so no UDP listener is probed.
+lane_port_bindable() {
+  python3 -c 'import socket,sys
+s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+try: s.bind(("127.0.0.1", int(sys.argv[1])))
+except OSError: sys.exit(1)' "$1" 2>/dev/null
+}
+# lane_port_preflight PORT LABEL: refuse, clearly, to start a listener whose port cannot be bound (another lane, a stale process). A node just stopped may still hold
+# its port for a moment: retried for 5 s. Called right before each listener starts. It cannot reserve the port: a bind that fails later still fails the lane.
 lane_port_preflight() {
   local i
-  for i in 1 2 3 4 5 6 7 8 9 10; do lane_port_listening "$1" || return 0; sleep 0.5; done
-  echo "lane slot $LANE_SLOT: $2 port $1 is already in use (something listens on it: another lane, or a stale process). Not starting it; free the port or use another slot." >&2
+  for i in 1 2 3 4 5 6 7 8 9 10; do lane_port_bindable "$1" && return 0; sleep 0.5; done
+  echo "lane slot ${LANE_SLOT:-0}: $2 port $1 cannot be bound (something holds it: another lane, or a stale process). Not starting it; free the port or use another slot." >&2
   return 1
 }
+# lane_preflight_ports LABEL PORT...: lane_port_preflight for each port of one service
+lane_preflight_ports() { local label=$1 p; shift; for p in "$@"; do lane_port_preflight "$p" "$label" || return 1; done; }
 
 # lane_port DEFAULT: the default port shifted into this lane's slot
 lane_port() { echo $(($1 + LANE_PORT_OFFSET)); }

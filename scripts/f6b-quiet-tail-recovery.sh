@@ -128,6 +128,7 @@ for i in $(seq 1 "$validators"); do
   mkdir -p "test-nodes/reth$i"
   openssl rand -hex 32 >"test-nodes/evm$i/jwt.hex"
   registry_layout_require || exit 1
+  lane_preflight_ports "reth$i" $((rethEngineBase + i - 1)) $((rethEthBase + i - 1)) $((rethP2PBase + i - 1)) || exit 1
   "$URETH_BIN" node --chain test-nodes/evm-genesis.json --datadir "test-nodes/reth$i/dd" \
     --authrpc.jwtsecret "test-nodes/evm$i/jwt.hex" \
     --authrpc.addr 127.0.0.1 --authrpc.port $((rethEngineBase + i - 1)) \

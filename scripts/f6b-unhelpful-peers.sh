@@ -163,6 +163,7 @@ for i in $(seq 1 "$validators"); do
   extra=(--no-persist-peers)
   [ "$i" = "1" ] && extra+=(--log.stdout.filter debug)
   registry_layout_require || exit 1
+  lane_preflight_ports "reth$i" $((rethEngineBase + i - 1)) $((rethEthBase + i - 1)) $((rethP2PBase + i - 1)) || exit 1
   "$URETH_BIN" node --chain "$chainSpec" --datadir "test-nodes/reth$i/dd" \
     --authrpc.jwtsecret "test-nodes/evm$i/jwt.hex" \
     --authrpc.addr 127.0.0.1 --authrpc.port $((rethEngineBase + i - 1)) \
@@ -182,6 +183,7 @@ for i in $(seq 1 "$bystanders"); do
   mkdir -p "test-nodes/byst$i"
   openssl rand -hex 32 >"test-nodes/byst$i/jwt.hex"
   registry_layout_require || exit 1
+  lane_preflight_ports "bystander reth$i" $(((18581+LANE_PORT_OFFSET) + i - 1)) $((bystEthBase + i - 1)) $((bystP2PBase + i - 1)) || exit 1
   "$URETH_BIN" node --chain "$chainSpec" --datadir "test-nodes/byst$i/dd" \
     --authrpc.jwtsecret "test-nodes/byst$i/jwt.hex" \
     --authrpc.addr 127.0.0.1 --authrpc.port $(((18581+LANE_PORT_OFFSET) + i - 1)) \

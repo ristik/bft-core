@@ -487,6 +487,7 @@ submitted_round() { # <round>: the shard log has a submission for this round
 }
 
 start_shard() {
+  lane_preflight_ports "shard node" "$shardP2PPort" "$shardRPCPort" || return 1
   start_bg shard "$scen/shard/debug.log" shard-node run --home "$scen/shard" --executor fake \
     --address "/ip4/127.0.0.1/tcp/$shardP2PPort" --bootnodes "$rootBoot" \
     --trust-base "$scen/trust-base.json" --shard-conf "$scen/shard-conf-${partitionID}_0.json" \
@@ -601,6 +602,7 @@ setup_cluster() {
     fail "unexpected status after enrollment: $(cat "$scen/status-enrolled.json" 2>/dev/null)"
   fi
 
+  lane_preflight_ports "root" "$rootP2PPort" "$rootRPCPort" || return 1
   start_bg root "$rootLog" root-node run --home "$scen/root" --address "/ip4/127.0.0.1/tcp/$rootP2PPort" \
     --trust-base "$scen/trust-base.json" --rpc-server-address "127.0.0.1:$rootRPCPort" --log-format text --log-level debug ||
     { fail "could not start the root node"; return 1; }
@@ -1043,6 +1045,7 @@ scenario_restart_at_anchor() {
 }
 
 start_local_shard() {
+  lane_preflight_ports "shard node" "$shardP2PPort" "$shardRPCPort" || return 1
   start_bg shard "$scen/shard/debug.log" shard-node run --home "$scen/shard" --executor fake \
     --address "/ip4/127.0.0.1/tcp/$shardP2PPort" --bootnodes "$rootBoot" \
     --trust-base "$scen/trust-base.json" --shard-conf "$scen/shard-conf-${partitionID}_0.json" \
@@ -1074,6 +1077,7 @@ setup_local_cluster() {
     fail "the shard configuration's T2 is not ${t2Millis}ms at or above the 5000ms floor"
     return 1
   fi
+  lane_preflight_ports "root" "$rootP2PPort" "$rootRPCPort" || return 1
   start_bg root "$rootLog" root-node run --home "$scen/root" --address "/ip4/127.0.0.1/tcp/$rootP2PPort" \
     --trust-base "$scen/trust-base.json" --rpc-server-address "127.0.0.1:$rootRPCPort" --log-format text --log-level debug ||
     { fail "could not start the root node"; return 1; }

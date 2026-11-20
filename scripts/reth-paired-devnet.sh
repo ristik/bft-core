@@ -562,6 +562,7 @@ cat >test-nodes/wrong-genesis.json <<'EOF'
 "baseFeePerGas":"0x3b9aca00"}
 EOF
 registry_layout_require || exit 1
+lane_preflight_ports "negative reth (wrong-genesis)" $((18651+LANE_PORT_OFFSET)) $((18645+LANE_PORT_OFFSET)) $((30499+LANE_PORT_OFFSET)) || exit 1
 "$URETH_BIN" node --chain test-nodes/wrong-genesis.json --datadir test-nodes/reth-wrong/dd \
   --authrpc.jwtsecret test-nodes/evm1/jwt.hex --authrpc.addr 127.0.0.1 --authrpc.port $((18651+LANE_PORT_OFFSET)) \
   --http --http.addr 127.0.0.1 --http.port $((18645+LANE_PORT_OFFSET)) --http.api eth,net,web3 \
@@ -612,6 +613,7 @@ g["config"]["chainId"] = 31338
 json.dump(g, open("test-nodes/wrong-chain-genesis.json", "w"))
 PYGEN
 registry_layout_require || exit 1
+lane_preflight_ports "negative reth (wrong-chain-genesis)" $((18751+LANE_PORT_OFFSET)) $((18745+LANE_PORT_OFFSET)) $((30599+LANE_PORT_OFFSET)) || exit 1
 "$URETH_BIN" node --chain test-nodes/wrong-chain-genesis.json --datadir test-nodes/reth-wrongchain/dd \
   --authrpc.jwtsecret test-nodes/evm1/jwt.hex --authrpc.addr 127.0.0.1 --authrpc.port $((18751+LANE_PORT_OFFSET)) \
   --http --http.addr 127.0.0.1 --http.port $((18745+LANE_PORT_OFFSET)) --http.api eth,net,web3 \
@@ -623,6 +625,7 @@ for _ in $(seq 1 60); do
   rpc http://127.0.0.1:$((18745+LANE_PORT_OFFSET)) eth_chainId '[]' 2>/dev/null | grep -q result && break
   sleep 1
 done
+lane_port_preflight $((28001+LANE_PORT_OFFSET)) "negative shard node" || exit 1
 boundedRun 60 build/ubft shard-node run --home test-nodes/evm1 --executor engine-api --registry-layout "$(registry_layout)" \
   --address /ip4/127.0.0.1/tcp/$((28001+LANE_PORT_OFFSET)) --trust-base test-nodes/trust-base.json \
   --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" \
@@ -650,6 +653,7 @@ g["alloc"]["0x00000000000000000000000000000000000000aa"] = {"balance": "0x1"}
 json.dump(g, open("test-nodes/other-genesis.json", "w"))
 PYGEN
 registry_layout_require || exit 1
+lane_preflight_ports "negative reth (other-genesis)" $((18851+LANE_PORT_OFFSET)) $((18845+LANE_PORT_OFFSET)) $((30699+LANE_PORT_OFFSET)) || exit 1
 "$URETH_BIN" node --chain test-nodes/other-genesis.json --datadir test-nodes/reth-othergenesis/dd \
   --authrpc.jwtsecret test-nodes/evm1/jwt.hex --authrpc.addr 127.0.0.1 --authrpc.port $((18851+LANE_PORT_OFFSET)) \
   --http --http.addr 127.0.0.1 --http.port $((18845+LANE_PORT_OFFSET)) --http.api eth,net,web3 \
@@ -678,6 +682,7 @@ elif [ "$expectedGenesis" = "$otherGenesis" ]; then
 elif [ "$otherChainID" != "0x7a69" ]; then
   fail "3d premise: the other client reports chainId $otherChainID, not 0x7a69 — this would be caught by the chain-id check, not the genesis check"
 else
+  lane_port_preflight $((28002+LANE_PORT_OFFSET)) "negative shard node" || exit 1
   boundedRun 60 build/ubft shard-node run --home test-nodes/evm1 --executor engine-api --registry-layout "$(registry_layout)" \
     --address /ip4/127.0.0.1/tcp/$((28002+LANE_PORT_OFFSET)) --trust-base test-nodes/trust-base.json \
     --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" \
@@ -705,6 +710,7 @@ else
   # would accept this. It is refused because both identity checks now read the authenticated Engine
   # connection too — standard eth_chainId/eth_getBlockByNumber on the authrpc port, which the
   # Engine API's underlying-protocol section requires and this pinned client serves.
+  lane_port_preflight $((28003+LANE_PORT_OFFSET)) "negative shard node" || exit 1
   boundedRun 60 build/ubft shard-node run --home test-nodes/evm1 --executor engine-api --registry-layout "$(registry_layout)" \
     --address /ip4/127.0.0.1/tcp/$((28003+LANE_PORT_OFFSET)) --trust-base test-nodes/trust-base.json \
     --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" \
@@ -773,6 +779,7 @@ g["config"]["pragueTime"] = 4102444800  # 2100-01-01; far enough that it cannot 
 json.dump(g, open("test-nodes/laterfork-genesis.json", "w"))
 PYFORK
 registry_layout_require || exit 1
+lane_preflight_ports "negative reth (laterfork-genesis)" $((18951+LANE_PORT_OFFSET)) $((18945+LANE_PORT_OFFSET)) $((30759+LANE_PORT_OFFSET)) || exit 1
 "$URETH_BIN" node --chain test-nodes/laterfork-genesis.json --datadir test-nodes/reth-laterfork/dd \
   --authrpc.jwtsecret test-nodes/evm1/jwt.hex --authrpc.addr 127.0.0.1 --authrpc.port $((18951+LANE_PORT_OFFSET)) \
   --http --http.addr 127.0.0.1 --http.port $((18945+LANE_PORT_OFFSET)) --http.api eth,net,web3 \
@@ -811,6 +818,7 @@ elif [ "$okNext" != "None" ]; then
   fail "3f premise: the configured client's eth_config reports a scheduled fork ('$okNext'), so the positive path would be refused too"
 else
   info "premise holds: identical chain id and genesis, Prague loaded at 4102444800, eth_config refuses unsupported Prague"
+  lane_port_preflight $((28004+LANE_PORT_OFFSET)) "negative shard node" || exit 1
   boundedRun 60 build/ubft shard-node run --home test-nodes/evm1 --executor engine-api --registry-layout "$(registry_layout)" \
     --address /ip4/127.0.0.1/tcp/$((28004+LANE_PORT_OFFSET)) --trust-base test-nodes/trust-base.json \
     --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" \

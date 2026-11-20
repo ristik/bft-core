@@ -172,6 +172,7 @@ start_validator() {
   if [ "$i" -eq 1 ]; then
     extra=(--signing-authority-socket "$sockDir/client.sock" --signing-authority-credential "$scen/authority/client.cred")
   fi
+  lane_preflight_ports "validator $i" $((valP2PBase + i - 1)) $((valRPCBase + i - 1)) || return 1
   start_any "v$i" "$home/debug.log" build/ubft shard-node run --home "$home" --executor engine-api --registry-layout 1 \
     --address "/ip4/127.0.0.1/tcp/$((valP2PBase + i - 1))" --bootnodes "$rootBoot,$addr" \
     --trust-base "$scen/trust-base.json" --shard-conf "$scen/shard-conf-${partitionID}_0.json" \
@@ -373,6 +374,7 @@ PY
   } >"$scen/identity.txt" || artifact_error "identity.txt"
 
   for i in 1 2; do
+    lane_preflight_ports "reth$i" $((rethEngineBase + i - 1)) $((rethEthBase + i - 1)) $((rethP2PBase + i - 1)) || return 1
     start_any "reth$i" "$scen/reth$i/reth.log" "$URETH_BIN" node --chain "$scen/evm-genesis-funded.json" \
       --datadir "$scen/reth$i/dd" --authrpc.jwtsecret "$scen/v$i/jwt.hex" \
       --authrpc.addr 127.0.0.1 --authrpc.port $((rethEngineBase + i - 1)) \
@@ -395,6 +397,7 @@ PY
   genesisHash=$(echo "$genesisBlock" | cut -d' ' -f2)
   pass "two pinned reth instances are up and peered on the funded chain spec (genesis ${genesisHash:0:18}...)"
 
+  lane_preflight_ports "root" "$rootP2PPort" "$rootRPCPort" || return 1
   start_bg root "$scen/root/debug.log" root-node run --home "$scen/root" --address "/ip4/127.0.0.1/tcp/$rootP2PPort" \
     --trust-base "$scen/trust-base.json" --rpc-server-address "127.0.0.1:$rootRPCPort" --log-format text --log-level debug ||
     { fail "could not start the root node"; return 1; }
