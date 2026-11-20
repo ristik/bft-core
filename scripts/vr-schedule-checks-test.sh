@@ -171,6 +171,11 @@ for f in 's/"rootEpoch":5/"rootEpoch":-5/' 's/"rootEpoch":5/"rootEpoch":5.0/' 's
   cases=$((cases+1)); rules "$(echo "$row" | sed "$f")" >"$d/pb.json"; vrs_check_rules "$d/pb.json" "$rid" $E true true 2>/dev/null && fail "PYTHONOPTIMIZE: $f passes"
 done
 unset PYTHONOPTIMIZE
+# ---- a command's failure survives vrs_logged (no `| tee`/`| tail` masking) ----------------------------------------------------------------------------
+cases=$((cases+1)); vrs_logged "$d/l1.log" sh -c 'echo boom >&2; exit 7' >/dev/null 2>&1; [ "$?" = 7 ] || fail "vrs_logged lost the failing command's status"
+cases=$((cases+1)); vrs_logged "$d/l2.log" sh -c 'echo fine' >/dev/null 2>&1 || fail "vrs_logged failed a succeeding command"
+cases=$((cases+1)); grep -q boom "$d/l1.log" || fail "vrs_logged did not keep the output"
+cases=$((cases+1)); grep -nE '\|[[:space:]]*(tee|tail|head)[^|]*\|\|' scripts/vr-schedule-steps.sh | grep -vE 'node-id|cut -c' >/dev/null && fail "a command's status is masked by a pipe to tee/tail/head in vr-schedule-steps.sh"
 # ---- postponement: VR lists B's old entry Superseded and the new one Active, each in one activations line of the rule ------------------------------------
 sline() { echo "rule ${1#0x} release $(printf 'ab%.0s' $(seq 32)) at root epoch $2, not before UC time 1795187438: $3"; }
 sstat() { python3 -c 'import json,sys; print(json.dumps({"activations": sys.argv[1:]}))' "$@"; }

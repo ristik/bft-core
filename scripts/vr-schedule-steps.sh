@@ -163,20 +163,23 @@ PY
 }
 
 vrs_dir() { mkdir -p "$VR_EVIDENCE/schedule" && echo "$VR_EVIDENCE/schedule"; }
+# vrs_logged <log> <command...>: run the command, keep its output in <log> and show it, and RETURN THE COMMAND'S OWN STATUS (a `| tee` or `| tail` would return the
+# status of the last pipe stage, so a failing command would count as success)
+vrs_logged() { local log=$1 rc; shift; "$@" >"$log" 2>&1; rc=$?; cat "$log"; return $rc; }
 vrs_queue() { # name rule-name release-hex [absolute root epoch E; default: known root epoch + 3]
   local d; d=$(vrs_dir); local g=$d/$1 kd ap=() k known
   mkdir -p "$g"; kd=$(mktemp -d)
   known=$(build/ubft validator upgrade --rpc "$vrb_rpc" --json | python3 -c 'import json,sys;print(json.load(sys.stdin)["knownRootEpoch"])')
   build/ubft governance propose schedule-activation --rpc "$vrb_rpc" --rule "$2" --release-digest "$3" --root-epoch "${4:-$((known + 3))}" --not-before-in 1h5m \
-    --label "VT-07a live $2" --out "$g/proposal.json" --note "VT-07a live run" 2>&1 | tee "$g/propose.log" || { vrb_log "FAIL: propose $1"; return 1; }
+    --label "VT-07a live $2" --out "$g/proposal.json" --note "VT-07a live run" >"$g/propose.log" 2>&1; local prc=$?; cat "$g/propose.log"; [ "$prc" = 0 ] || { vrb_log "FAIL: propose $1"; return 1; }
   for k in 0 1 2; do
     python3 -c "import json;print(json.load(open('$VR_DIR/dev-keys/keys.json'))['signers'][$k]['privateKey'])" >"$kd/s$k.key"; chmod 600 "$kd/s$k.key"
     build/ubft governance sign --rpc "$vrb_rpc" --proposal "$g/proposal.json" --signer-key "$kd/s$k.key" --out "$g/approval$k.json" >>"$g/sign.log" 2>&1 || { vrb_log "FAIL: sign $1/$k"; return 1; }
     ap+=(--approval "$g/approval$k.json")
   done
-  build/ubft governance aggregate --rpc "$vrb_rpc" --proposal "$g/proposal.json" "${ap[@]}" --out "$g/bundle.json" 2>&1 | tee "$g/aggregate.log" || { vrb_log "FAIL: aggregate $1"; return 1; }
+  build/ubft governance aggregate --rpc "$vrb_rpc" --proposal "$g/proposal.json" "${ap[@]}" --out "$g/bundle.json" >"$g/aggregate.log" 2>&1; local arc=$?; cat "$g/aggregate.log"; [ "$arc" = 0 ] || { vrb_log "FAIL: aggregate $1"; return 1; }
   python3 -c "import json;print(json.load(open('$VR_DIR/dev-keys/keys.json'))['signers'][0]['privateKey'])" >"$kd/sender.key"; chmod 600 "$kd/sender.key"
-  build/ubft governance execute --rpc "$vrb_rpc" --bundle "$g/bundle.json" --sender-key "$kd/sender.key" 2>&1 | tee "$g/execute-bundle.log" || { vrb_log "FAIL: queue $1"; return 1; }
+  build/ubft governance execute --rpc "$vrb_rpc" --bundle "$g/bundle.json" --sender-key "$kd/sender.key" >"$g/execute-bundle.log" 2>&1; local erc=$?; cat "$g/execute-bundle.log"; [ "$erc" = 0 ] || { vrb_log "FAIL: queue $1"; return 1; }
   rm -rf "$kd"
   vrb_log "PASS: $2 queued as change $(python3 -c "import json;print(json.load(open('$g/proposal.json'))['predictedChangeId'])") for root epoch ${4:-$((known + 3))}"
 }
@@ -276,8 +279,12 @@ vrs_rotate() { # a new payee for identity 4: the next election is due (SIGNING=a
  $evmHolder,"urethKey":"$cfg/ureth.key","jwt":"$cfg/none","operatorKey":"$cfg/operator.key",
  "payee":"$(python3 -c "import json;print(json.load(open('$keys'))['owners'][3]['address'])")","id":4}
 JSON
-  build/ubft validator rotate --validator-config "$cfg/validator.json" --new-payee "$payee" 2>&1 | tail -3
-  rm -rf "$cfg"
+  # the rotation's own exit status survives the cleanup (rc before rm), and its output is kept as evidence
+  build/ubft validator rotate --validator-config "$cfg/validator.json" --new-payee "$payee" >"$(vrs_dir)/rotate-$vrs_rot.log" 2>&1
+  local rc=$?
+  tail -3 "$(vrs_dir)/rotate-$vrs_rot.log"; rm -rf "$cfg"
+  [ "$rc" = 0 ] || vrb_log "FAIL: validator rotate (number $vrs_rot, payee $payee) exited $rc"
+  return $rc
 }
 # vrs_advance_authorities <epoch> <E>: each authority signs for one scope, so the authorities advance into root epoch n (advance-with-proof) and their shard
 # nodes restart under the new sessions before the shard can acknowledge. Shard node 4 is the no_test_rule node: it restarts as that binary, and at E it
