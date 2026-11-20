@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"time"
 )
 
@@ -66,9 +65,6 @@ func publishLocked(stage, dir string, replace bool) error {
 // versionsMarker marks a directory as this tool's retention directory: only a marked directory is ever collected from.
 const versionsMarker = ".unicity-seed-versions"
 
-// retainMove moves the replaced version into retention (a variable so a test can make it fail).
-var retainMove = os.Rename
-
 // RetentionError reports that a replacement took effect but the replaced version could not be moved into retention. The old version is intact at
 // Stage; callers must not remove Stage.
 type RetentionError struct {
@@ -92,67 +88,13 @@ func cleanStage(stage string, err error) {
 
 func versionsDir(dir string) string { return dir + ".versions" }
 
-// retainOldVersion moves a replaced version to <dir>.versions/<unix nano> and collects what is past the grace period from there.
-func retainOldVersion(stage, dir string) error {
-	vd := versionsDir(dir)
-	marker := filepath.Join(vd, versionsMarker)
-	switch err := os.Mkdir(vd, 0o700); {
-	case err == nil:
-		// this call created the directory: only then may it be marked as ours
-		if err := os.WriteFile(marker, nil, 0o600); err != nil {
-			return err
-		}
-	case errors.Is(err, os.ErrExist):
-		// a directory that already exists is used only if it carries our marker; an unmarked one, empty or not, is somebody else's
-		if !ownedVersionsDir(vd) {
-			return refuse("%s already exists and is not this tool's version directory", vd)
-		}
-	default:
-		return err
-	}
-	kept := filepath.Join(vd, strconv.FormatInt(time.Now().UnixNano(), 10))
-	if err := retainMove(stage, kept); err != nil {
-		return err
-	}
-	gcOldVersions(vd, kept)
-	return nil
-}
-
 // oldVersionGrace is how long a replaced version stays on disk for readers that opened it before the replacement (a verification or an HTTP response
 // in flight holds a descriptor on one version and reads its files relative to it).
 var oldVersionGrace = 10 * time.Minute
 
-// gcOldVersions removes versions older than the grace period (never keep, the one just retained) from the marked retention directory vd, and only
-// entries (directories, files and symlinks) named by a timestamp that this tool wrote. Nothing outside vd is ever touched.
-func gcOldVersions(vd, keep string) {
-	if !ownedVersionsDir(vd) {
-		return
-	}
-	ents, err := os.ReadDir(vd)
-	if err != nil {
-		return
-	}
-	for _, e := range ents {
-		ns, err := strconv.ParseInt(e.Name(), 10, 64)
-		if err != nil || filepath.Join(vd, e.Name()) == keep || time.Since(time.Unix(0, ns)) < oldVersionGrace {
-			continue
-		}
-		path := filepath.Join(vd, e.Name())
-		if e.IsDir() {
-			_ = os.RemoveAll(path)
-		} else {
-			_ = os.Remove(path) // a file or a symlink displaced from a symlink destination: removed itself, never followed
-		}
-	}
+func parentOf(p string) string {
+	d := filepath.Dir(p)
+	return d
 }
 
-// ownedVersionsDir reports whether vd is this tool's retention directory: vd itself is a real directory (an Lstat, so a symlink to another directory, even
-// to another seed's marked one, is refused) and it carries a regular marker file.
-func ownedVersionsDir(vd string) bool {
-	fi, err := os.Lstat(vd)
-	if err != nil || !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 {
-		return false
-	}
-	mi, err := os.Lstat(filepath.Join(vd, versionsMarker))
-	return err == nil && mi.Mode().IsRegular()
-}
+func baseOf(p string) string { return filepath.Base(p) }

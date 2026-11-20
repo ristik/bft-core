@@ -872,7 +872,7 @@ func TestAFailingRetentionKeepsTheOldVersion(t *testing.T) {
 	require.NoError(t, err)
 	defer d.Close()
 	prev := retainMove
-	retainMove = func(string, string) error { return fmt.Errorf("disk full") }
+	retainMove = func(int, string, int, string) error { return fmt.Errorf("disk full") }
 	defer func() { retainMove = prev }()
 	g := newFixture(t)
 	err = WriteDir(dst, g.files, g.manifest, true)
@@ -983,4 +983,29 @@ func TestRetentionRefusesAVersionsDirectoryThatIsASymlink(t *testing.T) {
 	// collection through such a symlink deletes nothing either
 	gcOldVersions(versionsDir(dst), "")
 	require.FileExists(t, filepath.Join(expired, "keep"))
+}
+
+// An interrupted creation of the retention directory leaves no unmarked DIR.versions: the next replacement creates it and retains normally.
+func TestInterruptedMarkerCreationIsRetriedNotRefusedForever(t *testing.T) {
+	f := newFixture(t)
+	parent := t.TempDir()
+	dst := filepath.Join(parent, "out")
+	require.NoError(t, WriteDir(dst, f.files, f.manifest, false))
+	if !canExchange(parent) {
+		t.Skip("no atomic exchange here")
+	}
+	prev := markVersionsDir
+	markVersionsDir = func(int) error { return fmt.Errorf("interrupted") }
+	g := newFixture(t)
+	err := WriteDir(dst, g.files, g.manifest, true)
+	markVersionsDir = prev
+	var re *RetentionError
+	require.ErrorAs(t, err, &re)
+	require.NoDirExists(t, versionsDir(dst), "no half-made retention directory is left in place")
+	// the retry: the creation completes, and the old version of THIS replacement is retained
+	h := newFixture(t)
+	require.NoError(t, WriteDir(dst, h.files, h.manifest, true))
+	require.FileExists(t, filepath.Join(versionsDir(dst), versionsMarker))
+	ents, _ := os.ReadDir(versionsDir(dst))
+	require.Len(t, ents, 2, "the marker and the one retained version")
 }
