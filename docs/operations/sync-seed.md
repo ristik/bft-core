@@ -111,3 +111,11 @@ the net closing rate: "caught up" within two blocks, "not closing" when the node
 An unavailable public head (a `null` answer) is reported as unknown, never as height 0 or as caught up.
 
 Then join through `ubft validator apply` as usual.
+
+## Destination directories are operator-controlled
+
+`seed fetch --out`, `seed export --out` and `seed import --home` publish into a directory the operator owns. The destination's parent (and the import home) may be
+reached through a symlink such as a stable `current` link; it is resolved once, up front, and everything after that (staging, the lock, the atomic exchange, the
+retained versions) uses the resolved path, with descriptor-relative, no-follow opens where files are read or removed. A hostile writer that swaps a component of
+that parent **after** it was resolved is not defended against: such a writer already has write access to the operator's own directory, which is outside the
+tool's threat model. Keep the destination (and its parents) writable by the operator only.

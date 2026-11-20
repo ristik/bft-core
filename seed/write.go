@@ -15,7 +15,9 @@ func WriteDir(dir string, payload map[string][]byte, manifest []byte, replace bo
 		return err
 	}
 	// the parent is resolved ONCE, up front (it may be a stable symlink such as "current"): staging, the exchange, the lock and retention all use the
-	// resolved path, so no symlinked component is opened after publication
+	// resolved path, so no symlinked component is opened after publication. Threat model: the destination directory is operator-controlled. A parent
+	// that a hostile writer swaps AFTER this resolve is not defended against (that writer already has write access to the operator's own directory);
+	// everything below the resolved parent is descriptor-relative and no-follow where it reads or removes.
 	rp, err := filepath.EvalSymlinks(parent)
 	if err != nil {
 		return err

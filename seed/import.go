@@ -65,7 +65,8 @@ func BeginImport(home string, v *Verified, replace bool) (*ImportTxn, error) {
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		return nil, err
 	}
-	// the home is resolved once (it may be reached through a symlink): the lock, the staging, the exchange and retention all use the resolved path
+	// the home is resolved once (it may be reached through a symlink): the lock, the staging, the exchange and retention all use the resolved path.
+	// The home is operator-controlled: a component swapped after this resolve by a hostile writer is outside the threat model (see WriteDir).
 	home, err := filepath.EvalSymlinks(home)
 	if err != nil {
 		return nil, err
