@@ -14,7 +14,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/unicitynetwork/bft-core/registrywitness"
 	"github.com/unicitynetwork/bft-core/shardnode"
 )
 
@@ -117,7 +116,7 @@ func (r *feeProofCountReader) Read(p []byte) (int, error) {
 func TestFeeProofResponseReadIsBoundedBeforeDecoding(t *testing.T) {
 	for _, status := range []int{http.StatusOK, http.StatusServiceUnavailable} {
 		t.Run(fmt.Sprint(status), func(t *testing.T) {
-			response := strings.Repeat(" ", registrywitness.MaxResponseBytes+8192)
+			response := strings.Repeat(" ", maxFeeProofResponseBytes+8192)
 			counter := &feeProofCountReader{Reader: strings.NewReader(response)}
 			client := NewEthClient("http://local.test")
 			client.http.Transport = feeProofTransport(func(*http.Request) (*http.Response, error) {
@@ -126,7 +125,7 @@ func TestFeeProofResponseReadIsBoundedBeforeDecoding(t *testing.T) {
 			var proof any
 			err := client.CallContext(t.Context(), &proof, "eth_getProof")
 			require.ErrorIs(t, err, ErrFeeProofOversized)
-			require.Equal(t, registrywitness.MaxResponseBytes+1, counter.bytes)
+			require.Equal(t, maxFeeProofResponseBytes+1, counter.bytes)
 			require.False(t, isFeeProofUnavailable(err))
 			require.Nil(t, proof)
 		})

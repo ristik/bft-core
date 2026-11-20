@@ -14,8 +14,6 @@ import (
 
 	gethtypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/rlp"
-
-	"github.com/unicitynetwork/bft-core/registrywitness"
 )
 
 // EthClient speaks the standard eth_* JSON-RPC namespace — reth's regular
@@ -44,6 +42,10 @@ type blockHeaderJSON struct {
 	StateRoot  data32   `json:"stateRoot"`
 	Timestamp  quantity `json:"timestamp"`
 }
+
+// A fee proof holds one account path and five storage paths. The 600 KiB cap
+// covers hex expansion of the trie nodes and the JSON envelope.
+const maxFeeProofResponseBytes = 600 << 10
 
 // ErrFeeProofUnavailable marks a transport or parent-state availability failure.
 var ErrFeeProofUnavailable = errors.New("engineapi: parent fee proof unavailable")
@@ -87,12 +89,12 @@ func (c *EthClient) call(ctx context.Context, method string, params []any, out a
 
 	var reader io.Reader = resp.Body
 	if feeProof {
-		// Use the existing hex-encoded witness cap, including headroom for JSON.
-		reader = io.LimitReader(reader, registrywitness.MaxResponseBytes+1)
+		// Read one extra byte to distinguish an oversize body from an exact fit.
+		reader = io.LimitReader(reader, maxFeeProofResponseBytes+1)
 	}
 	body, err := io.ReadAll(reader)
-	if feeProof && len(body) > registrywitness.MaxResponseBytes {
-		return fmt.Errorf("%w (%d bytes)", ErrFeeProofOversized, registrywitness.MaxResponseBytes)
+	if feeProof && len(body) > maxFeeProofResponseBytes {
+		return fmt.Errorf("%w (%d bytes)", ErrFeeProofOversized, maxFeeProofResponseBytes)
 	}
 	if err != nil {
 		if feeProof {
