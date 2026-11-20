@@ -81,13 +81,26 @@ vrp_cursors_match() {
   [ "$(cast call --rpc-url "$vrb_rpc" "$(vrp_custody)" 'recordCursor()(uint64)')" = "$(cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'recordCursor()(uint64)')" ]
 }
 
-# the new epoch's trust-base entry (UTB on): served by every root at /api/v1/trustbases, the entry of epoch 2 signed by the epoch-1 quorum
-vrp_utb() {
-  local r out; out=$VR_EVIDENCE/trustbases
-  for r in $(vrb_root_rpcs); do
-    curl -sf "$r/api/v1/trustbases" >"$out-$(echo "$r" | tr -c 'a-z0-9\n' '_').json" || { vrb_log "FAIL: $r serves no /api/v1/trustbases"; return 1; }
+# the signed trust-base history (UTB on, no aggregator): every root's own entry store exports from the pinned genesis and verifies epochs 1..N, and
+# the entry of epoch 2 is signed by epoch 1's quorum (the verifier's own line). With VR_AGG=1 the aggregator's /api/v1/trustbases is the UTB agent's
+# check (vr-utb-steps.sh vru_after); a root's own REST serves the V1 runtime projection only, never the signed history.
+vrp_utb() { # <last epoch expected>
+  local last=${1:-2} out=$VR_EVIDENCE/utb n f bad=0
+  declare -F vru_ev >/dev/null || source scripts/vr-utb-steps.sh || { vrb_log "FAIL: scripts/vr-utb-steps.sh"; return 1; }
+  mkdir -p "$out"
+  for f in test-nodes/root*/root-utb-entries.db; do
+    [ -f "$f" ] || continue
+    n=$(basename "$(dirname "$f")"); cp "$f" "$out/$n.db"
+    if build/ubft trust-base utb-export --utb-genesis test-nodes/utb-genesis.cbor --utb-genesis-id "$(utb_pin)" --utb-entries-db "$out/$n.db" --out "$out/$n.cbor" >"$out/$n.export.log" 2>&1 \
+      && vru_ev verify --bundle "$out/$n.cbor" --pin "$(utb_pin)" >"$out/$n.verify.txt" 2>&1 && grep -q "^ok: epochs 1\.\.$last," "$out/$n.verify.txt"; then
+      grep '^epoch 2 ' "$out/$n.verify.txt" >"$out/$n.epoch2.line" || true
+    else
+      vrb_log "FAIL: $n's entry store holds no verified epochs 1..$last ($(tail -n 1 "$out/$n.verify.txt" 2>/dev/null))"; bad=$((bad + 1))
+    fi
+    rm -f "$out/$n.db"
   done
-  vrb_log "PASS: /api/v1/trustbases captured per root (the epoch-2 entry and its predecessor signatures are in $VR_EVIDENCE/trustbases-*.json)"
+  [ "$bad" = 0 ] || return 1
+  vrb_log "PASS: every root's own entry store verifies epochs 1..$last from the pinned genesis; $(cat "$out"/root1.epoch2.line 2>/dev/null)"
 }
 
 # ---- the recovery (install K) through VR -------------------------------------------------------------------------------------------------
@@ -183,4 +196,5 @@ vrp_recovery() {
   vrb_log "custody's last acknowledged assignment is the recovery assignment $rec"
   vrp_facts_ok || { vrb_log "FAIL: the holder facts differ from custody's state"; return 1; }
   vrb_log "PASS: the recovery (install K) completed through VR: Recovered, Healthy, cursors and holder facts match"
+  if [ "${UTB_LANE:-0}" = 1 ]; then vrp_utb 4 || return 1; fi
 }
