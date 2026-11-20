@@ -175,3 +175,40 @@ func TestAVotersPullIsBoundedByTheOpOfTheControl(t *testing.T) {
 	require.NoError(t, x.fetchWitnesses(context.Background(), &heldWitnesses{m: map[[32]byte][]byte{}}, blockWith(author, hash)))
 	require.Equal(t, storage.MaxEVMWitnessBytes, got, "a Retirement's witness may not be longer than the executor accepts")
 }
+
+// A block ordering a VR root-only control (HandoffView beyond view 0, RuleSupport) fetches no witness for it: the control carries none, and its zero
+// hash is not asked of the peers (which would refuse the block as unavailable for every voter, the author included). The live run that found it:
+// the Prepare time gate of a pending schedule kept an intent at view 1, whose block no root could process.
+func TestFetchWitnessesAsksNothingForRootOnlyVRControls(t *testing.T) {
+	x, _, author, _ := witnessFixture(t)
+	x.witnesses = func(_ context.Context, h [32]byte, _ []peer.ID, _ int) ([]byte, error) {
+		t.Fatalf("a witness was asked for %x", h)
+		return nil, nil
+	}
+	b := &drctypes.BlockData{Author: author.String(), Epoch: 3, Round: 9, Payload: &drctypes.Payload{}}
+	b.Payload.PosControls = []rctypes.PosControl{
+		{Registry: true, Op: rctypes.OpHandoffView, OrderingEpoch: b.Epoch, OrderingRound: b.Round, View: &rctypes.ViewContext{IntentDigest: [32]byte{1}, View: 1}},
+	}
+	for _, c := range b.Payload.PosControls {
+		require.NoError(t, c.Validate(), "the control is well formed")
+		require.False(t, c.CarriesWitness())
+	}
+	store := &heldWitnesses{m: map[[32]byte][]byte{}}
+	require.NoError(t, x.fetchWitnesses(context.Background(), store, b))
+
+	// a witness-bearing control in the same block is still fetched (and a missing one still refuses the block)
+	data := []byte("a witness")
+	hash := sha256.Sum256(data)
+	b.Payload.PosControls = append(b.Payload.PosControls, validControl(b, hash))
+	asked := 0
+	x.witnesses = func(_ context.Context, h [32]byte, _ []peer.ID, _ int) ([]byte, error) {
+		asked++
+		require.Equal(t, hash, h)
+		return data, nil
+	}
+	require.NoError(t, x.fetchWitnesses(context.Background(), store, b))
+	require.Equal(t, 1, asked)
+	x.witnesses = func(context.Context, [32]byte, []peer.ID, int) ([]byte, error) { return nil, errors.New("none") }
+	store = &heldWitnesses{m: map[[32]byte][]byte{}}
+	require.ErrorIs(t, x.fetchWitnesses(context.Background(), store, b), storage.ErrWitnessUnavailable)
+}
