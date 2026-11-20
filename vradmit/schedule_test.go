@@ -3,6 +3,9 @@ package vradmit
 import (
 	"testing"
 
+	"github.com/unicitynetwork/bft-go-base/types"
+	"github.com/unicitynetwork/bft-go-base/types/hex"
+
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/vrschema"
 )
@@ -81,4 +84,49 @@ func TestRootScheduleBoundIsIgnoredNotFatal(t *testing.T) {
 	require.Len(t, next.Schedule, vrschema.MaxActivations)
 	_, err = next.Encode()
 	require.NoError(t, err)
+}
+
+// A version 1 root state (a checkpoint of the release before the committed schedule) is refused with a clear message: it cannot be
+// continued, a new generation is required (astra 5). The bytes are a real v1 encoding of the previous release's wire.
+func TestRootStateV1CheckpointIsRefused(t *testing.T) {
+	type v1Wire struct {
+		_             struct{} `cbor:",toarray"`
+		Domain        string
+		Version       uint64
+		Backoff       hex.Bytes
+		OpenUCTime    uint64
+		Support       hex.Bytes
+		Acknowledged  hex.Bytes
+		PrepareUCTime uint64
+		StagedBody    hex.Bytes
+		StagedResult  hex.Bytes
+		StagedBitmap  uint64
+		StagedSupport hex.Bytes
+		AttemptOpen   uint64
+		AttemptOpenUC uint64
+	}
+	g := GenesisRootState(1, 4)
+	b, err := g.Backoff.Encode()
+	require.NoError(t, err)
+	tab, err := g.Support.Encode()
+	require.NoError(t, err)
+	raw, err := types.Cbor.Marshal(v1Wire{Domain: rootStateDomain, Version: 1, Backoff: b, Support: tab, Acknowledged: g.Acknowledged[:],
+		StagedBody: make([]byte, 32), StagedResult: make([]byte, 32), StagedSupport: tab})
+	require.NoError(t, err)
+	_, err = DecodeRootState(raw)
+	require.ErrorIs(t, err, ErrRootStateV1)
+	require.ErrorIs(t, err, ErrRootState)
+	require.Contains(t, err.Error(), "new generation is required")
+}
+
+// K's Freeze evidence (fresh commitments and K readiness by K's exact bindings) is extracted; a commitment of a binding outside K is not.
+func TestKEvidenceSupportKeepsOnlyKBindings(t *testing.T) {
+	w := newWorld(t)
+	rule := vrschema.RuleID("a")
+	in := SupportInput{Network: fxNetwork, K: w.k, J: w.j, Evidence: vrschema.RuleSupportEvidence{
+		Fresh: []vrschema.SupportCommitment{w.commitment(w.k[0], rule), w.commitment(w.j[3], rule)}}}
+	got, err := KEvidenceSupport(in)
+	require.NoError(t, err)
+	require.Len(t, got.Entries, 1)
+	require.Equal(t, w.k[0].StakingID, got.Entries[0].StakingID)
 }
