@@ -67,3 +67,18 @@ func TestRootScheduleStageCommitPostponeLatch(t *testing.T) {
 	_, err = bad.Encode()
 	require.ErrorIs(t, err, ErrRootState)
 }
+
+// The table is bounded at 64: an entry past the bound (which VR's queue-time check makes unreachable) is ignored identically, never a halt.
+func TestRootScheduleBoundIsIgnoredNotFatal(t *testing.T) {
+	s := GenesisRootState(1, 4)
+	for i := 0; i < vrschema.MaxActivations; i++ {
+		s.Schedule = append(s.Schedule, vrschema.Activation{RuleID: vrschema.RuleID(string(rune('a' + i))), RootEpoch: 90, State: vrschema.ActActive, ChangeID: uint64(i + 1)})
+	}
+	s.StagedBody, s.StagedResult = [32]byte{1}, vrschema.Word{1}
+	s.StagedSchedule = []vrschema.Activation{{RuleID: vrschema.RuleID("over"), RootEpoch: 95, State: vrschema.ActActive, ChangeID: 99}}
+	next, err := s.CommitSchedule(2)
+	require.NoError(t, err)
+	require.Len(t, next.Schedule, vrschema.MaxActivations)
+	_, err = next.Encode()
+	require.NoError(t, err)
+}

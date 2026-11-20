@@ -122,11 +122,16 @@ func (s RootState) CommitSchedule(installed uint64) (RootState, error) {
 		if seen {
 			continue
 		}
-		var err error
-		if sched, err = vrschema.AppendSchedule(sched, vrschema.Schedule{RuleID: a.RuleID, ReleaseDigest: a.ReleaseDigest, RootEpoch: a.RootEpoch,
-			NotBeforeUcTime: a.NotBeforeUcTime}, a.ChangeID); err != nil {
+		next, err := vrschema.AppendSchedule(sched, vrschema.Schedule{RuleID: a.RuleID, ReleaseDigest: a.ReleaseDigest, RootEpoch: a.RootEpoch,
+			NotBeforeUcTime: a.NotBeforeUcTime}, a.ChangeID)
+		if errors.Is(err, vrschema.ErrOversize) {
+			// VR's queue-time check counts recorded plus pending schedules against MAX_ACTIVATIONS (64), so this cannot happen against a
+			// correct VR; if it ever does, every root ignores the entry identically rather than halting
+			continue
+		} else if err != nil {
 			return s, errors.Join(ErrRootState, err)
 		}
+		sched = next
 	}
 	s.Schedule = vrschema.Latch(sched, installed)
 	return s, nil
