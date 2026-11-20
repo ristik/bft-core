@@ -196,16 +196,10 @@ func (x *ConsensusManager) vrRecoveryRoute(parent *storage.ExecutedBlock, contro
 	}
 	lapsed := storage.PrepareLapsed(control, round)
 	switch {
-	case control.Phase == "endorsed", control.Phase == "prepared" && !lapsed:
-		// once the Freeze is committed the retained candidate is authoritative: a missing one orders nothing, whatever plan is cached
-		var held bool
-		if control.Phase == "endorsed" {
-			// a failed lookup is not a miss: the route is taken, and the commit branch reports the error
-			raw, lerr := x.committedRecoveryPreimage(control)
-			held = lerr != nil || raw != nil
-		} else {
-			held = x.heldRecoveryBody(control)
-		}
+	case control.Phase == "endorsed":
+		return false // handoffRecordsForRound reads the committed Freeze's retained candidate itself (vrRecoveryCommit)
+	case control.Phase == "prepared" && !lapsed:
+		held := x.heldRecoveryBody(control)
 		if held {
 			x.log.Info("VR recovery: the leader follows the exact recovery", "round", round, "phase", control.Phase, "attempt", control.Attempt)
 		}
@@ -342,38 +336,28 @@ func (x *ConsensusManager) committedRecoveryPreimage(control *evmroot.ControlSta
 
 // vrRecoveryCommit is H of an endorsed exact recovery, derived from the committed Freeze record and the candidate it retained, with no plan or
 // endorsement in memory (the old quorum's Freeze is committed: nothing more is needed from it). ok is false when the control state is not one.
-func (x *ConsensusManager) vrRecoveryCommit(round uint64, parent *storage.ExecutedBlock, control *evmroot.ControlState) ([][]byte, bool, error) {
-	if control.Phase != "endorsed" {
-		return nil, false, nil
-	}
-	preimage, err := x.committedRecoveryPreimage(control)
-	if err != nil {
-		return nil, true, fmt.Errorf("%w: the retained candidate of the committed Freeze: %w", ErrHandoffApproval, err)
-	}
-	if preimage == nil {
-		return nil, true, nil // routed here as a recovery: a clean miss orders nothing
-	}
+func (x *ConsensusManager) vrRecoveryCommit(round uint64, parent *storage.ExecutedBlock, control *evmroot.ControlState, preimage []byte) ([][]byte, error) {
 	record, err := storage.DecodeOrderedHandoffRecord(control.RecordBytes)
 	if err != nil {
-		return nil, true, err
+		return nil, err
 	}
 	if reason := x.frozenParentLoss(parent, control.FrozenParent, control.FrozenParent); reason != "" {
-		return nil, true, nil
+		return nil, nil
 	}
 	activation, ok := storage.CommitActivationRound(record.ActivationRound, round)
 	if !ok {
-		return nil, true, ErrHandoffApproval
+		return nil, ErrHandoffApproval
 	}
 	key, err := x.blockStore().CertifiedEVMShardAt(parent.GetRound(), control.FrozenParent)
 	if err != nil {
-		return nil, true, fmt.Errorf("%w: %w", ErrHandoffApproval, err)
+		return nil, fmt.Errorf("%w: %w", ErrHandoffApproval, err)
 	}
 	record.OrderedRound, record.ActivationRound, record.Kind = round, activation, "commit"
 	record.SuccessorTRHash, err = storage.AssignmentSuccessorTRHash(parent.ShardState.States[key], preimage, activation, x.params.HashAlgorithm)
 	if err != nil {
-		return nil, true, err
+		return nil, err
 	}
-	return [][]byte{record.Bytes()}, true, nil
+	return [][]byte{record.Bytes()}, nil
 }
 
 // pruneSpentPlans forgets the endorsed plans of attempts the authenticated control state has moved past (an aborted or lapsed attempt, a

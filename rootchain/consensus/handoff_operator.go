@@ -1253,8 +1253,21 @@ func (x *ConsensusManager) handoffRecordsForRound(round uint64, parentQC *rctype
 	}
 	// a validator-registry chain orders its records for the complete verified view certificate this root holds (VT-05b)
 	// ... except an exact recovery of its committed, unacknowledged primary (#1221), which follows the handoff path below
-	if x.vr != nil && len(control.VR) != 0 && !x.vrRecoveryRoute(parent, control, round) {
-		return x.vrRecordsForRound(round, parent, parentQC)
+	if x.vr != nil && len(control.VR) != 0 {
+		if control.Phase == "endorsed" {
+			// the retained candidate of the committed Freeze tells a recovery from an ordinary primary; it is read once, and an error is the caller's
+			raw, err := x.committedRecoveryPreimage(control)
+			if err != nil {
+				return nil, fmt.Errorf("%w: the retained candidate of the committed Freeze: %w", ErrHandoffApproval, err)
+			}
+			if raw == nil {
+				return x.vrRecordsForRound(round, parent, parentQC)
+			}
+			return x.vrRecoveryCommit(round, parent, control, raw)
+		}
+		if !x.vrRecoveryRoute(parent, control, round) {
+			return x.vrRecordsForRound(round, parent, parentQC)
+		}
 	}
 	// A Prepare whose freeze lapsed is dead: no Freeze is ordered for it, and once the cooldown has passed the leader may start the
 	// next attempt exactly as after an abort.
@@ -1296,13 +1309,6 @@ func (x *ConsensusManager) handoffRecordsForRound(round uint64, parentQC *rctype
 			return nil, nil
 		}
 		return x.prepareRecordFor(*intent, control, round)
-	}
-	if x.vr != nil && len(control.VR) != 0 && phase == "endorsed" {
-		// an endorsed exact recovery needs no plan in memory to order its H
-		// (routed here only for a recovery whose retained candidate identified it: if that lookup fails now, nothing is ordered, and the cached
-		// plan is never a substitute for the retained candidate)
-		records, _, err := x.vrRecoveryCommit(round, parent, control)
-		return records, err
 	}
 	plan, err := x.readyHandoff(expectedAttempt)
 	if err != nil {

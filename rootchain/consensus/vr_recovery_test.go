@@ -182,9 +182,7 @@ func TestVRRecoveryRouteFollowsTheCommittedPrepare(t *testing.T) {
 	require.True(t, x.vrRecoveryRoute(w.block, prepared, 12), "the Freeze and H of a held recovery's Prepare, whatever the eligibility says now: the EVM is frozen")
 	endorsed := *prepared
 	endorsed.Phase = "endorsed"
-	require.False(t, x.vrRecoveryRoute(w.block, &endorsed, 13), "endorsed: the retained candidate decides, a cached plan does not")
-	x.vr.retained = func([]byte) ([]byte, error) { return w.second.Candidate, nil }
-	require.True(t, x.vrRecoveryRoute(w.block, &endorsed, 13))
+	require.False(t, x.vrRecoveryRoute(w.block, &endorsed, 13), "endorsed: handoffRecordsForRound reads the retained candidate itself")
 
 	x.handoffPlans[id].plan.CandidatePreimage = nil // another plan under the same body: not a recovery
 	require.False(t, x.vrRecoveryRoute(w.block, prepared, 12))
@@ -331,24 +329,23 @@ func TestVRRecoveryLeaderOrdersPrepareFreezeAndH(t *testing.T) {
 	endorsed := control
 	endorsed.Phase, endorsed.OrderedRound, endorsed.RecordBytes = "endorsed", freeze.OrderedRound, records[0]
 	parent.ShardState.Control = &endorsed
-	x.vr.retained = func([]byte) ([]byte, error) { return nil, nil }
-	records, err = x.handoffRecordsForRound(freeze.OrderedRound+2, qc)
-	require.NoError(t, err)
-	require.Empty(t, records, "no retained recovery candidate, a quorum-ready plan still cached: nothing is ordered")
+	// a clean miss (an ordinary primary, or nothing retained) is the VR path, which has no plan here and orders nothing, whatever plan is cached
 	calls := 0
-	x.vr.retained = func([]byte) ([]byte, error) {
-		calls++
-		if calls > 1 {
-			return nil, errors.New("storage error")
-		}
-		return plan.CandidatePreimage, nil
-	}
-	records, err = x.handoffRecordsForRound(freeze.OrderedRound+2, qc)
-	require.ErrorContains(t, err, "storage error", "the failed read is reported, not swallowed")
-	require.Empty(t, records, "the second lookup fails: the cached quorum-ready plan does not stand in for it")
-	x.vr.retained = func([]byte) ([]byte, error) { return plan.CandidatePreimage, nil }
+	x.vr.retained = func([]byte) ([]byte, error) { calls++; return nil, nil }
 	records, err = x.handoffRecordsForRound(freeze.OrderedRound+2, qc)
 	require.NoError(t, err)
+	require.Empty(t, records)
+	require.Equal(t, 1, calls, "one lookup")
+	// a failed read is reported, with no records, even with the quorum-ready plan cached
+	x.vr.retained = func([]byte) ([]byte, error) { return nil, errors.New("storage error") }
+	records, err = x.handoffRecordsForRound(freeze.OrderedRound+2, qc)
+	require.ErrorContains(t, err, "storage error")
+	require.Empty(t, records)
+	calls = 0
+	x.vr.retained = func([]byte) ([]byte, error) { calls++; return plan.CandidatePreimage, nil }
+	records, err = x.handoffRecordsForRound(freeze.OrderedRound+2, qc)
+	require.NoError(t, err)
+	require.Equal(t, 1, calls, "one lookup on success")
 	require.False(t, vrPathUsed)
 	require.Len(t, records, 1)
 	h, err := storage.DecodeOrderedHandoffRecord(records[0])
