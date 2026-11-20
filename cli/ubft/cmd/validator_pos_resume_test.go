@@ -40,14 +40,21 @@ func TestPlanPosPublishResumesAfterEachStep(t *testing.T) {
 		"a later VR state":           {members, true, 6, [3]bool{false, false, false}},
 		"acknowledged":               {members, true, 5, [3]bool{false, false, false}},
 	} {
-		got, err := planPosPublish(members, c.pops, c.finalized, c.vrState)
+		got, err := planPosPublish(members, c.pops, c.finalized, vrclient.OutputView{State: c.vrState, OutputCommit: [32]byte{9}})
 		require.NoError(t, err, name)
 		require.Equal(t, c.want, got, name)
 	}
 	// Invalidated and Rejected are refusals with a clear message, whatever the election holds
+	// a Closed output without a publication commitment is a reservation that expired: never published, whatever the election holds
+	for _, st := range []uint8{5, 6, 7} {
+		_, err := planPosPublish(members, members, true, vrclient.OutputView{State: st})
+		require.ErrorIs(t, err, ErrValidator)
+		require.ErrorContains(t, err, vrOutputState(st))
+		require.ErrorContains(t, err, "without a publication commitment")
+	}
 	for _, st := range []uint8{3, 4} {
 		for _, finalized := range []bool{false, true} {
-			_, err := planPosPublish(members, members, finalized, st)
+			_, err := planPosPublish(members, members, finalized, vrclient.OutputView{State: st, OutputCommit: [32]byte{9}})
 			require.ErrorIs(t, err, ErrValidator)
 			require.ErrorContains(t, err, vrOutputState(st))
 		}
@@ -67,9 +74,10 @@ func TestSameDelegation(t *testing.T) {
 }
 
 func TestRequireVRPublishedNamesTheState(t *testing.T) {
-	require.NoError(t, requireVRPublished(2))
-	for st, name := range map[uint8]string{0: "None", 1: "Reserved", 3: "Invalidated", 4: "Rejected"} {
-		err := requireVRPublished(st)
+	require.NoError(t, requireVRPublished(vrclient.OutputView{State: 2}))
+	require.NoError(t, requireVRPublished(vrclient.OutputView{State: 7, OutputCommit: [32]byte{1}}), "Closed after a publication")
+	for st, name := range map[uint8]string{0: "None", 1: "Reserved", 3: "Invalidated", 4: "Rejected", 7: "Closed"} {
+		err := requireVRPublished(vrclient.OutputView{State: st})
 		require.ErrorIs(t, err, ErrValidator)
 		require.ErrorContains(t, err, name)
 	}
@@ -82,10 +90,12 @@ type fakePosChain struct {
 	pops      uint32
 	finalized bool
 	vrState   uint8
+	commit    [32]byte // VR's publication commitment for the result
 	// what each transaction does to the state; publishState is the VR output state after VR.publish (Published unless the result was invalidated)
-	publishState uint8
-	noProofs     bool // submitAssignmentPoPs mines without storing the proofs
-	sent         []string
+	publishState  uint8
+	publishCommit [32]byte
+	noProofs      bool // submitAssignmentPoPs mines without storing the proofs
+	sent          []string
 }
 
 func (f *fakePosChain) Publication(_ context.Context, _ [32]byte) (vrclient.PublicationRecord, error) {
@@ -97,7 +107,7 @@ func (f *fakePosChain) Publication(_ context.Context, _ [32]byte) (vrclient.Publ
 func (f *fakePosChain) Output(_ context.Context, _ [32]byte) (vrclient.OutputView, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return vrclient.OutputView{State: f.vrState}, nil
+	return vrclient.OutputView{State: f.vrState, OutputCommit: f.commit}, nil
 }
 
 // serve is a JSON-RPC endpoint for the sender: it prices and simulates everything successfully, and applies a mined transaction to the fake state.
@@ -135,6 +145,7 @@ func (f *fakePosChain) serve(t *testing.T, members uint32) *rpc.Client {
 			case hex.EncodeToString(vrclient.PosPublishABI.Methods["publish"].ID):
 				f.sent = append(f.sent, "publish")
 				f.vrState = f.publishState
+				f.commit = f.publishCommit
 			}
 			f.mu.Unlock()
 			res = tx.Hash()
@@ -181,6 +192,19 @@ func TestPosPublishCommandRequiresEachEffect(t *testing.T) {
 		require.ErrorIs(t, err, ErrValidator)
 		require.ErrorContains(t, err, "Invalidated")
 		require.Equal(t, []string{"publish"}, f.sent)
+	})
+	t.Run("the reservation expired before publication and the output ends Closed", func(t *testing.T) {
+		// Closed without a publication commitment is not a publication
+		f := &fakePosChain{pops: 4, finalized: true, vrState: 1, publishState: 7}
+		_, err := runFakePosPublish(t, f, 4, noPops)
+		require.ErrorIs(t, err, ErrValidator)
+		require.ErrorContains(t, err, "Closed")
+		require.ErrorContains(t, err, "without a publication commitment")
+	})
+	t.Run("Closed after a real publication is accepted", func(t *testing.T) {
+		f := &fakePosChain{pops: 4, finalized: true, vrState: 1, publishState: 7, publishCommit: [32]byte{5}}
+		_, err := runFakePosPublish(t, f, 4, noPops)
+		require.NoError(t, err)
 	})
 	t.Run("the proofs are not stored after the receipt", func(t *testing.T) {
 		f := &fakePosChain{vrState: 1, publishState: 2, noProofs: true}

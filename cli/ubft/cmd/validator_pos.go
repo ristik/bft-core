@@ -490,16 +490,29 @@ func validatorPosPublishCmd(base *baseFlags) *cobra.Command {
 // from what the election and VR already hold, so an interrupted run resumes at the first unfinished step. The election refuses proofs once the
 // candidate is published, and VR refuses a second publication, so the finished steps must not be sent again. A VR output past Reserved
 // (state 2, or Acknowledged, Recovered, Closed) means the result is published; Invalidated and Rejected are refusals, never success.
-func planPosPublish(members int, popCount uint32, candidatePublished bool, vrState uint8) ([3]bool, error) {
-	switch vrState {
+func planPosPublish(members int, popCount uint32, candidatePublished bool, out vrclient.OutputView) ([3]bool, error) {
+	switch out.State {
 	case 0, 1: // None, Reserved: not published in VR yet
 		finalize := !candidatePublished
 		return [3]bool{finalize && int(popCount) < members, finalize, true}, nil
-	case 2, 5, 6, 7: // Published, or beyond it (Acknowledged, Recovered, Closed): the result was published
+	case 2: // Published
 		return [3]bool{}, nil
+	case 5, 6, 7: // Acknowledged, Recovered, Closed: published before, but only if VR holds the publication commitment (a reservation that expired
+		// before publication also ends Closed)
+		if out.OutputCommit != ([32]byte{}) {
+			return [3]bool{}, nil
+		}
 	}
-	// Invalidated (3, a member lost its coverage) and Rejected (4): VR will never publish this result
-	return [3]bool{}, fmt.Errorf("%w: VR's output of this result is %s: it cannot be published; wait for the next election", ErrValidator, vrOutputState(vrState))
+	// Invalidated (3, a member lost its coverage), Rejected (4), or a closure that never held a publication: VR will not publish this result
+	return [3]bool{}, fmt.Errorf("%w: VR's output of this result is %s%s: it cannot be published; wait for the next election", ErrValidator, vrOutputState(out.State), noCommitNote(out))
+}
+
+// noCommitNote says why a Closed, Acknowledged or Recovered output is not a publication.
+func noCommitNote(out vrclient.OutputView) string {
+	if out.State >= 5 && out.OutputCommit == ([32]byte{}) {
+		return " without a publication commitment (it was never published)"
+	}
+	return ""
 }
 
 func vrOutputState(s uint8) string {
@@ -541,7 +554,7 @@ func verifyPosPublishEffect(ctx context.Context, chain posPublishChain, rid [32]
 		if err != nil {
 			return err
 		}
-		if err := requireVRPublished(out.State); err != nil {
+		if err := requireVRPublished(out); err != nil {
 			return err
 		}
 	}
@@ -549,12 +562,16 @@ func verifyPosPublishEffect(ctx context.Context, chain posPublishChain, rid [32]
 }
 
 // requireVRPublished accepts only a VR output that is Published (or past it); every other state is named in the refusal.
-func requireVRPublished(state uint8) error {
-	switch state {
-	case 2, 5, 6, 7:
+func requireVRPublished(out vrclient.OutputView) error {
+	switch out.State {
+	case 2:
 		return nil
+	case 5, 6, 7: // beyond Published only counts when VR holds the publication commitment
+		if out.OutputCommit != ([32]byte{}) {
+			return nil
+		}
 	}
-	return fmt.Errorf("%w: after VR.publish the result's output is %s, not Published (VR.publish returns a status without reverting when it cannot publish)", ErrValidator, vrOutputState(state))
+	return fmt.Errorf("%w: after VR.publish the result's output is %s%s, not Published (VR.publish returns a status without reverting when it cannot publish)", ErrValidator, vrOutputState(out.State), noCommitNote(out))
 }
 
 // posPublishChain is what the relayer reads from the election and VR.
@@ -599,7 +616,7 @@ func runPosPublish(ctx context.Context, w io.Writer, r posPublishRun) error {
 	if err != nil {
 		return err
 	}
-	plan, err := planPosPublish(len(r.Members), pubRec.PopCount, pubRec.Published, out.State)
+	plan, err := planPosPublish(len(r.Members), pubRec.PopCount, pubRec.Published, out)
 	if err != nil {
 		return err
 	}

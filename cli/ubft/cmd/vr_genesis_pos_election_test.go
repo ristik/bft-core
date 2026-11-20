@@ -157,3 +157,18 @@ func mustHex32(t *testing.T, s string) [32]byte {
 	require.NoError(t, err)
 	return [32]byte(b)
 }
+
+// a genesis bond that does not fit a custody lot is an error, never a panic of the verifier
+func TestPosCustodyOversizedBondIsRefused(t *testing.T) {
+	in, d, alloc := posElectionFixture(t)
+	network, err := vrHex("network", in.Network, 32)
+	require.NoError(t, err)
+	in.Identities = append([]vrInputIdentity(nil), in.Identities...)
+	in.Identities[0].RawWeight = ^uint64(0)
+	in.Pos.BondUnit = "340282366920938463463374607431768211455" // 2^128-1: the product overflows the 16-byte lot field
+	require.NotPanics(t, func() {
+		err = vrCheckPosCustody(in, d, network, alloc)
+	})
+	require.ErrorIs(t, err, ErrVRGenesis)
+	require.ErrorContains(t, err, "uint128")
+}

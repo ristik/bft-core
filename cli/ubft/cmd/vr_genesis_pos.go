@@ -398,6 +398,9 @@ func vrPosCustodyExpected(in vrGenesisInput, d vrDeploymentFile, network []byte,
 		}
 		rootHash, evmHash := vrschema.Keccak(rootKey), vrschema.Keccak(evmKey)
 		bond := new(big.Int).Mul(new(big.Int).SetUint64(id.RawWeight), bondUnit)
+		if bond.BitLen() > 128 {
+			return nil, fmt.Errorf("%w: identity %d's genesis bond %s does not fit a custody lot (uint128): bond unit %s x raw weight %d", ErrVRGenesis, sid, bond, bondUnit, id.RawWeight)
+		}
 		total.Add(total, bond)
 		// positions[id]: owner, withdrawal (= owner), root key hash, staged (zero), then generation 1 / roleNonce 0 / openLots 1 / lotCount 1 / no retirement
 		pos := vrschema.MapSlot(U(sid), U(22))
