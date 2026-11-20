@@ -3,7 +3,6 @@ package seed
 import (
 	"io"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strconv"
 )
@@ -38,13 +37,8 @@ func Handler(dir string) http.Handler {
 			http.Error(w, "busy", http.StatusServiceUnavailable)
 			return
 		}
-		path := filepath.Join(dir, filepath.Base(r.URL.Path))
-		st, err := os.Lstat(path)
-		if err != nil || !st.Mode().IsRegular() || st.Size() > limit {
-			http.NotFound(w, r)
-			return
-		}
-		f, err := os.Open(path)
+		// type and size are checked on the descriptor that is served (no symlink followed): the length sent is the opened file's
+		f, st, err := openRegular(filepath.Join(dir, filepath.Base(r.URL.Path)), limit)
 		if err != nil {
 			http.NotFound(w, r)
 			return
@@ -55,7 +49,7 @@ func Handler(dir string) http.Handler {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Length", strconv.FormatInt(st.Size(), 10))
 		if r.Method == http.MethodGet {
-			_, _ = io.CopyN(w, f, st.Size())
+			_, _ = io.Copy(w, io.LimitReader(f, st.Size()))
 		}
 	})
 }

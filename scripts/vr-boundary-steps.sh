@@ -240,8 +240,10 @@ EOF
 }
 
 if vrb_main; then
+  declare -F vrs_cleanup >/dev/null && vrs_cleanup
   vrb_log "VR BOUNDARY DONE"
 else
+  declare -F vrs_cleanup >/dev/null && vrs_cleanup   # VT-11: the seed servers (the harness trap stops the devnet itself)
   failures=$((failures + 1))
   for i in $(seq 1 "${validators:-4}"); do tail -n 3000 "test-nodes/root$i/debug.log" >"$VR_EVIDENCE/root$i-tail.log" 2>/dev/null; done
   for i in $(seq 1 "${validators:-4}"); do tail -n 1000 "test-nodes/evm$i/debug.log" >"$VR_EVIDENCE/evm$i-tail.log" 2>/dev/null; done

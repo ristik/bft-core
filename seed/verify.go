@@ -50,22 +50,28 @@ func ParseGenesisID(s string) ([types.TrustBaseV2IDLen]byte, error) {
 	return pin, nil
 }
 
-// VerifyDir reads a seed directory (the manifest and exactly its three payload files; any other file is ignored, never read) and verifies it.
+// VerifyDir reads a seed directory (the manifest and exactly its three payload files; any other file is ignored, never read) and verifies it. The
+// manifest is parsed first and its validated sizes bound the payload reads; every file is opened without following a symlink and checked on the
+// opened descriptor.
 func VerifyDir(dir string, p Pins) (*Verified, error) {
-	mraw, err := readBounded(filepath.Join(dir, ManifestName), MaxManifestBytes)
+	mraw, err := ReadFileBounded(filepath.Join(dir, ManifestName), MaxManifestBytes)
 	if err != nil {
 		return nil, refuse("reading the manifest: %v", err)
 	}
+	m, err := DecodeManifest(mraw)
+	if err != nil {
+		return nil, err
+	}
 	files := map[string][]byte{}
-	for name, limit := range fileLimits {
-		b, err := readBounded(filepath.Join(dir, name), limit)
+	for _, f := range m.Files {
+		b, err := ReadFileBounded(filepath.Join(dir, f.Name), f.Size)
 		if err != nil {
 			if os.IsNotExist(err) {
-				return nil, refuse("the seed has no %s", name)
+				return nil, refuse("the seed has no %s", f.Name)
 			}
-			return nil, refuse("reading %s: %v", name, err)
+			return nil, refuse("reading %s: %v", f.Name, err)
 		}
-		files[name] = b
+		files[f.Name] = b
 	}
 	return Verify(mraw, files, p)
 }
@@ -73,7 +79,13 @@ func VerifyDir(dir string, p Pins) (*Verified, error) {
 // Verify checks a seed given as bytes. Order: manifest shape, file hashes, the trust-base history against the pinned genesis, the manifest's
 // network claims against that history, the checkpoint certificate against the trust base of its own root epoch, the manifest's checkpoint
 // claims against the certificate.
-func Verify(manifestRaw []byte, files map[string][]byte, p Pins) (*Verified, error) {
+func Verify(manifestRaw []byte, files map[string][]byte, p Pins) (v *Verified, err error) {
+	// the decoders and verifiers are fed untrusted bytes: whatever they might still trip over becomes a refusal of the seed
+	defer func() {
+		if r := recover(); r != nil {
+			v, err = nil, refuse("the seed could not be verified (malformed certificate: %v)", r)
+		}
+	}()
 	m, err := DecodeManifest(manifestRaw)
 	if err != nil {
 		return nil, err
@@ -135,8 +147,14 @@ func Verify(manifestRaw []byte, files map[string][]byte, p Pins) (*Verified, err
 	if again, err := types.Cbor.Marshal(&tr); err != nil || !bytes.Equal(again, trRaw) {
 		return nil, refuse("the checkpoint TR is not canonical CBOR")
 	}
-	if uc.InputRecord == nil || uc.UnicitySeal == nil {
+	// every field the accessors and the verifier dereference must be present: a certificate with a missing part is a refusal, not a panic
+	switch {
+	case uc.InputRecord == nil || uc.UnicitySeal == nil:
 		return nil, refuse("the checkpoint UC has no input record or seal")
+	case uc.UnicityTreeCertificate == nil:
+		return nil, refuse("the checkpoint UC has no unicity tree certificate")
+	case len(uc.TRHash) != 32 || len(uc.ShardConfHash) != 32:
+		return nil, refuse("the checkpoint UC's TR hash or shard configuration hash is not 32 bytes")
 	}
 	if err := tr.IsValid(); err != nil {
 		return nil, refuse("the checkpoint TR: %v", err)

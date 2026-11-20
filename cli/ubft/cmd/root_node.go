@@ -104,6 +104,7 @@ type (
 		TargetBlockInterval time.Duration
 		MaxRequests         uint   // certification request channel capacity
 		RPCServerAddress    string // address on which http server is exposed with metrics endpoint
+		UTBBundleAddress    string // optional isolated read-only listener of the signed trust-base history (seed export)
 		// OperatorAllowedSources lists the addresses and CIDR prefixes whose requests the operator endpoints answer (default loopback only)
 		OperatorAllowedSources string
 		// OperatorAllowedHosts are the host names, besides IP literals and localhost, the operator endpoints accept in a request's Host header
@@ -201,6 +202,9 @@ func rootNodeRunCmd(baseFlags *baseFlags) *cobra.Command {
 	cmd.Flags().BoolVar(&flags.B1Registry, "b1-registry", false, "the deployment carries the B1 registry: refuse a handoff whose committee is above the registry's 16 members (a gas bound); a no-EVM deployment leaves it off (requires --q3-lane)")
 	cmd.Flags().StringVar(&flags.UTBGenesisFile, "utb-genesis", "", "enable the signed trust-base entry (UTB) profile: the canonical genesis entry file (see: trust-base utb-genesis); requires --utb-genesis-id and profile 2")
 	cmd.Flags().StringVar(&flags.UTBGenesisID, "utb-genesis-id", "", "the EntryID of the UTB genesis entry (0x-prefixed SHA-256): the pin the genesis file must match")
+	cmd.Flags().StringVar(&flags.UTBBundleAddress, "utb-bundle-address", "",
+		"with --utb-genesis: serve the complete signed trust-base history (GET /api/v1/utb/bundle, nothing else) read-only on this separate listener, for `ubft seed export`. "+
+			"The result is built once per trust-base tip and reused, with bounded concurrency; bind loopback or put a cache in front. Never the operator RPC address")
 	cmd.Flags().StringVar(&flags.UTBCaptureUCResp, "utb-capture-ucresp", "", "lane diagnostics: directory to write each distinct version 2 certification response that carries entries to, before it is sent")
 	_ = cmd.Flags().MarkHidden("utb-capture-ucresp")
 	cmd.Flags().StringVar(&flags.UTBEntriesDBFile, "utb-entries-db", "",
@@ -682,9 +686,6 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		mux.HandleFunc("PUT /api/v1/trustbases", trustBasesPutHandler(flags.HandoffProfile, trustBaseStore.Store))
 		mux.HandleFunc("GET /api/v1/trustbases", getTrustBaseHandler(trustBaseStore, obs))
 		mux.HandleFunc("GET /api/v1/roundInfo", getRoundInfoHandler(cm.GetState, obs))
-		if utbEntries != nil {
-			mux.HandleFunc("GET /api/v1/utb/bundle", utbBundleHandler(utbEntries, obs))
-		}
 		if committee != nil {
 			mux.HandleFunc("POST /api/v1/committee", q3Endpoint(func(context.Context, json.RawMessage) (any, error) { return committee.status(), nil }))
 		}
@@ -721,6 +722,15 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 				IdleTimeout:       30 * time.Second,
 			})
 	})
+
+	if flags.UTBBundleAddress != "" {
+		if utbEntries == nil {
+			return errors.New("--utb-bundle-address requires --utb-genesis")
+		}
+		g.Go(func() error {
+			return httpsrv.Run(ctx, newUTBBundleServer(flags.UTBBundleAddress, utbEntries, obs))
+		})
+	}
 
 	return g.Wait()
 }
@@ -779,23 +789,6 @@ func getTrustBaseHandler(trustBaseStore *trustbase.TrustBaseStore, obs Observabi
 		result := &TrustBasesResponse{TrustBases: trustBases}
 		if err := writeCborResponse(w, result); err != nil {
 			obs.Logger().Error(fmt.Sprintf("failed to write response: %v", err))
-		}
-	}
-}
-
-// utbBundleHandler serves the root's complete signed trust-base history as one bundle (the GetTrustBase encoding, genesis through the tip): public,
-// read-only data that a verifier authenticates against the pinned genesis EntryID alone (`ubft seed export` takes it from here).
-func utbBundleHandler(store gettrustbase.Source, obs Observability) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		raw, err := gettrustbase.ExportStore(store)
-		if err != nil {
-			obs.Logger().Warn(fmt.Sprintf("GET utb/bundle request: %v", err))
-			http.Error(w, "failed to export the trust-base history", http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/cbor")
-		if _, err := w.Write(raw); err != nil {
-			obs.Logger().Warn(fmt.Sprintf("GET utb/bundle request: failed to write response: %v", err))
 		}
 	}
 }

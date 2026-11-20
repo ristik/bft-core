@@ -3,6 +3,7 @@ package seed
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -214,8 +215,133 @@ func TestImportRefusesOverwriteAndRecords(t *testing.T) {
 	// the imported directory verifies again
 	_, err = VerifyDir(filepath.Join(home, ImportDir), Pins{GenesisID: f.pin})
 	require.NoError(t, err)
-	_, err = Import(v, home, nil, false, time.Now())
-	require.ErrorContains(t, err, "already holds")
+	_, err = Import(v, home, nil, false, time.Now()) // the same seed again resumes
+	require.NoError(t, err)
 	_, err = Import(v, home, nil, true, time.Now())
 	require.NoError(t, err)
+}
+
+func TestVerifyRefusesAnIncompleteUC(t *testing.T) {
+	f := newFixture(t)
+	files, _ := f.clone()
+	var uc types.UnicityCertificate
+	require.NoError(t, types.Cbor.Unmarshal(files[TipUCFile], &uc))
+	uc.UnicityTreeCertificate = nil
+	raw, err := types.Cbor.Marshal(&uc)
+	require.NoError(t, err)
+	files[TipUCFile] = raw
+	_, err = Verify(resign(t, f, files, nil), files, Pins{GenesisID: f.pin})
+	require.ErrorIs(t, err, ErrSeed)
+	require.ErrorContains(t, err, "unicity tree certificate")
+	// a certificate that decodes but is short of other parts is a refusal too, whatever the field
+	uc.UnicityTreeCertificate = nil
+	uc.UnicitySeal = nil
+	raw, _ = types.Cbor.Marshal(&uc)
+	files[TipUCFile] = raw
+	_, err = Verify(resign(t, f, files, nil), files, Pins{GenesisID: f.pin})
+	require.ErrorIs(t, err, ErrSeed)
+}
+
+func TestReadsAreBoundOnTheOpenedFile(t *testing.T) {
+	f := newFixture(t)
+	// a symlink in place of a payload file is not followed
+	require.NoError(t, os.Remove(filepath.Join(f.dir, TipTRFile)))
+	require.NoError(t, os.Symlink(filepath.Join(f.dir, TipUCFile), filepath.Join(f.dir, TipTRFile)))
+	_, err := VerifyDir(f.dir, Pins{GenesisID: f.pin})
+	require.ErrorIs(t, err, ErrSeed)
+	// a file larger than the manifest says is refused before it is read
+	g := newFixture(t)
+	require.NoError(t, os.WriteFile(filepath.Join(g.dir, UTBFile), bytes.Repeat([]byte{1}, int(MaxPinFileBytes)), 0o644))
+	_, err = VerifyDir(g.dir, Pins{GenesisID: g.pin})
+	require.ErrorIs(t, err, ErrSeed)
+	// the HTTP handler does not follow a symlink either
+	h := Handler(f.dir)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/"+TipTRFile, nil))
+	require.Equal(t, 404, rec.Code)
+}
+
+func TestWriteDirIsExclusiveAndAtomic(t *testing.T) {
+	f := newFixture(t)
+	parent := t.TempDir()
+	dst := filepath.Join(parent, "out")
+	require.NoError(t, WriteDir(dst, f.files, f.manifest, false))
+	_, err := VerifyDir(dst, Pins{GenesisID: f.pin})
+	require.NoError(t, err)
+	require.ErrorContains(t, WriteDir(dst, f.files, f.manifest, false), "already exists")
+	// a symlink at the destination is never written through
+	victim := filepath.Join(parent, "victim")
+	require.NoError(t, os.Mkdir(victim, 0o755))
+	link := filepath.Join(parent, "link")
+	require.NoError(t, os.Symlink(victim, link))
+	require.NoError(t, WriteDir(link, f.files, f.manifest, true))
+	ents, _ := os.ReadDir(victim)
+	require.Empty(t, ents, "the old symlink target is untouched")
+	require.NoError(t, WriteDir(dst, f.files, f.manifest, true))
+	ents, _ = os.ReadDir(parent)
+	for _, e := range ents {
+		require.False(t, strings.HasPrefix(e.Name(), ".seed-"), "no staging leftovers: %s", e.Name())
+	}
+}
+
+func TestSourcesAreCanonicalised(t *testing.T) {
+	for in, want := range map[string]string{"HTTP://Example.COM:80/seed/": "http://example.com/seed", "https://h:443": "https://h", "http://h:8080/a//b/../c": "http://h:8080/a/c"} {
+		got, err := normalize(in)
+		require.NoError(t, err)
+		require.Equal(t, want, got)
+	}
+	_, err := normalize("http://user:pw@h/seed")
+	require.ErrorIs(t, err, ErrSeed)
+	// two spellings of one endpoint are one source for --min-sources
+	f := newFixture(t)
+	a := serve(t, f.dir)
+	_, err = Fetch(context.Background(), []string{a, strings.ToUpper(a[:4]) + a[4:] + "/"}, FetchOptions{Pins: Pins{GenesisID: f.pin}, MinSources: 2})
+	require.ErrorContains(t, err, "required")
+}
+
+func TestImportResumesTheSameSeedAndKeepsTheOldUntilSwapped(t *testing.T) {
+	f := newFixture(t)
+	v, err := VerifyDir(f.dir, Pins{GenesisID: f.pin})
+	require.NoError(t, err)
+	home := filepath.Join(t.TempDir(), "h")
+	_, err = Import(v, home, nil, false, time.Unix(1, 0))
+	require.NoError(t, err)
+	_, err = Import(v, home, nil, false, time.Unix(2, 0)) // the same seed again: a resume, no --replace
+	require.NoError(t, err)
+	// another seed needs --replace
+	v2 := *v
+	v2.ManifestDigest = "0xabc"
+	_, err = Import(&v2, home, nil, false, time.Now())
+	require.ErrorContains(t, err, "already holds")
+}
+
+func TestResolveRestorePinEpoch1(t *testing.T) {
+	p, err := ucfixture.New(ucfixture.Config{Partition: 1, ShardBits: 0})
+	require.NoError(t, err)
+	f := newFixture(t)
+	v, err := VerifyDir(f.dir, Pins{GenesisID: f.pin})
+	require.NoError(t, err)
+	_ = p
+	// the fixture's own trust base is the genesis of its history: epoch 1 needs no bundles
+	tb := ucfixture2TrustBase(t)
+	rp, err := ResolveRestorePin(v, tb, false, nil)
+	require.NoError(t, err)
+	want, _ := tb.Hash(crypto.SHA256)
+	require.Equal(t, want, rp.BodyID[:])
+	require.EqualValues(t, 1, rp.RootEpoch)
+	// a genesis trust base that is not the pinned entry's origin is refused
+	other := *tb
+	other.NetworkID++
+	_, err = ResolveRestorePin(v, &other, false, nil)
+	require.ErrorIs(t, err, ErrSeed)
+	// a later epoch with no activation bundles is refused, never assumed
+	v.UC.UnicitySeal.Epoch = 2
+	_, err = ResolveRestorePin(v, tb, false, nil)
+	require.ErrorIs(t, err, ErrSeed) // (the fixture genesis is unsigned, so no lineage starts; the epoch-2 path runs live)
+}
+
+func ucfixture2TrustBase(t *testing.T) *types.RootTrustBaseV1 {
+	p, err := ucfixture.New(ucfixture.Config{Partition: 1, ShardBits: 0})
+	require.NoError(t, err)
+	return p.TrustBase()
 }

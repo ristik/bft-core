@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path"
 	"sort"
 	"strings"
 	"time"
@@ -34,12 +35,31 @@ func defaultClient() *http.Client {
 	return &http.Client{Timeout: 30 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 }
 
+// normalize is the canonical form of a source: lower-case scheme and host, the default port dropped, the path cleaned and without a trailing slash.
+// Equivalent spellings of one endpoint ("HTTP://Host:80/seed/", "http://host/seed") become one source. It cannot tell two names of one machine
+// apart (localhost, 127.0.0.1, a DNS alias): independence of the mirrors is the operator's choice.
 func normalize(src string) (string, error) {
 	u, err := url.Parse(strings.TrimSpace(src))
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.RawQuery != "" || u.Fragment != "" {
-		return "", refuse("source %q is not an http(s) URL", src)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
+		return "", refuse("source %q is not an http(s) URL without credentials", src)
 	}
-	return strings.TrimRight(u.String(), "/"), nil
+	scheme := strings.ToLower(u.Scheme)
+	host := strings.ToLower(u.Hostname())
+	port := u.Port()
+	if port == "" || (scheme == "http" && port == "80") || (scheme == "https" && port == "443") {
+		port = ""
+	}
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	if port != "" {
+		host += ":" + port
+	}
+	p := path.Clean("/" + u.EscapedPath())
+	if p == "/" {
+		p = ""
+	}
+	return scheme + "://" + host + p, nil
 }
 
 func get(ctx context.Context, c *http.Client, base, name string, max int64) ([]byte, error) {

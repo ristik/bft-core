@@ -313,6 +313,20 @@ h3_restore_validator() {
   # a lane that keeps its execution journals elsewhere (the post-M2a lanes) names the root; the H3 lane keeps it in the home
   local journal="$evidence/execution-journal.db"
   [ -z "${EVM_EXECUTION_JOURNAL_ROOT:-}" ] || journal="$EVM_EXECUTION_JOURNAL_ROOT/evm$i.db"
+  # VT-11 preflight: a restore from a seed is checked BEFORE anything of the validator is stopped or cleared. The seed is verified, the BodyID of the
+  # checkpoint's root epoch is resolved from authenticated history (the genesis trust base and the activation bundles H3_RESTORE_SEED_BUNDLES names, in epoch
+  # order, for epochs 2 and later), and the exact UC and TR files the restore will read are staged and loaded back with the restore's own loader.
+  local seedPin= pinOut b
+  local -a bundleArgs=()
+  if [ -n "${H3_RESTORE_SEED_DIR:-}" ]; then
+    mkdir -p test-nodes
+    seedPin=$(mktemp -d "test-nodes/seed-pin-XXXXXX")/pin
+    for b in ${H3_RESTORE_SEED_BUNDLES:-}; do bundleArgs+=(--bundle "$b"); done
+    pinOut=$(build/ubft seed restore-pin --dir "$H3_RESTORE_SEED_DIR" --utb-genesis-id "$(tr -d '[:space:]' <test-nodes/utb-genesis.id)" \
+      --trust-base "$H3_RESTORE_TRUST_BASE" ${bundleArgs[@]+"${bundleArgs[@]}"} --out "$seedPin" 2>&1) \
+      || { echo "h3_restore_validator $i: the seed's restore pin is refused; nothing of the validator was touched: $pinOut" >&2; return 1; }
+    bodyID=${pinOut##*bodyID=}
+  fi
   stop_one_evm_validator "$i" 2>/dev/null || true
   stop_pidfile "test-nodes/reth$i/pid" 'reth.* node' 2>/dev/null || true
   # Clearing state under a live node can corrupt it (and the evidence): every process that owns this validator's node home or its
@@ -344,12 +358,9 @@ h3_restore_validator() {
   cp "$evidence/jwt.hex" "test-nodes/evm$i/jwt.hex"
   h3_start_reth "$i" || return 1
   cp "test-nodes/evm$i/jwt.hex" "$evidence/jwt.hex"   # h3_start_reth drew a new secret for the new execution client
-  if [ -n "${H3_RESTORE_SEED_DIR:-}" ]; then
-    # VT-11: the pin is the verified seed's checkpoint (`ubft seed fetch|import` verified it against the pinned genesis), never the replica's files; the
-    # body identity is the epoch-1 trust base's, so a checkpoint of another root epoch is refused here
-    cp "$H3_RESTORE_SEED_DIR/tip-uc.cbor" "$evidence/tip.uc.cbor" && cp "$H3_RESTORE_SEED_DIR/tip-tr.cbor" "$evidence/tip.tr.cbor" || return 1
-    [ "$(build/ubft seed pin-epoch --dir "$H3_RESTORE_SEED_DIR" --utb-genesis-id "$(tr -d '[:space:]' <test-nodes/utb-genesis.id)")" = 1 ] || { echo "h3_restore_validator $i: the seed's checkpoint is not of root epoch 1" >&2; return 1; }
-    bodyID=$(build/ubft trust-base id --trust-base "$H3_RESTORE_TRUST_BASE" | tr -d '[:space:]')
+  if [ -n "$seedPin" ]; then
+    # VT-11: the pin is the preflight's staged files (the verified seed's checkpoint), never the replica's files
+    cp "$seedPin.uc.cbor" "$evidence/tip.uc.cbor" && cp "$seedPin.tr.cbor" "$evidence/tip.tr.cbor" || return 1
     echo "seed pin: $H3_RESTORE_SEED_DIR bodyID=$bodyID" >"$evidence/pin.txt"
   else
   lane_go_run h4-restore-pin "$H3_ARCHIVES/evm$replica" "$H3_RESTORE_TRUST_BASE" "$evidence/tip" >"$evidence/pin.txt" || return 1

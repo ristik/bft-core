@@ -29,13 +29,14 @@ import (
 
 	"github.com/unicitynetwork/bft-core/gettrustbase"
 	"github.com/unicitynetwork/bft-core/seed"
+	"github.com/unicitynetwork/bft-core/utbstore"
 )
 
 const seedHTTPTimeout = 30 * time.Second
 
 func newSeedCmd(base *baseFlags) *cobra.Command {
 	cmd := &cobra.Command{Use: "seed", Short: "Export, serve, fetch and import the public sync seed of a validator network"}
-	cmd.AddCommand(seedExportCmd(), seedServeCmd(), seedFetchCmd(), seedImportCmd(base), seedPinEpochCmd())
+	cmd.AddCommand(seedExportCmd(), seedServeCmd(), seedFetchCmd(), seedImportCmd(base), seedRestorePinCmd())
 	return cmd
 }
 
@@ -63,11 +64,12 @@ func httpGetBounded(ctx context.Context, rawURL string, max int64) ([]byte, erro
 }
 
 func seedExportCmd() *cobra.Command {
-	var rootRPC, utbFile, genesisID, archiveDir, shardStatus, ethRPC, out string
+	var bundleURL, utbFile, genesisID, archiveDir, shardStatus, ethRPC, out string
+	var replace bool
 	cmd := &cobra.Command{
 		Use:   "export",
 		Short: "Write a verified seed from this validator's own state (run on a synced validator)",
-		Long: "Reads the signed trust-base history (the root's GET /api/v1/utb/bundle, or --utb-bundle), the newest certified record of the shard node's archive " +
+		Long: "Reads the signed trust-base history (from the root's isolated bundle listener, --utb-bundle-address, or from --utb-bundle), the newest certified record of the shard node's archive " +
 			"directory (immutable files, readable while the node runs), optionally the shard node's frontier pins and the execution client's head, and writes " +
 			"manifest.json and the payload files to --out. The seed is verified from the same bytes before anything is written.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -76,16 +78,16 @@ func seedExportCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if (rootRPC == "") == (utbFile == "") {
-				return errors.New("give exactly one of --root-rpc and --utb-bundle")
+			if (bundleURL == "") == (utbFile == "") {
+				return errors.New("give exactly one of --bundle-url and --utb-bundle")
 			}
 			in := seed.ExportInput{GenesisID: pin, ArchiveDir: archiveDir, Now: time.Now()}
 			if utbFile != "" {
-				if in.UTBBundle, err = os.ReadFile(utbFile); err != nil {
+				if in.UTBBundle, err = seed.ReadFileBounded(utbFile, seed.MaxUTBBytes); err != nil {
 					return err
 				}
-			} else if in.UTBBundle, err = httpGetBounded(ctx, strings.TrimRight(rootRPC, "/")+"/api/v1/utb/bundle", seed.MaxUTBBytes); err != nil {
-				return fmt.Errorf("reading the root's trust-base history (is --utb-genesis set on the root?): %w", err)
+			} else if in.UTBBundle, err = httpGetBounded(ctx, strings.TrimRight(bundleURL, "/")+"/api/v1/utb/bundle", seed.MaxUTBBytes); err != nil {
+				return fmt.Errorf("reading the trust-base history from the root's bundle listener (is --utb-bundle-address set on the root?): %w", err)
 			}
 			if shardStatus != "" {
 				if in.StatusJSON, err = httpGetBounded(ctx, strings.TrimRight(shardStatus, "/")+"/api/v1/operator/status", 1<<20); err != nil {
@@ -95,7 +97,7 @@ func seedExportCmd() *cobra.Command {
 			if ethRPC != "" {
 				in.Ureth = func(height uint64, hash string) (*seed.UrethRef, error) { return urethRef(ctx, ethRPC, height, hash) }
 			}
-			v, err := seed.Export(in, out)
+			v, err := seed.Export(in, out, replace)
 			if err != nil {
 				return err
 			}
@@ -103,8 +105,9 @@ func seedExportCmd() *cobra.Command {
 			fmt.Fprintf(cmd.OutOrStdout(), "written to %s (serve it with `ubft seed serve --dir %s`, or give the directory to any web server)\n", out, out)
 			return nil
 		}}
-	cmd.Flags().StringVar(&rootRPC, "root-rpc", "", "the root's RPC base URL (its --utb-genesis profile serves the history)")
-	cmd.Flags().StringVar(&utbFile, "utb-bundle", "", "a trust-base history bundle file instead of --root-rpc (`ubft trust-base utb-export`)")
+	cmd.Flags().StringVar(&bundleURL, "bundle-url", "", "base URL of the root's isolated read-only bundle listener (the root's --utb-bundle-address), not its operator RPC")
+	cmd.Flags().BoolVar(&replace, "replace", false, "replace an existing --out directory (published by an atomic swap)")
+	cmd.Flags().StringVar(&utbFile, "utb-bundle", "", "a trust-base history bundle file instead of --bundle-url (`ubft trust-base utb-export`)")
 	cmd.Flags().StringVar(&genesisID, "utb-genesis-id", "", "the pinned EntryID of the UTB genesis entry (0x-prefixed): the export is checked against it")
 	cmd.Flags().StringVar(&archiveDir, "archive", "", "the shard node's archive directory")
 	cmd.Flags().StringVar(&shardStatus, "shard-status", "", "the shard node's status server base URL (adds the archive frontier pins)")
@@ -225,6 +228,7 @@ func seedFetchCmd() *cobra.Command {
 	var from []string
 	var out string
 	var minSources int
+	var fetchReplace bool
 	var pf seedPinFlags
 	cmd := &cobra.Command{
 		Use:   "fetch",
@@ -243,7 +247,7 @@ func seedFetchCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := writeVerifiedSeed(got.Verified, out); err != nil {
+			if err := seed.WriteDir(out, got.Files, got.ManifestRaw, fetchReplace); err != nil {
 				return err
 			}
 			fmt.Fprintln(cmd.OutOrStdout(), got.Summary())
@@ -256,21 +260,10 @@ func seedFetchCmd() *cobra.Command {
 		}}
 	cmd.Flags().StringArrayVar(&from, "from", nil, "a seed source base URL (repeat for several: they are compared, and any disagreement refuses)")
 	cmd.Flags().StringVar(&out, "out", "seed", "the directory to write the verified seed to")
-	cmd.Flags().IntVar(&minSources, "min-sources", 1, "how many sources must answer with the same manifest")
+	cmd.Flags().IntVar(&minSources, "min-sources", 1, "how many sources must answer with the same manifest (equivalent URL spellings count once; choose mirrors that are independent of each other: two names of one machine are not two sources)")
+	cmd.Flags().BoolVar(&fetchReplace, "replace", false, "replace an existing --out directory (published by an atomic swap)")
 	pf.add(cmd)
 	return cmd
-}
-
-func writeVerifiedSeed(v *seed.Verified, dir string) error {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-	for _, n := range seed.PayloadFiles {
-		if err := os.WriteFile(dir+"/"+n, v.Files[n], 0o644); err != nil {
-			return err
-		}
-	}
-	return os.WriteFile(dir+"/"+seed.ManifestName, v.ManifestRaw, 0o644) // last
 }
 
 func seedImportCmd(base *baseFlags) *cobra.Command {
@@ -296,10 +289,20 @@ func seedImportCmd(base *baseFlags) *cobra.Command {
 			if genesisFile == "" && (rootDB != "" || shardDB != "") {
 				return errors.New("--root-utb-db and --shard-utb-db need --utb-genesis")
 			}
-			rec, err := seed.Import(v, home, sources, replace, time.Now())
-			if err != nil {
-				return err
+			// 1. open every requested store (this validates the genesis file and the pin), 2. install the history into each (the store's own authenticated
+			// appends, idempotent: a retry resumes), 3. only then publish the import record. A failure before step 3 leaves no record, and the same seed
+			// can be imported again without --replace.
+			type opened struct {
+				path  string
+				store *utbstore.Store
+				close func()
 			}
+			var stores []opened
+			defer func() {
+				for _, o := range stores {
+					o.close()
+				}
+			}()
 			for _, db := range []struct{ path, def string }{{rootDB, rootUTBEntriesDBFileName}, {shardDB, shardUTBEntriesDBFileName}} {
 				if db.path == "" {
 					continue
@@ -308,13 +311,18 @@ func seedImportCmd(base *baseFlags) *cobra.Command {
 				if err != nil {
 					return err
 				}
-				added, err := gettrustbase.InstallBundle(store, v.Bundle)
-				tip := store.Tip().Epoch
-				closeStore()
+				stores = append(stores, opened{db.path, store, closeStore})
+			}
+			for _, o := range stores {
+				added, err := gettrustbase.InstallBundle(o.store, v.Bundle)
 				if err != nil {
-					return err
+					return fmt.Errorf("%s: %w (nothing is published; run the same import again to resume)", o.path, err)
 				}
-				fmt.Fprintf(cmd.OutOrStdout(), "%s: added %d trust-base entries; tip epoch %d\n", db.path, added, tip)
+				fmt.Fprintf(cmd.OutOrStdout(), "%s: added %d trust-base entries; tip epoch %d\n", o.path, added, o.store.Tip().Epoch)
+			}
+			rec, err := seed.Import(v, home, sources, replace, time.Now())
+			if err != nil {
+				return err
 			}
 			fmt.Fprintln(cmd.OutOrStdout(), v.Summary())
 			fmt.Fprintf(cmd.OutOrStdout(), "imported into %s/seed (seed %s)\n", home, rec.ManifestDigest)
@@ -333,10 +341,14 @@ func seedImportCmd(base *baseFlags) *cobra.Command {
 	return cmd
 }
 
-// seedPinEpochCmd prints the root epoch of a verified seed's checkpoint (for scripts that restore from the seed's pin).
-func seedPinEpochCmd() *cobra.Command {
-	var dir, genesisID string
-	cmd := &cobra.Command{Use: "pin-epoch", Short: "Verify a seed directory and print the root epoch of its checkpoint", Hidden: true,
+// seedRestorePinCmd is the preflight of a restore from a seed: it verifies the seed, derives the BodyID of the checkpoint's epoch from authenticated
+// history, stages the exact UC and TR files the restore will read, and loads them back with the restore's own loader. It touches no validator state: a
+// script runs it BEFORE stopping or clearing anything, and restores only if it succeeds.
+func seedRestorePinCmd() *cobra.Command {
+	var dir, genesisID, trustBase, outPrefix string
+	var bundles []string
+	var noUTB bool
+	cmd := &cobra.Command{Use: "restore-pin", Short: "Verify a seed and stage the restore pin (tip UC, TR and trust BodyID) without touching any validator state",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			pin, err := seed.ParseGenesisID(genesisID)
 			if err != nil {
@@ -346,11 +358,55 @@ func seedPinEpochCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			_, err = fmt.Fprintln(cmd.OutOrStdout(), v.Manifest.Checkpoint.RootEpoch)
-			return err
+			genesis, err := util.ReadJsonFile(trustBase, &types.RootTrustBaseV1{})
+			if err != nil {
+				return fmt.Errorf("reading --trust-base: %w", err)
+			}
+			var raws [][]byte
+			for _, b := range bundles {
+				raw, err := seed.ReadFileBounded(b, 4<<20)
+				if err != nil {
+					return err
+				}
+				raws = append(raws, raw)
+			}
+			rp, err := seed.ResolveRestorePin(v, genesis, !noUTB, raws)
+			if err != nil {
+				return err
+			}
+			ucPath, trPath := outPrefix+".uc.cbor", outPrefix+".tr.cbor"
+			for path, data := range map[string][]byte{ucPath: rp.UC, trPath: rp.TR} {
+				f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+				if err != nil {
+					return err
+				}
+				if _, err := f.Write(data); err != nil {
+					f.Close()
+					return err
+				}
+				if err := f.Close(); err != nil {
+					return err
+				}
+			}
+			// the restore's own loader reads the staged bytes back: what is checked is what will be consumed
+			uc, _, err := loadRestorePin(ucPath, trPath)
+			if err != nil {
+				return fmt.Errorf("the staged pin is not accepted by the restore loader: %w", err)
+			}
+			if uc.GetRootEpoch() != rp.RootEpoch {
+				return errors.New("the staged pin is of another epoch than the verified checkpoint")
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "epoch=%d bodyID=0x%x\n", rp.RootEpoch, rp.BodyID)
+			return nil
 		}}
 	cmd.Flags().StringVar(&dir, "dir", "seed", "the seed directory")
 	cmd.Flags().StringVar(&genesisID, "utb-genesis-id", "", "the pinned genesis EntryID")
+	cmd.Flags().StringVar(&trustBase, "trust-base", "", "the genesis (epoch 1) trust base file")
+	cmd.Flags().StringArrayVar(&bundles, "bundle", nil, "a root activation bundle file (q3/bundle encoding), repeated in epoch order: epochs 2 through the checkpoint's")
+	cmd.Flags().StringVar(&outPrefix, "out", "", "prefix of the staged files: <out>.uc.cbor and <out>.tr.cbor (created exclusively)")
+	cmd.Flags().BoolVar(&noUTB, "no-utb", false, "the deployment is not a UTB one")
 	_ = cmd.MarkFlagRequired("utb-genesis-id")
+	_ = cmd.MarkFlagRequired("trust-base")
+	_ = cmd.MarkFlagRequired("out")
 	return cmd
 }

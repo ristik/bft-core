@@ -63,6 +63,7 @@ func buildSyncView(ctx context.Context, v *loadedValidator, r *validatorStatusRe
 	behind := int64(r.PublicHead) - int64(*r.LocalHead)
 	s.Behind = &behind
 	if sample > 0 && v.cfg.LocalRPC != "" {
+		s.ETA = "unknown (a head sample was unavailable)"
 		l0, p0, t0 := *r.LocalHead, r.PublicHead, time.Now()
 		select {
 		case <-ctx.Done():

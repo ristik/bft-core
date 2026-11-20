@@ -18,6 +18,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"syscall"
 )
 
 const (
@@ -175,20 +176,47 @@ func (m *Manifest) file(name string) File {
 	return File{}
 }
 
-// readBounded reads a regular file of at most max bytes.
-func readBounded(path string, max int64) ([]byte, error) {
-	st, err := os.Lstat(path)
+// ReadFileBounded opens a file without following a symlink, checks on the OPENED descriptor that it is a regular file of at most max bytes, and
+// reads it through a limit: the type and size that were checked are the ones read, whatever happens to the path meanwhile.
+func ReadFileBounded(path string, max int64) ([]byte, error) {
+	f, st, err := openRegular(path, max)
 	if err != nil {
 		return nil, err
 	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, max+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) != st.Size() {
+		return nil, refuse("%s changed while it was read", filepath.Base(path))
+	}
+	return b, nil
+}
+
+// openRegular opens path with O_NOFOLLOW and Fstat-checks the descriptor: a regular file of at most max bytes.
+func openRegular(path string, max int64) (*os.File, os.FileInfo, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, nil, err
+	}
+	st, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, nil, err
+	}
 	if !st.Mode().IsRegular() {
-		return nil, refuse("%s is not a regular file", filepath.Base(path))
+		f.Close()
+		return nil, nil, refuse("%s is not a regular file", filepath.Base(path))
 	}
 	if st.Size() > max {
-		return nil, refuse("%s is %d bytes (limit %d)", filepath.Base(path), st.Size(), max)
+		f.Close()
+		return nil, nil, refuse("%s is %d bytes (limit %d)", filepath.Base(path), st.Size(), max)
 	}
-	return os.ReadFile(path)
+	return f, st, nil
 }
+
+func readBounded(path string, max int64) ([]byte, error) { return ReadFileBounded(path, max) }
 
 func sum(b []byte) string {
 	s := sha256.Sum256(b)

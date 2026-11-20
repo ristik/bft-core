@@ -15,17 +15,25 @@ vrs_port_a=$((38480 + vrs_off)); vrs_port_b=$((38481 + vrs_off)); vrs_port_c=$((
 vrs_log() { vrb_log "$@"; }
 vrs_pin() { tr -d '[:space:]' <test-nodes/utb-genesis.id; }
 vrs_pids=()
+vrs_bundle_url=http://127.0.0.1:$((38600 + vrs_off))   # root 1's isolated bundle listener (utb_root_flags)
 vrs_cleanup() { local p; for p in "${vrs_pids[@]}"; do kill "$p" 2>/dev/null; done; vrs_pids=(); }
-trap vrs_cleanup EXIT
+# NO trap here: this file is sourced into the harness shell, whose EXIT trap stops the devnet. Cleanup is vrs_cleanup, called by the steps that end
+# the seed work and by the harness failure path (vr-boundary-steps.sh); every server is also recorded in the lane's extra-pids (vrs_serve).
 
 # a server of an earlier (killed) run of THIS tree is stopped first: its pid is in the lane's extra-pids, checked by command and working directory
 vrs_kill_extra() {
-  local p pat
-  [ -f test-nodes/q3/extra-pids ] || return 0
+  local f=test-nodes/q3/extra-pids p pat keep=
+  [ -f "$f" ] || return 0
+  # only this file's own entries (command 'ubft seed serve', owned by this checkout) are signalled and dropped; every other helper's entry stays
   while read -r p pat; do
-    [ -n "${p:-}" ] && declare -F owned_pid >/dev/null && owned_pid "$p" "${pat:-ubft seed serve}" && kill -INT "$p" 2>/dev/null
-  done <test-nodes/q3/extra-pids
-  rm -f test-nodes/q3/extra-pids
+    [ -n "${p:-}" ] || continue
+    if [ "${pat:-}" = 'ubft seed serve' ]; then
+      declare -F owned_pid >/dev/null && owned_pid "$p" "$pat" && kill -INT "$p" 2>/dev/null
+    else
+      keep+="$p $pat"$'\n'
+    fi
+  done <"$f"
+  if [ -n "$keep" ]; then printf '%s' "$keep" >"$f"; else rm -f "$f"; fi
   sleep 1
 }
 vrs_serve() { # <dir> <port>
@@ -37,14 +45,14 @@ vrs_serve() { # <dir> <port>
   vrb_wait 20 "seed server on :$2" curl -sf "http://127.0.0.1:$2/manifest.json" -o /dev/null
 }
 
-vrs_archive_ready() { [ -n "$(find "$EVM_ARCHIVE_ROOT/evm1" -type f -name '*' 2>/dev/null | head -1)" ] && build/ubft seed export --root-rpc "$(vrb_rpc_of 1)" --utb-genesis-id "$(vrs_pin)" --archive "$EVM_ARCHIVE_ROOT/evm1" --out "$vrs_dir/probe" >/dev/null 2>&1; }
+vrs_archive_ready() { [ -n "$(find "$EVM_ARCHIVE_ROOT/evm1" -type f -name '*' 2>/dev/null | head -1)" ] && build/ubft seed export --bundle-url "$vrs_bundle_url" --utb-genesis-id "$(vrs_pin)" --archive "$EVM_ARCHIVE_ROOT/evm1" --out "$vrs_dir/probe" >/dev/null 2>&1; }
 
 vrs_export() {
   vrs_kill_extra
   declare -F m2_rpc_port >/dev/null || vrj_source_libs || return 1   # m2_rpc_port, evm_validator_rpc_addr: the lane libraries
   rm -rf "$vrs_dir"; mkdir -p "$vrs_dir"
   vrb_wait 600 "validator 1's archive holds a certified record and its seed verifies" vrs_archive_ready || return 1
-  build/ubft seed export --root-rpc "$(vrb_rpc_of 1)" --utb-genesis-id "$(vrs_pin)" --archive "$EVM_ARCHIVE_ROOT/evm1" \
+  build/ubft seed export --bundle-url "$vrs_bundle_url" --utb-genesis-id "$(vrs_pin)" --archive "$EVM_ARCHIVE_ROOT/evm1" \
     --shard-status "http://$(evm_validator_rpc_addr 1)" --eth-rpc "http://127.0.0.1:$rethEthBase" --out "$vrs_dir/export" 2>&1 | tee "$VR_EVIDENCE/seed-export.log" || { vrs_log "FAIL: seed export"; return 1; }
   cp "$vrs_dir/export/manifest.json" "$VR_EVIDENCE/seed-manifest.json"
   vrs_log "PASS: validator 1 exported a seed ($(ls -l "$vrs_dir/export" | awk 'NR>1{printf "%s=%s ", $9, $5}'))"
@@ -121,7 +129,7 @@ PY
 # imported into a fresh home and fresh entry stores: the cross-epoch verification live. A history cut back to epoch 1 under the same checkpoint is refused.
 vrs_epoch_ready() { # the exported seed's checkpoint is of root epoch >= 2 and its history tip is >= 2
   rm -rf "$vrs_dir/export2"
-  build/ubft seed export --root-rpc "$(vrb_rpc_of 1)" --utb-genesis-id "$(vrs_pin)" --archive "$EVM_ARCHIVE_ROOT/evm1" --out "$vrs_dir/export2" >/dev/null 2>&1 \
+  build/ubft seed export --bundle-url "$vrs_bundle_url" --utb-genesis-id "$(vrs_pin)" --archive "$EVM_ARCHIVE_ROOT/evm1" --out "$vrs_dir/export2" >/dev/null 2>&1 \
     && python3 -c "import json,sys;m=json.load(open('$vrs_dir/export2/manifest.json'));sys.exit(0 if m['checkpoint']['rootEpoch']>=2 and m['network']['utbTipEpoch']>=2 else 1)"
 }
 vrs_second() {
@@ -129,7 +137,7 @@ vrs_second() {
   declare -F m2_rpc_port >/dev/null || vrj_source_libs || return 1
   local pin d=$vrs_dir/second; pin=$(vrs_pin); mkdir -p "$vrs_dir" "$d"
   vrb_wait 900 "validator 1's archive holds a root epoch 2 certified record and the history tip is epoch 2" vrs_epoch_ready || return 1
-  build/ubft seed export --root-rpc "$(vrb_rpc_of 1)" --utb-genesis-id "$pin" --archive "$EVM_ARCHIVE_ROOT/evm1" --out "$vrs_dir/export2" 2>&1 | tee "$VR_EVIDENCE/seed2-export.log"
+  build/ubft seed export --bundle-url "$vrs_bundle_url" --utb-genesis-id "$pin" --archive "$EVM_ARCHIVE_ROOT/evm1" --out "$vrs_dir/export2" --replace 2>&1 | tee "$VR_EVIDENCE/seed2-export.log"
   cp "$vrs_dir/export2/manifest.json" "$VR_EVIDENCE/seed2-manifest.json"
   vrs_serve "$vrs_dir/export2" "$vrs_port_a" || return 1
   vrs_serve "$vrs_dir/export2" "$vrs_port_b" || return 1
@@ -155,5 +163,48 @@ open(d+'/manifest.json','w').write(json.dumps(m,indent=2)+'\n')
 PY
   vrs_serve "$d/cut" "$vrs_port_c" || return 1
   vrs_refused history-older-than-checkpoint-epoch "history ends at epoch" build/ubft seed fetch --from "http://127.0.0.1:$vrs_port_c" --out "$d/out" --utb-genesis-id "$pin" || return 1
+  vrs_restore_epoch2 || return 1
   vrs_cleanup
 }
+
+# The epoch-2 restore end to end (astra, #1227): an incumbent shard node (validator 4, a member of epoch 2) is restored from the seed's epoch-2 checkpoint.
+# First a REJECTED seed (a flipped checkpoint byte): the preflight refuses it and the running validator is untouched (same process, journal unchanged).
+# Then the good seed: the BodyID comes from the authenticated activation history (the genesis trust base and the epoch-2 activation bundle), the restore
+# runs, and the restored shard node answers and its execution client follows the head.
+vrs_restore_epoch2() {
+  local v=4 d=$vrs_dir/second good=$vrs_dir/second/fetched bad=$vrs_dir/second/bad e b i pid0 j0 j1 jf
+  e=$(python3 -c "import json;print(json.load(open('$good/manifest.json'))['checkpoint']['rootEpoch'])")
+  [ "$e" -ge 2 ] || { vrs_log "FAIL: the seed's checkpoint is of root epoch $e"; return 1; }
+  rm -rf "$bad"; cp -r "$good" "$bad"
+  python3 - "$bad/tip-uc.cbor" <<'PY'
+import sys
+p=sys.argv[1]; b=bytearray(open(p,'rb').read()); b[len(b)//2]^=1; open(p,'wb').write(b)
+PY
+  # the activation bundles of epochs 2..e, from a root (untrusted bytes: the preflight verifies them from the genesis trust base)
+  local bundles=
+  for i in $(seq 2 "$e"); do
+    build/ubft q3 proof-envelope --root-rpc "$(vrb_rpc_of 1)" --epoch "$i" --out "$d/bundle-$i.cbor" >/dev/null 2>&1 || { vrs_log "FAIL: the activation bundle of epoch $i"; return 1; }
+    bundles+="$d/bundle-$i.cbor "
+  done
+  declare -F h3_restore_validator >/dev/null || source scripts/lib/h3-lib.sh
+  declare -F reth_trust >/dev/null || source scripts/lib/reth-peers.sh
+  export H3_ARCHIVES=$EVM_ARCHIVE_ROOT H3_RESTORE_TRUST_BASE=test-nodes/trust-base.json H3_ONLINE="1 2 3 4" EVM_ARCHIVE_REPLICA_POOL="1 2 3 4"
+  export H3_RESTORE_SEED_BUNDLES="$bundles"
+  pid0=$(cat "test-nodes/evm$v/pid"); j0=$(stat -c '%Y %s' "test-nodes/evm$v/execution-journal.db" 2>/dev/null || stat -c '%Y %s' "$EVM_EXECUTION_JOURNAL_ROOT/evm$v.db" 2>/dev/null || echo none)
+  if H3_RESTORE_SEED_DIR=$bad h3_restore_validator "$v" 1 >"$VR_EVIDENCE/seed2-restore-rejected.log" 2>&1; then vrs_log "FAIL: the tampered seed was accepted by the restore"; return 1; fi
+  grep -q "nothing of the validator was touched" "$VR_EVIDENCE/seed2-restore-rejected.log" || { vrs_log "FAIL: the rejection did not come from the preflight"; cat "$VR_EVIDENCE/seed2-restore-rejected.log"; return 1; }
+  [ "$(cat "test-nodes/evm$v/pid")" = "$pid0" ] && kill -0 "$pid0" 2>/dev/null || { vrs_log "FAIL: validator $v was stopped by a rejected seed"; return 1; }
+  j1=$(stat -c '%Y %s' "test-nodes/evm$v/execution-journal.db" 2>/dev/null || stat -c '%Y %s' "$EVM_EXECUTION_JOURNAL_ROOT/evm$v.db" 2>/dev/null || echo none)
+  [ "$j0" = "$j1" ] || { vrs_log "FAIL: validator $v's journal changed under a rejected seed ($j0 -> $j1)"; return 1; }
+  [ -d "$H3_ARCHIVES/evm$v" ] && kill -0 "$(cat "test-nodes/reth$v/pid")" 2>/dev/null || { vrs_log "FAIL: validator $v's archive or execution client was touched by a rejected seed"; return 1; }
+  vrs_log "PASS: a rejected seed left validator $v untouched (the preflight refused it before anything was stopped; same pid $pid0, archive and execution client present)"
+  # the epoch-2 restore itself
+  export "EVM_ENGINE_URL_$v=http://127.0.0.1:$((rethEngineBase + v - 1))" "EVM_ETH_URL_$v=http://127.0.0.1:$((rethEthBase + v - 1))"
+  H3_RESTORE_SEED_DIR=$good h3_restore_validator "$v" 1 || { vrs_log "FAIL: the epoch-$e restore from the seed"; return 1; }
+  cp "test-nodes/evm$v/pin.txt" "$VR_EVIDENCE/seed2-restore-pin.txt" 2>/dev/null
+  vrb_wait 600 "the restored validator $v's shard node answers" curl -fsS -m 5 -X POST -H 'content-type: application/json' -d '{}' "http://$(evm_validator_rpc_addr "$v")/api/v1/q3/status" || return 1
+  vrb_wait 600 "the restored validator $v's execution client follows the head" vrs_reth_follows "$v" || return 1
+  vrs_log "PASS: validator $v was restored from the epoch-$e seed (the BodyID resolved from the authenticated activation history: $(cat "test-nodes/evm$v/pin.txt"))"
+}
+vrs_eth_number() { curl -s -X POST -H 'Content-Type: application/json' --data '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' "http://127.0.0.1:$1" | python3 -c "import json,sys;print(int(json.load(sys.stdin)['result'],16))"; }
+vrs_reth_follows() { local a b; a=$(vrs_eth_number $((rethEthBase + $1 - 1))) || return 1; b=$(vrs_eth_number "$rethEthBase") || return 1; vrb_log "reth$1 $a, reth1 $b"; [ "$a" -gt 0 ] && [ $((b - a)) -le 3 ]; }

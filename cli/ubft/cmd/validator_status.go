@@ -102,14 +102,18 @@ func validatorStatusCmd(base *baseFlags) *cobra.Command {
 }
 
 func blockInfo(ctx context.Context, c *rpc.Client, tag string) (number, ts uint64, err error) {
-	var h struct {
-		Number    hexutil.Uint64 `json:"number"`
-		Timestamp hexutil.Uint64 `json:"timestamp"`
+	var h *struct {
+		Number    *hexutil.Uint64 `json:"number"`
+		Timestamp *hexutil.Uint64 `json:"timestamp"`
 	}
 	if err := c.CallContext(ctx, &h, "eth_getBlockByNumber", tag, false); err != nil {
 		return 0, 0, err
 	}
-	return uint64(h.Number), uint64(h.Timestamp), nil
+	// a null answer or a block without a number is an unavailable head, never block 0 (a genuine genesis block carries "0x0")
+	if h == nil || h.Number == nil || h.Timestamp == nil {
+		return 0, 0, fmt.Errorf("eth_getBlockByNumber %s returned no block", tag)
+	}
+	return uint64(*h.Number), uint64(*h.Timestamp), nil
 }
 
 // syncing is eth_syncing: false, or a progress object (true). Any other answer is an error.

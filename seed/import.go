@@ -28,7 +28,8 @@ type ImportRecord struct {
 	RootRound      uint64   `json:"checkpointRootRound"`
 	ShardRound     uint64   `json:"checkpointShardRound"`
 	BlockHash      string   `json:"checkpointBlockHash"`
-	UrethHead      uint64   `json:"seedUrethHead,omitempty"`
+	// UnverifiedUrethHead is the exporter's claimed execution head: an observation nothing verified, for status only.
+	UnverifiedUrethHead uint64 `json:"unverifiedExporterUrethHead,omitempty"`
 }
 
 // ReadImportRecord reads a home's import record; (nil, nil) when the node did not start from a seed.
@@ -48,16 +49,20 @@ func ReadImportRecord(home string) (*ImportRecord, error) {
 }
 
 // Import places a verified seed in a validator home: <home>/seed/{manifest.json, the payload files, import.json}. The files are what Verify
-// returned (never re-read from a source). An existing import is refused unless replace is set, so a start from one seed is never silently
-// changed to another. The home is created if missing; nothing else in it is touched.
+// returned (never re-read from a source). Call it LAST, after every requested store install has succeeded: the record is the statement that the
+// import is complete. Importing the same seed again is a resume (it republishes the identical files); another seed over an existing import needs
+// replace, so a start from one seed is never silently changed to another. The directory is staged privately (exclusive creation) and swapped in by
+// rename; the previous import stays in place until the new one is.
 func Import(v *Verified, home string, sources []string, replace bool, now time.Time) (*ImportRecord, error) {
 	final := filepath.Join(home, ImportDir)
-	if old, err := ReadImportRecord(home); err != nil {
+	old, err := ReadImportRecord(home)
+	switch {
+	case err != nil && !replace:
 		return nil, err
-	} else if old != nil && !replace {
-		return nil, refuse("%s already holds an import of seed %s; pass --replace to replace it", home, old.ManifestDigest)
-	} else if old == nil {
-		if _, err := os.Lstat(final); err == nil && !replace {
+	case old != nil && old.ManifestDigest != v.ManifestDigest && !replace:
+		return nil, refuse("%s already holds an import of seed %s; pass --replace to replace it with %s", home, old.ManifestDigest, v.ManifestDigest)
+	case old == nil && !replace:
+		if _, err := os.Lstat(final); err == nil {
 			return nil, refuse("%s exists and is not a seed import; pass --replace to replace it", final)
 		}
 	}
@@ -70,11 +75,11 @@ func Import(v *Verified, home string, sources []string, replace bool, now time.T
 	}
 	defer os.RemoveAll(tmp)
 	for _, n := range PayloadFiles {
-		if err := os.WriteFile(filepath.Join(tmp, n), v.Files[n], 0o644); err != nil {
+		if err := writeNew(filepath.Join(tmp, n), v.Files[n]); err != nil {
 			return nil, err
 		}
 	}
-	if err := os.WriteFile(filepath.Join(tmp, ManifestName), v.ManifestRaw, 0o644); err != nil {
+	if err := writeNew(filepath.Join(tmp, ManifestName), v.ManifestRaw); err != nil {
 		return nil, err
 	}
 	cp := v.Manifest.Checkpoint
@@ -82,21 +87,16 @@ func Import(v *Verified, home string, sources []string, replace bool, now time.T
 		UTBGenesisID: v.Manifest.Network.UTBGenesisID, UTBTipEpoch: v.Manifest.Network.UTBTipEpoch, RootEpoch: cp.RootEpoch, RootRound: cp.RootRound,
 		ShardRound: cp.ShardRound, BlockHash: cp.BlockHash}
 	if v.Manifest.Ureth != nil {
-		rec.UrethHead = v.Manifest.Ureth.HeadNumber
+		rec.UnverifiedUrethHead = v.Manifest.Ureth.HeadNumber
 	}
 	raw, err := json.MarshalIndent(rec, "", "  ")
 	if err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(filepath.Join(tmp, ImportRecordName), append(raw, '\n'), 0o644); err != nil {
+	if err := writeNew(filepath.Join(tmp, ImportRecordName), append(raw, '\n')); err != nil {
 		return nil, err
 	}
-	if replace {
-		if err := os.RemoveAll(final); err != nil {
-			return nil, err
-		}
-	}
-	if err := os.Rename(tmp, final); err != nil {
+	if err := swapDir(tmp, final); err != nil {
 		return nil, err
 	}
 	return rec, nil

@@ -55,7 +55,8 @@ func ScanArchiveTip(dir string) (*ArchiveTip, error) {
 				continue
 			}
 			var uc types.UnicityCertificate
-			if types.Cbor.Unmarshal(rec.ResultingUC, &uc) != nil || uc.InputRecord == nil || len(uc.InputRecord.BlockHash) != 32 || len(rec.ResultingTR) == 0 {
+			if types.Cbor.Unmarshal(rec.ResultingUC, &uc) != nil || uc.InputRecord == nil || uc.UnicityTreeCertificate == nil || uc.UnicitySeal == nil ||
+				len(uc.InputRecord.BlockHash) != 32 || len(rec.ResultingTR) == 0 {
 				continue
 			}
 			v2 := archive.HasReceiptList(rec)
@@ -113,7 +114,7 @@ func bundleEpochs(dir string) []uint64 {
 }
 
 // Export writes a seed directory and verifies it before returning: an exporter never publishes a seed its own checks refuse.
-func Export(in ExportInput, outDir string) (*Verified, error) {
+func Export(in ExportInput, outDir string, replace bool) (*Verified, error) {
 	tip, err := ScanArchiveTip(in.ArchiveDir)
 	if err != nil {
 		return nil, err
@@ -167,15 +168,7 @@ func Export(in ExportInput, outDir string) (*Verified, error) {
 	if err != nil {
 		return nil, fmt.Errorf("the node's own seed does not verify, nothing exported: %w", err)
 	}
-	if err := os.MkdirAll(outDir, 0o755); err != nil {
-		return nil, err
-	}
-	for _, n := range PayloadFiles {
-		if err := writeAtomic(filepath.Join(outDir, n), payload[n]); err != nil {
-			return nil, err
-		}
-	}
-	if err := writeAtomic(filepath.Join(outDir, ManifestName), manifest); err != nil { // last: a directory with a manifest is complete
+	if err := WriteDir(outDir, payload, manifest, replace); err != nil {
 		return nil, err
 	}
 	return v, nil
@@ -191,14 +184,6 @@ func checkHeaderMatches(tip *ArchiveTip, uc *types.UnicityCertificate) error {
 		return refuse("the archive tip header is not the block its certificate commits to")
 	}
 	return nil
-}
-
-func writeAtomic(path string, b []byte) error {
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
 }
 
 // assemble builds the manifest and the payload map of a seed from its parts.
