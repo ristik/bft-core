@@ -70,7 +70,7 @@ type CutStore interface {
 
 // BlockCommitter is a store that makes the commit of a block atomic with its records and its cut: either all three are retained or none.
 type BlockCommitter interface {
-	CommitBlock(block *ExecutedBlock, recs []rootrecords.Record, cut *CutEntry) error
+	CommitBlock(block *ExecutedBlock, recs []rootrecords.Record, cut *CutEntry, obs []ObservationInput) error
 }
 
 // cutEntryOf is the cut of a committed block that carries a source state, nil for one that does not. The key's coordinates come from the
@@ -181,7 +181,7 @@ func (db BoltDB) GetCut(key CutKey) (cut DurableCut, err error) {
 
 // CommitBlock persists a committed block together with the records it projected and its cut in one transaction. A crash leaves the prior
 // state or the complete new one; a repeat after a crash is idempotent.
-func (db BoltDB) CommitBlock(block *ExecutedBlock, recs []rootrecords.Record, cut *CutEntry) error {
+func (db BoltDB) CommitBlock(block *ExecutedBlock, recs []rootrecords.Record, cut *CutEntry, obs []ObservationInput) error {
 	data, err := basetypes.Cbor.Marshal(block)
 	if err != nil {
 		return fmt.Errorf("serializing block: %w", err)
@@ -198,6 +198,9 @@ func (db BoltDB) CommitBlock(block *ExecutedBlock, recs []rootrecords.Record, cu
 			if err := putCutTx(meta, *cut); err != nil {
 				return err
 			}
+		}
+		if err := appendObservationsTx(meta, obs); err != nil {
+			return err
 		}
 		return writeBlockTx(tx, block, data, true)
 	})

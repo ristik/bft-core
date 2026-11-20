@@ -223,6 +223,12 @@ func (c PosControl) Validate() error {
 	return nil
 }
 
+// CarriesWitness reports whether the control commits to a retained witness. The VR root-only controls, RuleSupport and HandoffView, carry none
+// (Validate refuses a witness hash on them): there is nothing to fetch for them, and their zero hash is no witness.
+func (c PosControl) CarriesWitness() bool {
+	return !(c.Registry && (c.Op == OpRuleSupport || c.Op == OpHandoffView))
+}
+
 // MarshalCBOR encodes the canonical ten-element item.
 func (c PosControl) MarshalCBOR() ([]byte, error) {
 	if err := c.Validate(); err != nil {

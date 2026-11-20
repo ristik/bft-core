@@ -2234,7 +2234,7 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 	if x.recoveryProfile2 && rsp.CommittedHead.Anchor != nil {
 		blockStore, err = x.blockStore().NewFromAnchorState(rsp.CommittedHead)
 	} else {
-		blockStore, err = storage.NewFromState(x.params.HashAlgorithm, rsp.CommittedHead, x.blockStore().GetDB(), x.orchestration, x.log, x.params.NetworkProfileVersion)
+		blockStore, err = x.blockStore().RecoverFromState(rsp.CommittedHead)
 	}
 	if err != nil {
 		if errors.Is(err, storage.ErrRefusedBeforeWrite) {
@@ -2257,8 +2257,7 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 	// the replacement store executes the recovery blocks and then the live ones: it needs the control collaborators of the one it replaces
 	blockStore.SetPosServices(x.blockStore().PosServices())
 	if x.vr != nil {
-		blockStore.SetCommitObserver(x.vr.onCommit)
-		blockStore.SetExecutionObserver(x.vr.onExecuted)
+		x.vr.attach(blockStore)
 	}
 	blockStore.SetLeaderInputs(x.blockStore().LeaderInputs())
 	if x.utbPrevious != nil {
@@ -2779,7 +2778,9 @@ func (x *ConsensusManager) fetchWitnesses(ctx context.Context, store witnessHold
 		if err := x.checkControlEnvelope(c, block); err != nil {
 			return err
 		}
-		if store.HasWitness(c.WitnessHash) {
+		// a root-only VR control (HandoffView, RuleSupport) carries no witness: its zero hash must not be asked of the peers, or every
+		// block ordering a handoff view beyond view 0 would be refused as "witness unavailable" by every voter, the author included
+		if !c.CarriesWitness() || store.HasWitness(c.WitnessHash) {
 			continue
 		}
 		if peers == nil {
@@ -2880,10 +2881,6 @@ func (x *ConsensusManager) validateRecoveryState(rsp *abdrc.StateMsg) error {
 				}
 			}
 			bs.SetPosServices(x.blockStore().PosServices())
-			if x.vr != nil {
-				bs.SetCommitObserver(x.vr.onCommit)
-				bs.SetExecutionObserver(x.vr.onExecuted)
-			}
 			bs.SetLeaderInputs(x.blockStore().LeaderInputs())
 			if x.utbPrevious != nil {
 				bs.SetUTBBinding(utbBindingFor(x.utbSigningConfig(), bs, x.utbPrevious))
