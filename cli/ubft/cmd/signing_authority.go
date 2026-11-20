@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/sha256"
@@ -14,6 +15,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/spf13/cobra"
 	"golang.org/x/sync/errgroup"
 
@@ -23,6 +26,7 @@ import (
 	"github.com/unicitynetwork/bft-core/shardnode"
 	"github.com/unicitynetwork/bft-core/signingauthority"
 	"github.com/unicitynetwork/bft-core/signingauthority/service"
+	"github.com/unicitynetwork/bft-core/vrschema"
 )
 
 /*
@@ -67,6 +71,7 @@ Deployment order:
 	cmd.AddCommand(signingAuthorityReplaceSessionCmd(baseFlags))
 	cmd.AddCommand(signingAuthorityStatusCmd(baseFlags))
 	cmd.AddCommand(signingAuthorityRegistrationPolicyCmd(baseFlags))
+	cmd.AddCommand(signingAuthorityPosPolicyCmd(baseFlags))
 	return cmd
 }
 
@@ -83,6 +88,12 @@ type signingAuthorityRunFlags struct {
 
 	// the registrations this authority may sign (VT-10); empty: none
 	RegistrationPolicy string
+	// the P85 election this authority may sign possession proofs for (#1216); empty: pinned later by `signing-authority pos-policy`, or never
+	PosPolicies []string
+	// RequirePosPolicy refuses every P85 possession signature until the pin is set (the production profile: give --pos-policy at startup)
+	RequirePosPolicy bool
+	// LatePosPolicy lets `signing-authority pos-policy` pin the election on the running authority: development only
+	LatePosPolicy bool
 
 	AuthorityID string
 	NodeID      string
@@ -117,6 +128,9 @@ key exists: the authority starts pending and admits no client until complete-enr
 	cmd.Flags().StringVar(&flags.PoPSocket, "pop-socket", "", "Unix socket of the automated root member (`root-node run --vr-evm-authority-socket`): it serves the handoff possession proof and nothing else; with --pop-credential")
 	cmd.Flags().StringVar(&flags.PoPCredential, "pop-credential", "", "path to the member's credential (see `signing-authority credential`); a credential of its own, not the operator's. The root process must run as the authority's uid to reach the socket (its directory is 0700), so keep the operator credential file unreadable by the root process: the member credential is then the only thing it can use")
 	cmd.Flags().StringVar(&flags.RegistrationPolicy, "registration-policy", "", "JSON file pinning the VR deployment and listing the registrations this authority may sign for its EVM key (VT-10): without it the authority signs none. Fixed for the authority's lifetime")
+	cmd.Flags().StringArrayVar(&flags.PosPolicies, "pos-policy", nil, "JSON file pinning the P85 election (network word, chain id, ElectionPolicy address) and the identity ids this authority's EVM key may sign possession proofs for (#1216): without a pin the authority signs no P85 assignment possession. Fixed for the authority's lifetime; `signing-authority pos-policy` pins it once on a running authority")
+	cmd.Flags().BoolVar(&flags.RequirePosPolicy, "require-pos-policy", false, "refuse every P85 possession signature (election, delegation, assignment) until the P85 pin is set; with --pos-policy the pin is fixed from startup")
+	cmd.Flags().BoolVar(&flags.LatePosPolicy, "dev-allow-late-pos-policy", false, "DEVELOPMENT ONLY: let `signing-authority pos-policy` pin the P85 election on this running authority. The pin then comes from the operator credential that also asks for signatures, so it restricts nothing against a compromised credential; production gives --pos-policy at startup")
 	cmd.Flags().StringVar(&flags.AuthorityID, "authority-id", "", "operator-assigned name for this authority lifetime, for diagnostics")
 	cmd.Flags().StringVar(&flags.NodeID, "node-id", "", "the shard validator this authority signs for (`ubft node-id` on the shard node's key configuration)")
 	cmd.Flags().Uint16Var(&flags.NetworkID, "network-id", 0, "network identifier")
@@ -187,6 +201,22 @@ func signingAuthorityRun(ctx context.Context, flags *signingAuthorityRunFlags) e
 			return err
 		}
 		opts = append(opts, signingauthority.WithRegistrationPolicy(policy))
+	}
+	if len(flags.PosPolicies) > 1 {
+		return fmt.Errorf("--pos-policy is given once: %d policies named", len(flags.PosPolicies))
+	}
+	if len(flags.PosPolicies) == 1 {
+		pin, err := readPosPolicy(flags.PosPolicies[0])
+		if err != nil {
+			return err
+		}
+		opts = append(opts, signingauthority.WithPosPolicy(pin))
+	}
+	if flags.LatePosPolicy {
+		opts = append(opts, signingauthority.WithLatePosPolicy())
+	}
+	if flags.RequirePosPolicy {
+		opts = append(opts, signingauthority.WithRequirePosPolicy())
 	}
 	// The key is generated here. The enrollment has no configuration hash yet, on purpose.
 	authority, err := signingauthority.New(signingauthority.Enrollment{
@@ -773,6 +803,77 @@ must equal the authority's pin (a policy for another deployment is refused), and
 	}
 	flags.addOperatorFlags(cmd)
 	cmd.Flags().StringVar(&file, "policy", "", "the registration policy file (the format of `signing-authority run --registration-policy`)")
+	if err := cmd.MarkFlagRequired("policy"); err != nil {
+		panic(err)
+	}
+	return cmd
+}
+
+// posPolicyFile is the JSON of `signing-authority run --pos-policy` and `signing-authority pos-policy`.
+type posPolicyFile struct {
+	Network  string   `json:"network"`
+	ChainID  uint64   `json:"chainId"`
+	Election string   `json:"election"`
+	IDs      []uint64 `json:"ids"`
+}
+
+func readPosPolicy(path string) (signingauthority.PosPolicy, error) {
+	var p signingauthority.PosPolicy
+	raw, err := os.ReadFile(path) // #nosec G304 -- operator supplied local file
+	if err != nil {
+		return p, err
+	}
+	var f posPolicyFile
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&f); err != nil {
+		return p, fmt.Errorf("P85 pin %s: %w", path, err)
+	}
+	if dec.More() {
+		return p, fmt.Errorf("P85 pin %s: trailing data after the pin object", path)
+	}
+	nw, err := hexutil.Decode(f.Network)
+	if err != nil || len(nw) != 32 || !common.IsHexAddress(f.Election) || f.ChainID == 0 {
+		return p, fmt.Errorf("P85 pin %s: network is 32 bytes of 0x-hex, chainId nonzero and election an address", path)
+	}
+	copy(p.Network[:], nw)
+	p.ChainID = vrschema.U64(f.ChainID)
+	p.Election = common.HexToAddress(f.Election)
+	p.IDs = f.IDs
+	return p, nil
+}
+
+func signingAuthorityPosPolicyCmd(baseFlags *baseFlags) *cobra.Command {
+	flags := &signingAuthorityOperatorFlags{baseFlags: baseFlags}
+	var file string
+	cmd := &cobra.Command{
+		Use:   "pos-policy",
+		Short: "Pin the P85 election a running authority may sign possession proofs for (#1216)",
+		Long: `Pin, once, the scope of the P85 possession signatures of the running authority: the election's network word, the chain id, the
+ElectionPolicy address and the identity ids its EVM key may prove for. The election is deployed in the generation's genesis, after the
+authority started, so the operator states it here on the operator channel. The pin cannot be changed in the authority's lifetime: the same
+pin again is a no-op, another is refused. Until pinned, the authority signs no P85 assignment possession.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			pin, err := readPosPolicy(file)
+			if err != nil {
+				return err
+			}
+			operator, err := flags.operator()
+			if err != nil {
+				return err
+			}
+			defer func() { _ = operator.Close() }()
+			ctx, cancel := context.WithTimeout(cmd.Context(), flags.Timeout)
+			defer cancel()
+			if err := operator.SetPosPolicy(ctx, pin); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "P85 election pinned: %s, identities %v\n", common.Address(pin.Election).Hex(), pin.IDs)
+			return nil
+		},
+	}
+	flags.addOperatorFlags(cmd)
+	cmd.Flags().StringVar(&file, "policy", "", "the P85 pin file: {\"network\":\"0x..\",\"chainId\":N,\"election\":\"0x..\",\"ids\":[..]}")
 	if err := cmd.MarkFlagRequired("policy"); err != nil {
 		panic(err)
 	}

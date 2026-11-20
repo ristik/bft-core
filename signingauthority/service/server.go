@@ -554,6 +554,44 @@ func (s *Server) operatorOp(ctx context.Context, operation op, payload []byte) (
 		s.log.Info("signed a delegation possession", slog.Uint64("id", wire.Id), slog.Uint64("generation", wire.Generation),
 			slog.Uint64("delegationNonce", wire.DelegationNonce), slog.String("election", fmt.Sprintf("%x", wire.Election)))
 		return sig, nil
+	case opSignPosPoP:
+		var wire posPoPPayload
+		if err := types.Cbor.Unmarshal(payload, &wire); err != nil {
+			return nil, fmt.Errorf("%w: P85 possession request: %v", errMalformed, err)
+		}
+		if len(wire.ResultID) != 32 || len(wire.AssignmentID) != 32 || len(wire.Snapshot) != 32 {
+			return nil, fmt.Errorf("%w: the result, assignment and snapshot are 32-byte words", errMalformed)
+		}
+		request := signingauthority.PosPoPRequest{Attempt: wire.Attempt, ID: wire.ID, Generation: wire.Generation}
+		copy(request.ResultID[:], wire.ResultID)
+		copy(request.AssignmentID[:], wire.AssignmentID)
+		copy(request.Snapshot[:], wire.Snapshot)
+		pop, err := s.authority.SignPosPoP(request)
+		if err != nil {
+			s.log.Warn("refusing a P85 possession proof", slog.String("err", err.Error()))
+			return nil, err
+		}
+		s.log.Info("signed a P85 possession proof", slog.Uint64("id", wire.ID), slog.Uint64("generation", wire.Generation),
+			slog.Uint64("attempt", wire.Attempt), slog.String("result", fmt.Sprintf("%x", wire.ResultID)))
+		return types.Cbor.Marshal(pop)
+	case opSetPosPolicy:
+		var wire posPolicyPayload
+		if err := types.Cbor.Unmarshal(payload, &wire); err != nil {
+			return nil, fmt.Errorf("%w: P85 pin: %v", errMalformed, err)
+		}
+		if len(wire.Network) != 32 || len(wire.ChainID) != 32 || len(wire.Election) != 20 {
+			return nil, fmt.Errorf("%w: the pin names a 32-byte network word and chain id and a 20-byte election", errMalformed)
+		}
+		pin := signingauthority.PosPolicy{IDs: wire.IDs}
+		copy(pin.Network[:], wire.Network)
+		copy(pin.ChainID[:], wire.ChainID)
+		copy(pin.Election[:], wire.Election)
+		if err := s.authority.SetPosPolicy(pin); err != nil {
+			s.log.Warn("refusing a P85 pin", slog.String("err", err.Error()))
+			return nil, err
+		}
+		s.log.Info("P85 election pinned", slog.String("election", fmt.Sprintf("%x", wire.Election)), slog.Any("ids", wire.IDs))
+		return nil, nil
 	case opSignRegistration:
 		var wire registrationPayload
 		if err := types.Cbor.Unmarshal(payload, &wire); err != nil {

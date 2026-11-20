@@ -121,10 +121,14 @@ vrb_main() {
   if [ "${VR_UTB:-0}" = 1 ] && [ "${VR_AGG:-0}" = 1 ]; then source scripts/vr-utb-steps.sh; vru_before || return 1; fi
   if [ "${VR_RESTART_BETWEEN:-0}" = 1 ]; then vrb_hold 1 || return 1; fi
   if [ "${VR_RESTART_EARLY:-0}" = 1 ]; then vrb_hold 2 || return 1; fi
-  if [ "${VR_JOINER:-0}" = 1 ] && [ "${VR_JOINER_FOLLOW:-0}" != 1 ]; then
+  if [ "${VR_POS:-0}" = 1 ] && [ "${VR_JOINER:-0}" != 1 ]; then
+    # 1. (PoS without a joiner) the election is due at the cadence on its own: nothing to stage or apply
+    source scripts/vr-pos-steps.sh
+    vrb_log "PoS lane without a joiner: the committee of the genesis identities is re-elected at the cadence"
+  elif [ "${VR_JOINER:-0}" = 1 ] && [ "${VR_JOINER_FOLLOW:-0}" != 1 ]; then
     # 1. (joiner) a fifth identity applies and the Foundation admits it: an Admitted joiner is the election's work
-    vrj_apply || return 1
-    vrj_admit || return 1
+    if [ "${VR_POS:-0}" = 1 ]; then source scripts/vr-pos-steps.sh; vrp_apply || return 1   # PoS: the joiner joins by stake, no Foundation admission
+    else vrj_apply || return 1; vrj_admit || return 1; fi
   else
   # 1. an owner stages a new payee for identity 4: the election is due (a staged binding)
   keys=$VR_DIR/dev-keys/keys.json
@@ -155,7 +159,8 @@ EOF
   build/ubft validator rotate --validator-config "$cfg/validator.json" --new-payee "$payee" 2>&1 | tee "$VR_EVIDENCE/rotate.log" || { vrb_log "FAIL: rotate"; return 1; }
   vrb_log "PASS: identity 4 staged a new payee $payee"
   fi
-  # 2. the PoA election publishes R
+  # 2. the election publishes R (PoS: the hook's election reserves it from stake; the lane relayer submits the possession proofs and publishes it)
+  if [ "${VR_POS:-0}" = 1 ]; then vrp_publish || return 1; fi
   vrb_wait 900 "VR's open output is Published" vrb_published || return 1
   vrb_result=$(vrb_open_output)
   if [ "${VR_JOINER:-0}" = 1 ] && [ "${VR_JOINER_FOLLOW:-0}" != 1 ] && [ "${VR_ARCHIVE:-0}" = 1 ]; then vrj_restore_evm5 || return 1; fi
@@ -213,6 +218,11 @@ EOF
   cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'identity(uint64)' 4 >"$VR_EVIDENCE/identity4-after.hex"
   vrb_log "PASS: the Boundary installed J"
   if [ "${VR_JOINER:-0}" = 1 ]; then vrj_validates || return 1; fi
+  if [ "${VR_POS:-0}" = 1 ]; then
+    vrp_rotated || return 1
+    if [ "${UTB_LANE:-0}" = 1 ] || [ "${VR_UTB:-0}" = 1 ]; then vrp_utb || return 1; fi
+    if [ "${VR_POS_RECOVERY:-0}" = 1 ]; then vrp_recovery || return 1; fi
+  fi
   if [ "${VR_UTB:-0}" = 1 ] && [ "${VR_AGG:-0}" = 1 ]; then vru_after || return 1; fi
   for i in $(seq 1 "${validators:-4}") $([ "${VR_JOINER:-0}" = 1 ] && echo 5); do
     grep -E 'VR handoff|VR output published|root handoff outcome|switched|epoch' "test-nodes/root$i/debug.log" | tail -n 400 >"$VR_EVIDENCE/root$i-vr.log"

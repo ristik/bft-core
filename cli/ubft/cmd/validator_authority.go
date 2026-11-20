@@ -11,7 +11,9 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 
+	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/signingauthority"
+	"github.com/unicitynetwork/bft-core/signingauthority/service"
 	"github.com/unicitynetwork/bft-core/vrclient"
 	"github.com/unicitynetwork/bft-core/vrschema"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -61,23 +63,63 @@ func loadEVMAuthority(c evmAuthorityConfig) (*evmAuthority, error) {
 func (a *evmAuthority) Node() string   { return a.nodeID }
 func (a *evmAuthority) Public() []byte { return bytes.Clone(a.pub) }
 
-// Prove asks the authority for the EVM proof of the registration. It first reads the authority's enrollment and refuses unless it is the
-// configured node and key; the authority computes the digest itself (the request carries typed fields, not the digest).
-func (a *evmAuthority) Prove(ctx context.Context, req vrclient.ProofRequest) ([]byte, error) {
+// withOperator dials the authority and reads its enrollment first: it refuses unless the authority is the configured node and key.
+func (a *evmAuthority) withOperator(ctx context.Context, f func(context.Context, *service.OperatorClient) error) error {
 	op, err := openOperator(a.cfg.Socket, a.cfg.Credential)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer func() { _ = op.Close() }()
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	enrolled, key, err := op.Enrollment(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("reading the authority's enrollment: %w", err)
+		return fmt.Errorf("reading the authority's enrollment: %w", err)
 	}
 	if enrolled.NodeID != a.nodeID || !bytes.Equal(key, a.pub) {
-		return nil, fmt.Errorf("the authority at %s is node %s with another key than the configured EVM identity %s", a.cfg.Socket, enrolled.NodeID, a.nodeID)
+		return fmt.Errorf("the authority at %s is node %s with another key than the configured EVM identity %s", a.cfg.Socket, enrolled.NodeID, a.nodeID)
 	}
+	return f(ctx, op)
+}
+
+// PosPoP asks the authority for the P85 assignment possession proof of one frozen member (typed fields: the authority's pin names the
+// election, chain and network, and its own key and node are the signer).
+func (a *evmAuthority) PosPoP(ctx context.Context, req signingauthority.PosPoPRequest) (pop evmassign.EVMPoP, err error) {
+	err = a.withOperator(ctx, func(ctx context.Context, op *service.OperatorClient) (e error) {
+		pop, e = op.SignPosPoP(ctx, req)
+		return e
+	})
+	if err != nil {
+		return pop, fmt.Errorf("the signing authority refused the P85 possession proof: %w", err)
+	}
+	return pop, nil
+}
+
+// DelegationPossession asks the authority for the evm possession signature of admitDelegation (the authority recomputes the digest).
+func (a *evmAuthority) DelegationPossession(ctx context.Context, req signingauthority.DelegationPossessionRequest) (sig []byte, err error) {
+	err = a.withOperator(ctx, func(ctx context.Context, op *service.OperatorClient) (e error) {
+		sig, e = op.SignDelegationPossession(ctx, req)
+		return e
+	})
+	if err != nil {
+		return nil, fmt.Errorf("the signing authority refused the delegation possession: %w", err)
+	}
+	return sig, nil
+}
+
+// Prove asks the authority for the EVM proof of the registration. The authority computes the digest itself (the request carries typed
+// fields, not the digest).
+func (a *evmAuthority) Prove(ctx context.Context, req vrclient.ProofRequest) ([]byte, error) {
+	var sig []byte
+	err := a.withOperator(ctx, func(ctx context.Context, op *service.OperatorClient) error {
+		var e error
+		sig, e = a.signRegistration(ctx, op, req)
+		return e
+	})
+	return sig, err
+}
+
+func (a *evmAuthority) signRegistration(ctx context.Context, op *service.OperatorClient, req vrclient.ProofRequest) ([]byte, error) {
 	domain := vrschema.RegisterDomainText
 	if req.Binding {
 		domain = vrschema.BindingDomainText

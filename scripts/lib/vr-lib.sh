@@ -12,6 +12,11 @@
 #   vr_root_flags <i> <rpc> the flags a root of the lane runs with
 #   vr_readback <rpc>       VR's views through ureth: the genesis committee, the PoA module, GENESIS_RESULT, Healthy
 #
+# VR_POS=1 (VT-04): the PoS-prototype generation. The module is the PosElectionAdapter and the P85 stack (custody = liability holder 0) is in the
+# genesis; the plan carries a `pos` object whose genesis assignment id is the FULL shard configuration's, so the contracts genesis is built after a
+# reconciling genesis pass (vr_pos_reconcile, called by reth-paired-devnet.sh before the alloc merge). VR_MEASUREMENT and VR_FRESH_MEASUREMENT must
+# be the PoS-capable build's complete-path measurements (hook-pin ticket #1217).
+#
 # Inputs (environment):
 #   VR_CONTRACTS            a PRIVATE unicity-pos-contracts checkout with script/vr-genesis.sh (forge and cast on PATH): forge writes into it
 #                           (script/genesis-out/, out/, cache/), so never point it at a checkout another lane or a staging network uses
@@ -78,12 +83,43 @@ vr_prepare_genesis() { # after the profile: dev keys, the plan, the contracts ge
   done
   printf '[%s]\n' "$(IFS=,; echo "${items[*]}")" >"$VR_DIR/genesis-bindings.json"
   [ -s "$VR_DIR/dev-keys/keys.json" ] || python3 deploy/testnet/vr_dev_keys.py "$VR_DIR/dev-keys" "$n" || vr_die "generating the dev keys failed" || return 1
+  vr_plan 0x1111111111111111111111111111111111111111111111111111111111111111 || return 1
+  # a PoS generation builds its contracts genesis after the reconciling pass (the genesis assignment id comes from the full configuration)
+  [ "${VR_POS:-0}" = 1 ] && return 0
+  vr_contracts_genesis || return 1
+}
+
+vr_plan() { # <genesis assignment id: only a PoS plan carries it>
+  local pos=()
+  if [ "${VR_POS:-0}" = 1 ]; then
+    local g; g=$(build/ubft trust-base utb-manifest --trust-base test-nodes/trust-base.json --out-dir "$VR_DIR/root-identity" | sed -n 's/^root genesis id *\(0x[0-9a-f]\{64\}\)$/\1/p')
+    [ -n "$g" ] || vr_die "the manifest tool printed no root genesis id" || return 1
+    pos=(--pos --limits "${VR_POS_LIMITS:-4,5,5}" --pos-bond-unit 100000000000000000000 --pos-treasury 0x00000000000000000000000000000000000000ee
+         --pos-root-genesis "$g" --pos-assignment-id "$1" --pos-cadence-rounds "${VR_POS_CADENCE_ROUNDS:-400}" --pos-cadence-seconds "${VR_POS_CADENCE_SECONDS:-300}")
+  fi
   build/ubft vr-genesis plan --trust-base test-nodes/trust-base.json --shard-conf "test-nodes/shard-conf-${partitionID:-8}_0.json" \
     --bindings "$VR_DIR/genesis-bindings.json" --owners "$VR_DIR/dev-keys/owners.json" --b1-profile test-nodes/b1-profile.json \
     --network-word "$(vr_network_word)" --governor-signers "$(tr -d '\n' <"$VR_DIR/dev-keys/signers.txt")" --fee-collector "$(vr_fee_collector)" \
-    --out-input "$VR_DIR/input.json" --out-identities "$VR_DIR/genesis-identities.json" $(vr_utb_args) || return 1
-  ( cd "$VR_CONTRACTS" && HOME=${VR_FORGE_HOME:-$HOME} script/vr-genesis.sh "$OLDPWD/$VR_DIR/input.json" "$OLDPWD/$VR_DIR/contracts" ) ||
+    --out-input "$VR_DIR/input.json" --out-identities "$VR_DIR/genesis-identities.json" "${pos[@]}" $(vr_utb_args) || return 1
+}
+
+vr_contracts_genesis() {
+  local script=vr-genesis.sh; [ "${VR_POS:-0}" != 1 ] || script=vr-pos-genesis.sh
+  ( cd "$VR_CONTRACTS" && HOME=${VR_FORGE_HOME:-$HOME} script/$script "$OLDPWD/$VR_DIR/input.json" "$OLDPWD/$VR_DIR/contracts" ) ||
     vr_die "the contracts genesis failed" || return 1
+}
+
+vr_pos_reconcile() { # <funded genesis source, before the alloc merge>: the PoS plan's genesis assignment id from the full configuration
+  [ "${VR_POS:-0}" = 1 ] || return 0
+  local d=$VR_DIR/reconcile id; mkdir -p "$d"
+  build/ubft engine-api genesis --shard-conf "test-nodes/shard-conf-${partitionID:-8}_0.json" --trust-base test-nodes/trust-base.json \
+    --b1-profile test-nodes/b1-profile.json --alloc-source "$1" --out "$d/genesis.json" --full-shard-conf "$d/full-shard-conf.json" \
+    --identities-out "$d/b1-identities.json" >/dev/null || vr_die "the reconciling genesis failed" || return 1
+  id=$(build/ubft vr-genesis assignment --shard-conf "$d/full-shard-conf.json" --genesis-identities "$VR_DIR/genesis-identities.json" | sed -n 's/^genesis assignment id \(0x[0-9a-f]\{64\}\)$/\1/p')
+  [ -n "$id" ] || vr_die "vr-genesis assignment printed no id" || return 1
+  echo "vr: the PoS genesis assignment id is $id (the full shard configuration's)"
+  vr_plan "$id" || return 1
+  vr_contracts_genesis || return 1
 }
 
 vr_merge_alloc() { # <genesis source>: the VR accounts and the dev premine; every balance-only account of the source is part of the premine list
@@ -133,6 +169,16 @@ vr_root_flags() { # <i> <ureth rpc>: the VR-mode roots: the genesis committee, t
   local evmHolder="--vr-evm-keys test-nodes/evm$1/keys.json"
   [ "${SIGNING:-local}" != authority ] || evmHolder="--vr-evm-authority-socket test-nodes/auth$1/pop.sock --vr-evm-authority-credential test-nodes/auth$1/pop.cred"
   echo --genesis-identities "$VR_DIR/genesis-identities.json" --vr-deployment "$VR_DIR/vr-deployment.json" --pos-evm-rpc "$2" $evmHolder --vr-shard-rpc "http://$(evm_validator_rpc_addr "$1")"
+}
+
+# #1216: pin the P85 election in authority <i> (its identity's id and the generation's election, network word and chain). The election is in the
+# genesis, so every authority is pinned once its enrollment is complete; the pin cannot change afterwards.
+vr_pos_pin_authority() { # <i> [<identity id>]
+  [ "${VR_POS:-0}" = 1 ] && [ "${SIGNING:-local}" = authority ] || return 0
+  local home=test-nodes/auth$1
+  python3 scripts/vr-pos-authority-policy.py "$home/pos-policy.json" "$@" || return 1
+  build/ubft signing-authority pos-policy --operator-socket "$home/operator.sock" --operator-credential "$home/operator.cred" --policy "$home/pos-policy.json" ||
+    vr_die "pinning the P85 election in authority $1 failed" || return 1
 }
 
 vr_readback() { # <ureth rpc>: VR's views at the latest block read back what the plan put there

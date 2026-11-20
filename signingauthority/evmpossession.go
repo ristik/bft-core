@@ -95,6 +95,11 @@ func (a *Authority) SignElectionPoP(req ElectionPoPRequest) (evmassign.EVMPoP, e
 	if err != nil {
 		return evmassign.EVMPoP{}, fmt.Errorf("%w: %v", ErrContextMismatch, err)
 	}
+	// the same digest as SignPosPoP: the pin (when there is one, or when one is required) binds both entry points
+	d := req.Deployment
+	if err := a.checkPosScope(d.NetworkWord, d.ChainID, d.Election, id); err != nil {
+		return evmassign.EVMPoP{}, err
+	}
 	sig, err := ethSign(hs, digest)
 	if err != nil {
 		return evmassign.EVMPoP{}, err
@@ -109,6 +114,9 @@ func (a *Authority) SignDelegationPossession(req DelegationPossessionRequest) ([
 	defer a.mu.Unlock()
 	hs, pub, err := a.ethSigner()
 	if err != nil {
+		return nil, err
+	}
+	if err := a.checkPosScope(req.Network, req.Chain, req.Election, req.Request.Id); err != nil {
 		return nil, err
 	}
 	word, err := evmassign.NodeIDWord(a.enroll.NodeID)

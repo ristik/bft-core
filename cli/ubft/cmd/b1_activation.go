@@ -340,7 +340,9 @@ func deriveB1Profile(tb *types.RootTrustBaseV1, conf *types.PartitionDescription
 	if p.SystemGas, err = p.RequiredSystemGas(); err != nil {
 		return b1state.Profile{}, err
 	}
-	p.MaxGas = p.SystemGas + p.OrdinaryCapacity
+	if p.MaxGas, err = b1state.MaxGasFor(p.SystemGas, p.ForcedGas, p.OrdinaryCapacity); err != nil {
+		return b1state.Profile{}, err
+	}
 	if err := b1registry.ValidateProfile(p); err != nil {
 		return b1state.Profile{}, err
 	}

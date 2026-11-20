@@ -124,6 +124,23 @@ type vrGenesisInput struct {
 	Continuity         vrInputContinuity `json:"continuity"`
 	IdentityCount      int               `json:"identityCount"`
 	Identities         []vrInputIdentity `json:"identities"`
+	// Pos is present on a PoS-prototype generation (VT-04, design 3.8): script/VRPosGenesis.s.sol builds the P85 stack from it.
+	Pos *vrInputPos `json:"pos,omitempty"`
+}
+
+// vrInputPos is the PoS prototype's choices beyond the VR plan: the P85 stack's bond unit, treasury, the root consensus identity the
+// Evidence module verifies votes under, the genesis assignment id of the FULL shard configuration (the id the roots close), the reward
+// pool's funding and rate and the election cadence. Decimal strings for the amounts (forge parses them exactly).
+type vrInputPos struct {
+	BondUnit       string `json:"bondUnit"`
+	Treasury       string `json:"treasury"`
+	RootNetwork    uint64 `json:"rootNetwork"`
+	RootGenesis    string `json:"rootGenesis"`
+	AssignmentID   string `json:"assignmentId"`
+	RewardFunding  string `json:"rewardFunding"`
+	RewardRate     string `json:"rewardRate"`
+	CadenceRounds  uint64 `json:"cadenceRounds"`
+	CadenceSeconds uint64 `json:"cadenceSeconds"`
 }
 
 // vrOwner is one identity's owner and payee (the --owners file, in id order).
@@ -264,6 +281,7 @@ type vrPlanInput struct {
 	governorSigners []string
 	limits          vrInputLimits
 	fees            vrInputFees
+	pos             *vrInputPos
 }
 
 // vrPlan builds the contracts input and the roots' genesis identity records. Ids are assigned 1..n in ascending root node id (the order
@@ -306,6 +324,13 @@ func vrPlan(in vrPlanInput) (vrGenesisInput, []evmassign.Identity, error) {
 	// vMax, lMax and rMax are the P85-compatible limits() view only (VR v1 reads maxBatch alone); the plan fixes them
 	l := vrInputLimits{NMin: in.limits.NMin, NTarget: in.limits.NTarget, NMax: in.limits.NMax, VMax: vrschema.MaxCommittee, LMax: 1, RMax: 4,
 		MaxBatch: b1state.HookMaxRecords}
+	if in.pos != nil {
+		l.MaxBatch = in.profile.HRecords // the PoS-capable VR admits exactly the profile's H (a PoA generation keeps custody's ceiling)
+		l.VMax = vrPosMaxPool            // the PoS prototype's measured index ceiling (script/VRPosGenesis.s.sol MAX_POOL)
+		if l.NMax > vrPosMaxCommittee {
+			return out, nil, fmt.Errorf("%w: a PoS generation's nMax is at most %d (the contracts' measured limit), got %d", ErrVRGenesis, vrPosMaxCommittee, l.NMax)
+		}
+	}
 	if in.fees.BaseFeeFloor == 0 || in.fees.BaseFeeFloor > vrMaxBaseFee || in.fees.ChangeDenominator == 0 {
 		return out, nil, fmt.Errorf("%w: the base-fee floor must be in 1..2^62 and the change denominator positive", ErrVRGenesis)
 	}
@@ -355,6 +380,13 @@ func vrPlan(in vrPlanInput) (vrGenesisInput, []evmassign.Identity, error) {
 	out = vrGenesisInput{Format: vrInputFormat, ChainID: chainID, Network: lowerHex(in.network[:]), GovernorSigners: in.governorSigners, Limits: l,
 		KnownRootEpoch: in.tb.Epoch, Fees: in.fees, MaxGas: in.profile.MaxGas, SystemGas: in.profile.SystemGas,
 		Continuity: vrInputContinuity{MaxM: policy.MaxM, DistNum: policy.MaxDistNum, DistDen: policy.MaxDistDen}, IdentityCount: len(bindings)}
+	if in.pos != nil {
+		pos := *in.pos
+		if err := vrCheckPos(&pos, in.tb); err != nil {
+			return out, nil, err
+		}
+		out.Pos = &pos
+	}
 	for i, b := range bindings {
 		r := roots[b.RootNodeID]
 		v, okE := evms[b.EVMNodeID]
@@ -391,6 +423,42 @@ func vrPlan(in vrPlanInput) (vrGenesisInput, []evmassign.Identity, error) {
 	return out, ids, nil
 }
 
+// vrCheckPos validates the PoS choices and canonicalizes the words (lowercase). The genesis assignment id may be absent only while
+// planning the reconciling pass (`vr-genesis assignment` reads the plan's identities, not the input).
+func vrCheckPos(p *vrInputPos, tb *types.RootTrustBaseV1) error {
+	bu, ok := new(big.Int).SetString(p.BondUnit, 10)
+	if !ok || bu.Sign() <= 0 || bu.BitLen() > 128 {
+		return fmt.Errorf("%w: the PoS bond unit must be a positive decimal below 2^128", ErrVRGenesis)
+	}
+	for name, d := range map[string]string{"reward funding": p.RewardFunding, "reward rate": p.RewardRate} {
+		if v, ok := new(big.Int).SetString(d, 10); !ok || v.Sign() < 0 || v.BitLen() > 128 {
+			return fmt.Errorf("%w: the PoS %s must be a decimal below 2^128", ErrVRGenesis, name)
+		}
+	}
+	tr, err := vrAddress("PoS treasury", p.Treasury)
+	if err != nil || tr == (common.Address{}) {
+		return fmt.Errorf("%w: the PoS treasury must be a nonzero address", ErrVRGenesis)
+	}
+	p.Treasury = strings.ToLower(tr.Hex())
+	for name, w := range map[string]*string{"root genesis": &p.RootGenesis, "assignment id": &p.AssignmentID} {
+		b, err := vrHex("PoS "+name, *w, 32)
+		if err != nil {
+			return err
+		}
+		if [32]byte(b) == ([32]byte{}) {
+			return fmt.Errorf("%w: the PoS %s is zero", ErrVRGenesis, name)
+		}
+		*w = lowerHex(b)
+	}
+	if p.RootNetwork != uint64(tb.NetworkID) || p.RootNetwork == 0 {
+		return fmt.Errorf("%w: the PoS root network %d is not the trust base's %d", ErrVRGenesis, p.RootNetwork, tb.NetworkID)
+	}
+	if p.CadenceRounds == 0 || p.CadenceSeconds == 0 {
+		return fmt.Errorf("%w: the PoS election cadence must be positive", ErrVRGenesis)
+	}
+	return nil
+}
+
 // vrDeploymentFile is what script/vr-genesis.sh writes next to the alloc.
 type vrDeploymentFile struct {
 	Format                  string `json:"format"`
@@ -407,17 +475,39 @@ type vrDeploymentFile struct {
 	Module                  string `json:"module"`
 	ModuleCodeHash          string `json:"moduleCodeHash"`
 	ModuleTag               string `json:"moduleTag"`
-	Composer                string `json:"composer"`
-	ComposerCodeHash        string `json:"composerCodeHash"`
+	Composer                string `json:"composer,omitempty"`
+	ComposerCodeHash        string `json:"composerCodeHash,omitempty"`
 	Governor                string `json:"governor"`
 	GovernorCodeHash        string `json:"governorCodeHash"`
 	CommitteeDigest         string `json:"committeeDigest"`
 	LastAcked               string `json:"lastAcked"`
 	IdentityCount           uint64 `json:"identityCount"`
 	Members                 uint64 `json:"members"`
+	// the PoS prototype's P85 stack (script/vr-pos-genesis.sh); Composer* are absent there
+	Pos                bool   `json:"pos,omitempty"`
+	Custody            string `json:"custody,omitempty"`
+	CustodyCodeHash    string `json:"custodyCodeHash,omitempty"`
+	Election           string `json:"election,omitempty"`
+	ElectionCodeHash   string `json:"electionCodeHash,omitempty"`
+	Evidence           string `json:"evidence,omitempty"`
+	Selection          string `json:"selection,omitempty"`
+	Reader             string `json:"reader,omitempty"`
+	Policy             string `json:"policy,omitempty"`
+	PolicyCodeHash     string `json:"policyCodeHash,omitempty"`
+	RewardPool         string `json:"rewardPool,omitempty"`
+	RewardPoolCodeHash string `json:"rewardPoolCodeHash,omitempty"`
+	GenesisImpl        string `json:"genesisImpl,omitempty"`
+	Factory            string `json:"factory,omitempty"`
+	ManifestHash       string `json:"manifestHash,omitempty"`
+	PosAssignmentID    string `json:"posAssignmentId,omitempty"`
 }
 
 func (d vrDeploymentFile) accounts() map[string][2]string {
+	if d.Pos { // no composer engine on a PoS generation
+		return map[string][2]string{"registry": {d.Registry, d.RegistryCodeHash}, "governanceFacet": {d.GovernanceFacet, d.GovernanceFacetCodeHash},
+			"repairFacet": {d.RepairFacet, d.RepairFacetCodeHash}, "recordsFacet": {d.RecordsFacet, d.RecordsFacetCodeHash},
+			"module": {d.Module, d.ModuleCodeHash}, "governor": {d.Governor, d.GovernorCodeHash}}
+	}
 	return map[string][2]string{"registry": {d.Registry, d.RegistryCodeHash}, "governanceFacet": {d.GovernanceFacet, d.GovernanceFacetCodeHash},
 		"repairFacet": {d.RepairFacet, d.RepairFacetCodeHash}, "recordsFacet": {d.RecordsFacet, d.RecordsFacetCodeHash},
 		"module": {d.Module, d.ModuleCodeHash}, "composer": {d.Composer, d.ComposerCodeHash}, "governor": {d.Governor, d.GovernorCodeHash}}
@@ -565,7 +655,7 @@ func vrReplan(v vrVerifyInput) error {
 		return err
 	}
 	in, ids, err := vrPlan(vrPlanInput{tb: v.tb, conf: v.full, bindings: bindings, owners: owners, profile: v.profile, network: [32]byte(word),
-		governorSigners: append([]string(nil), v.input.GovernorSigners...), limits: v.input.Limits, fees: v.input.Fees})
+		governorSigners: append([]string(nil), v.input.GovernorSigners...), limits: v.input.Limits, fees: v.input.Fees, pos: v.input.Pos})
 	if err != nil {
 		return err
 	}
@@ -776,8 +866,15 @@ func vrVerify(v vrVerifyInput) (vrRootDeployment, error) {
 		}
 	}
 	// exactly the generation's accounts: the SealRegistry, the seven VR accounts, and the balance-only accounts the plan funds
+	posAccts, err := vrPosAccounts(in, d)
+	if err != nil {
+		return out, err
+	}
 	for a, acct := range alloc {
 		if a == common.Address(vrschema.SealRegistry) || vrGenesisRole(a) != "" {
+			continue
+		}
+		if _, isPos := posAccts[a]; isPos {
 			continue
 		}
 		want, funded := v.funded[a]
@@ -822,6 +919,12 @@ func vrVerify(v vrVerifyInput) (vrRootDeployment, error) {
 	codes, hashes := map[string][]byte{}, map[string][32]byte{}
 	accounts := d.accounts()
 	for _, a := range vrGenesisAccounts {
+		if in.Pos != nil && a.role == "composer" {
+			if _, there := alloc[vrGenesisAddress(a.low)]; there {
+				return fail("a PoS generation has no composer engine, but the genesis allocates %s", vrGenesisAddress(a.low))
+			}
+			continue
+		}
 		acct, ok := alloc[vrGenesisAddress(a.low)]
 		if !ok {
 			return fail("the EVM genesis has no %s account at %s", a.role, vrGenesisAddress(a.low))
@@ -861,8 +964,13 @@ func vrVerify(v vrVerifyInput) (vrRootDeployment, error) {
 	if hashes["governanceFacet"] == hashes["repairFacet"] || hashes["repairFacet"] == hashes["recordsFacet"] || hashes["governanceFacet"] == hashes["recordsFacet"] {
 		return fail("two facet roles carry the same code")
 	}
+	// the reviewed builds are enumerated: the caps are compile-time constants of the core and the facets, so an unknown core is refused, and the
+	// allocated build must be the one the plan selects (PoS plan: the PoS-capable build; PoA plan: the PoA build)
+	if err := b1state.CheckVRBuildRoles(hashes["registry"], hashes["governanceFacet"], hashes["repairFacet"], hashes["recordsFacet"], in.Pos != nil); err != nil {
+		return fail("%v", err)
+	}
 	composerHash, governorHash := hashes["composer"], hashes["governor"]
-	if lowerHex(composerHash[:]) != vrReviewedComposerCodeHash || !inertCode(codes["composer"]) {
+	if in.Pos == nil && (lowerHex(composerHash[:]) != vrReviewedComposerCodeHash || !inertCode(codes["composer"])) {
 		return fail("the composer engine is not the reviewed PoaComposerEngine runtime %s", vrReviewedComposerCodeHash)
 	}
 	if lowerHex(governorHash[:]) != vrReviewedGovernorCodeHash {
@@ -922,17 +1030,33 @@ func vrVerify(v vrVerifyInput) (vrRootDeployment, error) {
 
 	// 6. the allocated storage is exactly the plan's: VR, the module, the multisig; the facets and the composer hold none
 	wantVR, wantPoA, wantMultisig, committee, err := vrExpectedState(in, v.identities, hashes["module"])
+	if in.Pos != nil {
+		if err = vrPosExpectedState(in, d, v.identities, wantVR, hashes["module"]); err != nil {
+			return out, err
+		}
+		wantPoA = vrStorage{} // the adapter holds no storage
+		if wantAssignment, err := vrGenesisAssignment(v.full, v.identities); err != nil || lowerHex(wantAssignment[:]) != in.Pos.AssignmentID {
+			return fail("the PoS genesis assignment id %s is not the full shard configuration's (%x): the reconciling pass did not run on this configuration", in.Pos.AssignmentID, wantAssignment)
+		}
+		if err := vrCheckPosStack(in, d, v.identities, alloc, posAccts); err != nil {
+			return out, err
+		}
+	}
 	if err != nil {
 		return out, err
 	}
+	modTag := vrModuleTag(in)
 	if !strings.EqualFold(d.CommitteeDigest, lowerHex(committee[:])) || d.Members != uint64(len(v.identities)) || d.IdentityCount != uint64(in.IdentityCount) ||
-		!strings.EqualFold(d.NetworkWord, in.Network) || !strings.EqualFold(d.ModuleTag, lowerHex(vrPoaTag[:])) ||
+		!strings.EqualFold(d.NetworkWord, in.Network) || !strings.EqualFold(d.ModuleTag, lowerHex(modTag[:])) ||
 		!strings.EqualFold(d.LastAcked, lowerHex(vrschema.GenesisResult[:])) {
 		return fail("the deployment report's committee, counts or network word are not the plan's")
 	}
 	want := map[string]vrStorage{"registry": wantVR, "module": wantPoA, "governor": wantMultisig}
 	var diffs []string
 	for _, a := range vrGenesisAccounts {
+		if in.Pos != nil && a.role == "composer" {
+			continue
+		}
 		got, err := storageOf(alloc[vrGenesisAddress(a.low)])
 		if err != nil {
 			return out, err
@@ -1045,13 +1169,15 @@ func loadVRRootDeployment(path string, rootNetwork uint64, shardConfs []*types.P
 // newVRGenesisCmd is `ubft vr-genesis`.
 func newVRGenesisCmd() *cobra.Command {
 	root := &cobra.Command{Use: "vr-genesis", Short: "The genesis plan of a validator-registry generation (VT-14)"}
-	root.AddCommand(newVRGenesisPlanCmd(), newVRGenesisVerifyCmd())
+	root.AddCommand(newVRGenesisPlanCmd(), newVRGenesisVerifyCmd(), newVRGenesisAssignmentCmd())
 	return root
 }
 
 func newVRGenesisPlanCmd() *cobra.Command {
 	var trustBaseFile, shardConfFile, bindingsFile, ownersFile, profileFile, networkWord, governors, limits, feeCollector, outInput, outIDs string
 	var baseFeeFloor, changeDenominator uint64
+	var pos bool
+	var posIn vrInputPos
 	var utbEntry, utbID string
 	cmd := &cobra.Command{Use: "plan", Short: "Write the contracts genesis input and the roots' genesis identities of a VR generation",
 		Long: "Identities 1..n are the coupled genesis entities in ascending root node id; each is a member of the genesis committee with its\n" +
@@ -1085,13 +1211,18 @@ func newVRGenesisPlanCmd() *cobra.Command {
 					return err
 				}
 			}
+			var planPos *vrInputPos
+			if pos {
+				posIn.RootNetwork = uint64(tb.NetworkID)
+				planPos = &posIn
+			}
 			var l vrInputLimits
 			if _, err := fmt.Sscanf(limits, "%d,%d,%d", &l.NMin, &l.NTarget, &l.NMax); err != nil {
 				return fmt.Errorf("%w: --limits must be nMin,nTarget,nMax", ErrVRGenesis)
 			}
 			input, ids, err := vrPlan(vrPlanInput{tb: tb, conf: conf, bindings: bindings, owners: owners, profile: p, network: [32]byte(word),
 				governorSigners: strings.Split(governors, ","), limits: l,
-				fees: vrInputFees{BaseFeeFloor: baseFeeFloor, ChangeDenominator: changeDenominator, FeeCollector: feeCollector}})
+				fees: vrInputFees{BaseFeeFloor: baseFeeFloor, ChangeDenominator: changeDenominator, FeeCollector: feeCollector}, pos: planPos})
 			if err != nil {
 				return err
 			}
@@ -1125,6 +1256,15 @@ func newVRGenesisPlanCmd() *cobra.Command {
 	f.StringVar(&feeCollector, "fee-collector", "", "the fee collector (the shard nodes' --engine-fee-collector)")
 	f.Uint64Var(&baseFeeFloor, "base-fee-floor", 1_000_000, "the base-fee floor (ureth --unicity.base-fee-floor)")
 	f.Uint64Var(&changeDenominator, "change-denominator", 8, "the base-fee change denominator (ureth --unicity.base-fee-change-denominator)")
+	f.BoolVar(&pos, "pos", false, "plan the PoS-prototype generation (VT-04): the module is the PosElectionAdapter and the P85 stack is the holder; needs the --pos-* flags")
+	f.StringVar(&posIn.BondUnit, "pos-bond-unit", "", "PoS: base units of one weight unit (decimal); each identity bonds its raw weight times it")
+	f.StringVar(&posIn.Treasury, "pos-treasury", "", "PoS: the P85 treasury address")
+	f.StringVar(&posIn.RootGenesis, "pos-root-genesis", "", "PoS: the root consensus genesis identity G (0x + 64 hex; trust-base utb-manifest)")
+	f.StringVar(&posIn.AssignmentID, "pos-assignment-id", "", "PoS: the genesis assignment id of the FULL shard configuration (vr-genesis assignment)")
+	f.StringVar(&posIn.RewardFunding, "pos-reward-funding", "10000000000000000000000", "PoS: the reward pool's genesis funding in base units")
+	f.StringVar(&posIn.RewardRate, "pos-reward-rate", "1000000000000000000", "PoS: the genesis operator reward rate per 1,000 progress units")
+	f.Uint64Var(&posIn.CadenceRounds, "pos-cadence-rounds", 400, "PoS: ordinary progress rounds between elections")
+	f.Uint64Var(&posIn.CadenceSeconds, "pos-cadence-seconds", 300, "PoS: UC seconds between elections")
 	f.StringVar(&outInput, "out-input", "", "the contracts genesis input to write")
 	f.StringVar(&outIDs, "out-identities", "", "the roots' genesis identities to write")
 	vrUTBFlags(f, &utbEntry, &utbID, "write")
@@ -1267,4 +1407,46 @@ func enableVRServices(cm *consensus.ConsensusManager, orchestration *partitions.
 		Registry:   &storage.VRServices{Deployment: dep, State: vrstate.Authority{Pins: pins}},
 	})
 	return nil
+}
+
+// newVRGenesisAssignmentCmd prints the genesis assignment id of a shard configuration and a plan's genesis identities: evmassign's
+// AssignmentHash, the key the roots close the genesis epoch's liability under, and so the genesis assignment id the PoS custody must be
+// constructed with. The id depends on the FULL shard configuration (the base plus seal_registry_genesis), so the PoS generation takes it
+// from a reconciling genesis pass without the contracts' accounts (deploy/testnet/vr_genesis.py), and `verify` re-derives it.
+func newVRGenesisAssignmentCmd() *cobra.Command {
+	var shardConfFile, idsFile string
+	cmd := &cobra.Command{Use: "assignment", Short: "Print the genesis assignment id of a shard configuration and the genesis identities",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			conf, err := readShardConf(shardConfFile)
+			if err != nil {
+				return err
+			}
+			ids, _, err := readIdentities(idsFile)
+			if err != nil {
+				return err
+			}
+			id, err := vrGenesisAssignment(conf, ids)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "genesis assignment id %s\n", lowerHex(id[:]))
+			return nil
+		}}
+	cmd.Flags().StringVar(&shardConfFile, "shard-conf", "", "the full EVM shard configuration")
+	cmd.Flags().StringVar(&idsFile, "genesis-identities", "", "the genesis identities vr-genesis plan wrote")
+	_ = cmd.MarkFlagRequired("shard-conf")
+	_ = cmd.MarkFlagRequired("genesis-identities")
+	return cmd
+}
+
+func vrGenesisAssignment(conf *types.PartitionDescriptionRecord, ids []evmassign.Identity) ([32]byte, error) {
+	digest, err := evmassign.IdentitiesDigest(ids)
+	if err != nil {
+		return [32]byte{}, errors.Join(ErrVRGenesis, err)
+	}
+	h, err := evmassign.AssignmentHash(conf, digest)
+	if err != nil {
+		return [32]byte{}, errors.Join(ErrVRGenesis, err)
+	}
+	return h, nil
 }
