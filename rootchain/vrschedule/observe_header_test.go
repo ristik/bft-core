@@ -98,7 +98,7 @@ func TestRestartedRootReResolvesALegacySourceByItsCertifiedHash(t *testing.T) {
 	copy(h[:], hash)
 	reader := &headerReader{fakeReader: &fakeReader{at: map[[32]byte]*vrhandoff.Output{}}, number: map[[32]byte]uint64{h: 3}, err: errors.New("header unavailable")}
 	o := &Observer{Reader: reader, Sources: sources, Outputs: NewOutputs()}
-	require.Error(t, o.Observe(context.Background(), cert(20, 9, 9)), "an unavailable header re-resolves nothing")
+	require.NoError(t, o.Observe(context.Background(), cert(20, 9, 9)), "an unavailable historical header never stops observing")
 	_, ok = sources.Get(r)
 	require.False(t, ok)
 
@@ -138,4 +138,97 @@ type plainReader struct{ f *fakeReader }
 
 func (p *plainReader) OpenOutput(ctx context.Context, b, root [32]byte) (*vrhandoff.Output, error) {
 	return p.f.OpenOutput(ctx, b, root)
+}
+
+// Partial migration (astra r7): two legacy entries, the second's header unavailable. Recording another result writes a file that KEEPS the
+// unresolved entry marked pending; after a restart the second survives and is still pending, and a later resolution migrates it.
+func TestAPartialMigrationNeverDropsAnUnresolvedLegacyEntry(t *testing.T) {
+	r1, r2, r3 := vrschema.Word{0x51}, vrschema.Word{0x52}, vrschema.Word{0x53}
+	h1, h2 := bytes.Repeat([]byte{0x71}, 32), bytes.Repeat([]byte{0x72}, 32)
+	entry := func(r vrschema.Word, h []byte, round uint64) string {
+		return `{"resultId":"0x` + hex.EncodeToString(r[:]) + `","evmBlockHash":"0x` + hex.EncodeToString(h) + `","evmBlockNumber":` + "4" + `,"certRootRound":` +
+			string(rune('0'+round)) + `,"outputCommit":"0x` + hex.EncodeToString(bytes.Repeat([]byte{0xc0}, 32)) + `","certUcTime":1}`
+	}
+	path := filepath.Join(t.TempDir(), "vr-sources.json")
+	require.NoError(t, os.WriteFile(path, []byte("["+entry(r1, h1, 5)+","+entry(r2, h2, 6)+"]"), 0o600))
+	sources, err := NewSources(path)
+	require.NoError(t, err)
+	var k1, k2 [32]byte
+	copy(k1[:], h1)
+	copy(k2[:], h2)
+	reader := &partialReader{headerReader: &headerReader{fakeReader: &fakeReader{at: map[[32]byte]*vrhandoff.Output{{2}: published(r3)}}, number: map[[32]byte]uint64{k1: 3, k2: 8}},
+		unavailable: map[[32]byte]bool{k2: true}}
+	o := &Observer{Reader: reader, Sources: sources, Outputs: NewOutputs()}
+	ctx := context.Background()
+	require.NoError(t, o.Observe(ctx, cert(10, 1, 1)))
+	got, ok := sources.Get(r1)
+	require.True(t, ok)
+	require.EqualValues(t, 3, got.EVMBlockNumber, "the first entry migrated")
+	_, ok = sources.Get(r2)
+	require.False(t, ok, "the second is unavailable, not wrong")
+	require.True(t, sources.HasLegacy())
+
+	// recording another result must not drop the unresolved one
+	require.NoError(t, o.Observe(ctx, cert(11, 2, 2)))
+	_, ok = sources.Get(r3)
+	require.True(t, ok)
+
+	again, err := NewSources(path)
+	require.NoError(t, err)
+	require.True(t, again.HasLegacy(), "the unresolved entry survived the restart and is still pending")
+	_, ok = again.Get(r2)
+	require.False(t, ok)
+	g1, ok := again.Get(r1)
+	require.True(t, ok)
+	require.EqualValues(t, 3, g1.EVMBlockNumber)
+
+	// once its header is available the pending entry migrates, durably
+	reader.unavailable = nil
+	o2 := &Observer{Reader: reader, Sources: again, Outputs: NewOutputs()}
+	require.NoError(t, o2.Observe(ctx, cert(20, 9, 9)))
+	g2, ok := again.Get(r2)
+	require.True(t, ok)
+	require.EqualValues(t, 8, g2.EVMBlockNumber)
+	final, err := NewSources(path)
+	require.NoError(t, err)
+	require.False(t, final.HasLegacy())
+}
+
+// partialReader fails the header of chosen blocks.
+type partialReader struct {
+	*headerReader
+	unavailable map[[32]byte]bool
+}
+
+func (p *partialReader) HeaderNumber(ctx context.Context, h [32]byte) (uint64, error) {
+	if p.unavailable[h] {
+		return 0, errors.New("header unavailable")
+	}
+	return p.headerReader.HeaderNumber(ctx, h)
+}
+
+// A fetched source's height is never trusted (sol r5): incumbents of an earlier build agree on the shard round 4, and the root records the
+// height it derives itself from the certified hash (3). An unresolvable header leaves the entry unrecorded (retried), and a missing
+// resolver refuses.
+func TestAFetchedSourceHeightIsRederivedFromTheCertifiedHeader(t *testing.T) {
+	var h [32]byte
+	copy(h[:], bytes.Repeat([]byte{0x77}, 32))
+	fetched := SourceEntry{Source: vrhandoff.Source{ResultID: bytes.Repeat([]byte{0x52}, 32), EVMBlockHash: h[:], EVMBlockNumber: 4, CertRootRound: 12,
+		OutputCommit: bytes.Repeat([]byte{0xc0}, 32)}, CertUCTime: 1012}
+	reader := &headerReader{fakeReader: &fakeReader{}, number: map[[32]byte]uint64{h: 3}}
+	got, err := ResolveFetched(context.Background(), reader, fetched)
+	require.NoError(t, err)
+	require.EqualValues(t, 3, got.EVMBlockNumber, "the incumbents' shard round 4 is replaced by the verified EVM height")
+	require.EqualValues(t, 12, got.CertRootRound)
+	require.EqualValues(t, 4, fetched.EVMBlockNumber, "the argument is not modified")
+
+	sources, err := NewSources("")
+	require.NoError(t, err)
+	reader.err = errors.New("header unavailable")
+	_, err = ResolveFetched(context.Background(), reader, fetched)
+	require.Error(t, err)
+	_, ok := sources.Get(vrschema.Word(fetched.ResultID))
+	require.False(t, ok, "nothing is recorded while the header is unresolved")
+	_, err = ResolveFetched(context.Background(), nil, fetched)
+	require.Error(t, err, "without a resolver a fetched height is never trusted")
 }

@@ -22,6 +22,12 @@ type recordingReader struct {
 	out map[[32]byte]*vrhandoff.Output
 }
 
+// HeaderNumber resolves the certified block's true EVM number: the fixture certifies block hash {b..} at height 100+b, unequal to the shard
+// round (b) it also carries, so the test can tell the two apart.
+func (r recordingReader) HeaderNumber(_ context.Context, h [32]byte) (uint64, error) {
+	return 100 + uint64(h[0]), nil
+}
+
 func (r recordingReader) OpenOutput(_ context.Context, _, root [32]byte) (*vrhandoff.Output, error) {
 	return r.out[root], nil
 }
@@ -54,4 +60,5 @@ func TestTheCommitWorkerRecordsTheSource(t *testing.T) {
 	s, _ := sources.Get(r)
 	require.EqualValues(t, 11, s.CertRootRound)
 	require.EqualValues(t, 1011, s.CertUCTime)
+	require.EqualValues(t, 102, s.EVMBlockNumber, "the verified EVM height of block 2, not its shard round")
 }
