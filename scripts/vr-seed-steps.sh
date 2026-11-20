@@ -9,7 +9,8 @@
 #                fields, and the joiner applies (`ubft validator apply`, PoA)
 
 vrs_dir=test-nodes/seed
-vrs_off=$(( ${LANE_SLOT:-0} * 1000 ))
+# the seed servers' ports: 38480..38483 shifted by the lane's port offset (#1218: LANE_SLOT * 1000, or LANE_PORT_BASE); scripts/lib/lane-slot.sh lists them
+vrs_off=${LANE_PORT_OFFSET:-$(( ${LANE_SLOT:-0} * 1000 ))}
 vrs_port_a=$((38480 + vrs_off)); vrs_port_b=$((38481 + vrs_off)); vrs_port_c=$((38482 + vrs_off))
 vrs_log() { vrb_log "$@"; }
 vrs_pin() { tr -d '[:space:]' <test-nodes/utb-genesis.id; }
@@ -17,15 +18,29 @@ vrs_pids=()
 vrs_cleanup() { local p; for p in "${vrs_pids[@]}"; do kill "$p" 2>/dev/null; done; vrs_pids=(); }
 trap vrs_cleanup EXIT
 
+# a server of an earlier (killed) run of THIS tree is stopped first: its pid is in the lane's extra-pids, checked by command and working directory
+vrs_kill_extra() {
+  local p pat
+  [ -f test-nodes/q3/extra-pids ] || return 0
+  while read -r p pat; do
+    [ -n "${p:-}" ] && declare -F owned_pid >/dev/null && owned_pid "$p" "${pat:-ubft seed serve}" && kill -INT "$p" 2>/dev/null
+  done <test-nodes/q3/extra-pids
+  rm -f test-nodes/q3/extra-pids
+  sleep 1
+}
 vrs_serve() { # <dir> <port>
+  declare -F q3_record_extra_pid >/dev/null || source scripts/lib/q3-lib.sh
+  if (exec 3<>"/dev/tcp/127.0.0.1/$2") 2>/dev/null; then vrs_log "FAIL: port $2 (this lane's seed server port) is already in use by a process this lane does not own"; return 1; fi
   build/ubft seed serve --dir "$1" --listen "127.0.0.1:$2" >>"$VR_EVIDENCE/seed-serve-$2.log" 2>&1 &
   vrs_pids+=($!)
+  q3_record_extra_pid $! 'ubft seed serve'   # the lane's cleanup and the next run's preflight (vrs_kill_extra) stop it
   vrb_wait 20 "seed server on :$2" curl -sf "http://127.0.0.1:$2/manifest.json" -o /dev/null
 }
 
 vrs_archive_ready() { [ -n "$(find "$EVM_ARCHIVE_ROOT/evm1" -type f -name '*' 2>/dev/null | head -1)" ] && build/ubft seed export --root-rpc "$(vrb_rpc_of 1)" --utb-genesis-id "$(vrs_pin)" --archive "$EVM_ARCHIVE_ROOT/evm1" --out "$vrs_dir/probe" >/dev/null 2>&1; }
 
 vrs_export() {
+  vrs_kill_extra
   declare -F m2_rpc_port >/dev/null || vrj_source_libs || return 1   # m2_rpc_port, evm_validator_rpc_addr: the lane libraries
   rm -rf "$vrs_dir"; mkdir -p "$vrs_dir"
   vrb_wait 600 "validator 1's archive holds a certified record and its seed verifies" vrs_archive_ready || return 1
@@ -110,6 +125,7 @@ vrs_epoch_ready() { # the exported seed's checkpoint is of root epoch >= 2 and i
     && python3 -c "import json,sys;m=json.load(open('$vrs_dir/export2/manifest.json'));sys.exit(0 if m['checkpoint']['rootEpoch']>=2 and m['network']['utbTipEpoch']>=2 else 1)"
 }
 vrs_second() {
+  vrs_kill_extra
   declare -F m2_rpc_port >/dev/null || vrj_source_libs || return 1
   local pin d=$vrs_dir/second; pin=$(vrs_pin); mkdir -p "$vrs_dir" "$d"
   vrb_wait 900 "validator 1's archive holds a root epoch 2 certified record and the history tip is epoch 2" vrs_epoch_ready || return 1
