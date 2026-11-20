@@ -120,7 +120,11 @@ vrb_main() {
   vrb_log "roots: $(vrb_root_rpcs | tr '\n' ' ')"
   if [ "${VR_RESTART_BETWEEN:-0}" = 1 ]; then vrb_hold 1 || return 1; fi
   if [ "${VR_RESTART_EARLY:-0}" = 1 ]; then vrb_hold 2 || return 1; fi
-  if [ "${VR_JOINER:-0}" = 1 ] && [ "${VR_JOINER_FOLLOW:-0}" != 1 ]; then
+  if [ "${VR_POS:-0}" = 1 ] && [ "${VR_JOINER:-0}" != 1 ]; then
+    # 1. (PoS without a joiner) the election is due at the cadence on its own: nothing to stage or apply
+    source scripts/vr-pos-steps.sh
+    vrb_log "PoS lane without a joiner: the committee of the genesis identities is re-elected at the cadence"
+  elif [ "${VR_JOINER:-0}" = 1 ] && [ "${VR_JOINER_FOLLOW:-0}" != 1 ]; then
     # 1. (joiner) a fifth identity applies and the Foundation admits it: an Admitted joiner is the election's work
     if [ "${VR_POS:-0}" = 1 ]; then source scripts/vr-pos-steps.sh; vrp_apply || return 1   # PoS: the joiner joins by stake, no Foundation admission
     else vrj_apply || return 1; vrj_admit || return 1; fi
