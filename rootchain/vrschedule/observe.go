@@ -30,12 +30,17 @@ type SourceEntry struct {
 type sourcesFileV3 struct {
 	Version int          `json:"version"`
 	Sources []sourceFile `json:"sources"`
+	// Awaiting are publications observed whose header has not been resolved yet (no height): the durable work item that lets a restart
+	// recover the ORIGINAL publication boundary (hash, round, time) instead of losing it. Never served as a source.
+	Awaiting []sourceFile `json:"awaiting,omitempty"`
 }
 
 type sourceFile struct {
-	ResultID       hex.Bytes `json:"resultId"`
-	EVMBlockHash   hex.Bytes `json:"evmBlockHash"`
-	EVMBlockNumber uint64    `json:"evmBlockNumber"`
+	ResultID     hex.Bytes `json:"resultId"`
+	EVMBlockHash hex.Bytes `json:"evmBlockHash"`
+	// EVMBlockNumber is a pointer so a row WITHOUT the field is distinguishable from an explicit 0: a served source row must carry it; an
+	// awaiting row (no height yet) must not.
+	EVMBlockNumber *uint64   `json:"evmBlockNumber,omitempty"`
 	CertRootRound  uint64    `json:"certRootRound"`
 	OutputCommit   hex.Bytes `json:"outputCommit"`
 	CertUCTime     uint64    `json:"certUcTime"`
@@ -60,6 +65,8 @@ type Sources struct {
 	path  string
 	order []vrschema.Word
 	by    map[vrschema.Word]SourceEntry
+	// awaiting are the durable work items (see sourcesFileV3.Awaiting), oldest first, bounded by maxSources.
+	awaiting []SourceEntry
 }
 
 // NewSources reads path (if it exists); an empty path keeps the sources in memory. A file of version 1 or 2 makes it fail with
@@ -92,23 +99,30 @@ func NewSources(path string) (*Sources, error) {
 	if err := json.Unmarshal(raw, &v3); err != nil {
 		return nil, fmt.Errorf("vrschedule: %s: %w", path, err)
 	}
-	for _, f := range v3.Sources {
+	for _, f := range v3.Awaiting {
 		if len(f.ResultID) != 32 || len(f.EVMBlockHash) != 32 || len(f.OutputCommit) != 32 || f.CertRootRound == 0 {
-			return nil, fmt.Errorf("vrschedule: %s: a malformed source", path)
+			return nil, fmt.Errorf("vrschedule: %s: a malformed awaiting publication", path)
+		}
+		s.awaiting = append(s.awaiting, SourceEntry{Source: vrhandoff.Source{ResultID: f.ResultID, EVMBlockHash: f.EVMBlockHash, CertRootRound: f.CertRootRound,
+			OutputCommit: f.OutputCommit}, CertUCTime: f.CertUCTime})
+	}
+	for _, f := range v3.Sources {
+		if len(f.ResultID) != 32 || len(f.EVMBlockHash) != 32 || len(f.OutputCommit) != 32 || f.CertRootRound == 0 || f.EVMBlockNumber == nil {
+			return nil, fmt.Errorf("vrschedule: %s: a malformed source (a version 3 row carries a verified evmBlockNumber, explicit 0 included)", path)
 		}
 		r := vrschema.Word(f.ResultID)
 		s.order = append(s.order, r)
-		s.by[r] = SourceEntry{Source: vrhandoff.Source{ResultID: f.ResultID, EVMBlockHash: f.EVMBlockHash, EVMBlockNumber: f.EVMBlockNumber,
+		s.by[r] = SourceEntry{Source: vrhandoff.Source{ResultID: f.ResultID, EVMBlockHash: f.EVMBlockHash, EVMBlockNumber: *f.EVMBlockNumber,
 			CertRootRound: f.CertRootRound, OutputCommit: f.OutputCommit}, CertUCTime: f.CertUCTime}
 	}
 	return s, nil
 }
 
-func mustSourcesJSON(fs []sourceFile) []byte {
+func mustSourcesJSON(fs, awaiting []sourceFile) []byte {
 	if fs == nil {
 		fs = []sourceFile{}
 	}
-	raw, err := json.MarshalIndent(sourcesFileV3{Version: sourcesVersion, Sources: fs}, "", " ")
+	raw, err := json.MarshalIndent(sourcesFileV3{Version: sourcesVersion, Sources: fs, Awaiting: awaiting}, "", " ")
 	if err != nil {
 		panic(err) // plain structs: cannot fail
 	}
@@ -150,14 +164,21 @@ func (s *Sources) insertLocked(r vrschema.Word, e SourceEntry) error {
 		evicted[order[0]] = true
 		order = order[1:]
 	}
-	if err := s.persist(order, func(x vrschema.Word) SourceEntry {
+	var awaiting []SourceEntry
+	for _, a := range s.awaiting {
+		if !bytes.Equal(a.ResultID, r[:]) {
+			awaiting = append(awaiting, a)
+		}
+	}
+	if err := s.persistAwaiting(order, func(x vrschema.Word) SourceEntry {
 		if x == r {
 			return e
 		}
 		return s.by[x]
-	}); err != nil {
+	}, awaiting); err != nil {
 		return err
 	}
+	s.awaiting = awaiting
 	s.by[r] = e
 	for x := range evicted {
 		delete(s.by, x)
@@ -167,16 +188,60 @@ func (s *Sources) insertLocked(r vrschema.Word, e SourceEntry) error {
 }
 
 func (s *Sources) persist(order []vrschema.Word, by func(vrschema.Word) SourceEntry) error {
+	return s.persistAwaiting(order, by, s.awaiting)
+}
+
+func (s *Sources) persistAwaiting(order []vrschema.Word, by func(vrschema.Word) SourceEntry, awaiting []SourceEntry) error {
 	if s.path == "" {
 		return nil
 	}
 	fs := make([]sourceFile, 0, len(order))
 	for _, r := range order {
 		e := by(r)
-		fs = append(fs, sourceFile{ResultID: e.ResultID, EVMBlockHash: e.EVMBlockHash, EVMBlockNumber: e.EVMBlockNumber, CertRootRound: e.CertRootRound,
+		n := e.EVMBlockNumber
+		fs = append(fs, sourceFile{ResultID: e.ResultID, EVMBlockHash: e.EVMBlockHash, EVMBlockNumber: &n, CertRootRound: e.CertRootRound,
 			OutputCommit: e.OutputCommit, CertUCTime: e.CertUCTime})
 	}
-	return writeDurable(s.path, mustSourcesJSON(fs))
+	var aw []sourceFile
+	for _, e := range awaiting {
+		aw = append(aw, sourceFile{ResultID: e.ResultID, EVMBlockHash: e.EVMBlockHash, CertRootRound: e.CertRootRound, OutputCommit: e.OutputCommit, CertUCTime: e.CertUCTime})
+	}
+	return writeDurable(s.path, mustSourcesJSON(fs, aw))
+}
+
+// Await durably records a publication whose header is not resolved yet (before any resolution is attempted), so a restart retries the
+// original boundary: the same certifying round, time and hash as an uninterrupted observer. It is idempotent per result and never served.
+func (s *Sources) Await(e SourceEntry) error {
+	if len(e.ResultID) != 32 || e.CertRootRound == 0 {
+		return errors.New("vrschedule: a publication without a result id or a certifying round")
+	}
+	r := vrschema.Word(e.ResultID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.by[r]; ok {
+		return nil
+	}
+	for _, a := range s.awaiting {
+		if bytes.Equal(a.ResultID, e.ResultID) {
+			return nil // the first observation of the boundary wins
+		}
+	}
+	next := append(append([]SourceEntry(nil), s.awaiting...), e)
+	if len(next) > maxSources {
+		next = next[len(next)-maxSources:]
+	}
+	if err := s.persistAwaiting(s.order, func(x vrschema.Word) SourceEntry { return s.by[x] }, next); err != nil {
+		return err
+	}
+	s.awaiting = next
+	return nil
+}
+
+// Awaiting are the durable work items, oldest first.
+func (s *Sources) Awaiting() []SourceEntry {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return append([]SourceEntry(nil), s.awaiting...)
 }
 
 // writeDurable replaces path with data atomically and durably: the data is synced in a temporary file, renamed over path, and the directory
@@ -312,6 +377,7 @@ type Observer struct {
 func (o *Observer) Observe(ctx context.Context, c CertifiedEVM) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	o.retryAwaiting(ctx)
 	primed, lastRound := o.primed, o.lastRound
 	continuous := primed && c.RootRound > 0 && c.ParentRound == lastRound
 	out, cached := o.Outputs.At(c.StateRoot)
@@ -342,6 +408,14 @@ func (o *Observer) Observe(ctx context.Context, c CertifiedEVM) error {
 	}
 	if !continuous || prev == r {
 		return nil
+	}
+	// the publication is made durable BEFORE its header is resolved: a restart before the retry succeeds then recovers this boundary
+	// (hash, round, time) instead of priming on the already-Published result
+	pubEntry := SourceEntry{Source: vrhandoff.Source{ResultID: bytes.Clone(r[:]), EVMBlockHash: bytes.Clone(c.BlockHash[:]), CertRootRound: c.RootRound,
+		OutputCommit: bytes.Clone(out.State.Output.OutputCommit[:])}, CertUCTime: c.RootUCTime}
+	if aerr := o.Sources.Await(pubEntry); aerr != nil {
+		o.primed, o.lastRound, o.prev = primed, lastRound, prev
+		return aerr
 	}
 	// the true EVM block number of the first certified block publishing R, from its header by hash. An unavailable header observes nothing:
 	// the run is restored and the worker retries this very block, exactly as for a source that is not durable
@@ -435,4 +509,26 @@ func (o *Observer) merged() []vrschema.Activation {
 		}
 	}
 	return out
+}
+
+// retryAwaiting resolves the headers of the publications recorded before a restart (or a header outage) and records their sources with the
+// original boundary and the verified height. A failure leaves the item durable for the next observation; it never fails the observation.
+func (o *Observer) retryAwaiting(ctx context.Context) {
+	hr, ok := o.Reader.(HeaderReader)
+	if !ok || o.Sources == nil {
+		return
+	}
+	for _, e := range o.Sources.Awaiting() {
+		resolved, err := ResolveFetched(ctx, hr, e)
+		if err != nil {
+			if o.Log != nil {
+				o.Log.Debug("VR publication awaiting its header", "result", fmt.Sprintf("%x", e.ResultID[:8]), "error", err)
+			}
+			continue
+		}
+		if recorded, rerr := o.Sources.Record(resolved); rerr == nil && recorded && o.Log != nil {
+			o.Log.Info("VR output published: source recorded from the retried publication", "result", fmt.Sprintf("%x", e.ResultID[:8]),
+				"certRootRound", e.CertRootRound, "evmBlockNumber", resolved.EVMBlockNumber)
+		}
+	}
 }
