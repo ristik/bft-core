@@ -43,7 +43,7 @@ func published(r vrschema.Word) *vrhandoff.Output {
 }
 
 func cert(round uint64, block, root byte) CertifiedEVM {
-	return CertifiedEVM{RootRound: round, ParentRound: round - 1, RootUCTime: 1000 + round, BlockHash: [32]byte{block}, StateRoot: [32]byte{root}, BlockNumber: uint64(block)}
+	return CertifiedEVM{RootRound: round, ParentRound: round - 1, RootUCTime: 1000 + round, BlockHash: [32]byte{block}, StateRoot: [32]byte{root}, ShardRound: uint64(block)}
 }
 
 // Stage 0: the first certified block at which R is the open Published output, recorded only after the block before it was observed

@@ -211,7 +211,10 @@ func (o *Outputs) Put(root [32]byte, v *vrhandoff.Output) {
 type CertifiedEVM struct {
 	RootRound, ParentRound, RootUCTime uint64
 	BlockHash, StateRoot               [32]byte
-	BlockNumber                        uint64
+	// ShardRound is the certified block's shard round (IR.RoundNumber). It is NOT an EVM block height (a skipped shard round makes the two
+	// differ): it is a label, copied into Source.EVMBlockNumber, which the frozen schema names a block number (schema-v1 section 9) and
+	// which no reader uses as a height. Every read is by BlockHash.
+	ShardRound uint64
 }
 
 // Reader reads VR at one certified EVM block: the output state proven against its state root and the served preimages of the open
@@ -288,20 +291,20 @@ func (o *Observer) Observe(ctx context.Context, c CertifiedEVM) error {
 	o.prev = r
 	if !continuous && prev != r && o.Log != nil {
 		o.Log.Info("VR output published outside an unbroken observation run: no source recorded", "result", fmt.Sprintf("%x", r[:8]),
-			"evmBlock", c.BlockNumber, "rootRound", c.RootRound, "parentRound", c.ParentRound, "lastRound", lastRound, "primed", primed)
+			"shardRound", c.ShardRound, "rootRound", c.RootRound, "parentRound", c.ParentRound, "lastRound", lastRound, "primed", primed)
 	}
 	if !continuous || prev == r {
 		return nil
 	}
 	recorded, err := o.Sources.Record(SourceEntry{Source: vrhandoff.Source{ResultID: bytes.Clone(r[:]), EVMBlockHash: bytes.Clone(c.BlockHash[:]),
-		EVMBlockNumber: c.BlockNumber, CertRootRound: c.RootRound, OutputCommit: bytes.Clone(out.State.Output.OutputCommit[:])}, CertUCTime: c.RootUCTime})
+		EVMBlockNumber: c.ShardRound, CertRootRound: c.RootRound, OutputCommit: bytes.Clone(out.State.Output.OutputCommit[:])}, CertUCTime: c.RootUCTime})
 	if err != nil {
 		// not durable: this block is not observed (the store kept nothing), so the worker's retry of it records the same first source
 		o.primed, o.lastRound, o.prev = primed, lastRound, prev
 		return err
 	}
 	if recorded && o.Log != nil {
-		o.Log.Info("VR output published: source recorded", "result", fmt.Sprintf("%x", r[:8]), "evmBlock", c.BlockNumber, "certRootRound", c.RootRound)
+		o.Log.Info("VR output published: source recorded", "result", fmt.Sprintf("%x", r[:8]), "shardRound", c.ShardRound, "certRootRound", c.RootRound)
 	}
 	return nil
 }
