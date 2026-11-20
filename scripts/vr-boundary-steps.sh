@@ -101,6 +101,39 @@ vrb_restart_member() { # VR_RESTART_MEMBER=1: after the certificate, before the 
   vrb_log "PASS: root$node restarted, signed nothing again (its member file is byte for byte unchanged)"
 }
 
+# ---- the recovery of a PoA generation (#1221) ---------------------------------------------------------------------------------------------------------
+# VR_POA_RECOVERY=1 on the plain lane (no joiner, no PoS): J' (identity 4's new payee, the same four members) is handed off by the nodes, and the shard
+# nodes of identities 3 and 4 are stopped before the Prepare, so the EVM freezes at P, H commits J' and the shard never acknowledges it (3 of 4 needed,
+# 2 run). The operator then requests the exact recovery (`root handoff propose --vr-recovery`): the leader orders its Prepare, J''s four roots endorse,
+# the Freeze is a v3 companion, H installs K (the genesis identities, the old payee) at root epoch 3. The stopped shard nodes return, K acknowledges,
+# and VR applies RecoveryAck and the recovered Boundary: output Recovered (6), lastAcked = R, Healthy. A membership change (exit) takes two Foundation
+# governance delays of 3600 s certified time each on this devnet, so the PoA committee change of this run is the payee rotation of the plain lane.
+vrb_poa_stall() {
+  local i
+  declare -F stop_one_evm_validator >/dev/null || { vrb_log "FAIL: no stop_one_evm_validator"; return 1; }
+  for i in 3 4; do stop_one_evm_validator "$i" 2>/dev/null || true; done
+  vrb_log "the shard nodes of identities 3 and 4 stopped: J' cannot acknowledge (EVM quorum 3 of 4, 2 run)"
+}
+vrb_poa_recovery() {
+  source scripts/vr-pos-steps.sh || return 1
+  vrp_source_q3 || { vrb_log "FAIL: the q3 helpers"; return 1; }
+  local before after i
+  before=$(vrp_eth_block); sleep 45; after=$(vrp_eth_block)
+  [ "$after" -le "$((before + 1))" ] || { vrb_log "FAIL: J' certified blocks ($before -> $after) without its EVM quorum"; return 1; }
+  [ "$(vrp_result_state "$vrb_result")" = 2 ] || { vrb_log "FAIL: R is no longer Published in VR"; return 1; }
+  vrb_log "PASS: J' stalls (EVM block $before -> $after in 45 s with 2 of its 4 validators); R is still Published"
+  H3_ROOTS="1 2 3 4"
+  h3_retry_handoff 2 vrp_recovery_attempt || { vrb_log "FAIL: the recovery handoff"; return 1; }
+  vrp_recovery_evidence 2 handoff || return 1
+  vrp_install_k 3 "$H3_ROOTS" || { vrb_log "FAIL: the roots did not install the recovery"; return 1; }
+  vrp_recovery_evidence 2 switch || return 1
+  vrb_log "PASS: the roots installed the recovery K (root epoch 3)"
+  for i in 3 4; do start_one_evm_validator "$i" "${validators:-4}" "$partitionID" "$(m2_root_addr 1)" engine-api rpc "$(evm_bootnodes_for_peers "$(m2_root_addr 1)" "$i" 1 2 3 4)" >/dev/null 2>&1 || true; done
+  vrb_wait 900 "VR's output of R is Recovered (state 6)" bash -c "[ \"\$(cast call --rpc-url $vrb_rpc $vrb_vr 'output(bytes32)' $vrb_result | python3 -c \"import sys;h=sys.stdin.read().strip()[2:];print(int(h[64:128],16))\")\" = 6 ]" || return 1
+  [ "$(cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'health()(uint8)')" = 0 ] || { vrb_log "FAIL: VR is not Healthy after the recovery"; return 1; }
+  vrb_log "PASS: the recovery (install K) completed through VR on the PoA generation: Recovered, Healthy; committee $(cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'committeeIds()(uint64[])')"
+}
+
 vrb_main() {
   local i keys owner payee cfg p1
   if [ "${VR_RESTART_BETWEEN:-0}" = 1 ] || [ "${VR_RESTART_EARLY:-0}" = 1 ] || [ "${VR_JOINER_FOLLOW:-0}" = 1 ]; then
@@ -204,6 +237,8 @@ EOF
   vrb_wait 300 "a complete verified certificate is held" vrb_logs_have 'a complete verified certificate is held' || return 1
   grep -h 'VR handoff member' test-nodes/root*/debug.log >"$VR_EVIDENCE/member-steps.log" 2>/dev/null || true
   [ "${VR_RESTART_MEMBER:-0}" = 1 ] && { vrb_restart_member || return 1; }
+  # (VR_POA_RECOVERY=1, #1221) the shard nodes of two of the four stop once the certificate is complete: J' commits but its EVM quorum (3 of 4) cannot form
+  if [ "${VR_POA_RECOVERY:-0}" = 1 ]; then vrb_poa_stall || return 1; fi
   # 5. Prepare, Freeze v5, H, the epoch switch, the shard's acknowledgement and the Boundary
   vrb_wait 300 "a leader ordered the Prepare" vrb_logs_have 'VR handoff: ordering the prepare' || return 1
   vrb_wait 300 "a leader ordered the Freeze v5" vrb_logs_have 'VR handoff: ordering the freeze' || return 1
@@ -213,6 +248,7 @@ EOF
     [ "${VR_JOINER:-0}" = 1 ] || source scripts/vr-joiner-steps.sh
     vrj_advance_authorities || return 1
   fi
+  if [ "${VR_POA_RECOVERY:-0}" = 1 ]; then vrb_poa_recovery || return 1; fi
   vrb_wait 900 "the EVM shard acknowledged and VR applied the Boundary (lastAcked = R)" vrb_acked || return 1
   cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'committee()' >"$VR_EVIDENCE/committee-after.hex"
   cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'identity(uint64)' 4 >"$VR_EVIDENCE/identity4-after.hex"
