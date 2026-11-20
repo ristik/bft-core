@@ -894,7 +894,19 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 		if !ok {
 			return errors.New("retaining follower candidate: executor lacks raw block binding support")
 		}
-		if err := binder.CheckBlockBinding(ctx, block, params); err != nil {
+		bindingCtx, cancel := context.WithTimeout(ctx, r.awaitTimeout)
+		err := RetryBlockBinding(bindingCtx, func(ctx context.Context) error {
+			return binder.CheckBlockBinding(ctx, block, params)
+		})
+		cancel()
+		if err != nil {
+			if errors.Is(err, ErrBlockBindingUnavailable) {
+				r.health.updateExecutionRecovery("unready", err.Error())
+				r.health.updateVoting(false, err.Error())
+				if r.log != nil {
+					r.log.WarnContext(ctx, "abstaining while local candidate binding is unavailable", "error", err)
+				}
+			}
 			return fmt.Errorf("retaining follower candidate: %w", err)
 		}
 		if r.leaseLost() { // after the wait for the leader and the binding check, immediately before the speculative journal write
@@ -1696,9 +1708,7 @@ const verifyRetryInterval = 100 * time.Millisecond
 func (r *Round) verifyWithRetry(ctx context.Context, block Block, params RoundParams) (Status, error) {
 	verifyCtx, cancel := context.WithTimeout(ctx, r.awaitTimeout)
 	defer cancel()
-	// A local proof failure gets at most one renewed acquisition, after a 500 ms backoff.
-	// This bounds the entire round to two 500 ms episodes and 2.4 MiB of responses.
-	const transientRetryDelay = 500 * time.Millisecond
+	// Give each locally unavailable verification at most one renewed proof acquisition.
 	transientAttempts := 0
 	for {
 		status, err := r.executor.Verify(verifyCtx, block, params)
@@ -1709,7 +1719,7 @@ func (r *Round) verifyWithRetry(ctx context.Context, block Block, params RoundPa
 			}
 			if transientAttempts >= 1 || verifyCtx.Err() != nil {
 				if r.log != nil {
-					r.log.WarnContext(ctx, "abstaining after local parent witness acquisition remained unavailable", slog.String("err", err.Error()))
+					r.log.WarnContext(ctx, "abstaining after local proof acquisition remained unavailable", slog.String("err", err.Error()))
 				}
 				return status, nil
 			}
@@ -1717,7 +1727,7 @@ func (r *Round) verifyWithRetry(ctx context.Context, block Block, params RoundPa
 			select {
 			case <-verifyCtx.Done():
 				return status, nil
-			case <-time.After(transientRetryDelay):
+			case <-time.After(transientProofRetryDelay):
 			}
 			continue
 		}
