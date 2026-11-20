@@ -9,8 +9,10 @@ import (
 	"testing"
 	"time"
 
+	libp2pnet "github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/core/peerstore"
+	"github.com/libp2p/go-libp2p/p2p/net/swarm"
 	"github.com/stretchr/testify/require"
 
 	testobservability "github.com/unicitynetwork/bft-core/internal/testutils/observability"
@@ -203,6 +205,33 @@ func (x *liveTransport) up(c *q4bLive, names ...string) {
 			s.peer.Network().Peerstore().AddAddrs(h.peer.ID(), h.peer.MultiAddresses(), peerstore.PermanentAddrTTL)
 		}
 		x.online = append(x.online, h)
+	}
+}
+
+// connectAll makes sure every pair of the named roots is connected, clearing the dial backoff a failed first dial left. A lossy-link test
+// that loses the first attempt of a send before it dials (SendFault) never makes a connection, and the repeat of an undelivered message
+// never dials: a pair that start-up left without a connection would lose every message for good (#1194).
+func (x *liveTransport) connectAll(c *q4bLive, names ...string) {
+	x.t.Helper()
+	for _, a := range names {
+		for _, b := range names {
+			if a == b {
+				continue
+			}
+			from, to := x.roots[c.id(a)].peer, x.roots[c.id(b)].peer
+			require.Eventually(x.t, func() bool {
+				if from.Network().Connectedness(to.ID()) == libp2pnet.Connected {
+					return true
+				}
+				if sw, ok := from.Network().(*swarm.Swarm); ok {
+					sw.Backoff().Clear(to.ID())
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				defer cancel()
+				_, _ = from.Network().DialPeer(ctx, to.ID())
+				return from.Network().Connectedness(to.ID()) == libp2pnet.Connected
+			}, 10*time.Second, 50*time.Millisecond, "%s is connected to %s", a, b)
+		}
 	}
 }
 
