@@ -21,6 +21,11 @@ func (a *Authority) AdvanceEpoch(ctx context.Context, conf *types.PartitionDescr
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if successor != nil {
+		if err := a.fence.Check(ctx, successor.Epoch); err != nil {
+			return fmt.Errorf("advancing to root epoch %d: %w", successor.Epoch, err)
+		}
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.signer == nil {

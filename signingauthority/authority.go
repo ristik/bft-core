@@ -16,6 +16,7 @@ import (
 	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/internal/weightvalidation"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
+	"github.com/unicitynetwork/bft-core/vrrules"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
@@ -94,6 +95,15 @@ type Authority struct {
 	requirePos bool
 	// latePos allows the operator channel to pin the election at run time (WithLatePosPolicy): development only.
 	latePos bool
+	// fence refuses to sign for, or advance to, a root epoch >= E of an effective activation-schedule rule this binary lacks (WithFence).
+	fence *vrrules.Gate
+}
+
+// WithFence makes the authority refuse, with vrrules.ErrUpgradeRequired, to authenticate (and so reserve or sign) a request for a root
+// epoch >= E of an effective rule of the committed activation schedule that this binary lacks, and to advance into such an epoch (design
+// 7.4). A source failure with nothing known for the epoch refuses too. A nil gate fences nothing.
+func WithFence(g *vrrules.Gate) Option {
+	return func(a *Authority) error { a.fence = g; return nil }
 }
 
 // WithAdvanceHook calls hook at the start of every proof verification, outside the authority's locks. It changes no decision; it exists
@@ -732,6 +742,10 @@ func (a *Authority) Authenticate(ctx context.Context, req Request) (*Authorizati
 
 	// Authentication against the authority's own trust, for the root epoch the certificate names.
 	// An unknown epoch is a refusal rather than a reason to trust the certificate's own claim.
+	// the activation schedule's fence: nothing is authenticated, reserved or signed for an epoch >= E of a rule this binary lacks
+	if err := a.fence.Check(ctx, own.UC.GetRootEpoch()); err != nil {
+		return nil, fmt.Errorf("signing for root epoch %d: %w", own.UC.GetRootEpoch(), err)
+	}
 	tb, err := trust.GetByEpoch(ctx, own.UC.GetRootEpoch())
 	if err != nil {
 		return nil, fmt.Errorf("%w: root epoch %d: %w", ErrUnauthenticated, own.UC.GetRootEpoch(), err)

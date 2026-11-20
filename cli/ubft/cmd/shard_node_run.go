@@ -296,8 +296,10 @@ type shardNodeRunFlags struct {
 	Executor string // "fake" or "engine-api"
 
 	// engine-api executor only — see engineapi.Config.
-	EngineURL           string
-	EthURL              string
+	EngineURL string
+	EthURL    string
+	// ActivationSourceURL is the optional VR endpoint of the activation schedule's fence (newActivationGate).
+	ActivationSourceURL string
 	JWTSecret           string
 	EngineFeeCollector  string
 	ExpectedGenesisHash string
@@ -411,6 +413,7 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 
 	cmd.Flags().StringVar(&flags.Executor, "executor", "fake",
 		"which Executor to run: \"fake\" (deterministic in-memory, no external process) or \"engine-api\" (drives an Ethereum execution client)")
+	cmd.Flags().StringVar(&flags.ActivationSourceURL, "activation-source-url", "", activationSourceUsage)
 	cmd.Flags().StringVar(&flags.EngineURL, "engine-url", "http://127.0.0.1:8551",
 		"engine-api executor only: URL of the execution client's authenticated Engine API endpoint")
 	cmd.Flags().StringVar(&flags.EthURL, "eth-url", "http://127.0.0.1:8545",
@@ -768,6 +771,11 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	if closer, ok := executor.(interface{ Close() }); ok {
 		defer closer.Close()
 	}
+	activationGate, closeGate, err := newActivationGate(ctx, operatorLog, flags.ActivationSourceURL)
+	if err != nil {
+		return err
+	}
+	defer closeGate()
 	var executionID [32]byte
 	var handoffFollower *shardnode.HandoffFollower
 	var q3rt *q3active.Runtime
@@ -791,6 +799,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		}
 		defer historyDB.Close()
 		var historyOpts []shardnode.HistoryOption
+		historyOpts = append(historyOpts, shardnode.WithFence(activationGate))
 		if flags.UTBGenesisFile != "" { // the V2 handoffs this shard follows were committed by a UTB root: their certificates are version 3, also when the store reopens
 			historyOpts = append(historyOpts, shardnode.WithUTBProfile())
 		}
@@ -846,6 +855,9 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			}
 			if q3rt, jErr = q3active.New(q3active.Config{DB: journalDB, Genesis: trustBases[0], UTBGenesis: flags.UTBGenesisFile != "", MemberCeiling: q3Ceiling}); jErr != nil {
 				return fmt.Errorf("q3 runtime: %w", jErr)
+			}
+			if activationGate != nil {
+				q3rt.SetFence(activationGate.Check)
 			}
 			if q3Admit, jErr = wireQ3Pair(executor, q3rt, uint64(shardConf.NetworkID), origin.Valid(), [32]byte(origin.BlockHash())); jErr != nil {
 				return jErr
@@ -1729,6 +1741,19 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		return fmt.Errorf("creating metrics: %w", err)
 	}
 	node.SetMetrics(metrics)
+	if activationGate != nil {
+		if flags.baseFlags != nil {
+			if err := activationGate.RegisterMetric(flags.observe.Meter("shardnode")); err != nil {
+				return fmt.Errorf("creating the upgrade metric: %w", err)
+			}
+		}
+		go activationGate.Watch(ctx, activationWatchInterval, func() uint64 {
+			if q3rt != nil {
+				return q3rt.ActiveEpoch()
+			}
+			return trustBases[0].GetEpoch()
+		})
+	}
 
 	if err := peer.BootstrapConnect(ctx, flags.observe.Logger()); err != nil {
 		return fmt.Errorf("bootstrap connect: %w", err)

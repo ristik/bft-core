@@ -115,6 +115,11 @@ func (a *Authority) AdvanceWithProof(ctx context.Context, bundle []byte) (Advanc
 	if err != nil {
 		return AdvanceResult{}, fmt.Errorf("%w: %w", ErrLineageUnverified, err)
 	}
+	if !step.Replay && step.Epoch > current { // the lineage's catch-up of earlier epochs installs nothing to sign for
+		if err := a.fence.Check(ctx, step.Epoch); err != nil {
+			return AdvanceResult{}, fmt.Errorf("advancing to root epoch %d: %w", step.Epoch, err)
+		}
+	}
 	result := AdvanceResult{Epoch: step.Epoch, Replay: step.Replay, Retired: retired}
 	var successor *scopeChange
 	var adopted *types.RootTrustBaseV1 // the lineage's trust of the current epoch, held from now on

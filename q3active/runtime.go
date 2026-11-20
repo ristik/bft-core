@@ -93,12 +93,14 @@ type Runtime struct {
 	// memberCeiling is Config.MemberCeiling.
 	memberCeiling int
 	mu            sync.Mutex // serialises activation and recovery
-	journal       *q3install.Journal
-	hist          atomic.Pointer[q3format.History]
-	snap          atomic.Pointer[Snapshot] // the installer's provisional snapshot: private until its epoch is journaled complete
-	active        atomic.Pointer[Snapshot] // the published active context: the provisional one once its epoch is complete
-	parts         atomic.Pointer[Participants]
-	completed     sync.Map // epoch -> struct{}: journaled complete in this process
+	// fence, when set (SetFence), refuses installing an epoch of a rule this binary lacks (design 7.4); guarded by mu.
+	fence     func(ctx context.Context, epoch uint64) error
+	journal   *q3install.Journal
+	hist      atomic.Pointer[q3format.History]
+	snap      atomic.Pointer[Snapshot] // the installer's provisional snapshot: private until its epoch is journaled complete
+	active    atomic.Pointer[Snapshot] // the published active context: the provisional one once its epoch is complete
+	parts     atomic.Pointer[Participants]
+	completed sync.Map // epoch -> struct{}: journaled complete in this process
 }
 
 // ErrNotAttached is returned when an activation or recovery is asked before the participants were attached.
@@ -371,11 +373,25 @@ func (r *Runtime) Activate(ctx context.Context, b Bundle) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	claim := env.Links[len(env.Links)-1].Claim
+	// the activation schedule's fence (design 7.4): nothing of an epoch >= E of a rule this binary lacks is staged
+	if r.fence != nil {
+		if err := r.fence(ctx, claim.Epoch); err != nil {
+			return fmt.Errorf("epoch %d: %w", claim.Epoch, err)
+		}
+	}
 	if err := r.journal.Install(ctx, claim, raw); err != nil {
 		return err
 	}
 	r.complete(claim.Epoch)
 	return nil
+}
+
+// SetFence installs the activation-schedule fence (vrrules.Gate.Check): Activate and Recover refuse an epoch it refuses. Set it once,
+// before Recover or Activate; nil (the default, and every root) fences nothing here.
+func (r *Runtime) SetFence(f func(ctx context.Context, epoch uint64) error) {
+	r.mu.Lock()
+	r.fence = f
+	r.mu.Unlock()
 }
 
 // Recover is the startup pass: the journal completes any unfinished installation and checks every finished one against every
@@ -386,6 +402,17 @@ func (r *Runtime) Recover(ctx context.Context) error {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.fence != nil { // a staged installation is finished only for an epoch this binary may run
+		pending, err := r.journal.Staged()
+		if err != nil {
+			return err
+		}
+		for _, a := range pending {
+			if err := r.fence(ctx, a.Claim.Epoch); err != nil {
+				return fmt.Errorf("staged epoch %d: %w", a.Claim.Epoch, err)
+			}
+		}
+	}
 	err := r.journal.Recover(ctx, func(epoch uint64) (q3format.Claim, bool) {
 		e, ok := r.Activated(epoch)
 		if !ok {

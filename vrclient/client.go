@@ -350,3 +350,20 @@ func WrapRevert(err error) error {
 	}
 	return err
 }
+
+// ScheduleSource is a vrrules.Source over VR's activations[] (JSON-RPC at the client's block tag).
+type ScheduleSource struct{ Client *Client }
+
+// Schedule reads and decodes the activation schedule.
+func (s ScheduleSource) Schedule(ctx context.Context) ([]vrschema.Activation, error) {
+	acts, err := s.Client.Activations(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]vrschema.Activation, 0, len(acts))
+	for _, a := range acts {
+		out = append(out, vrschema.Activation{RuleID: a.RuleId, ReleaseDigest: a.ReleaseDigest, RootEpoch: a.RootEpoch,
+			NotBeforeUcTime: a.NotBeforeUcTime, State: a.State, ChangeID: a.ChangeId})
+	}
+	return out, nil
+}

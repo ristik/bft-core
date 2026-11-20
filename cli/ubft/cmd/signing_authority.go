@@ -79,9 +79,10 @@ type signingAuthorityRunFlags struct {
 	*baseFlags
 	trustBaseFlags
 
-	ClientSocket       string
-	OperatorSocket     string
-	OperatorCredential string
+	ActivationSourceURL string
+	ClientSocket        string
+	OperatorSocket      string
+	OperatorCredential  string
 	// the automated root member's narrow channel: the handoff possession proof only (VT-09); both or neither
 	PoPSocket     string
 	PoPCredential string
@@ -131,6 +132,7 @@ key exists: the authority starts pending and admits no client until complete-enr
 	cmd.Flags().StringArrayVar(&flags.PosPolicies, "pos-policy", nil, "JSON file pinning the P85 election (network word, chain id, ElectionPolicy address) and the identity ids this authority's EVM key may sign possession proofs for (#1216): without a pin the authority signs no P85 assignment possession. Fixed for the authority's lifetime; `signing-authority pos-policy` pins it once on a running authority")
 	cmd.Flags().BoolVar(&flags.RequirePosPolicy, "require-pos-policy", false, "refuse every P85 possession signature (election, delegation, assignment) until the P85 pin is set; with --pos-policy the pin is fixed from startup")
 	cmd.Flags().BoolVar(&flags.LatePosPolicy, "dev-allow-late-pos-policy", false, "DEVELOPMENT ONLY: let `signing-authority pos-policy` pin the P85 election on this running authority. The pin then comes from the operator credential that also asks for signatures, so it restricts nothing against a compromised credential; production gives --pos-policy at startup")
+	cmd.Flags().StringVar(&flags.ActivationSourceURL, "activation-source-url", "", activationSourceUsage)
 	cmd.Flags().StringVar(&flags.AuthorityID, "authority-id", "", "operator-assigned name for this authority lifetime, for diagnostics")
 	cmd.Flags().StringVar(&flags.NodeID, "node-id", "", "the shard validator this authority signs for (`ubft node-id` on the shard node's key configuration)")
 	cmd.Flags().Uint16Var(&flags.NetworkID, "network-id", 0, "network identifier")
@@ -217,6 +219,18 @@ func signingAuthorityRun(ctx context.Context, flags *signingAuthorityRunFlags) e
 	}
 	if flags.RequirePosPolicy {
 		opts = append(opts, signingauthority.WithRequirePosPolicy())
+	}
+	activationGate, closeGate, err := newActivationGate(ctx, log, flags.ActivationSourceURL)
+	if err != nil {
+		return err
+	}
+	defer closeGate()
+	if activationGate != nil {
+		opts = append(opts, signingauthority.WithFence(activationGate))
+		if err := activationGate.RegisterMetric(flags.observe.Meter("signingauthority")); err != nil {
+			return fmt.Errorf("creating the upgrade metric: %w", err)
+		}
+		go activationGate.Watch(ctx, activationWatchInterval, func() uint64 { return flags.RootEpoch })
 	}
 	// The key is generated here. The enrollment has no configuration hash yet, on purpose.
 	authority, err := signingauthority.New(signingauthority.Enrollment{
