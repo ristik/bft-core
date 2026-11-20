@@ -3,7 +3,6 @@ package engineapi
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,7 +16,7 @@ import (
 	"github.com/unicitynetwork/bft-core/shardnode"
 )
 
-func TestVerifyRetriesUnavailableFeeProofAndRejectsInvalidProof(t *testing.T) {
+func TestVerifyTreatsLocalFeeProofFailuresAsRetryable(t *testing.T) {
 	verifier, params, want := bootstrapAdapterFixture(t)
 	engine := newMockReth(t, Secret{})
 	var imports atomic.Int32
@@ -25,6 +24,22 @@ func TestVerifyRetriesUnavailableFeeProofAndRejectsInvalidProof(t *testing.T) {
 		imports.Add(1)
 		return PayloadStatusV1{Status: PayloadStatusValid}, nil
 	})
+	faults := []struct {
+		status int
+		body   string
+		detail string
+	}{
+		{http.StatusUnauthorized, "", "HTTP 401"},
+		{http.StatusRequestTimeout, "", "HTTP 408"},
+		{http.StatusTooManyRequests, "", "HTTP 429"},
+		{http.StatusInternalServerError, "", "HTTP 500"},
+		{http.StatusBadGateway, "", "HTTP 502"},
+		{http.StatusServiceUnavailable, "", "HTTP 503"},
+		{http.StatusGatewayTimeout, "", "HTTP 504"},
+		{http.StatusOK, `{"jsonrpc":"2.0","id":1,"error":{"code":-32001,"message":"block not found"}}`, "block not found"},
+		{http.StatusOK, `{"jsonrpc":"2.0","id":1,"result":[]}`, "decoding result"},
+		{http.StatusOK, strings.Repeat(" ", maxFeeProofResponseBytes+8192), "exceeds limit"},
+	}
 	var rpcCalls atomic.Int32
 	eth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request rpcRequest
@@ -37,14 +52,14 @@ func TestVerifyRetriesUnavailableFeeProofAndRejectsInvalidProof(t *testing.T) {
 		case "eth_getBlockByHash":
 			reply["result"] = blockHeaderJSON{Hash: data32(verifier.GenesisOrigin.BlockHash())}
 		case "eth_getProof":
-			switch rpcCalls.Add(1) {
-			case 1:
-				reply["error"] = &rpcError{Code: -32001, Message: "block not found"}
-			case 2:
-				reply["result"] = json.RawMessage(`{}`)
-			default:
-				reply["result"] = json.RawMessage(`[]`)
+			attempt := int(rpcCalls.Add(1)) - 1
+			if attempt < len(faults) {
+				fault := faults[attempt]
+				w.WriteHeader(fault.status)
+				_, _ = io.WriteString(w, fault.body)
+				return
 			}
+			reply["result"] = json.RawMessage(`{}`)
 		default:
 			t.Errorf("unexpected request: %s", request.Method)
 		}
@@ -78,24 +93,38 @@ func TestVerifyRetriesUnavailableFeeProofAndRejectsInvalidProof(t *testing.T) {
 	block, err := EncodeBlockWithSealCompanion(payload, &SealCompanion{RootInput: want.Encoded, Witnesses: witnesses, Provenance: "build"})
 	require.NoError(t, err)
 
+	for _, fault := range faults {
+		status, err := a.Verify(t.Context(), block, params)
+		require.Equal(t, shardnode.StatusSyncing, status, "%v", err)
+		require.ErrorIs(t, err, ErrFeeProofUnavailable)
+		require.ErrorContains(t, err, fault.detail)
+		var transient interface{ TransientVerify() bool }
+		require.ErrorAs(t, err, &transient)
+		require.True(t, transient.TransientVerify())
+		require.Zero(t, imports.Load())
+	}
 	status, err := a.Verify(t.Context(), block, params)
-	require.Equal(t, shardnode.StatusSyncing, status, "%v", err)
-	require.ErrorIs(t, err, ErrFeeProofUnavailable)
-	var transient interface{ TransientVerify() bool }
-	require.ErrorAs(t, err, &transient)
-	require.True(t, transient.TransientVerify())
-	require.Zero(t, imports.Load())
-
-	status, err = a.Verify(t.Context(), block, params)
 	require.NoError(t, err)
 	require.Equal(t, shardnode.StatusValid, status)
 	require.EqualValues(t, 1, imports.Load())
 
+	// A different collector from authenticated state still rejects the same candidate.
+	a.resolveCollector = func(context.Context, *EthClient, shardnode.BlockRef) ([20]byte, error) {
+		return [20]byte{19: 0x42}, nil
+	}
 	status, err = a.Verify(t.Context(), block, params)
-	require.Equal(t, shardnode.StatusInvalid, status, "%v", err)
-	require.ErrorContains(t, err, "decoding result")
-	require.False(t, errors.As(err, &transient))
+	require.NoError(t, err)
+	require.Equal(t, shardnode.StatusInvalid, status)
+	require.ErrorContains(t, a.CheckBlockBinding(t.Context(), block, params), "wrong VR fee collector")
 	require.EqualValues(t, 1, imports.Load())
+
+	a.resolveCollector = func(context.Context, *EthClient, shardnode.BlockRef) ([20]byte, error) {
+		return [20]byte{}, ErrFeeProofOversized
+	}
+	err = a.CheckBlockBinding(t.Context(), block, params)
+	require.ErrorIs(t, err, shardnode.ErrBlockBindingUnavailable)
+	require.ErrorIs(t, err, ErrFeeProofOversized)
+
 }
 
 type feeProofTransport func(*http.Request) (*http.Response, error)
@@ -126,7 +155,6 @@ func TestFeeProofResponseReadIsBoundedBeforeDecoding(t *testing.T) {
 			err := client.CallContext(t.Context(), &proof, "eth_getProof")
 			require.ErrorIs(t, err, ErrFeeProofOversized)
 			require.Equal(t, maxFeeProofResponseBytes+1, counter.bytes)
-			require.False(t, isFeeProofUnavailable(err))
 			require.Nil(t, proof)
 		})
 	}

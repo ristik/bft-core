@@ -45,6 +45,8 @@ var (
 	ErrCompanionUnauthenticated = errors.New("engineapi: seal companion failed VerifyCompanionWitnesses")
 	// ErrParentWitnessUnavailable means the exact certified parent's local RPC proof is not available.
 	ErrParentWitnessUnavailable = errors.New("engineapi: v2 parent registry witness unavailable")
+	// ErrFeeProofUnavailable means the local endpoint did not provide authenticated parent fees.
+	ErrFeeProofUnavailable = errors.New("engineapi: parent fee proof unavailable")
 )
 
 // Adapter implements shardnode.Executor by driving reth over the Engine
@@ -721,7 +723,15 @@ func (a *Adapter) collectorFor(ctx context.Context, parent shardnode.BlockRef) (
 	if a.resolveCollector == nil {
 		return a.feeCollector, nil
 	}
-	return a.resolveCollector(ctx, a.eth, parent)
+	collector, err := a.resolveCollector(ctx, a.eth, parent)
+	if err != nil {
+		// Local proof acquisition and validation cannot decide the validity of a candidate.
+		if a.log != nil {
+			a.log.WarnContext(ctx, "local parent fee proof unavailable", "parent", fmt.Sprintf("%x", parent.Hash), "error", err)
+		}
+		return [20]byte{}, fmt.Errorf("%w: %w", ErrFeeProofUnavailable, err)
+	}
+	return collector, nil
 }
 
 func (a *Adapter) buildDerived(ctx context.Context, p shardnode.RoundParams, derived rootinput.ResultV2, collector [20]byte) (shardnode.BuildID, error) {
@@ -903,10 +913,7 @@ func (a *Adapter) CheckBlockBinding(ctx context.Context, b shardnode.Block, p sh
 	}
 	collector, err := a.collectorFor(ctx, p.Parent)
 	if err != nil {
-		if isFeeProofUnavailable(err) {
-			return fmt.Errorf("%w: resolving parent fee state: %w", shardnode.ErrBlockBindingUnavailable, err)
-		}
-		return fmt.Errorf("engineapi: resolving parent fee state: %w", err)
+		return fmt.Errorf("%w: resolving parent fee state: %w", shardnode.ErrBlockBindingUnavailable, err)
 	}
 	attrs, err := DeriveAttributesV2Checked(input.Input, ParentHeader{Timestamp: uint64(parentHeader.Timestamp)}, collector)
 	if err != nil {
@@ -1066,11 +1073,7 @@ func (a *Adapter) Verify(ctx context.Context, b shardnode.Block, p shardnode.Rou
 
 	collector, err := a.collectorFor(ctx, p.Parent)
 	if err != nil {
-		cause := fmt.Errorf("engineapi: resolving parent fee state: %w", err)
-		if isFeeProofUnavailable(err) {
-			return shardnode.StatusSyncing, transientProofError{cause}
-		}
-		return shardnode.StatusInvalid, cause
+		return shardnode.StatusSyncing, transientProofError{err}
 	}
 
 	// Only now, with the input authenticated, are the execution parameters computable: they are functions of

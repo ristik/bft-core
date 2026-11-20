@@ -7,9 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
-	"strings"
 	"time"
 
 	gethtypes "github.com/ethereum/go-ethereum/core/types"
@@ -47,19 +45,8 @@ type blockHeaderJSON struct {
 // covers hex expansion of the trie nodes and the JSON envelope.
 const maxFeeProofResponseBytes = 600 << 10
 
-// ErrFeeProofUnavailable marks a transport or parent-state availability failure.
-var ErrFeeProofUnavailable = errors.New("engineapi: parent fee proof unavailable")
-
 // ErrFeeProofOversized marks a proof response beyond the bounded witness transport.
 var ErrFeeProofOversized = errors.New("engineapi: parent fee proof response exceeds limit")
-
-func isFeeProofUnavailable(err error) bool {
-	if errors.Is(err, ErrFeeProofUnavailable) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-		return true
-	}
-	var networkError net.Error
-	return errors.As(err, &networkError) && networkError.Timeout()
-}
 
 // CallContext makes the local execution transport available to proof readers.
 func (c *EthClient) CallContext(ctx context.Context, result any, method string, args ...any) error {
@@ -80,9 +67,6 @@ func (c *EthClient) call(ctx context.Context, method string, params []any, out a
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		if feeProof {
-			err = errors.Join(ErrFeeProofUnavailable, err)
-		}
 		return fmt.Errorf("engineapi: calling %s: %w", method, err)
 	}
 	defer resp.Body.Close()
@@ -97,14 +81,11 @@ func (c *EthClient) call(ctx context.Context, method string, params []any, out a
 		return fmt.Errorf("%w (%d bytes)", ErrFeeProofOversized, maxFeeProofResponseBytes)
 	}
 	if err != nil {
-		if feeProof {
-			err = errors.Join(ErrFeeProofUnavailable, err)
-		}
 		return fmt.Errorf("engineapi: reading response for %s: %w", method, err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		if feeProof && (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500) {
-			return fmt.Errorf("%w: HTTP %d", ErrFeeProofUnavailable, resp.StatusCode)
+		if feeProof {
+			return fmt.Errorf("engineapi: %s returned HTTP %d", method, resp.StatusCode)
 		}
 		return fmt.Errorf("engineapi: %s returned HTTP %d: %s", method, resp.StatusCode, string(body))
 	}
@@ -117,14 +98,10 @@ func (c *EthClient) call(ctx context.Context, method string, params []any, out a
 		return errors.New("engineapi: malformed parent fee proof response envelope")
 	}
 	if rpcResp.Error != nil {
-		if feeProof && (rpcResp.Error.Code == -32001 ||
-			(rpcResp.Error.Code == -32602 && strings.Contains(rpcResp.Error.Message, "exceeds maximum proof window"))) {
-			return errors.Join(ErrFeeProofUnavailable, rpcResp.Error)
-		}
 		return fmt.Errorf("engineapi: %s: %w", method, rpcResp.Error)
 	}
 	if feeProof && isJSONNull(rpcResp.Result) {
-		return ErrFeeProofUnavailable
+		return errors.New("engineapi: empty parent fee proof")
 	}
 	if out == nil {
 		return nil
