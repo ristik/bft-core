@@ -2,6 +2,23 @@
 
 This guide operates one validator on a Validator Registry (VR) proof-of-stake generation with the P85 prototype contracts. One validator runs a root node, an EVM shard node, ureth for execution, and a signing authority for the shard's certification key. The Foundation publishes the network release and endpoints. Use its authenticated release announcement to obtain the release digest and the UTB genesis EntryID.
 
+## Rehearsal shell
+
+For VT-13, use the dedicated `vt13operator` account on the rehearsal host. Generate a new SSH key on your workstation and submit **only the public key** in `briefs/vt13-operator-log.md` for the rehearsal maintainer to install. Use the host address from the public RPC URL in the rehearsal inputs.
+
+```bash
+install -d -m 700 "$HOME/.ssh"
+ssh-keygen -t ed25519 -f "$HOME/.ssh/vt13-operator" -C vt13-operator
+cat "$HOME/.ssh/vt13-operator.pub"
+```
+
+After the maintainer confirms the key is installed, check the server's SSH host fingerprint at the connection prompt. The rehearsal host's ECDSA fingerprint is `SHA256:Q9TuHHqEgdBwZrhgFitNfo1RaOhpOtg9uuIxtCo0X2A`. Connect using the new key and do the remaining steps in that shell.
+
+```bash
+ssh -o IdentitiesOnly=yes -o HostKeyAlgorithms=ecdsa-sha2-nistp256 \
+  -i "$HOME/.ssh/vt13-operator" vt13operator@212.23.222.159
+```
+
 ## 1. Install the release
 
 Use a dedicated Linux service account, a synchronized clock and persistent SSD storage. Allow inbound root and shard libp2p TCP and the release's ureth devp2p ports. Use outbound access to the public RPC, seed and peers. Keep operator RPC, metrics, Engine API and signing sockets on loopback or a private admin network. Archive replay needs the local ureth debug API for header witnesses. The reference host has 6 CPU cores / 12 threads, 64 GB RAM and two 1 TB NVMe drives. Size for your release and retention policy, and check `validator doctor`.
@@ -49,6 +66,8 @@ CUSTODY=$(jq -er '.custody' release/deployment.json)
 REGISTRY=0xff00000000000000000000000000000000000003
 ubft validator init --rpc "$RPC_URL" --chain-id "$CHAIN_ID" --ports 26652,28152,30303
 OPERATOR=$(jq -er '.payee' validator.json)
+ROOT_EPOCH=$(ubft validator status --sample 0 --json | jq -er '.rootEpoch | select(. >= 1)')
+NEXT_SHARD_EPOCH=$ROOT_EPOCH
 SHARD_NODE=$(ubft node-id --home "$UBFT_HOME/evm" | tail -n1)
 install -d -m 700 authority
 ubft signing-authority credential --out authority/operator.cred
@@ -60,15 +79,16 @@ jq -n --arg network "$NETWORK_WORD" --argjson chainId "$CHAIN_ID" \
     {action:"register",owner:$owner,payee:$owner,rootNodeId:$root[0].nodeId,rootKey:$root[0].sigKey}
   ]}' > authority/registration.json
 ubft signing-authority run --home "$UBFT_HOME/authority" --authority-id "$SHARD_NODE" --network-id 3 --partition-id 8 \
-  --shard-id 0x80 --shard-epoch 0 --root-epoch 1 --node-id "$SHARD_NODE" \
+  --shard-id 0x80 --shard-epoch "$NEXT_SHARD_EPOCH" --root-epoch 1 --node-id "$SHARD_NODE" \
   --trust-base "$UBFT_HOME/release/trust-base.json" \
-  --lineage-genesis-trust-base "$UBFT_HOME/release/trust-base.json" --lineage-utb-genesis \
   --client-socket "$UBFT_HOME/authority/client.sock" \
   --operator-socket "$UBFT_HOME/authority/operator.sock" --operator-credential "$UBFT_HOME/authority/operator.cred" \
   --pop-socket "$UBFT_HOME/authority/pop.sock" --pop-credential "$UBFT_HOME/authority/pop.cred" \
   --registration-policy "$UBFT_HOME/authority/registration.json" --dev-allow-late-pos-policy \
   --metrics-address 127.0.0.1:29352 >logs/authority.log 2>&1 &
 ```
+
+A pending authority is scoped to the shard epoch that will first name it. On the rehearsal lane the genesis shard epoch is 0 and every handoff is coupled, so the current root epoch is the next shard epoch. On another deployment, set `NEXT_SHARD_EPOCH` to the successor shard epoch published for your admission.
 
 The late P85 pin is for this prototype rehearsal when VR assigns the identity at application. For a deployment with a provisioned identity, use an approved startup `--pos-policy` and `--require-pos-policy`. Wait for `signing authority running` in `logs/authority.log`, then select the authority in the validator config.
 
@@ -107,6 +127,10 @@ ROOT_PEERS=$(paste -sd, release/root-peers.txt)
 SHARD_PEERS=$(paste -sd, release/shard-peers.txt)
 mapfile -t ARCHIVE_PEERS < <(head -n 2 release/shard-peers.txt | sed 's|.*/p2p/||')
 FEE_COLLECTOR=$(cat release/fee-collector.txt)
+ROOT_INSTALL=()
+if (( ROOT_EPOCH > 1 )); then
+  ROOT_INSTALL=(--install-handoff-epoch "$ROOT_EPOCH")
+fi
 UTB=(--utb-genesis "$UBFT_HOME/release/utb-genesis.cbor" --utb-genesis-id "$GENESIS_PIN")
 unicity-reth node --chain "$UBFT_HOME/release/genesis.json" --datadir "$UBFT_HOME/ureth" \
   --p2p-secret-key "$UBFT_HOME/ureth-key/p2p-secret" --disable-discovery \
@@ -119,7 +143,7 @@ ubft root-node run --home "$UBFT_HOME/root" --address /ip4/127.0.0.1/tcp/26652 \
   --genesis-identities release/genesis-identities.json --vr-deployment release/vr-deployment.json \
   --pos-evm-rpc "$RPC_URL" --vr-shard-rpc http://127.0.0.1:28352 \
   --vr-evm-authority-socket "$UBFT_HOME/authority/pop.sock" \
-  --vr-evm-authority-credential "$UBFT_HOME/authority/pop.cred" "${UTB[@]}" >logs/root.log 2>&1 &
+  --vr-evm-authority-credential "$UBFT_HOME/authority/pop.cred" "${ROOT_INSTALL[@]}" "${UTB[@]}" >logs/root.log 2>&1 &
 SHARD_ARGS=(--home "$UBFT_HOME/evm" --address /ip4/127.0.0.1/tcp/28152
   --bootnodes "$ROOT_PEERS,$SHARD_PEERS" --metrics prometheus --rpc-server-address 127.0.0.1:28352
   --trust-base release/trust-base.json --full-shard-conf release/full-shard-conf.json
@@ -156,15 +180,19 @@ Wait for a P85 election to reserve a result naming your identity. With the relea
 ubft validator pos-publish --own-proof
 ```
 
-Once the result is published, the roots derive the intent and the nodes collect readiness. Watch for Prepare, Freeze, the committed handoff and activation. When the release publishes the certified successor configuration and activation bundle, use them to enroll the pending authority and advance it. The filenames below match the first handoff of the rehearsal. For later handoffs use the actual epochs and feed each missing bundle to `--proof` in order.
+Once the result is published, the roots derive the intent and the nodes collect readiness. Watch for Prepare, Freeze, the committed handoff and activation. Wait for your own root to install the first activated epoch that names you. Read its certified configuration and trust base over its loopback operator RPC. Use the exact root and shard epochs from that activation.
 
 ```bash
-curl -fsS "${RELEASE_URL%/}/shard-conf-1.json" -o shard-conf-1.json
-curl -fsS "${RELEASE_URL%/}/activation-2.cbor" -o activation-2.cbor
-ubft signing-authority complete-enrollment "${AUTH[@]}" --shard-conf shard-conf-1.json
-ubft signing-authority advance-with-proof "${AUTH[@]}" --proof activation-2.cbor \
-  --client-socket "$UBFT_HOME/authority/client.sock" --out "$UBFT_HOME/authority/client.cred"
+read -rp 'Activated root epoch: ' ACTIVATED_ROOT_EPOCH
+read -rp 'Activated shard epoch: ' ACTIVATED_SHARD_EPOCH
+ubft q3 shard-conf --root-rpc http://127.0.0.1:25852 --epoch "$ACTIVATED_SHARD_EPOCH" --out activated-shard-conf.json
+ubft q3 trust-base --root-rpc http://127.0.0.1:25852 --epoch "$ACTIVATED_ROOT_EPOCH" --out activated-trust-base.json
+ubft signing-authority complete-enrollment "${AUTH[@]}" --shard-conf activated-shard-conf.json
+ubft signing-authority advance-epoch "${AUTH[@]}" --shard-conf activated-shard-conf.json --trust-base activated-trust-base.json
+ubft signing-authority replace-session "${AUTH[@]}" --out "$UBFT_HOME/authority/client.cred"
 ```
+
+This initial enrollment uses the configuration verified by your paired root. At each later handoff, repeat the advance and session steps with the new verified files. Complete enrollment only once. For an authority already equipped with a lineage pin and an installed configuration, use `signing-authority advance-with-proof` and the verified activation bundles in epoch order. Keep its certification session private.
 
 Wait for the local shard to activate the same root epoch. If the shard needs to reload its session, stop that shard process through its supervisor and restart it with the same `run` arguments. A registered identity or reserved result is still waiting to validate. Check that the successor handoff is acknowledged, the registry lists your membership, your root votes, your shard certifies with the authority, and local ureth tracks the public head.
 
