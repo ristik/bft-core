@@ -104,7 +104,7 @@ if [ -z "$launcher" ]; then fail "could not extract the launcher block from docs
   log="$tmp/launch/log"
   run_launcher() { # LANE_COMMAND [signal]: the block, with the mongo calls and the lane command replaced
     printf '%s\n' "$launcher" | sed -e 's#scripts/lane-slot.sh mongo down [^;]*#echo "mongo-down locks=$(ls "$LANE_LOCK_DIR" | grep -c "^slot-")" >>"$LAUNCH_LOG"#' \
-      -e 's#scripts/lane-slot.sh mongo up [^#]*#echo mongo-up >>"$LAUNCH_LOG"#' -e 's#\./scripts/reth-paired-devnet.sh 4 10#'"$1"'#' >"$tmp/launch/block.sh"
+      -e 's#scripts/lane-slot.sh mongo up [^#]*#echo mongo-up >>"$LAUNCH_LOG" #' -e 's#\./scripts/reth-paired-devnet.sh 4 10#'"$1"'#' >"$tmp/launch/block.sh"
     rm -f "$log"; ( cd "$tmp/launch" && LAUNCH_LOG="$log" LANE_LOCK_DIR="$tmp/locks-l" bash block.sh ) >/dev/null 2>&1; echo $?
   }
   rm -rf "$tmp/locks-l"
@@ -113,7 +113,7 @@ if [ -z "$launcher" ]; then fail "could not extract the launcher block from docs
   rc=$(run_launcher false); held=$(ls "$tmp/locks-l" 2>/dev/null | grep -c '^slot-')
   [ "$rc" != 0 ] && [ "$held" = 0 ] && grep -q 'mongo-down locks=1' "$log" && pass "launcher: a failing lane keeps its exit status and still releases the slot" || fail "launcher failing lane: rc=$rc locks left=$held log=$(cat "$log" 2>/dev/null)"
   # terminated while the lane runs (a tmux kill-session, a kill): the EXIT trap still runs
-  printf '%s\n' "$launcher" | sed -e 's#scripts/lane-slot.sh mongo down [^;]*#echo mongo-down >>"$LAUNCH_LOG"#' -e 's#scripts/lane-slot.sh mongo up [^#]*#true#' -e 's#\./scripts/reth-paired-devnet.sh 4 10#sleep 60#' >"$tmp/launch/block2.sh"
+  printf '%s\n' "$launcher" | sed -e 's#scripts/lane-slot.sh mongo down [^;]*#echo mongo-down >>"$LAUNCH_LOG"#' -e 's#scripts/lane-slot.sh mongo up [^#]*#true #' -e 's#\./scripts/reth-paired-devnet.sh 4 10#sleep 60#' >"$tmp/launch/block2.sh"
   ( cd "$tmp/launch" && LAUNCH_LOG="$log" LANE_LOCK_DIR="$tmp/locks-l" bash block2.sh ) >/dev/null 2>&1 & lp=$!
   sleep 2; held=$(ls "$tmp/locks-l" | grep -c '^slot-'); kill -TERM "$lp" 2>/dev/null; wait "$lp" 2>/dev/null; sleep 0.5; after=$(ls "$tmp/locks-l" | grep -c '^slot-')
   [ "$held" = 1 ] && [ "$after" = 0 ] && pass "launcher: a terminated launcher releases the slot" || fail "launcher terminated: held=$held after=$after"
