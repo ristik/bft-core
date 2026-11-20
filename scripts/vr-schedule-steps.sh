@@ -60,46 +60,52 @@ vrs_require_roots() {
 }
 # vrs_check_rules <unicity_rulesV1 response> <ruleId> <epoch> <latched true|false> <known true|false>: ureth reports the rule scheduled for E
 vrs_check_rules() {
+  vrs_validate_rules "$1" || return 1
   python3 - "$@" <<'PY'
 import json, sys
 f, rid, epoch, latched, known = sys.argv[1], sys.argv[2].lower(), int(sys.argv[3]), sys.argv[4] == "true", sys.argv[5] == "true"
-try:
-    r = json.load(open(f))["result"]
-except Exception as e:
-    sys.exit("no unicity_rulesV1 result: %s" % e)
-if not r.get("observed"):
+r = json.load(open(f))["result"]
+if r["observed"] is not True:
     sys.exit("ureth has observed no canonical head")
-if known and not any(k["id"].lower() == rid for k in r.get("known", [])):
+if known and not any(k["id"].lower() == rid for k in r["known"]):
     sys.exit("the rule is not among the rules this binary knows")
-hit = [e for e in r.get("scheduled", []) if e["ruleId"].lower() == rid and e["rootEpoch"] == epoch and e["latched"] == latched and e["known"] == known]
-sys.exit(0 if hit else "no scheduled entry for the rule at epoch %d (latched=%s known=%s): %s" % (epoch, latched, known, r.get("scheduled")))
+hit = [e for e in r["scheduled"] if e["ruleId"].lower() == rid and e["rootEpoch"] == epoch and e["latched"] is latched and e["known"] is known]
+sys.exit(0 if hit else "no scheduled entry for the rule at epoch %d (latched=%s known=%s): %s" % (epoch, latched, known, r["scheduled"]))
 PY
 }
 # vrs_check_rules_absent <unicity_rulesV1 response> <ruleId>: a VALID response (result present, observed=true, lists well formed) that has no scheduled entry for the rule;
 # a missing, malformed, error or observed=false response is a failure, never "absent"
-vrs_check_rules_absent() {
+# vrs_validate_rules <unicity_rulesV1 response>: the STRICT structure every rules check starts from (u64 JSON integer epochs, 64-hex ids and digests, boolean flags)
+vrs_validate_rules() {
   python3 - "$@" <<'PY'
 import json, re, sys
-f, rid = sys.argv[1], sys.argv[2].lower()
 hexid = re.compile(r"^0x[0-9a-fA-F]{64}$")
 try:
-    r = json.load(open(f))["result"]
-    observed = r["observed"]
+    r = json.load(open(sys.argv[1]))["result"]
+    assert type(r["observed"]) is bool
     known, scheduled, lacking = r["known"], r["scheduled"], r["lacking"]
     assert isinstance(r["genesisSpec"], str)
     assert isinstance(known, list) and isinstance(scheduled, list) and isinstance(lacking, list)
     for k in known:
         assert isinstance(k["name"], str) and hexid.match(k["id"])
-    for e in scheduled:   # every entry well formed: an empty object or a missing field is a malformed response, not an absence
+    for e in scheduled:   # every entry well formed: an empty object, a float epoch, integer flags or a short digest is a malformed response
         assert hexid.match(e["ruleId"]) and hexid.match(e["releaseDigest"]) and type(e["rootEpoch"]) is int and 0 <= e["rootEpoch"] < 2**64
         assert type(e["latched"]) is bool and type(e["known"]) is bool
     for e in lacking:
         assert hexid.match(e["ruleId"]) and hexid.match(e["releaseDigest"]) and type(e["rootEpoch"]) is int and 0 <= e["rootEpoch"] < 2**64
 except Exception as e:
     sys.exit("not a valid unicity_rulesV1 response: %r" % (e,))
-if observed is not True:
+PY
+}
+vrs_check_rules_absent() {
+  vrs_validate_rules "$1" || return 1
+  python3 - "$@" <<'PY'
+import json, sys
+r = json.load(open(sys.argv[1]))["result"]
+rid = sys.argv[2].lower()
+if r["observed"] is not True:
     sys.exit("ureth has observed no canonical head")
-bad = [e for e in scheduled + lacking if e["ruleId"].lower() == rid]
+bad = [e for e in r["scheduled"] + r["lacking"] if e["ruleId"].lower() == rid]
 sys.exit("the rule is already scheduled: %s" % bad if bad else 0)
 PY
 }

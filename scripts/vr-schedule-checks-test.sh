@@ -126,6 +126,22 @@ str='{"ruleId":"'$other'","releaseDigest":"'$other'","rootEpoch":"5","latched":f
 r "${base/\"scheduled\":[]/\"scheduled\":[$str]}" >"$d/b.json"; bad vrs_check_rules_absent "$d/b.json" "$rid"
 nb='{"ruleId":"'$other'","releaseDigest":"'$other'","rootEpoch":5,"latched":"no","known":false}'
 r "${base/\"scheduled\":[]/\"scheduled\":[$nb]}" >"$d/b.json"; bad vrs_check_rules_absent "$d/b.json" "$rid"
+mk() { r "{\"genesisSpec\":\"Cancun\",\"known\":[{\"name\":\"noop-test-v1\",\"id\":\"$rid\"}],\"observed\":true,\"scheduled\":[$1],\"lacking\":[]}"; }
+goodrow='{"ruleId":"'$rid'","releaseDigest":"'$rid'","rootEpoch":5,"latched":true,"known":true}'
+mk "$goodrow" >"$d/u.json"; ok vrs_check_rules "$d/u.json" "$rid" $E true true   # the strict validation still accepts a well-formed latched row
+# vrs_check_rules (the post-handoff latch assertion) reuses the strict row validation
+fl='{"ruleId":"'$rid'","releaseDigest":"'$rid'","rootEpoch":5.0,"latched":true,"known":true}'
+mk "$fl" >"$d/u.json";  bad vrs_check_rules "$d/u.json" "$rid" $E true true    # float epoch 5.0
+in='{"ruleId":"'$rid'","releaseDigest":"'$rid'","rootEpoch":5,"latched":1,"known":1}'
+mk "$in" >"$d/u.json";  bad vrs_check_rules "$d/u.json" "$rid" $E true true    # integer flags
+nd='{"ruleId":"'$rid'","rootEpoch":5,"latched":true,"known":true}'
+mk "$nd" >"$d/u.json";  bad vrs_check_rules "$d/u.json" "$rid" $E true true    # no release digest
+sd='{"ruleId":"'$rid'","releaseDigest":"0x11","rootEpoch":5,"latched":true,"known":true}'
+mk "$sd" >"$d/u.json";  bad vrs_check_rules "$d/u.json" "$rid" $E true true    # short digest
+ng='{"ruleId":"'$rid'","releaseDigest":"'$rid'","rootEpoch":-5,"latched":true,"known":true}'
+mk "$ng" >"$d/u.json";  bad vrs_check_rules "$d/u.json" "$rid" $E true true
+# a valid row plus a malformed unrelated one: the response as a whole is invalid
+mk "{\"ruleId\":\"$rid\",\"releaseDigest\":\"$rid\",\"rootEpoch\":5,\"latched\":true,\"known\":true},{}" >"$d/u.json"; bad vrs_check_rules "$d/u.json" "$rid" $E true true
 okentry='{"ruleId":"'$other'","releaseDigest":"'$other'","rootEpoch":9,"latched":false,"known":false}'
 r "${base/\"scheduled\":[]/\"scheduled\":[$okentry]}" >"$d/b.json"; ok vrs_check_rules_absent "$d/b.json" "$rid"   # a well-formed entry for ANOTHER rule is still an absence
 [ "$fails" = 0 ] && echo "vr-schedule checks: all pass" || { echo "vr-schedule checks: $fails failing"; exit 1; }

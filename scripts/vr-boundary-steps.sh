@@ -43,7 +43,14 @@ vrb_members_logged() { # every successor's root node (the four of this lane, and
 }
 vrb_logs_have() { grep -l -- "$1" test-nodes/root*/debug.log >/dev/null 2>&1; }
 vrb_acked() { [ "$(cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'lastAcked()(bytes32)')" = "$vrb_result" ]; }
-vrb_root_epoch2() { local r n=0; for r in $(vrb_root_rpcs); do curl -sf -X POST -H 'Content-Type: application/json' -d '{}' "$r/api/v1/q3/status" | grep -q '"activeEpoch": *2' && n=$((n+1)); done; [ "$n" -ge 3 ]; }
+vrb_root_epoch2() { # at least 3 of this lane's roots report activeEpoch as the JSON integer 2 (equality; no substring match)
+  local r n=0 f; f=$(mktemp)
+  for r in $(vrb_root_rpcs); do
+    curl -sf -X POST -H 'Content-Type: application/json' -d '{}' "$r/api/v1/q3/status" >"$f" 2>/dev/null \
+      && python3 -c 'import json,sys; v=json.load(open(sys.argv[1]))["activeEpoch"]; sys.exit(0 if type(v) is int and v == 2 else 1)' "$f" 2>/dev/null && n=$((n+1))
+  done
+  rm -f "$f"; [ "$n" -ge 3 ]
+}
 
 # The development hooks (the readiness hold, the joiner staging hook) exist only in a binary built with the vrdev build tag; the lane's `make build`
 # (setup-evm-nodes.sh) takes it from MAKEFLAGS=GO_BUILD_TAGS=-tags=vrdev. A production build has no such hook and no flag or variable enables one.
