@@ -119,6 +119,9 @@ type RegistrationRequest struct {
 // registration is well formed (shape, both compressed keys on the curve, distinct keys); and its EVM node and key are exactly this
 // authority's enrolled node and key.
 func (a *Authority) SignRegistration(req RegistrationRequest) ([]byte, error) {
+	if _, err := a.fenceGate(); err != nil {
+		return nil, err
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	binding := false

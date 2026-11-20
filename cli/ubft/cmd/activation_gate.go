@@ -1,11 +1,16 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/unicitynetwork/bft-core/signingauthority"
+	"go.opentelemetry.io/otel/metric"
 	"log/slog"
+	"os"
 	"strings"
 	"time"
 
@@ -76,4 +81,65 @@ func gateCheckpoint(g *vrrules.Gate) func(uint64, []vrschema.Activation) error {
 		return nil
 	}
 	return g.CheckCheckpoint
+}
+
+// fenceProvision is the file that ends an authority's pre-genesis enrollment mode.
+type fenceProvision struct {
+	B1Profile            string `json:"b1Profile"`
+	ActivationSourceURL  string `json:"activationSourceUrl"`
+	ExecutionGenesisHash string `json:"executionGenesisHash"`
+}
+
+// provisionFenceWhenReady waits for the provisioning file, builds the gate from it and hands it to the authority, which then signs. A file
+// that does not provide a complete VR fence is reported and the authority stays disabled.
+func provisionFenceWhenReady(ctx context.Context, log *slog.Logger, path string, network *[32]byte, a *signingauthority.Authority, meter metric.Meter, epoch func() uint64) {
+	for ctx.Err() == nil {
+		raw, err := os.ReadFile(path) // #nosec G304 -- operator supplied local file
+		if err == nil {
+			if err := provisionFence(ctx, log, raw, network, a, meter, epoch); err != nil {
+				log.Error("the fence provisioning is refused; the authority keeps signing nothing", "file", path, "error", err)
+			}
+			return
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+}
+
+func provisionFence(ctx context.Context, log *slog.Logger, raw []byte, network *[32]byte, a *signingauthority.Authority, meter metric.Meter, epoch func() uint64) error {
+	var p fenceProvision
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&p); err != nil {
+		return err
+	}
+	_, pf, err := readB1ProfileFile(p.B1Profile)
+	if err != nil {
+		return fmt.Errorf("the b1 profile: %w", err)
+	}
+	if pf.VRHookMeasurement == nil {
+		return errors.New("the b1 profile is not a VR generation's")
+	}
+	genesis, err := parseCodeHash(p.ExecutionGenesisHash)
+	if err != nil {
+		return fmt.Errorf("executionGenesisHash: %w", err)
+	}
+	gate, _, err := newActivationGate(ctx, log, p.ActivationSourceURL, vrFence{VR: true, CodeHash: &pf.VRHookMeasurement.RegistryCodeHash, GenesisHash: genesis, NetworkWord: network})
+	if err != nil {
+		return err
+	}
+	if gate == nil {
+		return errors.New("no activation source")
+	}
+	if err := gate.RegisterMetric(meter); err != nil {
+		return err
+	}
+	if err := a.ProvisionFence(gate); err != nil {
+		return err
+	}
+	go gate.Watch(ctx, activationWatchInterval, epoch)
+	log.Info("signing authority fence provisioned: signing is enabled", "source", p.ActivationSourceURL)
+	return nil
 }

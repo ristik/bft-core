@@ -171,3 +171,17 @@ func TestCheckpointDecidesAKToKPlus2Recovery(t *testing.T) {
 	require.Zero(t, stale.reads)
 	require.Error(t, g.Check(ctx, k+4), "but not an epoch the checkpoint does not cover: the stale source is not enough")
 }
+
+// Endpoint observations never supersede the certified schedule retained from a checkpoint: a stale or competing head that shows another
+// schedule cannot change the decision for an epoch the checkpoint covers.
+func TestEndpointNeverSupersedesCheckpointEvidence(t *testing.T) {
+	rule := vrschema.RuleID("seen-on-another-head")
+	other := &scripted{ev: Evidence{CoveredEpoch: 50, BlockNumber: 99, Schedule: []vrschema.Activation{{RuleID: rule, RootEpoch: 3, State: vrschema.ActActive, ChangeID: 1}}}}
+	g := NewGate(other, Set{}, quiet())
+	require.NoError(t, g.CheckCheckpoint(4, nil), "the certified schedule of epoch 4 is empty")
+	require.NoError(t, g.Poll(context.Background(), 4), "the poll sees a competing head with a later, higher-coverage schedule")
+	require.Len(t, g.Pending(), 1, "and warns of it")
+	require.NoError(t, g.Check(context.Background(), 4), "but the decision for epoch 4 stays the certified one")
+	require.Equal(t, 1, other.reads, "with no read")
+	require.ErrorIs(t, g.Check(context.Background(), 20), ErrUpgradeRequired, "an epoch the checkpoint does not cover falls back to the endpoint evidence")
+}

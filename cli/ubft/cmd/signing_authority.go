@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/unicitynetwork/bft-core/vrrules"
 	"net"
 	"os"
 	"path/filepath"
@@ -81,6 +82,7 @@ type signingAuthorityRunFlags struct {
 
 	ActivationSourceURL  string
 	VRGeneration         bool
+	FenceProvisionFile   string
 	B1Profile            string
 	ExecutionGenesisHash string
 	VRNetworkWord        string
@@ -139,6 +141,7 @@ key exists: the authority starts pending and admits no client until complete-enr
 	cmd.Flags().BoolVar(&flags.LatePosPolicy, "dev-allow-late-pos-policy", false, "DEVELOPMENT ONLY: let `signing-authority pos-policy` pin the P85 election on this running authority. The pin then comes from the operator credential that also asks for signatures, so it restricts nothing against a compromised credential; production gives --pos-policy at startup")
 	cmd.Flags().StringVar(&flags.ActivationSourceURL, "activation-source-url", "", activationSourceUsage)
 	cmd.Flags().BoolVar(&flags.VRGeneration, "vr-generation", false, "force the VR-generation requirements (it cannot disable them): a b1 profile with the VR measurement, or a VR registration/P85 policy, already requires --activation-source-url and the generation pins, and the authority refuses to start without them")
+	cmd.Flags().StringVar(&flags.FenceProvisionFile, "fence-provision-file", "", "on a VR generation whose fence inputs are not known at start (the authority is started first to provide its key): start in the pre-genesis enrollment mode, signing and advancing nothing, and enable signing when this JSON file {b1Profile, activationSourceUrl, executionGenesisHash} appears. Provision the genesis hash from the generation's own genesis artifacts, not from the endpoint it checks")
 	cmd.Flags().StringVar(&flags.B1Profile, "b1-profile", "", "the deployment's b1 profile (as the shard node's): on a VR generation it supplies the registry code hash pin and makes the activation fence mandatory")
 	cmd.Flags().StringVar(&flags.ExecutionGenesisHash, "execution-genesis-hash", "", "0x-prefixed hash of the deployment's execution genesis block: the generation the activation source must be (mandatory on a VR generation)")
 	cmd.Flags().StringVar(&flags.VRNetworkWord, "vr-network-word", "", "optional 0x-prefixed VR network word the activation source's registry must report")
@@ -207,12 +210,15 @@ func signingAuthorityRun(ctx context.Context, flags *signingAuthorityRunFlags) e
 	if err != nil {
 		return err
 	}
+	var policyNetwork *[32]byte // the VR network word the registration policy pins: the generation this authority belongs to
 	if flags.RegistrationPolicy != "" {
 		policy, err := readRegistrationPolicy(flags.RegistrationPolicy)
 		if err != nil {
 			return err
 		}
 		opts = append(opts, signingauthority.WithRegistrationPolicy(policy))
+		nw := [32]byte(policy.Deployment.Network)
+		policyNetwork = &nw
 	}
 	if len(flags.PosPolicies) > 1 {
 		return fmt.Errorf("--pos-policy is given once: %d policies named", len(flags.PosPolicies))
@@ -260,17 +266,37 @@ func signingAuthorityRun(ctx context.Context, flags *signingAuthorityRunFlags) e
 			return err
 		}
 	}
-	activationGate, closeGate, err := newActivationGate(ctx, log, flags.ActivationSourceURL, fenceGen)
-	if err != nil {
-		return err
+	if fenceGen.NetworkWord == nil {
+		fenceGen.NetworkWord = policyNetwork
 	}
-	defer closeGate()
-	if activationGate != nil {
-		opts = append(opts, signingauthority.WithFence(activationGate))
-		if err := activationGate.RegisterMetric(flags.observe.Meter("signingauthority")); err != nil {
-			return fmt.Errorf("creating the upgrade metric: %w", err)
+	if fenceGen.VR && flags.LineageGenesis == "" {
+		// the schedule for an epoch is decided from the checkpoint of the activation proof the authority verifies itself: an authority that
+		// advances on the operator's word alone has no authenticated evidence for the epochs it installs
+		return fmt.Errorf("%w: a VR generation advances by advance-with-proof, so --lineage-genesis-trust-base is mandatory", errVRFenceRequired)
+	}
+	// On a VR generation whose fence inputs are not known yet (the authority is started to provide its key, from which the shard
+	// configuration and the genesis are generated), --fence-provision-file starts it in the pre-genesis enrollment mode: it signs and
+	// advances nothing until that file supplies the b1 profile, the execution genesis hash and the activation source.
+	pending := fenceGen.VR && flags.FenceProvisionFile != "" && (flags.ActivationSourceURL == "" || fenceGen.CodeHash == nil || fenceGen.GenesisHash == nil)
+	var activationGate *vrrules.Gate
+	closeGate := func() {}
+	if pending {
+		opts = append(opts, signingauthority.WithFencePending())
+		log.Warn("signing authority in pre-genesis enrollment mode: it signs nothing until its activation fence is provisioned", "file", flags.FenceProvisionFile)
+	} else {
+		var gerr error
+		activationGate, closeGate, gerr = newActivationGate(ctx, log, flags.ActivationSourceURL, fenceGen)
+		if gerr != nil {
+			return gerr
 		}
-		go activationGate.Watch(ctx, activationWatchInterval, func() uint64 { return flags.RootEpoch })
+		defer closeGate()
+		if activationGate != nil {
+			opts = append(opts, signingauthority.WithFence(activationGate))
+			if err := activationGate.RegisterMetric(flags.observe.Meter("signingauthority")); err != nil {
+				return fmt.Errorf("creating the upgrade metric: %w", err)
+			}
+			go activationGate.Watch(ctx, activationWatchInterval, func() uint64 { return flags.RootEpoch })
+		}
 	}
 	// The key is generated here. The enrollment has no configuration hash yet, on purpose.
 	authority, err := signingauthority.New(signingauthority.Enrollment{
@@ -282,6 +308,9 @@ func signingAuthorityRun(ctx context.Context, flags *signingAuthorityRunFlags) e
 		return err
 	}
 	defer authority.Close()
+	if pending {
+		go provisionFenceWhenReady(ctx, log, flags.FenceProvisionFile, policyNetwork, authority, flags.observe.Meter("signingauthority"), func() uint64 { return flags.RootEpoch })
+	}
 
 	server, err := service.NewServer(authority, service.Config{OperatorCredential: operatorCredential, PoPCredential: popCredential, Log: log})
 	if err != nil {

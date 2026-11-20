@@ -79,6 +79,10 @@ func (a *Authority) AdvanceWithProof(ctx context.Context, bundle []byte) (Advanc
 	if err := ctx.Err(); err != nil {
 		return AdvanceResult{}, err
 	}
+	fence, err := a.fenceGate()
+	if err != nil {
+		return AdvanceResult{}, err
+	}
 	if !a.advancing.TryLock() {
 		return AdvanceResult{}, fmt.Errorf("%w: another activation proof is being verified", ErrAdvanceBusy)
 	}
@@ -116,7 +120,7 @@ func (a *Authority) AdvanceWithProof(ctx context.Context, bundle []byte) (Advanc
 	if err != nil {
 		return AdvanceResult{}, fmt.Errorf("%w: %w", ErrLineageUnverified, err)
 	}
-	if a.fence != nil && step.Epoch >= current { // earlier steps are the lineage's catch-up: nothing to sign for
+	if fence != nil && step.Epoch >= current { // earlier steps are the lineage's catch-up: nothing to sign for
 		// the schedule of the checkpoint this authority just verified (VerifySnapshot, against the entry's control digest): it holds every
 		// entry with E <= the epoch, so it decides without an endpoint and whatever Boundaries the EVM skipped
 		v, _, ok := step.Entry.Handoff()
@@ -127,7 +131,7 @@ func (a *Authority) AdvanceWithProof(ctx context.Context, bundle []byte) (Advanc
 		if err != nil {
 			return AdvanceResult{}, fmt.Errorf("%w: %w", ErrLineageUnverified, err)
 		}
-		if err := a.fence.CheckCheckpoint(step.Epoch, sched); err != nil {
+		if err := fence.CheckCheckpoint(step.Epoch, sched); err != nil {
 			return AdvanceResult{}, fmt.Errorf("advancing to root epoch %d: %w", step.Epoch, err)
 		}
 	}

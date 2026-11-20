@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -443,13 +444,24 @@ func TestSigningAuthorityRefusesToStartOnAVRGenerationWithoutTheFence(t *testing
 		"--trust-base", trustBasePath, "--authority-id", "authority-1", "--node-id", nodeID.String(),
 		"--network-id", "5", "--partition-id", "7", "--shard-epoch", "0", "--root-epoch", strconv.FormatUint(tb.GetEpoch(), 10),
 	}
-	// the activation options omitted: refused, and no socket was ever opened
-	err = run(append(append([]string{}, args...), "--vr-generation")...)
+	// automatic detection: a VR registration policy is trusted deployment data, so no --vr-generation is passed
+	policy := filepath.Join(home, "policy.json")
+	require.NoError(t, os.WriteFile(policy, []byte(`{"network":"0x`+strings.Repeat("11", 32)+`","chainId":3,"registry":"0xff00000000000000000000000000000000000003","authorized":[]}`), 0o600))
+	vr := append(append([]string{}, args...), "--registration-policy", policy)
+
+	// without the lineage pin the advance would rest on the operator's word: refused
+	err = run(vr...)
+	require.ErrorIs(t, err, errVRFenceRequired)
+	require.Contains(t, err.Error(), "lineage")
+	require.NoFileExists(t, clientSocket)
+	// with it, the activation options omitted: refused, and no socket was ever opened
+	vr = append(vr, "--lineage-genesis-trust-base", trustBasePath)
+	err = run(vr...)
 	require.ErrorIs(t, err, errVRFenceRequired)
 	require.NoFileExists(t, clientSocket)
 	require.NoFileExists(t, operatorSocket)
 	// the URL alone is not enough: the generation pins are mandatory too
-	err = run(append(append([]string{}, args...), "--vr-generation", "--activation-source-url", "http://127.0.0.1:1")...)
+	err = run(append(append([]string{}, vr...), "--activation-source-url", "http://127.0.0.1:1")...)
 	require.ErrorIs(t, err, errVRFenceRequired)
 	require.NoFileExists(t, clientSocket)
 }

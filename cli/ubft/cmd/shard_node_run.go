@@ -794,11 +794,10 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				gh := [32]byte(h)
 				fenceGen.GenesisHash = &gh
 			}
-			// the read is made at this node's own committed EVM block, never at whatever head the endpoint serves
-			fenceGen.Anchor = func(ctx context.Context) ([32]byte, uint64, error) {
-				ref, herr := executor.Head(ctx)
-				return [32]byte(ref.Hash), ref.Number, herr
-			}
+			// the read is made at this node's own certified, committed EVM block (the engine's finalized block, which Commit moves only for a
+			// block a UC certified), never the engine's `latest` and never whatever head the endpoint serves
+			fenceGen.Anchor = func(ctx context.Context) ([32]byte, uint64, error) { return committedAnchor(ctx, executor) }
+
 			if sourceURL == "" {
 				sourceURL = flags.EthURL
 			}
@@ -2478,4 +2477,23 @@ func attachShardRecordsFeed(cfg *b1paired.Config, host recordsfeed.Libp2p, roots
 	return attachRecordsFeed(cfg, host, roots, role, cuts, func(err error) {
 		log.Error("root-record retention failed: this node no longer mirrors its full record history", "error", err)
 	})
+}
+
+// committedAnchor is the shard's verified committed block: the executor's finalized block. An error or an identity that is not a block
+// hash is an error (never a conversion of an empty reference).
+func committedAnchor(ctx context.Context, executor shardnode.Executor) ([32]byte, uint64, error) {
+	f, ok := executor.(interface {
+		Finalized(context.Context) (shardnode.BlockRef, error)
+	})
+	if !ok {
+		return [32]byte{}, 0, errors.New("the executor reports no committed block")
+	}
+	ref, err := f.Finalized(ctx)
+	if err != nil {
+		return [32]byte{}, 0, err
+	}
+	if len(ref.Hash) != 32 {
+		return [32]byte{}, 0, fmt.Errorf("the executor's committed block has a %d-byte hash", len(ref.Hash))
+	}
+	return [32]byte(ref.Hash), ref.Number, nil
 }

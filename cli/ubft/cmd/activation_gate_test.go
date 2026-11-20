@@ -2,11 +2,14 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/unicitynetwork/bft-core/shardnode"
 )
 
 func TestActivationGateIsMandatoryOnAVRGeneration(t *testing.T) {
@@ -38,4 +41,31 @@ func TestActivationGateIsMandatoryOnAVRGeneration(t *testing.T) {
 	closeFn()
 	_, err = parseCodeHash("0x01")
 	require.Error(t, err)
+}
+
+type fakeCommitted struct {
+	shardnode.Executor
+	ref shardnode.BlockRef
+	err error
+}
+
+func (f fakeCommitted) Finalized(context.Context) (shardnode.BlockRef, error) { return f.ref, f.err }
+
+func TestCommittedAnchorNeverPanics(t *testing.T) {
+	ctx := context.Background()
+	// an RPC error yields an empty reference: an error, not a conversion panic
+	_, _, err := committedAnchor(ctx, fakeCommitted{err: errors.New("rpc down")})
+	require.Error(t, err)
+	// a short hash is refused
+	_, _, err = committedAnchor(ctx, fakeCommitted{ref: shardnode.BlockRef{Number: 3, Hash: shardnode.Hash{1, 2}}})
+	require.Error(t, err)
+	// an executor with no committed block
+	_, _, err = committedAnchor(ctx, nil)
+	require.Error(t, err)
+	h := make(shardnode.Hash, 32)
+	h[0] = 7
+	got, n, err := committedAnchor(ctx, fakeCommitted{ref: shardnode.BlockRef{Number: 3, Hash: h}})
+	require.NoError(t, err)
+	require.EqualValues(t, 3, n)
+	require.Equal(t, byte(7), got[0])
 }

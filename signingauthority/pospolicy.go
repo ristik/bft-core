@@ -137,6 +137,9 @@ type PosPoPRequest struct {
 
 // SignPosPoP signs evmassign.PoPDigest for this authority's own key under the pinned election, for a pinned identity, and nothing else.
 func (a *Authority) SignPosPoP(req PosPoPRequest) (evmassign.EVMPoP, error) {
+	if _, err := a.fenceGate(); err != nil {
+		return evmassign.EVMPoP{}, err
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.pos == nil {

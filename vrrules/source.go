@@ -96,7 +96,8 @@ type Gate struct {
 	log   *slog.Logger
 
 	mu      sync.Mutex
-	best    *Evidence
+	cert    *Evidence // from an authenticated checkpoint (CheckCheckpoint): the certified schedule retained for the epochs up to its own
+	obs     *Evidence // from endpoint reads: never supersedes cert
 	pending []vrschema.Activation
 	preview []vrschema.Activation // pending (queued/scheduled) entries this binary lacks: warning only
 	logged  map[string]bool
@@ -134,12 +135,15 @@ func (g *Gate) Check(ctx context.Context, epoch uint64) error {
 	}
 	need := CoverNeeded(epoch)
 	g.mu.Lock()
-	best := g.best
+	cert, obs := g.cert, g.obs
 	g.mu.Unlock()
 	var ev Evidence
-	if best != nil && best.CoveredEpoch >= need {
-		ev = *best
-	} else {
+	switch {
+	case cert != nil && cert.CoveredEpoch >= need:
+		ev = *cert // the certified schedule decides; an endpoint's view of its own head never overrides it
+	case obs != nil && obs.CoveredEpoch >= need:
+		ev = *obs
+	default:
 		rctx, cancel := context.WithTimeout(ctx, readTimeout)
 		defer cancel()
 		got, err := g.src.Read(rctx)
@@ -185,17 +189,21 @@ func (g *Gate) CheckCheckpoint(epoch uint64, sched []vrschema.Activation) error 
 		g.log.Error("refusing to install an epoch past an activation this binary lacks", "event", "upgrade.refused", "epoch", epoch, "source", "checkpoint", "error", err)
 		return err
 	}
-	g.remember(ev)
+	g.mu.Lock()
+	if g.cert == nil || ev.CoveredEpoch >= g.cert.CoveredEpoch {
+		g.cert = &ev
+	}
+	g.mu.Unlock()
 	return nil
 }
 
-// remember keeps the evidence that covers the most epochs (the later block on a tie).
+// remember keeps the endpoint evidence that covers the most epochs (the later block on a tie).
 func (g *Gate) remember(ev Evidence) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.best == nil || ev.CoveredEpoch > g.best.CoveredEpoch || (ev.CoveredEpoch == g.best.CoveredEpoch && ev.BlockNumber >= g.best.BlockNumber) {
+	if g.obs == nil || ev.CoveredEpoch > g.obs.CoveredEpoch || (ev.CoveredEpoch == g.obs.CoveredEpoch && ev.BlockNumber >= g.obs.BlockNumber) {
 		cp := ev
-		g.best = &cp
+		g.obs = &cp
 	}
 }
 
