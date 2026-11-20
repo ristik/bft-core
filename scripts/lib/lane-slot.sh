@@ -65,6 +65,7 @@ f8-http 28601 3
 aggregator-bft-p2p 29101 2
 aggregator-http 3001 2
 seed-serve 38480 4
+seed-bundle 38600 8
 f6c-root-p2p 36662 1
 f6c-root-rpc 36866 1
 f6c-shard-p2p 36111 1
