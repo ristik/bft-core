@@ -901,3 +901,50 @@ func TestAFailingRetentionKeepsTheOldVersion(t *testing.T) {
 	require.ErrorAs(t, err, &re)
 	require.FileExists(t, filepath.Join(re.Stage, ImportRecordName), "the previous import is kept, not deleted")
 }
+
+func TestRetentionDoesNotTakeOverAnExistingVersionsDirectory(t *testing.T) {
+	f := newFixture(t)
+	parent := t.TempDir()
+	dst := filepath.Join(parent, "out")
+	require.NoError(t, WriteDir(dst, f.files, f.manifest, false))
+	if !canExchange(parent) {
+		t.Skip("no atomic exchange here")
+	}
+	// an EMPTY pre-existing DIR.versions is not ours either: not marked, not used
+	require.NoError(t, os.Mkdir(versionsDir(dst), 0o755))
+	g := newFixture(t)
+	err := WriteDir(dst, g.files, g.manifest, true)
+	var re *RetentionError
+	require.ErrorAs(t, err, &re)
+	require.NoFileExists(t, filepath.Join(versionsDir(dst), versionsMarker), "an existing directory is never marked")
+	ents, _ := os.ReadDir(versionsDir(dst))
+	require.Empty(t, ents, "nothing was moved into it")
+	old, verr := VerifyDir(re.Stage, Pins{GenesisID: f.pin})
+	require.NoError(t, verr, "the old version is kept at the stage path")
+	require.Equal(t, ManifestDigest(f.manifest), old.ManifestDigest)
+}
+
+func TestCollectionExpiresRetainedFilesAndSymlinksWithoutFollowing(t *testing.T) {
+	parent := t.TempDir()
+	dst := filepath.Join(parent, "out")
+	vd := versionsDir(dst)
+	require.NoError(t, os.Mkdir(vd, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(vd, versionsMarker), nil, 0o600))
+	victim := filepath.Join(parent, "victim")
+	require.NoError(t, os.Mkdir(victim, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(victim, "keep"), []byte("x"), 0o644))
+	old := time.Now().Add(-time.Hour).UnixNano()
+	file := filepath.Join(vd, fmt.Sprint(old))
+	link := filepath.Join(vd, fmt.Sprint(old+1))
+	fresh := filepath.Join(vd, fmt.Sprint(time.Now().UnixNano()))
+	require.NoError(t, os.WriteFile(file, []byte("x"), 0o644))
+	require.NoError(t, os.Symlink(victim, link))
+	require.NoError(t, os.Symlink(victim, fresh))
+	gcOldVersions(vd, "")
+	require.NoFileExists(t, file)
+	_, err := os.Lstat(link)
+	require.True(t, os.IsNotExist(err), "the expired symlink is removed")
+	require.FileExists(t, filepath.Join(victim, "keep"), "the symlink's target is never followed")
+	_, err = os.Lstat(fresh)
+	require.NoError(t, err, "a version inside the grace period stays")
+}

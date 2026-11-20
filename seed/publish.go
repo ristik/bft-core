@@ -95,18 +95,20 @@ func versionsDir(dir string) string { return dir + ".versions" }
 // retainOldVersion moves a replaced version to <dir>.versions/<unix nano> and collects what is past the grace period from there.
 func retainOldVersion(stage, dir string) error {
 	vd := versionsDir(dir)
-	if err := os.Mkdir(vd, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
-		return err
-	}
 	marker := filepath.Join(vd, versionsMarker)
-	if _, err := os.Lstat(marker); err != nil {
-		// an existing directory of that name that this tool did not mark is not ours: nothing is moved into it and nothing is collected from it
-		if ents, rerr := os.ReadDir(vd); rerr != nil || len(ents) > 0 {
-			return refuse("%s exists and is not this tool's version directory", vd)
-		}
+	switch err := os.Mkdir(vd, 0o700); {
+	case err == nil:
+		// this call created the directory: only then may it be marked as ours
 		if err := os.WriteFile(marker, nil, 0o600); err != nil {
 			return err
 		}
+	case errors.Is(err, os.ErrExist):
+		// a directory that already exists is used only if it carries our marker; an unmarked one, empty or not, is somebody else's
+		if fi, lerr := os.Lstat(marker); lerr != nil || !fi.Mode().IsRegular() {
+			return refuse("%s already exists and is not this tool's version directory", vd)
+		}
+	default:
+		return err
 	}
 	kept := filepath.Join(vd, strconv.FormatInt(time.Now().UnixNano(), 10))
 	if err := retainMove(stage, kept); err != nil {
@@ -121,7 +123,7 @@ func retainOldVersion(stage, dir string) error {
 var oldVersionGrace = 10 * time.Minute
 
 // gcOldVersions removes versions older than the grace period (never keep, the one just retained) from the marked retention directory vd, and only
-// entries named by a timestamp that this tool wrote. Nothing outside vd is ever touched.
+// entries (directories, files and symlinks) named by a timestamp that this tool wrote. Nothing outside vd is ever touched.
 func gcOldVersions(vd, keep string) {
 	if _, err := os.Lstat(filepath.Join(vd, versionsMarker)); err != nil {
 		return
@@ -132,9 +134,14 @@ func gcOldVersions(vd, keep string) {
 	}
 	for _, e := range ents {
 		ns, err := strconv.ParseInt(e.Name(), 10, 64)
-		if err != nil || !e.IsDir() || filepath.Join(vd, e.Name()) == keep || time.Since(time.Unix(0, ns)) < oldVersionGrace {
+		if err != nil || filepath.Join(vd, e.Name()) == keep || time.Since(time.Unix(0, ns)) < oldVersionGrace {
 			continue
 		}
-		_ = os.RemoveAll(filepath.Join(vd, e.Name()))
+		path := filepath.Join(vd, e.Name())
+		if e.IsDir() {
+			_ = os.RemoveAll(path)
+		} else {
+			_ = os.Remove(path) // a file or a symlink displaced from a symlink destination: removed itself, never followed
+		}
 	}
 }
