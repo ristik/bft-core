@@ -160,4 +160,15 @@ upgrade "" >"$d/lb.json";                                                       
 echo garbage >"$d/lb.json";                                                       mf "latched row: garbage" lr_pred "$d/lg.json" "$d/lb.json" 'no schedule'
 upgrade "$(urow "$rid" 5 Latched | sed 's/"rootEpoch":5/"rootEpoch":"5"/')" >"$d/lb.json"; mf "latched row: string epoch" lr_pred "$d/lg.json" "$d/lb.json" 'no Latched row'
 
+# the predicates run under PYTHONOPTIMIZE=1 (which strips `assert`) and still reject the bad inputs
+cases=$((cases+1)); grep -nE '^[[:space:]]*assert[[:space:]]' scripts/vr-schedule-steps.sh >/dev/null && fail "an assert statement is left in vr-schedule-steps.sh"
+export PYTHONOPTIMIZE=1
+rules "$row" >"$d/pg.json"; rules "$(echo "$row" | sed 's/"latched":true/"latched":1/')" >"$d/pb.json"
+cases=$((cases+1)); vrs_check_rules "$d/pg.json" "$rid" $E true true 2>/dev/null || fail "PYTHONOPTIMIZE: the good row no longer passes"
+cases=$((cases+1)); vrs_check_rules "$d/pb.json" "$rid" $E true true 2>/dev/null && fail "PYTHONOPTIMIZE: the integer-flag row passes (an assert-based predicate)"
+cases=$((cases+1)); rules "{}" >"$d/pb.json"; vrs_check_rules_absent "$d/pb.json" "$rid" 2>/dev/null && fail "PYTHONOPTIMIZE: scheduled:[{}] passes"
+for f in 's/"rootEpoch":5/"rootEpoch":-5/' 's/"rootEpoch":5/"rootEpoch":5.0/' 's/"known":true/"known":1/' 's/"releaseDigest":"[^"]*",//'; do
+  cases=$((cases+1)); rules "$(echo "$row" | sed "$f")" >"$d/pb.json"; vrs_check_rules "$d/pb.json" "$rid" $E true true 2>/dev/null && fail "PYTHONOPTIMIZE: $f passes"
+done
+unset PYTHONOPTIMIZE
 if [ "$fails" = 0 ]; then echo "vr-schedule checks: all $cases cases pass"; else echo "vr-schedule checks: $fails failing of $cases"; exit 1; fi

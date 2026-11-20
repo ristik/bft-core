@@ -80,21 +80,38 @@ vrs_validate_rules() {
   python3 - "$@" <<'PY'
 import json, re, sys
 hexid = re.compile(r"^0x[0-9a-fA-F]{64}$")
+def invalid(why):   # explicit exits, never `assert`: asserts vanish under PYTHONOPTIMIZE=1
+    sys.exit("not a valid unicity_rulesV1 response: %s" % why)
+def is_u64(v):
+    return type(v) is int and 0 <= v < 2**64
+def row_ok(e, flags):
+    if not isinstance(e, dict):
+        return False
+    if not (isinstance(e.get("ruleId"), str) and hexid.match(e["ruleId"]) and isinstance(e.get("releaseDigest"), str) and hexid.match(e["releaseDigest"])):
+        return False
+    if not is_u64(e.get("rootEpoch")):
+        return False
+    return all(type(e.get(f)) is bool for f in flags)
 try:
     r = json.load(open(sys.argv[1]))["result"]
-    assert type(r["observed"]) is bool
-    known, scheduled, lacking = r["known"], r["scheduled"], r["lacking"]
-    assert isinstance(r["genesisSpec"], str)
-    assert isinstance(known, list) and isinstance(scheduled, list) and isinstance(lacking, list)
-    for k in known:
-        assert isinstance(k["name"], str) and hexid.match(k["id"])
-    for e in scheduled:   # every entry well formed: an empty object, a float epoch, integer flags or a short digest is a malformed response
-        assert hexid.match(e["ruleId"]) and hexid.match(e["releaseDigest"]) and type(e["rootEpoch"]) is int and 0 <= e["rootEpoch"] < 2**64
-        assert type(e["latched"]) is bool and type(e["known"]) is bool
-    for e in lacking:
-        assert hexid.match(e["ruleId"]) and hexid.match(e["releaseDigest"]) and type(e["rootEpoch"]) is int and 0 <= e["rootEpoch"] < 2**64
+    observed, known, scheduled, lacking, spec = r["observed"], r["known"], r["scheduled"], r["lacking"], r["genesisSpec"]
 except Exception as e:
-    sys.exit("not a valid unicity_rulesV1 response: %r" % (e,))
+    invalid(repr(e))
+if type(observed) is not bool:
+    invalid("observed is not a boolean")
+if not isinstance(spec, str):
+    invalid("genesisSpec")
+if not (isinstance(known, list) and isinstance(scheduled, list) and isinstance(lacking, list)):
+    invalid("known, scheduled and lacking must be lists")
+for k in known:   # every entry well formed: an empty object, a float epoch, integer flags or a short digest is a malformed response
+    if not (isinstance(k, dict) and isinstance(k.get("name"), str) and isinstance(k.get("id"), str) and hexid.match(k["id"])):
+        invalid("a known entry: %r" % (k,))
+for e in scheduled:
+    if not row_ok(e, ("latched", "known")):
+        invalid("a scheduled entry: %r" % (e,))
+for e in lacking:
+    if not row_ok(e, ()):
+        invalid("a lacking entry: %r" % (e,))
 PY
 }
 vrs_check_rules_absent() {
