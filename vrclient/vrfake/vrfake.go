@@ -56,6 +56,7 @@ type Chain struct {
 	Poa        map[uint64][2]uint64 // state, since
 	Committee  []uint64
 	Config     vrclient.ConfigView
+	Health     uint8
 	Changes    map[uint64]vrclient.ChangeView
 	Pending    []uint64
 	Open       [32]byte
@@ -79,6 +80,8 @@ type Chain struct {
 	ExtraLogs []map[string]any
 	// FailSyncing makes eth_syncing fail.
 	FailSyncing bool
+	// FailActivations makes activationCount fail.
+	FailActivations bool
 }
 
 // New returns a chain with VR at 0xff..03, PoaElection at 0xff..07 and the SealRegistry at 0xff..02, chain id 3, no identities.
@@ -486,7 +489,7 @@ func (c *Chain) vr(from ethcommon.Address, method string, in []any, write bool) 
 	case "config":
 		return pack(a, method, c.Config), nil
 	case "activeModule":
-		return pack(a, method, vrclient.ModuleView{Module: c.Module, Meta: vrclient.ModuleMeta{ModuleTag: c.Tag}}), nil
+		return pack(a, method, vrclient.ModuleView{Module: c.Module, Health: c.Health, Meta: vrclient.ModuleMeta{ModuleTag: c.Tag}}), nil
 	case "committee":
 		return pack(a, method, c.members()), nil
 	case "openOutput":
@@ -500,6 +503,9 @@ func (c *Chain) vr(from ethcommon.Address, method string, in []any, write bool) 
 	case "change":
 		return pack(a, method, c.Changes[in[0].(uint64)]), nil
 	case "activationCount":
+		if c.FailActivations {
+			return nil, &rpcError{Code: -32603, Message: "activation schedule unavailable"}
+		}
 		return pack(a, method, uint32(0)), nil
 	case "recordCursor":
 		return pack(a, method, c.RecordCursor), nil

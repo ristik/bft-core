@@ -9,6 +9,7 @@ import (
 
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/unicitynetwork/bft-core/logger"
+	"github.com/unicitynetwork/bft-core/monitoring"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
@@ -385,7 +386,7 @@ func (x *ConsensusManager) enterSwitching(from, to uint64, id []byte, captured C
 	gen := x.ctxGen.Add(1)
 	x.switchCtx.Store(&switchContext{SwitchState: SwitchState{Phase: SwitchSwitching, Epoch: from, Target: to, Activation: id, Generation: gen},
 		done: make(chan struct{})})
-	x.log.Info("switching epoch in process at the committed activation", "epoch", from, "target", to, "activation", fmt.Sprintf("%X", id))
+	x.log.Info("switching epoch in process at the committed activation", "epoch", from, "target", to, "activation", fmt.Sprintf("%X", id), monitoring.Event(monitoring.EvRootEpochSwitch))
 	return &errEpochSwitch{from: from, to: to, activation: id, captured: captured, started: started}
 }
 
@@ -432,6 +433,7 @@ func (x *ConsensusManager) resetVolatile() {
 	x.retained = nil
 	x.leaderCheckedRound = 0
 	x.switchCheckedRound = 0
+	x.missedRun, x.lastTimeoutRound = 0, 0 // the successor counts its own streaks, as after a restart
 	x.posQueue.reset()
 	x.primaryCache.dropParked()
 	x.v3Planned.Store(nil)
@@ -474,7 +476,7 @@ func (x *ConsensusManager) faultSwitch(sw *errEpochSwitch, err error) {
 	x.dropFuture()
 	x.stopAcquire()
 	x.log.Error("in-process epoch switch failed: signing stays fenced and the process exits to its recovery", "epoch", sw.from, "target", sw.to,
-		logger.Error(err))
+		logger.Error(err), monitoring.Event(monitoring.EvRootEpochSwitchFail))
 }
 
 // futureMessages holds consensus messages of the epoch after the installed one that arrive before this root has committed the

@@ -25,13 +25,24 @@ type validatorChain struct {
 	chainID *big.Int
 	cfg     vrclient.ConfigView
 	module  vrclient.ModuleView
+	head    uint64 // the block vr reads at, when the chain was dialled pinned
 }
 
 func (v *loadedValidator) dial(ctx context.Context) (*validatorChain, error) {
+	return v.dialWith(ctx, false, false)
+}
+
+// dialWith dials the public RPC. pinned reads VR's configuration and module at one block (ch.vr then reads that block throughout, ch.head is its number), so a
+// boundary cannot split what one status combines; bounded bounds each response (the exporter's and status's polls).
+func (v *loadedValidator) dialWith(ctx context.Context, pinned, bounded bool) (*validatorChain, error) {
 	if v.cfg.RPC == "" {
 		return nil, fmt.Errorf("%w: no RPC endpoint (validator.json \"rpc\" or --rpc)", ErrValidator)
 	}
-	c, err := rpc.DialContext(ctx, v.cfg.RPC)
+	dial := rpc.DialContext
+	if bounded {
+		dial = dialBounded
+	}
+	c, err := dial(ctx, v.cfg.RPC)
 	if err != nil {
 		return nil, fmt.Errorf("%w: dialing %s: %w", ErrValidator, v.cfg.RPC, err)
 	}
@@ -50,6 +61,12 @@ func (v *loadedValidator) dial(ctx context.Context) (*validatorChain, error) {
 	if v.cfg.ChainID != 0 && ch.chainID.Cmp(new(big.Int).SetUint64(v.cfg.ChainID)) != 0 {
 		c.Close()
 		return nil, fmt.Errorf("%w: the RPC serves chain %s, the config expects %d", ErrValidator, ch.chainID, v.cfg.ChainID)
+	}
+	if pinned {
+		if ch.vr, ch.head, err = ch.vr.Pin(ctx); err != nil {
+			c.Close()
+			return nil, fmt.Errorf("%w: pinning the head at %s: %w", ErrValidator, v.cfg.RPC, err)
+		}
 	}
 	if ch.cfg, err = ch.vr.Config(ctx); err != nil {
 		c.Close()

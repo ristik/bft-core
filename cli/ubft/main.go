@@ -16,6 +16,17 @@ func main() {
 	ctx := quitSignalContext()
 	err := cmd.New(observability.NewFactory()).Execute(ctx)
 	if err != nil && !cancelledByQuitSignal(ctx) {
+		var coded interface {
+			ExitCode() int
+			Silent() bool
+		}
+		if errors.As(err, &coded) {
+			// `validator status --exit-code`: the verdict is the exit status; a verdict has already been printed
+			if !coded.Silent() {
+				fmt.Fprintln(os.Stderr, "Error:", err)
+			}
+			os.Exit(coded.ExitCode())
+		}
 		fmt.Fprintln(os.Stderr, "Error:", err)
 		os.Exit(1)
 	}

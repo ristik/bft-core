@@ -7,8 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ethereum/go-ethereum/rpc"
-
 	"github.com/unicitynetwork/bft-core/seed"
 )
 
@@ -43,7 +41,7 @@ func etaOf(behind int64, rate, headRate float64) string {
 }
 
 func headOf(ctx context.Context, url string) (uint64, error) {
-	c, err := rpc.DialContext(ctx, url)
+	c, err := dialBounded(ctx, url)
 	if err != nil {
 		return 0, err
 	}
