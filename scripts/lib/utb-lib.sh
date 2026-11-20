@@ -606,7 +606,7 @@ utb_selftest() {
   utb_st "the aggregator's bft-core pin is accepted when it is an ancestor of the checkout" bash -c "source '$cwd/scripts/lib/utb-lib.sh'; git -C '$cwd' cat-file -e f4f324197 2>/dev/null || exit 0; git -C '$cwd' merge-base --is-ancestor f4f324197 HEAD || exit 0; [ \"\$(utb_agg_pins_ok '$pd' '$cwd')\" = f4f324197c63 ]"
   utb_st_no "an aggregator pin that is not in the checkout's history is refused" bash -c "source '$cwd/scripts/lib/utb-lib.sh'; printf 'replace github.com/unicitynetwork/bft-core => github.com/ristik/bft-core v1.1.1-0.20261019192856-000000000000\n' >'$pd/gomod-pins.txt'; utb_agg_pins_ok '$pd' '$cwd'"
   utb_st "the aggregator environment carries the genesis, the pin and its own store" bash -c "cd '$t' && source '$cwd/scripts/lib/utb-lib.sh' && env=\$(utb_agg_env 2) && grep -q 'UTB_GENESIS_FILE=$t/test-nodes/utb-genesis.cbor' <<<\"\$env\" && grep -q 'UTB_GENESIS_ID=0x' <<<\"\$env\" && grep -q 'UTB_ENTRIES_DB=$t/test-nodes/utb-agg2.db' <<<\"\$env\""
-  utb_st "the history URL follows the aggregator's port" bash -c "source '$cwd/scripts/lib/utb-lib.sh'; [ \"\$(LANE_SLOT=1 utb_agg_history_url 2)\" = http://127.0.0.1:4002/api/v1/trustbases ]"
+  utb_st "the history URL follows the aggregator's (slot-derived) port" env LANE_SLOT=1 bash -c "source '$cwd/scripts/lib/utb-lib.sh'; [ \"\$(utb_agg_history_url 2)\" = http://127.0.0.1:4002/api/v1/trustbases ]"
   # the U3b repair judgement: a catch-up from the roots must raise the tip; responses alone, or a catch-up that only re-appends held entries, do not pass
   local rc="$cwd/scripts/lib/utb-repair-check.py"
   mkdir -p "$t/rep"
