@@ -171,4 +171,27 @@ for f in 's/"rootEpoch":5/"rootEpoch":-5/' 's/"rootEpoch":5/"rootEpoch":5.0/' 's
   cases=$((cases+1)); rules "$(echo "$row" | sed "$f")" >"$d/pb.json"; vrs_check_rules "$d/pb.json" "$rid" $E true true 2>/dev/null && fail "PYTHONOPTIMIZE: $f passes"
 done
 unset PYTHONOPTIMIZE
+# ---- postponement: VR lists B's old entry Superseded and the new one Active, each in one activations line of the rule ------------------------------------
+sline() { echo "rule ${1#0x} release $(printf 'ab%.0s' $(seq 32)) at root epoch $2, not before UC time 1795187438: $3"; }
+sstat() { python3 -c 'import json,sys; print(json.dumps({"activations": sys.argv[1:]}))' "$@"; }
+sstat "$(sline "$rid" 8 Superseded)" "$(sline "$rid" 10 Active)" >"$d/pg.json"; pp_pred() { vrs_check_postponed "$1" "$rid" 8 10; }
+sstat "$(sline "$rid" 8 Active)" "$(sline "$rid" 10 Active)" >"$d/pb.json";       mf "postponed: the old entry is not Superseded" pp_pred "$d/pg.json" "$d/pb.json" 'no Superseded'
+sstat "$(sline "$rid" 8 Superseded)" "$(sline "$rid" 10 Latched)" >"$d/pb.json";  mf "postponed: the new entry is not Active" pp_pred "$d/pg.json" "$d/pb.json" 'no Superseded'
+sstat "$(sline "$rid" 8 Superseded)" "$(sline "$rid" 11 Active)" >"$d/pb.json";   mf "postponed: another new epoch" pp_pred "$d/pg.json" "$d/pb.json" 'no Superseded'
+sstat "$(sline "$rid" 8 Superseded)" "$(sline "$other" 10 Active)" >"$d/pb.json"; mf "postponed: the Active entry is another rule's" pp_pred "$d/pg.json" "$d/pb.json" 'no Superseded'
+sstat "$(sline "$other" 8 Superseded)" "$(sline "$rid" 10 Active)" >"$d/pb.json"; mf "postponed: the Superseded entry is another rule's" pp_pred "$d/pg.json" "$d/pb.json" 'no Superseded'
+sstat "$(sline "$rid" 10 Active)" >"$d/pb.json";                                  mf "postponed: no old entry" pp_pred "$d/pg.json" "$d/pb.json" 'no Superseded'
+sstat "$(sline "$rid" 8 Superseded)" >"$d/pb.json";                               mf "postponed: no new entry" pp_pred "$d/pg.json" "$d/pb.json" 'no Superseded'
+echo '{"activations": "none"}' >"$d/pb.json";                                      mf "postponed: activations is not a list" pp_pred "$d/pg.json" "$d/pb.json" 'not a list'
+echo '{}' >"$d/pb.json";                                                           mf "postponed: no activations" pp_pred "$d/pg.json" "$d/pb.json" 'no activations'
+sstat "$(sline "$rid" 8 Superseded) and Active at root epoch 10: Active" >"$d/pb.json"; mf "postponed: both facts in ONE line" pp_pred "$d/pg.json" "$d/pb.json" 'no Superseded'
+# the change state of the refused postponement: Rejected with reason 6 on one line
+gl() { printf '  #7 schedule\n      state %s\n' "$1"; }
+gl "Rejected (reason 6)" >"$d/cg.txt"; cs_pred() { vrs_check_change_state "$1" Rejected 6; }
+gl "Rejected (reason 5)" >"$d/cb.txt"; mf "change: Rejected with another reason" cs_pred "$d/cg.txt" "$d/cb.txt"
+gl "Rejected" >"$d/cb.txt";            mf "change: Rejected without a reason" cs_pred "$d/cg.txt" "$d/cb.txt"
+gl "Active" >"$d/cb.txt";              mf "change: Active (accepted, not rejected)" cs_pred "$d/cg.txt" "$d/cb.txt"
+gl "Queued" >"$d/cb.txt";              mf "change: still Queued" cs_pred "$d/cg.txt" "$d/cb.txt"
+printf '  #7 schedule\n      note Rejected (reason 6)\n' >"$d/cb.txt"; mf "change: the words on another line" cs_pred "$d/cg.txt" "$d/cb.txt"
+: >"$d/cb.txt";                        mf "change: empty output" cs_pred "$d/cg.txt" "$d/cb.txt"
 if [ "$fails" = 0 ]; then echo "vr-schedule checks: all $cases cases pass"; else echo "vr-schedule checks: $fails failing of $cases"; exit 1; fi

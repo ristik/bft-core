@@ -126,6 +126,29 @@ bad = [e for e in r["scheduled"] + r["lacking"] if e["ruleId"].lower() == rid]
 sys.exit("the rule is already scheduled: %s" % bad if bad else 0)
 PY
 }
+# vrs_check_postponed <validator status --json> <ruleId> <oldE> <newE>: VR lists the rule's OLD entry (root epoch oldE) as Superseded and a NEW entry (root epoch newE) as Active,
+# each in ONE activations line of that rule
+vrs_check_postponed() {
+  python3 - "$@" <<'PY'
+import json, re, sys
+f, rid, old, new = sys.argv[1], sys.argv[2].lower().removeprefix("0x"), sys.argv[3], sys.argv[4]
+try:
+    acts = json.load(open(f))["activations"]
+except Exception as e:
+    sys.exit("no activations: %r" % (e,))
+if not isinstance(acts, list) or not all(isinstance(a, str) for a in acts):
+    sys.exit("activations is not a list of strings")
+def has(epoch, state):
+    pat = re.compile(r"^rule %s release [0-9a-f]{64} at root epoch %s, not before UC time [0-9]+: %s$" % (rid, epoch, state))
+    return any(pat.match(a) for a in acts)
+sys.exit(0 if has(old, "Superseded") and has(new, "Active") else "no Superseded(%s)+Active(%s) pair for the rule in %r" % (old, new, acts))
+PY
+}
+# vrs_check_change_state <governance list text> <state> [reason number]: the change is in that state (Rejected with that reason), on ONE line
+vrs_check_change_state() {
+  if [ -n "${3:-}" ]; then grep -qE "^[[:space:]]+state $2 \\(reason $3\\)\$" "$1" 2>/dev/null
+  else grep -qE "^[[:space:]]+state $2\$" "$1" 2>/dev/null; fi
+}
 # vrs_check_latched_row <validator upgrade --json> <ruleId> <epoch>: ONE schedule row has this rule, this root epoch and the state Latched
 vrs_check_latched_row() {
   python3 - "$@" <<'PY'
@@ -140,11 +163,11 @@ PY
 }
 
 vrs_dir() { mkdir -p "$VR_EVIDENCE/schedule" && echo "$VR_EVIDENCE/schedule"; }
-vrs_queue() { # name rule-name release-hex
+vrs_queue() { # name rule-name release-hex [absolute root epoch E; default: known root epoch + 3]
   local d; d=$(vrs_dir); local g=$d/$1 kd ap=() k known
   mkdir -p "$g"; kd=$(mktemp -d)
   known=$(build/ubft validator upgrade --rpc "$vrb_rpc" --json | python3 -c 'import json,sys;print(json.load(sys.stdin)["knownRootEpoch"])')
-  build/ubft governance propose schedule-activation --rpc "$vrb_rpc" --rule "$2" --release-digest "$3" --root-epoch "$((known + 3))" --not-before-in 1h5m \
+  build/ubft governance propose schedule-activation --rpc "$vrb_rpc" --rule "$2" --release-digest "$3" --root-epoch "${4:-$((known + 3))}" --not-before-in 1h5m \
     --label "VT-07a live $2" --out "$g/proposal.json" --note "VT-07a live run" 2>&1 | tee "$g/propose.log" || { vrb_log "FAIL: propose $1"; return 1; }
   for k in 0 1 2; do
     python3 -c "import json;print(json.load(open('$VR_DIR/dev-keys/keys.json'))['signers'][$k]['privateKey'])" >"$kd/s$k.key"; chmod 600 "$kd/s$k.key"
@@ -155,8 +178,21 @@ vrs_queue() { # name rule-name release-hex
   python3 -c "import json;print(json.load(open('$VR_DIR/dev-keys/keys.json'))['signers'][0]['privateKey'])" >"$kd/sender.key"; chmod 600 "$kd/sender.key"
   build/ubft governance execute --rpc "$vrb_rpc" --bundle "$g/bundle.json" --sender-key "$kd/sender.key" 2>&1 | tee "$g/execute-bundle.log" || { vrb_log "FAIL: queue $1"; return 1; }
   rm -rf "$kd"
-  vrb_log "PASS: $2 queued as change $(python3 -c "import json;print(json.load(open('$g/proposal.json'))['predictedChangeId'])") for root epoch $((known + 3))"
+  vrb_log "PASS: $2 queued as change $(python3 -c "import json;print(json.load(open('$g/proposal.json'))['predictedChangeId'])") for root epoch ${4:-$((known + 3))}"
 }
+vrs_change_id() { python3 -c "import json;print(json.load(open('$(vrs_dir)/$1/proposal.json'))['predictedChangeId'])"; }
+vrs_sender_key() { local f; f=$(mktemp); python3 -c "import json;print(json.load(open('$VR_DIR/dev-keys/keys.json'))['signers'][0]['privateKey'])" >"$f"; chmod 600 "$f"; echo "$f"; }
+# vrs_execute <name> [max seconds]: execute the queued change once its governance delays have passed (retrying until they do)
+vrs_execute() {
+  local g; g=$(vrs_dir)/$1; local id waited=0 kf; id=$(vrs_change_id "$1"); kf=$(vrs_sender_key)
+  while ! build/ubft governance execute --rpc "$vrb_rpc" --change "$id" --sender-key "$kf" >"$g/execute-change.log" 2>&1; do
+    sleep 30; waited=$((waited + 30))
+    [ "$waited" -lt "${2:-9000}" ] || { vrb_log "FAIL: change $id ($1) could not be executed within ${2:-9000}s"; tail -3 "$g/execute-change.log"; rm -f "$kf"; return 1; }
+  done
+  rm -f "$kf"; vrb_log "PASS: change $id ($1) executed after ${waited}s of retries"
+}
+vrs_gov_list() { build/ubft governance list --rpc "$vrb_rpc" --change "$(vrs_change_id "$1")" 2>&1; }
+vrs_status_json() { build/ubft validator status --rpc "$vrb_rpc" --json 2>/dev/null; }
 vrs_run() {
   local d i; d=$(vrs_dir)
   vrs_require_roots || return 1
@@ -218,8 +254,9 @@ vrs_scrape_check() { # state ruleId E: scrape shard node 4's metrics endpoint, k
 }
 vrs_upgrade_state() { build/ubft validator upgrade --rpc "$vrb_rpc" 2>&1; }
 vrs_upgrade_json() { build/ubft validator upgrade --rpc "$vrb_rpc" --json 2>/dev/null; }
-vrs_rotate() { # a new payee for identity 4 (local keys): the next election is due
-  local keys=$VR_DIR/dev-keys/keys.json owner payee cfg rid ehome= rhome= h
+vrs_rot=0
+vrs_rotate() { # a new payee for identity 4: the next election is due (SIGNING=authority: the payee is the next one the authority's policy lists)
+  local keys=$VR_DIR/dev-keys/keys.json owner payee cfg rid ehome= rhome= h evmHolder
   owner=$(python3 -c "import json;print(json.load(open('$keys'))['owners'][3]['privateKey'])")
   payee=0x$(openssl rand -hex 20)
   rid=$(python3 -c "import json;print(json.load(open('$VR_DIR/genesis-identities.json'))[3]['rootNodeId'])")
@@ -227,20 +264,51 @@ vrs_rotate() { # a new payee for identity 4 (local keys): the next election is d
   for h in test-nodes/root*/; do [ "$(build/ubft node-id --home "$h" 2>/dev/null | tail -n1)" = "$rid" ] && rhome=${h%/}; done
   for h in test-nodes/evm*/; do [ "$(build/ubft node-id --home "$h" 2>/dev/null | tail -n1)" = "$eid" ] && ehome=${h%/}; done
   cfg=$(mktemp -d); printf '%s\n' "$owner" >"$cfg/operator.key"; chmod 600 "$cfg/operator.key"; openssl rand -hex 32 >"$cfg/ureth.key"
+  evmHolder="\"evmKeys\":\"$PWD/$ehome/keys.json\""
+  if [ "${SIGNING:-local}" = authority ]; then
+    local an=${ehome#test-nodes/evm}
+    evmHolder="\"evmAuthority\":{\"socket\":\"$PWD/test-nodes/auth$an/operator.sock\",\"credential\":\"$PWD/test-nodes/auth$an/operator.cred\",\"nodeInfo\":\"$PWD/test-nodes/auth$an/node-info.json\"}"
+    vrs_rot=$((vrs_rot + 1))   # index 0 is the Boundary step's own rotation
+    payee=$(python3 -c "import json;print(json.load(open('$VR_DIR/rotate-payees-all.json'))['$an'][$vrs_rot])") || { vrb_log "FAIL: the authority policy lists no payee number $vrs_rot (VR_ROTATIONS)"; return 1; }
+  fi
   cat >"$cfg/validator.json" <<JSON
 {"format":"unicity.validator.config.v1","rpc":"$vrb_rpc","registry":"$vrb_vr","rootKeys":"$PWD/$rhome/keys.json",
- "evmKeys":"$PWD/$ehome/keys.json","urethKey":"$cfg/ureth.key","jwt":"$cfg/none","operatorKey":"$cfg/operator.key",
+ $evmHolder,"urethKey":"$cfg/ureth.key","jwt":"$cfg/none","operatorKey":"$cfg/operator.key",
  "payee":"$(python3 -c "import json;print(json.load(open('$keys'))['owners'][3]['address'])")","id":4}
 JSON
   build/ubft validator rotate --validator-config "$cfg/validator.json" --new-payee "$payee" 2>&1 | tail -3
   rm -rf "$cfg"
 }
-vrs_handoff() { # target epoch: rotate, wait for the new output, the roots' switch and VR's Boundary
-  local n=$1
+# vrs_advance_authorities <epoch> <E>: each authority signs for one scope, so the authorities advance into root epoch n (advance-with-proof) and their shard
+# nodes restart under the new sessions before the shard can acknowledge. Shard node 4 is the no_test_rule node: it restarts as that binary, and at E it
+# is expected to refuse the epoch (it is neither awaited nor advanced).
+vrs_advance_authorities() {
+  local n=$1 E=$2 i root1 pdr
+  [ -n "$(type -t vrj_advance_authorities)" ] || source scripts/vr-joiner-steps.sh
+  vrj_source_libs || return 1
+  root1="http://127.0.0.1:$(m2_rpc_port 1)"
+  for i in 1 2 3 4; do
+    [ "$i" = 4 ] && [ "$n" = "$E" ] && continue
+    vrb_wait 300 "evm$i activated root epoch $n" grep -Fq "msg=\"handoff activated\" rootEpoch=$n" "test-nodes/evm$i/debug.log" || return 1
+  done
+  build/ubft q3 trust-base --root-rpc "$root1" --epoch "$n" --out "test-nodes/trust-base-epoch$n.json" || { vrb_log "FAIL: the trust base of epoch $n"; return 1; }
+  for i in 1 2 3; do
+    H3_ONLINE="1 2 3 4" M2_ADVANCE_NO_REPLICA_WAIT=1 h3_advance_authorities "$n" 1 "$i" || { vrb_log "FAIL: the advance of authority $i into epoch $n"; return 1; }
+  done
+  if [ "$n" != "$E" ]; then
+    cp build/ubft build/ubft.default && mv build/ubft-ntr build/ubft   # shard node 4 restarts as the no_test_rule binary
+    H3_ONLINE="1 2 3 4" M2_ADVANCE_NO_REPLICA_WAIT=1 h3_advance_authorities "$n" 1 4; local rc=$?
+    mv build/ubft build/ubft-ntr && mv build/ubft.default build/ubft
+    [ "$rc" = 0 ] || { vrb_log "FAIL: the advance of authority 4 into epoch $n"; return 1; }
+  fi
+}
+vrs_handoff() { # target epoch, E: rotate, wait for the new output, the roots' switch, the authorities' advance (SIGNING=authority) and VR's Boundary
+  local n=$1 E=$2
   vrs_rotate || return 1
   vrb_wait 900 "VR's open output is Published (towards epoch $n)" vrb_published || return 1
   vrb_result=$(vrb_open_output)
   vrb_wait 900 "the roots switched to epoch $n" vrs_roots_at "$n" || return 1
+  if [ "${SIGNING:-local}" = authority ]; then vrs_advance_authorities "$n" "$E" || return 1; fi
   vrb_wait 900 "the EVM shard acknowledged and VR applied the Boundary into epoch $n" vrb_acked || return 1
 }
 vrs_long() {
@@ -259,32 +327,43 @@ vrs_long() {
   [ "$rc" != 0 ] || vrb_log "PASS: shard node 4 restarted as a no_test_rule binary"
   mv build/ubft build/ubft-ntr && mv build/ubft.default build/ubft
   [ "$rc" = 0 ] || return 1
-  # 2. queue and execute the schedule
+  # 2. queue the schedule A (noop-test-v1, E), a second rule B (postpone-test-v1, E_B=8) and two postponements together, so one 3600 s governance wait serves all:
+  #    P1 postpones B to 10 (executed before the handoff into 4: B's cutoff is epoch 6, so it is accepted), P2 postpones A to 9 (executed before the handoff into E:
+  #    successor E > E-2, past A's cutoff, so VR rejects it with PastCutoff)
+  local ridB Eb=8 Eb2=10 Ea2=9; ridB=$(vrs_rule_id postpone-test-v1)
   vrs_queue noop noop-test-v1 0x1111111111111111111111111111111111111111111111111111111111111111 || return 1
+  vrs_queue ruleb postpone-test-v1 0x3333333333333333333333333333333333333333333333333333333333333333 "$Eb" || return 1
+  vrs_queue postb postpone-test-v1 0x4444444444444444444444444444444444444444444444444444444444444444 "$Eb2" || return 1
+  vrs_queue posta noop-test-v1 0x5555555555555555555555555555555555555555555555555555555555555555 "$Ea2" || return 1
   vrb_wait 240 "shard node 4 exports unicity_upgrade_required{state=pending} for the queued rule" vrs_scrape_check pending "$(vrs_rule_id noop-test-v1)" "$E" || return 1
-  g=$d/noop; change=$(python3 -c "import json;print(json.load(open('$g/proposal.json'))['predictedChangeId'])")
-  kd=$(mktemp -d); python3 -c "import json;print(json.load(open('$VR_DIR/dev-keys/keys.json'))['signers'][0]['privateKey'])" >"$kd/sender.key"; chmod 600 "$kd/sender.key"
-  vrb_log "waiting out the governance delays (3600 s of certified time) for change $change"
-  while ! build/ubft governance execute --rpc "$vrb_rpc" --change "$change" --sender-key "$kd/sender.key" >"$g/execute-change.log" 2>&1; do
-    sleep 60; waited=$((waited + 60))
-    [ "$waited" -lt 9000 ] || { vrb_log "FAIL: the delays did not pass within 150 minutes"; tail -3 "$g/execute-change.log"; return 1; }
-  done
-  rm -rf "$kd"; cat "$g/execute-change.log"
-  vrb_log "PASS: the schedule (change $change, E=$E) was executed after ${waited}s"
+  g=$d/noop; change=$(vrs_change_id noop)
+  vrb_log "waiting out the governance delays (3600 s of certified time) for the queued changes"
+  vrs_execute noop 9000 || return 1
+  vrs_execute ruleb 600 || return 1
+  vrb_log "PASS: the schedules A (change $change, E=$E) and B (E=$Eb) were executed"
   vrs_upgrade_state >"$d/upgrade-after-execute.txt"; cat "$d/upgrade-after-execute.txt"
   # 3. one handoff per epoch up to E
   local rid; rid=$(vrs_rule_id noop-test-v1)
   vrs_check_rules_absent "$d/ureth-rules-before.json" "$rid" || { vrb_log "FAIL: ureth's baseline unicity_rulesV1 is not a valid response without the rule"; return 1; }
   vrb_log "PASS: baseline: ureth observed the head and lists no schedule for the rule"
   for i in $(seq $((known + 1)) "$E"); do
-    vrs_handoff "$i" || { vrb_log "FAIL: the handoff into epoch $i"; return 1; }
+    if [ "$i" = $((known + 2)) ]; then vrs_execute postb 600 || return 1; fi     # P1, accepted: committed in the handoff into 4 (<= B's E-2 = 6)
+    if [ "$i" = "$E" ]; then vrs_execute posta 600 || return 1; fi              # P2, past A's cutoff: committed in the handoff into E
+    vrs_handoff "$i" "$E" || { vrb_log "FAIL: the handoff into epoch $i"; return 1; }
     vrb_log "PASS: handoff into epoch $i committed"
     vrs_upgrade_state >"$d/upgrade-epoch$i.txt"; vrs_upgrade_json >"$d/upgrade-epoch$i.json"; vrs_rules >"$d/ureth-rules-epoch$i.json"
+    vrs_status_json >"$d/status-epoch$i.json"; vrs_gov_list postb >"$d/gov-postb-epoch$i.txt"; vrs_gov_list posta >"$d/gov-posta-epoch$i.txt"
   done
   # the evidence, then the checks: any missing piece fails the step (and so the lane)
   local r
   for r in 1 2 3 4; do grep -hE 'activation\.latched|activation\.active' "test-nodes/root$r/debug.log" | cut -c1-400 >"$d/root$r-activation-events.txt"; done
   grep -hE 'upgrade\.required|upgrade\.refused|UpgradeRequired' test-nodes/evm4/debug.log | cut -c1-500 >"$d/evm4-upgrade-lines.txt"
+  # (a) the postponement of B before its cutoff was accepted at the handoff into epoch 4: the old entry is Superseded and the new one Active
+  vrs_check_postponed "$d/status-epoch$((known + 2)).json" "$ridB" "$Eb" "$Eb2" || { vrb_log "FAIL: VR does not list B as Superseded(E=$Eb) + Active(E=$Eb2) after the handoff into epoch $((known + 2))"; return 1; }
+  vrb_log "PASS: the postponement of rule B (E $Eb -> $Eb2) before its cutoff was accepted: old entry Superseded, new Active"
+  # (b) the postponement of A after its cutoff (successor $E > $E-2) was refused: the change is Rejected, reason 6 (PastCutoff), and A is unchanged
+  vrs_check_change_state "$d/gov-posta-epoch$E.txt" Rejected 6 || { vrb_log "FAIL: the postponement of A past its cutoff is not Rejected (reason 6, PastCutoff): $(grep -E 'state' "$d/gov-posta-epoch$E.txt" | head -2)"; return 1; }
+  vrb_log "PASS: the postponement of rule A after its cutoff was refused: change Rejected (PastCutoff)"
   vrs_check_all_roots "$d" "$rid" "$E" 1 2 3 4 || { vrb_log "FAIL: not every root logged activation.latched and activation.active for the rule at epoch $E"; return 1; }
   vrb_log "PASS: all 4 roots logged activation.latched and activation.active for rule $rid at epoch $E"
   vrs_check_latched_row "$d/upgrade-epoch$E.json" "$rid" "$E" || { vrb_log "FAIL: VR does not list the schedule as Latched after epoch $E"; return 1; }
