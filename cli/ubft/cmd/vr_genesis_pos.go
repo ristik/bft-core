@@ -16,10 +16,10 @@ import (
 )
 
 // The PosElectionAdapter's cached metadata (src/vr/pos/PosElectionAdapter.sol): the tag, LIABILITY_HOLDER, and the gas bounds it
-// declares (the caps themselves: the measured worst case is above them, owner-questions "VT-04").
+// declares: the PoS-capable VR build's caps (5.0 / 1.5 / 2.5 M; VT-04b, astra's caps ruling), which VR takes as min(its ceiling, these).
 var (
 	vrPosTag       = vrschema.Keccak([]byte("unicity.vr.pos-p85.v1"))
-	vrPosGasBounds = [8]uint64{4_000_000, 1_000_000, 1_500_000, 10_000, 10_000, 10_000, 10_000, 10_000}
+	vrPosGasBounds = [8]uint64{5_000_000, 1_500_000, 2_500_000, 10_000, 10_000, 10_000, 10_000, 10_000}
 )
 
 // The prototype's measured deployment limit (contracts script/VRPosGenesis.s.sol, test/vr/pos/PosLimit.t.sol): a committee of at most 6 from an
