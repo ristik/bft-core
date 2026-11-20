@@ -61,13 +61,16 @@ type validatorStatusReport struct {
 	LocalRPC      string   `json:"localRpc,omitempty"`
 	LocalHead     *uint64  `json:"localHead,omitempty"`
 	LocalSync     string   `json:"localSync,omitempty"` // "in sync", "syncing …", "behind by …", "unreachable: …" or "unknown: …"
+	// Sync is the catch-up view (VT-11): height, rate, time to the head, and where the node's data came from.
+	Sync *syncView `json:"sync,omitempty"`
 	// Unknown lists every read that failed; status then exits with an error after printing what it could read.
 	Unknown []string `json:"unknown,omitempty"`
 }
 
 type validatorStatusFlags struct {
 	validatorFlags
-	JSON bool
+	JSON   bool
+	Sample time.Duration
 }
 
 func validatorStatusCmd(base *baseFlags) *cobra.Command {
@@ -94,6 +97,7 @@ func validatorStatusCmd(base *baseFlags) *cobra.Command {
 	}
 	f.validatorFlags.add(cmd)
 	cmd.Flags().BoolVar(&f.JSON, "json", false, "print the status as JSON")
+	cmd.Flags().DurationVar(&f.Sample, "sample", 3*time.Second, "how long to sample the local and public heads for the catch-up rate (0: no rate)")
 	return cmd
 }
 
@@ -319,6 +323,7 @@ func validatorStatus(ctx context.Context, f *validatorStatusFlags) (*validatorSt
 			r.Unknown = append(r.Unknown, "local sync: "+strings.TrimPrefix(r.LocalSync, "unknown: "))
 		}
 	}
+	r.Sync = buildSyncView(ctx, v, r, f.Sample)
 	if len(r.Unknown) > 0 {
 		return r, fmt.Errorf("%w: status is incomplete: %s", ErrValidator, strings.Join(r.Unknown, "; "))
 	}
@@ -409,6 +414,7 @@ func (r *validatorStatusReport) text(w io.Writer) {
 		fmt.Fprintf(w, "; local ureth %s: %s", r.LocalRPC, r.LocalSync)
 	}
 	fmt.Fprintln(w)
+	r.Sync.text(w)
 	for _, u := range r.Unknown {
 		fmt.Fprintf(w, "UNKNOWN: %s\n", u)
 	}

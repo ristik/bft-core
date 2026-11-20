@@ -682,6 +682,9 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 		mux.HandleFunc("PUT /api/v1/trustbases", trustBasesPutHandler(flags.HandoffProfile, trustBaseStore.Store))
 		mux.HandleFunc("GET /api/v1/trustbases", getTrustBaseHandler(trustBaseStore, obs))
 		mux.HandleFunc("GET /api/v1/roundInfo", getRoundInfoHandler(cm.GetState, obs))
+		if utbEntries != nil {
+			mux.HandleFunc("GET /api/v1/utb/bundle", utbBundleHandler(utbEntries, obs))
+		}
 		if committee != nil {
 			mux.HandleFunc("POST /api/v1/committee", q3Endpoint(func(context.Context, json.RawMessage) (any, error) { return committee.status(), nil }))
 		}
@@ -776,6 +779,23 @@ func getTrustBaseHandler(trustBaseStore *trustbase.TrustBaseStore, obs Observabi
 		result := &TrustBasesResponse{TrustBases: trustBases}
 		if err := writeCborResponse(w, result); err != nil {
 			obs.Logger().Error(fmt.Sprintf("failed to write response: %v", err))
+		}
+	}
+}
+
+// utbBundleHandler serves the root's complete signed trust-base history as one bundle (the GetTrustBase encoding, genesis through the tip): public,
+// read-only data that a verifier authenticates against the pinned genesis EntryID alone (`ubft seed export` takes it from here).
+func utbBundleHandler(store gettrustbase.Source, obs Observability) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		raw, err := gettrustbase.ExportStore(store)
+		if err != nil {
+			obs.Logger().Warn(fmt.Sprintf("GET utb/bundle request: %v", err))
+			http.Error(w, "failed to export the trust-base history", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/cbor")
+		if _, err := w.Write(raw); err != nil {
+			obs.Logger().Warn(fmt.Sprintf("GET utb/bundle request: failed to write response: %v", err))
 		}
 	}
 }

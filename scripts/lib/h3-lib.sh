@@ -344,8 +344,17 @@ h3_restore_validator() {
   cp "$evidence/jwt.hex" "test-nodes/evm$i/jwt.hex"
   h3_start_reth "$i" || return 1
   cp "test-nodes/evm$i/jwt.hex" "$evidence/jwt.hex"   # h3_start_reth drew a new secret for the new execution client
+  if [ -n "${H3_RESTORE_SEED_DIR:-}" ]; then
+    # VT-11: the pin is the verified seed's checkpoint (`ubft seed fetch|import` verified it against the pinned genesis), never the replica's files; the
+    # body identity is the epoch-1 trust base's, so a checkpoint of another root epoch is refused here
+    cp "$H3_RESTORE_SEED_DIR/tip-uc.cbor" "$evidence/tip.uc.cbor" && cp "$H3_RESTORE_SEED_DIR/tip-tr.cbor" "$evidence/tip.tr.cbor" || return 1
+    [ "$(build/ubft seed pin-epoch --dir "$H3_RESTORE_SEED_DIR" --utb-genesis-id "$(tr -d '[:space:]' <test-nodes/utb-genesis.id)")" = 1 ] || { echo "h3_restore_validator $i: the seed's checkpoint is not of root epoch 1" >&2; return 1; }
+    bodyID=$(build/ubft trust-base id --trust-base "$H3_RESTORE_TRUST_BASE" | tr -d '[:space:]')
+    echo "seed pin: $H3_RESTORE_SEED_DIR bodyID=$bodyID" >"$evidence/pin.txt"
+  else
   lane_go_run h4-restore-pin "$H3_ARCHIVES/evm$replica" "$H3_RESTORE_TRUST_BASE" "$evidence/tip" >"$evidence/pin.txt" || return 1
   bodyID=$(tr ' ' '\n' <"$evidence/pin.txt" | sed -n 's/^bodyID=//p')
+  fi
   rootBoot=$(m2_root_addr "$(h3_first_root)")
   bootnodes=$(evm_bootnodes_for_peers "$rootBoot" "$i" $H3_ONLINE) || return 1
   # exactly two replicas: each is two array elements (the flag and the node id)

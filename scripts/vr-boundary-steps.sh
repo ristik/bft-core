@@ -108,8 +108,10 @@ vrb_main() {
   fi
   if [ "${VR_JOINER:-0}" = 1 ]; then
     source scripts/vr-joiner-steps.sh
+    if [ "${VR_SEED:-0}" = 1 ]; then source scripts/vr-seed-steps.sh; vrs_export || return 1; vrs_tamper || return 1; vrs_fetch || return 1; fi
     vrj_start_nodes || return 1
     if [ "${VR_JOINER_FOLLOW:-0}" = 1 ]; then vrj_dev_follow || return 1; fi
+    if [ "${VR_SEED:-0}" = 1 ]; then vrs_finish || return 1; return 0; fi
     if [ "${VR_JOINER_ONLY:-0}" = 1 ]; then
       sleep 60
       for i in 5; do curl -sf -X POST -H 'Content-Type: application/json' -d '{}' "http://127.0.0.1:$(m2_rpc_port $i)/api/v1/q3/status" >"$VR_EVIDENCE/joiner-root-status.json"; done
