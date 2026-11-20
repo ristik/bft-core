@@ -1,10 +1,14 @@
 package vrschedule
 
 import (
+	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"math/big"
+	"os"
+	"path/filepath"
 	"testing"
 
 	gethtypes "github.com/ethereum/go-ethereum/core/types"
@@ -71,4 +75,67 @@ func TestVerifiedHeaderNumber(t *testing.T) {
 	raw, _ = json.Marshal(&moved)
 	_, err = VerifiedHeaderNumber(raw, h.Hash())
 	require.ErrorIs(t, err, ErrRead, "an altered number no longer hashes to the certified block")
+}
+
+// Restart (astra r6): a vr-sources.json written by an earlier build (a bare array whose evmBlockNumber is the shard round 4) is not served
+// as it stands; the observer re-resolves it by its certified hash (EVM block 3) before anything else, rewrites the file as version 2, and a
+// restarted root then serves 3, like a fresh root. An unavailable header leaves the entry unavailable (never wrong).
+func TestRestartedRootReResolvesALegacySourceByItsCertifiedHash(t *testing.T) {
+	r := vrschema.Word{0x52}
+	hash := bytes.Repeat([]byte{0x77}, 32)
+	legacy := `[{"resultId":"` + "0x" + hex.EncodeToString(r[:]) + `","evmBlockHash":"` + "0x" + hex.EncodeToString(hash) + `","evmBlockNumber":4,"certRootRound":12,"outputCommit":"` +
+		"0x" + hex.EncodeToString(bytes.Repeat([]byte{0xc0}, 32)) + `","certUcTime":1012}]`
+	path := filepath.Join(t.TempDir(), "vr-sources.json")
+	require.NoError(t, os.WriteFile(path, []byte(legacy), 0o600))
+
+	sources, err := NewSources(path)
+	require.NoError(t, err)
+	_, ok := sources.Get(r)
+	require.False(t, ok, "a legacy entry is never served with its shard round")
+	require.True(t, sources.HasLegacy())
+
+	var h [32]byte
+	copy(h[:], hash)
+	reader := &headerReader{fakeReader: &fakeReader{at: map[[32]byte]*vrhandoff.Output{}}, number: map[[32]byte]uint64{h: 3}, err: errors.New("header unavailable")}
+	o := &Observer{Reader: reader, Sources: sources, Outputs: NewOutputs()}
+	require.Error(t, o.Observe(context.Background(), cert(20, 9, 9)), "an unavailable header re-resolves nothing")
+	_, ok = sources.Get(r)
+	require.False(t, ok)
+
+	reader.err = nil
+	require.NoError(t, o.Observe(context.Background(), cert(21, 9, 9)))
+	got, ok := sources.Get(r)
+	require.True(t, ok)
+	require.EqualValues(t, 3, got.EVMBlockNumber, "the verified EVM height, not the shard round")
+	require.False(t, sources.HasLegacy())
+
+	// the file is now version 2, and a restarted root serves the same entry as the one that upgraded
+	again, err := NewSources(path)
+	require.NoError(t, err)
+	got2, ok := again.Get(r)
+	require.True(t, ok)
+	require.Equal(t, got, got2)
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Contains(t, string(raw), `"version": 2`)
+}
+
+// A reader that cannot resolve a block's number records no source: the shard round is never recorded as a height.
+func TestNoSourceIsRecordedWithoutAHeaderReader(t *testing.T) {
+	r := vrschema.Word{0x52}
+	sources, err := NewSources("")
+	require.NoError(t, err)
+	reader := &plainReader{&fakeReader{at: map[[32]byte]*vrhandoff.Output{{2}: published(r)}}}
+	o := &Observer{Reader: reader, Sources: sources, Outputs: NewOutputs()}
+	require.NoError(t, o.Observe(context.Background(), cert(10, 1, 1)))
+	require.Error(t, o.Observe(context.Background(), cert(11, 2, 2)))
+	_, ok := sources.Get(r)
+	require.False(t, ok)
+}
+
+// plainReader exposes only OpenOutput.
+type plainReader struct{ f *fakeReader }
+
+func (p *plainReader) OpenOutput(ctx context.Context, b, root [32]byte) (*vrhandoff.Output, error) {
+	return p.f.OpenOutput(ctx, b, root)
 }

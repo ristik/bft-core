@@ -23,6 +23,9 @@ type queuedFake struct {
 func (queuedFake) OpenOutput(context.Context, [32]byte, [32]byte) (*vrhandoff.Output, error) {
 	return nil, nil // VR has no open output
 }
+func (queuedFake) HeaderNumber(_ context.Context, h [32]byte) (uint64, error) {
+	return uint64(h[0]), nil
+}
 func (f queuedFake) QueuedSchedules(_ context.Context, h [32]byte) ([]vrschema.Activation, error) {
 	*f.got = append(*f.got, h)
 	return f.queued, nil

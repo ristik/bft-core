@@ -24,6 +24,13 @@ type SourceEntry struct {
 	CertUCTime uint64
 }
 
+// sourcesFileV2 is the persisted form: versioned, so a file written before the source carried the verified EVM block number (a bare JSON
+// array, whose evmBlockNumber is the shard round) is recognised and re-resolved by its certified hash before any entry is served.
+type sourcesFileV2 struct {
+	Version int          `json:"version"`
+	Sources []sourceFile `json:"sources"`
+}
+
 type sourceFile struct {
 	ResultID       hex.Bytes `json:"resultId"`
 	EVMBlockHash   hex.Bytes `json:"evmBlockHash"`
@@ -46,11 +53,15 @@ type Sources struct {
 	path  string
 	order []vrschema.Word
 	by    map[vrschema.Word]SourceEntry
+	// legacy are the entries of a version 1 file: their number is the shard round of the build that wrote them. They are never served; Upgrade
+	// re-resolves each by its certified block hash (header hash verified) and replaces the number, so a restarted root and a fresh root
+	// derive the same intent digest.
+	legacy map[vrschema.Word]SourceEntry
 }
 
 // NewSources reads path (if it exists); an empty path keeps the sources in memory.
 func NewSources(path string) (*Sources, error) {
-	s := &Sources{path: path, by: map[vrschema.Word]SourceEntry{}}
+	s := &Sources{path: path, by: map[vrschema.Word]SourceEntry{}, legacy: map[vrschema.Word]SourceEntry{}}
 	if path == "" {
 		return s, nil
 	}
@@ -62,8 +73,18 @@ func NewSources(path string) (*Sources, error) {
 		return nil, err
 	}
 	var fs []sourceFile
-	if err := json.Unmarshal(raw, &fs); err != nil {
-		return nil, fmt.Errorf("vrschedule: %s: %w", path, err)
+	legacy := false
+	if t := bytes.TrimSpace(raw); len(t) > 0 && t[0] == '[' {
+		legacy = true
+		if err := json.Unmarshal(raw, &fs); err != nil {
+			return nil, fmt.Errorf("vrschedule: %s: %w", path, err)
+		}
+	} else {
+		var v2 sourcesFileV2
+		if err := json.Unmarshal(raw, &v2); err != nil || v2.Version != 2 {
+			return nil, fmt.Errorf("vrschedule: %s: not a sources file of version 2: %v", path, err)
+		}
+		fs = v2.Sources
 	}
 	for _, f := range fs {
 		if len(f.ResultID) != 32 || len(f.EVMBlockHash) != 32 || len(f.OutputCommit) != 32 || f.CertRootRound == 0 {
@@ -71,10 +92,55 @@ func NewSources(path string) (*Sources, error) {
 		}
 		r := vrschema.Word(f.ResultID)
 		s.order = append(s.order, r)
-		s.by[r] = SourceEntry{Source: vrhandoff.Source{ResultID: f.ResultID, EVMBlockHash: f.EVMBlockHash, EVMBlockNumber: f.EVMBlockNumber,
+		e := SourceEntry{Source: vrhandoff.Source{ResultID: f.ResultID, EVMBlockHash: f.EVMBlockHash, EVMBlockNumber: f.EVMBlockNumber,
 			CertRootRound: f.CertRootRound, OutputCommit: f.OutputCommit}, CertUCTime: f.CertUCTime}
+		if legacy {
+			s.legacy[r] = e
+		} else {
+			s.by[r] = e
+		}
 	}
 	return s, nil
+}
+
+// HasLegacy reports whether entries of a version 1 file still await Upgrade.
+func (s *Sources) HasLegacy() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.legacy) > 0
+}
+
+// Upgrade re-resolves every legacy entry by its certified block hash (hr verifies the header's hash) and serves it with the true EVM
+// block number; the file is rewritten as version 2. It stops at the first failure and leaves the rest unavailable (never wrong): the
+// observer retries it with its next observation. It returns how many entries it upgraded and how many changed their number.
+func (s *Sources) Upgrade(ctx context.Context, hr HeaderReader) (upgraded, changed int, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, r := range append([]vrschema.Word(nil), s.order...) {
+		e, ok := s.legacy[r]
+		if !ok {
+			continue
+		}
+		var h [32]byte
+		copy(h[:], e.EVMBlockHash)
+		n, herr := hr.HeaderNumber(ctx, h)
+		if herr != nil {
+			return upgraded, changed, herr
+		}
+		if n != e.EVMBlockNumber {
+			changed++
+		}
+		e.EVMBlockNumber = n
+		s.by[r] = e
+		delete(s.legacy, r)
+		upgraded++
+	}
+	if upgraded > 0 {
+		if perr := s.persist(s.order, func(x vrschema.Word) SourceEntry { return s.by[x] }); perr != nil {
+			return upgraded, changed, perr
+		}
+	}
+	return upgraded, changed, nil
 }
 
 // Get is R's committed source.
@@ -96,6 +162,9 @@ func (s *Sources) Record(e SourceEntry) (bool, error) {
 	defer s.mu.Unlock()
 	if _, ok := s.by[r]; ok {
 		return false, nil
+	}
+	if _, ok := s.legacy[r]; ok {
+		return false, nil // a legacy entry of R is re-resolved by Upgrade, never replaced by a fresh observation
 	}
 	order := append(append([]vrschema.Word(nil), s.order...), r)
 	evicted := map[vrschema.Word]bool{}
@@ -127,10 +196,13 @@ func (s *Sources) persist(order []vrschema.Word, by func(vrschema.Word) SourceEn
 	fs := make([]sourceFile, 0, len(order))
 	for _, r := range order {
 		e := by(r)
+		if _, legacy := s.legacy[r]; legacy {
+			continue // an unresolved legacy entry is not rewritten as a verified one
+		}
 		fs = append(fs, sourceFile{ResultID: e.ResultID, EVMBlockHash: e.EVMBlockHash, EVMBlockNumber: e.EVMBlockNumber, CertRootRound: e.CertRootRound,
 			OutputCommit: e.OutputCommit, CertUCTime: e.CertUCTime})
 	}
-	raw, err := json.MarshalIndent(fs, "", " ")
+	raw, err := json.MarshalIndent(sourcesFileV2{Version: 2, Sources: fs}, "", " ")
 	if err != nil {
 		return err
 	}
@@ -222,8 +294,8 @@ type Reader interface {
 	OpenOutput(ctx context.Context, blockHash, stateRoot [32]byte) (*vrhandoff.Output, error)
 }
 
-// HeaderReader is the optional read of a certified block's true EVM number by its hash (RPC implements it, verifying the header's hash).
-// A Reader without it records the shard round, which is only right while no shard round was skipped: production readers implement it.
+// HeaderReader is the read of a certified block's true EVM number by its hash (RPC implements it, verifying the header's hash). A reader
+// without it records no source: the shard round is never recorded as a block number.
 type HeaderReader interface {
 	HeaderNumber(ctx context.Context, blockHash [32]byte) (uint64, error)
 }
@@ -270,6 +342,16 @@ type Observer struct {
 func (o *Observer) Observe(ctx context.Context, c CertifiedEVM) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	if hr, ok := o.Reader.(HeaderReader); ok && o.Sources != nil && o.Sources.HasLegacy() {
+		// a file of an earlier build: its numbers are shard rounds. They are re-resolved by hash before any source is served or recorded
+		up, changed, err := o.Sources.Upgrade(ctx, hr)
+		if o.Log != nil && up > 0 {
+			o.Log.Warn("VR sources of an earlier build re-resolved by their certified hashes", "sources", up, "numberCorrected", changed)
+		}
+		if err != nil {
+			return err
+		}
+	}
 	primed, lastRound := o.primed, o.lastRound
 	continuous := primed && c.RootRound > 0 && c.ParentRound == lastRound
 	out, cached := o.Outputs.At(c.StateRoot)
@@ -303,14 +385,15 @@ func (o *Observer) Observe(ctx context.Context, c CertifiedEVM) error {
 	}
 	// the true EVM block number of the first certified block publishing R, from its header by hash. An unavailable header observes nothing:
 	// the run is restored and the worker retries this very block, exactly as for a source that is not durable
-	number := c.ShardRound
-	if hr, ok := o.Reader.(HeaderReader); ok {
-		n, herr := hr.HeaderNumber(ctx, c.BlockHash)
-		if herr != nil {
-			o.primed, o.lastRound, o.prev = primed, lastRound, prev
-			return herr
-		}
-		number = n
+	hr, ok := o.Reader.(HeaderReader)
+	if !ok {
+		o.primed, o.lastRound, o.prev = primed, lastRound, prev
+		return errors.New("vrschedule: the reader cannot resolve a certified block's number: no source is recorded with a shard round")
+	}
+	number, herr := hr.HeaderNumber(ctx, c.BlockHash)
+	if herr != nil {
+		o.primed, o.lastRound, o.prev = primed, lastRound, prev
+		return herr
 	}
 	recorded, err := o.Sources.Record(SourceEntry{Source: vrhandoff.Source{ResultID: bytes.Clone(r[:]), EVMBlockHash: bytes.Clone(c.BlockHash[:]),
 		EVMBlockNumber: number, CertRootRound: c.RootRound, OutputCommit: bytes.Clone(out.State.Output.OutputCommit[:])}, CertUCTime: c.RootUCTime})

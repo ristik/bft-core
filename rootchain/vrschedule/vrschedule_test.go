@@ -38,6 +38,15 @@ func (f *fakeReader) OpenOutput(_ context.Context, _, root [32]byte) (*vrhandoff
 	return f.at[root], nil
 }
 
+// HeaderNumber: the fixtures certify block hash {b} at EVM height b (cert), so the true number is the hash's first byte.
+func (f *fakeReader) HeaderNumber(_ context.Context, h [32]byte) (uint64, error) {
+	return uint64(h[0]), nil
+}
+
+func (f *flakyReader) HeaderNumber(_ context.Context, h [32]byte) (uint64, error) {
+	return uint64(h[0]), nil
+}
+
 func published(r vrschema.Word) *vrhandoff.Output {
 	return &vrhandoff.Output{State: vradmit.OutputState{ResultID: r, OpenOutput: r, Output: vrschema.OutputRecord{State: vrschema.OutPublished, OutputCommit: vrschema.Word{0xc0}}}}
 }
