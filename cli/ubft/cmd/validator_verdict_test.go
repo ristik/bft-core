@@ -97,6 +97,13 @@ func TestStatusAndExporterPreserveModuleFaultWhenScheduleIsUnknown(t *testing.T)
 	require.Contains(t, report.Unknown[0], "activation schedule:")
 	require.Equal(t, "module_unhealthy", report.Findings[0].Code)
 
+	text, err := runValidator(t, home, "status", "--exit-code", "--id", "1")
+	require.ErrorAs(t, err, &coded)
+	require.Equal(t, ExitCritical, coded.ExitCode())
+	require.Contains(t, text, "activation schedule: unknown")
+	require.Contains(t, text, "UNKNOWN: activation schedule:")
+	require.NotContains(t, text, "activation schedule: empty")
+
 	e := &validatorExporter{
 		flags: &validatorStatusFlags{validatorFlags: validatorFlags{baseFlags: &baseFlags{}, Config: filepath.Join(home, validatorConfigFile), ID: 1}},
 		log:   slog.Default(),
@@ -108,6 +115,14 @@ func TestStatusAndExporterPreserveModuleFaultWhenScheduleIsUnknown(t *testing.T)
 	require.Equal(t, []float64{0}, metrics["unicity_upgrade_schedule_known"])
 	require.NotContains(t, metrics, "unicity_upgrade_required")
 	require.NotContains(t, metrics, "unicity_vr_activations")
+
+	chain.With(func(c *vrfake.Chain) { c.FailActivations = false })
+	text, err = runValidator(t, home, "status", "--exit-code", "--id", "1")
+	require.ErrorAs(t, err, &coded)
+	require.Equal(t, ExitCritical, coded.ExitCode())
+	require.Contains(t, text, "activation schedule: empty")
+	require.NotContains(t, text, "activation schedule: unknown")
+
 }
 
 func TestHeadOfRejectsOversizedResponse(t *testing.T) {

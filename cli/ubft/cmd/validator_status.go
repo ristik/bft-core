@@ -510,7 +510,9 @@ func (r *validatorStatusReport) text(w io.Writer) {
 	fmt.Fprintf(w, "clock: progress %d, UC time %d, epoch started at progress %d; root records %d of %d imported\n", r.Progress, r.UcTime, r.EpochStart,
 		r.RecordCursor, r.RecordCount)
 	fmt.Fprintf(w, "next boundary: %s\n", r.NextBoundary)
-	if len(r.Activations) == 0 {
+	if !r.ScheduleKnown {
+		fmt.Fprintln(w, "activation schedule: unknown")
+	} else if len(r.Activations) == 0 {
 		fmt.Fprintln(w, "activation schedule: empty")
 	}
 	for _, a := range r.Activations {

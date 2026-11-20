@@ -7,7 +7,7 @@
 # Needs sudo for iptables and mount. Only this lane's processes and ports are touched; every induced condition is undone.
 set -euo pipefail
 VT12_SOURCE_ONLY=1 source scripts/vt12-monitoring.sh ""
-EVID=${EVID:-$HOME/evidence/vt12/live}; mkdir -p "$EVID"
+EVID=${EVID:-$HOME/evidence/vt12/live}
 PROM=http://127.0.0.1:${MON_PROM_PORT:-19090}
 GRAFANA=http://127.0.0.1:${MON_GRAFANA_PORT:-13000}
 MON=${MON_DIR:-test-nodes/monitoring}
@@ -26,9 +26,15 @@ try:
     alerts=payload['data']['alerts']
     if payload['status']!='success' or not isinstance(alerts,list):
         sys.exit(2)
-    for a in alerts:
-        labels=a['labels']
-        if a['state']=='firing' and labels.get('alertname')==name and all(labels.get(k)==v for k,v in want.items()):
+    for alert in alerts:
+        labels=alert['labels']
+        if alert['state'] not in ('inactive','pending','firing') or not isinstance(labels,dict):
+            sys.exit(2)
+        if not isinstance(labels['alertname'],str) or any(not isinstance(v,str) for v in labels.values()):
+            sys.exit(2)
+    for alert in alerts:
+        labels=alert['labels']
+        if alert['state']=='firing' and labels['alertname']==name and all(labels.get(k)==v for k,v in want.items()):
             sys.exit(0)
 except (ValueError, KeyError, TypeError, AttributeError):
     sys.exit(2)
@@ -96,13 +102,6 @@ resume_reth() {
   fi
   paused_pid=
 }
-paused_pid= dpid= spid= disk_mount= blocked=
-p2p_port=$(lane_port 26663)
-peer_rule=(-i lo -p tcp -m multiport --ports "$p2p_port" -m comment --comment "vt12-$BASHPID" -j DROP)
-sudo -n true
-work=$(mktemp -d)
-test -r "$MON/prometheus.yml"
-cp "$MON/prometheus.yml" "$work/prometheus.yml"
 unblock_peers() {
   if [ -n "$blocked" ]; then
     sudo -n iptables -D INPUT "${peer_rule[@]}"
@@ -113,9 +112,28 @@ restore_scrapes() {
   cat "$work/prometheus.yml" >"$MON/prometheus.yml"
   curl -fsS --max-time 10 -X POST "$PROM/-/reload" >/dev/null
 }
+restart_stopped_exporter() {
+  [ -n "$stopped_exporter_pid" ] || return 0
+  local attempt pattern='ubft validator exporter.*v3.json'
+  # The trap may run before the original process finishes shutting down.
+  if owned_pid "$stopped_exporter_pid" "$pattern"; then
+    kill "$stopped_exporter_pid" 2>/dev/null || true
+    for attempt in {1..20}; do
+      owned_pid "$stopped_exporter_pid" "$pattern" || break
+      sleep 0.25
+    done
+    if owned_pid "$stopped_exporter_pid" "$pattern"; then
+      echo "Validator 3 exporter did not stop" >&2
+      return 1
+    fi
+  fi
+  start_exporter 3 || return 1
+  stopped_exporter_pid=
+}
 cleanup() {
   trap '' INT TERM HUP
   set +e
+  restart_stopped_exporter || echo "Failed to restore validator 3 exporter" >&2
   resume_reth
   unblock_peers
   [ -z "$dpid" ] || kill "$dpid" 2>/dev/null
@@ -126,9 +144,6 @@ cleanup() {
   rmdir "$work/tmpfs-disk" "$work/stub" 2>/dev/null || true
   rmdir "$work"
 }
-trap cleanup EXIT
-trap 'exit 143' INT TERM HUP
-
 check_upgrade() {
   log "== pending upgrade: scrape the VT-07 metric"
   if [ -n "${VT12_VT07_PORT:-}" ]; then
@@ -222,12 +237,14 @@ check_disk() {
 check_scrape() {
   log "== scrape failure: validator 3's exporter stopped"
   expect_quiet UnicityTargetDown validator=3 job=vrexporter
+  local exporter_pid
   exporter_pid=$(cat "$MON/exporter3.pid")
   owned_pid "$exporter_pid" 'ubft validator exporter.*v3.json'
+  stopped_exporter_pid=$exporter_pid
   kill "$exporter_pid"
   wait_for firing 120 UnicityTargetDown validator=3 job=vrexporter
   snap target-down
-  start_exporter 3
+  restart_stopped_exporter
   wait_for quiet 120 UnicityTargetDown validator=3 job=vrexporter
 }
 
@@ -255,6 +272,9 @@ PYPNG
   log "PASS: Grafana returned a dashboard PNG"
 }
 
+# Allow the regression tests to load the checks without touching a live lane.
+if [ "${BASH_SOURCE[0]}" != "$0" ]; then return 0; fi
+
 if [ "$#" -eq 0 ]; then
   set -- upgrade evm peers disk scrape rpc dashboard
 fi
@@ -264,6 +284,17 @@ for scenario in "$@"; do
     *) echo "Unknown acceptance scenario: $scenario" >&2; exit 2 ;;
   esac
 done
+
+mkdir -p "$EVID"
+paused_pid= dpid= spid= disk_mount= blocked= stopped_exporter_pid=
+p2p_port=$(lane_port 26663)
+peer_rule=(-i lo -p tcp -m multiport --ports "$p2p_port" -m comment --comment "vt12-$BASHPID" -j DROP)
+sudo -n true
+work=$(mktemp -d)
+test -r "$MON/prometheus.yml"
+cp "$MON/prometheus.yml" "$work/prometheus.yml"
+trap cleanup EXIT
+trap 'exit 143' INT TERM HUP
 
 log "== baseline: targets, scraped unicity_* series, rule evaluation"
 api api/v1/targets >"$EVID/targets.json"

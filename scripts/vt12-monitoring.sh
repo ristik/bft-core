@@ -50,16 +50,30 @@ PYID
 }
 
 start_exporter() {
-  local i=$1 custody=
+  local i=$1 custody= pid attempt
+  local port=$((29400 + i))
   local -a extra=()
   if [ -r "${VR_DIR:-test-nodes/vr}/contracts/deployment.json" ]; then
-    custody=$(jq -r '.custody // empty' "${VR_DIR:-test-nodes/vr}/contracts/deployment.json")
+    custody=$(jq -r '.custody // empty' "${VR_DIR:-test-nodes/vr}/contracts/deployment.json") || return 1
     [ -z "$custody" ] || extra+=(--custody "$custody")
   fi
-  nohup build/ubft validator exporter --validator-config "$MON/v$i.json" --listen "127.0.0.1:$((29400 + i))" --interval 5s \
+  nohup build/ubft validator exporter --validator-config "$MON/v$i.json" --listen "127.0.0.1:$port" --interval 5s \
     --root-metrics "http://127.0.0.1:$(lane_port "$((25865 + i))")/api/v1/metrics" --disk-path "ureth=test-nodes/reth$i" "${extra[@]}" \
     --log-format text --log-level info >"$MON/exporter$i.log" 2>&1 </dev/null &
-  echo $! >"$MON/exporter$i.pid"
+  pid=$!
+  if ! echo "$pid" >"$MON/exporter$i.pid"; then
+    kill "$pid" 2>/dev/null || true
+    return 1
+  fi
+  for attempt in {1..20}; do
+    if owned_pid "$pid" 'ubft validator exporter' && curl -fsS --max-time 1 "http://127.0.0.1:$port/metrics" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  stop_pidfile "$MON/exporter$i.pid" 'ubft validator exporter'
+  echo "Validator $i exporter did not start on port $port" >&2
+  return 1
 }
 
 start_exporters() {
