@@ -457,6 +457,7 @@ func (x *ConsensusManager) setHandoffIntent(plan abdrc.HandoffApprovalMsg) {
 	cloned.Receipts = bytes.Clone(plan.Receipts)
 	cloned.PrimaryPoPs = bytes.Clone(plan.PrimaryPoPs)
 	x.handoffIntent = &cloned
+	x.handoffIntentGen++
 	x.prefetchFactsForPlan(plan.CandidatePreimage)
 }
 
@@ -472,6 +473,17 @@ func (x *ConsensusManager) retireIntent(control *evmroot.ControlState) {
 	if x.handoffIntent != nil && x.handoffIntent.Attempt <= control.Attempt {
 		x.handoffIntent = nil
 	}
+}
+
+// pendingIntentGen is pendingIntent with the generation of the registration it read.
+func (x *ConsensusManager) pendingIntentGen(attempt uint64) (*abdrc.HandoffApprovalMsg, uint64) {
+	x.handoffMu.Lock()
+	defer x.handoffMu.Unlock()
+	if x.handoffIntent == nil || x.handoffIntent.Attempt != attempt {
+		return nil, 0
+	}
+	cloned := *x.handoffIntent
+	return &cloned, x.handoffIntentGen
 }
 
 // pendingIntent is the held intent for the given attempt, or nil. An intent for another attempt or another epoch is dead.

@@ -142,14 +142,12 @@ func isRecoveryPlan(plan abdrc.HandoffApprovalMsg) (evmassign.Candidate, bool) {
 }
 
 // dropRecoveryIntent forgets the held intent when it is a recovery of attempt (the pending condition is gone, or it was never eligible).
-func (x *ConsensusManager) dropRecoveryIntent(checked abdrc.HandoffApprovalMsg) {
+func (x *ConsensusManager) dropRecoveryIntent(gen uint64) {
 	x.handoffMu.Lock()
 	defer x.handoffMu.Unlock()
-	// only the instance that was judged: a replacement request that arrived meanwhile is kept
-	if in := x.handoffIntent; in != nil && in.Attempt == checked.Attempt && bytes.Equal(in.Candidate, checked.Candidate) && bytes.Equal(in.Body, checked.Body) {
-		if _, ok := isRecoveryPlan(*in); ok {
-			x.handoffIntent = nil
-		}
+	// only the registration that was judged: a retry that registered the same plan meanwhile is a new registration and stays
+	if x.handoffIntent != nil && x.handoffIntentGen == gen {
+		x.handoffIntent = nil
 	}
 }
 
@@ -219,7 +217,7 @@ func (x *ConsensusManager) vrRecoveryRoute(parent *storage.ExecutedBlock, contro
 	if st, err := vradmit.DecodeRootState(control.VR); err != nil || st.Backoff.Epoch != control.Epoch || st.Backoff.Attempt != attempt {
 		return false
 	}
-	intent := x.pendingIntent(attempt)
+	intent, gen := x.pendingIntentGen(attempt)
 	if intent == nil {
 		return false
 	}
@@ -233,7 +231,7 @@ func (x *ConsensusManager) vrRecoveryRoute(parent *storage.ExecutedBlock, contro
 	}
 	if err := eligible(parent, c); err != nil {
 		x.log.Info("VR recovery: the request is dropped", "round", round, "attempt", attempt, "reason", err)
-		x.dropRecoveryIntent(*intent)
+		x.dropRecoveryIntent(gen)
 		return false
 	}
 	x.log.Info("VR recovery: the leader orders the Prepare of the exact recovery", "round", round, "attempt", attempt)

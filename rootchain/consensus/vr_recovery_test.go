@@ -165,6 +165,26 @@ func TestVRRecoveryRoute(t *testing.T) {
 	require.False(t, x.vrRecoveryRoute(w.block, &evmroot.ControlState{Epoch: 2, Phase: "aborted", Attempt: 7, VR: vrBytes(t, 2, 8)}, 30), "another attempt's intent is dead")
 }
 
+// A failed eligibility read must not clear a retry that registered the very same plan while the check was in flight.
+func TestVRRecoveryDropIsPerRegistration(t *testing.T) {
+	w := newRecoveryWorld(t)
+	x := w.r.manager
+	plan := recoveryPlanOf(w, 0, 2)
+	x.setHandoffIntent(plan)
+	x.vr = &vrHandoff{recoveryEligible: func(*storage.ExecutedBlock, evmassign.Candidate) error {
+		x.setHandoffIntent(plan) // the operator retries: identical bytes, a new registration
+		return errors.New("read error")
+	}}
+	idle := &evmroot.ControlState{Epoch: 2, Phase: "idle", VR: vrBytes(t, 2, 0)}
+	require.False(t, x.vrRecoveryRoute(w.block, idle, 20))
+	require.NotNil(t, x.pendingIntent(0), "the retry's registration survives the earlier check's failure")
+
+	// without an interleaved retry the failed check drops it
+	x.vr.recoveryEligible = func(*storage.ExecutedBlock, evmassign.Candidate) error { return errors.New("read error") }
+	require.False(t, x.vrRecoveryRoute(w.block, idle, 21))
+	require.Nil(t, x.pendingIntent(0))
+}
+
 func TestVRRecoveryRouteFollowsTheCommittedPrepare(t *testing.T) {
 	w := newRecoveryWorld(t)
 	x := w.r.manager

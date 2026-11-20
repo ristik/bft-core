@@ -161,7 +161,9 @@ type (
 		handoffPlans map[[32]byte]*pendingHandoff
 		// handoffIntent is the operator plan this validator holds for the leader to order a Prepare for: unsigned, naming no parent.
 		handoffIntent *abdrc.HandoffApprovalMsg
-		handoffAborts map[handoffAbortKey]*pendingHandoffAbort
+		// handoffIntentGen counts the registrations of an intent (setHandoffIntent): a later cleanup of an intent it judged drops only that registration
+		handoffIntentGen uint64
+		handoffAborts    map[handoffAbortKey]*pendingHandoffAbort
 
 		// the in-process epoch switch (#1086, epoch_switch.go): the process's switch, the barrier (held by a switch from Switching until
 		// the successor is published; the operator entry points hold its read side), the context generation, the published switch state,
