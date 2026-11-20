@@ -23,7 +23,7 @@ ssh -o IdentitiesOnly=yes -o HostKeyAlgorithms=ecdsa-sha2-nistp256 \
 
 Use a dedicated Linux service account, a synchronized clock and persistent SSD storage. Allow inbound root and shard libp2p TCP and the release's ureth devp2p ports. Use outbound access to the public RPC, seed and peers. Keep operator RPC, metrics, Engine API and signing sockets on loopback or a private admin network. Archive replay needs the local ureth debug API for header witnesses. The reference host has 6 CPU cores / 12 threads, 64 GB RAM and two 1 TB NVMe drives. Size for your release and retention policy, and check `validator doctor`.
 
-Install the matching Linux `ubft` and `unicity-reth` from the release's checksum manifest. The rehearsal release is built for Linux x86-64. These examples use Bash, curl, jq and the GNU core utilities. Run them from a fresh login shell. Keep the same values when supervising services or starting another shell.
+Install the matching Linux `ubft` and `unicity-reth` from the release's checksum manifest. The rehearsal release is built for Linux x86-64. These examples use Bash, curl, jq, GnuPG and the GNU core utilities. Run them from a fresh login shell. Keep the same values when supervising services or starting another shell.
 
 ```bash
 umask 077
@@ -86,6 +86,7 @@ ubft signing-authority run --home "$UBFT_HOME/authority" --authority-id "$SHARD_
   --pop-socket "$UBFT_HOME/authority/pop.sock" --pop-credential "$UBFT_HOME/authority/pop.cred" \
   --registration-policy "$UBFT_HOME/authority/registration.json" --dev-allow-late-pos-policy \
   --metrics-address 127.0.0.1:29352 >logs/authority.log 2>&1 &
+AUTHORITY_PID=$!
 ```
 
 A pending authority is scoped to the shard epoch that will first name it. On the rehearsal lane the genesis shard epoch is 0 and every handoff is coupled, so the current root epoch is the next shard epoch. On another deployment, set `NEXT_SHARD_EPOCH` to the successor shard epoch published for your admission.
@@ -101,7 +102,20 @@ ubft validator init --force --rpc "$RPC_URL" --chain-id "$CHAIN_ID" --ports 2665
 ubft validator doctor
 ```
 
-Fund the printed operator address with the bond plus transaction gas using the release's funding instructions. Back up the root keys, shard peer identity, operator key, ureth p2p secret and service configuration using encrypted storage. Keep the JWT and credentials private. Start only one instance per identity. Always pass the same `--p2p-secret-key` to ureth so its enode survives a datadir rebuild.
+Fund the printed operator address with the bond plus transaction gas using the release's funding instructions. For a local rehearsal backup, run this from the validator home in your SSH terminal. GnuPG asks you to choose and confirm a fresh backup passphrase. Keep it out of the operator log.
+
+```bash
+export GPG_TTY=$(tty)
+install -d -m 700 "$HOME/validator-backups"
+BACKUP="$HOME/validator-backups/validator-$(date -u +%Y%m%dT%H%M%SZ).tar.gz.gpg"
+tar -czf - root/keys.json evm/keys.json ureth-key/p2p-secret operator/key validator.json | \
+  gpg --symmetric --cipher-algo AES256 --output "$BACKUP"
+gpg --decrypt "$BACKUP" | tar -tzf -
+```
+
+The second command lists the encrypted archive's entries without writing a decrypted archive. Keep the JWT and authority credentials private. Start only one instance per identity. Always pass the same `--p2p-secret-key` to ureth so its enode survives a datadir rebuild.
+
+Before applying, check that `validator status --sample 0 --json` still reports the `ROOT_EPOCH` captured above. If an incumbent handoff completed before your first registration, the pending authority may be scoped to the previous successor. In that case, stop only your still-pending authority using its saved `AUTHORITY_PID`. Re-read the current `ROOT_EPOCH`, update `NEXT_SHARD_EPOCH`, and repeat the authority run command with the existing policy and credentials. Write the replacement node info to a fresh filename, then point `validator init --force` at that file. Keep the same wallet, payee, root keys and shard peer identity. Once registration has committed, consult the Foundation before changing the authority or its binding.
 
 ## 3. Verify the seed and start as a follower
 
