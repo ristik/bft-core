@@ -1283,6 +1283,9 @@ func (x *ConsensusManager) handoffRecordsForRound(round uint64, parentQC *rctype
 		if intent == nil {
 			return nil, nil
 		}
+		if x.vr != nil && len(control.VR) != 0 && !x.vrRecoveryIntentOK(parent, *intent) {
+			return nil, nil // the intent changed since the route judged it: ordered next round, if eligible
+		}
 		// a due election result is rejected first (contracts#73): the Prepare waits for a later round, its intent kept
 		reject := x.preferRejection
 		if x.vr != nil && x.vr.reject != nil {

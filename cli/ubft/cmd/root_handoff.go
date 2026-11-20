@@ -231,6 +231,10 @@ func newRootCmd() *cobra.Command {
 		for attemptNo := 1; ; attemptNo++ {
 			accepted, err := proposeOnce(cmd.Context(), client, endpoints, request, prepareTimeout, attemptNo > 1)
 			if err == nil {
+				if vrRecovery {
+					_, err = fmt.Fprintf(cmd.OutOrStdout(), "submitted %d root endorsements for the VR recovery\n", accepted)
+					return err
+				}
 				_, err = fmt.Fprintf(cmd.OutOrStdout(), "submitted %d root endorsements for epoch %d\n", accepted, epoch)
 				return err
 			}

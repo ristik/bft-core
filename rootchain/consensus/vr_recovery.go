@@ -113,11 +113,12 @@ func isRecoveryPlan(plan abdrc.HandoffApprovalMsg) (evmassign.Candidate, bool) {
 }
 
 // dropRecoveryIntent forgets the held intent when it is a recovery of attempt (the pending condition is gone, or it was never eligible).
-func (x *ConsensusManager) dropRecoveryIntent(attempt uint64) {
+func (x *ConsensusManager) dropRecoveryIntent(checked abdrc.HandoffApprovalMsg) {
 	x.handoffMu.Lock()
 	defer x.handoffMu.Unlock()
-	if x.handoffIntent != nil && x.handoffIntent.Attempt == attempt {
-		if _, ok := isRecoveryPlan(*x.handoffIntent); ok {
+	// only the instance that was judged: a replacement request that arrived meanwhile is kept
+	if in := x.handoffIntent; in != nil && in.Attempt == checked.Attempt && bytes.Equal(in.Candidate, checked.Candidate) && bytes.Equal(in.Body, checked.Body) {
+		if _, ok := isRecoveryPlan(*in); ok {
 			x.handoffIntent = nil
 		}
 	}
@@ -140,6 +141,20 @@ func (x *ConsensusManager) heldRecoveryBody(control *evmroot.ControlState) bool 
 		}
 	}
 	return false
+}
+
+// vrRecoveryIntentOK is the check the Prepare branch repeats on the intent it loads itself: on a VR chain only an eligible recovery plan is
+// ordered there, whatever replaced the intent since vrRecoveryRoute judged it.
+func (x *ConsensusManager) vrRecoveryIntentOK(parent *storage.ExecutedBlock, intent abdrc.HandoffApprovalMsg) bool {
+	c, ok := isRecoveryPlan(intent)
+	if !ok {
+		return false
+	}
+	eligible := x.vrRecoveryEligibleAt
+	if x.vr != nil && x.vr.recoveryEligible != nil {
+		eligible = x.vr.recoveryEligible
+	}
+	return eligible(parent, c) == nil
 }
 
 // vrRecoveryRoute says whether the leader orders the records of a VR chain's round from a held exact-recovery plan instead of the verified
@@ -182,7 +197,7 @@ func (x *ConsensusManager) vrRecoveryRoute(parent *storage.ExecutedBlock, contro
 	}
 	if err := eligible(parent, c); err != nil {
 		x.log.Info("VR recovery: the request is dropped", "round", round, "attempt", attempt, "reason", err)
-		x.dropRecoveryIntent(attempt)
+		x.dropRecoveryIntent(*intent)
 		return false
 	}
 	x.log.Info("VR recovery: the leader orders the Prepare of the exact recovery", "round", round, "attempt", attempt)

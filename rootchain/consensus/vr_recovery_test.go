@@ -504,7 +504,7 @@ func TestVRRecoveryLeaderChangeOrdersTheSameFreeze(t *testing.T) {
 		require.NoError(t, err)
 		_, err = w.r.manager.blockStore().VerifyFreezeCompanion(freeze, recs[1])
 		require.NoError(t, err)
-		freezes = append(freezes, recs[0])
+		freezes = append(freezes, append(append([]byte{}, recs[0]...), recs[1]...))
 	}
 	require.Equal(t, freezes[0], freezes[1])
 }
