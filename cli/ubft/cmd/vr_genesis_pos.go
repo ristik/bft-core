@@ -5,6 +5,7 @@ package cmd
 // the plan: its accounts, code hashes, balances, and the custody slots that tie it to VR and to the roots' genesis identities.
 
 import (
+	"errors"
 	"fmt"
 	"math/big"
 	"strings"
@@ -178,12 +179,130 @@ func vrCheckPosStack(in vrGenesisInput, d vrDeploymentFile, identities []evmassi
 	if err != nil {
 		return err
 	}
+	if err := vrCheckPosElection(in, d, network, alloc); err != nil {
+		return err
+	}
 	chainWord := vrschema.U64(in.ChainID)
 	for i, id := range identities {
 		sid := uint64(i + 1)
 		eid := vrschema.PoaExposureDigest(vrschema.Word(network), chainWord, vrschema.ValidatorRegistry, vrschema.Word(assignment), sid)
 		if got := slots[vrschema.MapSlot(eid, vrschema.U64(vrCustodyMemberDigestSlot))]; !strings.EqualFold(lowerHex(got[:]), lowerHex(id.ExposureDigest)) {
 			return fail("custody's member digest of genesis identity %d is %x, the roots' genesis identity carries %x", sid, got, id.ExposureDigest)
+		}
+	}
+	return nil
+}
+
+// ElectionPolicy storage (the compiled layout the genesis script initializes through the factory; unicity-pos-contracts src/p85/ElectionPolicy.sol).
+const (
+	vrElectionInitializedSlot = 0
+	vrElectionNetworkSlot     = 2
+	vrElectionCustodySlot     = 3
+	vrElectionRootsSlot       = 4
+	vrElectionEvidenceSlot    = 5
+	vrElectionSelectionSlot   = 6
+	vrElectionParamsSlot      = 8  // nMin, nTarget, nMax as three 4-byte fields
+	vrElectionCadenceSlot     = 9  // cadenceRounds, then cadenceSeconds, above the low 8 bytes
+	vrElectionStagedSlot      = 18 // mapping(id => mapping(generation => Staged))
+	vrElectionIndexLenSlot    = 19 // the live index
+	vrElectionHookCallerSlot  = 23
+	vrElectionRegistrySlot    = 24
+)
+
+// vrCheckPosElection binds the election's initialization to the plan: it is initialized, its links (network word, custody, the root records,
+// evidence, selection, the PosElectionAdapter as hook caller, VR as the registry) and its election parameters and cadence are the plan's, its
+// live index holds the genesis identities, and each genesis identity's staged binding at generation 1 is the plan's (node words, key hashes
+// and payee). An alloc that keeps the election's code but drops or alters its storage is refused: the election would otherwise stay
+// uninitialized and refuse its operations.
+func vrCheckPosElection(in vrGenesisInput, d vrDeploymentFile, network []byte, alloc map[common.Address]vrAllocAccount) error {
+	fail := func(f string, a ...any) error { return fmt.Errorf("%w: "+f, append([]any{ErrVRGenesis}, a...)...) }
+	election, err := vrAddress("PoS election", d.Election)
+	if err != nil {
+		return err
+	}
+	slots, err := storageOf(alloc[election])
+	if err != nil {
+		return err
+	}
+	word := func(slot uint64) vrschema.Word { return slots[vrschema.U64(slot)] }
+	addrOf := func(name, s string) (vrschema.Word, error) {
+		a, err := vrAddress(name, s)
+		return vrschema.AddrWord(a), err
+	}
+	want := map[string]struct {
+		slot uint64
+		w    vrschema.Word
+	}{}
+	set := func(name string, slot uint64, w vrschema.Word) {
+		want[name] = struct {
+			slot uint64
+			w    vrschema.Word
+		}{slot, w}
+	}
+	set("initialized", vrElectionInitializedSlot, vrschema.U64(1))
+	set("network word", vrElectionNetworkSlot, vrschema.Word(network))
+	for _, l := range []struct {
+		name, addr string
+		slot       uint64
+	}{{"custody", d.Custody, vrElectionCustodySlot}, {"evidence", d.Evidence, vrElectionEvidenceSlot}, {"selection", d.Selection, vrElectionSelectionSlot}} {
+		w, err := addrOf("PoS "+l.name, l.addr)
+		if err != nil {
+			return err
+		}
+		set(l.name, l.slot, w)
+	}
+	set("root records", vrElectionRootsSlot, vrschema.AddrWord(common.Address(vrschema.SealRegistry)))
+	set("hook caller (the adapter)", vrElectionHookCallerSlot, vrschema.AddrWord(vrGenesisAddress(7)))
+	set("registry (VR)", vrElectionRegistrySlot, vrschema.AddrWord(common.Address(vrschema.ValidatorRegistry)))
+	set("index length", vrElectionIndexLenSlot, vrschema.U64(uint64(len(in.Identities))))
+	for name, x := range want {
+		if got := word(x.slot); got != x.w {
+			return fail("the election's %s (slot %d) is %x, the plan names %x: the election is not initialized as planned", name, x.slot, got, x.w)
+		}
+	}
+	// parameters and cadence: packed fields
+	field := func(w vrschema.Word, offset, size uint64) uint64 {
+		var v uint64
+		for i := uint64(0); i < size; i++ {
+			v |= uint64(w[31-offset-i]) << (8 * i)
+		}
+		return v
+	}
+	params, cadence := word(vrElectionParamsSlot), word(vrElectionCadenceSlot)
+	for _, c := range []struct {
+		name      string
+		got, want uint64
+	}{
+		{"nMin", field(params, 0, 4), uint64(in.Limits.NMin)}, {"nTarget", field(params, 4, 4), uint64(in.Limits.NTarget)}, {"nMax", field(params, 8, 4), uint64(in.Limits.NMax)},
+		{"cadenceRounds", field(cadence, 8, 8), in.Pos.CadenceRounds}, {"cadenceSeconds", field(cadence, 16, 8), in.Pos.CadenceSeconds},
+	} {
+		if c.got != c.want {
+			return fail("the election's %s is %d, the plan names %d", c.name, c.got, c.want)
+		}
+	}
+	for i, id := range in.Identities {
+		sid := uint64(i + 1)
+		base := vrschema.MapSlot(vrschema.U64(1), vrschema.MapSlot(vrschema.U64(sid), vrschema.U64(vrElectionStagedSlot)))
+		rootKey, err2 := vrHex("rootKey", id.RootKey, 33)
+		evmKey, err4 := vrHex("evmKey", id.EVMKey, 33)
+		payee, err5 := vrAddress("payee", id.Payee)
+		if err := errors.Join(err2, err4, err5); err != nil {
+			return err
+		}
+		for _, c := range []struct {
+			name   string
+			offset uint64
+			w      vrschema.Word
+		}{
+			{"root node id", 0, vrschema.Keccak([]byte(id.RootNodeID))}, {"EVM node id", 2, vrschema.Keccak([]byte(id.EVMNodeID))}, {"payee", 4, vrschema.AddrWord(payee)},
+			{"root key hash", 7, vrschema.Keccak(rootKey)}, {"EVM key hash", 8, vrschema.Keccak(evmKey)},
+		} {
+			if got := slots[vrschema.SlotAdd(base, c.offset)]; got != c.w {
+				return fail("the election's staged %s of genesis identity %d is %x, the plan names %x", c.name, sid, got, c.w)
+			}
+		}
+		if slots[vrschema.SlotAdd(base, 5)] == (vrschema.Word{}) {
+			return fail("the election has no staged binding hash for genesis identity %d", sid)
 		}
 	}
 	return nil

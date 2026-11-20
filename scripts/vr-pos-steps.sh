@@ -85,11 +85,12 @@ vrp_cursors_match() {
 # the entry of epoch 2 is signed by epoch 1's quorum (the verifier's own line). With VR_AGG=1 the aggregator's /api/v1/trustbases is the UTB agent's
 # check (vr-utb-steps.sh vru_after); a root's own REST serves the V1 runtime projection only, never the signed history.
 vrp_utb() { # <last epoch expected>
-  local last=${1:-2} out=$VR_EVIDENCE/utb n f bad=0
+  local last=${1:-2} out=$VR_EVIDENCE/utb n f bad=0 found=0
   declare -F vru_ev >/dev/null || source scripts/vr-utb-steps.sh || { vrb_log "FAIL: scripts/vr-utb-steps.sh"; return 1; }
   mkdir -p "$out"
   for f in test-nodes/root*/root-utb-entries.db; do
     [ -f "$f" ] || continue
+    found=$((found + 1))
     n=$(basename "$(dirname "$f")"); cp "$f" "$out/$n.db"
     if build/ubft trust-base utb-export --utb-genesis test-nodes/utb-genesis.cbor --utb-genesis-id "$(utb_pin)" --utb-entries-db "$out/$n.db" --out "$out/$n.cbor" >"$out/$n.export.log" 2>&1 \
       && vru_ev verify --bundle "$out/$n.cbor" --pin "$(utb_pin)" >"$out/$n.verify.txt" 2>&1 && grep -q "^ok: epochs 1\.\.$last," "$out/$n.verify.txt"; then
@@ -99,6 +100,7 @@ vrp_utb() { # <last epoch expected>
     fi
     rm -f "$out/$n.db"
   done
+  [ "$found" -ge "${validators:-4}" ] || { vrb_log "FAIL: only $found root entry stores found (at least ${validators:-4} expected): the history is not verified"; return 1; }
   [ "$bad" = 0 ] || return 1
   vrb_log "PASS: every root's own entry store verifies epochs 1..$last from the pinned genesis; $(cat "$out"/root1.epoch2.line 2>/dev/null)"
 }

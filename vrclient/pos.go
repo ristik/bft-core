@@ -52,6 +52,7 @@ var PosElectionABI = mustABI(`[
 // finalizeCandidate. The proofs are permissionless to relay; a lane relayer that holds the members' EVM keys submits them all.
 var PosPublishABI = mustABI(`[
  {"type":"function","name":"openResult","stateMutability":"view","inputs":[],"outputs":[{"name":"","type":"bytes32"}]},
+ {"type":"function","name":"publication","stateMutability":"view","inputs":[{"name":"resultID","type":"bytes32"}],"outputs":[{"name":"","type":"tuple","components":[{"name":"primaryHash","type":"bytes32"},{"name":"kCommit","type":"bytes32"},{"name":"incumbent","type":"bytes32"},{"name":"incumbentExposureDigest","type":"bytes32"},{"name":"incumbentKeyDigest","type":"bytes32"},{"name":"policyDigest","type":"bytes32"},{"name":"contractsDigest","type":"bytes32"},{"name":"snapshotDigest","type":"bytes32"},{"name":"assignmentID","type":"bytes32"},{"name":"popSetDigest","type":"bytes32"},{"name":"published","type":"bool"},{"name":"popCount","type":"uint32"},{"name":"attempt","type":"uint64"},{"name":"lost","type":"bool"}]}]},
  {"type":"function","name":"popDigest","stateMutability":"view","inputs":[{"name":"resultID","type":"bytes32"},{"name":"id","type":"uint64"},{"name":"evmKeyHash","type":"bytes32"}],"outputs":[{"name":"","type":"bytes32"}]},
  {"type":"function","name":"frozenMembers","stateMutability":"view","inputs":[{"name":"resultID","type":"bytes32"}],"outputs":[{"name":"","type":"tuple[]","components":[{"name":"id","type":"uint64"},{"name":"generation","type":"uint64"},{"name":"weight","type":"uint64"},{"name":"raw","type":"uint64"},{"name":"bindingHash","type":"bytes32"}]}]},
  {"type":"function","name":"submitAssignmentPoPs","stateMutability":"nonpayable","inputs":[{"name":"resultID","type":"bytes32"},{"name":"pops","type":"tuple[]","components":[{"name":"id","type":"uint64"},{"name":"evmKey","type":"bytes"},{"name":"signature","type":"bytes"}]}],"outputs":[]},
@@ -159,6 +160,42 @@ func (c *Client) OpenResult(ctx context.Context, election ethcommon.Address) (ri
 
 func (c *Client) FrozenMembers(ctx context.Context, election ethcommon.Address, rid [32]byte) (out []FrozenMember, err error) {
 	return out, c.posPublishCall(ctx, election, "frozenMembers", &out, rid)
+}
+
+// PublicationRecord is the part of ElectionPolicy.Publication a relayer resumes from: whether the candidate is published in P85, how many
+// possession proofs are stored, and whether the result lost its coverage.
+type PublicationRecord struct {
+	PrimaryHash             [32]byte
+	KCommit                 [32]byte
+	Incumbent               [32]byte
+	IncumbentExposureDigest [32]byte
+	IncumbentKeyDigest      [32]byte
+	PolicyDigest            [32]byte
+	ContractsDigest         [32]byte
+	SnapshotDigest          [32]byte
+	AssignmentID            [32]byte
+	PopSetDigest            [32]byte
+	Published               bool
+	PopCount                uint32
+	Attempt                 uint64
+	Lost                    bool
+}
+
+// Publication reads a result's publication record from the election.
+func (c *Client) Publication(ctx context.Context, election ethcommon.Address, rid [32]byte) (p PublicationRecord, err error) {
+	data, err := PosPublishABI.Pack("publication", rid)
+	if err != nil {
+		return p, fmt.Errorf("%w: packing publication: %v", ErrVR, err)
+	}
+	ret, err := c.CallRaw(ctx, election, data)
+	if err != nil {
+		return p, fmt.Errorf("publication: %w", err)
+	}
+	vals, err := PosPublishABI.Methods["publication"].Outputs.Unpack(ret)
+	if err != nil || len(vals) != 1 {
+		return p, fmt.Errorf("%w: decoding publication: %v", ErrVR, err)
+	}
+	return *abi.ConvertType(vals[0], new(PublicationRecord)).(*PublicationRecord), nil
 }
 
 func (c *Client) PopDigest(ctx context.Context, election ethcommon.Address, rid [32]byte, id uint64, evmKeyHash [32]byte) (d [32]byte, err error) {

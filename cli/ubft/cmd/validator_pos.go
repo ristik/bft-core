@@ -6,6 +6,7 @@ package cmd
 // generation's lots and pulls the credit. The generation's custody is the active module's liability holder.
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -159,6 +160,11 @@ func validatorApplyPoS(cmd *cobra.Command, f *txFlags, pf *posFlags) error {
 		req := vrclient.DelegationRequest{Id: id, Generation: pos.Generation, RoleNonce: pos.RoleNonce, DelegationNonce: d.NextNonce, Expiry: math.MaxUint64,
 			Binding: vrclient.Delegation{RootNodeID: vrclient.NodeIDWord(root.NodeID), RootKey: root.Public(), EvmNodeID: vrclient.NodeIDWord(evm.NodeID),
 				EvmKey: evm.Public(), OperatorPayee: payee}}
+		if sameDelegation(d.Binding, req.Binding) {
+			// a retry after the final receipt was lost: the election already stages this binding; another admission would only burn a nonce
+			fmt.Fprintf(w, "identity %d's delegation is already staged as configured\n", id)
+			return nil, nil
+		}
 		var digest [32]byte
 		if err := ch.vr.CallPos(ctx, election, vrclient.PosElectionABI, "delegationDigest", &digest, req); err != nil {
 			return nil, err
@@ -214,6 +220,10 @@ func validatorApplyPoS(cmd *cobra.Command, f *txFlags, pf *posFlags) error {
 		if steps, err = registerVR(); err != nil {
 			return err
 		}
+	}
+	if len(steps) == 0 {
+		fmt.Fprintf(w, "identity %d is already registered, bonded and its delegation staged: nothing to do\n", id)
+		return nil
 	}
 	// the chain of steps: each receipt names the next (VR register -> custody register -> bond -> admit); stage is the step just done
 	stage := 0
@@ -464,6 +474,15 @@ func validatorPosPublishCmd(base *baseFlags) *cobra.Command {
 				}
 				pops = append(pops, vrclient.PoPInput{Id: m.Id, EvmKey: pub, Signature: sig})
 			}
+			pubRec, err := ch.vr.Publication(ctx, election, rid)
+			if err != nil {
+				return err
+			}
+			out, err := ch.vr.Output(ctx, rid)
+			if err != nil {
+				return err
+			}
+			plan := planPosPublish(len(members), pubRec.PopCount, pubRec.Published, out.State)
 			sub, err := vrclient.PosCalldata(vrclient.PosPublishABI, "submitAssignmentPoPs", rid, pops)
 			if err != nil {
 				return err
@@ -477,14 +496,44 @@ func validatorPosPublishCmd(base *baseFlags) *cobra.Command {
 				return err
 			}
 			fmt.Fprintf(w, "result %x with %d members\n", rid, len(members))
-			return runSteps(ctx, w, s, f.DryRun, []step{
+			all := []step{
 				{what: "submit every frozen member's possession proof", tx: vrclient.Tx{To: election, Data: sub}},
 				{what: "finalize the candidate (publish it in P85)", tx: vrclient.Tx{To: election, Data: fin}},
 				{what: "publish the result in VR", tx: vrclient.Tx{To: ch.vr.Registry, Data: pub}},
-			}, nil)
+			}
+			var steps []step
+			for i, st := range all {
+				if plan[i] {
+					steps = append(steps, st)
+				} else {
+					fmt.Fprintf(w, "already done: %s\n", st.what)
+				}
+			}
+			if len(steps) == 0 {
+				fmt.Fprintln(w, "nothing to do: the result is published in VR")
+				return nil
+			}
+			return runSteps(ctx, w, s, f.DryRun, steps, nil)
 		},
 	}
 	f.add(cmd)
 	cmd.Flags().StringArrayVar(&keyArgs, "evm-keys", nil, "id=path of a member's EVM shard node key file (repeat per member)")
 	return cmd
+}
+
+// planPosPublish says which of the relayer's three steps (submit the possession proofs, finalize the candidate, publish in VR) are still to do,
+// from what the election and VR already hold, so an interrupted run resumes at the first unfinished step. The election refuses proofs once the
+// candidate is published, and VR refuses a second publication, so the finished steps must not be sent again. A VR output past Reserved
+// (state 2, Published, or later) means the result is published.
+func planPosPublish(members int, popCount uint32, candidatePublished bool, vrState uint8) [3]bool {
+	published := vrState >= 2
+	finalize := !candidatePublished && !published
+	submit := finalize && int(popCount) < members
+	return [3]bool{submit, finalize, !published}
+}
+
+// sameDelegation reports whether two delegation bindings are the same node words, keys and payee.
+func sameDelegation(a, b vrclient.Delegation) bool {
+	return a.RootNodeID == b.RootNodeID && a.EvmNodeID == b.EvmNodeID && a.OperatorPayee == b.OperatorPayee &&
+		bytes.Equal(a.RootKey, b.RootKey) && bytes.Equal(a.EvmKey, b.EvmKey)
 }
