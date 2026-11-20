@@ -23,8 +23,19 @@ func TestPlanPosPublishResumesAfterEachStep(t *testing.T) {
 		"the candidate is finalized": {members, true, 1, [3]bool{false, false, true}},
 		"published in VR":            {members, true, 2, [3]bool{false, false, false}},
 		"a later VR state":           {members, true, 6, [3]bool{false, false, false}},
+		"acknowledged":               {members, true, 5, [3]bool{false, false, false}},
 	} {
-		require.Equal(t, c.want, planPosPublish(members, c.pops, c.finalized, c.vrState), name)
+		got, err := planPosPublish(members, c.pops, c.finalized, c.vrState)
+		require.NoError(t, err, name)
+		require.Equal(t, c.want, got, name)
+	}
+	// Invalidated and Rejected are refusals with a clear message, whatever the election holds
+	for _, st := range []uint8{3, 4} {
+		for _, finalized := range []bool{false, true} {
+			_, err := planPosPublish(members, members, finalized, st)
+			require.ErrorIs(t, err, ErrValidator)
+			require.ErrorContains(t, err, vrOutputState(st))
+		}
 	}
 }
 

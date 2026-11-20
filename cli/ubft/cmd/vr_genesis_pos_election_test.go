@@ -82,6 +82,16 @@ func TestPosElectionInitializationIsBoundToThePlan(t *testing.T) {
 			base := vrschema.MapSlot(vrschema.U64(1), vrschema.MapSlot(vrschema.U64(2), vrschema.U64(vrElectionStagedSlot)))
 			return setSlot(a, vrschema.SlotAdd(base, 7), vrschema.Word{})
 		}),
+		"the index entries removed (length kept)": mutate(func(a vrAllocAccount) vrAllocAccount {
+			return setSlot(a, vrschema.Keccak(wb(vrschema.U64(vrElectionIndexLenSlot))), vrschema.Word{})
+		}),
+		"a staged root key's bytes removed (hash kept)": mutate(func(a vrAllocAccount) vrAllocAccount {
+			base := vrschema.MapSlot(vrschema.U64(1), vrschema.MapSlot(vrschema.U64(1), vrschema.U64(vrElectionStagedSlot)))
+			return setSlot(a, vrschema.Keccak(wb(vrschema.SlotAdd(base, 1))), vrschema.Word{})
+		}),
+		"the reverse index position removed": mutate(func(a vrAllocAccount) vrAllocAccount {
+			return setSlot(a, vrschema.MapSlot(vrschema.U64(3), vrschema.U64(vrElectionPositionSlot)), vrschema.Word{})
+		}),
 		"the live index emptied": mutate(func(a vrAllocAccount) vrAllocAccount {
 			return setSlot(a, vrschema.U64(vrElectionIndexLenSlot), vrschema.U64(0))
 		}),

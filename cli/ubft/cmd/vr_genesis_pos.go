@@ -204,7 +204,8 @@ const (
 	vrElectionParamsSlot      = 8  // nMin, nTarget, nMax as three 4-byte fields
 	vrElectionCadenceSlot     = 9  // cadenceRounds, then cadenceSeconds, above the low 8 bytes
 	vrElectionStagedSlot      = 18 // mapping(id => mapping(generation => Staged))
-	vrElectionIndexLenSlot    = 19 // the live index
+	vrElectionIndexLenSlot    = 19 // the live index: the length here, the entries (uint64, four to a word) from keccak(19)
+	vrElectionPositionSlot    = 20 // mapping(id => 1-based position in the index)
 	vrElectionHookCallerSlot  = 23
 	vrElectionRegistrySlot    = 24
 )
@@ -301,9 +302,54 @@ func vrCheckPosElection(in vrGenesisInput, d vrDeploymentFile, network []byte, a
 				return fail("the election's staged %s of genesis identity %d is %x, the plan names %x", c.name, sid, got, c.w)
 			}
 		}
-		if slots[vrschema.SlotAdd(base, 5)] == (vrschema.Word{}) {
-			return fail("the election has no staged binding hash for genesis identity %d", sid)
+		// the key bytes themselves (eligibility hashes them), then the binding hash the election computed over them
+		for _, k := range []struct {
+			name string
+			slot uint64
+			key  []byte
+		}{{"root key", 1, rootKey}, {"EVM key", 3, evmKey}} {
+			if err := vrCheckLongBytes(slots, vrschema.SlotAdd(base, k.slot), k.key); err != nil {
+				return fail("the election's staged %s of genesis identity %d: %v", k.name, sid, err)
+			}
+		}
+		bh := vrschema.Keccak(wb(vrElectionBindingDomain), wb(vrschema.U64(sid)), wb(vrschema.U64(1)), wb(vrschema.Keccak([]byte(id.RootNodeID))),
+			wb(vrschema.Keccak(rootKey)), wb(vrschema.Keccak([]byte(id.EVMNodeID))), wb(vrschema.Keccak(evmKey)), wb(vrschema.AddrWord(payee)))
+		if got := slots[vrschema.SlotAdd(base, 5)]; got != bh {
+			return fail("the election's staged binding hash of genesis identity %d is %x, the plan's binding hashes to %x", sid, got, bh)
+		}
+		// the live index: entry i is identity i+1, and the reverse position says so
+		entry := vrschema.SlotAdd(vrschema.Keccak(wb(vrschema.U64(vrElectionIndexLenSlot))), uint64(i)/4)
+		if got := field(slots[entry], (uint64(i)%4)*8, 8); got != sid {
+			return fail("the election's index entry %d is %d, the genesis identity is %d", i, got, sid)
+		}
+		if got := slots[vrschema.MapSlot(vrschema.U64(sid), vrschema.U64(vrElectionPositionSlot))]; got != vrschema.U64(sid) {
+			return fail("the election's index position of identity %d is %x, not %d", sid, got, sid)
 		}
 	}
 	return nil
 }
+
+// vrElectionBindingDomain is ElectionPolicy.BINDING_DOMAIN.
+var vrElectionBindingDomain = vrschema.Keccak([]byte("unicity.p85.delegation-binding"))
+
+// vrCheckLongBytes checks a Solidity `bytes` of 32 bytes or more stored at slot: the word holds 2*len+1, the data starts at keccak(slot).
+func vrCheckLongBytes(slots vrStorage, slot vrschema.Word, want []byte) error {
+	if len(want) < 32 {
+		return fmt.Errorf("short key")
+	}
+	if got := slots[slot]; got != vrschema.U64(uint64(len(want))*2+1) {
+		return fmt.Errorf("length word %x, want a %d-byte string", got, len(want))
+	}
+	data := vrschema.Keccak(wb(slot))
+	for off := 0; off < len(want); off += 32 {
+		var w vrschema.Word
+		copy(w[:], want[off:])
+		if got := slots[vrschema.SlotAdd(data, uint64(off/32))]; got != w {
+			return fmt.Errorf("data word %d is %x, want %x", off/32, got, w)
+		}
+	}
+	return nil
+}
+
+// wb is a word as a byte slice.
+func wb(w vrschema.Word) []byte { return w[:] }

@@ -437,43 +437,6 @@ func validatorPosPublishCmd(base *baseFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			keys := map[uint64]*KeyConf{}
-			for _, a := range keyArgs {
-				var id uint64
-				var path string
-				if i := strings.Index(a, "="); i > 0 {
-					if _, err := fmt.Sscanf(a[:i], "%d", &id); err != nil {
-						return fmt.Errorf("%w: --evm-keys %q is not id=path", ErrValidator, a)
-					}
-					path = a[i+1:]
-				}
-				kc, err := readKeyConf(path)
-				if err != nil {
-					return err
-				}
-				keys[id] = kc
-			}
-			var pops []vrclient.PoPInput
-			for _, m := range members {
-				kc := keys[m.Id]
-				if kc == nil {
-					return fmt.Errorf("%w: no EVM key file for member %d (--evm-keys %d=path)", ErrValidator, m.Id, m.Id)
-				}
-				nk, err := nodeKeys(kc)
-				if err != nil {
-					return err
-				}
-				pub := nk.Public()
-				d, err := ch.vr.PopDigest(ctx, election, rid, m.Id, [32]byte(ethcrypto.Keccak256(pub)))
-				if err != nil {
-					return err
-				}
-				sig, err := vrclient.SignDigest(nk.Key, d)
-				if err != nil {
-					return err
-				}
-				pops = append(pops, vrclient.PoPInput{Id: m.Id, EvmKey: pub, Signature: sig})
-			}
 			pubRec, err := ch.vr.Publication(ctx, election, rid)
 			if err != nil {
 				return err
@@ -482,7 +445,49 @@ func validatorPosPublishCmd(base *baseFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			plan := planPosPublish(len(members), pubRec.PopCount, pubRec.Published, out.State)
+			plan, err := planPosPublish(len(members), pubRec.PopCount, pubRec.Published, out.State)
+			if err != nil {
+				return err
+			}
+			var pops []vrclient.PoPInput
+			if plan[0] { // holders are read only when proofs must still be submitted: a resumed run needs no key file
+				keys := map[uint64]*KeyConf{}
+				for _, a := range keyArgs {
+					var id uint64
+					var path string
+					if i := strings.Index(a, "="); i > 0 {
+						if _, err := fmt.Sscanf(a[:i], "%d", &id); err != nil {
+							return fmt.Errorf("%w: --evm-keys %q is not id=path", ErrValidator, a)
+						}
+						path = a[i+1:]
+					}
+					kc, err := readKeyConf(path)
+					if err != nil {
+						return err
+					}
+					keys[id] = kc
+				}
+				for _, m := range members {
+					kc := keys[m.Id]
+					if kc == nil {
+						return fmt.Errorf("%w: no EVM key file for member %d (--evm-keys %d=path)", ErrValidator, m.Id, m.Id)
+					}
+					nk, err := nodeKeys(kc)
+					if err != nil {
+						return err
+					}
+					pub := nk.Public()
+					d, err := ch.vr.PopDigest(ctx, election, rid, m.Id, [32]byte(ethcrypto.Keccak256(pub)))
+					if err != nil {
+						return err
+					}
+					sig, err := vrclient.SignDigest(nk.Key, d)
+					if err != nil {
+						return err
+					}
+					pops = append(pops, vrclient.PoPInput{Id: m.Id, EvmKey: pub, Signature: sig})
+				}
+			}
 			sub, err := vrclient.PosCalldata(vrclient.PosPublishABI, "submitAssignmentPoPs", rid, pops)
 			if err != nil {
 				return err
@@ -524,12 +529,25 @@ func validatorPosPublishCmd(base *baseFlags) *cobra.Command {
 // planPosPublish says which of the relayer's three steps (submit the possession proofs, finalize the candidate, publish in VR) are still to do,
 // from what the election and VR already hold, so an interrupted run resumes at the first unfinished step. The election refuses proofs once the
 // candidate is published, and VR refuses a second publication, so the finished steps must not be sent again. A VR output past Reserved
-// (state 2, Published, or later) means the result is published.
-func planPosPublish(members int, popCount uint32, candidatePublished bool, vrState uint8) [3]bool {
-	published := vrState >= 2
-	finalize := !candidatePublished && !published
-	submit := finalize && int(popCount) < members
-	return [3]bool{submit, finalize, !published}
+// (state 2, or Acknowledged, Recovered, Closed) means the result is published; Invalidated and Rejected are refusals, never success.
+func planPosPublish(members int, popCount uint32, candidatePublished bool, vrState uint8) ([3]bool, error) {
+	switch vrState {
+	case 0, 1: // None, Reserved: not published in VR yet
+		finalize := !candidatePublished
+		return [3]bool{finalize && int(popCount) < members, finalize, true}, nil
+	case 2, 5, 6, 7: // Published, or beyond it (Acknowledged, Recovered, Closed): the result was published
+		return [3]bool{}, nil
+	}
+	// Invalidated (3, a member lost its coverage) and Rejected (4): VR will never publish this result
+	return [3]bool{}, fmt.Errorf("%w: VR's output of this result is %s: it cannot be published; wait for the next election", ErrValidator, vrOutputState(vrState))
+}
+
+func vrOutputState(s uint8) string {
+	names := []string{"None", "Reserved", "Published", "Invalidated", "Rejected", "Acknowledged", "Recovered", "Closed"}
+	if int(s) < len(names) {
+		return names[s]
+	}
+	return fmt.Sprintf("state %d", s)
 }
 
 // sameDelegation reports whether two delegation bindings are the same node words, keys and payee.
