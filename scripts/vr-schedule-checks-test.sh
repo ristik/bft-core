@@ -18,11 +18,16 @@ bad vrs_check_all_roots "$d" "$rid" $E                              # no roots
 : >"$d/root3-activation-events.txt";                  bad vrs_check_all_roots "$d" "$rid" $E 1 2 3 4   # one root silent
 line activation.latched l $E >"$d/root3-activation-events.txt"; bad vrs_check_all_roots "$d" "$rid" $E 1 2 3 4   # latched but never active
 bad vrs_check_all_roots "$d" "$rid" $E 1 2 3 4 5                    # a root with no file at all
-# the shard refusal
-echo "time=x level=ERROR msg=refusing event=upgrade.refused epoch=5 error=\"UpgradeRequired: this binary does not support rule ${rid#0x}, active from root epoch $E (release digest 11)\"" >"$d/ref.txt"
+# the shard refusal: ONE record carries event=upgrade.refused, epoch=E and an UpgradeRequired naming the rule and E
+ref() { echo "time=x level=ERROR msg=\"refusing\" event=upgrade.refused epoch=$1 error=\"UpgradeRequired: this binary does not support rule ${2#0x}, active from root epoch $3 (release digest 11)\""; }
+ref 5 "$rid" 5 >"$d/ref.txt"
 ok  vrs_check_refusal "$d/ref.txt" "$rid" $E
+ref 6 "$rid" 5 >"$d/ref6.txt";       bad vrs_check_refusal "$d/ref6.txt" "$rid" $E      # astra: a refusal at epoch 6 for a rule active from 5
+{ ref 6 "$rid" 5; ref 5 0xcd$(printf 'cd%.0s' $(seq 31)) 5; } >"$d/split.txt"; bad vrs_check_refusal "$d/split.txt" "$rid" $E   # the right rule on one line, epoch E on another
+{ ref 6 "$rid" 5; echo "level=INFO msg=other epoch=5"; } >"$d/split2.txt";      bad vrs_check_refusal "$d/split2.txt" "$rid" $E
 bad vrs_check_refusal "$d/ref.txt" "$rid" 6
 bad vrs_check_refusal "$d/ref.txt" 0xcd$(printf 'cd%.0s' $(seq 31)) $E
+sed 's/event=upgrade.refused/event=other/' "$d/ref.txt" >"$d/noevent.txt"; bad vrs_check_refusal "$d/noevent.txt" "$rid" $E
 bad vrs_check_refusal "$d/none.txt" "$rid" $E
 # the pending warning
 echo "level=WARN msg=\"UPGRADE REQUIRED\" event=upgrade.required state=pending rule=${rid#0x} activationEpoch=5" >"$d/warn.txt"
@@ -39,5 +44,13 @@ r "${good/\"observed\":true/\"observed\":false}" >"$d/u.json";       bad vrs_che
 r "${good/\"scheduled\":[*]/\"scheduled\":[]}" >"$d/u.json";         bad vrs_check_rules "$d/u.json" 0xcd$(printf 'cd%.0s' $(seq 31)) $E true true
 echo '{"error":{"code":-32601}}' >"$d/u.json";                       bad vrs_check_rules "$d/u.json" "$rid" $E true true
 echo 'not json' >"$d/u.json";                                       bad vrs_check_rules "$d/u.json" "$rid" $E true true
-echo "Latched rule x" >"$d/up.txt"; ok vrs_check_upgrade_state "$d/up.txt" Latched; bad vrs_check_upgrade_state "$d/up.txt" Queued
+# the VR schedule row: rule, epoch and state in ONE row
+other=0xcd$(printf 'cd%.0s' $(seq 31))
+row() { echo "{\"ruleId\":\"$1\",\"rootEpoch\":$2,\"state\":\"$3\"}"; }
+printf '{"schedule":[%s]}' "$(row $rid 5 Latched)" >"$d/up.json";                          ok  vrs_check_latched_row "$d/up.json" "$rid" $E
+printf '{"schedule":[%s,%s]}' "$(row $other 5 Latched)" "$(row $rid 5 Active)" >"$d/up.json"; bad vrs_check_latched_row "$d/up.json" "$rid" $E   # astra: another rule Latched, the target not
+printf '{"schedule":[%s]}' "$(row $rid 6 Latched)" >"$d/up.json";                          bad vrs_check_latched_row "$d/up.json" "$rid" $E
+printf '{"schedule":[%s]}' "$(row $rid 5 Queued)" >"$d/up.json";                           bad vrs_check_latched_row "$d/up.json" "$rid" $E
+printf '{"schedule":[]}' >"$d/up.json";                                                    bad vrs_check_latched_row "$d/up.json" "$rid" $E
+echo 'garbage' >"$d/up.json";                                                              bad vrs_check_latched_row "$d/up.json" "$rid" $E
 [ "$fails" = 0 ] && echo "vr-schedule checks: all pass" || { echo "vr-schedule checks: $fails failing"; exit 1; }

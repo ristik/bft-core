@@ -122,15 +122,17 @@ func provisionFence(ctx context.Context, log *slog.Logger, raw []byte, start vrF
 	if pf.VRHookMeasurement == nil {
 		return errors.New("the b1 profile is not a VR generation's")
 	}
-	genesis, err := parseCodeHash(p.ExecutionGenesisHash)
-	if err != nil {
-		return fmt.Errorf("executionGenesisHash: %w", err)
+	var genesis *[32]byte // omitted in the file: the startup pin (if any) stands
+	if p.ExecutionGenesisHash != "" {
+		if genesis, err = parseCodeHash(p.ExecutionGenesisHash); err != nil {
+			return fmt.Errorf("executionGenesisHash: %w", err)
+		}
 	}
-	pins, err := mergePins(start, startURL, p.ActivationSourceURL, &pf.VRHookMeasurement.RegistryCodeHash, genesis)
+	pins, url, err := mergePins(start, startURL, p.ActivationSourceURL, &pf.VRHookMeasurement.RegistryCodeHash, genesis)
 	if err != nil {
 		return err
 	}
-	gate, _, err := newActivationGate(ctx, log, p.ActivationSourceURL, pins)
+	gate, _, err := newActivationGate(ctx, log, url, pins)
 	if err != nil {
 		return err
 	}
@@ -149,9 +151,10 @@ func provisionFence(ctx context.Context, log *slog.Logger, raw []byte, start vrF
 }
 
 // mergePins resolves the deferred fence's pins: those the operator gave at startup (flags, registration policy) and those the provisioning
-// file and its b1 profile supply. A pin given by both must agree (a conflict refuses the provisioning, so signing is never enabled over a
-// contradiction); a pin given by one stands. The gate of a deferred start thereby has the pins of an immediate start.
-func mergePins(start vrFence, startURL, fileURL string, fileCode, fileGenesis *[32]byte) (vrFence, error) {
+// file and its b1 profile supply. A pin present on one side and omitted on the other stands; only two present, different values conflict
+// (and refuse the provisioning, so signing is never enabled over a contradiction). The gate of a deferred start thereby has the pins of an
+// immediate start. It returns the pins and the activation source URL to use.
+func mergePins(start vrFence, startURL, fileURL string, fileCode, fileGenesis *[32]byte) (vrFence, string, error) {
 	out := start
 	out.VR = true
 	pick := func(name string, have, file *[32]byte) (*[32]byte, error) {
@@ -166,13 +169,17 @@ func mergePins(start vrFence, startURL, fileURL string, fileCode, fileGenesis *[
 	}
 	var err error
 	if out.CodeHash, err = pick("registry code hash", start.CodeHash, fileCode); err != nil {
-		return out, err
+		return out, "", err
 	}
 	if out.GenesisHash, err = pick("execution genesis hash", start.GenesisHash, fileGenesis); err != nil {
-		return out, err
+		return out, "", err
 	}
-	if startURL != "" && startURL != fileURL {
-		return out, fmt.Errorf("the activation source given at startup (%s) is not the provisioned one (%s)", startURL, fileURL)
+	url := startURL
+	switch {
+	case startURL != "" && fileURL != "" && startURL != fileURL:
+		return out, "", fmt.Errorf("the activation source given at startup (%s) is not the provisioned one (%s)", startURL, fileURL)
+	case url == "":
+		url = fileURL
 	}
-	return out, nil
+	return out, url, nil
 }

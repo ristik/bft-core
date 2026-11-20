@@ -25,10 +25,11 @@ vrs_check_all_roots() {
     vrs_check_events "$d/root$i-activation-events.txt" "$rid" "$e" 'activation\.active' || { echo "root$i did not log activation.active for rule $rid epoch $e" >&2; return 1; }
   done
 }
-# vrs_check_refusal <log> <ruleId> <epoch>: the UpgradeRequired refusal names this very rule and epoch
+# vrs_check_refusal <log> <ruleId> <epoch>: ONE log record is the structured refusal (event=upgrade.refused) at install epoch E whose UpgradeRequired
+# error names this rule and activation epoch E (the greps are filters over the same line: nothing is matched across records)
 vrs_check_refusal() {
-  local rid=${2#0x}
-  grep 'UpgradeRequired' "$1" 2>/dev/null | grep -q "rule $rid" && grep 'UpgradeRequired' "$1" | grep "rule $rid" | grep -qE "root epoch $3([^0-9]|$)"
+  grep -E 'event=upgrade\.refused' "$1" 2>/dev/null | grep -E "(^|[ ,{])epoch=$3([ ,}\"]|$)" | grep "UpgradeRequired" \
+    | grep "rule ${2#0x}" | grep -qE "root epoch $3([^0-9]|$)"
 }
 # vrs_check_warning <log> <ruleId>: the pending warning for this rule (a queued schedule) was logged
 vrs_check_warning() { grep 'upgrade.required' "$1" 2>/dev/null | grep 'state=pending' | grep -qE "rule=(0x)?${2#0x}"; }
@@ -49,8 +50,18 @@ hit = [e for e in r.get("scheduled", []) if e["ruleId"].lower() == rid and e["ro
 sys.exit(0 if hit else "no scheduled entry for the rule at epoch %d (latched=%s known=%s): %s" % (epoch, latched, known, r.get("scheduled")))
 PY
 }
-# vrs_check_upgrade_state <validator upgrade text> <state>: the schedule is listed in that state
-vrs_check_upgrade_state() { grep -q "$2" "$1" 2>/dev/null; }
+# vrs_check_latched_row <validator upgrade --json> <ruleId> <epoch>: ONE schedule row has this rule, this root epoch and the state Latched
+vrs_check_latched_row() {
+  python3 - "$@" <<'PY'
+import json, sys
+f, rid, epoch = sys.argv[1], sys.argv[2].lower(), int(sys.argv[3])
+try:
+    rows = json.load(open(f))["schedule"]
+except Exception as e:
+    sys.exit("no schedule in %s: %s" % (f, e))
+sys.exit(0 if any(r.get("ruleId", "").lower() == rid and r.get("rootEpoch") == epoch and r.get("state") == "Latched" for r in rows) else "no Latched row for the rule at epoch %d" % epoch)
+PY
+}
 
 vrs_dir() { mkdir -p "$VR_EVIDENCE/schedule" && echo "$VR_EVIDENCE/schedule"; }
 vrs_queue() { # name rule-name release-hex
@@ -107,6 +118,7 @@ vrs_roots_at() { # epoch: at least 3 roots report this active epoch
 }
 vrs_rules() { curl -s -X POST -H 'Content-Type: application/json' --data '{"jsonrpc":"2.0","id":1,"method":"unicity_rulesV1","params":[]}' "$vrb_rpc"; }
 vrs_upgrade_state() { build/ubft validator upgrade --rpc "$vrb_rpc" 2>&1; }
+vrs_upgrade_json() { build/ubft validator upgrade --rpc "$vrb_rpc" --json 2>/dev/null; }
 vrs_rotate() { # a new payee for identity 4 (local keys): the next election is due
   local keys=$VR_DIR/dev-keys/keys.json owner payee cfg rid ehome= rhome= h
   owner=$(python3 -c "import json;print(json.load(open('$keys'))['owners'][3]['privateKey'])")
@@ -165,7 +177,7 @@ vrs_long() {
   for i in $(seq $((known + 1)) "$E"); do
     vrs_handoff "$i" || { vrb_log "FAIL: the handoff into epoch $i"; return 1; }
     vrb_log "PASS: handoff into epoch $i committed"
-    vrs_upgrade_state >"$d/upgrade-epoch$i.txt"; vrs_rules >"$d/ureth-rules-epoch$i.json"
+    vrs_upgrade_state >"$d/upgrade-epoch$i.txt"; vrs_upgrade_json >"$d/upgrade-epoch$i.json"; vrs_rules >"$d/ureth-rules-epoch$i.json"
   done
   # the evidence, then the checks: any missing piece fails the step (and so the lane)
   local r
@@ -174,7 +186,7 @@ vrs_long() {
   curl -s "http://$(evm_validator_rpc_addr 4)/api/v1/metrics" | grep -i 'upgrade_required' >"$d/evm4-metric.txt" 2>/dev/null
   vrs_check_all_roots "$d" "$rid" "$E" 1 2 3 4 || { vrb_log "FAIL: not every root logged activation.latched and activation.active for the rule at epoch $E"; return 1; }
   vrb_log "PASS: all 4 roots logged activation.latched and activation.active for rule $rid at epoch $E"
-  vrs_check_upgrade_state "$d/upgrade-epoch$E.txt" Latched || { vrb_log "FAIL: VR does not list the schedule as Latched after epoch $E"; return 1; }
+  vrs_check_latched_row "$d/upgrade-epoch$E.json" "$rid" "$E" || { vrb_log "FAIL: VR does not list the schedule as Latched after epoch $E"; return 1; }
   vrb_log "PASS: VR latched the schedule at the Boundary into epoch $E"
   vrs_check_rules "$d/ureth-rules-epoch$E.json" "$rid" "$E" true true || { vrb_log "FAIL: ureth's unicity_rulesV1 does not show the rule latched at epoch $E"; return 1; }
   vrb_log "PASS: ureth unicity_rulesV1 lists the rule at epoch $E as latched and known"
