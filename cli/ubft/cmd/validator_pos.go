@@ -86,6 +86,12 @@ func validatorApplyPoS(cmd *cobra.Command, f *txFlags, pf *posFlags) error {
 	if err != nil {
 		return err
 	}
+	if have && !f.DryRun {
+		// a resumed apply (the VR registration committed in an earlier run) saves the verified id too, so a caller can always read it back
+		if err := v.rememberID(id); err != nil {
+			return err
+		}
+	}
 	var network [32]byte
 	if err := ch.vr.CallPos(ctx, custody, vrclient.CustodyABI, "network", &network); err != nil {
 		return err
@@ -772,4 +778,13 @@ func checkRecovers(digest [32]byte, sig, pub []byte) error {
 		return errors.New("the signature recovers to another key")
 	}
 	return nil
+}
+
+// rememberID saves the identity id findID verified (the owner's registered one) into the validator configuration when it is not there yet.
+func (v *loadedValidator) rememberID(id uint64) error {
+	if v.cfg.ID == id {
+		return nil
+	}
+	v.cfg.ID = id
+	return v.save()
 }

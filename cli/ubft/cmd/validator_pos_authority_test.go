@@ -10,9 +10,14 @@ import (
 )
 
 func TestParseEVMAuthorityArg(t *testing.T) {
-	for _, bad := range []string{"", "5", "=a,b,c", "0=a,b,c", "x=a,b,c", "5=a,b", "5=a,b,c,d", "5oops=a,b,c", "5 6=a,b,c"} {
+	for _, bad := range []string{"", "5", "=a,b,c", "0=a,b,c", "x=a,b,c", "5=a,b", "5=a,b,c,d"} {
 		_, _, err := parseEVMAuthorityArg(bad)
-		require.Error(t, err, bad)
+		require.ErrorContains(t, err, "--evm-authority", bad)
+	}
+	// the whole selector is the identity: a prefix that scans as a number is refused by the parser, before any file is read
+	for _, bad := range []string{"5oops=a,b,c", "5 6=a,b,c"} {
+		_, _, err := parseEVMAuthorityArg(bad)
+		require.ErrorContains(t, err, "the identity is a positive number", bad)
 	}
 }
 
@@ -41,4 +46,17 @@ func TestDelegationRequestOfKeepsEveryField(t *testing.T) {
 	require.Equal(t, r.Binding.RootNodeID, e.Binding.RootNodeID)
 	require.Equal(t, r.Binding.EvmKey, e.Binding.EvmKey)
 	require.Equal(t, r.Binding.OperatorPayee, e.Binding.OperatorPayee)
+}
+
+// A resumed apply remembers the id it found: the configuration of a fresh run has none, and the id is saved once, idempotently.
+func TestRememberIDSavesTheDiscoveredIdentity(t *testing.T) {
+	home := t.TempDir()
+	_, err := runValidator(t, home, "init", "--rpc", "http://127.0.0.1:1")
+	require.NoError(t, err)
+	v, _ := loadHome(t, home)
+	require.Zero(t, v.cfg.ID)
+	require.NoError(t, v.rememberID(5))
+	require.Equal(t, uint64(5), readConfig(t, home).ID)
+	require.NoError(t, v.rememberID(5))
+	require.Equal(t, uint64(5), readConfig(t, home).ID)
 }

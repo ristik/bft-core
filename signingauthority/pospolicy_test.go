@@ -136,8 +136,11 @@ func TestRequirePosPolicyRefusesAllThreeUntilPinned(t *testing.T) {
 	require.ErrorIs(t, err, ErrPosPolicy)
 	_, err = a.SignDelegationPossession(DelegationPossessionRequest{})
 	require.ErrorIs(t, err, ErrPosPolicy)
-	_, err = a.SignElectionPoP(ElectionPoPRequest{})
-	require.Error(t, err)
+	// a valid candidate: the refusal is the pin's, not the candidate validation's
+	ea, ereq, _ := electionPoPFixture(t)
+	ea.requirePos = true
+	_, err = ea.SignElectionPoP(ereq)
+	require.ErrorIs(t, err, ErrPosPolicy)
 	require.NoError(t, a.SetPosPolicy(posPin()))
 	_, err = a.SignPosPoP(posRequest())
 	require.NoError(t, err)
