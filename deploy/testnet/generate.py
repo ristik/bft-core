@@ -57,6 +57,17 @@ BASE_T2_MS = 5000
 ROOT_BLOCK_RATE_MS = 900   # the roots' --block-rate default (consensus.BlockRate); the package does not change it
 FOLLOWER_AWAIT_CAP_MS = 5000   # shardnode.DefaultAwaitTimeout, the cap of a follower's wait for its leader's block
 
+# The host loopback ports the package publishes. --port-offset adds to all of them; keep the offset a multiple of the lane slot stride (1000) so the
+# published ports stay clear of the lane ports (scripts/lib/lane-slot.sh).
+HOST_PORTS = {'rpc': 8545, 'faucet': 8088, 'prometheus': 9090}
+
+
+def check_port_offset(value):
+    if not 0 <= value <= 20000 or max(HOST_PORTS.values()) + value > 65535:
+        raise SystemExit(f'--port-offset {value}: must be 0..20000 (and keep every published port below 65536)')
+    return value
+
+
 def min_t2_ms(interval_ms, root_block_rate_ms=ROOT_BLOCK_RATE_MS):
     """shardnode.MinT2ForBlockInterval in milliseconds: T2 >= interval + min(T2/2, 5 s) + one root round, solved for T2 (0 without an interval)."""
     if interval_ms <= 0: return 0
@@ -231,10 +242,11 @@ def check_authorities_unchanged(boot, final, n):
                                'never recreated, so everything it is started with must be known when it is first started')
 
 def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, with_pos=False, rpc_bind=operator_rpc.DEFAULT_BIND, utb=None, utb_aggregator='integration', *,
-             payout=FAUCET_PAYOUT, subnets=None, root_cpus=ROOT_CPUS, block_interval_ms=0):
+             payout=FAUCET_PAYOUT, subnets=None, root_cpus=ROOT_CPUS, block_interval_ms=0, port_offset=0):
     """JSON is a YAML subset, accepted directly by Docker Compose. `utb`: the pinned EntryID of the UTB genesis entry (0x..), or None for the package without the signed history.
     `payout`: the faucet signer's payout per claim (UCT, network.json's). `subnets`: bridged_subnets(), the faucet and edge networks. `root_cpus`: each root's CPU quota.
-    `block_interval_ms`: the shard nodes' --target-block-interval (0: none)."""
+    `block_interval_ms`: the shard nodes' --target-block-interval (0: none). `port_offset`: added to every host-published port (HOST_PORTS), so
+    generations co-hosted on one machine do not collide (the lane slot scheme, scripts/lane-slot.sh); the container ports do not change."""
     subnets = subnets or bridged_subnets()
     services = {}
     def service(name, image, command, mounts=(), memory='256m', cpu=0.5, networks=None, pod=None, **extra):
@@ -313,16 +325,16 @@ def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, wit
     service('aggregator',node,['aggregator'],['./aggregator:/state:ro',network,'./aggregator-conf:'+AGGREGATOR_CONF_DIR]+(['./aggregator-utb:'+UTB_AGGREGATOR_DIR] if utb and utb_aggregator == 'integration' else []),memory='512m',cpu=0.75,pod='pod1',
         environment=aggregator_environment(root_boot,rpc_bind,utb,utb_aggregator),depends_on={'mongo':{'condition':'service_healthy'}})
     service('rpc',images['rpc'],['python3','-u','gateway.py'],[network],memory='128m',networks=['validators','edge'],environment={'TRUSTED_PROXY_IP':subnets['edge']['gateway']},
-        ports=['127.0.0.1:8545:8545'],healthcheck={'test':['CMD','python3','-c',"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8545/healthz', timeout=10)"],'interval':'30s','timeout':'12s','retries':3})
+        ports=[f"127.0.0.1:{HOST_PORTS['rpc']+port_offset}:8545"],healthcheck={'test':['CMD','python3','-c',"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8545/healthz', timeout=10)"],'interval':'30s','timeout':'12s','retries':3})
     service('relay',images['guard'],['python3','-u','relay.py'],['./network/network.json:/config/network.json:ro'],memory='128m',networks=['validators','faucet'])
     service('signer',images['signer'],['/bin/sh','/app/backend-entrypoint.sh'],memory='512m',networks=['faucet'],
         environment={'WEB3_PROVIDER':'http://relay:8545','HCAPTCHA_SITEKEY':captcha,'FAUCET_PAYOUT':payout},secrets=['faucet_keystore','faucet_password','hcaptcha_secret'])
     service('faucet',images['guard'],['python3','-u','gateway.py'],['./network/network.json:/config/network.json:ro','./claims:/state'],
-        memory='128m',networks=['faucet'],ports=['127.0.0.1:8088:8080'],depends_on=['signer'])
+        memory='128m',networks=['faucet'],ports=[f"127.0.0.1:{HOST_PORTS['faucet']+port_offset}:8080"],depends_on=['signer'])
     service('prometheus','prom/prometheus:v3.2.1@sha256:6927e0919a144aa7616fd0137d4816816d42f6b816de3af269ab065250859a62',
         ['/bin/prometheus','--config.file=/etc/prometheus/prometheus.json','--storage.tsdb.path=/prometheus','--storage.tsdb.retention.time=7d','--storage.tsdb.retention.size=1GB'],
         ['./monitoring/prometheus.json:/etc/prometheus/prometheus.json:ro','./monitoring/alerts.json:/etc/prometheus/alerts.json:ro','./metrics:/prometheus'],
-        memory='256m',networks=['validators','faucet'],user='10001:10001',ports=['127.0.0.1:9090:9090'])
+        memory='256m',networks=['validators','faucet'],user='10001:10001',ports=[f"127.0.0.1:{HOST_PORTS['prometheus']+port_offset}:9090"])
     return {'name':out.name,'services':services,
         'networks':{'validators':{'internal':True},'aggregator':{'internal':True},'faucet':{'ipam':{'config':[dict(subnets['faucet'])]}},'edge':{'ipam':{'config':[dict(subnets['edge'])]}}},
         'secrets':{'faucet_keystore':{'file':'./faucet-secrets/keystore.json'},'faucet_password':{'file':'./faucet-secrets/password'},
@@ -346,6 +358,7 @@ def main():
     p.add_argument('--pos-cadence-seconds',type=int,default=pos.CADENCE_SECONDS,help='election cadence: UC seconds after the last acknowledged rotation')
     p.add_argument('--utb',action=argparse.BooleanOptionalAction,default=True,help='the signed trust-base entry (UTB) profile, ON by default: the roots produce and serve the signed history, shard nodes and the aggregator verify it from the genesis entry pinned in the manifest. --no-utb is the escape hatch for the package without it (old tests)')
     p.add_argument('--utb-aggregator',choices=UTB_AGGREGATORS,default='integration',help='with --utb: which aggregator the images carry (build-images.py --aggregator-variant): the integration aggregator (genesis entry file, own store) or the upstream-facing one (one-entry bundle, expected network, history in its MongoDB)')
+    p.add_argument('--port-offset',type=int,default=0,help='added to every host-published port (RPC 8545, faucet 8088, Prometheus 9090) so a second generation can run on the same host; default 0: unchanged. Lane slot N uses 1000*N (scripts/lane-slot.sh); tooling then needs TN_PUBLIC_RPC and TN_FAUCET set to the shifted ports')
     p.add_argument('--captcha-sitekey',required=True)
     p.add_argument('--captcha-secret-file',required=True,type=Path)
     p.add_argument('--faucet-payout',default=FAUCET_PAYOUT,help=f'UCT per faucet claim, decimal (default {FAUCET_PAYOUT}): the signer\'s payout and the guard\'s check of it')
@@ -448,7 +461,7 @@ def main():
             # the authorities are started from THIS compose and never recreated (their keys exist only in their memory): every argument their
             # entrypoint takes, the UTB lineage pin included, must be known here already (bft-core#1091: started without --lineage-utb-genesis,
             # every authority of a --utb generation refused the first activation); main() checks the final compose names the same entrypoints
-            boot=immutable(topology(out,a.validators,{'root':roots,'evm':evms},records['images'],a.captcha_sitekey,utb=utb_pin,payout=a.faucet_payout,subnets=subnets,root_cpus=a.root_cpus,block_interval_ms=a.block_interval_ms))
+            boot=immutable(topology(out,a.validators,{'root':roots,'evm':evms},records['images'],a.captcha_sitekey,utb=utb_pin,payout=a.faucet_payout,subnets=subnets,root_cpus=a.root_cpus,port_offset=check_port_offset(a.port_offset),block_interval_ms=a.block_interval_ms))
             write(out/'compose.yaml',boot)
             def authority(i,*args):
                 auth=out/f'validator{i}/auth'
@@ -589,7 +602,7 @@ def main():
             trusted_proxy_ip=subnets['faucet']['gateway'],**faucet['network'])
         write(out/'network/network.json',network)
         flags=[*flags,'--unicity.genesis-commitment='+genesis_commitment(json.loads((home/'genesis.json').read_text()))]
-        final=immutable(topology(out,a.validators,{'root':roots,'evm':evms},records['images'],a.captcha_sitekey,flags,max_gas,bool(genesis),a.rpc_bind,utb_pin,a.utb_aggregator,payout=a.faucet_payout,subnets=subnets,root_cpus=a.root_cpus,block_interval_ms=a.block_interval_ms))
+        final=immutable(topology(out,a.validators,{'root':roots,'evm':evms},records['images'],a.captcha_sitekey,flags,max_gas,bool(genesis),a.rpc_bind,utb_pin,a.utb_aggregator,payout=a.faucet_payout,subnets=subnets,root_cpus=a.root_cpus,port_offset=check_port_offset(a.port_offset),block_interval_ms=a.block_interval_ms))
         if not a.offline_validation:
             check_authorities_unchanged(boot,final,a.validators)
         write(out/'compose.yaml',final)

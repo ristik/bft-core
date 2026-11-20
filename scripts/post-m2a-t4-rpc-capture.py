@@ -158,7 +158,7 @@ def main():
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--trace-dir", required=True, type=Path,
                         help="incremental per-block traces captured by d1-monitor while bindings were live")
-    parser.add_argument("--eth-base", type=int, default=18545)
+    parser.add_argument("--eth-base", type=int, default=18545 + int(__import__("os").environ.get("LANE_PORT_OFFSET", "0")))
     parser.add_argument("--validators", type=int, default=4)
     args = parser.parse_args()
     try:

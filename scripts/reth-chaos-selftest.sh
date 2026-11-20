@@ -90,7 +90,7 @@ rpc() {
   case "$2" in
     eth_getTransactionCount) echo "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x1\"}" ;;
     eth_getBlockByNumber)
-      if [ "$port" = "18547" ]; then echo "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"number\":\"0x9\",\"hash\":\"0xdead\"}}"
+      if [ "$port" = "$((rethEthBase + 2))" ]; then echo "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"number\":\"0x9\",\"hash\":\"0xdead\"}}"
       else echo "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"number\":\"0x4\",\"hash\":\"0xabc\"}}"; fi ;;
     *) echo "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"blockNumber\":\"0x4\",\"status\":\"0x1\"}}" ;;
   esac
@@ -197,7 +197,7 @@ gateOut=$(
     port=${1##*:}
     if [ "$2" = eth_getTransactionCount ]; then
       printf '%s' '{"jsonrpc":"2.0","id":1,"result":"0x1"}'
-    elif [ "$2" = eth_getBlockByNumber ] && [ "$port" = 18547 ]; then
+    elif [ "$2" = eth_getBlockByNumber ] && [ "$port" = "$((rethEthBase + 2))" ]; then
       printf '%s' '{"jsonrpc":"2.0","id":1,"result":{"number":"0x4","hash":"0xdef"}}'
     elif [ "$2" = eth_getBlockByNumber ]; then
       printf '%s' '{"jsonrpc":"2.0","id":1,"result":{"number":"0x4","hash":"0xabc"}}'

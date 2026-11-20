@@ -62,6 +62,7 @@
 # checkout as its working directory (helper.sh owned_pid). There is no name-based sweep.
 
 set -u -o pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/lane-slot.sh" || exit 2   # LANE_SLOT: every port below is shifted into this lane's slot
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 # shellcheck source=../helper.sh
 source helper.sh
@@ -70,10 +71,10 @@ partitionID=8
 networkID=3
 # The owner's test floor is 5000ms. Production T2 must be sized well above normal round timing.
 t2Millis=5000
-rootP2PPort=36662
-rootRPCPort=36866
-shardP2PPort=36111
-shardRPCPort=36311
+rootP2PPort=$((36662+LANE_PORT_OFFSET))
+rootRPCPort=$((36866+LANE_PORT_OFFSET))
+shardP2PPort=$((36111+LANE_PORT_OFFSET))
+shardRPCPort=$((36311+LANE_PORT_OFFSET))
 # How long a negative window may take to acquire its first line. Every log it is used on is written
 # continuously while the cluster runs.
 windowTimeout=60
@@ -486,6 +487,7 @@ submitted_round() { # <round>: the shard log has a submission for this round
 }
 
 start_shard() {
+  lane_preflight_ports "shard node" "$shardP2PPort" "$shardRPCPort" || return 1
   start_bg shard "$scen/shard/debug.log" shard-node run --home "$scen/shard" --executor fake \
     --address "/ip4/127.0.0.1/tcp/$shardP2PPort" --bootnodes "$rootBoot" \
     --trust-base "$scen/trust-base.json" --shard-conf "$scen/shard-conf-${partitionID}_0.json" \
@@ -600,6 +602,7 @@ setup_cluster() {
     fail "unexpected status after enrollment: $(cat "$scen/status-enrolled.json" 2>/dev/null)"
   fi
 
+  lane_preflight_ports "root" "$rootP2PPort" "$rootRPCPort" || return 1
   start_bg root "$rootLog" root-node run --home "$scen/root" --address "/ip4/127.0.0.1/tcp/$rootP2PPort" \
     --trust-base "$scen/trust-base.json" --rpc-server-address "127.0.0.1:$rootRPCPort" --log-format text --log-level debug ||
     { fail "could not start the root node"; return 1; }
@@ -622,6 +625,7 @@ setup_cluster() {
   # Control against the root verifier: the same node, started without the authority flags, signs
   # with the key configuration's key. Its own checkpoint file keeps it from touching the checkpoint
   # the authority-backed node uses.
+  lane_port_preflight "$shardP2PPort" "local-key control shard node p2p" || return 1
   start_bg local-control "$controlLog" shard-node run --home "$scen/shard" --executor fake \
     --address "/ip4/127.0.0.1/tcp/$shardP2PPort" --bootnodes "$rootBoot" \
     --trust-base "$scen/trust-base.json" --shard-conf "$scen/shard-conf-${partitionID}_0.json" \
@@ -1042,6 +1046,7 @@ scenario_restart_at_anchor() {
 }
 
 start_local_shard() {
+  lane_preflight_ports "shard node" "$shardP2PPort" "$shardRPCPort" || return 1
   start_bg shard "$scen/shard/debug.log" shard-node run --home "$scen/shard" --executor fake \
     --address "/ip4/127.0.0.1/tcp/$shardP2PPort" --bootnodes "$rootBoot" \
     --trust-base "$scen/trust-base.json" --shard-conf "$scen/shard-conf-${partitionID}_0.json" \
@@ -1073,6 +1078,7 @@ setup_local_cluster() {
     fail "the shard configuration's T2 is not ${t2Millis}ms at or above the 5000ms floor"
     return 1
   fi
+  lane_preflight_ports "root" "$rootP2PPort" "$rootRPCPort" || return 1
   start_bg root "$rootLog" root-node run --home "$scen/root" --address "/ip4/127.0.0.1/tcp/$rootP2PPort" \
     --trust-base "$scen/trust-base.json" --rpc-server-address "127.0.0.1:$rootRPCPort" --log-format text --log-level debug ||
     { fail "could not start the root node"; return 1; }
