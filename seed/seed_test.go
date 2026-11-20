@@ -21,6 +21,7 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/bft-core/archive"
+	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 
 	"github.com/unicitynetwork/bft-core/rootchain/testutils/ucfixture"
 )
@@ -281,13 +282,29 @@ func TestWriteDirIsExclusiveAndAtomic(t *testing.T) {
 	require.NoError(t, os.Mkdir(victim, 0o755))
 	link := filepath.Join(parent, "link")
 	require.NoError(t, os.Symlink(victim, link))
-	require.NoError(t, WriteDir(link, f.files, f.manifest, true))
-	ents, _ := os.ReadDir(victim)
-	require.Empty(t, ents, "the old symlink target is untouched")
-	require.NoError(t, WriteDir(dst, f.files, f.manifest, true))
-	ents, _ = os.ReadDir(parent)
+	exchange := canExchange(parent)
+	if !exchange {
+		// no atomic exchange on this filesystem: every replacement is refused before anything moves
+		err = WriteDir(link, f.files, f.manifest, true)
+		require.ErrorContains(t, err, "not supported")
+		target, lerr := os.Readlink(link)
+		require.NoError(t, lerr, "the destination symlink is intact")
+		require.Equal(t, victim, target)
+		ents, _ := os.ReadDir(victim)
+		require.Empty(t, ents, "the symlink target is untouched")
+		require.ErrorContains(t, WriteDir(dst, f.files, f.manifest, true), "not supported")
+		_, err = VerifyDir(dst, Pins{GenesisID: f.pin})
+		require.NoError(t, err, "the original destination is intact")
+	} else {
+		require.NoError(t, WriteDir(link, f.files, f.manifest, true))
+		ents, _ := os.ReadDir(victim)
+		require.Empty(t, ents, "the old symlink target is untouched")
+		require.NoError(t, WriteDir(dst, f.files, f.manifest, true))
+	}
+	ents, _ := os.ReadDir(parent)
 	for _, e := range ents {
 		require.False(t, strings.HasPrefix(e.Name(), ".seed-"), "no staging leftovers: %s", e.Name())
+		require.False(t, strings.HasSuffix(e.Name(), ".lock"), "no lock leftovers: %s", e.Name())
 	}
 }
 
@@ -331,7 +348,7 @@ func TestResolveRestorePinEpoch1(t *testing.T) {
 	_ = p
 	// the fixture's own trust base is the genesis of its history: epoch 1 needs no bundles
 	tb := ucfixture2TrustBase(t)
-	rp, err := ResolveRestorePin(v, tb, false, nil)
+	rp, err := ResolveRestorePin(v, tb, false, nil, nil)
 	require.NoError(t, err)
 	want, _ := tb.Hash(crypto.SHA256)
 	require.Equal(t, want, rp.BodyID[:])
@@ -339,11 +356,11 @@ func TestResolveRestorePinEpoch1(t *testing.T) {
 	// a genesis trust base that is not the pinned entry's origin is refused
 	other := *tb
 	other.NetworkID++
-	_, err = ResolveRestorePin(v, &other, false, nil)
+	_, err = ResolveRestorePin(v, &other, false, nil, nil)
 	require.ErrorIs(t, err, ErrSeed)
 	// a later epoch with no activation bundles is refused, never assumed
 	v.UC.UnicitySeal.Epoch = 2
-	_, err = ResolveRestorePin(v, tb, false, nil)
+	_, err = ResolveRestorePin(v, tb, false, nil, nil)
 	require.ErrorIs(t, err, ErrSeed) // (the fixture genesis is unsigned, so no lineage starts; the epoch-2 path runs live)
 }
 
@@ -412,12 +429,17 @@ func TestPublishIsExclusiveAcrossConcurrentWriters(t *testing.T) {
 	require.NoError(t, err)
 	// the lock file is gone, and a replacement keeps the destination readable and complete
 	require.NoFileExists(t, dst+".lock")
-	require.NoError(t, WriteDir(dst, f.files, f.manifest, true))
+	if canExchange(parent) {
+		require.NoError(t, WriteDir(dst, f.files, f.manifest, true))
+	} else {
+		require.ErrorContains(t, WriteDir(dst, f.files, f.manifest, true), "not supported")
+	}
 	_, err = VerifyDir(dst, Pins{GenesisID: f.pin})
-	require.NoError(t, err)
+	require.NoError(t, err, "the destination is complete after a replacement or its refusal")
 	// a stale lock refuses a publication with a message that names it
 	require.NoError(t, os.WriteFile(dst+".lock", nil, 0o600))
 	require.ErrorContains(t, WriteDir(dst, f.files, f.manifest, true), "in progress")
+	require.NoError(t, os.Remove(dst+".lock"))
 }
 
 func TestHandlerServesOnlyTheDeclaredSizeAndStaysInsideTheDirectory(t *testing.T) {
@@ -635,7 +657,13 @@ func TestScanArchiveTipSkipsAMalformedNewerRecord(t *testing.T) {
 	seal2 := *uc.UnicitySeal
 	seal2.RootChainRoundNumber += 200
 	wrongTR.UnicitySeal = &seal2
-	put(string([]byte{0xc2, 0x80, 0x02}), wrongTR, bytes.Clone(f.files[TipTRFile][:len(f.files[TipTRFile])-1]))
+	var otherTR certification.TechnicalRecord
+	require.NoError(t, types.Cbor.Unmarshal(f.files[TipTRFile], &otherTR))
+	otherTR.Round++ // well-formed and valid, but not the technical record this UC commits to (its hash differs)
+	otherTRRaw, err := types.Cbor.Marshal(&otherTR)
+	require.NoError(t, err)
+	require.NotEqual(t, f.files[TipTRFile], otherTRRaw)
+	put(string([]byte{0xc2, 0x80, 0x02}), wrongTR, otherTRRaw)
 	tip, err := ScanArchiveTip(dir)
 	require.NoError(t, err)
 	require.Equal(t, good.BlockHash, tip.Request.BlockHash)
@@ -709,4 +737,34 @@ func TestVerifyDirReadsOneDirectoryVersion(t *testing.T) {
 	m, err := d.read(ManifestName, MaxManifestBytes)
 	require.NoError(t, err)
 	require.Equal(t, f.manifest, m, "the opened directory still yields the version it was opened at")
+}
+
+func TestResolveShardConfCarriesTheConfigurationThroughTheActivations(t *testing.T) {
+	p, err := ucfixture.New(ucfixture.Config{Partition: 1, ShardBits: 0})
+	require.NoError(t, err)
+	supplied := *p.Shards()[0].Config // epoch 0, the configuration the node was started with
+	suppliedHash, _ := supplied.Hash(crypto.SHA256)
+	succ := supplied
+	succ.Epoch = 1
+	succHash, _ := succ.Hash(crypto.SHA256)
+	rootOnly := confStep(func(active []byte) ([]byte, *types.PartitionDescriptionRecord, error) { return active, nil, nil })
+	coupled := confStep(func(active []byte) ([]byte, *types.PartitionDescriptionRecord, error) {
+		require.Equal(t, suppliedHash, active, "the step receives the configuration carried so far")
+		return succHash, &succ, nil
+	})
+	// accepted: a root-only activation, then a coupled one that activates shard epoch 1: the hash is the successor's
+	h, err := resolveShardConf(&supplied, 1, []confStep{rootOnly, coupled})
+	require.NoError(t, err)
+	require.Equal(t, succHash, h)
+	// refused: the activations never reach shard epoch 2 ("supply the configuration for epoch 2")
+	_, err = resolveShardConf(&supplied, 2, []confStep{rootOnly, coupled})
+	require.ErrorContains(t, err, "supply the configuration for shard epoch 2")
+	_, err = resolveShardConf(&supplied, 1, nil)
+	require.ErrorContains(t, err, "supply the configuration")
+	// refused: a transition that does not verify
+	bad := confStep(func([]byte) ([]byte, *types.PartitionDescriptionRecord, error) {
+		return nil, nil, fmt.Errorf("proof invalid")
+	})
+	_, err = resolveShardConf(&supplied, 1, []confStep{bad})
+	require.ErrorContains(t, err, "does not verify")
 }

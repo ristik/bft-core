@@ -381,7 +381,7 @@ func seedRestorePinCmd() *cobra.Command {
 				}
 				raws = append(raws, raw)
 			}
-			rp, err := seed.ResolveRestorePin(v, genesis, !noUTB, raws)
+			rp, err := seed.ResolveRestorePin(v, genesis, !noUTB, raws, pins.ShardConf)
 			if err != nil {
 				return err
 			}

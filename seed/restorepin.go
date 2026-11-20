@@ -29,7 +29,7 @@ type RestorePin struct {
 //     one the seed's UTB history names (same members and weights), so the two authenticated histories agree.
 //
 // bundles must cover epochs 2..RootEpoch in order.
-func ResolveRestorePin(v *Verified, genesis *types.RootTrustBaseV1, utbDeployment bool, bundles [][]byte) (*RestorePin, error) {
+func ResolveRestorePin(v *Verified, genesis *types.RootTrustBaseV1, utbDeployment bool, bundles [][]byte, shardConf *types.PartitionDescriptionRecord) (*RestorePin, error) {
 	epoch := v.UC.GetRootEpoch()
 	if genesis == nil || genesis.Epoch != 1 {
 		return nil, refuse("the genesis trust base (epoch 1) is required")
@@ -55,6 +55,10 @@ func ResolveRestorePin(v *Verified, genesis *types.RootTrustBaseV1, utbDeploymen
 			return nil, refuse("the genesis trust base is not the one the pinned UTB genesis entry was built from")
 		}
 	}
+	trEpoch := v.TR.Epoch
+	if shardConf != nil && trEpoch > shardConf.Epoch && epoch == 1 {
+		return nil, refuse("supply the configuration for shard epoch %d: the checkpoint is of root epoch 1, so no activation can lead from epoch %d to it", trEpoch, shardConf.Epoch)
+	}
 	pin := &RestorePin{UC: bytes.Clone(v.Files[TipUCFile]), TR: bytes.Clone(v.Files[TipTRFile]), RootEpoch: epoch}
 	if epoch == 1 {
 		// whatever the deployment's profile, the checkpoint must verify against the supplied native genesis trust base itself
@@ -73,18 +77,41 @@ func ResolveRestorePin(v *Verified, genesis *types.RootTrustBaseV1, utbDeploymen
 		return nil, refuse("starting the history from the genesis trust base: %v", err)
 	}
 	var found bool
+	var steps []confStep
+	partition, shard := v.UC.GetPartitionID(), v.UC.GetShardID()
 	for i, raw := range bundles {
+		prev := lin
 		next, step, err := lin.Extend(raw)
 		if err != nil {
 			return nil, refuse("activation bundle %d does not verify from the genesis: %v", i+1, err)
 		}
 		lin = next
+		if !step.Replay && step.Epoch >= 2 {
+			steps = append(steps, func(active []byte) ([]byte, *types.PartitionDescriptionRecord, error) {
+				tr, err := activationproof.ShardTransition(prev, step, partition, shard, active)
+				if err != nil {
+					return nil, nil, err
+				}
+				return tr.NextConfHash, tr.Conf, nil
+			})
+		}
 		if step.Epoch == epoch {
 			pin.BodyID, found = step.Entry.BodyID(), true
 		}
 	}
 	if !found {
 		return nil, refuse("the activation bundles do not reach the checkpoint's root epoch %d (they end at epoch %d)", epoch, lin.Tip())
+	}
+	// the shard configuration the checkpoint's technical record names: carried from the supplied configuration through every verified activation
+	// (the old committee's commit, the committed checkpoint against the active configuration, the committed candidate), and compared with the UC
+	if shardConf != nil && trEpoch > shardConf.Epoch {
+		h, err := resolveShardConf(shardConf, trEpoch, steps)
+		if err != nil {
+			return nil, err
+		}
+		if !bytes.Equal(h, v.UC.ShardConfHash) {
+			return nil, refuse("the checkpoint certifies another shard configuration than the one the verified activations lead to at shard epoch %d", trEpoch)
+		}
 	}
 	// the two authenticated histories must agree on the committee of the checkpoint's epoch
 	tb, err := lin.Trust(epoch)
@@ -122,4 +149,28 @@ func sameCommittee(tb *types.RootTrustBaseV1, e *types.RootTrustBaseV2) error {
 		}
 	}
 	return nil
+}
+
+// confStep is one verified activation, as the shard sees it: given the configuration hash active before it, the hash certified from it and the
+// activated configuration of a coupled change (nil for a root-only change, which keeps the configuration).
+type confStep func(active []byte) (next []byte, conf *types.PartitionDescriptionRecord, err error)
+
+// resolveShardConf carries the supplied configuration through the activations in order and returns the configuration hash of the shard epoch trEpoch.
+// When the activations never reach that epoch, the operator must supply a configuration that does.
+func resolveShardConf(supplied *types.PartitionDescriptionRecord, trEpoch uint64, steps []confStep) ([]byte, error) {
+	active, err := supplied.Hash(crypto.SHA256)
+	if err != nil {
+		return nil, refuse("hashing the supplied shard configuration: %v", err)
+	}
+	for _, step := range steps {
+		next, conf, err := step(active)
+		if err != nil {
+			return nil, refuse("the shard transition does not verify: %v", err)
+		}
+		active = next
+		if conf != nil && conf.Epoch == trEpoch {
+			return next, nil
+		}
+	}
+	return nil, refuse("supply the configuration for shard epoch %d: the verified activations lead from the supplied epoch %d to no such epoch", trEpoch, supplied.Epoch)
 }

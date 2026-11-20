@@ -239,7 +239,7 @@ func checkUCShape(uc *types.UnicityCertificate) error {
 // TECHNICAL RECORD's epoch, as restore selects it (rootinput: the authorized epoch), never the input record's: at an assignment transition the input
 // record still names the old epoch while the technical record and the UC's configuration hash name the successor. The checkpoint must be of c's
 // network, partition and shard; not of an epoch before c's; and at c's own epoch it must certify exactly c's hash. A later epoch's configuration comes
-// from the verified handoffs, which only the restore itself can resolve, so no hash is compared for it here.
+// from the verified activations: ResolveRestorePin carries the supplied configuration through them and compares the hash (restore-pin always does).
 func checkShardConf(c *types.PartitionDescriptionRecord, network types.NetworkID, partition types.PartitionID, shard types.ShardID, trEpoch uint64, ucConfHash []byte) error {
 	if c == nil {
 		return nil
