@@ -323,7 +323,7 @@ h3_restore_validator() {
     seedPin=$(mktemp -d "test-nodes/seed-pin-XXXXXX")/pin
     for b in ${H3_RESTORE_SEED_BUNDLES:-}; do bundleArgs+=(--bundle "$b"); done
     pinOut=$(build/ubft seed restore-pin --dir "$H3_RESTORE_SEED_DIR" --utb-genesis-id "$(tr -d '[:space:]' <test-nodes/utb-genesis.id)" \
-      --trust-base "$H3_RESTORE_TRUST_BASE" ${bundleArgs[@]+"${bundleArgs[@]}"} --out "$seedPin" 2>&1) \
+      --trust-base "$H3_RESTORE_TRUST_BASE" --full-shard-conf "$EVM_FULL_SHARD_CONF" ${bundleArgs[@]+"${bundleArgs[@]}"} --out "$seedPin" 2>&1) \
       || { echo "h3_restore_validator $i: the seed's restore pin is refused; nothing of the validator was touched: $pinOut" >&2; return 1; }
     bodyID=${pinOut##*bodyID=}
   fi

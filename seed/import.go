@@ -48,6 +48,29 @@ func ReadImportRecord(home string) (*ImportRecord, error) {
 	return &r, nil
 }
 
+// CheckImportDestination decides, BEFORE anything is written anywhere, whether importing v into home is allowed: no import yet (a fresh start), the
+// same seed again (a resume), or another seed with replace. Call it before touching any entry store, so a refused replacement changes nothing. It
+// reports whether the destination exists (the publication then replaces it).
+func CheckImportDestination(home string, v *Verified, replace bool) (replacing bool, err error) {
+	final := filepath.Join(home, ImportDir)
+	old, err := ReadImportRecord(home)
+	switch {
+	case err != nil && !replace:
+		return false, err
+	case old != nil && old.ManifestDigest != v.ManifestDigest && !replace:
+		return false, refuse("%s already holds an import of seed %s; pass --replace to replace it with %s", home, old.ManifestDigest, v.ManifestDigest)
+	case old != nil:
+		return true, nil
+	}
+	if _, err := os.Lstat(final); err == nil {
+		if !replace {
+			return false, refuse("%s exists and is not a seed import; pass --replace to replace it", final)
+		}
+		return true, nil
+	}
+	return false, nil
+}
+
 // Import places a verified seed in a validator home: <home>/seed/{manifest.json, the payload files, import.json}. The files are what Verify
 // returned (never re-read from a source). Call it LAST, after every requested store install has succeeded: the record is the statement that the
 // import is complete. Importing the same seed again is a resume (it republishes the identical files); another seed over an existing import needs
@@ -55,16 +78,9 @@ func ReadImportRecord(home string) (*ImportRecord, error) {
 // rename; the previous import stays in place until the new one is.
 func Import(v *Verified, home string, sources []string, replace bool, now time.Time) (*ImportRecord, error) {
 	final := filepath.Join(home, ImportDir)
-	old, err := ReadImportRecord(home)
-	switch {
-	case err != nil && !replace:
+	replacing, err := CheckImportDestination(home, v, replace)
+	if err != nil {
 		return nil, err
-	case old != nil && old.ManifestDigest != v.ManifestDigest && !replace:
-		return nil, refuse("%s already holds an import of seed %s; pass --replace to replace it with %s", home, old.ManifestDigest, v.ManifestDigest)
-	case old == nil && !replace:
-		if _, err := os.Lstat(final); err == nil {
-			return nil, refuse("%s exists and is not a seed import; pass --replace to replace it", final)
-		}
 	}
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		return nil, err
@@ -96,7 +112,7 @@ func Import(v *Verified, home string, sources []string, replace bool, now time.T
 	if err := writeNew(filepath.Join(tmp, ImportRecordName), append(raw, '\n')); err != nil {
 		return nil, err
 	}
-	if err := swapDir(tmp, final); err != nil {
+	if err := publishDir(tmp, final, replacing); err != nil {
 		return nil, err
 	}
 	return rec, nil

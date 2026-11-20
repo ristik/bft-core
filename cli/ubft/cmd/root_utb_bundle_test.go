@@ -33,6 +33,16 @@ func TestUTBBundleCacheBuildsOncePerTipAndHonoursTheBudget(t *testing.T) {
 	if _, err := c.get(); err == nil {
 		t.Fatal("a history over the budget was built")
 	}
+	// the refusal is cached for the tip: the next request makes no store reads; a new tip is read again
+	n := src.ranges.Load()
+	if _, err := c.get(); err == nil || src.ranges.Load() != n {
+		t.Fatalf("an over-budget refusal was not cached for its tip (reads %d -> %d, err %v)", n, src.ranges.Load(), err)
+	}
+	src.tip = utbstore.Tip{Epoch: 2}
+	if _, err := c.get(); err == nil || src.ranges.Load() == n {
+		t.Fatal("a new tip was not read again")
+	}
+	src.tip = utbstore.Tip{Epoch: 1}
 	c = &utbBundleCache{src: src, budget: 1 << 20}
 	// the fake entry is not a valid entry, so the encoder refuses; what is checked here is that a refusal is not cached as a success
 	for i := 0; i < 2; i++ {

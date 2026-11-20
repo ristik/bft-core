@@ -7,7 +7,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"path"
 	"sort"
 	"strings"
 	"time"
@@ -55,11 +54,45 @@ func normalize(src string) (string, error) {
 	if port != "" {
 		host += ":" + port
 	}
-	p := path.Clean("/" + u.EscapedPath())
-	if p == "/" {
-		p = ""
+	return scheme + "://" + host + canonicalPath(u.EscapedPath()), nil
+}
+
+// canonicalPath decodes every segment (so "%7Euser" and "~user" are one), removes dot segments (also "%2e%2e"), and re-encodes each segment with
+// only the unreserved characters left bare and all others as upper-case %XX. An encoded slash stays inside its segment; it is not a separator.
+func canonicalPath(escaped string) string {
+	var out []string
+	for _, seg := range strings.Split(escaped, "/") {
+		d, err := url.PathUnescape(seg)
+		if err != nil {
+			d = seg
+		}
+		switch d {
+		case "", ".":
+		case "..":
+			if len(out) > 0 {
+				out = out[:len(out)-1]
+			}
+		default:
+			out = append(out, encodeSegment(d))
+		}
 	}
-	return scheme + "://" + host + p, nil
+	if len(out) == 0 {
+		return ""
+	}
+	return "/" + strings.Join(out, "/")
+}
+
+func encodeSegment(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '.' || c == '_' || c == '~' {
+			b.WriteByte(c)
+		} else {
+			fmt.Fprintf(&b, "%%%02X", c)
+		}
+	}
+	return b.String()
 }
 
 func get(ctx context.Context, c *http.Client, base, name string, max int64) ([]byte, error) {

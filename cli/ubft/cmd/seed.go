@@ -219,7 +219,7 @@ func (f *seedPinFlags) pins() (seed.Pins, error) {
 		if err != nil {
 			return seed.Pins{}, fmt.Errorf("reading --full-shard-conf: %w", err)
 		}
-		p.Partition, p.Shard = &pdr.PartitionID, &pdr.ShardID
+		p.Partition, p.Shard, p.ShardConf = &pdr.PartitionID, &pdr.ShardID, pdr
 	}
 	return p, nil
 }
@@ -289,6 +289,10 @@ func seedImportCmd(base *baseFlags) *cobra.Command {
 			if genesisFile == "" && (rootDB != "" || shardDB != "") {
 				return errors.New("--root-utb-db and --shard-utb-db need --utb-genesis")
 			}
+			// 0. the destination first: a refused replacement must change nothing, so it is decided before any store is touched
+			if _, err := seed.CheckImportDestination(home, v, replace); err != nil {
+				return err
+			}
 			// 1. open every requested store (this validates the genesis file and the pin), 2. install the history into each (the store's own authenticated
 			// appends, idempotent: a retry resumes), 3. only then publish the import record. A failure before step 3 leaves no record, and the same seed
 			// can be imported again without --replace.
@@ -345,16 +349,20 @@ func seedImportCmd(base *baseFlags) *cobra.Command {
 // history, stages the exact UC and TR files the restore will read, and loads them back with the restore's own loader. It touches no validator state: a
 // script runs it BEFORE stopping or clearing anything, and restores only if it succeeds.
 func seedRestorePinCmd() *cobra.Command {
-	var dir, genesisID, trustBase, outPrefix string
+	var dir, trustBase, outPrefix string
 	var bundles []string
 	var noUTB bool
-	cmd := &cobra.Command{Use: "restore-pin", Short: "Verify a seed and stage the restore pin (tip UC, TR and trust BodyID) without touching any validator state",
+	var pf seedPinFlags
+	cmd := &cobra.Command{Use: "restore-pin", Short: "Verify a seed against this node's shard configuration and stage the restore pin (tip UC, TR and trust BodyID) without touching any validator state",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			pin, err := seed.ParseGenesisID(genesisID)
+			if pf.shardConf == "" {
+				return errors.New("--full-shard-conf is required: the checkpoint must be verified to be of this node's shard before anything is stopped or erased")
+			}
+			pins, err := pf.pins()
 			if err != nil {
 				return err
 			}
-			v, err := seed.VerifyDir(dir, seed.Pins{GenesisID: pin})
+			v, err := seed.VerifyDir(dir, pins)
 			if err != nil {
 				return err
 			}
@@ -400,12 +408,11 @@ func seedRestorePinCmd() *cobra.Command {
 			return nil
 		}}
 	cmd.Flags().StringVar(&dir, "dir", "seed", "the seed directory")
-	cmd.Flags().StringVar(&genesisID, "utb-genesis-id", "", "the pinned genesis EntryID")
+	pf.add(cmd)
 	cmd.Flags().StringVar(&trustBase, "trust-base", "", "the genesis (epoch 1) trust base file")
 	cmd.Flags().StringArrayVar(&bundles, "bundle", nil, "a root activation bundle file (q3/bundle encoding), repeated in epoch order: epochs 2 through the checkpoint's")
 	cmd.Flags().StringVar(&outPrefix, "out", "", "prefix of the staged files: <out>.uc.cbor and <out>.tr.cbor (created exclusively)")
 	cmd.Flags().BoolVar(&noUTB, "no-utb", false, "the deployment is not a UTB one")
-	_ = cmd.MarkFlagRequired("utb-genesis-id")
 	_ = cmd.MarkFlagRequired("trust-base")
 	_ = cmd.MarkFlagRequired("out")
 	return cmd

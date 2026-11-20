@@ -16,6 +16,7 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/bft-core/archive"
+	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 )
 
 // ExportInput is what a synced validator supplies.
@@ -55,8 +56,11 @@ func ScanArchiveTip(dir string) (*ArchiveTip, error) {
 				continue
 			}
 			var uc types.UnicityCertificate
-			if types.Cbor.Unmarshal(rec.ResultingUC, &uc) != nil || uc.InputRecord == nil || uc.UnicityTreeCertificate == nil || uc.UnicitySeal == nil ||
-				len(uc.InputRecord.BlockHash) != 32 || len(rec.ResultingTR) == 0 {
+			// the same structural check the verifier applies, and the TR must be the one the UC commits to: a malformed newer record cannot win and break
+			// the export while an older valid one exists
+			var tr certification.TechnicalRecord
+			if types.Cbor.Unmarshal(rec.ResultingUC, &uc) != nil || checkUCShape(&uc) != nil || len(rec.ResultingTR) == 0 ||
+				types.Cbor.Unmarshal(rec.ResultingTR, &tr) != nil || tr.IsValid() != nil || tr.HashMatches(uc.TRHash) != nil {
 				continue
 			}
 			v2 := archive.HasReceiptList(rec)

@@ -10,7 +10,8 @@
 
 vrs_dir=test-nodes/seed
 # the seed servers' ports: 38480..38483 shifted by the lane's port offset (#1218: LANE_SLOT * 1000, or LANE_PORT_BASE); scripts/lib/lane-slot.sh lists them
-vrs_off=${LANE_PORT_OFFSET:-$(( ${LANE_SLOT:-0} * 1000 ))}
+declare -F seed_port_offset >/dev/null || source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/utb-lib.sh"
+vrs_off=$(seed_port_offset)
 vrs_port_a=$((38480 + vrs_off)); vrs_port_b=$((38481 + vrs_off)); vrs_port_c=$((38482 + vrs_off))
 vrs_log() { vrb_log "$@"; }
 vrs_pin() { tr -d '[:space:]' <test-nodes/utb-genesis.id; }
@@ -198,6 +199,17 @@ PY
   [ "$j0" = "$j1" ] || { vrs_log "FAIL: validator $v's journal changed under a rejected seed ($j0 -> $j1)"; return 1; }
   [ -d "$H3_ARCHIVES/evm$v" ] && kill -0 "$(cat "test-nodes/reth$v/pid")" 2>/dev/null || { vrs_log "FAIL: validator $v's archive or execution client was touched by a rejected seed"; return 1; }
   vrs_log "PASS: a rejected seed left validator $v untouched (the preflight refused it before anything was stopped; same pid $pid0, archive and execution client present)"
+  # a VALID seed for another shard: the target's shard configuration names another partition than the seed's checkpoint, so the preflight must refuse it
+  # (a seed for another shard cannot be signed here; the target's configuration is the one that differs) and leave the validator untouched
+  python3 - "$EVM_FULL_SHARD_CONF" "$d/other-shard-conf.json" <<'PY'
+import json,sys
+c=json.load(open(sys.argv[1])); c['partitionId']=c['partitionId']+1; json.dump(c,open(sys.argv[2],'w'))
+PY
+  if EVM_FULL_SHARD_CONF=$d/other-shard-conf.json H3_RESTORE_SEED_DIR=$good h3_restore_validator "$v" 1 >"$VR_EVIDENCE/seed2-restore-other-shard.log" 2>&1; then vrs_log "FAIL: a seed for another shard was accepted by the restore"; return 1; fi
+  grep -q "another shard" "$VR_EVIDENCE/seed2-restore-other-shard.log" && grep -q "nothing of the validator was touched" "$VR_EVIDENCE/seed2-restore-other-shard.log" || { vrs_log "FAIL: the other-shard refusal did not come from the preflight"; cat "$VR_EVIDENCE/seed2-restore-other-shard.log"; return 1; }
+  [ "$(cat "test-nodes/evm$v/pid")" = "$pid0" ] && kill -0 "$pid0" 2>/dev/null && [ -d "$H3_ARCHIVES/evm$v" ] && kill -0 "$(cat "test-nodes/reth$v/pid")" 2>/dev/null \
+    || { vrs_log "FAIL: validator $v was touched by a seed for another shard"; return 1; }
+  vrs_log "PASS: a valid seed for another shard was refused by the preflight and validator $v is untouched (same pid $pid0)"
   # the epoch-2 restore itself
   export "EVM_ENGINE_URL_$v=http://127.0.0.1:$((rethEngineBase + v - 1))" "EVM_ETH_URL_$v=http://127.0.0.1:$((rethEthBase + v - 1))"
   H3_RESTORE_SEED_DIR=$good h3_restore_validator "$v" 1 || { vrs_log "FAIL: the epoch-$e restore from the seed"; return 1; }

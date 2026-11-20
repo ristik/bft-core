@@ -25,6 +25,9 @@ type Pins struct {
 	// Partition and Shard, when set, are the importer's own shard (from its shard configuration): the checkpoint must be of that shard.
 	Partition *types.PartitionID
 	Shard     *types.ShardID
+	// ShardConf, when set, is the target's own full shard configuration (partition, shard, network, epoch): the checkpoint must be of that shard, not
+	// older than that configuration's epoch, and, at the same epoch, certify exactly that configuration's hash.
+	ShardConf *types.PartitionDescriptionRecord
 }
 
 // Verified is a seed that passed every check, with the decoded evidence.
@@ -147,14 +150,8 @@ func Verify(manifestRaw []byte, files map[string][]byte, p Pins) (v *Verified, e
 	if again, err := types.Cbor.Marshal(&tr); err != nil || !bytes.Equal(again, trRaw) {
 		return nil, refuse("the checkpoint TR is not canonical CBOR")
 	}
-	// every field the accessors and the verifier dereference must be present: a certificate with a missing part is a refusal, not a panic
-	switch {
-	case uc.InputRecord == nil || uc.UnicitySeal == nil:
-		return nil, refuse("the checkpoint UC has no input record or seal")
-	case uc.UnicityTreeCertificate == nil:
-		return nil, refuse("the checkpoint UC has no unicity tree certificate")
-	case len(uc.TRHash) != 32 || len(uc.ShardConfHash) != 32:
-		return nil, refuse("the checkpoint UC's TR hash or shard configuration hash is not 32 bytes")
+	if err := checkUCShape(&uc); err != nil {
+		return nil, err
 	}
 	if err := tr.IsValid(); err != nil {
 		return nil, refuse("the checkpoint TR: %v", err)
@@ -193,6 +190,28 @@ func Verify(manifestRaw []byte, files map[string][]byte, p Pins) (v *Verified, e
 		return nil, refuse("the checkpoint is of another shard than this node's")
 	}
 
+	if c := p.ShardConf; c != nil {
+		if uint64(c.NetworkID) != uint64(bundle.Network) {
+			return nil, refuse("the checkpoint is of network %d, this node's shard configuration is of network %d", bundle.Network, c.NetworkID)
+		}
+		if c.PartitionID != partition || !bytes.Equal(c.ShardID.Bytes(), shard.Bytes()) {
+			return nil, refuse("the checkpoint is of partition %d shard %x, this node's shard configuration is of partition %d shard %x (a seed for another shard)",
+				partition, shard.Bytes(), c.PartitionID, c.ShardID.Bytes())
+		}
+		switch ep := uc.GetShardEpoch(); {
+		case ep < c.Epoch:
+			return nil, refuse("the checkpoint is of shard epoch %d, older than this node's shard configuration (epoch %d)", ep, c.Epoch)
+		case ep == c.Epoch:
+			h, err := c.Hash(crypto.SHA256)
+			if err != nil {
+				return nil, refuse("hashing this node's shard configuration: %v", err)
+			}
+			if !bytes.Equal(h, uc.ShardConfHash) {
+				return nil, refuse("the checkpoint certifies another shard configuration than this node's at shard epoch %d", ep)
+			}
+		}
+	}
+
 	// 3. the manifest's claims are what the verified bytes say
 	cp := m.Checkpoint
 	ir := uc.InputRecord
@@ -216,4 +235,20 @@ func (v *Verified) Summary() string {
 	cp := v.Manifest.Checkpoint
 	return fmt.Sprintf("seed %s: trust-base epochs %d..%d, checkpoint root epoch %d round %d, shard round %d, block %s",
 		v.ManifestDigest, v.Bundle.Entries[0].Epoch, v.Bundle.Tip().Epoch, cp.RootEpoch, cp.RootRound, cp.ShardRound, cp.BlockHash)
+}
+
+// checkUCShape is the structural check shared by the verifier and the archive scan: every field the accessors and the verifier dereference must be
+// present and well-sized. A certificate with a missing part is a refusal (and, in the scan, never the "newest record"), not a panic.
+func checkUCShape(uc *types.UnicityCertificate) error {
+	switch {
+	case uc.InputRecord == nil || uc.UnicitySeal == nil:
+		return refuse("the checkpoint UC has no input record or seal")
+	case uc.UnicityTreeCertificate == nil:
+		return refuse("the checkpoint UC has no unicity tree certificate")
+	case len(uc.InputRecord.BlockHash) != 32:
+		return refuse("the checkpoint UC's block hash is not 32 bytes")
+	case len(uc.TRHash) != 32 || len(uc.ShardConfHash) != 32:
+		return refuse("the checkpoint UC's TR hash or shard configuration hash is not 32 bytes")
+	}
+	return nil
 }

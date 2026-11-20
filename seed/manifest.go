@@ -194,9 +194,20 @@ func ReadFileBounded(path string, max int64) ([]byte, error) {
 	return b, nil
 }
 
-// openRegular opens path with O_NOFOLLOW and Fstat-checks the descriptor: a regular file of at most max bytes.
+// openRegular opens the file `path` names inside its directory through a root handle (os.OpenRoot): the name is resolved only within that directory,
+// never through a symlink (O_NOFOLLOW), and without blocking on a FIFO or device (O_NONBLOCK, then the descriptor's own type is checked). It checks on
+// the OPENED descriptor that the file is regular and at most max bytes.
 func openRegular(path string, max int64) (*os.File, os.FileInfo, error) {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	dir, name := filepath.Split(path)
+	if dir == "" {
+		dir = "."
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer root.Close()
+	f, err := root.OpenFile(name, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -207,11 +218,11 @@ func openRegular(path string, max int64) (*os.File, os.FileInfo, error) {
 	}
 	if !st.Mode().IsRegular() {
 		f.Close()
-		return nil, nil, refuse("%s is not a regular file", filepath.Base(path))
+		return nil, nil, refuse("%s is not a regular file", name)
 	}
 	if st.Size() > max {
 		f.Close()
-		return nil, nil, refuse("%s is %d bytes (limit %d)", filepath.Base(path), st.Size(), max)
+		return nil, nil, refuse("%s is %d bytes (limit %d)", name, st.Size(), max)
 	}
 	return f, st, nil
 }

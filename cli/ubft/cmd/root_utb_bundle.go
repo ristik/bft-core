@@ -27,6 +27,9 @@ type utbBundleCache struct {
 	mu     sync.Mutex
 	tip    utbstore.Tip
 	raw    []byte
+	// refusedTip and refusal: a history over the budget is refused deterministically for its tip, so the next request makes no store reads
+	refusedTip utbstore.Tip
+	refusal    error
 }
 
 // get returns the encoded bundle for the store's current tip. Concurrent callers wait on the one build.
@@ -36,6 +39,9 @@ func (c *utbBundleCache) get() ([]byte, error) {
 	defer c.mu.Unlock()
 	if c.raw != nil && c.tip == tip {
 		return c.raw, nil
+	}
+	if c.refusal != nil && c.refusedTip == tip {
+		return nil, c.refusal
 	}
 	var raw [][]byte
 	total := 0
@@ -48,7 +54,8 @@ func (c *utbBundleCache) get() ([]byte, error) {
 			total += len(e)
 		}
 		if total > c.budget {
-			return nil, fmt.Errorf("the history is larger than the %d byte budget of one response: export it with `ubft trust-base utb-export` from the store", c.budget)
+			c.refusedTip, c.refusal = tip, fmt.Errorf("the history is larger than the %d byte budget of one response (the seed format's own limit: such a history cannot be put in a seed in v1; followers sync it over the GetTrustBase stream)", c.budget)
+			return nil, c.refusal
 		}
 		raw = append(raw, page...)
 		if !more {
@@ -61,7 +68,8 @@ func (c *utbBundleCache) get() ([]byte, error) {
 		return nil, err
 	}
 	if len(enc) > c.budget {
-		return nil, fmt.Errorf("the encoded history is larger than the %d byte budget of one response", c.budget)
+		c.refusedTip, c.refusal = tip, fmt.Errorf("the encoded history is larger than the %d byte budget of one response", c.budget)
+		return nil, c.refusal
 	}
 	c.tip, c.raw = tip, enc
 	return enc, nil

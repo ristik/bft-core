@@ -49,11 +49,14 @@ them, recovery can stop, and the follower must be given a fresher seed or other 
 sources). `--min-sources N` requires N agreeing sources; an unreachable source is reported, not counted as agreement. Equivalent spellings of one URL
 (scheme and host case, a default port, a trailing slash, `..` segments) count once, but two names of one machine cannot be told apart: **choose mirrors
 that are independent of each other**, or the threshold means nothing. The destination is a fresh directory (an existing one needs `--replace`); the files
-are written with exclusive creation into a private staging directory that is renamed into place. Files are downloaded under the
+are written with exclusive creation into a private staging directory and published under a lock file (`DIR.lock`: of two concurrent publications one is refused),
+by a rename onto the absent destination or, on replace, an atomic exchange (Linux) so the destination is never absent. A lock left by a crashed command is removed by hand.
+Equivalent URL paths count once: unreserved escapes are decoded (`%7E` is `~`), dot segments removed, other escapes upper-cased.
+`seed serve` opens files only inside its directory, serves each payload at exactly the size the directory's manifest declares, and never blocks on or follows a non-regular file. Files are downloaded under the
 manifest's sizes and hash-checked, from any agreeing source. Redirects are refused.
 
 What a seed cannot give: freshness. A valid seed is a point in the past; an attacker who serves an old but valid seed can only make the follower start
-earlier, and the follower then catches up from peers that authenticate every later step. Use `--min-epoch`, several sources, or compare the checkpoint's
+earlier, and the follower then catches up from peers that authenticate every later step, **if** peers and replicas still serve the records and handoff history it needs: an older seed needs more of them, and if they were pruned, recovery can stop. Use `--min-epoch`, several sources, or compare the checkpoint's
 root round with a public RPC if staleness matters to you.
 
 ## Commands
@@ -73,14 +76,17 @@ ubft seed import --dir ./seed --home $UBFT_HOME --utb-genesis utb-genesis.cbor -
 
 `seed export` takes the history from the root's **isolated bundle listener**: start the root with `--utb-bundle-address 127.0.0.1:PORT` (with
 `--utb-genesis`; off by default). It serves one read-only route, `GET /api/v1/utb/bundle`, never the operator RPC (which stays private): the encoded history
-is built once per trust-base tip and reused, with at most four requests in service and an aggregate size budget (a history over it is refused: export it
-from the store with `ubft trust-base utb-export` and pass `--utb-bundle FILE`). Put a cache or a static mirror in front for a public service.
+is built once per trust-base tip and reused, with at most four requests in service and an aggregate size budget of 256 MiB. That budget is also the **seed
+format's own limit** (`MaxUTBBytes`, for `--utb-bundle` and the manifest): a history beyond it cannot be put in a seed in v1, and a follower of such a network
+syncs its trust-base history over the GetTrustBase stream instead. `--utb-bundle FILE` exports from a file (`ubft trust-base utb-export`) under the same limit. Put a cache or a static mirror in front for a public service.
 
-`seed import` installs the history into each requested entry store first (the store's own authenticated appends, idempotent) and writes `<home>/seed/import.json`
+`seed import` first decides whether the destination may take the seed (no import yet, the same seed again, or another seed with `--replace`), before any
+store is touched; then it installs the history into each requested entry store (the store's own authenticated appends, idempotent) and writes `<home>/seed/import.json`
 last: a failure leaves no import record, and importing the same seed again resumes without `--replace`.
 
-**Restore from the seed: preflight first.** `ubft seed restore-pin --dir ./seed --utb-genesis-id 0xPIN --trust-base trust-base.json [--bundle epoch2.cbor ...] --out PREFIX`
-verifies the seed, resolves the BodyID of the checkpoint's root epoch from authenticated history (epoch 1: the genesis trust base's hash; later epochs: the
+**Restore from the seed: preflight first.** `ubft seed restore-pin --dir ./seed --utb-genesis-id 0xPIN --full-shard-conf full-shard-conf.json --trust-base trust-base.json [--bundle epoch2.cbor ...] --out PREFIX`
+verifies the seed (and that its checkpoint is of **this node's** network, partition and shard, not older than the configuration's shard epoch, and at the
+same epoch certifying exactly that configuration's hash: a valid seed for another shard is refused before anything is touched), resolves the BodyID of the checkpoint's root epoch from authenticated history (epoch 1: the genesis trust base's hash; later epochs: the
 genesis trust base plus the activation bundles of epochs 2 to the checkpoint's, `ubft q3 proof-envelope`, verified from the genesis by the same lineage the
 signing authority uses, and checked against the seed's own history for the same committee), stages the exact `PREFIX.uc.cbor` and `PREFIX.tr.cbor`, and loads
 them back with the restore's loader. It touches no validator state; run it **before** stopping the node or clearing its journal, archive or execution

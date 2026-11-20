@@ -9,6 +9,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -344,4 +347,156 @@ func ucfixture2TrustBase(t *testing.T) *types.RootTrustBaseV1 {
 	p, err := ucfixture.New(ucfixture.Config{Partition: 1, ShardBits: 0})
 	require.NoError(t, err)
 	return p.TrustBase()
+}
+
+func TestShardConfPinRefusesAnotherShard(t *testing.T) {
+	p, err := ucfixture.New(ucfixture.Config{Partition: 1, ShardBits: 1})
+	require.NoError(t, err)
+	b, err := p.Next(ucfixture.BlockSpec{Round: 2, Timestamp: 1800000000, Changes: []ucfixture.Change{{Shard: 1, Hash: bytes.Repeat([]byte{7}, 32)}}})
+	require.NoError(t, err)
+	resp := b.Responses[0]
+	ucRaw, _ := types.Cbor.Marshal(&resp.UC)
+	trRaw, _ := types.Cbor.Marshal(&resp.Technical)
+	utbRaw, err := p.TrustBaseBundle()
+	require.NoError(t, err)
+	bundle, err := types.DecodeTrustBaseBundle(utbRaw, types.TrustBaseLimits{MaxBytes: len(utbRaw), MaxEntries: 8})
+	require.NoError(t, err)
+	tipID, _ := bundle.Tip().EntryID()
+	m, files := assemble(bundle, tipID, utbRaw, ucRaw, trRaw, &resp.UC, tipID, time.Unix(1, 0))
+	raw, err := m.Encode()
+	require.NoError(t, err)
+	sh := p.Shards()
+	// the seed is valid and is of shard 1: this node's configuration of shard 0 refuses it
+	_, err = Verify(raw, files, Pins{GenesisID: tipID, ShardConf: sh[0].Config})
+	require.ErrorContains(t, err, "another shard")
+	// ... of another partition
+	other := *sh[1].Config
+	other.PartitionID++
+	_, err = Verify(raw, files, Pins{GenesisID: tipID, ShardConf: &other})
+	require.ErrorContains(t, err, "another shard")
+	// ... and this node's own configuration accepts it
+	_, err = Verify(raw, files, Pins{GenesisID: tipID, ShardConf: sh[1].Config})
+	require.NoError(t, err)
+	// a configuration of a LATER shard epoch than the checkpoint's is refused
+	later := *sh[1].Config
+	later.Epoch = 9
+	_, err = Verify(raw, files, Pins{GenesisID: tipID, ShardConf: &later})
+	require.ErrorContains(t, err, "older than")
+}
+
+func TestPublishIsExclusiveAcrossConcurrentWriters(t *testing.T) {
+	f := newFixture(t)
+	parent := t.TempDir()
+	dst := filepath.Join(parent, "out")
+	var wg sync.WaitGroup
+	var ok, refused atomic.Int32
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := WriteDir(dst, f.files, f.manifest, false); err == nil {
+				ok.Add(1)
+			} else {
+				refused.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	require.EqualValues(t, 1, ok.Load(), "exactly one concurrent fresh publication succeeds")
+	require.EqualValues(t, 7, refused.Load())
+	_, err := VerifyDir(dst, Pins{GenesisID: f.pin})
+	require.NoError(t, err)
+	// the lock file is gone, and a replacement keeps the destination readable and complete
+	require.NoFileExists(t, dst+".lock")
+	require.NoError(t, WriteDir(dst, f.files, f.manifest, true))
+	_, err = VerifyDir(dst, Pins{GenesisID: f.pin})
+	require.NoError(t, err)
+	// a stale lock refuses a publication with a message that names it
+	require.NoError(t, os.WriteFile(dst+".lock", nil, 0o600))
+	require.ErrorContains(t, WriteDir(dst, f.files, f.manifest, true), "in progress")
+}
+
+func TestHandlerServesOnlyTheDeclaredSizeAndStaysInsideTheDirectory(t *testing.T) {
+	f := newFixture(t)
+	h := Handler(f.dir)
+	// a payload that grew past its manifest declaration is not served
+	require.NoError(t, os.WriteFile(filepath.Join(f.dir, TipTRFile), append(bytes.Clone(f.files[TipTRFile]), 1), 0o644))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/"+TipTRFile, nil))
+	require.Equal(t, 404, rec.Code)
+	// names that leave the directory are refused
+	for _, p := range []string{"/../x", "/%2e%2e/manifest.json", "/a/manifest.json", "/..%2fmanifest.json"} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", p, nil))
+		require.Equal(t, 404, rec.Code, p)
+	}
+	// a FIFO in place of a payload does not block the server (non-blocking open, then the descriptor's type is refused)
+	require.NoError(t, os.Remove(filepath.Join(f.dir, TipUCFile)))
+	require.NoError(t, syscall.Mkfifo(filepath.Join(f.dir, TipUCFile), 0o644))
+	done := make(chan int)
+	go func() {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", "/"+TipUCFile, nil))
+		done <- rec.Code
+	}()
+	select {
+	case code := <-done:
+		require.Equal(t, 404, code)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the handler blocked on a FIFO")
+	}
+}
+
+func TestSourceCanonicalPathsDecodeUnreservedEscapes(t *testing.T) {
+	for in, want := range map[string]string{
+		"http://h/%7Euser/seed": "http://h/~user/seed",
+		"http://h/a%2Fb/seed":   "http://h/a%2Fb/seed",
+		"http://h/%2e%2e/seed":  "http://h/seed",
+		"http://h/s%65ed":       "http://h/seed",
+		"http://h/a%20b":        "http://h/a%20b",
+	} {
+		got, err := normalize(in)
+		require.NoError(t, err)
+		require.Equal(t, want, got, in)
+	}
+}
+
+func TestCheckImportDestinationDecidesBeforeAnyStoreIsTouched(t *testing.T) {
+	f := newFixture(t)
+	v, err := VerifyDir(f.dir, Pins{GenesisID: f.pin})
+	require.NoError(t, err)
+	home := filepath.Join(t.TempDir(), "h")
+	replacing, err := CheckImportDestination(home, v, false)
+	require.NoError(t, err)
+	require.False(t, replacing)
+	_, err = Import(v, home, nil, false, time.Now())
+	require.NoError(t, err)
+	// the same seed: a resume; another seed without --replace: refused by the check, which the CLI runs before opening any entry store
+	replacing, err = CheckImportDestination(home, v, false)
+	require.NoError(t, err)
+	require.True(t, replacing)
+	other := *v
+	other.ManifestDigest = "0xdeadbeef"
+	_, err = CheckImportDestination(home, &other, false)
+	require.ErrorContains(t, err, "already holds")
+	_, err = CheckImportDestination(home, &other, true)
+	require.NoError(t, err)
+}
+
+func TestUCShapeCheckIsSharedAndStrict(t *testing.T) {
+	f := newFixture(t)
+	var uc types.UnicityCertificate
+	require.NoError(t, types.Cbor.Unmarshal(f.files[TipUCFile], &uc))
+	require.NoError(t, checkUCShape(&uc))
+	for name, mut := range map[string]func(*types.UnicityCertificate){
+		"no tree certificate": func(u *types.UnicityCertificate) { u.UnicityTreeCertificate = nil },
+		"no seal":             func(u *types.UnicityCertificate) { u.UnicitySeal = nil },
+		"no input record":     func(u *types.UnicityCertificate) { u.InputRecord = nil },
+		"short TR hash":       func(u *types.UnicityCertificate) { u.TRHash = u.TRHash[:31] },
+		"short conf hash":     func(u *types.UnicityCertificate) { u.ShardConfHash = nil },
+	} {
+		c := uc
+		mut(&c)
+		require.ErrorIs(t, checkUCShape(&c), ErrSeed, name)
+	}
 }
