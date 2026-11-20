@@ -77,19 +77,23 @@ func TestJudge(t *testing.T) {
 		{"local down", func(r *validatorStatusReport) { r.LocalSync = "unreachable: connection refused" }, "critical", "local_unreachable"},
 		{"local behind", func(r *validatorStatusReport) {
 			h := uint64(91)
-			r.PublicHead, r.LocalHead, r.LocalSync = 100, &h, "behind by 9 blocks"
+			ph := uint64(100)
+			r.PublicHead, r.LocalHead, r.LocalSync = &ph, &h, "behind by 9 blocks"
 		}, "warning", "local_behind"},
 		{"local far behind", func(r *validatorStatusReport) {
 			h := uint64(20)
-			r.PublicHead, r.LocalHead, r.LocalSync = 100, &h, "behind by 80 blocks"
+			ph := uint64(100)
+			r.PublicHead, r.LocalHead, r.LocalSync = &ph, &h, "behind by 80 blocks"
 		}, "critical", "local_behind"},
 		{"syncing far behind is critical, not a warning", func(r *validatorStatusReport) {
 			h := uint64(1)
-			r.PublicHead, r.LocalHead, r.LocalSync = 1000, &h, "syncing (block 1 of 1000)"
+			ph := uint64(1000)
+			r.PublicHead, r.LocalHead, r.LocalSync = &ph, &h, "syncing (block 1 of 1000)"
 		}, "critical", "local_behind"},
 		{"syncing close behind", func(r *validatorStatusReport) {
 			h := uint64(99)
-			r.PublicHead, r.LocalHead, r.LocalSync = 100, &h, "syncing (block 99 of 100)"
+			ph := uint64(100)
+			r.PublicHead, r.LocalHead, r.LocalSync = &ph, &h, "syncing (block 99 of 100)"
 		}, "warning", "local_syncing"},
 		{"upgrade far", func(r *validatorStatusReport) {
 			r.Epoch = 3
@@ -122,7 +126,7 @@ func TestExporterMetrics(t *testing.T) {
 	var logs strings.Builder
 	one, two := uint8(4), uint64(7)
 	e := &validatorExporter{log: slog.New(slog.NewTextHandler(&logs, nil)), rep: &validatorStatusReport{Identity: "found", ID: 2, PoaState: "Active", PoaStateCode: &one, Member: true, Health: "Healthy",
-		RecordCount: 40, RecordCursor: 30, CustodyCursor: &two, Verdict: "ok", Committee: []uint64{1, 2, 3}, PublicHead: 100, LocalRPC: "x", LocalHead: &two}, localMax: 7}
+		RecordCount: 40, RecordCursor: 30, CustodyCursor: &two, Verdict: "ok", Committee: []uint64{1, 2, 3}, PublicHead: ptrU(100), LocalRPC: "x", LocalHead: &two}, localMax: 7}
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(e)
 	seen := map[string]bool{}
@@ -208,7 +212,7 @@ func gather(t *testing.T, e *validatorExporter) map[string][]float64 {
 // when unknown, and the upgrade series follow the schedule (they clear when it no longer holds the rule).
 func TestExporterUnknownIsAbsent(t *testing.T) {
 	var logs strings.Builder
-	rep := &validatorStatusReport{Identity: "found", Health: "Healthy", PublicHead: 100, LocalRPC: "x", Epoch: 3, Verdict: "ok"}
+	rep := &validatorStatusReport{Identity: "found", Health: "Healthy", PublicHead: ptrU(100), LocalRPC: "x", Epoch: 3, Verdict: "ok"}
 	e := &validatorExporter{log: slog.New(slog.NewTextHandler(&logs, nil)), rep: rep}
 	m := gather(t, e)
 	require.NotContains(t, m, "unicity_evm_head_lag_blocks", "no local head was ever observed")
@@ -235,3 +239,5 @@ func TestExporterUnknownIsAbsent(t *testing.T) {
 	m = gather(t, e)
 	require.Equal(t, []float64{10}, m["unicity_evm_head_lag_blocks"])
 }
+
+func ptrU(v uint64) *uint64 { return &v }

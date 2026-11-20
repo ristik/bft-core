@@ -113,7 +113,7 @@ func (r *validatorStatusReport) judge(t statusThresholds) {
 	if r.Staged != nil && r.LocalKeys == "staged" {
 		r.find("warning", "staged_binding", "the keys match the STAGED binding: they sign only once it is installed")
 	}
-	if r.PublicHeadTime != 0 || r.PublicHead > 0 {
+	if r.PublicHead != nil {
 		age := time.Since(time.Unix(int64(r.PublicHeadTime), 0))
 		switch {
 		case age > t.MaxHeadAge:
@@ -144,10 +144,12 @@ func (r *validatorStatusReport) judge(t statusThresholds) {
 		r.find("critical", "local_unreachable", "the local execution client does not answer: %s", r.LocalSync)
 	case r.LocalHead == nil:
 		// the head is unknown (eth_syncing or the block read failed): listed in Unknown, never "in sync"
+	case r.PublicHead == nil:
+		// the public head is unknown (listed in Unknown): no gap can be judged
 	default:
 		var gap uint64
-		if r.PublicHead > *r.LocalHead {
-			gap = r.PublicHead - *r.LocalHead
+		if *r.PublicHead > *r.LocalHead {
+			gap = *r.PublicHead - *r.LocalHead
 		}
 		switch {
 		case gap > 10*t.MaxLocalBlock:

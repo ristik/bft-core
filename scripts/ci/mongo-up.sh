@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
-# A digest-pinned MongoDB replica set rs0 on 127.0.0.1:27117 for the aggregator (scripts/lib/agg-lib.sh needs a replica set, not just an open port).
+# A digest-pinned MongoDB replica set rs0 on 127.0.0.1:27117 (+1000 per lane slot) for the aggregator (scripts/lib/agg-lib.sh needs a replica set, not just an open port).
 #   scripts/ci/mongo-up.sh up LOG_DIR      start (fresh storage, this job's container and volume), initiate rs0, wait for a writable primary
 #   scripts/ci/mongo-up.sh down LOG_DIR    save the logs, remove only this job's container and volume
 # The container and volume are named from the job (CI_MONGO_NAME, default lane-mongo-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT); nothing else is touched.
 set -euo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+source "$here/../lib/lane-slot.sh"   # LANE_SLOT shifts the port: one replica set per slot
 pins=$here/lane-pins.json
 image=$(jq -r '.images.mongo.image' "$pins"); digest=$(jq -r '.images.mongo.digest' "$pins")
 ref=${image%%:*}@$digest
-name=${CI_MONGO_NAME:-lane-mongo-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}}
+name=${CI_MONGO_NAME:-lane-mongo${LANE_RUN_TAG}-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}}
 vol=$name-data
-port=27117
+port=$((27117 + LANE_PORT_OFFSET))   # slot 0: 27117
 log=${2:?usage: mongo-up.sh up|down LOG_DIR}
 mkdir -p "$log"
 case "${1:-}" in

@@ -29,6 +29,7 @@ vrj_start_nodes() {
   if [ "${SIGNING:-local}" = authority ]; then   # its EVM key is its authority's, pending at shard epoch 1 until J's configuration names it
     h3_spare_authority "$i" 1 1 trust-base.json || { vrj_log "FAIL: the joiner's signing authority"; return 1; }
   fi
+  if declare -F vrs_import >/dev/null; then vrs_import || { vrj_log "FAIL: the seed import"; return 1; }; fi   # VT-11: the joiner starts from the fetched seed
   boot=$(m2_root_addr 1)
   { m2_start_root "$i" 1 "$boot"; } >/dev/null 2>&1 || true   # its readiness check needs lsof: the RPC is the check
   vrb_wait 90 "the joiner's root answers on its RPC" curl -sf "http://127.0.0.1:$(m2_rpc_port "$i")/api/v1/roundInfo" || return 1
@@ -145,6 +146,7 @@ vrj_restore_evm5() {
   local i=$vrj_id
   vrj_source_libs || return 1
   declare -F lane_go_run >/dev/null || source scripts/lib/portable.sh
+  [ -z "${vrs_fetched:-}" ] || export H3_RESTORE_SEED_DIR=$vrs_fetched   # VT-11: restore from the verified seed's pin
   export H3_ARCHIVES=$EVM_ARCHIVE_ROOT H3_RESTORE_NO_SESSION=1 H3_RESTORE_TRUST_BASE=test-nodes/trust-base.json H3_ONLINE="1 2 3 4"
   export EVM_ARCHIVE_REPLICA_POOL="1 2 3 4 5"
   vrb_wait 300 "the incumbents' shard nodes hold the staged successor" vrj_incumbents_staged || return 1

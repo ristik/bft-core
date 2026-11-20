@@ -4,6 +4,7 @@
 #
 # The caller defines (before calling a function): info (optional), and runs from the repository root (test-nodes/, build/ubft). UBFT overrides build/ubft.
 
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lane-slot.sh"   # LANE_SLOT: ports below are shifted into the lane's slot
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/portable.sh"
 UBFT=${UBFT:-build/ubft}
 UTB_DIR=${UTB_DIR:-test-nodes/utb}
@@ -25,10 +26,15 @@ utb_prepare_genesis() {
 
 # The flags a root or a shard node of the lane starts with. The pin is read from the file the generation wrote, never from a value copied into a script.
 utb_pin() { tr -d '[:space:]' <test-nodes/utb-genesis.id; }
+# the lane's port offset, one definition for every seed port (#1218: LANE_PORT_OFFSET, else LANE_SLOT * 1000)
+seed_port_offset() { echo "${LANE_PORT_OFFSET:-$(( ${LANE_SLOT:-0} * 1000 ))}"; }
 utb_root_flags() { # node (unused: every root has the same profile)
   [ -s test-nodes/utb-genesis.cbor ] && [ -s test-nodes/utb-genesis.id ] || { echo "utb_root_flags: no UTB genesis (utb_prepare_genesis first)" >&2; return 1; }
   mkdir -p "test-nodes/utb-ucresp/root${1:-0}"
-  echo "--utb-genesis test-nodes/utb-genesis.cbor --utb-genesis-id $(utb_pin) --utb-capture-ucresp test-nodes/utb-ucresp/root${1:-0}"
+  local bundle=
+  # VT-11: a seed run gives each root its isolated read-only bundle listener (38600 + the lane's port offset + node - 1), never the operator RPC
+  if [ "${VR_SEED:-0}" = 1 ] || [ "${VR_SEED2:-0}" = 1 ]; then bundle=" --utb-bundle-address 127.0.0.1:$((38600 + $(seed_port_offset) + ${1:-1} - 1))"; fi
+  echo "--utb-genesis test-nodes/utb-genesis.cbor --utb-genesis-id $(utb_pin) --utb-capture-ucresp test-nodes/utb-ucresp/root${1:-0}$bundle"
 }
 # a shard node takes the profile flags only (it sends no certification response, so it captures nothing)
 utb_shard_flags() { echo "--utb-genesis test-nodes/utb-genesis.cbor --utb-genesis-id $(utb_pin)"; }
@@ -47,7 +53,7 @@ utb_agg_env() { # K (1-based)
 }
 # The aggregator's read-only binary history range (design 11.3 item 4): GET /api/v1/trustbases?from=E[&to=E]..., the PR6 response codec. The same endpoint serves the
 # lane's reference client; port is the aggregator's (agg_port from scripts/lib/agg-lib.sh when it is loaded).
-utb_agg_history_url() { local k=${1:-1} port=${AGG_PORT:-3001}; echo "http://127.0.0.1:$((port + k - 1))/api/v1/trustbases"; }
+utb_agg_history_url() { local k=${1:-1} port=$((3001+LANE_PORT_OFFSET)); echo "http://127.0.0.1:$((port + k - 1))/api/v1/trustbases"; }
 
 # The aggregator is ristik/aggregator-go integration/enshrined-evm at a pinned commit (AGG_COMMIT, 40 hex), built from a clean clone by utb_agg_build, never from a local patch.
 # Its provenance directory builds/aggregator-<sha8>/ records the commit, the go.mod pins of bft-core and bft-go-base, the toolchain and the digest of the binary.
@@ -605,7 +611,7 @@ utb_selftest() {
   utb_st "the aggregator's bft-core pin is accepted when it is an ancestor of the checkout" bash -c "source '$cwd/scripts/lib/utb-lib.sh'; git -C '$cwd' cat-file -e f4f324197 2>/dev/null || exit 0; git -C '$cwd' merge-base --is-ancestor f4f324197 HEAD || exit 0; [ \"\$(utb_agg_pins_ok '$pd' '$cwd')\" = f4f324197c63 ]"
   utb_st_no "an aggregator pin that is not in the checkout's history is refused" bash -c "source '$cwd/scripts/lib/utb-lib.sh'; printf 'replace github.com/unicitynetwork/bft-core => github.com/ristik/bft-core v1.1.1-0.20261019192856-000000000000\n' >'$pd/gomod-pins.txt'; utb_agg_pins_ok '$pd' '$cwd'"
   utb_st "the aggregator environment carries the genesis, the pin and its own store" bash -c "cd '$t' && source '$cwd/scripts/lib/utb-lib.sh' && env=\$(utb_agg_env 2) && grep -q 'UTB_GENESIS_FILE=$t/test-nodes/utb-genesis.cbor' <<<\"\$env\" && grep -q 'UTB_GENESIS_ID=0x' <<<\"\$env\" && grep -q 'UTB_ENTRIES_DB=$t/test-nodes/utb-agg2.db' <<<\"\$env\""
-  utb_st "the history URL follows the aggregator's port" bash -c "source '$cwd/scripts/lib/utb-lib.sh'; [ \"\$(AGG_PORT=3100 utb_agg_history_url 2)\" = http://127.0.0.1:3101/api/v1/trustbases ]"
+  utb_st "the history URL follows the aggregator's (slot-derived) port" env LANE_SLOT=1 bash -c "source '$cwd/scripts/lib/utb-lib.sh'; [ \"\$(utb_agg_history_url 2)\" = http://127.0.0.1:4002/api/v1/trustbases ]"
   # the U3b repair judgement: a catch-up from the roots must raise the tip; responses alone, or a catch-up that only re-appends held entries, do not pass
   local rc="$cwd/scripts/lib/utb-repair-check.py"
   mkdir -p "$t/rep"

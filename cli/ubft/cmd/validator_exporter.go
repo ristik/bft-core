@@ -142,8 +142,8 @@ func (e *validatorExporter) poll(ctx context.Context) {
 	if r.LocalHead != nil && (!e.localSeen || *r.LocalHead > e.localMax) {
 		e.localMax, e.localSeen = *r.LocalHead, true
 	}
-	if r.PublicHead != e.headSeen || e.headMove.IsZero() {
-		e.headSeen, e.headMove = r.PublicHead, time.Now()
+	if r.PublicHead != nil && (*r.PublicHead != e.headSeen || e.headMove.IsZero()) {
+		e.headSeen, e.headMove = *r.PublicHead, time.Now()
 	}
 	state := r.PoaState
 	if r.Identity == "none" {
@@ -287,7 +287,9 @@ func (e *validatorExporter) Collect(ch chan<- prometheus.Metric) {
 	default:
 		g(dVerdict, 3)
 	}
-	g(dPubHead, float64(r.PublicHead))
+	if r.PublicHead != nil {
+		g(dPubHead, float64(*r.PublicHead))
+	}
 	if r.PublicHeadTime != 0 {
 		g(dPubAge, time.Since(time.Unix(int64(r.PublicHeadTime), 0)).Seconds())
 	}
@@ -300,9 +302,9 @@ func (e *validatorExporter) Collect(ch chan<- prometheus.Metric) {
 			ref, known = *r.LocalHead, true
 		}
 		// the lag needs a local head to measure against: none was ever observed, so there is no lag value (not "the whole chain")
-		if known {
-			if r.PublicHead > ref {
-				g(dLocalLag, float64(r.PublicHead-ref))
+		if known && r.PublicHead != nil {
+			if *r.PublicHead > ref {
+				g(dLocalLag, float64(*r.PublicHead-ref))
 			} else {
 				g(dLocalLag, 0)
 			}

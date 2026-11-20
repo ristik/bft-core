@@ -110,7 +110,7 @@ preflight() {
   if [ "${DNB_AGG_SHARDS:-1}" != 1 ]; then
     check "the aggregator shard count is 2 (the depth-1 topology 0x40, 0xc0)" test "${DNB_AGG_SHARDS}" = 2
   fi
-  if (exec 3<>/dev/tcp/127.0.0.1/27117) 2>/dev/null; then yes "MongoDB replica set port 27117 answers"; else no "no MongoDB on 127.0.0.1:27117"; fi
+  if (exec 3<>/dev/tcp/127.0.0.1/$((27117+LANE_PORT_OFFSET))) 2>/dev/null; then yes "MongoDB replica set port $((27117+LANE_PORT_OFFSET)) answers"; else no "no MongoDB on 127.0.0.1:$((27117+LANE_PORT_OFFSET))"; fi
   echo "-- the aggregator (ristik/aggregator-go integration/enshrined-evm at AGG_COMMIT, built by --build-aggregator; provenance builds/aggregator-<sha8>/)"
   if [ -n "${AGG_BIN:-}" ] && [ -x "$AGG_BIN" ]; then
     yes "AGG_BIN $AGG_BIN"
