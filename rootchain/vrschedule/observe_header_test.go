@@ -6,10 +6,10 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"log/slog"
 	"math/big"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -79,61 +79,52 @@ func TestVerifiedHeaderNumber(t *testing.T) {
 	require.ErrorIs(t, err, ErrRead, "an altered number no longer hashes to the certified block")
 }
 
-// Pre-production simplification (astra r8): a sources file of an earlier build is DISCARDED at startup (never migrated), a copy is kept as
-// .v1.bak and the event is logged with the count. Until the source is re-learned the root behaves exactly like a fresh root, and once it
-// re-observes the publication it holds the same source (so derives the same intent digest) as a fresh root.
-func TestAV1SourcesFileIsDiscardedAndTheRootBehavesLikeAFreshRoot(t *testing.T) {
-	var logs bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
-	t.Cleanup(func() { slog.SetDefault(prev) })
-
+// Hard cutover (astra r9): the VT-07 build requires a fresh generation. A sources file of version 1 (a bare array of shard rounds) or
+// version 2 (which could carry an unverified fetched height) REFUSES the start with a clear error, and is neither discarded, backed up nor
+// migrated; no file at all is fine; a version 3 file (verified heights only) round-trips.
+func TestAnOlderSourcesFileRefusesToStartAndV3RoundTrips(t *testing.T) {
 	r := vrschema.Word{0x52}
-	hash := bytes.Repeat([]byte{0x77}, 32)
-	legacy := `[{"resultId":"0x` + hex.EncodeToString(r[:]) + `","evmBlockHash":"0x` + hex.EncodeToString(hash) + `","evmBlockNumber":4,"certRootRound":12,"outputCommit":"0x` +
-		hex.EncodeToString(bytes.Repeat([]byte{0xc0}, 32)) + `","certUcTime":1012}]`
-	path := filepath.Join(t.TempDir(), "vr-sources.json")
-	require.NoError(t, os.WriteFile(path, []byte(legacy), 0o600))
-
-	restarted, err := NewSources(path)
-	require.NoError(t, err)
-	fresh, err := NewSources("")
-	require.NoError(t, err)
-	_, ok := restarted.Get(r)
-	require.False(t, ok, "the shard-round entry is not served")
-	_, ok = fresh.Get(r)
-	require.False(t, ok)
-	require.Contains(t, logs.String(), "event=vr.sources.legacy_discarded")
-	require.Contains(t, logs.String(), "count=1")
-	bak, err := os.ReadFile(path + ".v1.bak")
-	require.NoError(t, err)
-	require.Equal(t, legacy, string(bak), "the old file is kept")
-
-	// both roots observe the same publication (EVM block 3 certified at shard round 4) and hold the identical source
-	var h [32]byte
-	copy(h[:], hash)
-	obs := func(src *Sources) {
-		reader := &headerReader{fakeReader: &fakeReader{at: map[[32]byte]*vrhandoff.Output{{2}: published(r)}}, number: map[[32]byte]uint64{{2}: 3}}
-		o := &Observer{Reader: reader, Sources: src, Outputs: NewOutputs()}
-		require.NoError(t, o.Observe(context.Background(), cert(10, 1, 1)))
-		pub := cert(11, 2, 2)
-		pub.ShardRound = 4
-		require.NoError(t, o.Observe(context.Background(), pub))
+	entry := `{"resultId":"0x` + hex.EncodeToString(r[:]) + `","evmBlockHash":"0x` + hex.EncodeToString(bytes.Repeat([]byte{0x77}, 32)) + `","evmBlockNumber":4,"certRootRound":12,"outputCommit":"0x` +
+		hex.EncodeToString(bytes.Repeat([]byte{0xc0}, 32)) + `","certUcTime":1012}`
+	for name, content := range map[string]string{
+		"v1 bare array": `[` + entry + `]`,
+		"v2 object":     `{"version":2,"sources":[` + entry + `]}`,
+		"v2 pending":    `{"version":2,"sources":[` + strings.Replace(entry, `"certUcTime":1012`, `"certUcTime":1012,"pending":true`, 1) + `]}`,
+		"unversioned":   `{"sources":[` + entry + `]}`,
+	} {
+		path := filepath.Join(t.TempDir(), "vr-sources.json")
+		require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+		_, err := NewSources(path)
+		require.ErrorIs(t, err, ErrLegacySources, name)
+		require.Contains(t, err.Error(), "requires a fresh generation", name)
+		raw, rerr := os.ReadFile(path)
+		require.NoError(t, rerr)
+		require.Equal(t, content, string(raw), name+": the file is left exactly as it was")
+		_, serr := os.Stat(path + ".v1.bak")
+		require.True(t, os.IsNotExist(serr), name+": no backup is made")
 	}
-	obs(restarted)
-	obs(fresh)
-	a, ok := restarted.Get(r)
+
+	// no file at all is fine (a fresh generation); a recorded source is written as version 3 and reloads as it is
+	path := filepath.Join(t.TempDir(), "vr-sources.json")
+	sources, err := NewSources(path)
+	require.NoError(t, err)
+	reader := &headerReader{fakeReader: &fakeReader{at: map[[32]byte]*vrhandoff.Output{{2}: published(r)}}, number: map[[32]byte]uint64{{2}: 3}}
+	o := &Observer{Reader: reader, Sources: sources, Outputs: NewOutputs()}
+	require.NoError(t, o.Observe(context.Background(), cert(10, 1, 1)))
+	pub := cert(11, 2, 2)
+	pub.ShardRound = 4
+	require.NoError(t, o.Observe(context.Background(), pub))
+	got, ok := sources.Get(r)
 	require.True(t, ok)
-	b, ok := fresh.Get(r)
-	require.True(t, ok)
-	require.Equal(t, a, b, "the restarted root and the fresh root hold the same source")
-	require.EqualValues(t, 3, a.EVMBlockNumber)
-	// and the file the restarted root now writes is a version 2 file it reloads as it is
+	require.EqualValues(t, 3, got.EVMBlockNumber)
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.Contains(t, string(raw), `"version": 3`)
 	again, err := NewSources(path)
 	require.NoError(t, err)
-	c, ok := again.Get(r)
+	back, ok := again.Get(r)
 	require.True(t, ok)
-	require.Equal(t, a, c)
+	require.Equal(t, got, back)
 }
 
 // The order and the map change together: recording more than the capacity while lookups are in flight leaves the memory, the order and the

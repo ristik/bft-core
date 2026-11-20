@@ -235,7 +235,7 @@ func TestSourcesRefuseRoundZero(t *testing.T) {
 	_, err = s.Record(SourceEntry{Source: vrhandoff.Source{ResultID: make([]byte, 32), EVMBlockHash: make([]byte, 32), OutputCommit: make([]byte, 32)}})
 	require.Error(t, err)
 	path := filepath.Join(t.TempDir(), "bad.json")
-	require.NoError(t, os.WriteFile(path, []byte(`{"version":2,"sources":[{"resultId":"0x`+strings.Repeat("11", 32)+`","evmBlockHash":"0x`+strings.Repeat("22", 32)+
+	require.NoError(t, os.WriteFile(path, []byte(`{"version":3,"sources":[{"resultId":"0x`+strings.Repeat("11", 32)+`","evmBlockHash":"0x`+strings.Repeat("22", 32)+
 		`","evmBlockNumber":1,"certRootRound":0,"outputCommit":"0x`+strings.Repeat("33", 32)+`","certUcTime":5}]}`), 0o600))
 	_, err = NewSources(path)
 	require.Error(t, err)
@@ -283,8 +283,9 @@ func TestAFailedSourceWriteIsRetriedAndSurvivesARestart(t *testing.T) {
 	require.NoError(t, os.Mkdir(full.path, 0o700))
 	next := SourceEntry{Source: vrhandoff.Source{ResultID: append([]byte{0xee}, make([]byte, 31)...), EVMBlockHash: make([]byte, 32), CertRootRound: 99,
 		OutputCommit: make([]byte, 32)}}
-	_, err = full.Record(next)
+	failed, err := full.Record(next)
 	require.Error(t, err)
+	require.False(t, failed, "a failed durable insertion reports that nothing was added")
 	_, ok = full.Get(oldest)
 	require.True(t, ok, "a failed write evicts nothing")
 	_, ok = full.Get(vrschema.Word{0xee})

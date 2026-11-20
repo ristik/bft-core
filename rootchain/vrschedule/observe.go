@@ -24,11 +24,10 @@ type SourceEntry struct {
 	CertUCTime uint64
 }
 
-// sourcesFileV2 is the persisted form: versioned. A file of an earlier build (a bare JSON array, or entries marked pending) holds shard
-// rounds where this build records verified EVM heights. Sources are re-derivable (a root re-observes them from certified blocks, or fetches
-// them from the incumbents with the height verified locally), so such a file is discarded at startup, never migrated: the root then behaves
-// exactly like a fresh root until it re-learns the source.
-type sourcesFileV2 struct {
+// sourcesFileV3 is the persisted form: versioned, verified heights only. Version 3 records only an EVM block number that was verified
+// against its certified header. Files of earlier builds (version 1, a bare array of shard rounds; version 2, which could carry an unverified
+// fetched height) are REFUSED at startup, never discarded, backed up or migrated: the VT-07 build requires a fresh generation.
+type sourcesFileV3 struct {
 	Version int          `json:"version"`
 	Sources []sourceFile `json:"sources"`
 }
@@ -40,9 +39,13 @@ type sourceFile struct {
 	CertRootRound  uint64    `json:"certRootRound"`
 	OutputCommit   hex.Bytes `json:"outputCommit"`
 	CertUCTime     uint64    `json:"certUcTime"`
-	// Pending was written by a build that migrated entries in place: such an entry has no verified height and is discarded on load.
-	Pending bool `json:"pending,omitempty"`
 }
+
+// sourcesVersion is the on-disk version this build writes and reads.
+const sourcesVersion = 3
+
+// ErrLegacySources is the refusal to start over a sources file of a pre-VT-07 build.
+var ErrLegacySources = errors.New("vr-sources.json was written by a pre-VT-07 build; this build requires a fresh generation (upgrading a running generation is unsupported: regenerate)")
 
 // maxSources bounds the retained sources: VR has at most one open output, so a few suffice for the current and the previous intents.
 const maxSources = 8
@@ -59,12 +62,8 @@ type Sources struct {
 	by    map[vrschema.Word]SourceEntry
 }
 
-// LegacyDiscardedEvent is the stable log event of a sources file of an earlier build discarded at startup.
-const LegacyDiscardedEvent = "vr.sources.legacy_discarded"
-
-// NewSources reads path (if it exists); an empty path keeps the sources in memory. A file of an earlier build (version 1, or with an entry
-// without a verified height) is discarded: a warning with event=vr.sources.legacy_discarded and the entry count is logged, a copy is kept
-// beside it as <path>.v1.bak, and the store starts empty.
+// NewSources reads path (if it exists); an empty path keeps the sources in memory. A file of version 1 or 2 makes it fail with
+// ErrLegacySources: no file at all is fine, as on a fresh generation.
 func NewSources(path string) (*Sources, error) {
 	s := &Sources{path: path, by: map[vrschema.Word]SourceEntry{}}
 	if path == "" {
@@ -77,38 +76,23 @@ func NewSources(path string) (*Sources, error) {
 	if err != nil {
 		return nil, err
 	}
-	var fs []sourceFile
-	legacy := 0
 	if t := bytes.TrimSpace(raw); len(t) > 0 && t[0] == '[' {
-		if err := json.Unmarshal(raw, &fs); err != nil {
-			return nil, fmt.Errorf("vrschedule: %s: %w", path, err)
-		}
-		legacy = len(fs)
-	} else {
-		var v2 sourcesFileV2
-		if err := json.Unmarshal(raw, &v2); err != nil || v2.Version != 2 {
-			return nil, fmt.Errorf("vrschedule: %s: not a sources file of version 2: %v", path, err)
-		}
-		fs = v2.Sources
-		for _, f := range fs {
-			if f.Pending {
-				legacy = len(fs)
-				break
-			}
-		}
+		return nil, fmt.Errorf("vrschedule: %s: %w", path, ErrLegacySources) // version 1: a bare array
 	}
-	if legacy > 0 {
-		if err := os.WriteFile(path+".v1.bak", raw, 0o600); err != nil { // #nosec G304 -- beside the root's own state file
-			return nil, fmt.Errorf("vrschedule: keeping a copy of %s: %w", path, err)
-		}
-		slog.Warn("VR sources file of an earlier build discarded: its heights are not verified EVM heights; the sources are re-learned",
-			"event", LegacyDiscardedEvent, "count", legacy, "path", path, "backup", path+".v1.bak")
-		if err := writeDurable(path, mustSourcesJSON(nil)); err != nil {
-			return nil, err
-		}
-		return s, nil
+	var head struct {
+		Version int `json:"version"`
 	}
-	for _, f := range fs {
+	if err := json.Unmarshal(raw, &head); err != nil {
+		return nil, fmt.Errorf("vrschedule: %s: %w", path, err)
+	}
+	if head.Version != sourcesVersion {
+		return nil, fmt.Errorf("vrschedule: %s: version %d: %w", path, head.Version, ErrLegacySources)
+	}
+	var v3 sourcesFileV3
+	if err := json.Unmarshal(raw, &v3); err != nil {
+		return nil, fmt.Errorf("vrschedule: %s: %w", path, err)
+	}
+	for _, f := range v3.Sources {
 		if len(f.ResultID) != 32 || len(f.EVMBlockHash) != 32 || len(f.OutputCommit) != 32 || f.CertRootRound == 0 {
 			return nil, fmt.Errorf("vrschedule: %s: a malformed source", path)
 		}
@@ -124,7 +108,7 @@ func mustSourcesJSON(fs []sourceFile) []byte {
 	if fs == nil {
 		fs = []sourceFile{}
 	}
-	raw, err := json.MarshalIndent(sourcesFileV2{Version: 2, Sources: fs}, "", " ")
+	raw, err := json.MarshalIndent(sourcesFileV3{Version: sourcesVersion, Sources: fs}, "", " ")
 	if err != nil {
 		panic(err) // plain structs: cannot fail
 	}
@@ -151,7 +135,10 @@ func (s *Sources) Record(e SourceEntry) (bool, error) {
 	if _, ok := s.by[r]; ok {
 		return false, nil
 	}
-	return true, s.insertLocked(r, e)
+	if err := s.insertLocked(r, e); err != nil {
+		return false, err // nothing was added
+	}
+	return true, nil
 }
 
 // insertLocked adds e as the newest source, evicts the oldest beyond maxSources, writes the file, and only then updates the order and the
