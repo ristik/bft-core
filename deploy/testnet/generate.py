@@ -461,7 +461,7 @@ def main():
             # the authorities are started from THIS compose and never recreated (their keys exist only in their memory): every argument their
             # entrypoint takes, the UTB lineage pin included, must be known here already (bft-core#1091: started without --lineage-utb-genesis,
             # every authority of a --utb generation refused the first activation); main() checks the final compose names the same entrypoints
-            boot=immutable(topology(out,a.validators,{'root':roots,'evm':evms},records['images'],a.captcha_sitekey,utb=utb_pin,payout=a.faucet_payout,subnets=subnets,root_cpus=a.root_cpus,block_interval_ms=a.block_interval_ms,port_offset=check_port_offset(a.port_offset)))
+            boot=immutable(topology(out,a.validators,{'root':roots,'evm':evms},records['images'],a.captcha_sitekey,utb=utb_pin,payout=a.faucet_payout,subnets=subnets,root_cpus=a.root_cpus,port_offset=check_port_offset(a.port_offset),block_interval_ms=a.block_interval_ms))
             write(out/'compose.yaml',boot)
             def authority(i,*args):
                 auth=out/f'validator{i}/auth'
@@ -602,7 +602,7 @@ def main():
             trusted_proxy_ip=subnets['faucet']['gateway'],**faucet['network'])
         write(out/'network/network.json',network)
         flags=[*flags,'--unicity.genesis-commitment='+genesis_commitment(json.loads((home/'genesis.json').read_text()))]
-        final=immutable(topology(out,a.validators,{'root':roots,'evm':evms},records['images'],a.captcha_sitekey,flags,max_gas,bool(genesis),a.rpc_bind,utb_pin,a.utb_aggregator,payout=a.faucet_payout,subnets=subnets,root_cpus=a.root_cpus,block_interval_ms=a.block_interval_ms,port_offset=check_port_offset(a.port_offset)))
+        final=immutable(topology(out,a.validators,{'root':roots,'evm':evms},records['images'],a.captcha_sitekey,flags,max_gas,bool(genesis),a.rpc_bind,utb_pin,a.utb_aggregator,payout=a.faucet_payout,subnets=subnets,root_cpus=a.root_cpus,port_offset=check_port_offset(a.port_offset),block_interval_ms=a.block_interval_ms))
         if not a.offline_validation:
             check_authorities_unchanged(boot,final,a.validators)
         write(out/'compose.yaml',final)

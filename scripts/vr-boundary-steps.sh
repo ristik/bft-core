@@ -6,7 +6,7 @@
 # assembler root assembles, a leader orders the Prepare, the Freeze v5 and H, the roots switch to J, the EVM shard acknowledges, and VR
 # applies the Boundary that installs J. Evidence goes to $VR_EVIDENCE (default ~/evidence/vt14/boundary).
 
-VR_EVIDENCE=${VR_EVIDENCE:-$HOME/evidence/vt09}
+VR_EVIDENCE=${VR_EVIDENCE:-$HOME/evidence/vt09${LANE_RUN_TAG:-}}   # one directory per lane slot: parallel lanes never share intents.txt and the other files this reads back
 mkdir -p "$VR_EVIDENCE"
 vrb_log() { echo "vr-boundary: $*" | tee -a "$VR_EVIDENCE/steps.log"; }
 vrb_rpc=http://127.0.0.1:$rethEthBase

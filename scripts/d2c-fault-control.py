@@ -77,7 +77,7 @@ def start_reth(i):
 
 
 def start_shard(i):
-    command = ("source helper.sh; rootBoot=$(boot_node test-nodes/root1 26662); "
+    command = ("source helper.sh; rootBoot=$(boot_node test-nodes/root1 \"$rootPortStart\"); "
                f"start_one_evm_validator {i} 4 8 \"$rootBoot\" engine-api")
     subprocess.run(["bash", "-c", command], cwd=ROOT, check=True, env=os.environ.copy())
 
