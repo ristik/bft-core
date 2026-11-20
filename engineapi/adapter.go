@@ -903,7 +903,10 @@ func (a *Adapter) CheckBlockBinding(ctx context.Context, b shardnode.Block, p sh
 	}
 	collector, err := a.collectorFor(ctx, p.Parent)
 	if err != nil {
-		return fmt.Errorf("%w: resolving parent fee state: %w", shardnode.ErrBlockBindingUnavailable, err)
+		if isFeeProofUnavailable(err) {
+			return fmt.Errorf("%w: resolving parent fee state: %w", shardnode.ErrBlockBindingUnavailable, err)
+		}
+		return fmt.Errorf("engineapi: resolving parent fee state: %w", err)
 	}
 	attrs, err := DeriveAttributesV2Checked(input.Input, ParentHeader{Timestamp: uint64(parentHeader.Timestamp)}, collector)
 	if err != nil {
@@ -976,7 +979,7 @@ func (a *Adapter) Verify(ctx context.Context, b shardnode.Block, p shardnode.Rou
 				if _, err := a.deriveV2(ctx, p, p.AuthorizingCertificate, p.AuthorizingTechnicalRecord); err != nil {
 					if isParentWitnessAcquisitionError(err) {
 						if errors.Is(err, ErrParentWitnessUnavailable) {
-							return shardnode.StatusSyncing, transientParentWitnessError{err}
+							return shardnode.StatusSyncing, transientProofError{err}
 						}
 						return shardnode.StatusSyncing, err
 					}
@@ -1025,7 +1028,7 @@ func (a *Adapter) Verify(ctx context.Context, b shardnode.Block, p shardnode.Rou
 	if err != nil {
 		if isParentWitnessAcquisitionError(err) {
 			if errors.Is(err, ErrParentWitnessUnavailable) {
-				return shardnode.StatusSyncing, transientParentWitnessError{err}
+				return shardnode.StatusSyncing, transientProofError{err}
 			}
 			return shardnode.StatusSyncing, fmt.Errorf("engineapi: acquiring parent witness for round %d: %w", p.Round, err)
 		}
@@ -1063,7 +1066,11 @@ func (a *Adapter) Verify(ctx context.Context, b shardnode.Block, p shardnode.Rou
 
 	collector, err := a.collectorFor(ctx, p.Parent)
 	if err != nil {
-		return shardnode.StatusSyncing, fmt.Errorf("engineapi: resolving parent fee state: %w", err)
+		cause := fmt.Errorf("engineapi: resolving parent fee state: %w", err)
+		if isFeeProofUnavailable(err) {
+			return shardnode.StatusSyncing, transientProofError{cause}
+		}
+		return shardnode.StatusInvalid, cause
 	}
 
 	// Only now, with the input authenticated, are the execution parameters computable: they are functions of

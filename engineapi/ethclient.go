@@ -7,11 +7,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	gethtypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/rlp"
+
+	"github.com/unicitynetwork/bft-core/registrywitness"
 )
 
 // EthClient speaks the standard eth_* JSON-RPC namespace — reth's regular
@@ -41,12 +45,27 @@ type blockHeaderJSON struct {
 	Timestamp  quantity `json:"timestamp"`
 }
 
+// ErrFeeProofUnavailable marks a transport or parent-state availability failure.
+var ErrFeeProofUnavailable = errors.New("engineapi: parent fee proof unavailable")
+
+// ErrFeeProofOversized marks a proof response beyond the bounded witness transport.
+var ErrFeeProofOversized = errors.New("engineapi: parent fee proof response exceeds limit")
+
+func isFeeProofUnavailable(err error) bool {
+	if errors.Is(err, ErrFeeProofUnavailable) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return true
+	}
+	var networkError net.Error
+	return errors.As(err, &networkError) && networkError.Timeout()
+}
+
 // CallContext makes the local execution transport available to proof readers.
 func (c *EthClient) CallContext(ctx context.Context, result any, method string, args ...any) error {
 	return c.call(ctx, method, args, result)
 }
 
 func (c *EthClient) call(ctx context.Context, method string, params []any, out any) error {
+	feeProof := method == "eth_getProof"
 	reqBody, err := json.Marshal(rpcRequest{JSONRPC: "2.0", ID: 1, Method: method, Params: params})
 	if err != nil {
 		return fmt.Errorf("engineapi: encoding request for %s: %w", method, err)
@@ -59,23 +78,51 @@ func (c *EthClient) call(ctx context.Context, method string, params []any, out a
 
 	resp, err := c.http.Do(req)
 	if err != nil {
+		if feeProof {
+			err = errors.Join(ErrFeeProofUnavailable, err)
+		}
 		return fmt.Errorf("engineapi: calling %s: %w", method, err)
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	var reader io.Reader = resp.Body
+	if feeProof {
+		// Use the existing hex-encoded witness cap, including headroom for JSON.
+		reader = io.LimitReader(reader, registrywitness.MaxResponseBytes+1)
+	}
+	body, err := io.ReadAll(reader)
+	if feeProof && len(body) > registrywitness.MaxResponseBytes {
+		return fmt.Errorf("%w (%d bytes)", ErrFeeProofOversized, registrywitness.MaxResponseBytes)
+	}
 	if err != nil {
+		if feeProof {
+			err = errors.Join(ErrFeeProofUnavailable, err)
+		}
 		return fmt.Errorf("engineapi: reading response for %s: %w", method, err)
 	}
 	if resp.StatusCode != http.StatusOK {
+		if feeProof && (resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500) {
+			return fmt.Errorf("%w: HTTP %d", ErrFeeProofUnavailable, resp.StatusCode)
+		}
 		return fmt.Errorf("engineapi: %s returned HTTP %d: %s", method, resp.StatusCode, string(body))
 	}
 	var rpcResp rpcResponse
 	if err := json.Unmarshal(body, &rpcResp); err != nil {
 		return fmt.Errorf("engineapi: decoding response envelope for %s: %w", method, err)
 	}
+	if feeProof && (rpcResp.JSONRPC != "2.0" || rpcResp.ID != 1 ||
+		(len(rpcResp.Result) == 0) == (rpcResp.Error == nil)) {
+		return errors.New("engineapi: malformed parent fee proof response envelope")
+	}
 	if rpcResp.Error != nil {
+		if feeProof && (rpcResp.Error.Code == -32001 ||
+			(rpcResp.Error.Code == -32602 && strings.Contains(rpcResp.Error.Message, "exceeds maximum proof window"))) {
+			return errors.Join(ErrFeeProofUnavailable, rpcResp.Error)
+		}
 		return fmt.Errorf("engineapi: %s: %w", method, rpcResp.Error)
+	}
+	if feeProof && isJSONNull(rpcResp.Result) {
+		return ErrFeeProofUnavailable
 	}
 	if out == nil {
 		return nil
