@@ -457,6 +457,7 @@ func (x *ConsensusManager) setHandoffIntent(plan abdrc.HandoffApprovalMsg) {
 	cloned.Receipts = bytes.Clone(plan.Receipts)
 	cloned.PrimaryPoPs = bytes.Clone(plan.PrimaryPoPs)
 	x.handoffIntent = &cloned
+	x.handoffIntentGen++
 	x.prefetchFactsForPlan(plan.CandidatePreimage)
 }
 
@@ -472,6 +473,17 @@ func (x *ConsensusManager) retireIntent(control *evmroot.ControlState) {
 	if x.handoffIntent != nil && x.handoffIntent.Attempt <= control.Attempt {
 		x.handoffIntent = nil
 	}
+}
+
+// pendingIntentGen is pendingIntent with the generation of the registration it read.
+func (x *ConsensusManager) pendingIntentGen(attempt uint64) (*abdrc.HandoffApprovalMsg, uint64) {
+	x.handoffMu.Lock()
+	defer x.handoffMu.Unlock()
+	if x.handoffIntent == nil || x.handoffIntent.Attempt != attempt {
+		return nil, 0
+	}
+	cloned := *x.handoffIntent
+	return &cloned, x.handoffIntentGen
 }
 
 // pendingIntent is the held intent for the given attempt, or nil. An intent for another attempt or another epoch is dead.
@@ -1149,6 +1161,7 @@ func (x *ConsensusManager) onHandoffApprovalMsg(_ context.Context, msg *abdrc.Ha
 		return err
 	}
 	id := plan.body.id
+	x.pruneSpentPlans()
 	x.handoffMu.Lock()
 	defer x.handoffMu.Unlock()
 	if x.handoffPlans == nil {
@@ -1251,8 +1264,22 @@ func (x *ConsensusManager) handoffRecordsForRound(round uint64, parentQC *rctype
 		}
 	}
 	// a validator-registry chain orders its records for the complete verified view certificate this root holds (VT-05b)
+	// ... except an exact recovery of its committed, unacknowledged primary (#1221), which follows the handoff path below
 	if x.vr != nil && len(control.VR) != 0 {
-		return x.vrRecordsForRound(round, parent, parentQC)
+		if control.Phase == "endorsed" {
+			// the retained candidate of the committed Freeze tells a recovery from an ordinary primary; it is read once, and an error is the caller's
+			raw, err := x.committedRecoveryPreimage(control)
+			if err != nil {
+				return nil, fmt.Errorf("%w: the retained candidate of the committed Freeze: %w", ErrHandoffApproval, err)
+			}
+			if raw == nil {
+				return x.vrRecordsForRound(round, parent, parentQC)
+			}
+			return x.vrRecoveryCommit(round, parent, control, raw)
+		}
+		if !x.vrRecoveryRoute(parent, control, round) {
+			return x.vrRecordsForRound(round, parent, parentQC)
+		}
 	}
 	// A Prepare whose freeze lapsed is dead: no Freeze is ordered for it, and once the cooldown has passed the leader may start the
 	// next attempt exactly as after an abort.
@@ -1282,8 +1309,15 @@ func (x *ConsensusManager) handoffRecordsForRound(round uint64, parentQC *rctype
 		if intent == nil {
 			return nil, nil
 		}
+		if x.vr != nil && len(control.VR) != 0 && !x.vrRecoveryIntentOK(parent, *intent) {
+			return nil, nil // the intent changed since the route judged it: ordered next round, if eligible
+		}
 		// a due election result is rejected first (contracts#73): the Prepare waits for a later round, its intent kept
-		if x.preferRejection(context.Background(), parentQC.GetRound(), round, parentQC) {
+		reject := x.preferRejection
+		if x.vr != nil && x.vr.reject != nil {
+			reject = x.vr.reject
+		}
+		if reject(context.Background(), parentQC.GetRound(), round, parentQC) {
 			return nil, nil
 		}
 		return x.prepareRecordFor(*intent, control, round)

@@ -174,7 +174,7 @@ vrp_source_q3() {
   }
 }
 
-vrp_result_state() { cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'output(bytes32)' "$1" 2>/dev/null | python3 -c "import sys;h=sys.stdin.read().strip()[2:];w=[h[i:i+64] for i in range(0,len(h),64)];print(int(w[2],16))"; }
+vrp_result_state() { cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'output(bytes32)' "$1" 2>/dev/null | python3 -c "import sys;h=sys.stdin.read().strip()[2:];w=[h[i:i+64] for i in range(0,len(h),64)];print(int(w[1],16))"; }
 vrp_new_open_result() { local r; r=$(cast call --rpc-url "$vrb_rpc" "$(vrp_election)" 'openResult()(bytes32)'); [ "$r" != 0x0000000000000000000000000000000000000000000000000000000000000000 ] && [ "$r" != "$vrb_result" ]; }
 vrp_root_epoch_is() { curl -sf -X POST -H 'Content-Type: application/json' -d '{}' "http://127.0.0.1:$(m2_rpc_port 1)/api/v1/q3/status" | python3 -c "import json,sys;sys.exit(0 if json.load(sys.stdin).get('activeEpoch')==$1 else 1)"; }
 vrp_eth_block() { cast block-number --rpc-url "$vrb_rpc"; }
@@ -220,6 +220,56 @@ vrp_election_diag() {
   } 2>&1 | tee "$VR_EVIDENCE/second-election-diagnostics.txt"
 }
 
+# q3_install_n for K: the restart helper's readiness check needs lsof (not on the dev server), so a root it restarted is judged by its own q3/status
+vrp_root_active() { curl -sf -X POST -H 'Content-Type: application/json' -d '{}' "http://127.0.0.1:$(m2_rpc_port "$1")/api/v1/q3/status" | python3 -c "import json,sys;sys.exit(0 if json.load(sys.stdin).get('activeEpoch')==$2 else 1)"; }
+vrp_install_k() { # <epoch> <roots expected to switch in process>
+  local epoch=$1 r
+  if ! Q3_EXPECT_SWITCHED="$2" q3_install_roots "$epoch"; then
+    for r in $H3_ROOTS; do vrb_wait 180 "root $r runs epoch $epoch" vrp_root_active "$r" "$epoch" || return 1; done
+  fi
+  for r in $(seq 1 120); do [ "$(q3_signers_of "$(h3_first_root)" 2>/dev/null | jq -r .epoch 2>/dev/null)" = "$epoch" ] && break; sleep 1; done
+  q3_signers_of "$(h3_first_root)" | jq -c . >"$Q3_DIR/first-epoch${epoch}-certificate.json"
+  [ "$(jq -r .epoch "$Q3_DIR/first-epoch${epoch}-certificate.json")" = "$epoch" ] || return 1
+  q3_history_ids "$Q3_DIR/history-ids-epoch${epoch}.txt"
+}
+
+# what VR, custody and the roots say when the recovery's acknowledgement does not arrive
+vrp_recovery_diag() {
+  local d=$VR_EVIDENCE/recovery-diag.txt r=$1 i
+  {
+    echo "output(R): $(cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'output(bytes32)' "$r" 2>&1 | head -c 600)"
+    echo "health $(cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'health()(uint8)' 2>&1) lastAcked $(cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'lastAcked()(bytes32)' 2>&1) openOutput $(vrb_open_output 2>&1)"
+    echo "VR cursor $(cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'recordCursor()(uint64)' 2>&1) custody cursor $(cast call --rpc-url "$vrb_rpc" "$(vrp_custody)" 'recordCursor()(uint64)' 2>&1)"
+    echo "custody lastAckedAssignment $(cast call --rpc-url "$vrb_rpc" "$(vrp_custody)" 'lastAckedAssignment()(bytes32)' 2>&1) eth block $(vrp_eth_block 2>&1)"
+    for i in 1 2 3 4 5; do echo "root$i q3status: $(curl -s -m 3 -X POST -H 'Content-Type: application/json' -d '{}' "http://127.0.0.1:$(m2_rpc_port "$i")/api/v1/q3/status" | head -c 300)"; done
+    for i in 1 2 3 4; do echo "evm$i: $(grep -c 'certification request signed' test-nodes/evm$i/debug.log) signed; $(grep 'level=ERROR' test-nodes/evm$i/debug.log | tail -1 | cut -c1-300)"; done
+    grep -h 'ack\|Ack' test-nodes/root1/debug.log | grep -vi 'backoff\|callback\|track\|replica' | tail -10 | cut -c1-300
+  } >"$d" 2>&1
+  vrb_log "recovery diagnostics written to $d"
+}
+
+vrp_recovery_attempt() { q3_x build/ubft root handoff propose --vr-recovery --root-rpc "$(q3_propose_rpcs)"; }
+
+# what the roots' logs show of the recovery (#1221): the leader's Prepare/Freeze/H of the exact recovery, the committed outcome at root epoch 3, and the in-process switch 3 -> 4
+vrp_recovery_evidence() { # <old root epoch> <handoff = the handoff committed | switch = the in-process switch to old+1>
+  local old=$1 phase=$2 inproc=${3:-$H3_ROOTS} d=$VR_EVIDENCE/recovery-logs r f ok=0 want=${M2_RUN_LOG_DIR:-test-nodes}
+  mkdir -p "$d"
+  for r in $H3_ROOTS; do
+    f=test-nodes/root$r/debug.log; [ -f "$f" ] || f=$want/root$r/debug.log
+    grep -a 'VR recovery:\|root handoff outcome\|switched epoch in process' "$f" >"$d/root$r.$phase.txt" 2>/dev/null || true
+  done
+  if [ "$phase" = handoff ]; then
+    grep -aqh 'VR recovery: the leader orders the Prepare' "$d"/root*.handoff.txt || { vrb_log "FAIL: no root logged the recovery Prepare"; return 1; }
+    grep -aqh 'VR recovery: the leader follows the exact recovery.*phase=prepared' "$d"/root*.handoff.txt || { vrb_log "FAIL: no root logged the recovery Freeze"; return 1; }
+    grep -aqh "root handoff outcome.*phase=committed.*rootEpoch=$old" "$d"/root*.handoff.txt || { vrb_log "FAIL: no committed outcome at root epoch $old"; return 1; }
+    vrb_log "PASS: the leader ordered Prepare, Freeze (v3, exact recovery) and H at root epoch $old (logs in $d)"
+  else
+    ok=0; for r in $inproc; do grep -aq "switched epoch in process.*epoch=$((old + 1)).*from=$old\|switched epoch in process.*from=$old.*epoch=$((old + 1))" "$d/root$r.switch.txt" && ok=$((ok + 1)); done
+    [ "$ok" = "$(echo $inproc | wc -w | tr -d ' ')" ] || { vrb_log "FAIL: $ok of the roots switched $old -> $((old + 1)) in process"; return 1; }
+    vrb_log "PASS: every one of K's $ok roots switched $old -> $((old + 1)) in process"
+  fi
+}
+
 vrp_recovery() {
   vrp_source_q3 || { vrb_log "FAIL: the q3 helpers"; return 1; }
   local first=$vrb_result i rid2 rec
@@ -243,17 +293,35 @@ vrp_recovery() {
   [ "$after" -le "$((before + 1))" ] || { vrb_log "FAIL: J' certified blocks ($before -> $after) without its EVM quorum"; return 1; }
   [ "$(vrp_result_state "$rid2")" = 2 ] || { vrb_log "FAIL: J' is no longer Published in VR"; return 1; }
   vrb_log "PASS: J' stalls (EVM block $before -> $after in 45 s with $((nj - stop)) of its $nj validators)"
-  # 3. the recovery: the roots return to K's committee (epoch 4), exact K, no receipts, supersedes J'
-  build/ubft q3 trust-base --root-rpc "http://127.0.0.1:$(m2_rpc_port 1)" --epoch 3 --out test-nodes/trust-base-epoch3.json || { vrb_log "FAIL: the trust base of epoch 3"; return 1; }
+  # 3. the recovery (#1221): the VR leader proposes the exact recovery to K (epoch 4) after J' committed and failed to acknowledge. The operator only
+  # requests it (`root handoff propose --vr-recovery`: nothing named, the root derives K from the retained authorization); the leader orders the Prepare,
+  # J''s four roots endorse it, the Freeze is a v3 companion (KindRecovery, exact K, no receipts) and then H. The endorsements are scoped to J''s roots
+  # (the retired joiner's root is not in epoch 3) and the install barrier to K's five roots.
+  H3_ROOTS="$(seq -s ' ' 1 "$nj")"
+  h3_retry_handoff 3 vrp_recovery_attempt || { vrb_log "FAIL: the recovery handoff"; return 1; }
+  vrp_recovery_evidence 3 handoff || return 1
   H3_ROOTS="$(seq -s ' ' 1 "$n")"
-  Q3_WEIGHTS="$(for _ in $(seq 1 "$n"); do printf '1 '; done | sed 's/ $//')" Q3_NEXT_EPOCH=4 q3_trust_base_v3 4 || { vrb_log "FAIL: the recovery's trust base"; return 1; }
-  H3_ROOTS="$(seq -s ' ' 1 "$nj")"   # J''s roots run the recovery handoff; the retired joiner's root is not in epoch 3
-  Q3_RECOVERY=1 Q3_SUPERSEDE=1 Q3_NEXT_EPOCH=4 Q3_ASSIGN_TAG=rec Q3_SUFFIX=-2 h3_retry_handoff 3 q3_attempt || { vrb_log "FAIL: the recovery handoff"; return 1; }
-  Q3_EXPECT_SWITCHED="$(seq -s ' ' 1 "$n")" q3_install_n 4 || { vrb_log "FAIL: the roots did not install the recovery"; return 1; }
-  vrb_log "PASS: the roots installed the recovery K (root epoch 4)"
+  # K's roots that were in J' switch in process; the retired joiner's root, a follower of epoch 3, installs by the harness's restart path when its in-process
+  # switch fails (a P85 record-log prefix it cannot fetch: filed in briefs/owner-questions.md)
+  local inproc; inproc="$(seq -s ' ' 1 "$nj")"
+  vrp_install_k 4 "$inproc" || { vrb_log "FAIL: the roots did not install the recovery"; return 1; }
+  vrp_recovery_evidence 3 switch "$inproc" || return 1
+  vrb_log "PASS: the roots installed the recovery K (root epoch 4): J''s $nj roots switched in process, restarted: ${Q3_RESTARTED:-none}"
+  # each authority signs for one scope: K's five move into the recovery's (root epoch 4, shard epoch 3) before the shard can acknowledge it
+  if [ "${SIGNING:-local}" = authority ]; then
+    build/ubft q3 trust-base --root-rpc "http://127.0.0.1:$(m2_rpc_port 1)" --epoch 4 --out test-nodes/trust-base-epoch4.json || { vrb_log "FAIL: the trust base of epoch 4"; return 1; }
+    H3_ONLINE="$(seq -s ' ' 1 "$nj")" M2_ADVANCE_NO_REPLICA_WAIT=1 h3_advance_authorities 4 3 $(seq -s ' ' 1 "$nj") || { vrb_log "FAIL: the authority advance of J''s four"; return 1; }
+    # the joiner (identity 5) is a running member of K already (J named it): its authority advances and its shard node restarts under the new session
+    local op5=(--operator-socket "test-nodes/auth5/operator.sock" --operator-credential "test-nodes/auth5/operator.cred")
+    stop_one_evm_validator 5 2>/dev/null || true
+    build/ubft signing-authority advance-epoch "${op5[@]}" --trust-base test-nodes/trust-base-epoch4.json --shard-conf "$(h3_pdr_file 3)" || { vrb_log "FAIL: identity 5's authority advance"; return 1; }
+    build/ubft signing-authority replace-session "${op5[@]}" --out test-nodes/auth5/client.cred || { vrb_log "FAIL: identity 5's session"; return 1; }
+    start_one_evm_validator 5 "${validators:-4}" "$partitionID" "$(m2_root_addr 1)" engine-api rpc "$(evm_bootnodes_for_peers "$(m2_root_addr 1)" 5 1 2 3 4 5)" >/dev/null 2>&1 || { vrb_log "FAIL: identity 5's shard node did not start"; return 1; }
+    vrb_log "PASS: K's authorities advanced into root epoch 4 / shard epoch 3"
+  fi
   # 4. the three stopped validators return into K's scope; VR imports RecoveryAck(J') and the Boundary (recovered)
-  for i in $(seq $((nj - stop + 1)) "$nj"); do start_one_evm_validator "$i" "${validators:-4}" "$partitionID" "$(m2_root_addr 1)" engine-api rpc "$(evm_bootnodes_for_peers "$(m2_root_addr 1)" "$i" 1 2 3 4 5)" >/dev/null 2>&1 || true; done
-  vrb_wait 900 "VR's output of J' is Recovered (state 6)" bash -c "[ \"\$(cast call --rpc-url $vrb_rpc $vrb_vr 'output(bytes32)' $rid2 | python3 -c \"import sys;h=sys.stdin.read().strip()[2:];print(int(h[128:192],16))\")\" = 6 ]" || return 1
+  for i in $(seq $((nj - stop + 1)) "$nj"); do kill -0 "$(cat "test-nodes/evm$i/pid" 2>/dev/null)" 2>/dev/null || start_one_evm_validator "$i" "${validators:-4}" "$partitionID" "$(m2_root_addr 1)" engine-api rpc "$(evm_bootnodes_for_peers "$(m2_root_addr 1)" "$i" 1 2 3 4 5)" >/dev/null 2>&1 || true; done
+  vrb_wait 900 "VR's output of J' is Recovered (state 6)" bash -c "[ \"\$(cast call --rpc-url $vrb_rpc $vrb_vr 'output(bytes32)' $rid2 | python3 -c \"import sys;h=sys.stdin.read().strip()[2:];print(int(h[64:128],16))\")\" = 6 ]" || { vrp_recovery_diag "$rid2"; return 1; }
   [ "$(cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'health()(uint8)')" = 0 ] || { vrb_log "FAIL: VR is not Healthy after the recovery"; return 1; }
   [ "$(cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'lastAcked()(bytes32)')" = "$rid2" ] || { vrb_log "FAIL: lastAcked is not J's pair result"; return 1; }
   vrb_wait 300 "custody and VR have applied the same records" vrp_cursors_match || return 1
