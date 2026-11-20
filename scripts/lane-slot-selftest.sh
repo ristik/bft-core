@@ -71,7 +71,7 @@ echo "32768 60999" >"$tmp/range"; export LANE_PORT_RESERVED_FILE=/nonexistent
 for pair in "3 paired-default" "3 f6b"; do set -- $pair
   LANE_PORT_RANGE_FILE="$tmp/range" acq --slot "$1" --profile "$2" --token "e$1$2" >/dev/null && fail "slot $1 profile $2 accepted with listeners in the ephemeral range" || pass "slot $1 profile $2 is refused: its listeners are in the ephemeral range"
 done
-echo "20000 30000" >"$tmp/range2"
+echo "50000 60000" >"$tmp/range2"
 LANE_PORT_RANGE_FILE="$tmp/range2" acq --slot 2 --profile paired-default --token e2 >/dev/null && pass "slot 2 paired-default is accepted when no listener is in the range" || fail "slot 2 paired-default refused with no listener in the range"
 rel 2 --token e2
 printf '32768 60999\n' >"$tmp/range3"
