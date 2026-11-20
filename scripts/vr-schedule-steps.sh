@@ -16,20 +16,25 @@ vrs_check_events() {
   local rid=${2#0x}
   grep -E "(event=)?$4" "$1" 2>/dev/null | grep -E "rule=(0x)?$rid" | grep -qE "epoch=$3([^0-9]|$)"
 }
+# vrs_check_active <file> <ruleId> <E>: one activation.active record for the rule (activation epoch E) whose CURRENT epoch is >= E
+vrs_check_active() {
+  grep -E 'activation\.active' "$1" 2>/dev/null | grep -E "rule=(0x)?${2#0x}" | grep -E "(^|[ ,{])epoch=$3([ ,}\"]|$)" \
+    | sed -n 's/.*currentEpoch=\([0-9][0-9]*\).*/\1/p' | awk -v e="$3" '$1 >= e { ok = 1 } END { exit ok ? 0 : 1 }'
+}
 # vrs_check_all_roots <dir> <ruleId> <epoch> <roots...>: every listed root logged activation.latched AND activation.active for the rule at E
 vrs_check_all_roots() {
   local d=$1 rid=$2 e=$3 i; shift 3
   [ "$#" -gt 0 ] || return 1
   for i in "$@"; do
     vrs_check_events "$d/root$i-activation-events.txt" "$rid" "$e" 'activation\.latched' || { echo "root$i did not log activation.latched for rule $rid epoch $e" >&2; return 1; }
-    vrs_check_events "$d/root$i-activation-events.txt" "$rid" "$e" 'activation\.active' || { echo "root$i did not log activation.active for rule $rid epoch $e" >&2; return 1; }
+    vrs_check_active "$d/root$i-activation-events.txt" "$rid" "$e" || { echo "root$i did not log activation.active for rule $rid epoch $e" >&2; return 1; }
   done
 }
-# vrs_check_refusal <log> <ruleId> <epoch>: ONE log record is the structured refusal (event=upgrade.refused) at install epoch E whose UpgradeRequired
-# error names this rule and activation epoch E (the greps are filters over the same line: nothing is matched across records)
+# vrs_check_refusal <log> <ruleId> <epoch>: ONE log record is the structured refusal (event=upgrade.refused) whose ATTEMPTED epoch (its epoch key) is E
+# and whose UpgradeRequired error names this rule (the greps are filters over the same line: nothing is matched across records, and the rule's own
+# scheduled epoch in the message text is not what decides)
 vrs_check_refusal() {
-  grep -E 'event=upgrade\.refused' "$1" 2>/dev/null | grep -E "(^|[ ,{])epoch=$3([ ,}\"]|$)" | grep "UpgradeRequired" \
-    | grep "rule ${2#0x}" | grep -qE "root epoch $3([^0-9]|$)"
+  grep -E 'event=upgrade\.refused' "$1" 2>/dev/null | grep -E "(^|[ ,{])epoch=$3([ ,}\"]|$)" | grep "UpgradeRequired" | grep -q "rule ${2#0x}"
 }
 # vrs_check_warning <log> <ruleId>: the pending warning for this rule (a queued schedule) was logged
 vrs_check_warning() { grep 'upgrade.required' "$1" 2>/dev/null | grep 'state=pending' | grep -qE "rule=(0x)?${2#0x}"; }
@@ -48,6 +53,24 @@ if known and not any(k["id"].lower() == rid for k in r.get("known", [])):
     sys.exit("the rule is not among the rules this binary knows")
 hit = [e for e in r.get("scheduled", []) if e["ruleId"].lower() == rid and e["rootEpoch"] == epoch and e["latched"] == latched and e["known"] == known]
 sys.exit(0 if hit else "no scheduled entry for the rule at epoch %d (latched=%s known=%s): %s" % (epoch, latched, known, r.get("scheduled")))
+PY
+}
+# vrs_check_rules_absent <unicity_rulesV1 response> <ruleId>: a VALID response (result present, observed=true, lists well formed) that has no scheduled entry for the rule;
+# a missing, malformed, error or observed=false response is a failure, never "absent"
+vrs_check_rules_absent() {
+  python3 - "$@" <<'PY'
+import json, sys
+f, rid = sys.argv[1], sys.argv[2].lower()
+try:
+    r = json.load(open(f))["result"]
+    assert isinstance(r["known"], list) and isinstance(r["scheduled"], list) and isinstance(r["lacking"], list)
+    observed = r["observed"]
+except Exception as e:
+    sys.exit("not a valid unicity_rulesV1 response: %r" % (e,))
+if observed is not True:
+    sys.exit("ureth has observed no canonical head")
+bad = [e for e in r["scheduled"] if e.get("ruleId", "").lower() == rid]
+sys.exit("the rule is already scheduled: %s" % bad if bad else 0)
 PY
 }
 # vrs_check_latched_row <validator upgrade --json> <ruleId> <epoch>: ONE schedule row has this rule, this root epoch and the state Latched
@@ -173,7 +196,8 @@ vrs_long() {
   vrs_upgrade_state >"$d/upgrade-after-execute.txt"; cat "$d/upgrade-after-execute.txt"
   # 3. one handoff per epoch up to E
   local rid; rid=$(vrs_rule_id noop-test-v1)
-  vrs_check_rules "$d/ureth-rules-before.json" "$rid" "$E" false true && { vrb_log "FAIL: ureth lists the rule as scheduled before it was executed"; return 1; }
+  vrs_check_rules_absent "$d/ureth-rules-before.json" "$rid" || { vrb_log "FAIL: ureth's baseline unicity_rulesV1 is not a valid response without the rule"; return 1; }
+  vrb_log "PASS: baseline: ureth observed the head and lists no schedule for the rule"
   for i in $(seq $((known + 1)) "$E"); do
     vrs_handoff "$i" || { vrb_log "FAIL: the handoff into epoch $i"; return 1; }
     vrb_log "PASS: handoff into epoch $i committed"

@@ -115,20 +115,28 @@ func provisionFence(ctx context.Context, log *slog.Logger, raw []byte, start vrF
 	if err := dec.Decode(&p); err != nil {
 		return err
 	}
-	_, pf, err := readB1ProfileFile(p.B1Profile)
-	if err != nil {
-		return fmt.Errorf("the b1 profile: %w", err)
-	}
-	if pf.VRHookMeasurement == nil {
-		return errors.New("the b1 profile is not a VR generation's")
+	// a field the startup already supplied need not be in the file: the b1 profile (the registry code hash) is read only when it is there or
+	// the startup has no code hash, and the genesis hash below only when the file has one
+	var fileCode *[32]byte
+	if p.B1Profile != "" || start.CodeHash == nil {
+		_, pf, err := readB1ProfileFile(p.B1Profile)
+		if err != nil {
+			return fmt.Errorf("the b1 profile: %w", err)
+		}
+		if pf.VRHookMeasurement == nil {
+			return errors.New("the b1 profile is not a VR generation's")
+		}
+		fileCode = &pf.VRHookMeasurement.RegistryCodeHash
 	}
 	var genesis *[32]byte // omitted in the file: the startup pin (if any) stands
 	if p.ExecutionGenesisHash != "" {
-		if genesis, err = parseCodeHash(p.ExecutionGenesisHash); err != nil {
-			return fmt.Errorf("executionGenesisHash: %w", err)
+		g, gerr := parseCodeHash(p.ExecutionGenesisHash)
+		if gerr != nil {
+			return fmt.Errorf("executionGenesisHash: %w", gerr)
 		}
+		genesis = g
 	}
-	pins, url, err := mergePins(start, startURL, p.ActivationSourceURL, &pf.VRHookMeasurement.RegistryCodeHash, genesis)
+	pins, url, err := mergePins(start, startURL, p.ActivationSourceURL, fileCode, genesis)
 	if err != nil {
 		return err
 	}

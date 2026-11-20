@@ -661,6 +661,8 @@ function start_one_evm_validator() {
   local rpcArgs=()
   if [ "$exposeRPC" == "rpc" ]; then
     rpcArgs=(--rpc-server-address "$(evm_validator_rpc_addr "$i")")
+    # the activation-schedule lane asserts unicity_upgrade_required on the shard nodes: they export it themselves, not through EVM_EXTRA_ARGS
+    [ "${VR_SCHEDULE:-0}" = 0 ] || rpcArgs+=(--metrics prometheus)
   fi
 
   local signingArgs=()

@@ -101,3 +101,18 @@ func TestDeferredProvisioningCarriesTheStartupPins(t *testing.T) {
 	_, _, err = mergePins(vrFence{VR: true}, "http://a", "http://b", &code, &gen)
 	require.Error(t, err)
 }
+
+// A field the startup already supplied is not required in the provisioning file, and one the file gives is parsed only when present.
+func TestProvisionFenceDoesNotRequireWhatStartupSupplied(t *testing.T) {
+	code, gen := [32]byte{2}, [32]byte{3}
+	start := vrFence{VR: true, CodeHash: &code, GenesisHash: &gen}
+	got, url, err := mergePins(start, "http://x", "", nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, start, got)
+	require.Equal(t, "http://x", url)
+	// nothing from either side is an unresolved pin, left for the gate's own mandatory checks
+	got, url, err = mergePins(vrFence{VR: true}, "", "", nil, nil)
+	require.NoError(t, err)
+	require.Nil(t, got.CodeHash)
+	require.Empty(t, url)
+}
