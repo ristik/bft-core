@@ -233,7 +233,7 @@ EOF
     grep -v 'IR change request\|CertificationResp' test-nodes/root5/debug.log | tail -n 3000 >"$VR_EVIDENCE/root5-tail.log"
     tail -n 1500 test-nodes/evm5/debug.log >"$VR_EVIDENCE/evm5-tail.log" 2>/dev/null; tail -n 200 test-nodes/reth5/reth.log >"$VR_EVIDENCE/reth5-tail.log" 2>/dev/null
   fi
-  if [ "${VR_SCHEDULE:-0}" = 1 ]; then source scripts/vr-schedule-steps.sh; vrs_run || return 1; fi
+  if [ "${VR_SCHEDULE:-0}" != 0 ]; then source scripts/vr-schedule-steps.sh; if [ "$VR_SCHEDULE" = 2 ]; then vrs_long || return 1; else vrs_run || return 1; fi; fi
   return 0
 }
 
