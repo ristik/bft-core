@@ -145,6 +145,8 @@ type vrHandoff struct {
 	derive  func(storage.VRIntentQuery) (vrschedule.Derived, bool, error)
 	leader  func(vrschedule.PreparePlan, *storage.ExecutedBlock, uint64, types.PartitionShardID, func(p, root [32]byte) ([]byte, error), crypto.Hash) (vrschedule.LeaderStep, error)
 	reject  func(ctx context.Context, parentRound, round uint64, qc *rctypes.QuorumCert) bool
+	// recoveryEligible judges a held exact-recovery candidate at the parent block (the manager's own when nil; replaced in tests)
+	recoveryEligible func(*storage.ExecutedBlock, evmassign.Candidate) error
 }
 
 // vrOperator is the sender identity of the loopback operator endpoints.

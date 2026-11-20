@@ -1251,7 +1251,8 @@ func (x *ConsensusManager) handoffRecordsForRound(round uint64, parentQC *rctype
 		}
 	}
 	// a validator-registry chain orders its records for the complete verified view certificate this root holds (VT-05b)
-	if x.vr != nil && len(control.VR) != 0 {
+	// ... except an exact recovery of its committed, unacknowledged primary (#1221), which follows the handoff path below
+	if x.vr != nil && len(control.VR) != 0 && !x.vrRecoveryRoute(parent, control, round) {
 		return x.vrRecordsForRound(round, parent, parentQC)
 	}
 	// A Prepare whose freeze lapsed is dead: no Freeze is ordered for it, and once the cooldown has passed the leader may start the
@@ -1283,7 +1284,11 @@ func (x *ConsensusManager) handoffRecordsForRound(round uint64, parentQC *rctype
 			return nil, nil
 		}
 		// a due election result is rejected first (contracts#73): the Prepare waits for a later round, its intent kept
-		if x.preferRejection(context.Background(), parentQC.GetRound(), round, parentQC) {
+		reject := x.preferRejection
+		if x.vr != nil && x.vr.reject != nil {
+			reject = x.vr.reject
+		}
+		if reject(context.Background(), parentQC.GetRound(), round, parentQC) {
 			return nil, nil
 		}
 		return x.prepareRecordFor(*intent, control, round)

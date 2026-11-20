@@ -44,6 +44,15 @@ type rootHandoffPlanRequest struct {
 	// Q3 asks for a V3 plan without receipts: the exact recovery K needs none (the root decides by the verified candidate kind and refuses any
 	// other candidate that carries fewer than every member's receipt). With receipts it is implied.
 	Q3 bool `json:"q3,omitempty"`
+	// VRRecovery asks a VR-mode root for the exact recovery of the committed, unacknowledged primary (#1221): the root derives the plan from
+	// its own committed state (the successor is K of the retained authorization) and holds it as its intent; NextTrustBase and EVMAssignment
+	// are not read. The VR admission rules are unchanged: the leader orders its Prepare, J''s root quorum endorses, and the chain admits the Freeze v3 companion.
+	VRRecovery bool `json:"vrRecovery,omitempty"`
+}
+
+// rootHandoffVRRecoveryPlanner is a VR-mode root that plans the exact recovery of its pending primary.
+type rootHandoffVRRecoveryPlanner interface {
+	PlanVRRecovery() (abdrc.HandoffApprovalMsg, error)
 }
 
 func localOperatorRequest(w http.ResponseWriter, r *http.Request) bool {
@@ -76,7 +85,14 @@ func rootHandoffPlanHandler(operator rootHandoffOperator) http.HandlerFunc {
 		// The plan names no EVM parent: the root binds it when the Prepare is ordered.
 		var plan abdrc.HandoffApprovalMsg
 		var err error
-		if request.Q3 || len(request.Q3Receipts) != 0 {
+		if request.VRRecovery {
+			planner, ok := operator.(rootHandoffVRRecoveryPlanner)
+			if !ok {
+				http.Error(w, "this root is not a VR-mode root", http.StatusUnprocessableEntity)
+				return
+			}
+			plan, err = planner.PlanVRRecovery()
+		} else if request.Q3 || len(request.Q3Receipts) != 0 {
 			planner, ok := operator.(rootHandoffQ3Planner)
 			if !ok {
 				http.Error(w, "this root is not running the Q3 lane", http.StatusUnprocessableEntity)
@@ -191,7 +207,7 @@ func newRootCmd() *cobra.Command {
 	root := &cobra.Command{Use: "root", Short: "Root chain operator commands"}
 	handoff := &cobra.Command{Use: "handoff", Short: "Profile-2 validator handoff"}
 	var nextFile, rootRPCs, nextEVMAssignment, readinessReceipts string
-	var q3Plan bool
+	var q3Plan, vrRecovery bool
 	var prepareTimeout time.Duration
 	var maxAttempts int
 	propose := &cobra.Command{Use: "propose", Short: "Request old-validator endorsements for a new root trust base", Long: "Plans the handoff, has the root order a Prepare for it (which freezes the EVM and binds the frozen parent), and then collects the\n" +
@@ -204,7 +220,7 @@ func newRootCmd() *cobra.Command {
 				endpoints = append(endpoints, endpoint)
 			}
 		}
-		request, epoch, err := buildPlanRequest(nextFile, nextEVMAssignment, readinessReceipts, q3Plan)
+		request, epoch, err := planRequestFor(vrRecovery, nextFile, nextEVMAssignment, readinessReceipts, q3Plan)
 		if err != nil {
 			return err
 		}
@@ -235,7 +251,7 @@ func newRootCmd() *cobra.Command {
 	propose.Flags().IntVar(&maxAttempts, "max-attempts", 3, "how many attempts to plan when a Prepare lapses before it is endorsed (each lapse makes the attempt dead)")
 	propose.Flags().DurationVar(&prepareTimeout, "prepare-timeout", 60*time.Second, "how long to wait for the root to commit the Prepare before endorsing")
 	propose.Flags().StringVar(&rootRPCs, "root-rpc", "", "comma-separated local old validator RPC URLs")
-	_ = propose.MarkFlagRequired("next-trust-base")
+	propose.Flags().BoolVar(&vrRecovery, "vr-recovery", false, vrRecoveryFlagHelp)
 	_ = propose.MarkFlagRequired("root-rpc")
 	propose.Flags().StringVar(&readinessReceipts, "readiness-receipts", "",
 		"comma-separated readiness receipt files of every successor member (`handoff q3-readiness`): the plan is then a V3 plan, and the root refuses it unless every member declared itself ready for exactly this candidate")
@@ -398,6 +414,23 @@ func handoffPost(ctx context.Context, client *http.Client, url string, body []by
 	return nil
 }
 
+const vrRecoveryFlagHelp = "plan the exact recovery of a VR chain's committed, unacknowledged primary (#1221): the root derives the successor (K of the retained authorization) from its own committed state; no trust base, assignment or receipts are given"
+
+// planRequestFor is buildPlanRequest, or the request of a VR exact recovery, which names nothing: the root derives all of it.
+func planRequestFor(vrRecovery bool, nextFile, nextEVMAssignment, readinessReceipts string, q3Plan bool) ([]byte, uint64, error) {
+	if vrRecovery {
+		if nextFile != "" || nextEVMAssignment != "" || readinessReceipts != "" || q3Plan {
+			return nil, 0, errors.New("--vr-recovery takes no trust base, assignment, receipts or --q3")
+		}
+		request, err := json.Marshal(rootHandoffPlanRequest{VRRecovery: true})
+		return request, 0, err
+	}
+	if nextFile == "" {
+		return nil, 0, errors.New("--next-trust-base is required")
+	}
+	return buildPlanRequest(nextFile, nextEVMAssignment, readinessReceipts, q3Plan)
+}
+
 // buildPlanRequest is the plan request `propose` sends to the first root: the next trust base, the coupled EVM assignment (checked against it), and the
 // readiness receipts as the V3 plan's encoded bytes. It does no network I/O, so an operator wrapper that cannot run `propose` in one process (the roots'
 // loopback-only endpoints are in different namespaces) builds the same request with `handoff plan-request` and performs the plan, intent and endorse phases itself.
@@ -430,13 +463,13 @@ func buildPlanRequest(nextFile, nextEVMAssignment, readinessReceipts string, q3P
 
 func newPlanRequestCmd() *cobra.Command {
 	var nextFile, nextEVMAssignment, readinessReceipts, out string
-	var q3Plan bool
+	var q3Plan, vrRecovery bool
 	cmd := &cobra.Command{Use: "plan-request", Short: "Write the plan request `propose` would send (no network)",
 		Long: "Builds and checks the plan request of a handoff exactly as `propose` does and writes it to --out. It contacts no node. A wrapper that\n" +
 			"runs the plan, intent and endorse phases itself (each inside one validator's network namespace) sends this file to the first root's\n" +
 			"/api/v1/handoff/plan, the returned plan to every other root's /intent, and then to every root's /endorse.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			request, _, err := buildPlanRequest(nextFile, nextEVMAssignment, readinessReceipts, q3Plan)
+			request, _, err := planRequestFor(vrRecovery, nextFile, nextEVMAssignment, readinessReceipts, q3Plan)
 			if err != nil {
 				return err
 			}
@@ -447,7 +480,7 @@ func newPlanRequestCmd() *cobra.Command {
 	cmd.Flags().StringVar(&readinessReceipts, "readiness-receipts", "", "comma-separated readiness receipt files (as for propose)")
 	cmd.Flags().BoolVar(&q3Plan, "q3", false, "plan as a V3 handoff without readiness receipts (as for propose)")
 	cmd.Flags().StringVar(&out, "out", "", "the request file to write")
-	_ = cmd.MarkFlagRequired("next-trust-base")
+	cmd.Flags().BoolVar(&vrRecovery, "vr-recovery", false, vrRecoveryFlagHelp)
 	_ = cmd.MarkFlagRequired("out")
 	return cmd
 }
