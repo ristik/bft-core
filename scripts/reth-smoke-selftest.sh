@@ -311,7 +311,9 @@ echo "=== teardown is this checkout's, nested cleanups included: a separately ow
 # `build/ubft root-node` on the machine, from inside reth-paired-devnet.sh's cleanup, beneath this lane.
 CO=$T/co OTHER=$T/other
 mkdir -p "$CO/scripts/lib" "$CO/build" "$CO/fake" "$OTHER/build" "$OTHER/fake"
-cp scripts/reth-smoke.sh "$CO/scripts/"; cp scripts/lib/reth-pin.sh "$CO/scripts/lib/"; cp helper.sh stop-evm.sh "$CO/"
+cp scripts/reth-smoke.sh "$CO/scripts/"
+cp scripts/lib/reth-pin.sh scripts/lib/lane-slot.sh "$CO/scripts/lib/"
+cp helper.sh stop-evm.sh "$CO/"
 for d in "$CO" "$OTHER"; do
   printf '#!/usr/bin/perl\nsleep 600;\n' >"$d/build/ubft"; cp "$d/build/ubft" "$d/fake/reth"; chmod +x "$d/build/ubft" "$d/fake/reth"
 done
@@ -457,6 +459,25 @@ check   "a second run needs no build: the cache is a hit" uObtain "$T/ucache" "$
 check   "…reported as a hit" test "$URETH_PIN_CACHE_STATE" = hit
 check   "…with the binary in place again" urethPinVerifyBinary "$T/udest2/unicity-reth" "$U"
 check   "…and no cargo invoked at all" test ! -s "$T/cargo.log"
+
+twoPinnedClients() (
+  unset URETH_BIN
+  export URETH_PIN_CACHE_DIR=$T/ucache
+  local vrBinary ordinaryCache
+  ordinaryCache=$(urethPinCacheEntry "$URETH_PIN_CACHE_DIR" "$otherCommit")
+  fakereth "$ordinaryCache" "$otherCommit"
+  # Resolve two different pins against the same cache, as concurrent lanes would.
+  URETH_PIN_COMMIT=$U
+  urethPinResolve || return 1
+  vrBinary=$URETH_BIN
+  unset URETH_BIN
+  URETH_PIN_COMMIT=$otherCommit
+  urethPinResolve || return 1
+  [ "$vrBinary" != "$URETH_BIN" ] &&
+    urethPinVerifyBinary "$vrBinary" "$U" &&
+    urethPinVerifyBinary "$URETH_BIN" "$otherCommit"
+)
+check "resolving another pin leaves a running lane's executable available for restart" twoPinnedClients
 
 # A cached binary for the pin's own path that reports another commit: a hit whose contents changed
 # must be refused loudly and left in place, exactly as a tampered cached archive is.

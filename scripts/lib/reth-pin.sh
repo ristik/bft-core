@@ -337,11 +337,11 @@ urethPinUnicityFlags() {
   fi
 }
 
-# urethPinObtain <cache-dir> <dest-dir>
+# urethPinObtain <cache-dir> [dest-dir]
 #
-# Leaves a release unicity-reth built from URETH_PIN_COMMIT at <dest-dir>/unicity-reth, or fails
-# having left nothing usable there. Sets URETH_PIN_CACHE_STATE to "hit" or "miss" and
-# URETH_PIN_BINARY to the destination path.
+# Verifies the commit-specific cache entry and sets URETH_PIN_BINARY to that path.
+# When dest-dir is supplied, it publishes a copy in the caller's isolated directory instead.
+# Sets URETH_PIN_CACHE_STATE to "hit" or "miss".
 #
 # Release, not debug: these lanes have real T2 timing budgets and a debug client would change what
 # they measure. The build is slow, which is exactly why the cache is keyed by commit and platform
@@ -350,17 +350,21 @@ urethPinUnicityFlags() {
 # Every refusal starts "ureth-pin: ". The source is never taken on trust: whichever checkout
 # produced the binary, the binary must report the pinned commit before it is accepted or cached.
 urethPinObtain() {
-  local cacheDir=$1 destDir=$2
-  local platform commit cache dest src="" built worktree=""
+  local cacheDir=$1 destDir=${2:-}
+  local platform commit cache dest src="" built pending worktree=""
   commit=$URETH_PIN_COMMIT
   platform=$(rethPinPlatform)
   cache=$(urethPinCacheEntry "$cacheDir" "$commit" "$platform")
-  dest=$destDir/$URETH_PIN_BIN
   URETH_PIN_CACHE_STATE=
-  URETH_PIN_BINARY=$dest
+  URETH_PIN_BINARY=$cache
 
-  mkdir -p "$cacheDir" "$destDir" || { urethPinErr "cannot create $cacheDir or $destDir"; return 1; }
-  rm -f "$dest"
+  mkdir -p "$cacheDir" || { urethPinErr "cannot create $cacheDir"; return 1; }
+  if [ -n "$destDir" ]; then
+    dest=$destDir/$URETH_PIN_BIN
+    mkdir -p "$destDir" || { urethPinErr "cannot create $destDir"; return 1; }
+    rm -f "$dest"
+    URETH_PIN_BINARY=$dest
+  fi
 
   if [ -f "$cache" ]; then
     URETH_PIN_CACHE_STATE=hit
@@ -371,8 +375,9 @@ urethPinObtain() {
       urethPinErr "cached $cache is not the pinned $URETH_PIN_BIN — refusing the cache hit (not rebuilding: whatever changed it should be seen). Delete $cache to rebuild."
       return 1
     fi
-    cp "$cache" "$dest" || { urethPinErr "cannot place the cached binary at $dest"; return 1; }
-    chmod +x "$dest"
+    if [ -n "$destDir" ]; then
+      cp "$cache" "$dest" && chmod +x "$dest" || { urethPinErr "cannot place the cached binary at $dest"; return 1; }
+    fi
     echo "ureth-pin: cache hit, $URETH_PIN_BIN at $commit ($platform)"
     return 0
   fi
@@ -450,12 +455,22 @@ urethPinObtain() {
     urethPinErr "the build reported success but $built is not an executable"
     return 1
   fi
-  if ! urethPinVerifyBinary "$built" "$commit"; then
+  # Copy out of the shared Cargo target before verification. Publish only a verified copy,
+  # atomically, and leave an entry another resolver already published in place.
+  pending=$(mktemp "$cache.XXXXXX") || return 1
+  if ! cp "$built" "$pending" || ! chmod +x "$pending" || ! urethPinVerifyBinary "$pending" "$commit"; then
+    rm -f "$pending"
     return 1
   fi
-  cp "$built" "$cache" || { urethPinErr "cannot cache the built binary at $cache"; return 1; }
-  cp "$built" "$dest" || { urethPinErr "cannot place the built binary at $dest"; return 1; }
-  chmod +x "$dest"
+  if ! ln "$pending" "$cache" 2>/dev/null && ! urethPinVerifyBinary "$cache" "$commit"; then
+    rm -f "$pending"
+    urethPinErr "cannot publish the verified binary at $cache"
+    return 1
+  fi
+  rm -f "$pending"
+  if [ -n "$destDir" ]; then
+    cp "$cache" "$dest" && chmod +x "$dest" || { urethPinErr "cannot place the cached binary at $dest"; return 1; }
+  fi
 
   # Drop the throwaway worktree now the binary is cached. It is only needed once per pin, and
   # leaving it registered would litter the developer's checkout with entries that need
@@ -479,12 +494,10 @@ urethPinObtain() {
 # pinned commit is fine, and an operator accidentally pointing at stock reth is refused rather than
 # silently measured. Otherwise the pinned commit is obtained through urethPinObtain.
 #
-# The default destination is the pin library's own bin directory under the cache, not a directory in
-# a lane's tree. That is deliberate and load-bearing: setup-evm-nodes.sh runs `make clean`, which
-# deletes test-nodes/ whole, and reth-chaos.sh and the f6b lanes delete test-nodes/ between
-# scenarios, so a copy there is deleted out from under a running lane. The shared bin also means the
-# ~28-minute build is paid once on a host and every lane afterwards is a cache hit. The binary is
-# verified by the revision it reports on every resolve, so the shared path is not a shared verdict.
+# The default points directly at a verified cache entry keyed by commit and platform. A second
+# lane resolving a different client cannot change the executable the first lane will restart.
+# This path also stays outside the tree's test-nodes cleanup. Explicit destinations remain
+# available for callers with an isolated directory.
 #
 # A cold obtain is a ~28-minute release build, so a line saying that is printed BEFORE it starts.
 urethPinResolve() {
@@ -499,14 +512,13 @@ urethPinResolve() {
     export URETH_BIN
     return 0
   fi
-  [ -n "$destDir" ] || destDir=$cacheDir/bin
   if [ ! -f "$(urethPinCacheEntry "$cacheDir" "$URETH_PIN_COMMIT" "$(rethPinPlatform)")" ]; then
     echo "ureth-pin: no cached $URETH_PIN_BIN for $URETH_PIN_COMMIT — building it now; a cold build is a ~28-minute release build, cached for every later lane"
   fi
   if ! urethPinObtain "$cacheDir" "$destDir"; then
     return 1
   fi
-  URETH_BIN=$destDir/$URETH_PIN_BIN
+  URETH_BIN=$URETH_PIN_BINARY
   export URETH_BIN
   echo "ureth-pin: using $URETH_BIN (commit $URETH_PIN_COMMIT)"
   return 0
