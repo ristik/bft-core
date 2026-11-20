@@ -44,8 +44,9 @@ vrs_check_warning() {
 }
 # vrs_check_metric <metrics text> <ruleId> <E> <state>: a SAMPLE line (not HELP/TYPE) of unicity_upgrade_required with the labels rule, epoch and state and the value 1
 vrs_check_metric() {
-  grep -v '^#' "$1" 2>/dev/null | grep -E 'unicity_upgrade_required[{ ]' | grep -E "rule=\"(0x)?${2#0x}\"" | grep -E "epoch=\"$3\"" | grep -E "state=\"$4\"" \
-    | grep -qE '[} ]1(\.0+)?[[:space:]]*$'
+  # the EXACT exported name, anchored (ab_ is the exporter's prefix), the label keys inside the braces, and the value field = 1
+  grep -E '^(ab_)?unicity_upgrade_required\{' "$1" 2>/dev/null | grep -E "[{,]rule=\"(0x)?${2#0x}\"" | grep -E "[{,]epoch=\"$3\"" | grep -E "[{,]state=\"$4\"" \
+    | grep -qE '\} 1(\.0+)?[[:space:]]*$'
 }
 # vrs_require_roots: THIS lane's roots only (scoped discovery), exactly the expected count, each root's status saved as evidence
 vrs_require_roots() {
@@ -90,10 +91,10 @@ try:
     for k in known:
         assert isinstance(k["name"], str) and hexid.match(k["id"])
     for e in scheduled:   # every entry well formed: an empty object or a missing field is a malformed response, not an absence
-        assert hexid.match(e["ruleId"]) and hexid.match(e["releaseDigest"]) and type(e["rootEpoch"]) is int
+        assert hexid.match(e["ruleId"]) and hexid.match(e["releaseDigest"]) and type(e["rootEpoch"]) is int and 0 <= e["rootEpoch"] < 2**64
         assert type(e["latched"]) is bool and type(e["known"]) is bool
     for e in lacking:
-        assert hexid.match(e["ruleId"]) and hexid.match(e["releaseDigest"]) and type(e["rootEpoch"]) is int
+        assert hexid.match(e["ruleId"]) and hexid.match(e["releaseDigest"]) and type(e["rootEpoch"]) is int and 0 <= e["rootEpoch"] < 2**64
 except Exception as e:
     sys.exit("not a valid unicity_rulesV1 response: %r" % (e,))
 if observed is not True:

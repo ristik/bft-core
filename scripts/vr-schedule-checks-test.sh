@@ -56,6 +56,11 @@ m "$rid" 5 effective 1 >"$d/m.txt";           bad vrs_check_metric "$d/m.txt" "$
 m "$rid" 6 pending 1 >"$d/m.txt";             bad vrs_check_metric "$d/m.txt" "$rid" $E pending   # wrong epoch
 m "$other" 5 pending 1 >"$d/m.txt";           bad vrs_check_metric "$d/m.txt" "$rid" $E pending   # another rule
 { m "$rid" 6 pending 1; m "$other" 5 pending 1; m "$rid" 5 effective 1; } >"$d/m.txt"; bad vrs_check_metric "$d/m.txt" "$rid" $E pending   # labels spread over samples
+m "$rid" 5 pending 1 | sed 's/^ab_/other_/' >"$d/m.txt";   bad vrs_check_metric "$d/m.txt" "$rid" $E pending   # astra r7: another metric name (other_unicity_upgrade_required) with matching labels
+m "$rid" 5 pending 1 | sed 's/^ab_//' >"$d/m.txt";         ok  vrs_check_metric "$d/m.txt" "$rid" $E pending   # the unprefixed exact name is accepted
+m "$rid" 5 pending 1 | sed 's/^ab_/x_ab_/' >"$d/m.txt";    bad vrs_check_metric "$d/m.txt" "$rid" $E pending
+m "$rid" 5 pending 1 | sed 's/unicity_upgrade_required/unicity_upgrade_required_total/' >"$d/m.txt"; bad vrs_check_metric "$d/m.txt" "$rid" $E pending
+m "$rid" 5 pending 1 | sed 's/} 1/} 1 1795000000/' >"$d/m.txt"; bad vrs_check_metric "$d/m.txt" "$rid" $E pending   # extra field: the value is not the last field
 : >"$d/m.txt";                                bad vrs_check_metric "$d/m.txt" "$rid" $E pending
 bad vrs_check_metric "$d/missing.txt" "$rid" $E pending
 # ureth's unicity_rulesV1
@@ -94,6 +99,16 @@ r "${base/\"scheduled\":[]/\"scheduled\":\"none\"}" >"$d/b.json"; bad vrs_check_
 r "${base/\"lacking\":[]/\"lacking\":[{}]}" >"$d/b.json";        bad vrs_check_rules_absent "$d/b.json" "$rid"
 r "${base/\"known\":[{\"name\":\"noop-test-v1\",\"id\":\"$rid\"}]/\"known\":[{}]}" >"$d/b.json"; bad vrs_check_rules_absent "$d/b.json" "$rid"
 r "${base/\"genesisSpec\":\"Cancun\",/}" >"$d/b.json";           bad vrs_check_rules_absent "$d/b.json" "$rid"   # genesisSpec missing
+neg='{"ruleId":"'$other'","releaseDigest":"'$other'","rootEpoch":-1,"latched":false,"known":false}'
+r "${base/\"scheduled\":[]/\"scheduled\":[$neg]}" >"$d/b.json"; bad vrs_check_rules_absent "$d/b.json" "$rid"   # astra r7: an unrelated entry with rootEpoch -1 (not a u64)
+big='{"ruleId":"'$other'","releaseDigest":"'$other'","rootEpoch":18446744073709551616,"latched":false,"known":false}'
+r "${base/\"scheduled\":[]/\"scheduled\":[$big]}" >"$d/b.json"; bad vrs_check_rules_absent "$d/b.json" "$rid"   # 2^64
+flt='{"ruleId":"'$other'","releaseDigest":"'$other'","rootEpoch":5.0,"latched":false,"known":false}'
+r "${base/\"scheduled\":[]/\"scheduled\":[$flt]}" >"$d/b.json"; bad vrs_check_rules_absent "$d/b.json" "$rid"   # not a JSON integer
+str='{"ruleId":"'$other'","releaseDigest":"'$other'","rootEpoch":"5","latched":false,"known":false}'
+r "${base/\"scheduled\":[]/\"scheduled\":[$str]}" >"$d/b.json"; bad vrs_check_rules_absent "$d/b.json" "$rid"
+nb='{"ruleId":"'$other'","releaseDigest":"'$other'","rootEpoch":5,"latched":"no","known":false}'
+r "${base/\"scheduled\":[]/\"scheduled\":[$nb]}" >"$d/b.json"; bad vrs_check_rules_absent "$d/b.json" "$rid"
 okentry='{"ruleId":"'$other'","releaseDigest":"'$other'","rootEpoch":9,"latched":false,"known":false}'
 r "${base/\"scheduled\":[]/\"scheduled\":[$okentry]}" >"$d/b.json"; ok vrs_check_rules_absent "$d/b.json" "$rid"   # a well-formed entry for ANOTHER rule is still an absence
 [ "$fails" = 0 ] && echo "vr-schedule checks: all pass" || { echo "vr-schedule checks: $fails failing"; exit 1; }

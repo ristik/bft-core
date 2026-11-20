@@ -167,6 +167,8 @@ EOF
   cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'output(bytes32)' "$vrb_result" >"$VR_EVIDENCE/output.hex"
   vrb_log "R = $vrb_result"
   # 3. every root observed the source and derives the intent
+  # the schedule lane first requires exactly this lane's roots (scoped discovery; merge dependency: bft-core#1233): a cross-lane problem shows here
+  if [ "${VR_SCHEDULE:-0}" != 0 ]; then source scripts/vr-schedule-steps.sh; vrs_require_roots || return 1; fi
   vrb_wait "$([ "${VR_JOINER:-0}" = 1 ] && echo 900 || echo 300)" "every root derives the intent over its committed state (the joiner's included)" vrb_all_intents || return 1
   for i in $(vrb_root_rpcs); do vrb_intent "$i" | python3 -c "import json,sys;d=json.load(sys.stdin);print(sys.argv[1], d['digest'], d['view'], d['assembler'])" "$i"; done | tee "$VR_EVIDENCE/intents.txt"
   [ "$(awk '{print $2}' "$VR_EVIDENCE/intents.txt" | sort -u | wc -l)" = 1 ] || { vrb_log "FAIL: the roots derive different intents"; return 1; }
