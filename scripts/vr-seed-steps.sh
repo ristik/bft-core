@@ -94,8 +94,9 @@ vrs_finish() {
 import json,sys
 p=sys.argv[1]; c=json.load(open(p)); c['localRpc']=sys.argv[2]; json.dump(c,open(p,'w'))
 PY
-  build/ubft validator status --validator-config "$vrj_cfg/validator.json" --home test-nodes/seed-joiner --sample 5s 2>&1 | tee "$VR_EVIDENCE/joiner-status.txt"
-  build/ubft validator status --validator-config "$vrj_cfg/validator.json" --home test-nodes/seed-joiner --sample 5s --json >"$VR_EVIDENCE/joiner-status.json" 2>&1 || true
+  cp "$vrj_cfg/validator.json" test-nodes/seed-joiner/validator.json   # the validator home holds validator.json and the seed import (status reads seed/import.json beside the config)
+  build/ubft validator status --validator-config "$PWD/test-nodes/seed-joiner/validator.json" --sample 5s 2>&1 | tee "$VR_EVIDENCE/joiner-status.txt"
+  build/ubft validator status --validator-config "$PWD/test-nodes/seed-joiner/validator.json" --sample 5s --json >"$VR_EVIDENCE/joiner-status.json" 2>&1 || true
   grep -q '^catch-up:' "$VR_EVIDENCE/joiner-status.txt" && grep -q 'seed: imported' "$VR_EVIDENCE/joiner-status.txt" || { vrs_log "FAIL: the status shows no sync fields or no seed"; return 1; }
   vrs_log "PASS: the joiner caught up from the seed, applied (PoA) and reports its sync state"
   vrs_cleanup
