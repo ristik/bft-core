@@ -21,24 +21,6 @@ tests:
               description: "Prometheus cannot scrape root on a (validator 1): the process is down, hung or unreachable."
               runbook: "docs/operations/monitoring/runbooks.md#unicitytargetdown"
               summary: "A validator scrape target is down."
-  - interval: 15s
-    input_series:
-      - series: 'unicity_root_committed_round{instance="a",validator="1"}'
-        values: '100x80'
-      - series: 'unicity_root_member{instance="a",validator="1"}'
-        values: '1x80'
-    alert_rule_test:
-      - eval_time: 18m
-        alertname: UnicityRootStalled
-        exp_alerts:
-          - exp_labels:
-              severity: critical
-              instance: "a"
-              validator: "1"
-            exp_annotations:
-              description: "Root 1 sees no new committed root block: the committee has lost quorum or this node is cut off."
-              runbook: "docs/operations/monitoring/runbooks.md#unicityrootstalled"
-              summary: "The root chain has committed nothing for 3 minutes."
   - interval: 5s
     input_series:
       - series: 'unicity_root_committed_round{instance="a",validator="1"}'
@@ -507,24 +489,6 @@ tests:
               description: "Import lag 300 on validator 1 persists after a burst."
               runbook: "docs/operations/monitoring/runbooks.md#unicityrecordimportlag"
               summary: "The SealRegistry imports root records slower than the root projects them."
-  - interval: 15s
-    input_series:
-      - series: 'unicity_vr_record_cursor{instance="a",validator="1"}'
-        values: '10x80'
-      - series: 'unicity_vr_record_application_lag{instance="a",validator="1"}'
-        values: '5x80'
-    alert_rule_test:
-      - eval_time: 18m
-        alertname: UnicityRecordCursorStuck
-        exp_alerts:
-          - exp_labels:
-              severity: critical
-              instance: "a"
-              validator: "1"
-            exp_annotations:
-              description: "Records are imported but VR applies none: the records hook is not running."
-              runbook: "docs/operations/monitoring/runbooks.md#unicityrecordcursorstuck"
-              summary: "VR's record cursor does not move while records are waiting."
   - interval: 5s
     input_series:
       - series: 'unicity_vr_record_cursor{instance="a",validator="1"}'

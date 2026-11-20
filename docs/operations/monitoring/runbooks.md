@@ -27,7 +27,7 @@ Severity: critical.
 
 Severity: critical.
 
-**What it means.** The root chain commits nothing: the committee has lost quorum, or this node is cut off from it.
+**What it means.** This member has observed no new committed root block over three minutes, and that condition persisted for another minute. The committee may have lost quorum, or this node may be cut off from it.
 
 **Confirm.** `unicity_root_committed_round` is flat on every root: a chain-wide stall. Flat only here: this node is isolated (`unicity_peers_connected{network="root"}`). Log: `event=root.round.timeout` every round, `event=root.recovery.triggered`.
 
@@ -255,7 +255,7 @@ Severity: critical.
 
 Severity: critical.
 
-**What it means.** A client session is issued, the authority is not retired and the shard node is active, but the authority signs nothing: either the session never made a first signature (`unicity_authority_session_signatures == 0` for 3 minutes) or the last signature is more than 2 minutes old.
+**What it means.** A client session is issued, the authority is not retired and the shard node is active, but the authority signs nothing: either the session never made a first signature (`unicity_authority_session_signatures == 0` for 3 minutes) or the last certification signature in this session is more than 2 minutes old. Either condition must persist for another 2 minutes.
 
 **Confirm.** `unicity_authority_session_age_seconds`, `unicity_authority_session_signatures`, `unicity_authority_last_signature_age_seconds`, `unicity_shard_certified_lag_rounds`; the shard node log for authority errors.
 
@@ -315,7 +315,7 @@ Severity: warning.
 
 Severity: critical.
 
-**What it means.** VR's record cursor does not move for 10 minutes although records are waiting: the records hook is not running.
+**What it means.** VR's record cursor has been flat for 10 minutes, and the flat cursor and application lag persisted for another 5 minutes. Check whether the records hook is running.
 
 **Confirm.** `changes(unicity_vr_record_cursor[10m])`, `unicity_vr_record_application_lag`, `unicity_vr_module_health`.
 
