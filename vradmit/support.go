@@ -429,3 +429,28 @@ func commitmentInScope(c vrschema.SupportCommitment, network uint64, eff map[vrs
 	}
 	return nil
 }
+
+// KEvidenceSupport are the verified commitments of a Freeze's rule-support evidence that are by K's exact bindings (fresh commitments and
+// this intent's K-member readiness), as a table. The Freeze passed gate (b) with them, so a recovery that keeps K installed must keep them
+// (design section 7.3: K's frozen, binding-scoped evidence that passed gate (b) is promoted on the recovery acknowledgement, with no new
+// signature). Call it only after VerifyRuleSupport accepted the same input. Entries referenced from the committed table are already there.
+func KEvidenceSupport(in SupportInput) (SupportTable, error) {
+	var cs []vrschema.SupportCommitment
+	exactK := func(c vrschema.SupportCommitment) bool {
+		m, ok := memberByID(in.K, c.StakingID)
+		return ok && m.Generation == c.Generation && bytes.Equal(c.RootKeyHash, ethcrypto.Keccak256(m.RootKey)) && c.Network == in.Network
+	}
+	for _, c := range in.Evidence.Fresh {
+		if exactK(c) {
+			cs = append(cs, c)
+		}
+	}
+	for _, r := range in.Evidence.KReadiness {
+		for _, c := range r.Commitments {
+			if exactK(c) {
+				cs = append(cs, c)
+			}
+		}
+	}
+	return SupportTable{}.Add(cs...)
+}

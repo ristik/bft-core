@@ -310,6 +310,13 @@ type RootChecker interface {
 	CheckVerifiedEpoch(entry q3format.Entry, proof handoff.OldCommitProof, head *abdrc.CommittedBlock, candidate []byte) error
 }
 
+// RootFencer is implemented by a root sink that refuses an epoch whose verified checkpoint schedules a rule its binary lacks (the activation
+// schedule's fence, design section 7.4). It reads and writes nothing durable; the runtime calls it before the journal stages anything,
+// for a new activation, and before the journal recovers anything, for every staged one.
+type RootFencer interface {
+	FenceEpoch(epoch uint64, head *abdrc.CommittedBlock) error
+}
+
 // Authenticate checks the bundle itself as Activate would and changes nothing: the envelope against this runtime's history (the
 // journal's own check, which derives the activation record), and, when the attached root sink offers them, the root's checks of the
 // bundle (the commit proof under the old epoch's keys, the snapshot, a coupled candidate); checks of the root's own durable state stay in
@@ -373,6 +380,15 @@ func (r *Runtime) Activate(ctx context.Context, b Bundle) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	claim := env.Links[len(env.Links)-1].Claim
+	// the fence of the checkpoint the bundle carries, after its authentication and before the journal stages (or retains) anything
+	if f, ok := r.parts.Load().Root.(RootFencer); ok {
+		if err := r.Authenticate(b); err != nil {
+			return err
+		}
+		if err := f.FenceEpoch(claim.Epoch, b.Snapshot); err != nil {
+			return err
+		}
+	}
 	// the activation schedule's fence (design 7.4): nothing of an epoch >= E of a rule this binary lacks is staged
 	if r.fence != nil {
 		if err := r.fence(ctx, claim.Epoch); err != nil {
@@ -402,6 +418,23 @@ func (r *Runtime) Recover(ctx context.Context) error {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// every staged epoch is fenced by its own checkpoint before the journal completes or restores anything: a binary that lacks a rule
+	// effective at a staged epoch leaves the stores as it found them
+	if f, ok := r.parts.Load().Root.(RootFencer); ok {
+		staged, err := r.journal.Staged()
+		if err != nil {
+			return err
+		}
+		for _, a := range staged {
+			b, _, err := DecodeBundle(a.Bundle)
+			if err != nil {
+				return err
+			}
+			if err := f.FenceEpoch(a.Claim.Epoch, b.Snapshot); err != nil {
+				return err
+			}
+		}
+	}
 	if r.fence != nil { // a staged installation is finished only for an epoch this binary may run
 		pending, err := r.journal.Staged()
 		if err != nil {

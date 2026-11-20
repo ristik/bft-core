@@ -36,6 +36,9 @@ type RootState struct {
 	// StagedSupport are the staged primary's own readiness commitments (by J's exact bindings), which enter the support table at its
 	// primary Boundary (MaterializeJ); a recovered Boundary drops them.
 	StagedSupport SupportTable
+	// StagedKSupport is K's own support that the staged primary's Freeze verified (its fresh commitments and K readiness, by K's exact
+	// bindings): a recovered Boundary keeps K installed and promotes it into the table (design section 7.3); a primary one drops it.
+	StagedKSupport SupportTable
 	// AttemptOpenRound and AttemptOpenUCTime are the round and committed UC time of the block whose end opened the stored attempt identity
 	// (the Open step, design section 5.5.2): the intent's attemptOpenRound, of which its anchor is max(source.certRootRound,
 	// attemptOpenRound), and openTime(0) when the anchor is that block (VT-05b). Zero for the genesis attempt, which no block opened.
@@ -150,6 +153,7 @@ type rootStateWire struct {
 	StagedResult  hex.Bytes
 	StagedBitmap  uint64
 	StagedSupport hex.Bytes
+	StagedKSupport hex.Bytes
 	AttemptOpen   uint64
 	AttemptOpenUC uint64
 	Schedule      []activationWire
@@ -176,14 +180,18 @@ func (s RootState) Encode() ([]byte, error) {
 	if (s.Backoff.LastView == 0) && s.OpenUCTime != 0 {
 		return nil, fmt.Errorf("%w: an open time without a committed view", ErrRootState)
 	}
-	if (s.StagedBody == [32]byte{}) != (s.StagedResult == vrschema.Word{}) || (s.StagedBody == [32]byte{} && (s.StagedBitmap != 0 || len(s.StagedSupport.Entries) != 0 || len(s.StagedSchedule) != 0)) {
+	if (s.StagedBody == [32]byte{}) != (s.StagedResult == vrschema.Word{}) || (s.StagedBody == [32]byte{} && (s.StagedBitmap != 0 || len(s.StagedSupport.Entries) != 0 || len(s.StagedKSupport.Entries) != 0 || len(s.StagedSchedule) != 0)) {
 		return nil, fmt.Errorf("%w: a staged boundary without its body or result", ErrRootState)
 	}
 	st, err := s.StagedSupport.Encode()
 	if err != nil {
 		return nil, err
 	}
-	return types.Cbor.Marshal(rootStateWire{Domain: rootStateDomain, Version: 2, Backoff: b, OpenUCTime: s.OpenUCTime, Support: t, StagedSupport: st,
+	sk, err := s.StagedKSupport.Encode()
+	if err != nil {
+		return nil, err
+	}
+	return types.Cbor.Marshal(rootStateWire{Domain: rootStateDomain, Version: 2, Backoff: b, OpenUCTime: s.OpenUCTime, Support: t, StagedSupport: st, StagedKSupport: sk,
 		Acknowledged: s.Acknowledged[:], PrepareUCTime: s.PrepareUCTime, StagedBody: s.StagedBody[:], StagedResult: s.StagedResult[:],
 		StagedBitmap: uint64(s.StagedBitmap), AttemptOpen: s.AttemptOpenRound, AttemptOpenUC: s.AttemptOpenUCTime,
 		Schedule: encodeActivations(s.Schedule), StagedSched: encodeActivations(s.StagedSchedule)})
@@ -201,8 +209,19 @@ func (s RootState) Digest() ([32]byte, error) {
 // ErrRootState reports a VR root state encoding that is malformed or not canonical.
 var ErrRootState = errors.New("vradmit: VR root state")
 
+// ErrRootStateV1 is the refusal of a version 1 VR root state (a checkpoint written before the activation schedule joined the committed
+// control state, VT-07a). The change is not backward compatible: the control digest and every replay hash differ, so a v1 chain cannot be
+// continued by this release. A new generation is required.
+var ErrRootStateV1 = fmt.Errorf("%w: a version 1 VR root state: this release adds the committed activation schedule to the control state, which changes its encoding and digest; a new generation is required (a v1 checkpoint cannot be continued)", ErrRootState)
+
 // DecodeRootState accepts exactly the canonical encoding.
 func DecodeRootState(raw []byte) (RootState, error) {
+	var head []any
+	if err := types.Cbor.Unmarshal(raw, &head); err == nil && len(head) >= 2 && head[0] == rootStateDomain {
+		if v, ok := head[1].(uint64); ok && v == 1 {
+			return RootState{}, ErrRootStateV1
+		}
+	}
 	var w rootStateWire
 	if err := types.Cbor.Unmarshal(raw, &w); err != nil || w.Domain != rootStateDomain || w.Version != 2 {
 		return RootState{}, fmt.Errorf("%w: encoding", ErrRootState)
@@ -224,6 +243,10 @@ func DecodeRootState(raw []byte) (RootState, error) {
 	if err != nil {
 		return RootState{}, errors.Join(ErrRootState, err)
 	}
+	stagedK, err := DecodeSupportTable(w.StagedKSupport)
+	if err != nil {
+		return RootState{}, errors.Join(ErrRootState, err)
+	}
 	if len(w.Acknowledged) != 32 || len(w.StagedBody) != 32 || len(w.StagedResult) != 32 || w.StagedBitmap > 0xFFFF {
 		return RootState{}, fmt.Errorf("%w: field widths", ErrRootState)
 	}
@@ -236,7 +259,7 @@ func DecodeRootState(raw []byte) (RootState, error) {
 		return RootState{}, err
 	}
 	s := RootState{Schedule: sched, StagedSchedule: stagedSched, Backoff: bw.State, OpenUCTime: w.OpenUCTime, Support: t, Acknowledged: vrschema.Word(w.Acknowledged), PrepareUCTime: w.PrepareUCTime,
-		StagedBody: [32]byte(w.StagedBody), StagedResult: vrschema.Word(w.StagedResult), StagedBitmap: uint16(w.StagedBitmap), StagedSupport: staged,
+		StagedBody: [32]byte(w.StagedBody), StagedResult: vrschema.Word(w.StagedResult), StagedBitmap: uint16(w.StagedBitmap), StagedSupport: staged, StagedKSupport: stagedK,
 		AttemptOpenRound: w.AttemptOpen, AttemptOpenUCTime: w.AttemptOpenUC}
 	again, err := s.Encode()
 	if err != nil || !bytes.Equal(again, raw) {

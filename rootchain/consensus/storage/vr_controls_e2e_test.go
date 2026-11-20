@@ -248,3 +248,60 @@ func TestVRAcknowledgementProjectsTheBoundary(t *testing.T) {
 	_, _, _, err = storage.AckVRForTest(st, other, f.candidates, 101, 3_000, 5)
 	require.ErrorIs(t, err, storage.ErrPosSource)
 }
+
+// Recovery keeps K's support from the primary Freeze (design section 7.3, astra 4): the table starts EMPTY (K's quorum for the pending rule
+// came from the Freeze's fresh evidence, not from earlier readiness), the Freeze staged it, and the recovery acknowledgement promotes it
+// with J's own staged commitments dropped; a primary acknowledgement drops it instead.
+func TestVRRecoveryPromotesKSupportFromTheFreeze(t *testing.T) {
+	f := newVXFixture(t)
+	rule := vrschema.RuleID("fork-a")
+	v5 := vradmit.V5Of(f.cand)
+	jRaw, err := v5.Encode()
+	require.NoError(t, err)
+	rec := v5
+	rec.Kind, rec.Identities, rec.PoPs, rec.ReplacedAssignment = evmassign.KindRecovery, f.k, nil, vxReplaced[:]
+	kRaw, err := rec.Encode()
+	require.NoError(t, err)
+	jBody, kBody := [32]byte{0xb1}, [32]byte{0xb2}
+	f.candidates[string(jBody[:])], f.candidates[string(kBody[:])] = jRaw, kRaw
+
+	vr := vradmit.GenesisRootState(2, 4) // an empty support table
+	require.Empty(t, vr.Support.Entries)
+	kStaged, err := vradmit.SupportTable{}.Add(f.commitment(f.k[0], rule), f.commitment(f.k[1], rule), f.commitment(f.k[2], rule))
+	require.NoError(t, err)
+	jStaged, err := vradmit.SupportTable{}.Add(f.commitment(f.identity(5), rule))
+	require.NoError(t, err)
+	vr.StagedBody, vr.StagedResult, vr.StagedBitmap, vr.StagedSupport, vr.StagedKSupport = jBody, f.r, 0, jStaged, kStaged
+
+	st := rootrecords.NewState(1, 1)
+	st, err = st.Commit(20, 2, 60, true, jBody)
+	require.NoError(t, err)
+	st, err = st.Block(2, 60)
+	require.NoError(t, err)
+	st, err = st.Commit(70, 3, 100, true, kBody)
+	require.NoError(t, err)
+	st, err = st.Block(3, 100)
+	require.NoError(t, err)
+	_, _, after, err := storage.AckVRForTest(st, vr, f.candidates, 101, 3_000, 5)
+	require.NoError(t, err)
+	var ids [][]byte
+	for _, e := range after.Support.Entries {
+		ids = append(ids, e.StakingID)
+	}
+	require.Equal(t, [][]byte{f.k[0].StakingID, f.k[1].StakingID, f.k[2].StakingID}, ids, "K's Freeze evidence is promoted; J's commitments are not")
+	require.Empty(t, after.StagedKSupport.Entries)
+
+	// a primary acknowledgement keeps only J's: K's evidence is dropped
+	st = rootrecords.NewState(1, 1)
+	st, err = st.Commit(20, 2, 60, true, jBody)
+	require.NoError(t, err)
+	st, err = st.Block(2, 60)
+	require.NoError(t, err)
+	_, _, after, err = storage.AckVRForTest(st, vr, f.candidates, 61, 2_000, 4)
+	require.NoError(t, err)
+	ids = nil
+	for _, e := range after.Support.Entries {
+		ids = append(ids, e.StakingID)
+	}
+	require.Equal(t, [][]byte{f.identity(5).StakingID}, ids)
+}

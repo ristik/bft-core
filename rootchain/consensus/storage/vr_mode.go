@@ -434,6 +434,8 @@ func (x *ExecutedBlock) admitV5(v *vrStep, pos *posStep, svc *VRServices, r evmr
 	var body [32]byte
 	copy(body[:], r.NextBodyID)
 	next.StagedBody, next.StagedResult, next.StagedBitmap, next.StagedSupport = body, result, vrschema.RejectedBitmap(cand.RegistryChanges), staged
+	// K's own support this Freeze verified is retained with the primary and promoted if J's recovery is acknowledged instead (section 7.3)
+	next.StagedKSupport = verified.KSupport
 	// the Accepted schedule changes of this candidate enter the committed schedule when its H commits (section 7.1); the verdicts are the
 	// ones the Freeze just verified against the fold
 	verdicts := make([]uint8, len(cand.RegistryChanges))
@@ -487,7 +489,7 @@ func (p *posStep) abortVR(v *vrStep, r evmroot.OrderedHandoffRecord, round, time
 		p.set(next)
 		p.records = append(p.records, rec)
 	}
-	s.StagedBody, s.StagedResult, s.StagedBitmap, s.StagedSupport, s.StagedSchedule = [32]byte{}, vrschema.Word{}, 0, vradmit.SupportTable{}, nil
+	s.StagedBody, s.StagedResult, s.StagedBitmap, s.StagedSupport, s.StagedKSupport, s.StagedSchedule = [32]byte{}, vrschema.Word{}, 0, vradmit.SupportTable{}, vradmit.SupportTable{}, nil
 	v.set(s)
 	return nil
 }
@@ -543,9 +545,12 @@ func (p *posStep) ackVR(v *vrStep, candidates candidateSource, round, timestamp,
 		if s.Support, err = s.Support.Add(s.StagedSupport.Entries...); err != nil {
 			return errors.Join(ErrPosSource, err)
 		}
+	} else if s.Support, err = s.Support.Add(s.StagedKSupport.Entries...); err != nil {
+		// K's evidence that passed gate (b) at the Freeze: promoted, no new signature (design section 7.3)
+		return errors.Join(ErrPosSource, err)
 	}
 	s.Acknowledged = result
-	s.StagedBody, s.StagedResult, s.StagedBitmap, s.StagedSupport, s.StagedSchedule = [32]byte{}, vrschema.Word{}, 0, vradmit.SupportTable{}, nil
+	s.StagedBody, s.StagedResult, s.StagedBitmap, s.StagedSupport, s.StagedKSupport, s.StagedSchedule = [32]byte{}, vrschema.Word{}, 0, vradmit.SupportTable{}, vradmit.SupportTable{}, nil
 	v.set(s)
 	return nil
 }

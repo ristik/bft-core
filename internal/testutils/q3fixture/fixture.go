@@ -94,6 +94,9 @@ type Options struct {
 	// SourceState is the P85 source state (rootrecords.State bytes) the old checkpoint's control commits, so that installing the checkpoint
 	// needs the record log it names (storage.BlockStore.SetRecordFetcher); default none.
 	SourceState []byte
+	// ControlVR is the VR root state the old checkpoint's control commits (evmroot.ControlState.VR): a chain in VR mode, whose activation
+	// schedule a startup fence reads from the checkpoint; default none.
+	ControlVR []byte
 	// PeerEVM gives every EVM validator of the successor a real peer identity, as the production ingress subscribes a request's sender by its
 	// node id; otherwise a replaced member is named evm-N, which only a harness calling the manager directly can use.
 	PeerEVM bool
@@ -365,7 +368,7 @@ func New(t *testing.T, o Options) *Fixture {
 		PredecessorBodyID: oldID, NextBodyID: bodyID[:], SuccessorTRHash: trHash, Kind: "commit",
 		FrozenID: evmroot.D4FrozenID(bodyID[:], f.Evidence.Summary, f.Evidence.FrozenParent, f.Evidence.CandidateDigest, attempt, oldID)}
 	control := evmroot.ControlState{Network: Network, Epoch: oldEpoch, Attempt: attempt, OrderedRound: ordered, PredecessorBodyID: oldID, Phase: "committed",
-		RecordBytes: record.Bytes(), PreviousDigest: bytes.Repeat([]byte{4}, 32), FrozenParent: bytes.Clone(o.Frozen), Pos: bytes.Clone(o.SourceState)}
+		RecordBytes: record.Bytes(), PreviousDigest: bytes.Repeat([]byte{4}, 32), FrozenParent: bytes.Clone(o.Frozen), Pos: bytes.Clone(o.SourceState), VR: bytes.Clone(o.ControlVR)}
 	key := types.PartitionShardID{PartitionID: PartitionID, ShardID: types.ShardID{}.Key()}
 	states := storage.ShardStates{States: map[types.PartitionShardID]*storage.ShardInfo{key: state}, Changed: storage.ShardSet{key: {}}, Control: &control}
 	for _, conf := range f.ExtraConfs {
