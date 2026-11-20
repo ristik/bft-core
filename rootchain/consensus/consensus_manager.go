@@ -2234,7 +2234,7 @@ func (x *ConsensusManager) onStateResponse(ctx context.Context, rsp *abdrc.State
 	if x.recoveryProfile2 && rsp.CommittedHead.Anchor != nil {
 		blockStore, err = x.blockStore().NewFromAnchorState(rsp.CommittedHead)
 	} else {
-		blockStore, err = storage.NewFromState(x.params.HashAlgorithm, rsp.CommittedHead, x.blockStore().GetDB(), x.orchestration, x.log, x.params.NetworkProfileVersion)
+		blockStore, err = x.blockStore().RecoverFromState(rsp.CommittedHead)
 	}
 	if err != nil {
 		if errors.Is(err, storage.ErrRefusedBeforeWrite) {
@@ -2879,9 +2879,6 @@ func (x *ConsensusManager) validateRecoveryState(rsp *abdrc.StateMsg) error {
 				}
 			}
 			bs.SetPosServices(x.blockStore().PosServices())
-			if x.vr != nil {
-				x.vr.attach(bs)
-			}
 			bs.SetLeaderInputs(x.blockStore().LeaderInputs())
 			if x.utbPrevious != nil {
 				bs.SetUTBBinding(utbBindingFor(x.utbSigningConfig(), bs, x.utbPrevious))

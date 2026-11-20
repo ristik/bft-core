@@ -93,6 +93,8 @@ func ValidateRecoveryState(hashAlg crypto.Hash, state *abdrc.StateMsg, toRound u
 	if err != nil {
 		return fmt.Errorf("verifier construction failed: %w", err)
 	}
+	// Only the real install and replay have a durable observation queue.
+	staged.observed.Store(nil)
 	head := sm.CommittedHead
 	pending := slices.Clone(sm.Pending)
 	slices.SortFunc(pending, func(a, b *rctypes.BlockData) int { return cmp.Compare(a.GetRound(), b.GetRound()) })

@@ -75,7 +75,19 @@ NewBlockTreeWithRootBlock creates BlockTree with given block as root node.
 Intended use-case is for recovery - acquire latest committed block and build on that state.
 */
 func NewBlockTreeWithRootBlock(block *ExecutedBlock, bDB PersistentStore) (*BlockTree, error) {
-	if err := bDB.WriteBlock(block, true); err != nil {
+	return newBlockTreeWithRootBlock(block, bDB, nil)
+}
+
+func newBlockTreeWithRootBlock(block *ExecutedBlock, bDB PersistentStore, obs []ObservationInput) (*BlockTree, error) {
+	var err error
+	if len(obs) == 0 {
+		err = bDB.WriteBlock(block, true)
+	} else if committer, ok := bDB.(BlockCommitter); ok {
+		err = committer.CommitBlock(block, nil, nil, obs)
+	} else {
+		return nil, refusedBeforeWrite{ErrNoAtomicObservationCommit}
+	}
+	if err != nil {
 		return nil, fmt.Errorf("block write failed: %w", err)
 	}
 	rootNode := newNode(block)
@@ -508,6 +520,9 @@ func (bt *BlockTree) persistCommit(block *ExecutedBlock, recs []rootrecords.Reco
 			return err
 		}
 	} else {
+		if len(obs) > 0 {
+			return ErrNoAtomicObservationCommit
+		}
 		if len(recs) > 0 {
 			if err := bt.blocksDB.(RecordStore).AppendRecords(recs); err != nil {
 				return err
@@ -517,9 +532,6 @@ func (bt *BlockTree) persistCommit(block *ExecutedBlock, recs []rootrecords.Reco
 			if err := bt.blocksDB.(CutStore).PutCut(*cut); err != nil {
 				return err
 			}
-		}
-		if len(obs) > 0 {
-			return errors.New("the persistent store cannot commit the observation queue atomically")
 		}
 		if err := bt.blocksDB.WriteBlock(block, true); err != nil {
 			return err

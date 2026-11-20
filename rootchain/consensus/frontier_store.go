@@ -130,6 +130,9 @@ func (s *frontierPersistentStore) CommitBlock(block *storage.ExecutedBlock, recs
 	if store, ok := s.PersistentStore.(storage.BlockCommitter); ok {
 		return s.fault(store.CommitBlock(block, recs, cut, obs))
 	}
+	if len(obs) > 0 {
+		return s.fault(storage.ErrNoAtomicObservationCommit)
+	}
 	// the real store cannot commit atomically: the same writes in the order a crash repeats idempotently
 	if len(recs) > 0 {
 		if err := s.AppendRecords(recs); err != nil {
@@ -328,9 +331,9 @@ func (s *frontierPersistentStore) PendingObservations(max int) ([]storage.Observ
 	return nil, storage.ObservationCursor{}, storage.ErrAssignmentHistory
 }
 
-func (s *frontierPersistentStore) AckObservation(round uint64, cursor storage.ObservationCursor) error {
+func (s *frontierPersistentStore) AckObservation(id storage.ObservationID, prev [32]byte) error {
 	if q, ok := s.PersistentStore.(storage.ObservationQueue); ok {
-		return q.AckObservation(round, cursor)
+		return q.AckObservation(id, prev)
 	}
 	return storage.ErrAssignmentHistory
 }

@@ -316,8 +316,8 @@ func (o *Outputs) Put(root [32]byte, v *vrhandoff.Output) {
 // CertifiedEVM is the designated EVM shard's certified block in one committed root block (RootRound, its parent ParentRound, its UC
 // time RootUCTime).
 type CertifiedEVM struct {
-	RootRound, ParentRound, RootUCTime uint64
-	BlockHash, StateRoot               [32]byte
+	RootEpoch, RootRound, ParentRound, RootUCTime uint64
+	BlockHash, StateRoot                          [32]byte
 	// ShardRound is the certified block's shard round (IR.RoundNumber). It is NOT an EVM block height (a skipped shard round makes the two
 	// differ): it is a label for logs. Source.EVMBlockNumber is the true height, resolved by BlockHash (HeaderReader). Every read is by BlockHash.
 	ShardRound uint64
@@ -347,8 +347,8 @@ const QueuedEvery = 10 * time.Second
 // Observer is stage 0: for every committed root block, in commit order, the designated EVM shard's certified block is read and VR's open
 // output there is cached. A result's committed source is the first certified block at which it is the open Published output, so it is
 // recorded only from an unbroken run of observations: each observed committed block must be the child of the previously observed one
-// (ParentRound), and the block before the recording one must have been observed without R. Any gap (a read the worker gave up on, a batch
-// the queue dropped, a recovery that jumped to a peer's head, a restart, an epoch boundary) breaks the run, so a first publication that
+// (ParentRound), and the block before the recording one must have been observed without R. Any gap (a read the worker gave up on, a recovery
+// that jumped to a peer's head or an epoch boundary) breaks the run, so a first publication that
 // fell into a gap leaves R without a source here (unavailable), never with a later, wrong one.
 type Observer struct {
 	Reader  Reader
@@ -368,6 +368,7 @@ type Observer struct {
 
 	mu        sync.Mutex
 	primed    bool
+	lastEpoch uint64
 	lastRound uint64        // the round of the last committed block observed in the current run
 	prev      vrschema.Word // the open Published output at the last observed block, zero when none
 }
@@ -378,8 +379,8 @@ func (o *Observer) Observe(ctx context.Context, c CertifiedEVM) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.retryAwaiting(ctx)
-	primed, lastRound := o.primed, o.lastRound
-	continuous := primed && c.RootRound > 0 && c.ParentRound == lastRound
+	primed, lastEpoch, lastRound := o.primed, o.lastEpoch, o.lastRound
+	continuous := primed && c.RootEpoch == lastEpoch && c.RootRound > lastRound && c.ParentRound == lastRound
 	out, cached := o.Outputs.At(c.StateRoot)
 	if !cached {
 		var err error
@@ -391,7 +392,7 @@ func (o *Observer) Observe(ctx context.Context, c CertifiedEVM) error {
 		o.Outputs.Put(c.StateRoot, out)
 	}
 	prev := o.prev
-	o.primed, o.lastRound, o.prev = true, c.RootRound, vrschema.Word{}
+	o.primed, o.lastEpoch, o.lastRound, o.prev = true, c.RootEpoch, c.RootRound, vrschema.Word{}
 	if o.OnPending != nil {
 		o.boundNow = PendingSchedules(out)
 		o.OnPending(o.merged())
@@ -414,26 +415,26 @@ func (o *Observer) Observe(ctx context.Context, c CertifiedEVM) error {
 	pubEntry := SourceEntry{Source: vrhandoff.Source{ResultID: bytes.Clone(r[:]), EVMBlockHash: bytes.Clone(c.BlockHash[:]), CertRootRound: c.RootRound,
 		OutputCommit: bytes.Clone(out.State.Output.OutputCommit[:])}, CertUCTime: c.RootUCTime}
 	if aerr := o.Sources.Await(pubEntry); aerr != nil {
-		o.primed, o.lastRound, o.prev = primed, lastRound, prev
+		o.primed, o.lastEpoch, o.lastRound, o.prev = primed, lastEpoch, lastRound, prev
 		return aerr
 	}
 	// the true EVM block number of the first certified block publishing R, from its header by hash. An unavailable header observes nothing:
 	// the run is restored and the worker retries this very block, exactly as for a source that is not durable
 	hr, ok := o.Reader.(HeaderReader)
 	if !ok {
-		o.primed, o.lastRound, o.prev = primed, lastRound, prev
+		o.primed, o.lastEpoch, o.lastRound, o.prev = primed, lastEpoch, lastRound, prev
 		return errors.New("vrschedule: the reader cannot resolve a certified block's number: no source is recorded with a shard round")
 	}
 	number, herr := hr.HeaderNumber(ctx, c.BlockHash)
 	if herr != nil {
-		o.primed, o.lastRound, o.prev = primed, lastRound, prev
+		o.primed, o.lastEpoch, o.lastRound, o.prev = primed, lastEpoch, lastRound, prev
 		return herr
 	}
 	recorded, err := o.Sources.Record(SourceEntry{Source: vrhandoff.Source{ResultID: bytes.Clone(r[:]), EVMBlockHash: bytes.Clone(c.BlockHash[:]),
 		EVMBlockNumber: number, CertRootRound: c.RootRound, OutputCommit: bytes.Clone(out.State.Output.OutputCommit[:])}, CertUCTime: c.RootUCTime})
 	if err != nil {
 		// not durable: this block is not observed (the store kept nothing), so the worker's retry of it records the same first source
-		o.primed, o.lastRound, o.prev = primed, lastRound, prev
+		o.primed, o.lastEpoch, o.lastRound, o.prev = primed, lastEpoch, lastRound, prev
 		return err
 	}
 	if recorded && o.Log != nil {
@@ -533,18 +534,17 @@ func (o *Observer) retryAwaiting(ctx context.Context) {
 	}
 }
 
-// Cursor is the observer's continuity state: the root round it last observed and the result that was the open Published output there
-// (zero when none). The worker stores it with each acknowledged queue entry.
-func (o *Observer) Cursor() (round uint64, prev vrschema.Word) {
+// PreviousResult returns the open Published result at the last observed block, or zero when none.
+func (o *Observer) PreviousResult() vrschema.Word {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	return o.lastRound, o.prev
+	return o.prev
 }
 
-// Resume restores the continuity state of an acknowledged entry after a restart, so the queue's next entry (the committed block that
-// follows it) continues the run instead of priming on a result that was already Published.
-func (o *Observer) Resume(round uint64, prev vrschema.Word) {
+// Resume restores continuity from the last durable acknowledgement, including when a failed acknowledgement left
+// the in-memory observer ahead of the durable cursor.
+func (o *Observer) Resume(set bool, epoch, round uint64, prev vrschema.Word) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	o.primed, o.lastRound, o.prev = true, round, prev
+	o.primed, o.lastEpoch, o.lastRound, o.prev = set, epoch, round, prev
 }

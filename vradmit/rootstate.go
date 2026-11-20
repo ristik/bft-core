@@ -141,23 +141,23 @@ func (s RootState) CommitSchedule(installed uint64) (RootState, error) {
 }
 
 type rootStateWire struct {
-	_             struct{} `cbor:",toarray"`
-	Domain        string
-	Version       uint64
-	Backoff       hex.Bytes
-	OpenUCTime    uint64
-	Support       hex.Bytes
-	Acknowledged  hex.Bytes
-	PrepareUCTime uint64
-	StagedBody    hex.Bytes
-	StagedResult  hex.Bytes
-	StagedBitmap  uint64
-	StagedSupport hex.Bytes
+	_              struct{} `cbor:",toarray"`
+	Domain         string
+	Version        uint64
+	Backoff        hex.Bytes
+	OpenUCTime     uint64
+	Support        hex.Bytes
+	Acknowledged   hex.Bytes
+	PrepareUCTime  uint64
+	StagedBody     hex.Bytes
+	StagedResult   hex.Bytes
+	StagedBitmap   uint64
+	StagedSupport  hex.Bytes
 	StagedKSupport hex.Bytes
-	AttemptOpen   uint64
-	AttemptOpenUC uint64
-	Schedule      []activationWire
-	StagedSched   []activationWire
+	AttemptOpen    uint64
+	AttemptOpenUC  uint64
+	Schedule       []activationWire
+	StagedSched    []activationWire
 }
 
 const rootStateDomain = "UNICITY_VR_ROOT_STATE"

@@ -84,8 +84,7 @@ type vrHandoff struct {
 	queue    *vrschedule.Queue
 	obsWake  chan struct{} // a commit happened: the durable observation queue has new entries (a wakeup only; nothing is carried)
 	// obsq is the durable observation queue of the CURRENT block store (the manager replaces its block store on recovery and on an epoch switch)
-	obsq     func() observationQueue
-	resumed  bool // the observer resumed from the queue's cursor
+	obsq     func() storage.ObservationQueue
 	peers    func() []peer.ID
 	update   func() (vrschedule.Committed, error)
 	prefetch chan vrschedule.CertifiedEVM
@@ -181,7 +180,7 @@ func (x *ConsensusManager) EnableVRHandoff(ctx context.Context, cfg VRHandoffCon
 	}
 	cfg.Intents.Config = x.q3.ProtocolConfig
 	svc.Registry.Intents = cfg.Intents
-	v := &vrHandoff{cfg: cfg, obsWake: make(chan struct{}, 1), obsq: func() observationQueue { return x.blockStore() }, prefetch: make(chan vrschedule.CertifiedEVM, 64),
+	v := &vrHandoff{cfg: cfg, obsWake: make(chan struct{}, 1), obsq: func() storage.ObservationQueue { return x.blockStore() }, prefetch: make(chan vrschedule.CertifiedEVM, 64),
 		observer: &vrschedule.Observer{Reader: cfg.Reader, Sources: cfg.Intents.Sources, Outputs: cfg.Intents.Outputs, Log: cfg.Log,
 			OnPending: func(a []vrschema.Activation) { x.notePending(a, x.InstalledRootEpoch()) }}}
 	v.svc = vrschedule.NewService(vrschedule.ServiceConfig{Self: x.id.String(), Signer: cfg.Signer, Log: cfg.Log, Send: func(m vrschedule.Message) { v.send(ctx, m) }})
@@ -387,12 +386,6 @@ func (v *vrHandoff) send(ctx context.Context, m vrschedule.Message) {
 	}()
 }
 
-// observationQueue is the durable queue of certified EVM observations the block store writes in the commit transaction.
-type observationQueue interface {
-	PendingObservations(max int) ([]storage.ObservationInput, storage.ObservationCursor, error)
-	AckObservation(round uint64, cursor storage.ObservationCursor) error
-}
-
 // attach connects a block store to the handoff: it queues the designated EVM shard's certified blocks at every commit, in the commit
 // transaction, and wakes the worker; the execution observer prefetches.
 func (v *vrHandoff) attach(bs *storage.BlockStore) {
@@ -417,6 +410,7 @@ const (
 	ObservePoll       = 3 * time.Second
 	observeBackoffMin = 500 * time.Millisecond
 	observeBackoffMax = 10 * time.Second
+	observationBatch  = 64
 )
 
 // run consumes the durable observation queue in order (stage 0), then updates the protocol over the committed state; after its first update
@@ -425,79 +419,66 @@ func (v *vrHandoff) run(ctx context.Context) {
 	backoff := observeBackoffMin
 	timer := time.NewTimer(0)
 	defer timer.Stop()
+	wake := v.obsWake
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-v.obsWake:
+		case <-wake:
 		case <-timer.C:
 		}
-		ok := v.drain(ctx)
+		more, err := v.drain(ctx)
 		v.refresh(ctx)
 		wait := ObservePoll
-		if !ok {
+		wake = v.obsWake
+		switch {
+		case err != nil:
 			wait = backoff
-			if backoff *= 2; backoff > observeBackoffMax {
-				backoff = observeBackoffMax
-			}
-		} else {
+			backoff = min(2*backoff, observeBackoffMax)
+			wake = nil // a commit notification cannot shorten retry backoff
+		case more:
+			wait = 0 // service the next batch after refreshing the protocol
 			backoff = observeBackoffMin
-		}
-		if !timer.Stop() {
-			select {
-			case <-timer.C:
-			default:
-			}
+		default:
+			backoff = observeBackoffMin
 		}
 		timer.Reset(wait)
 	}
 }
 
-// drain observes every queued entry in commit order. An entry is acknowledged only after its outcome (a recorded source, an awaiting item,
-// or nothing to record) is durable; a failed read leaves it queued, and the next pass (after a backoff, never giving up) replays from it. It
-// reports whether the queue was fully drained.
-func (v *vrHandoff) drain(ctx context.Context) bool {
+// drain observes one bounded batch in commit order. A failed read or acknowledgement leaves the input queued.
+func (v *vrHandoff) drain(ctx context.Context) (more bool, err error) {
 	q := v.obsq()
 	if q == nil {
-		return true
+		return false, nil
 	}
-	for {
-		entries, cursor, err := q.PendingObservations(64)
-		if err != nil {
-			v.cfg.Log.Debug("VR handoff: the observation queue is not readable", "error", err)
-			return true // a store without a queue (tests): nothing to drain
+	entries, cursor, err := q.PendingObservations(observationBatch)
+	if err != nil {
+		v.cfg.Log.Debug("VR handoff: the observation queue is not readable", "error", err)
+		return false, err
+	}
+	v.observer.Resume(cursor.Set, cursor.ID.Epoch, cursor.ID.Round, vrschema.Word(cursor.Prev))
+	for _, e := range entries {
+		if err := ctx.Err(); err != nil {
+			return false, err
 		}
-		if !v.resumed {
-			if cursor.Set {
-				v.observer.Resume(cursor.Round, vrschema.Word(cursor.Prev))
-			}
-			v.resumed = true
-		}
-		if len(entries) == 0 {
+		c := vrschedule.CertifiedEVM{RootEpoch: e.RootEpoch, RootRound: e.RootRound, ParentRound: e.ParentRound, RootUCTime: e.RootUCTime, BlockHash: e.BlockHash, StateRoot: e.StateRoot, ShardRound: e.ShardRound}
+		if err := v.observer.Observe(ctx, c); err != nil {
 			v.statMu.Lock()
-			v.observeErr = 0
+			v.observeErr++
 			v.statMu.Unlock()
-			return true
+			v.cfg.Log.Warn("VR handoff: observing a certified EVM block failed; it stays queued and is retried", "shardRound", c.ShardRound, "rootRound", c.RootRound, "error", err)
+			return false, err
 		}
-		for _, e := range entries {
-			c := vrschedule.CertifiedEVM{RootRound: e.RootRound, ParentRound: e.ParentRound, RootUCTime: e.RootUCTime, BlockHash: e.BlockHash, StateRoot: e.StateRoot, ShardRound: e.ShardRound}
-			if err := v.observer.Observe(ctx, c); err != nil {
-				v.statMu.Lock()
-				v.observeErr++
-				v.statMu.Unlock()
-				v.cfg.Log.Warn("VR handoff: observing a certified EVM block failed; it stays queued and is retried", "shardRound", c.ShardRound, "rootRound", c.RootRound, "error", err)
-				return false
-			}
-			round, prev := v.observer.Cursor()
-			if err := q.AckObservation(e.RootRound, storage.ObservationCursor{Set: true, Round: round, Prev: [32]byte(prev)}); err != nil {
-				v.cfg.Log.Warn("VR handoff: acknowledging an observation failed; it stays queued", "rootRound", c.RootRound, "error", err)
-				return false
-			}
+		if err := q.AckObservation(e.ID(), [32]byte(v.observer.PreviousResult())); err != nil {
+			v.cfg.Log.Warn("VR handoff: acknowledging an observation failed", "rootRound", c.RootRound, "error", err)
+			return false, err
 		}
-		v.statMu.Lock()
-		v.observeErr = 0
-		v.statMu.Unlock()
 	}
+	v.statMu.Lock()
+	v.observeErr = 0
+	v.statMu.Unlock()
+	return len(entries) == observationBatch, nil
 }
 
 func (v *vrHandoff) refresh(ctx context.Context) {

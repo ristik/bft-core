@@ -108,17 +108,22 @@ func (refusedBeforeWrite) Is(target error) bool { return target == ErrRefusedBef
 // NewFromState installs the committed head of a peer's state message as the root of a new store. The head is validated completely before anything is
 // written (newRootBlock with recovery set).
 func NewFromState(hash crypto.Hash, block *abdrc.CommittedBlock, db PersistentStore, orchestration Orchestration, log *slog.Logger, networkProfile ...uint64) (*BlockStore, error) {
-	return newFromHead(hash, block, db, orchestration, log, true, networkProfile...)
+	return newFromHead(hash, block, db, orchestration, log, true, nil, networkProfile...)
+}
+
+// RecoverFromState installs the certified head on the existing store's database, preserving observation across the recovery.
+func (x *BlockStore) RecoverFromState(block *abdrc.CommittedBlock) (*BlockStore, error) {
+	return newFromHead(x.hash, block, x.storage, x.orchestration, x.log, true, x.observed.Load(), x.profile)
 }
 
 // NewFromCheckpoint installs a head that is authenticated by its own verification (a handoff checkpoint: the old committee's commit proof and the
 // epoch genesis, which carry no QC of the checkpoint block itself) as the root of a new store. It is not for a state message of a peer: that is
 // NewFromState, which also binds the head to its QCs and last responses.
 func NewFromCheckpoint(hash crypto.Hash, block *abdrc.CommittedBlock, db PersistentStore, orchestration Orchestration, log *slog.Logger, networkProfile ...uint64) (*BlockStore, error) {
-	return newFromHead(hash, block, db, orchestration, log, false, networkProfile...)
+	return newFromHead(hash, block, db, orchestration, log, false, nil, networkProfile...)
 }
 
-func newFromHead(hash crypto.Hash, block *abdrc.CommittedBlock, db PersistentStore, orchestration Orchestration, log *slog.Logger, recovery bool, networkProfile ...uint64) (*BlockStore, error) {
+func newFromHead(hash crypto.Hash, block *abdrc.CommittedBlock, db PersistentStore, orchestration Orchestration, log *slog.Logger, recovery bool, observed *basetypes.PartitionShardID, networkProfile ...uint64) (*BlockStore, error) {
 	if db == nil {
 		return nil, refusedBeforeWrite{errors.New("storage is nil")}
 	}
@@ -143,7 +148,11 @@ func newFromHead(hash crypto.Hash, block *abdrc.CommittedBlock, db PersistentSto
 		return nil, refusedBeforeWrite{fmt.Errorf("failed to create new root node: %w", err)}
 	}
 
-	blTree, err := NewBlockTreeWithRootBlock(rootNode, db)
+	var obs []ObservationInput
+	if rootNode.GetRound() != rctypes.GenesisRootRound && !isEpochAnchorRoot(rootNode) {
+		obs = observationsOf([]*ExecutedBlock{rootNode}, observed)
+	}
+	blTree, err := newBlockTreeWithRootBlock(rootNode, db, obs)
 	if err != nil {
 		return nil, fmt.Errorf("creating block tree from recovery: %w", err)
 	}
@@ -157,13 +166,15 @@ func newFromHead(hash crypto.Hash, block *abdrc.CommittedBlock, db PersistentSto
 			return nil, fmt.Errorf("capturing the handoff checkpoint of the recovered head: %w", err)
 		}
 	}
-	return withTree(&BlockStore{
+	store := withTree(&BlockStore{
 		hash:          hash,
 		storage:       db,
 		orchestration: orchestration,
 		profile:       profile,
 		log:           log,
-	}, blTree), nil
+	}, blTree)
+	store.observed.Store(observed)
+	return store, nil
 }
 
 /*

@@ -1,10 +1,10 @@
 package storage
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"sync/atomic"
 
 	"go.etcd.io/bbolt"
 
@@ -18,71 +18,82 @@ import (
 // them in order, acknowledging an entry only after its outcome (a recorded source, or an awaiting item) is durable. The result id and the
 // output commitment are not known here (they come from the output read the worker makes); the in-memory commit notification is a wakeup only.
 
+// ObservationID identifies a committed observation across root epoch changes, when old root rounds may be reused.
+type ObservationID struct {
+	Epoch, Round uint64
+	BlockHash    [32]byte
+}
+
 // ObservationInput is what the observer needs of one committed block's certified EVM block.
 type ObservationInput struct {
-	RootRound, ParentRound, RootUCTime uint64
-	BlockHash, StateRoot               [32]byte
+	RootEpoch, RootRound, ParentRound, RootUCTime uint64
+	BlockHash, StateRoot                          [32]byte
 	// ShardRound is the certified block's shard round (IR.RoundNumber): a label, never a block height.
 	ShardRound uint64
 }
 
-// ObservationCursor is the observer's continuity state after its last acknowledged entry: the round it last observed and the result that was
-// the open Published output there (zero when none), so a restart resumes exactly where the acknowledged work ended.
+func (o ObservationInput) ID() ObservationID {
+	return ObservationID{Epoch: o.RootEpoch, Round: o.RootRound, BlockHash: o.BlockHash}
+}
+
+// ObservationCursor holds the last acknowledged observation and its open Published result (zero when none).
 type ObservationCursor struct {
-	Set   bool
-	Round uint64
-	Prev  [32]byte
+	Set  bool
+	ID   ObservationID
+	Prev [32]byte
 }
 
 // ObservationQueue is the durable queue a store may offer.
 type ObservationQueue interface {
-	// PendingObservations are up to max unacknowledged entries, oldest first, and the cursor of the last acknowledged one.
+	// PendingObservations returns up to max unacknowledged entries, oldest first, and the cursor of the last acknowledged one.
 	PendingObservations(max int) ([]ObservationInput, ObservationCursor, error)
-	// AckObservation deletes every entry up to and including round and stores the cursor, in one transaction.
-	AckObservation(round uint64, cursor ObservationCursor) error
+	// AckObservation deletes the exact entry at the front of the queue and advances the cursor in one transaction.
+	AckObservation(id ObservationID, prev [32]byte) error
 }
-
-// MaxObservationQueue bounds the unacknowledged entries: beyond it the OLDEST are dropped at commit (a worker that was away for this many
-// commits has lost the boundary of anything older; the incumbents' sources are then fetched). The queue is otherwise bounded by consumption.
-const MaxObservationQueue = 4096
 
 var (
-	keyObsPrefix = []byte("vr/obs/")
-	keyObsCursor = []byte("vr/obscursor")
+	keyObsPrefix                 = []byte("vr/obs/")
+	keyObsCursor                 = []byte("vr/obs-cursor-v2")
+	ErrNoAtomicObservationCommit = errors.New("the persistent store cannot commit the observation queue atomically")
 )
 
-func obsKey(round uint64) []byte {
-	k := make([]byte, len(keyObsPrefix)+8)
-	copy(k, keyObsPrefix)
-	binary.BigEndian.PutUint64(k[len(keyObsPrefix):], round)
-	return k
+func obsKey(id ObservationID) []byte {
+	k := make([]byte, 0, len(keyObsPrefix)+16+len(id.BlockHash))
+	k = append(k, keyObsPrefix...)
+	k = binary.BigEndian.AppendUint64(k, id.Epoch)
+	k = binary.BigEndian.AppendUint64(k, id.Round)
+	return append(k, id.BlockHash[:]...)
 }
 
-// appendObservationsTx writes the entries (oldest first) and enforces the bound.
+func readObservationCursor(meta *bbolt.Bucket) (cur ObservationCursor, err error) {
+	if raw := meta.Get(keyObsCursor); raw != nil {
+		if err := basetypes.Cbor.Unmarshal(raw, &cur); err != nil {
+			return cur, fmt.Errorf("reading the observation cursor: %w", err)
+		}
+	}
+	return cur, nil
+}
+
+// appendObservationsTx retains every pending input until acknowledgement. The worker bounds its reads, and a slow
+// execution client may grow the on-disk backlog without losing an unobserved publication boundary.
 func appendObservationsTx(meta *bbolt.Bucket, obs []ObservationInput) error {
 	if len(obs) == 0 {
 		return nil
 	}
+	cur, err := readObservationCursor(meta)
+	if err != nil {
+		return err
+	}
 	for _, o := range obs {
+		// Recovery can reinstall a head already observed. Keep the cursor monotonic within each epoch.
+		if cur.Set && (o.RootEpoch < cur.ID.Epoch || (o.RootEpoch == cur.ID.Epoch && o.RootRound <= cur.ID.Round)) {
+			continue
+		}
 		raw, err := basetypes.Cbor.Marshal(o)
 		if err != nil {
 			return fmt.Errorf("serializing an observation: %w", err)
 		}
-		if err := meta.Put(obsKey(o.RootRound), raw); err != nil {
-			return err
-		}
-	}
-	n := 0
-	c := meta.Cursor()
-	for k, _ := c.Seek(keyObsPrefix); k != nil && len(k) == len(keyObsPrefix)+8 && string(k[:len(keyObsPrefix)]) == string(keyObsPrefix); k, _ = c.Next() {
-		n++
-	}
-	for ; n > MaxObservationQueue; n-- {
-		k, _ := c.Seek(keyObsPrefix)
-		if k == nil {
-			break
-		}
-		if err := c.Delete(); err != nil {
+		if err := meta.Put(obsKey(o.ID()), raw); err != nil {
 			return err
 		}
 	}
@@ -96,16 +107,21 @@ func (db BoltDB) PendingObservations(max int) (out []ObservationInput, cur Obser
 		if meta == nil {
 			return errors.New("metadata bucket not found")
 		}
-		if raw := meta.Get(keyObsCursor); raw != nil {
-			if err := basetypes.Cbor.Unmarshal(raw, &cur); err != nil {
-				return fmt.Errorf("reading the observation cursor: %w", err)
-			}
+		var err error
+		if cur, err = readObservationCursor(meta); err != nil {
+			return err
 		}
 		c := meta.Cursor()
-		for k, v := c.Seek(keyObsPrefix); k != nil && len(out) < max && len(k) == len(keyObsPrefix)+8 && string(k[:len(keyObsPrefix)]) == string(keyObsPrefix); k, v = c.Next() {
+		for k, v := c.Seek(keyObsPrefix); bytes.HasPrefix(k, keyObsPrefix) && len(out) < max; k, v = c.Next() {
+			if len(k) == len(keyObsPrefix)+8 {
+				return errors.New("the observation queue predates epoch-aware observations; regenerate this development generation")
+			}
 			var o ObservationInput
 			if err := basetypes.Cbor.Unmarshal(v, &o); err != nil {
 				return fmt.Errorf("reading an observation: %w", err)
+			}
+			if !bytes.Equal(k, obsKey(o.ID())) {
+				return errors.New("observation queue key does not match its entry")
 			}
 			out = append(out, o)
 		}
@@ -115,8 +131,8 @@ func (db BoltDB) PendingObservations(max int) (out []ObservationInput, cur Obser
 }
 
 // AckObservation implements ObservationQueue.
-func (db BoltDB) AckObservation(round uint64, cursor ObservationCursor) error {
-	raw, err := basetypes.Cbor.Marshal(cursor)
+func (db BoltDB) AckObservation(id ObservationID, prev [32]byte) error {
+	raw, err := basetypes.Cbor.Marshal(ObservationCursor{Set: true, ID: id, Prev: prev})
 	if err != nil {
 		return err
 	}
@@ -125,14 +141,13 @@ func (db BoltDB) AckObservation(round uint64, cursor ObservationCursor) error {
 		if meta == nil {
 			return errors.New("metadata bucket not found")
 		}
-		c := meta.Cursor()
-		for k, _ := c.Seek(keyObsPrefix); k != nil && len(k) == len(keyObsPrefix)+8 && string(k[:len(keyObsPrefix)]) == string(keyObsPrefix); k, _ = c.Next() {
-			if binary.BigEndian.Uint64(k[len(keyObsPrefix):]) > round {
-				break
-			}
-			if err := c.Delete(); err != nil {
-				return err
-			}
+		key := obsKey(id)
+		first, _ := meta.Cursor().Seek(keyObsPrefix)
+		if !bytes.Equal(first, key) {
+			return errors.New("the acknowledged observation is no longer at the front of the queue")
+		}
+		if err := meta.Delete(key); err != nil {
+			return err
 		}
 		return meta.Put(keyObsCursor, raw)
 	})
@@ -153,12 +168,12 @@ func (x *BlockStore) PendingObservations(max int) ([]ObservationInput, Observati
 	return q.PendingObservations(max)
 }
 
-func (x *BlockStore) AckObservation(round uint64, cursor ObservationCursor) error {
+func (x *BlockStore) AckObservation(id ObservationID, prev [32]byte) error {
 	q, ok := x.storage.(ObservationQueue)
 	if !ok {
 		return errors.New("the persistent store keeps no observation queue")
 	}
-	return q.AckObservation(round, cursor)
+	return q.AckObservation(id, prev)
 }
 
 // observationsOf are the certified EVM observations of a commit path (newest block first), oldest first, of the observed shard; a block
@@ -177,10 +192,8 @@ func observationsOf(path []*ExecutedBlock, key *basetypes.PartitionShardID) []Ob
 		if si == nil || si.IR == nil || len(si.IR.BlockHash) != 32 || len(si.IR.Hash) != 32 {
 			continue
 		}
-		out = append(out, ObservationInput{RootRound: b.GetRound(), ParentRound: b.BlockData.GetParentRound(), RootUCTime: b.BlockData.Timestamp,
+		out = append(out, ObservationInput{RootEpoch: b.BlockData.Epoch, RootRound: b.GetRound(), ParentRound: b.BlockData.GetParentRound(), RootUCTime: b.BlockData.Timestamp,
 			BlockHash: [32]byte(si.IR.BlockHash), StateRoot: [32]byte(si.IR.Hash), ShardRound: si.IR.RoundNumber})
 	}
 	return out
 }
-
-var _ = atomic.Pointer[BlockTree]{}

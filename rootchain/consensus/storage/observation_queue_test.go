@@ -2,6 +2,7 @@ package storage
 
 import (
 	"bytes"
+	"crypto"
 	"path/filepath"
 	"testing"
 
@@ -16,51 +17,151 @@ func obsFor(round uint64) ObservationInput {
 	return ObservationInput{RootRound: round, ParentRound: round - 1, RootUCTime: 1000 + round, BlockHash: [32]byte{byte(round)}, StateRoot: [32]byte{byte(round), 1}, ShardRound: round + 3}
 }
 
-// The queue entries are written with the committing block in one transaction, survive a reopen, are consumed in order, and the cursor
-// stored with an acknowledgement survives too; a queue is pruned by consumption and bounded when nothing consumes it.
-func TestTheObservationQueueIsDurableOrderedAndBounded(t *testing.T) {
+func TestTheObservationQueueRetainsThePublishingRoundAcrossABacklog(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "root.db")
 	db, err := NewBoltStorage(path, WithNoSync())
 	require.NoError(t, err)
+	prior, publication := obsFor(10), obsFor(11)
 	require.NoError(t, db.db.Update(func(tx *bbolt.Tx) error {
-		return appendObservationsTx(tx.Bucket(bucketMetadata), []ObservationInput{obsFor(5), obsFor(6), obsFor(7)})
+		return appendObservationsTx(tx.Bucket(bucketMetadata), []ObservationInput{prior, publication})
+	}))
+	require.NoError(t, db.AckObservation(prior.ID(), [32]byte{}))
+
+	// The execution client comes back after more than the former 4,096-entry eviction limit.
+	var later []ObservationInput
+	for round := uint64(12); round < 12+4096; round++ {
+		entry := publication
+		entry.RootRound, entry.ParentRound = round, round-1
+		later = append(later, entry)
+	}
+	require.NoError(t, db.db.Update(func(tx *bbolt.Tx) error {
+		return appendObservationsTx(tx.Bucket(bucketMetadata), later)
 	}))
 	require.NoError(t, db.Close())
 
-	// a restart with a non-empty durable queue
 	db, err = NewBoltStorage(path, WithNoSync())
 	require.NoError(t, err)
-	got, cur, err := db.PendingObservations(10)
+	t.Cleanup(func() { _ = db.Close() })
+	got, cur, err := db.PendingObservations(64)
 	require.NoError(t, err)
-	require.False(t, cur.Set)
-	require.Equal(t, []ObservationInput{obsFor(5), obsFor(6), obsFor(7)}, got, "oldest first")
-	require.NoError(t, db.AckObservation(6, ObservationCursor{Set: true, Round: 6, Prev: [32]byte{9}}))
-	got, cur, err = db.PendingObservations(10)
+	require.Len(t, got, 64)
+	require.Equal(t, publication, got[0])
+	require.Equal(t, later[:63], got[1:])
+	require.Equal(t, ObservationCursor{Set: true, ID: prior.ID()}, cur)
+	require.Error(t, db.AckObservation(got[1].ID(), [32]byte{9}), "an acknowledgement may not skip the boundary")
+	require.NoError(t, db.AckObservation(publication.ID(), [32]byte{9}))
+	got, cur, err = db.PendingObservations(1)
 	require.NoError(t, err)
-	require.Equal(t, []ObservationInput{obsFor(7)}, got, "consumed entries are pruned")
-	require.Equal(t, ObservationCursor{Set: true, Round: 6, Prev: [32]byte{9}}, cur)
-	require.NoError(t, db.Close())
-	db, err = NewBoltStorage(path, WithNoSync())
-	require.NoError(t, err)
-	_, cur, err = db.PendingObservations(10)
-	require.NoError(t, err)
-	require.EqualValues(t, 6, cur.Round, "the cursor survives a restart")
+	require.Equal(t, later[:1], got)
+	require.Equal(t, ObservationCursor{Set: true, ID: publication.ID(), Prev: [32]byte{9}}, cur)
+}
 
-	// bounded when nothing consumes it: the oldest are dropped
-	var many []ObservationInput
-	for r := uint64(100); r < 100+MaxObservationQueue+50; r++ {
-		many = append(many, obsFor(r))
+func TestAnOldEpochAcknowledgementKeepsTheSuccessorAtTheReusedRound(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "root.db")
+	db, err := NewBoltStorage(path)
+	require.NoError(t, err)
+	commit := func(entry ObservationInput) {
+		b := &ExecutedBlock{BlockData: &rctypes.BlockData{Version: 3, Epoch: entry.RootEpoch, Round: entry.RootRound,
+			Payload: &rctypes.Payload{Version: 3}}, CommitQc: &rctypes.QuorumCert{}}
+		require.NoError(t, db.CommitBlock(b, nil, nil, []ObservationInput{entry}))
 	}
-	require.NoError(t, db.db.Update(func(tx *bbolt.Tx) error { return appendObservationsTx(tx.Bucket(bucketMetadata), many) }))
-	all, _, err := db.PendingObservations(MaxObservationQueue + 1000)
+
+	old := obsFor(13)
+	old.RootEpoch = 1
+	commit(old)
+	batch, _, err := db.PendingObservations(64)
 	require.NoError(t, err)
-	require.Len(t, all, MaxObservationQueue)
-	require.EqualValues(t, 100+MaxObservationQueue+49, all[len(all)-1].RootRound, "the newest are kept")
-	require.NoError(t, db.AckObservation(all[len(all)-1].RootRound, ObservationCursor{Set: true, Round: all[len(all)-1].RootRound}))
-	all, _, err = db.PendingObservations(10)
-	require.NoError(t, err)
-	require.Empty(t, all, "an acknowledged queue is empty")
+	require.Equal(t, []ObservationInput{old}, batch)
+
+	anchor := &rctypes.EpochAnchor{Epoch: 2, Slot: 12, GenesisID: bytes.Repeat([]byte{2}, 32), StateRoot: bytes.Repeat([]byte{3}, 32)}
+	root := &ExecutedBlock{BlockData: &rctypes.BlockData{Version: 3, Epoch: anchor.Epoch, Round: anchor.Slot,
+		Payload: &rctypes.Payload{Version: 3}, Anchor: anchor}}
+	require.NoError(t, db.InstallEpochAnchorRoot(root, anchor))
+	successor := old
+	successor.RootEpoch, successor.BlockHash, successor.StateRoot = 2, [32]byte{99}, [32]byte{100}
+	commit(successor)
+	require.NoError(t, db.AckObservation(batch[0].ID(), [32]byte{1}))
+	require.Error(t, db.AckObservation(batch[0].ID(), [32]byte{2}), "a stale acknowledgement cannot rewrite the cursor")
 	require.NoError(t, db.Close())
+
+	db, err = NewBoltStorage(path)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	got, cur, err := db.PendingObservations(64)
+	require.NoError(t, err)
+	require.Equal(t, []ObservationInput{successor}, got)
+	require.Equal(t, ObservationCursor{Set: true, ID: old.ID(), Prev: [32]byte{1}}, cur)
+}
+
+func TestRecoveryQueuesTheCertifiedHeadAndReplayedCommits(t *testing.T) {
+	c := newTestChain(t, chainShard{partition: 1, epochStarts: []uint64{1}})
+	shard := types.PartitionShardID{PartitionID: 1, ShardID: types.ShardID{}.Key()}
+	c.certifiedEVM = true
+	c.store.SetObservedShard(shard)
+	c.next()
+	c.next()
+	c.next(1)
+	c.next()
+	msg := received(t, c.state())
+	head := msg.CommittedHead.GetRound()
+	donor, _, err := c.store.PendingObservations(64)
+	require.NoError(t, err)
+	require.Len(t, donor, 1)
+	require.Equal(t, head, donor[0].RootRound)
+
+	c.next()
+	c.propose(nil, nil)
+	for round := head + 2; round <= c.round; round++ {
+		block, err := c.store.Block(round)
+		require.NoError(t, err)
+		msg.Pending = append(msg.Pending, block.BlockData)
+	}
+	msg = received(t, msg)
+	path := filepath.Join(t.TempDir(), "receiver.db")
+	db, err := NewBoltStorage(path)
+	require.NoError(t, err)
+	receiver, err := New(crypto.SHA256, db, c.orch, c.log)
+	require.NoError(t, err)
+	receiver.SetObservedShard(shard)
+	configure := func(bs *BlockStore) (IRChangeReqVerifier, error) {
+		bs.SetObservedShard(shard)
+		return chainVerifier{bs}, nil
+	}
+	require.NoError(t, ValidateRecoveryState(crypto.SHA256, msg, c.round, c.orch, db, configure, c.log),
+		"pending QCs commit a certified EVM input even if the same verifier setup enables observation")
+	before, _, err := db.PendingObservations(64)
+	require.NoError(t, err)
+	require.Empty(t, before)
+
+	replacement, err := receiver.RecoverFromState(msg.CommittedHead)
+	require.NoError(t, err)
+	afterHead, _, err := db.PendingObservations(64)
+	require.NoError(t, err)
+	require.Equal(t, donor, afterHead)
+	for i, block := range msg.Pending {
+		_, err := replacement.ProcessQc(block.Qc)
+		if i == 0 && errorsIsCommitFailed(err) {
+			err = nil
+		}
+		require.NoError(t, err)
+		_, err = replacement.Add(block, chainVerifier{replacement})
+		require.NoError(t, err)
+	}
+	require.NoError(t, db.Close())
+
+	db, err = NewBoltStorage(path)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+	got, _, err := db.PendingObservations(64)
+	require.NoError(t, err)
+	donor, _, err = c.store.PendingObservations(64)
+	require.NoError(t, err)
+	require.Len(t, donor, 2)
+	require.Equal(t, donor, got)
+	blocks, err := db.LoadBlocks()
+	require.NoError(t, err)
+	require.Equal(t, head+1, got[1].RootRound)
+	require.Equal(t, replacement.tree().Root().GetRound(), blocks[len(blocks)-1].GetRound())
 }
 
 // observationsOf lists the certified EVM block of EVERY block of a commit path (newest first in the path), oldest first, of the observed
