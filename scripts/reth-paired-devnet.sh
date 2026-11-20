@@ -413,7 +413,7 @@ if [ "${SIGNING:-local}" = authority ]; then
   enroll_evm_authorities "$validators" "$partitionID" || exit 1
   echo "enrolled $validators independent signing authorities against the full shard configuration"
   if [ "${VR_POS:-0}" = 1 ]; then
-    for i in $(seq 1 "$validators"); do vr_pos_pin_authority "$i" || exit 1; done
+    for i in $(seq 1 "$validators"); do M2_CHAIN_ID="$postM2aChainID" vr_pos_pin_authority "$i" || exit 1; done
   fi
 fi
 

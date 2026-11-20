@@ -10,7 +10,7 @@ import (
 )
 
 func TestParseEVMAuthorityArg(t *testing.T) {
-	for _, bad := range []string{"", "5", "=a,b,c", "0=a,b,c", "x=a,b,c", "5=a,b", "5=a,b,c,d"} {
+	for _, bad := range []string{"", "5", "=a,b,c", "0=a,b,c", "x=a,b,c", "5=a,b", "5=a,b,c,d", "5oops=a,b,c", "5 6=a,b,c"} {
 		_, _, err := parseEVMAuthorityArg(bad)
 		require.Error(t, err, bad)
 	}

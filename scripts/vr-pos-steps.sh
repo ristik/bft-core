@@ -42,7 +42,7 @@ vrp_apply() {
   # the joiner's authority is pinned to the id VR and custody confirmed at registration (the apply's receipts; saved in its validator config), never a guess
   local cid; cid=$(jq -r '.id // empty' "$vrj_cfg/validator.json")
   [ -n "$cid" ] && [ "$cid" = "$vrj_id" ] || { vrb_log "FAIL: the joiner's confirmed identity ($cid) is not the id its lane expects ($vrj_id)"; return 1; }
-  vr_pos_pin_authority "$vrj_id" "$cid" || { vrb_log "FAIL: the joiner's P85 pin"; return 1; }
+  M2_CHAIN_ID="${M2_CHAIN_ID:-$postM2aChainID}" vr_pos_pin_authority "$vrj_id" "$cid" || { vrb_log "FAIL: the joiner's P85 pin"; return 1; }
   local indexed; indexed=$(cast call --rpc-url "$vrb_rpc" "$el" 'isIndexed(uint64)(bool)' "$id")
   [ "$indexed" = true ] || { vrb_log "FAIL: identity $id is not in the election's live index after apply"; return 1; }
   vrb_log "PASS: identity $id registered in VR and custody, bonded, delegation admitted (live count $(cast call --rpc-url "$vrb_rpc" "$el" 'liveCount()(uint32)' | awk '{print $1}'))"
@@ -101,7 +101,9 @@ vrp_publish() {
   vrb_wait 1500 "the hook's election reserves a result from stake (cadence passed)" vrp_open_result || return 1
   local rid; rid=$(cast call --rpc-url "$vrb_rpc" "$(vrp_election)" 'openResult()(bytes32)')
   vrb_log "the election reserved $rid; VR's open output is $(vrb_open_output)"
-  build/ubft validator pos-publish --validator-config "$vrj_cfg/validator.json" $(vrp_evm_key_args | tr '\n' ' ') 2>&1 | tee "$VR_EVIDENCE/pos-publish.log" || { vrb_log "FAIL: pos-publish"; return 1; }
+  local -a holders=(); local line
+  while IFS= read -r line; do [ -z "$line" ] || holders+=("$line"); done < <(vrp_evm_key_args)
+  build/ubft validator pos-publish --validator-config "$vrj_cfg/validator.json" ${holders[@]+"${holders[@]}"} 2>&1 | tee "$VR_EVIDENCE/pos-publish.log" || { vrb_log "FAIL: pos-publish"; return 1; }
   vrb_log "PASS: every possession proof submitted, the candidate finalized and the result published in VR"
 }
 

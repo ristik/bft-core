@@ -13,6 +13,7 @@ import (
 	"io"
 	"math"
 	"math/big"
+	"strconv"
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -740,12 +741,12 @@ func delegationRequestOf(r vrclient.DelegationRequest) evmassign.DelegationReque
 
 // parseEVMAuthorityArg reads one --evm-authority value: id=socket,credential,nodeInfo.
 func parseEVMAuthorityArg(a string) (uint64, *evmAuthority, error) {
-	var id uint64
 	i := strings.Index(a, "=")
 	if i <= 0 {
 		return 0, nil, fmt.Errorf("%w: --evm-authority %q is not id=socket,credential,nodeInfo", ErrValidator, a)
 	}
-	if _, err := fmt.Sscanf(a[:i], "%d", &id); err != nil || id == 0 {
+	id, perr := strconv.ParseUint(a[:i], 10, 64)
+	if perr != nil || id == 0 {
 		return 0, nil, fmt.Errorf("%w: --evm-authority %q: the identity is a positive number", ErrValidator, a)
 	}
 	parts := strings.Split(a[i+1:], ",")

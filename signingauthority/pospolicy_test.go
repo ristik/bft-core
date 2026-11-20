@@ -168,3 +168,24 @@ func TestPosPolicyNotInstallableAtRunTimeInProduction(t *testing.T) {
 	other.Election = [20]byte{0xEE}
 	require.ErrorIs(t, b.SetPosPolicy(other), ErrPosPolicyConflict)
 }
+
+// Startup installation: two different pins conflict, and a reused option does not share state between authorities.
+func TestStartupPosPolicyConflictAndReuse(t *testing.T) {
+	f := newFixture(t, 1)
+	other := posPin()
+	other.Election = [20]byte{0xEE}
+	_, err := New(f.enroll, trustStub{tb: f.tb}, WithPosPolicy(posPin()), WithPosPolicy(other))
+	require.ErrorIs(t, err, ErrPosPolicyConflict)
+
+	pin := posPin()
+	opt := WithPosPolicy(pin)
+	a, err := New(f.enroll, trustStub{tb: f.tb}, opt)
+	require.NoError(t, err)
+	b, err := New(f.enroll, trustStub{tb: f.tb}, opt)
+	require.NoError(t, err)
+	pin.IDs[0] = 9 // the caller's slice is not the authority's
+	_, err = a.SignPosPoP(posRequest())
+	require.NoError(t, err)
+	require.NotSame(t, a.pos, b.pos)
+	require.NotSame(t, &a.pos.IDs[0], &b.pos.IDs[0])
+}

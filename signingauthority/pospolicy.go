@@ -89,12 +89,18 @@ func (a *Authority) checkPosScope(network, chain [32]byte, election [20]byte, id
 
 // WithPosPolicy pins the P85 possession scope at startup.
 func WithPosPolicy(p PosPolicy) Option {
+	own := p
+	own.IDs = slices.Clone(p.IDs) // a private copy: the option may be reused and the caller's slice may change
 	return func(a *Authority) error {
-		if err := p.valid(); err != nil {
+		if err := own.valid(); err != nil {
 			return err
 		}
-		p.IDs = slices.Clone(p.IDs)
-		a.pos = &p
+		if a.pos != nil && !a.pos.same(own) {
+			return fmt.Errorf("%w: two different startup pins", ErrPosPolicyConflict)
+		}
+		q := own
+		q.IDs = slices.Clone(own.IDs)
+		a.pos = &q
 		return nil
 	}
 }
