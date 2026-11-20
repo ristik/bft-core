@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/unicitynetwork/bft-core/evmassign"
 )
@@ -110,6 +111,12 @@ func (a *Authority) SignDelegationPossession(req DelegationPossessionRequest) ([
 	hs, pub, err := a.ethSigner()
 	if err != nil {
 		return nil, err
+	}
+	if a.pos != nil {
+		// a pinned authority signs delegations only for its pinned election and identities
+		if req.Network != a.pos.Network || req.Chain != a.pos.ChainID || req.Election != a.pos.Election || !slices.Contains(a.pos.IDs, req.Request.Id) {
+			return nil, fmt.Errorf("%w: the delegation is for another election, chain or identity than this authority's pin", ErrPosPolicy)
+		}
 	}
 	word, err := evmassign.NodeIDWord(a.enroll.NodeID)
 	if err != nil {

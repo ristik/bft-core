@@ -28,6 +28,7 @@ func TestThePoSABIsMatchTheCompiledSelectors(t *testing.T) {
 		{PosPublishABI, "submitAssignmentPoPs", "ac7931b4"},
 		{PosPublishABI, "publish", "8b2e6dcf"},
 		{PosPublishABI, "publication", "f1d81f14"},
+		{PosPublishABI, "result", "39a926c4"},
 		{CustodyABI, "bond", "6b0432ef"},
 		{CustodyABI, "bondUnit", "39f320cc"},
 		{CustodyABI, "claim", "ddd5e1b2"},
@@ -66,4 +67,28 @@ func TestPublicationViewDecodes(t *testing.T) {
 	require.True(t, p.Published)
 	require.Equal(t, uint32(4), p.PopCount)
 	require.Equal(t, [32]byte{1}, p.PrimaryHash)
+}
+
+// The election's result view decodes into ResultRecord field by field.
+func TestResultViewDecodes(t *testing.T) {
+	out := PosPublishABI.Methods["result"].Outputs
+	type tup struct {
+		State          uint8
+		Reason         uint8
+		Attempt        uint64
+		Progress       uint64
+		UcTime         uint64
+		PolicyID       uint32
+		Origin         [32]byte
+		Predecessor    [32]byte
+		AssignmentID   [32]byte
+		SnapshotDigest [32]byte
+	}
+	raw, err := out.Pack(tup{State: 1, Attempt: 3, AssignmentID: [32]byte{7}, SnapshotDigest: [32]byte{8}})
+	require.NoError(t, err)
+	r, err := decodeResultRecord(raw)
+	require.NoError(t, err)
+	require.Equal(t, uint64(3), r.Attempt)
+	require.Equal(t, [32]byte{7}, r.AssignmentID)
+	require.Equal(t, [32]byte{8}, r.SnapshotDigest)
 }

@@ -399,7 +399,7 @@ func TestTheClientOffersSigningAndReadOnlyRestoreStatus(t *testing.T) {
 	for i := 0; i < reflect.TypeOf(&OperatorClient{}).NumMethod(); i++ {
 		operatorMethods = append(operatorMethods, reflect.TypeOf(&OperatorClient{}).Method(i).Name)
 	}
-	require.ElementsMatch(t, []string{"AdvanceEpoch", "AdvanceWithProof", "Close", "CompleteEnrollment", "Enrollment", "ReplaceSession", "SignDelegationPossession", "SignElectionPoP", "SignHandoffPoP", "SignRegistration", "ReloadRegistrationPolicy", "Status"}, operatorMethods,
+	require.ElementsMatch(t, []string{"AdvanceEpoch", "AdvanceWithProof", "Close", "CompleteEnrollment", "Enrollment", "ReplaceSession", "SignDelegationPossession", "SignElectionPoP", "SignHandoffPoP", "SignRegistration", "SignPosPoP", "SetPosPolicy", "ReloadRegistrationPolicy", "Status"}, operatorMethods,
 		"and the control plane signs nothing but the three possession messages (its own key, each recomputed from typed inputs), never a certification")
 }
 

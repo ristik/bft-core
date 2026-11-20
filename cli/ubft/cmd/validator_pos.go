@@ -19,6 +19,8 @@ import (
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/spf13/cobra"
 
+	"github.com/unicitynetwork/bft-core/evmassign"
+	"github.com/unicitynetwork/bft-core/signingauthority"
 	"github.com/unicitynetwork/bft-core/vrclient"
 )
 
@@ -55,9 +57,6 @@ func validatorApplyPoS(cmd *cobra.Command, f *txFlags, pf *posFlags) error {
 	if err != nil {
 		return err
 	}
-	if keys.EVMAuth != nil {
-		return fmt.Errorf("%w: the P85 possession proof of admitDelegation is signed by the EVM key, which a signing authority holds: authority signing of P85 possession proofs is not available yet (use SIGNING=local)", ErrValidator)
-	}
 	owner := s.From()
 	withdrawal := owner
 	if pf.Withdrawal != "" {
@@ -81,6 +80,7 @@ func validatorApplyPoS(cmd *cobra.Command, f *txFlags, pf *posFlags) error {
 	if err != nil {
 		return err
 	}
+	evmNode, evmPub := keys.evmNodeAndKey(evm)
 	id, have, err := findID(ctx, v, ch, owner)
 	if err != nil {
 		return err
@@ -159,8 +159,8 @@ func validatorApplyPoS(cmd *cobra.Command, f *txFlags, pf *posFlags) error {
 			return nil, err
 		}
 		req := vrclient.DelegationRequest{Id: id, Generation: pos.Generation, RoleNonce: pos.RoleNonce, DelegationNonce: d.NextNonce, Expiry: math.MaxUint64,
-			Binding: vrclient.Delegation{RootNodeID: vrclient.NodeIDWord(root.NodeID), RootKey: root.Public(), EvmNodeID: vrclient.NodeIDWord(evm.NodeID),
-				EvmKey: evm.Public(), OperatorPayee: payee}}
+			Binding: vrclient.Delegation{RootNodeID: vrclient.NodeIDWord(root.NodeID), RootKey: root.Public(), EvmNodeID: vrclient.NodeIDWord(evmNode),
+				EvmKey: evmPub, OperatorPayee: payee}}
 		if sameDelegation(d.Binding, req.Binding) {
 			// a retry after the final receipt was lost: the election already stages this binding; another admission would only burn a nonce
 			fmt.Fprintf(w, "identity %d's delegation is already staged as configured\n", id)
@@ -170,9 +170,25 @@ func validatorApplyPoS(cmd *cobra.Command, f *txFlags, pf *posFlags) error {
 		if err := ch.vr.CallPos(ctx, election, vrclient.PosElectionABI, "delegationDigest", &digest, req); err != nil {
 			return nil, err
 		}
-		ownerSig, err1 := vrclient.SignDigest(keys.Operator, digest)
-		evmSig, err2 := vrclient.SignDigest(evm.Key, digest)
-		if err := errors.Join(err1, err2); err != nil {
+		ownerSig, err := vrclient.SignDigest(keys.Operator, digest)
+		if err != nil {
+			return nil, err
+		}
+		var evmSig []byte
+		if keys.EVMAuth != nil {
+			// the EVM key is the signing authority's: it recomputes the digest from the typed payload and its own pin; the digest the
+			// election returned must be the one it signs, or the authority and the contracts disagree about the domain
+			var chainWord [32]byte
+			chainID.FillBytes(chainWord[:])
+			dreq := delegationRequestOf(req)
+			if want := evmassign.DelegationDigest(network, chainWord, election, dreq); want != digest {
+				return nil, fmt.Errorf("%w: the election's delegation digest %x is not the one the authority signs (%x): the deployment's network word or chain differs from custody's", ErrValidator, digest, want)
+			}
+			evmSig, err = keys.EVMAuth.DelegationPossession(ctx, signingauthority.DelegationPossessionRequest{Network: network, Chain: chainWord, Election: election, Request: dreq})
+		} else {
+			evmSig, err = vrclient.SignDigest(evm.Key, digest)
+		}
+		if err != nil {
 			return nil, err
 		}
 		data, err := vrclient.PosCalldata(vrclient.PosElectionABI, "admitDelegation", req, ownerSig, evmSig)
@@ -281,7 +297,9 @@ func validatorApplyPoS(cmd *cobra.Command, f *txFlags, pf *posFlags) error {
 func posKeys(v *loadedValidator, keys *validatorKeys) (root, evm vrclient.NodeKeys, payee common.Address, err error) {
 	var e1, e2, e3 error
 	root, e1 = nodeKeys(keys.Root)
-	evm, e2 = nodeKeys(keys.EVM)
+	if keys.EVMAuth == nil { // a signing authority holds the EVM key: there is no key file to load
+		evm, e2 = nodeKeys(keys.EVM)
+	}
 	payee, e3 = v.payee()
 	return root, evm, payee, errors.Join(e1, e2, e3)
 }
@@ -411,7 +429,7 @@ var _ = ethcrypto.Keccak256
 // lane that holds every member's EVM key (SIGNING=local) submits them all here. Production members submit their own.
 func validatorPosPublishCmd(base *baseFlags) *cobra.Command {
 	f := &txFlags{validatorFlags: validatorFlags{baseFlags: base}}
-	var keyArgs []string
+	var keyArgs, authArgs []string
 	cmd := &cobra.Command{
 		Use:   "pos-publish",
 		Short: "PoS lane relayer: submit every frozen member's possession proof, finalizeCandidate, then VR.publish",
@@ -456,11 +474,47 @@ func validatorPosPublishCmd(base *baseFlags) *cobra.Command {
 						}
 						keys[id] = kc
 					}
+					auths := map[uint64]*evmAuthority{}
+					for _, a := range authArgs {
+						id, ea, err := parseEVMAuthorityArg(a)
+						if err != nil {
+							return nil, err
+						}
+						auths[id] = ea
+					}
+					var rec vrclient.ResultRecord
+					if len(auths) > 0 {
+						var err error
+						if rec, err = ch.vr.Result(ctx, election, rid); err != nil {
+							return nil, err
+						}
+					}
 					var pops []vrclient.PoPInput
 					for _, m := range members {
+						if ea := auths[m.Id]; ea != nil {
+							if keys[m.Id] != nil {
+								return nil, fmt.Errorf("%w: member %d has both --evm-keys and --evm-authority", ErrValidator, m.Id)
+							}
+							// the EVM key stays in its signing authority: it signs the digest it recomputes from the frozen result and its pin, and the
+							// election's own popDigest must verify that signature, or the authority's pin and the contracts disagree
+							pop, err := ea.PosPoP(ctx, signingauthority.PosPoPRequest{ResultID: rid, AssignmentID: rec.AssignmentID, Snapshot: rec.SnapshotDigest,
+								Attempt: rec.Attempt, ID: m.Id, Generation: m.Generation})
+							if err != nil {
+								return nil, err
+							}
+							d, err := ch.vr.PopDigest(ctx, election, rid, m.Id, [32]byte(ethcrypto.Keccak256(pop.EVMKey)))
+							if err != nil {
+								return nil, err
+							}
+							if err := checkRecovers(d, pop.Signature, pop.EVMKey); err != nil {
+								return nil, fmt.Errorf("%w: member %d: the authority's proof does not verify against the election's popDigest: %w", ErrValidator, m.Id, err)
+							}
+							pops = append(pops, vrclient.PoPInput{Id: m.Id, EvmKey: pop.EVMKey, Signature: pop.Signature})
+							continue
+						}
 						kc := keys[m.Id]
 						if kc == nil {
-							return nil, fmt.Errorf("%w: no EVM key file for member %d (--evm-keys %d=path)", ErrValidator, m.Id, m.Id)
+							return nil, fmt.Errorf("%w: no EVM key file for member %d (--evm-keys %d=path or --evm-authority %d=socket,credential,nodeInfo)", ErrValidator, m.Id, m.Id, m.Id)
 						}
 						nk, err := nodeKeys(kc)
 						if err != nil {
@@ -482,6 +536,7 @@ func validatorPosPublishCmd(base *baseFlags) *cobra.Command {
 		},
 	}
 	f.add(cmd)
+	cmd.Flags().StringArrayVar(&authArgs, "evm-authority", nil, "id=socket,credential,nodeInfo of the signing authority that holds a member's EVM key (repeat per member; instead of --evm-keys)")
 	cmd.Flags().StringArrayVar(&keyArgs, "evm-keys", nil, "id=path of a member's EVM shard node key file (repeat per member)")
 	return cmd
 }
@@ -666,4 +721,54 @@ func runPosPublish(ctx context.Context, w io.Writer, r posPublishRun) error {
 		return append([]step(nil), steps[i+1:]...), nil
 	}
 	return runSteps(ctx, w, r.Sender, r.DryRun, steps, verify)
+}
+
+// evmNodeAndKey is the EVM node id and 33-byte public key: the authority's enrolled identity, or the loaded key file's.
+func (k *validatorKeys) evmNodeAndKey(file vrclient.NodeKeys) (string, []byte) {
+	if k.EVMAuth != nil {
+		return k.EVMAuth.Node(), k.EVMAuth.Public()
+	}
+	return file.NodeID, file.Public()
+}
+
+// delegationRequestOf is the admitDelegation payload in the form the authority and evmassign take.
+func delegationRequestOf(r vrclient.DelegationRequest) evmassign.DelegationRequest {
+	return evmassign.DelegationRequest{Id: r.Id, Generation: r.Generation, RoleNonce: r.RoleNonce, DelegationNonce: r.DelegationNonce, Expiry: r.Expiry,
+		Binding: evmassign.DelegationBinding{RootNodeID: r.Binding.RootNodeID, RootKey: r.Binding.RootKey, EvmNodeID: r.Binding.EvmNodeID,
+			EvmKey: r.Binding.EvmKey, OperatorPayee: r.Binding.OperatorPayee}}
+}
+
+// parseEVMAuthorityArg reads one --evm-authority value: id=socket,credential,nodeInfo.
+func parseEVMAuthorityArg(a string) (uint64, *evmAuthority, error) {
+	var id uint64
+	i := strings.Index(a, "=")
+	if i <= 0 {
+		return 0, nil, fmt.Errorf("%w: --evm-authority %q is not id=socket,credential,nodeInfo", ErrValidator, a)
+	}
+	if _, err := fmt.Sscanf(a[:i], "%d", &id); err != nil || id == 0 {
+		return 0, nil, fmt.Errorf("%w: --evm-authority %q: the identity is a positive number", ErrValidator, a)
+	}
+	parts := strings.Split(a[i+1:], ",")
+	if len(parts) != 3 {
+		return 0, nil, fmt.Errorf("%w: --evm-authority %q is not id=socket,credential,nodeInfo", ErrValidator, a)
+	}
+	ea, err := loadEVMAuthority(evmAuthorityConfig{Socket: parts[0], Credential: parts[1], NodeInfo: parts[2]})
+	return id, ea, err
+}
+
+// checkRecovers verifies a contracts-form signature (v 27/28) over digest against the compressed key.
+func checkRecovers(digest [32]byte, sig, pub []byte) error {
+	if len(sig) != 65 {
+		return fmt.Errorf("a %d-byte signature", len(sig))
+	}
+	rec := bytes.Clone(sig)
+	rec[64] -= 27
+	got, err := ethcrypto.SigToPub(digest[:], rec)
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(ethcrypto.CompressPubkey(got), pub) {
+		return errors.New("the signature recovers to another key")
+	}
+	return nil
 }

@@ -88,6 +88,8 @@ type Authority struct {
 	advanceHook func()
 	// registration is the operator's registration policy (WithRegistrationPolicy); nil: this authority signs no registration.
 	registration *RegistrationPolicy
+	// pos is the pinned scope of the P85 possession signatures (WithPosPolicy, SetPosPolicy); nil: SignPosPoP is refused.
+	pos *PosPolicy
 }
 
 // WithAdvanceHook calls hook at the start of every proof verification, outside the authority's locks. It changes no decision; it exists
