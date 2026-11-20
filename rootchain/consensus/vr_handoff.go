@@ -397,7 +397,7 @@ func (v *vrHandoff) onCommit(blocks []*storage.ExecutedBlock) {
 			continue
 		}
 		out = append(out, vrschedule.CertifiedEVM{RootRound: b.GetRound(), ParentRound: b.BlockData.GetParentRound(), RootUCTime: b.BlockData.Timestamp, BlockHash: [32]byte(si.IR.BlockHash),
-			StateRoot: [32]byte(si.IR.Hash), BlockNumber: si.IR.RoundNumber})
+			StateRoot: [32]byte(si.IR.Hash), ShardRound: si.IR.RoundNumber})
 	}
 	select {
 	case v.commits <- out:
@@ -435,7 +435,7 @@ func (v *vrHandoff) observe(ctx context.Context, c vrschedule.CertifiedEVM) {
 			v.statMu.Lock()
 			v.observeErr++
 			v.statMu.Unlock()
-			v.cfg.Log.Warn("VR handoff: observing a certified EVM block failed", "evmBlock", c.BlockNumber, "rootRound", c.RootRound, "error", err)
+			v.cfg.Log.Warn("VR handoff: observing a certified EVM block failed", "shardRound", c.ShardRound, "rootRound", c.RootRound, "error", err)
 			return
 		}
 		select {
@@ -1057,7 +1057,7 @@ func (v *vrHandoff) fetchSource(ctx context.Context, r [32]byte) {
 			v.cfg.Log.Warn("VR handoff: recording a fetched source failed", "error", err)
 			return
 		}
-		v.cfg.Log.Info("VR handoff: the committed source of a result was fetched from the incumbents", "result", fmt.Sprintf("%x", r[:8]), "evmBlock", e.EVMBlockNumber, "certRootRound", e.CertRootRound)
+		v.cfg.Log.Info("VR handoff: the committed source of a result was fetched from the incumbents", "result", fmt.Sprintf("%x", r[:8]), "shardRound", e.EVMBlockNumber, "certRootRound", e.CertRootRound)
 		v.wake()
 	}()
 }
