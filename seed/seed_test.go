@@ -948,3 +948,39 @@ func TestCollectionExpiresRetainedFilesAndSymlinksWithoutFollowing(t *testing.T)
 	_, err = os.Lstat(fresh)
 	require.NoError(t, err, "a version inside the grace period stays")
 }
+
+func TestRetentionRefusesAVersionsDirectoryThatIsASymlink(t *testing.T) {
+	f := newFixture(t)
+	parent := t.TempDir()
+	dst := filepath.Join(parent, "out")
+	require.NoError(t, WriteDir(dst, f.files, f.manifest, false))
+	if !canExchange(parent) {
+		t.Skip("no atomic exchange here")
+	}
+	// another seed's marked retention directory, with an expired entry in it
+	other := filepath.Join(t.TempDir(), "other.versions")
+	require.NoError(t, os.Mkdir(other, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(other, versionsMarker), nil, 0o600))
+	expired := filepath.Join(other, fmt.Sprint(time.Now().Add(-time.Hour).UnixNano()))
+	require.NoError(t, os.MkdirAll(expired, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(expired, "keep"), []byte("x"), 0o644))
+	require.NoError(t, os.Symlink(other, versionsDir(dst)))
+	prev := oldVersionGrace
+	oldVersionGrace = 0
+	defer func() { oldVersionGrace = prev }()
+
+	g := newFixture(t)
+	err := WriteDir(dst, g.files, g.manifest, true)
+	var re *RetentionError
+	require.ErrorAs(t, err, &re)
+	// nothing was moved into the other directory and nothing in it was deleted
+	ents, _ := os.ReadDir(other)
+	require.Len(t, ents, 2, "only the marker and the entry that were there")
+	require.FileExists(t, filepath.Join(expired, "keep"))
+	old, verr := VerifyDir(re.Stage, Pins{GenesisID: f.pin})
+	require.NoError(t, verr, "the old version is kept at the stage path")
+	require.Equal(t, ManifestDigest(f.manifest), old.ManifestDigest)
+	// collection through such a symlink deletes nothing either
+	gcOldVersions(versionsDir(dst), "")
+	require.FileExists(t, filepath.Join(expired, "keep"))
+}

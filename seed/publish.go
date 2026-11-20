@@ -104,7 +104,7 @@ func retainOldVersion(stage, dir string) error {
 		}
 	case errors.Is(err, os.ErrExist):
 		// a directory that already exists is used only if it carries our marker; an unmarked one, empty or not, is somebody else's
-		if fi, lerr := os.Lstat(marker); lerr != nil || !fi.Mode().IsRegular() {
+		if !ownedVersionsDir(vd) {
 			return refuse("%s already exists and is not this tool's version directory", vd)
 		}
 	default:
@@ -125,7 +125,7 @@ var oldVersionGrace = 10 * time.Minute
 // gcOldVersions removes versions older than the grace period (never keep, the one just retained) from the marked retention directory vd, and only
 // entries (directories, files and symlinks) named by a timestamp that this tool wrote. Nothing outside vd is ever touched.
 func gcOldVersions(vd, keep string) {
-	if _, err := os.Lstat(filepath.Join(vd, versionsMarker)); err != nil {
+	if !ownedVersionsDir(vd) {
 		return
 	}
 	ents, err := os.ReadDir(vd)
@@ -144,4 +144,15 @@ func gcOldVersions(vd, keep string) {
 			_ = os.Remove(path) // a file or a symlink displaced from a symlink destination: removed itself, never followed
 		}
 	}
+}
+
+// ownedVersionsDir reports whether vd is this tool's retention directory: vd itself is a real directory (an Lstat, so a symlink to another directory, even
+// to another seed's marked one, is refused) and it carries a regular marker file.
+func ownedVersionsDir(vd string) bool {
+	fi, err := os.Lstat(vd)
+	if err != nil || !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 {
+		return false
+	}
+	mi, err := os.Lstat(filepath.Join(vd, versionsMarker))
+	return err == nil && mi.Mode().IsRegular()
 }
