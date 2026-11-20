@@ -1,147 +1,163 @@
 #!/usr/bin/env bash
-# Proves the live-acceptance checks of vr-schedule-steps.sh fail when the evidence is missing or wrong (and pass on the right evidence), on canned data.
+# Proves the live-acceptance checks of vr-schedule-steps.sh pass on the right evidence and fail on wrong evidence, on canned data.
+#
+# Every must-fail case is a DIFFERENTIAL test: a good input for the predicate's family is built by a literal builder; the bad input is that good input
+# with ONE explicit edit (a sed on the line, or a different builder argument); the harness then asserts that (1) the bad input DIFFERS from the good one,
+# (2) the predicate PASSES on the good one, and (3) it FAILS on the bad one, for the python predicates with a failure message matching the intended
+# reason. So a case cannot pass vacuously (an edit that changed nothing, or an input that was bad for some other reason).
 set -u
 cd "$(dirname "$0")/.." || exit 2
 source scripts/vr-schedule-steps.sh
-fails=0
-ok()   { if "$@"; then :; else echo "FAIL (expected pass): $*"; fails=$((fails+1)); fi; }
-bad()  { if "$@" 2>/dev/null; then echo "FAIL (expected failure): $*"; fails=$((fails+1)); fi; }
+fails=0 cases=0
 d=$(mktemp -d); trap 'rm -rf "$d"' EXIT
 rid=0xabababababababababababababababababababababababababababababababab
+other=0xcd$(printf 'cd%.0s' $(seq 31))
 E=5
-line() { echo "time=x level=INFO msg=\"$2\" event=$1 rule=${rid#0x} epoch=$3 digest=1111 currentEpoch=${4:-$3}"; }
-for i in 1 2 3 4; do { line activation.latched "latched" $E; line activation.active "active" $E; } >"$d/root$i-activation-events.txt"; done
-ok  vrs_check_all_roots "$d" "$rid" $E 1 2 3 4
-bad vrs_check_all_roots "$d" "$rid" 6 1 2 3 4                       # another epoch
-bad vrs_check_all_roots "$d" 0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd 5 1 2 3 4   # another rule
-bad vrs_check_all_roots "$d" "$rid" $E                              # no roots
-{ line activation.latched l $E; line activation.active a $E 4; } >"$d/root1-activation-events.txt"; bad vrs_check_all_roots "$d" "$rid" $E 1   # active record whose CURRENT epoch (4) is below E
-{ line activation.latched l $E; line activation.active a $E 6; } >"$d/root1-activation-events.txt"; ok  vrs_check_all_roots "$d" "$rid" $E 1   # current epoch 6 >= E
-{ line activation.latched l $E; echo "event=activation.active rule=${rid#0x} epoch=$E"; } >"$d/root1-activation-events.txt"; bad vrs_check_all_roots "$d" "$rid" $E 1   # no currentEpoch at all
-for i in 1 2 3 4; do { line activation.latched "latched" $E; line activation.active "active" $E; } >"$d/root$i-activation-events.txt"; done
-: >"$d/root3-activation-events.txt";                  bad vrs_check_all_roots "$d" "$rid" $E 1 2 3 4   # one root silent
-line activation.latched l $E >"$d/root3-activation-events.txt"; bad vrs_check_all_roots "$d" "$rid" $E 1 2 3 4   # latched but never active
-bad vrs_check_all_roots "$d" "$rid" $E 1 2 3 4 5                    # a root with no file at all
-# the shard refusal: ONE record carries event=upgrade.refused, epoch=E and an UpgradeRequired naming the rule and E
-ref() { echo "time=x level=ERROR msg=\"refusing\" event=upgrade.refused epoch=$1 error=\"UpgradeRequired: this binary does not support rule ${2#0x}, active from root epoch $3 (release digest 11)\""; }
-ref 5 "$rid" 5 >"$d/ref.txt"
-ok  vrs_check_refusal "$d/ref.txt" "$rid" $E
-ref 6 "$rid" 5 >"$d/ref6.txt";       bad vrs_check_refusal "$d/ref6.txt" "$rid" $E      # astra: a refusal at epoch 6 for a rule active from 5
-{ ref 6 "$rid" 5; ref 5 0xcd$(printf 'cd%.0s' $(seq 31)) 5; } >"$d/split.txt"; bad vrs_check_refusal "$d/split.txt" "$rid" $E   # the right rule on one line, epoch E on another
-{ ref 6 "$rid" 5; echo "level=INFO msg=other epoch=5"; } >"$d/split2.txt";      bad vrs_check_refusal "$d/split2.txt" "$rid" $E
-bad vrs_check_refusal "$d/ref.txt" "$rid" 6
-ref 5 "$rid" 9 >"$d/ref59.txt"; ok vrs_check_refusal "$d/ref59.txt" "$rid" $E      # attempted epoch 5 decides, not the text's scheduled epoch
-bad vrs_check_refusal "$d/ref.txt" 0xcd$(printf 'cd%.0s' $(seq 31)) $E
-sed 's/event=upgrade.refused/event=other/' "$d/ref.txt" >"$d/noevent.txt"; bad vrs_check_refusal "$d/noevent.txt" "$rid" $E
-bad vrs_check_refusal "$d/none.txt" "$rid" $E
-# the pending warning: ONE record with the rule, activationEpoch=E and currentEpoch<E
-warn() { echo "level=WARN msg=\"UPGRADE REQUIRED\" event=upgrade.required state=$1 rule=${2#0x} release=11 activationEpoch=$3 currentEpoch=$4 notBeforeUcTime=1"; }
-warn pending "$rid" 5 2 >"$d/warn.txt";                        ok  vrs_check_warning "$d/warn.txt" "$rid" $E
-warn pending "$rid" 5 5 >"$d/w.txt";                           bad vrs_check_warning "$d/w.txt" "$rid" $E      # currentEpoch not below E: not ahead
-warn pending "$rid" 5 7 >"$d/w.txt";                           bad vrs_check_warning "$d/w.txt" "$rid" $E
-warn effective "$rid" 5 2 >"$d/w.txt";                         bad vrs_check_warning "$d/w.txt" "$rid" $E      # wrong state
-warn pending "$rid" 6 2 >"$d/w.txt";                           bad vrs_check_warning "$d/w.txt" "$rid" $E      # another activation epoch
-warn pending 0xcd$(printf 'cd%.0s' $(seq 31)) 5 2 >"$d/w.txt"; bad vrs_check_warning "$d/w.txt" "$rid" $E      # another rule
-{ warn pending "$rid" 6 2; warn pending 0xcd$(printf 'cd%.0s' $(seq 31)) 5 2; warn effective "$rid" 5 2; } >"$d/w.txt"; bad vrs_check_warning "$d/w.txt" "$rid" $E   # the pieces on different records
-echo "event=upgrade.required state=pending rule=${rid#0x} activationEpoch=5" >"$d/w.txt";   bad vrs_check_warning "$d/w.txt" "$rid" $E      # no currentEpoch
-bad vrs_check_warning "$d/ref.txt" "$rid" $E
-bad vrs_check_warning "$d/none.txt" "$rid" $E
-# the metric: a SAMPLE line, value 1, labels rule/epoch/state (not HELP/TYPE)
-other=0xcd$(printf 'cd%.0s' $(seq 31))
-m() { echo "ab_unicity_upgrade_required{epoch=\"$2\",rule=\"${1#0x}\",state=\"$3\",otel_scope_name=\"x\"} $4"; }
-{ echo "# HELP ab_unicity_upgrade_required 1 for each rule"; echo "# TYPE ab_unicity_upgrade_required gauge"; m "$rid" 5 pending 1; } >"$d/m.txt"; ok  vrs_check_metric "$d/m.txt" "$rid" $E pending
-{ echo "# HELP ab_unicity_upgrade_required rule=\"${rid#0x}\" epoch=\"5\" state=\"pending\" 1"; echo "# TYPE ab_unicity_upgrade_required gauge"; } >"$d/m.txt";  bad vrs_check_metric "$d/m.txt" "$rid" $E pending   # HELP/TYPE only
-m "$rid" 5 pending 0 >"$d/m.txt";             bad vrs_check_metric "$d/m.txt" "$rid" $E pending   # value 0
-m "$rid" 5 effective 1 >"$d/m.txt";           bad vrs_check_metric "$d/m.txt" "$rid" $E pending   # wrong state
-m "$rid" 6 pending 1 >"$d/m.txt";             bad vrs_check_metric "$d/m.txt" "$rid" $E pending   # wrong epoch
-m "$other" 5 pending 1 >"$d/m.txt";           bad vrs_check_metric "$d/m.txt" "$rid" $E pending   # another rule
-{ m "$rid" 6 pending 1; m "$other" 5 pending 1; m "$rid" 5 effective 1; } >"$d/m.txt"; bad vrs_check_metric "$d/m.txt" "$rid" $E pending   # labels spread over samples
-m "$rid" 5 pending 1 | sed 's/^ab_/other_/' >"$d/m.txt";   bad vrs_check_metric "$d/m.txt" "$rid" $E pending   # astra r7: another metric name (other_unicity_upgrade_required) with matching labels
-m "$rid" 5 pending 1 | sed 's/^ab_//' >"$d/m.txt";         ok  vrs_check_metric "$d/m.txt" "$rid" $E pending   # the unprefixed exact name is accepted
-m "$rid" 5 pending 1 | sed 's/^ab_/x_ab_/' >"$d/m.txt";    bad vrs_check_metric "$d/m.txt" "$rid" $E pending
-m "$rid" 5 pending 1 | sed 's/unicity_upgrade_required/unicity_upgrade_required_total/' >"$d/m.txt"; bad vrs_check_metric "$d/m.txt" "$rid" $E pending
-m "$rid" 5 pending 1 | sed 's/} 1/} 1 1795000000/' >"$d/m.txt"; bad vrs_check_metric "$d/m.txt" "$rid" $E pending   # extra field: the value is not the last field
-: >"$d/m.txt";                                bad vrs_check_metric "$d/m.txt" "$rid" $E pending
-bad vrs_check_metric "$d/missing.txt" "$rid" $E pending
-# ureth's unicity_rulesV1
-r() { echo "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":$1}"; }
-good='{"genesisSpec":"Cancun","known":[{"name":"noop-test-v1","id":"'$rid'"}],"observed":true,"scheduled":[{"ruleId":"'$rid'","releaseDigest":"'$rid'","rootEpoch":5,"latched":true,"known":true}],"lacking":[]}'
-r "$good" >"$d/u.json";                                              ok  vrs_check_rules "$d/u.json" "$rid" $E true true
-r "${good/\"latched\":true/\"latched\":false}" >"$d/u.json";         bad vrs_check_rules "$d/u.json" "$rid" $E true true
-r "${good/\"rootEpoch\":5/\"rootEpoch\":6}" >"$d/u.json";            bad vrs_check_rules "$d/u.json" "$rid" $E true true
-r "${good/\"observed\":true/\"observed\":false}" >"$d/u.json";       bad vrs_check_rules "$d/u.json" "$rid" $E true true
-r "${good/\"scheduled\":[*]/\"scheduled\":[]}" >"$d/u.json";         bad vrs_check_rules "$d/u.json" 0xcd$(printf 'cd%.0s' $(seq 31)) $E true true
-echo '{"error":{"code":-32601}}' >"$d/u.json";                       bad vrs_check_rules "$d/u.json" "$rid" $E true true
-echo 'not json' >"$d/u.json";                                       bad vrs_check_rules "$d/u.json" "$rid" $E true true
-# the VR schedule row: rule, epoch and state in ONE row
-other=0xcd$(printf 'cd%.0s' $(seq 31))
-row() { echo "{\"ruleId\":\"$1\",\"rootEpoch\":$2,\"state\":\"$3\"}"; }
-printf '{"schedule":[%s]}' "$(row $rid 5 Latched)" >"$d/up.json";                          ok  vrs_check_latched_row "$d/up.json" "$rid" $E
-printf '{"schedule":[%s,%s]}' "$(row $other 5 Latched)" "$(row $rid 5 Active)" >"$d/up.json"; bad vrs_check_latched_row "$d/up.json" "$rid" $E   # astra: another rule Latched, the target not
-printf '{"schedule":[%s]}' "$(row $rid 6 Latched)" >"$d/up.json";                          bad vrs_check_latched_row "$d/up.json" "$rid" $E
-printf '{"schedule":[%s]}' "$(row $rid 5 Queued)" >"$d/up.json";                           bad vrs_check_latched_row "$d/up.json" "$rid" $E
-printf '{"schedule":[]}' >"$d/up.json";                                                    bad vrs_check_latched_row "$d/up.json" "$rid" $E
-echo 'garbage' >"$d/up.json";                                                              bad vrs_check_latched_row "$d/up.json" "$rid" $E
-# the roots' status: activeEpoch is a JSON integer EQUAL to E
-st() { echo "{\"activeEpoch\": $1, \"follower\": false}" >"$d/st.json"; }
-st 5;        ok  vrs_check_status_epoch "$d/st.json" $E
-st 50;       bad vrs_check_status_epoch "$d/st.json" $E     # astra r8: activeEpoch 50 for E=5 (substring/>= matching accepted it)
-st 4;        bad vrs_check_status_epoch "$d/st.json" $E
-st 6;        bad vrs_check_status_epoch "$d/st.json" $E     # not >=
-st '"5"';    bad vrs_check_status_epoch "$d/st.json" $E     # a string, not a JSON integer
-st 5.0;      bad vrs_check_status_epoch "$d/st.json" $E
-st null;     bad vrs_check_status_epoch "$d/st.json" $E
-echo '{"epoch":5}' >"$d/st.json"; bad vrs_check_status_epoch "$d/st.json" $E
-echo 'garbage' >"$d/st.json";     bad vrs_check_status_epoch "$d/st.json" $E
-bad vrs_check_status_epoch "$d/missing.json" $E
-# the short lane uses the same predicates for its queued unsupported rule: a HELP line or a bare warning is no evidence
-fr=0xefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef
-{ echo "# HELP ab_unicity_upgrade_required unsupported rules"; echo "# TYPE ab_unicity_upgrade_required gauge"; } >"$d/m.txt"; bad vrs_check_metric "$d/m.txt" "$fr" 8 pending
-echo 'level=WARN msg="upgrade required"' >"$d/w.txt";                                         bad vrs_check_warning "$d/w.txt" "$fr" 8
-warn pending "$fr" 8 2 >"$d/w.txt";                                                              ok  vrs_check_warning "$d/w.txt" "$fr" 8
-# the baseline: a valid response without the entry passes; anything else fails
-base='{"genesisSpec":"Cancun","known":[{"name":"noop-test-v1","id":"'$rid'"}],"observed":true,"scheduled":[],"lacking":[]}'
-r "$base" >"$d/b.json";                                         ok  vrs_check_rules_absent "$d/b.json" "$rid"
-r "${base/\"observed\":true/\"observed\":false}" >"$d/b.json";   bad vrs_check_rules_absent "$d/b.json" "$rid"
-echo '{"error":{"code":-32601,"message":"method not found"}}' >"$d/b.json"; bad vrs_check_rules_absent "$d/b.json" "$rid"
-echo 'garbage' >"$d/b.json";                                      bad vrs_check_rules_absent "$d/b.json" "$rid"
-: >"$d/b.json";                                                 bad vrs_check_rules_absent "$d/b.json" "$rid"
-bad vrs_check_rules_absent "$d/missing.json" "$rid"
-echo '{"result":{"observed":true}}' >"$d/b.json";                bad vrs_check_rules_absent "$d/b.json" "$rid"   # lists missing: malformed
-r "$good" >"$d/b.json";                                         bad vrs_check_rules_absent "$d/b.json" "$rid"   # the rule IS scheduled
-r "${base/\"scheduled\":[]/\"scheduled\":[{}]}" >"$d/b.json";    bad vrs_check_rules_absent "$d/b.json" "$rid"   # astra: scheduled:[{}]
-r "${base/\"scheduled\":[]/\"scheduled\":[{\"ruleId\":\"0x11\"}]}" >"$d/b.json"; bad vrs_check_rules_absent "$d/b.json" "$rid"   # truncated id, missing fields
-r "${base/\"scheduled\":[]/\"scheduled\":[null]}" >"$d/b.json";  bad vrs_check_rules_absent "$d/b.json" "$rid"
-r "${base/\"scheduled\":[]/\"scheduled\":\"none\"}" >"$d/b.json"; bad vrs_check_rules_absent "$d/b.json" "$rid"
-r "${base/\"lacking\":[]/\"lacking\":[{}]}" >"$d/b.json";        bad vrs_check_rules_absent "$d/b.json" "$rid"
-r "${base/\"known\":[{\"name\":\"noop-test-v1\",\"id\":\"$rid\"}]/\"known\":[{}]}" >"$d/b.json"; bad vrs_check_rules_absent "$d/b.json" "$rid"
-r "${base/\"genesisSpec\":\"Cancun\",/}" >"$d/b.json";           bad vrs_check_rules_absent "$d/b.json" "$rid"   # genesisSpec missing
-neg='{"ruleId":"'$other'","releaseDigest":"'$other'","rootEpoch":-1,"latched":false,"known":false}'
-r "${base/\"scheduled\":[]/\"scheduled\":[$neg]}" >"$d/b.json"; bad vrs_check_rules_absent "$d/b.json" "$rid"   # astra r7: an unrelated entry with rootEpoch -1 (not a u64)
-big='{"ruleId":"'$other'","releaseDigest":"'$other'","rootEpoch":18446744073709551616,"latched":false,"known":false}'
-r "${base/\"scheduled\":[]/\"scheduled\":[$big]}" >"$d/b.json"; bad vrs_check_rules_absent "$d/b.json" "$rid"   # 2^64
-flt='{"ruleId":"'$other'","releaseDigest":"'$other'","rootEpoch":5.0,"latched":false,"known":false}'
-r "${base/\"scheduled\":[]/\"scheduled\":[$flt]}" >"$d/b.json"; bad vrs_check_rules_absent "$d/b.json" "$rid"   # not a JSON integer
-str='{"ruleId":"'$other'","releaseDigest":"'$other'","rootEpoch":"5","latched":false,"known":false}'
-r "${base/\"scheduled\":[]/\"scheduled\":[$str]}" >"$d/b.json"; bad vrs_check_rules_absent "$d/b.json" "$rid"
-nb='{"ruleId":"'$other'","releaseDigest":"'$other'","rootEpoch":5,"latched":"no","known":false}'
-r "${base/\"scheduled\":[]/\"scheduled\":[$nb]}" >"$d/b.json"; bad vrs_check_rules_absent "$d/b.json" "$rid"
-mk() { r "{\"genesisSpec\":\"Cancun\",\"known\":[{\"name\":\"noop-test-v1\",\"id\":\"$rid\"}],\"observed\":true,\"scheduled\":[$1],\"lacking\":[]}"; }
-goodrow='{"ruleId":"'$rid'","releaseDigest":"'$rid'","rootEpoch":5,"latched":true,"known":true}'
-mk "$goodrow" >"$d/u.json"; ok vrs_check_rules "$d/u.json" "$rid" $E true true   # the strict validation still accepts a well-formed latched row
-# vrs_check_rules (the post-handoff latch assertion) reuses the strict row validation
-fl='{"ruleId":"'$rid'","releaseDigest":"'$rid'","rootEpoch":5.0,"latched":true,"known":true}'
-mk "$fl" >"$d/u.json";  bad vrs_check_rules "$d/u.json" "$rid" $E true true    # float epoch 5.0
-in='{"ruleId":"'$rid'","releaseDigest":"'$rid'","rootEpoch":5,"latched":1,"known":1}'
-mk "$in" >"$d/u.json";  bad vrs_check_rules "$d/u.json" "$rid" $E true true    # integer flags
-nd='{"ruleId":"'$rid'","rootEpoch":5,"latched":true,"known":true}'
-mk "$nd" >"$d/u.json";  bad vrs_check_rules "$d/u.json" "$rid" $E true true    # no release digest
-sd='{"ruleId":"'$rid'","releaseDigest":"0x11","rootEpoch":5,"latched":true,"known":true}'
-mk "$sd" >"$d/u.json";  bad vrs_check_rules "$d/u.json" "$rid" $E true true    # short digest
-ng='{"ruleId":"'$rid'","releaseDigest":"'$rid'","rootEpoch":-5,"latched":true,"known":true}'
-mk "$ng" >"$d/u.json";  bad vrs_check_rules "$d/u.json" "$rid" $E true true
-# a valid row plus a malformed unrelated one: the response as a whole is invalid
-mk "{\"ruleId\":\"$rid\",\"releaseDigest\":\"$rid\",\"rootEpoch\":5,\"latched\":true,\"known\":true},{}" >"$d/u.json"; bad vrs_check_rules "$d/u.json" "$rid" $E true true
-okentry='{"ruleId":"'$other'","releaseDigest":"'$other'","rootEpoch":9,"latched":false,"known":false}'
-r "${base/\"scheduled\":[]/\"scheduled\":[$okentry]}" >"$d/b.json"; ok vrs_check_rules_absent "$d/b.json" "$rid"   # a well-formed entry for ANOTHER rule is still an absence
-[ "$fails" = 0 ] && echo "vr-schedule checks: all pass" || { echo "vr-schedule checks: $fails failing"; exit 1; }
+fail() { echo "FAIL: $*"; fails=$((fails+1)); }
+
+# mf <label> <predicate> <good> <bad> [reason-regex]: predicate <file> must pass on good, fail on bad (and say why, when a reason is given)
+mf() {
+  local label=$1 pred=$2 good=$3 bad=$4 reason=${5:-} err
+  cases=$((cases+1))
+  if [ -d "$good" ]; then diff -r "$good" "$bad" >/dev/null 2>&1 && { fail "$label: the bad input equals the good one (vacuous case)"; return; }
+  else cmp -s "$good" "$bad" && { fail "$label: the bad input equals the good one (vacuous case)"; return; }; fi
+  "$pred" "$good" 2>/dev/null || { fail "$label: the good input does not pass"; return; }
+  err=$("$pred" "$bad" 2>&1 >/dev/null) && { fail "$label: the bad input passes"; return; }
+  [ -z "$reason" ] || echo "$err" | grep -qE "$reason" || fail "$label: failed for another reason: $err"
+  return 0
+}
+ok() { cases=$((cases+1)); "$@" 2>/dev/null || fail "expected pass: $*"; }   # a good input that must pass
+
+# ---- builders: each writes the GOOD evidence of its family ------------------------------------------------------------------------------------------
+act() { echo "time=x level=INFO msg=\"$2\" event=$1 rule=${rid#0x} epoch=$E digest=1111 currentEpoch=$3"; }
+mkroots() { local dir=$1 i; rm -rf "$dir"; mkdir -p "$dir"; for i in 1 2 3 4; do { act activation.latched latched $E; act activation.active active $E; } >"$dir/root$i-activation-events.txt"; done; }
+refusal() { echo "time=x level=ERROR msg=\"refusing\" event=upgrade.refused epoch=5 error=\"UpgradeRequired: this binary does not support rule ${rid#0x}, active from root epoch 5 (release digest 11)\""; }
+warning() { echo "level=WARN msg=\"UPGRADE REQUIRED\" event=upgrade.required state=pending rule=${rid#0x} release=11 activationEpoch=5 currentEpoch=2 notBeforeUcTime=1"; }
+metric() { { echo "# HELP ab_unicity_upgrade_required 1 for each rule"; echo "# TYPE ab_unicity_upgrade_required gauge"; echo "ab_unicity_upgrade_required{epoch=\"5\",rule=\"${rid#0x}\",state=\"pending\",otel_scope_name=\"x\"} 1"; }; }
+rpc() { echo "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":$1}"; }
+row='{"ruleId":"'$rid'","releaseDigest":"'$rid'","rootEpoch":5,"latched":true,"known":true}'
+rules() { rpc '{"genesisSpec":"Cancun","known":[{"name":"noop-test-v1","id":"'$rid'"}],"observed":true,"scheduled":['"$1"'],"lacking":[]}'; }
+status() { echo "{\"activeEpoch\": $1, \"follower\": false}"; }
+upgrade() { printf '{"schedule":[%s]}' "$1"; }
+urow() { echo '{"ruleId":"'$1'","rootEpoch":'$2',"state":"'$3'"}'; }
+
+# ---- the roots' activation events: every root, rule, epoch E, latched AND active with currentEpoch >= E ------------------------------------------------
+mkroots "$d/rg"; roots_pred() { vrs_check_all_roots "$1" "$rid" $E 1 2 3 4; }
+edit() { mkroots "$d/rb"; "$@"; }   # a bad copy: a fresh good set, then ONE edit
+edit sed -i.bak 's/epoch=5 /epoch=6 /' "$d/rb/root2-activation-events.txt";                    mf "roots: another activation epoch on one root" roots_pred "$d/rg" "$d/rb"
+edit sed -i.bak "s/rule=${rid#0x}/rule=${other#0x}/" "$d/rb/root4-activation-events.txt";      mf "roots: another rule on one root" roots_pred "$d/rg" "$d/rb"
+edit sed -i.bak 's/currentEpoch=5/currentEpoch=4/' "$d/rb/root3-activation-events.txt";        mf "roots: active record with a CURRENT epoch below E" roots_pred "$d/rg" "$d/rb"
+edit sed -i.bak 's/ currentEpoch=5//' "$d/rb/root1-activation-events.txt";                     mf "roots: no currentEpoch at all" roots_pred "$d/rg" "$d/rb"
+edit sed -i.bak '/activation.latched/d' "$d/rb/root3-activation-events.txt";                   mf "roots: latched missing on one root" roots_pred "$d/rg" "$d/rb"
+edit sed -i.bak '/activation.active/d' "$d/rb/root3-activation-events.txt";                    mf "roots: active missing on one root" roots_pred "$d/rg" "$d/rb"
+edit sh -c ": >'$d/rb/root3-activation-events.txt'";                                           mf "roots: one root silent" roots_pred "$d/rg" "$d/rb"
+edit rm "$d/rb/root4-activation-events.txt";                                                   mf "roots: one root with no file" roots_pred "$d/rg" "$d/rb"
+mkroots "$d/rb6"; for i in 1 2 3 4; do sed -i.bak 's/currentEpoch=5/currentEpoch=6/' "$d/rb6/root$i-activation-events.txt"; done; ok vrs_check_all_roots "$d/rb6" "$rid" $E 1 2 3 4   # current epoch 6 >= E is fine
+cases=$((cases+1)); vrs_check_all_roots "$d/rg" "$rid" $E 2>/dev/null && fail "no roots listed passes"
+cases=$((cases+1)); vrs_check_all_roots "$d/rg" "$rid" 6 1 2 3 4 2>/dev/null && fail "the right evidence for another expected epoch passes"
+cases=$((cases+1)); vrs_check_all_roots "$d/rg" "$other" $E 1 2 3 4 2>/dev/null && fail "the right evidence for another expected rule passes"
+
+# ---- the shard refusal: ONE record, event=upgrade.refused, the attempted epoch key = E, UpgradeRequired naming the rule ----------------------------------
+refusal >"$d/rf.txt"; ref_pred() { vrs_check_refusal "$1" "$rid" $E; }
+refusal | sed 's/ epoch=5 / epoch=6 /' >"$d/rb.txt";                          mf "refusal: attempted epoch 6 (rule active from 5)" ref_pred "$d/rf.txt" "$d/rb.txt"
+refusal | sed "s/rule ${rid#0x}/rule ${other#0x}/" >"$d/rb.txt";               mf "refusal: another rule" ref_pred "$d/rf.txt" "$d/rb.txt"
+refusal | sed 's/event=upgrade.refused/event=other/' >"$d/rb.txt";             mf "refusal: not the structured event" ref_pred "$d/rf.txt" "$d/rb.txt"
+refusal | sed 's/UpgradeRequired/SomethingElse/' >"$d/rb.txt";                 mf "refusal: no UpgradeRequired" ref_pred "$d/rf.txt" "$d/rb.txt"
+{ refusal | sed 's/ epoch=5 / epoch=6 /'; echo "level=INFO msg=other epoch=5"; } >"$d/rb.txt"; mf "refusal: epoch E on another record" ref_pred "$d/rf.txt" "$d/rb.txt"
+{ refusal | sed 's/ epoch=5 / epoch=6 /'; refusal | sed "s/rule ${rid#0x}/rule ${other#0x}/"; } >"$d/rb.txt"; mf "refusal: rule and epoch spread over two records" ref_pred "$d/rf.txt" "$d/rb.txt"
+refusal | sed 's/root epoch 5/root epoch 9/' >"$d/rg9.txt"; ok ref_pred "$d/rg9.txt"                                 # the attempted epoch decides, not the text's scheduled epoch
+cases=$((cases+1)); vrs_check_refusal "$d/none.txt" "$rid" $E 2>/dev/null && fail "a missing refusal log passes"
+
+# ---- the pending warning: ONE record, rule, activationEpoch=E, currentEpoch < E ---------------------------------------------------------------------------
+warning >"$d/wg.txt"; warn_pred() { vrs_check_warning "$1" "$rid" $E; }
+warning | sed 's/currentEpoch=2/currentEpoch=5/' >"$d/wb.txt";                 mf "warning: currentEpoch = E (not ahead)" warn_pred "$d/wg.txt" "$d/wb.txt"
+warning | sed 's/currentEpoch=2/currentEpoch=7/' >"$d/wb.txt";                 mf "warning: currentEpoch > E" warn_pred "$d/wg.txt" "$d/wb.txt"
+warning | sed 's/state=pending/state=effective/' >"$d/wb.txt";                 mf "warning: wrong state" warn_pred "$d/wg.txt" "$d/wb.txt"
+warning | sed 's/activationEpoch=5/activationEpoch=6/' >"$d/wb.txt";           mf "warning: another activation epoch" warn_pred "$d/wg.txt" "$d/wb.txt"
+warning | sed "s/rule=${rid#0x}/rule=${other#0x}/" >"$d/wb.txt";              mf "warning: another rule" warn_pred "$d/wg.txt" "$d/wb.txt"
+warning | sed 's/ currentEpoch=2//' >"$d/wb.txt";                              mf "warning: no currentEpoch" warn_pred "$d/wg.txt" "$d/wb.txt"
+warning | sed 's/event=upgrade.required/event=other/' >"$d/wb.txt";            mf "warning: not the structured event" warn_pred "$d/wg.txt" "$d/wb.txt"
+{ warning | sed 's/activationEpoch=5/activationEpoch=6/'; warning | sed "s/rule=${rid#0x}/rule=${other#0x}/"; warning | sed 's/state=pending/state=effective/'; } >"$d/wb.txt"; mf "warning: the pieces on three different records" warn_pred "$d/wg.txt" "$d/wb.txt"
+echo 'level=WARN msg="upgrade required"' >"$d/wb.txt";                         mf "warning: a bare warning" warn_pred "$d/wg.txt" "$d/wb.txt"
+
+# ---- the metric: an exact-name SAMPLE line with labels rule/epoch/state and the value 1 as the last field --------------------------------------------------
+metric >"$d/mg.txt"; met_pred() { vrs_check_metric "$1" "$rid" $E pending; }
+metric | sed '/^ab_/d' >"$d/mb.txt";                                           mf "metric: HELP/TYPE only" met_pred "$d/mg.txt" "$d/mb.txt"
+metric | sed 's/} 1$/} 0/' >"$d/mb.txt";                                       mf "metric: value 0" met_pred "$d/mg.txt" "$d/mb.txt"
+metric | sed 's/state=\"pending\"/state=\"effective\"/' >"$d/mb.txt";          mf "metric: wrong state" met_pred "$d/mg.txt" "$d/mb.txt"
+metric | sed 's/epoch=\"5\"/epoch=\"6\"/' >"$d/mb.txt";                        mf "metric: wrong epoch" met_pred "$d/mg.txt" "$d/mb.txt"
+metric | sed "s/rule=\"${rid#0x}\"/rule=\"${other#0x}\"/" >"$d/mb.txt";        mf "metric: another rule" met_pred "$d/mg.txt" "$d/mb.txt"
+metric | sed 's/^ab_unicity/other_unicity/' >"$d/mb.txt";                      mf "metric: another metric name (other_unicity_upgrade_required)" met_pred "$d/mg.txt" "$d/mb.txt"
+metric | sed 's/^ab_unicity/x_ab_unicity/' >"$d/mb.txt";                       mf "metric: prefixed name" met_pred "$d/mg.txt" "$d/mb.txt"
+metric | sed 's/unicity_upgrade_required{/unicity_upgrade_required_total{/' >"$d/mb.txt"; mf "metric: another metric family (_total)" met_pred "$d/mg.txt" "$d/mb.txt"
+metric | sed 's/} 1$/} 1 1795000000/' >"$d/mb.txt";                            mf "metric: value is not the last field" met_pred "$d/mg.txt" "$d/mb.txt"
+metric | sed 's/rule=/rulez=/' >"$d/mb.txt";                                   mf "metric: label key rule missing" met_pred "$d/mg.txt" "$d/mb.txt"
+metric | sed 's/,state=/,statez=/' >"$d/mb.txt";                               mf "metric: label key state missing" met_pred "$d/mg.txt" "$d/mb.txt"
+{ metric | sed 's/epoch=\"5\"/epoch=\"6\"/'; metric | sed "s/rule=\"${rid#0x}\"/rule=\"${other#0x}\"/"; metric | sed 's/state=\"pending\"/state=\"effective\"/'; } | grep -v '^#' >"$d/mb.txt"; mf "metric: labels spread over three samples" met_pred "$d/mg.txt" "$d/mb.txt"
+metric | sed 's/^ab_//' >"$d/mg2.txt"; ok met_pred "$d/mg2.txt"                                                          # the unprefixed exact name is accepted
+
+# ---- ureth's unicity_rulesV1: the latch assertion (vrs_check_rules) and the baseline (vrs_check_rules_absent) both start from the strict validation ----------
+rules "$row" >"$d/ug.json"; lat_pred() { vrs_check_rules "$1" "$rid" $E true true; }
+bad_row() { rules "$(echo "$row" | sed "$1")" >"$d/ub.json"; }
+bad_row 's/"rootEpoch":5/"rootEpoch":5.0/';       mf "rules: float epoch 5.0" lat_pred "$d/ug.json" "$d/ub.json" 'not a valid'
+bad_row 's/"rootEpoch":5/"rootEpoch":-5/';        mf "rules: negative epoch" lat_pred "$d/ug.json" "$d/ub.json" 'not a valid'
+bad_row 's/"rootEpoch":5/"rootEpoch":18446744073709551616/'; mf "rules: epoch 2^64" lat_pred "$d/ug.json" "$d/ub.json" 'not a valid'
+bad_row 's/"rootEpoch":5/"rootEpoch":"5"/';       mf "rules: string epoch" lat_pred "$d/ug.json" "$d/ub.json" 'not a valid'
+bad_row 's/"latched":true/"latched":1/';          mf "rules: integer latched" lat_pred "$d/ug.json" "$d/ub.json" 'not a valid'
+bad_row 's/"known":true/"known":1/';              mf "rules: integer known" lat_pred "$d/ug.json" "$d/ub.json" 'not a valid'
+bad_row 's/"releaseDigest":"[^"]*",//';           mf "rules: no release digest" lat_pred "$d/ug.json" "$d/ub.json" 'not a valid'
+bad_row 's/"releaseDigest":"0x[0-9a-f]*"/"releaseDigest":"0x11"/'; mf "rules: short release digest" lat_pred "$d/ug.json" "$d/ub.json" 'not a valid'
+bad_row "s/\"ruleId\":\"$rid\"/\"ruleId\":\"0x11\"/"; mf "rules: short rule id" lat_pred "$d/ug.json" "$d/ub.json" 'not a valid'
+rules "$row,{}" >"$d/ub.json";                    mf "rules: a valid row plus an empty entry" lat_pred "$d/ug.json" "$d/ub.json" 'not a valid'
+bad_row 's/"latched":true/"latched":false/';      mf "rules: the rule is not latched" lat_pred "$d/ug.json" "$d/ub.json" 'no scheduled entry'
+bad_row 's/"rootEpoch":5/"rootEpoch":6/';         mf "rules: another epoch" lat_pred "$d/ug.json" "$d/ub.json" 'no scheduled entry'
+bad_row 's/"known":true/"known":false/';         mf "rules: not known" lat_pred "$d/ug.json" "$d/ub.json" 'no scheduled entry'
+bad_row "s/\"ruleId\":\"$rid\"/\"ruleId\":\"$other\"/"; mf "rules: another rule scheduled" lat_pred "$d/ug.json" "$d/ub.json" 'no scheduled entry'
+sed 's/"observed":true/"observed":false/' "$d/ug.json" >"$d/ub.json";            mf "rules: observed=false" lat_pred "$d/ug.json" "$d/ub.json" 'observed'
+sed 's/"result"/"resultz"/' "$d/ug.json" >"$d/ub.json";                         mf "rules: no result" lat_pred "$d/ug.json" "$d/ub.json" 'not a valid'
+echo '{"error":{"code":-32601,"message":"method not found"}}' >"$d/ub.json";     mf "rules: an error response" lat_pred "$d/ug.json" "$d/ub.json" 'not a valid'
+echo garbage >"$d/ub.json";                                                      mf "rules: garbage" lat_pred "$d/ug.json" "$d/ub.json" 'not a valid'
+
+# the baseline: absence is a VALID response without the rule
+oentry='{"ruleId":"'$other'","releaseDigest":"'$other'","rootEpoch":9,"latched":false,"known":false}'
+rules "$oentry" >"$d/bg.json"; abs_pred() { vrs_check_rules_absent "$1" "$rid"; }
+rules "$oentry,$row" >"$d/bb.json";               mf "baseline: the rule IS scheduled" abs_pred "$d/bg.json" "$d/bb.json" 'already scheduled'
+rules "$oentry,{}" >"$d/bb.json";                 mf "baseline: scheduled:[.., {}]" abs_pred "$d/bg.json" "$d/bb.json" 'not a valid'
+rules "{}" >"$d/bb.json";                         mf "baseline: scheduled:[{}]" abs_pred "$d/bg.json" "$d/bb.json" 'not a valid'
+rules "null" >"$d/bb.json";                       mf "baseline: scheduled:[null]" abs_pred "$d/bg.json" "$d/bb.json" 'not a valid'
+rules "$(echo "$oentry" | sed 's/"rootEpoch":9/"rootEpoch":-1/')" >"$d/bb.json";   mf "baseline: unrelated entry with rootEpoch -1" abs_pred "$d/bg.json" "$d/bb.json" 'not a valid'
+rules "$(echo "$oentry" | sed 's/"rootEpoch":9/"rootEpoch":18446744073709551616/')" >"$d/bb.json"; mf "baseline: unrelated entry with rootEpoch 2^64" abs_pred "$d/bg.json" "$d/bb.json" 'not a valid'
+rules "$(echo "$oentry" | sed 's/"rootEpoch":9/"rootEpoch":9.0/')" >"$d/bb.json"; mf "baseline: unrelated entry with float epoch" abs_pred "$d/bg.json" "$d/bb.json" 'not a valid'
+rules "$(echo "$oentry" | sed 's/"latched":false/"latched":0/')" >"$d/bb.json"; mf "baseline: unrelated entry with integer flag" abs_pred "$d/bg.json" "$d/bb.json" 'not a valid'
+rules "$(echo "$oentry" | sed 's/"releaseDigest":"[^"]*",//')" >"$d/bb.json"; mf "baseline: unrelated entry without a digest" abs_pred "$d/bg.json" "$d/bb.json" 'not a valid'
+sed 's/"scheduled":\[[^]]*\]/"scheduled":"none"/' "$d/bg.json" >"$d/bb.json";   mf "baseline: scheduled is not a list" abs_pred "$d/bg.json" "$d/bb.json" 'not a valid'
+sed 's/"lacking":\[\]/"lacking":[{}]/' "$d/bg.json" >"$d/bb.json";               mf "baseline: lacking:[{}]" abs_pred "$d/bg.json" "$d/bb.json" 'not a valid'
+sed 's/"known":\[{[^}]*}\]/"known":[{}]/' "$d/bg.json" >"$d/bb.json";            mf "baseline: known:[{}]" abs_pred "$d/bg.json" "$d/bb.json" 'not a valid'
+sed 's/"genesisSpec":"Cancun",//' "$d/bg.json" >"$d/bb.json";                    mf "baseline: no genesisSpec" abs_pred "$d/bg.json" "$d/bb.json" 'not a valid'
+sed 's/"observed":true/"observed":false/' "$d/bg.json" >"$d/bb.json";            mf "baseline: observed=false" abs_pred "$d/bg.json" "$d/bb.json" 'observed'
+sed 's/"observed":true/"observed":1/' "$d/bg.json" >"$d/bb.json";                mf "baseline: observed is not a boolean" abs_pred "$d/bg.json" "$d/bb.json" 'not a valid'
+echo '{"error":{"code":-32601}}' >"$d/bb.json";                                  mf "baseline: an error response" abs_pred "$d/bg.json" "$d/bb.json" 'not a valid'
+: >"$d/bb.json";                                                                 mf "baseline: an empty file" abs_pred "$d/bg.json" "$d/bb.json" 'not a valid'
+rules "" >"$d/bg0.json"; ok abs_pred "$d/bg0.json"                                                                  # a valid response with no entry at all is an absence
+
+# ---- the roots' status: activeEpoch is a JSON integer EQUAL to E ---------------------------------------------------------------------------------------
+status 5 >"$d/sg.json"; st_pred() { vrs_check_status_epoch "$1" $E; }
+status 50 >"$d/sb.json";   mf "status: activeEpoch 50 for E=5 (astra r8)" st_pred "$d/sg.json" "$d/sb.json" 'not 5'
+status 4 >"$d/sb.json";    mf "status: 4" st_pred "$d/sg.json" "$d/sb.json" 'not 5'
+status 6 >"$d/sb.json";    mf "status: 6 (not >=)" st_pred "$d/sg.json" "$d/sb.json" 'not 5'
+status '"5"' >"$d/sb.json"; mf "status: the string \"5\"" st_pred "$d/sg.json" "$d/sb.json" 'not 5'
+status 5.0 >"$d/sb.json";  mf "status: 5.0" st_pred "$d/sg.json" "$d/sb.json" 'not 5'
+status null >"$d/sb.json"; mf "status: null" st_pred "$d/sg.json" "$d/sb.json" 'not 5'
+echo '{"epoch":5}' >"$d/sb.json"; mf "status: no activeEpoch key" st_pred "$d/sg.json" "$d/sb.json" 'no activeEpoch'
+echo garbage >"$d/sb.json"; mf "status: garbage" st_pred "$d/sg.json" "$d/sb.json" 'no activeEpoch'
+
+# ---- VR's schedule row (validator upgrade --json): rule, epoch and the state Latched in ONE row -------------------------------------------------------------
+upgrade "$(urow "$rid" 5 Latched)" >"$d/lg.json"; lr_pred() { vrs_check_latched_row "$1" "$rid" $E; }
+upgrade "$(urow "$other" 5 Latched),$(urow "$rid" 5 Active)" >"$d/lb.json";       mf "latched row: another rule Latched, the target not (astra)" lr_pred "$d/lg.json" "$d/lb.json" 'no Latched row'
+upgrade "$(urow "$rid" 6 Latched)" >"$d/lb.json";                                 mf "latched row: another epoch" lr_pred "$d/lg.json" "$d/lb.json" 'no Latched row'
+upgrade "$(urow "$rid" 5 Queued)" >"$d/lb.json";                                  mf "latched row: Queued" lr_pred "$d/lg.json" "$d/lb.json" 'no Latched row'
+upgrade "" >"$d/lb.json";                                                         mf "latched row: empty schedule" lr_pred "$d/lg.json" "$d/lb.json" 'no Latched row'
+echo garbage >"$d/lb.json";                                                       mf "latched row: garbage" lr_pred "$d/lg.json" "$d/lb.json" 'no schedule'
+upgrade "$(urow "$rid" 5 Latched | sed 's/"rootEpoch":5/"rootEpoch":"5"/')" >"$d/lb.json"; mf "latched row: string epoch" lr_pred "$d/lg.json" "$d/lb.json" 'no Latched row'
+
+if [ "$fails" = 0 ]; then echo "vr-schedule checks: all $cases cases pass"; else echo "vr-schedule checks: $fails failing of $cases"; exit 1; fi
