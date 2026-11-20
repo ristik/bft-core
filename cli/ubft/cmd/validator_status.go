@@ -38,36 +38,41 @@ type validatorStatusReport struct {
 	} `json:"staged,omitempty"`
 	LocalKeys string `json:"localKeys,omitempty"` // "current", "staged", "other" or empty when the keys are not readable
 
-	PoaState      string   `json:"poaState,omitempty"`
-	PoaSince      uint64   `json:"poaSinceProgress,omitempty"`
-	Member        bool     `json:"member"`
-	Pending       []string `json:"pendingGovernance,omitempty"`
-	Module        string   `json:"module"`
-	ModuleTag     string   `json:"moduleTag"`
-	Health        string   `json:"health"`
-	Epoch         uint64   `json:"rootEpoch"`
-	EpochStart    uint64   `json:"epochStartProgress"`
-	Committee     []uint64 `json:"committee"`
-	Limits        string   `json:"limits"`
-	Progress      uint64   `json:"progress"`
-	UcTime        uint64   `json:"ucTime"`
-	RecordCursor  uint64   `json:"recordCursor"`
-	RecordCount   uint64   `json:"recordCount"`
-	NextBoundary  string   `json:"nextBoundary"`
-	Activations   []string `json:"activations,omitempty"`
-	PublicHead    uint64   `json:"publicHead"`
-	PublicHeadAge string   `json:"publicHeadAge"`
-	PublicSyncing *bool    `json:"publicSyncing"` // null: eth_syncing failed (see Unknown)
-	LocalRPC      string   `json:"localRpc,omitempty"`
-	LocalHead     *uint64  `json:"localHead,omitempty"`
-	LocalSync     string   `json:"localSync,omitempty"` // "in sync", "syncing …", "behind by …", "unreachable: …" or "unknown: …"
+	PoaState     string   `json:"poaState,omitempty"`
+	PoaSince     uint64   `json:"poaSinceProgress,omitempty"`
+	Member       bool     `json:"member"`
+	Pending      []string `json:"pendingGovernance,omitempty"`
+	Module       string   `json:"module"`
+	ModuleTag    string   `json:"moduleTag"`
+	Health       string   `json:"health"`
+	Epoch        uint64   `json:"rootEpoch"`
+	EpochStart   uint64   `json:"epochStartProgress"`
+	Committee    []uint64 `json:"committee"`
+	Limits       string   `json:"limits"`
+	Progress     uint64   `json:"progress"`
+	UcTime       uint64   `json:"ucTime"`
+	RecordCursor uint64   `json:"recordCursor"`
+	RecordCount  uint64   `json:"recordCount"`
+	NextBoundary string   `json:"nextBoundary"`
+	Activations  []string `json:"activations,omitempty"`
+	PublicHead   *uint64  `json:"publicHead"` // null when the public head could not be read, never 0
+	// PublicHeadUnknown: the public head could not be read, so PublicHead is not a measurement (see Unknown).
+	PublicHeadUnknown bool    `json:"publicHeadUnknown,omitempty"`
+	PublicHeadAge     string  `json:"publicHeadAge"`
+	PublicSyncing     *bool   `json:"publicSyncing"` // null: eth_syncing failed (see Unknown)
+	LocalRPC          string  `json:"localRpc,omitempty"`
+	LocalHead         *uint64 `json:"localHead,omitempty"`
+	LocalSync         string  `json:"localSync,omitempty"` // "in sync", "syncing …", "behind by …", "unreachable: …" or "unknown: …"
+	// Sync is the catch-up view (VT-11): height, rate, time to the head, and where the node's data came from.
+	Sync *syncView `json:"sync,omitempty"`
 	// Unknown lists every read that failed; status then exits with an error after printing what it could read.
 	Unknown []string `json:"unknown,omitempty"`
 }
 
 type validatorStatusFlags struct {
 	validatorFlags
-	JSON bool
+	JSON   bool
+	Sample time.Duration
 }
 
 func validatorStatusCmd(base *baseFlags) *cobra.Command {
@@ -94,18 +99,23 @@ func validatorStatusCmd(base *baseFlags) *cobra.Command {
 	}
 	f.validatorFlags.add(cmd)
 	cmd.Flags().BoolVar(&f.JSON, "json", false, "print the status as JSON")
+	cmd.Flags().DurationVar(&f.Sample, "sample", 3*time.Second, "how long to sample the local and public heads for the catch-up rate (0: no rate)")
 	return cmd
 }
 
 func blockInfo(ctx context.Context, c *rpc.Client, tag string) (number, ts uint64, err error) {
-	var h struct {
-		Number    hexutil.Uint64 `json:"number"`
-		Timestamp hexutil.Uint64 `json:"timestamp"`
+	var h *struct {
+		Number    *hexutil.Uint64 `json:"number"`
+		Timestamp *hexutil.Uint64 `json:"timestamp"`
 	}
 	if err := c.CallContext(ctx, &h, "eth_getBlockByNumber", tag, false); err != nil {
 		return 0, 0, err
 	}
-	return uint64(h.Number), uint64(h.Timestamp), nil
+	// a null answer or a block without a number is an unavailable head, never block 0 (a genuine genesis block carries "0x0")
+	if h == nil || h.Number == nil || h.Timestamp == nil {
+		return 0, 0, fmt.Errorf("eth_getBlockByNumber %s returned no block", tag)
+	}
+	return uint64(*h.Number), uint64(*h.Timestamp), nil
 }
 
 // syncing is eth_syncing: false, or a progress object (true). Any other answer is an error.
@@ -301,10 +311,13 @@ func validatorStatus(ctx context.Context, f *validatorStatusFlags) (*validatorSt
 	// sync: the public endpoint's head, and this validator's own ureth against it
 	n, ts, err := blockInfo(ctx, ch.rpc, "latest")
 	if err != nil {
-		return nil, err
+		// an unavailable public head (null, an error) leaves the head and everything derived from it unknown; the rest of the report stands
+		r.PublicHeadUnknown = true
+		r.Unknown = append(r.Unknown, "public head: "+err.Error())
+	} else {
+		r.PublicHead = &n
+		r.PublicHeadAge = time.Since(time.Unix(int64(ts), 0)).Round(time.Second).String()
 	}
-	r.PublicHead = n
-	r.PublicHeadAge = time.Since(time.Unix(int64(ts), 0)).Round(time.Second).String()
 	if busy, err := syncing(ctx, ch.rpc); err != nil {
 		r.Unknown = append(r.Unknown, "public sync: eth_syncing: "+err.Error())
 	} else {
@@ -314,11 +327,19 @@ func validatorStatus(ctx context.Context, f *validatorStatusFlags) (*validatorSt
 		r.LocalRPC = v.cfg.LocalRPC
 		lctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
-		r.LocalSync = localSync(lctx, v.cfg.LocalRPC, n, &r.LocalHead)
+		if r.PublicHeadUnknown {
+			r.LocalSync = "unknown: the public head is unavailable"
+			if h, err := headOf(lctx, v.cfg.LocalRPC); err == nil {
+				r.LocalHead = &h
+			}
+		} else {
+			r.LocalSync = localSync(lctx, v.cfg.LocalRPC, n, &r.LocalHead)
+		}
 		if strings.HasPrefix(r.LocalSync, "unknown:") {
 			r.Unknown = append(r.Unknown, "local sync: "+strings.TrimPrefix(r.LocalSync, "unknown: "))
 		}
 	}
+	r.Sync = buildSyncView(ctx, v, r, f.Sample)
 	if len(r.Unknown) > 0 {
 		return r, fmt.Errorf("%w: status is incomplete: %s", ErrValidator, strings.Join(r.Unknown, "; "))
 	}
@@ -404,11 +425,16 @@ func (r *validatorStatusReport) text(w io.Writer) {
 	if r.PublicSyncing != nil {
 		pub = fmt.Sprintf("syncing %v", *r.PublicSyncing)
 	}
-	fmt.Fprintf(w, "sync: public head %d (%s old, %s)", r.PublicHead, r.PublicHeadAge, pub)
+	if r.PublicHeadUnknown || r.PublicHead == nil {
+		fmt.Fprintf(w, "sync: public head UNKNOWN (%s)", pub)
+	} else {
+		fmt.Fprintf(w, "sync: public head %d (%s old, %s)", *r.PublicHead, r.PublicHeadAge, pub)
+	}
 	if r.LocalRPC != "" {
 		fmt.Fprintf(w, "; local ureth %s: %s", r.LocalRPC, r.LocalSync)
 	}
 	fmt.Fprintln(w)
+	r.Sync.text(w)
 	for _, u := range r.Unknown {
 		fmt.Fprintf(w, "UNKNOWN: %s\n", u)
 	}

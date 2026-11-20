@@ -6,14 +6,14 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/f8-rugregator-pin.sh"
 F8_PIN=$F8_RUGREGATOR_PIN
 F8_BIN=${RUGREGATOR_BIN:-}
 F8_SRC=${RUGREGATOR_SOURCE:-}
-F8_ROOT_RPC_BASE=${F8_ROOT_RPC_BASE:-25866}
+F8_ROOT_RPC_BASE=${F8_ROOT_RPC_BASE:-$((25866+LANE_PORT_OFFSET))}
 F8_LOG_DIR=${F8_LOG_DIR:-test-nodes/f8-mixed}
 # A is deliberately split into two non-default ranges; B is a single full-range
 # (unsharded) partition, whose canonical end-marker encoding is 0x80.
 F8_IDS=(0x40 0xc0 0x80)
 F8_PARTITIONS=(9 9 10)
 F8_NAMES=(a-left a-right b-left)
-F8_HTTP_PORTS=(28601 28602 28603)
+F8_HTTP_PORTS=($((28601+LANE_PORT_OFFSET)) $((28602+LANE_PORT_OFFSET)) $((28603+LANE_PORT_OFFSET)))
 F8_PIDS=()
 # Rugregator's canonical absent-deadline SDK request fixture. Its witness is
 # valid, and every fresh shard DB can independently certify the same StateID.

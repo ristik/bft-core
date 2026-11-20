@@ -57,9 +57,10 @@ knownScenarios="baseline follower-restart leader-kill reth-only-restart pair-res
 : "${chainID:=31337}"
 : "${pinnedRethCommit:=$URETH_PIN_COMMIT}"   # the fork client the seal-capable shard node requires
 
-: "${rethEngineBase:=18551}"
-: "${rethEthBase:=18545}"
-: "${rethP2PBase:=30401}"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lane-slot.sh"   # LANE_SLOT: ports below are shifted into the lane's slot
+: "${rethEngineBase:=$((18551+LANE_PORT_OFFSET))}"
+: "${rethEthBase:=$((18545+LANE_PORT_OFFSET))}"
+: "${rethP2PBase:=$((30401+LANE_PORT_OFFSET))}"
 
 : "${failures:=0}"
 pass() { echo "  PASS: $1"; }

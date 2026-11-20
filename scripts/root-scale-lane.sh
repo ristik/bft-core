@@ -117,13 +117,13 @@ wait_rounds() { # wait_rounds <rounds above current> <timeout s>: success if the
   while [ "$(shard_round)" -lt "$want" ]; do [ "$w" -lt "$2" ] || return 1; sleep 1; w=$((w + 1)); done
 }
 rpc_up() { # root index: its RPC port is listening
-  local port=$((25866 + $1 - 1)); (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null
+  local port=$(((25866+LANE_PORT_OFFSET) + $1 - 1)); (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null
 }
 stop_root() { stop_pidfile "test-nodes/root$1/pid" 'ubft root-node' TERM; }
 start_root() {
   local i=$1
   UBFT_Q4_SHIM_DIR="" build/ubft root-node run --home "test-nodes/root$i" --address "/ip4/127.0.0.1/tcp/$((rootPortStart + i - 1))" \
-    --bootnodes="$rootBoot" --trust-base test-nodes/trust-base.json --rpc-server-address "127.0.0.1:$((25866 + i - 1))" \
+    --bootnodes="$rootBoot" --trust-base test-nodes/trust-base.json --rpc-server-address "127.0.0.1:$(((25866+LANE_PORT_OFFSET) + i - 1))" \
     --log-format text --log-level info --metrics prometheus >>"test-nodes/root$i/debug.log" 2>&1 &
   echo $! >"test-nodes/root$i/pid"
 }
