@@ -235,8 +235,8 @@ func TestSourcesRefuseRoundZero(t *testing.T) {
 	_, err = s.Record(SourceEntry{Source: vrhandoff.Source{ResultID: make([]byte, 32), EVMBlockHash: make([]byte, 32), OutputCommit: make([]byte, 32)}})
 	require.Error(t, err)
 	path := filepath.Join(t.TempDir(), "bad.json")
-	require.NoError(t, os.WriteFile(path, []byte(`[{"resultId":"0x`+strings.Repeat("11", 32)+`","evmBlockHash":"0x`+strings.Repeat("22", 32)+
-		`","evmBlockNumber":1,"certRootRound":0,"outputCommit":"0x`+strings.Repeat("33", 32)+`","certUcTime":5}]`), 0o600))
+	require.NoError(t, os.WriteFile(path, []byte(`{"version":2,"sources":[{"resultId":"0x`+strings.Repeat("11", 32)+`","evmBlockHash":"0x`+strings.Repeat("22", 32)+
+		`","evmBlockNumber":1,"certRootRound":0,"outputCommit":"0x`+strings.Repeat("33", 32)+`","certUcTime":5}]}`), 0o600))
 	_, err = NewSources(path)
 	require.Error(t, err)
 }
