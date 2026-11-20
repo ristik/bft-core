@@ -22,6 +22,13 @@ var (
 	vrPosGasBounds = [8]uint64{4_000_000, 1_000_000, 1_500_000, 10_000, 10_000, 10_000, 10_000, 10_000}
 )
 
+// The prototype's measured deployment limit (contracts script/VRPosGenesis.s.sol, test/vr/pos/PosLimit.t.sol): a committee of at most 6 from an
+// index of at most 8 identities of one lot each.
+const (
+	vrPosMaxCommittee = 6
+	vrPosMaxPool      = 8
+)
+
 // custody storage appended by VT-04 (docs/p85/custody-storage-layout.txt): deploymentDomain and exposureMemberDigest.
 const (
 	vrCustodyDomainSlot       = 39

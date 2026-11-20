@@ -324,6 +324,12 @@ func vrPlan(in vrPlanInput) (vrGenesisInput, []evmassign.Identity, error) {
 	// vMax, lMax and rMax are the P85-compatible limits() view only (VR v1 reads maxBatch alone); the plan fixes them
 	l := vrInputLimits{NMin: in.limits.NMin, NTarget: in.limits.NTarget, NMax: in.limits.NMax, VMax: vrschema.MaxCommittee, LMax: 1, RMax: 4,
 		MaxBatch: b1state.HookMaxRecords}
+	if in.pos != nil {
+		l.VMax = vrPosMaxPool // the PoS prototype's measured index ceiling (script/VRPosGenesis.s.sol MAX_POOL)
+		if l.NMax > vrPosMaxCommittee {
+			return out, nil, fmt.Errorf("%w: a PoS generation's nMax is at most %d (the contracts' measured limit), got %d", ErrVRGenesis, vrPosMaxCommittee, l.NMax)
+		}
+	}
 	if in.fees.BaseFeeFloor == 0 || in.fees.BaseFeeFloor > vrMaxBaseFee || in.fees.ChangeDenominator == 0 {
 		return out, nil, fmt.Errorf("%w: the base-fee floor must be in 1..2^62 and the change denominator positive", ErrVRGenesis)
 	}
