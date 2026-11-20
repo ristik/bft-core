@@ -75,7 +75,12 @@ func FromJournal(ctx context.Context, c configuredprogress.Context, subject arch
 	block := shardnode.Block{Number: b.Number, Hash: b.Hash, StateRoot: b.StateRoot, ParentHash: b.ParentHash, Raw: b.Raw, BlockSize: b.BlockSize, StateSize: b.StateSize}
 	p := shardnode.RoundParams{Round: b.Round, Epoch: b.AuthorizingTR.Epoch, Timestamp: b.AuthorizingUC.UnicitySeal.Timestamp, SealHash: seal, Leader: b.AuthorizingTR.Leader, Parent: shardnode.BlockRef{Number: b.ParentNumber, Hash: b.ParentHash, StateRoot: b.ParentState}, AuthorizingCertificate: b.AuthorizingUC, AuthorizingTechnicalRecord: b.AuthorizingTR}
 	if adapter != nil {
-		if err := adapter.CheckBlockBinding(adapter.HistoricalContext(ctx), block, p); err != nil {
+		if err := shardnode.RetryBlockBinding(adapter.HistoricalContext(ctx), func(ctx context.Context) error {
+			return adapter.CheckBlockBinding(ctx, block, p)
+		}); err != nil {
+			if errors.Is(err, shardnode.ErrBlockBindingUnavailable) {
+				return archive.Request{}, nil, err
+			}
 			return archive.Request{}, nil, fmt.Errorf("%w: %v", ErrBinding, err)
 		}
 	}

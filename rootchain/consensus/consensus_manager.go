@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/libp2p/go-libp2p/core/peer"
+	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
@@ -31,6 +32,7 @@ import (
 
 	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/logger"
+	"github.com/unicitynetwork/bft-core/monitoring"
 	"github.com/unicitynetwork/bft-core/network"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
@@ -128,6 +130,14 @@ type (
 		// the votes. voteBuffer maps author id to vote, so we do not buffer same vote
 		// multiple times (votes are buffered for single round only)
 		voteBuffer map[string]*abdrc.VoteMsg
+		// the unicity_* metrics (VT-12, docs/operations/monitoring/metrics-catalogue.md); nil-safe
+		mon              *monitoring.Registry
+		votesMissed      *prometheus.CounterVec
+		proposals        prometheus.Counter
+		roundTimeout     prometheus.Counter
+		memberOverride   func() bool // test seam for the committee membership
+		lastTimeoutRound uint64      // the round of the last counted local timeout (a round counts once); owned by the manager loop
+		missedRun        int         // consecutive rounds this member ended without any vote; owned by the manager loop
 		// whether the CM is in recovery mode, trying to get into the same state as other CMs
 		recovery         *recoveryState
 		frontier         *frontierSampler
@@ -458,6 +468,9 @@ func NewConsensusManager(
 		log:              log,
 		tracer:           observe.Tracer("cm.distributed"),
 	}
+	if p, ok := observe.(interface{ PrometheusRegisterer() prometheus.Registerer }); ok {
+		consensusManager.mon = monitoring.New(p.PrometheusRegisterer())
+	}
 
 	consensusManager.storeRef.Store(bStore)
 	// Probably not the correct trust base, but we start with it and update as we discover current round
@@ -561,6 +574,10 @@ func (x *ConsensusManager) initMetrics(observe Observability) (err error) {
 		return fmt.Errorf("creating counter for frontier faults: %w", err)
 	}
 
+	x.initUnicityMetrics()
+	if x.pacemaker != nil {
+		x.pacemaker.roundEnded = x.roundEnded
+	}
 	return nil
 }
 
@@ -942,7 +959,8 @@ func (x *ConsensusManager) handlePacemakerEvent(ctx context.Context, event paceM
 func (x *ConsensusManager) onLocalTimeout(ctx context.Context) {
 	ctx, span := x.tracer.Start(ctx, "ConsensusManager.onLocalTimeout")
 	defer span.End()
-	x.log.InfoContext(ctx, "local timeout")
+	x.log.InfoContext(ctx, "local timeout", "round", x.pacemaker.GetCurrentRound(), monitoring.Event(monitoring.EvRootRoundTimeout))
+	x.noteRoundTimeout(x.pacemaker.GetCurrentRound())
 	x.sendTimeoutVote(ctx)
 }
 
@@ -1658,7 +1676,7 @@ func (x *ConsensusManager) processQC(ctx context.Context, qc *drctypes.QuorumCer
 		if x.frontier != nil && errors.Is(err, storage.ErrPersistenceUncertain) {
 			x.frontier.latchFault(fmt.Errorf("QC of round %d: %w", qc.GetRound(), err))
 		}
-		x.log.WarnContext(ctx, "failure to process QC triggers recovery", logger.Error(err))
+		x.log.WarnContext(ctx, "failure to process QC triggers recovery", logger.Error(err), monitoring.Event(monitoring.EvRootRecovery))
 		if e := x.sendRecoveryRequests(ctx, qc); e != nil {
 			x.log.WarnContext(ctx, "sending recovery requests failed", logger.Error(e))
 		}
@@ -2141,6 +2159,8 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 	}
 	if err = x.net.Send(ctx, proposalMsg, slices.Collect(maps.Keys(sendTo))...); err != nil {
 		x.log.WarnContext(ctx, "error on broadcasting proposal message", logger.Error(err))
+	} else {
+		x.noteProposal() // signed and sent (unicity_root_proposals_total)
 	}
 	for _, cr := range proposalMsg.Block.Payload.Requests {
 		x.proposedCR.Add(ctx, 1, observability.Shard(cr.Partition, cr.Shard, attribute.String("reason", cr.CertReason.String())))

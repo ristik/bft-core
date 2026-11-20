@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"github.com/unicitynetwork/bft-core/monitoring"
 	"github.com/unicitynetwork/bft-core/rootrecords"
 	basetypes "github.com/unicitynetwork/bft-go-base/types"
 	"log/slog"
@@ -443,6 +444,16 @@ func (x *BlockStore) ControlCut(key CutKey) (ControlCut, error) {
 	return x.tree().ControlCut(key)
 }
 
+// RecordCount is the number of records of the retained source log (the records the committed root chain has projected); false without a record store.
+func (x *BlockStore) RecordCount() (uint64, bool) {
+	store, ok := x.storage.(RecordStore)
+	if !ok {
+		return 0, false
+	}
+	n, err := store.RecordCount()
+	return n, err == nil
+}
+
 // Records returns up to max records of the retained source log from the index.
 func (x *BlockStore) Records(from uint64, max int) ([]rootrecords.Record, error) {
 	store, ok := x.storage.(RecordStore)
@@ -605,7 +616,7 @@ func (x *BlockStore) logHandoffOutcome(root *ExecutedBlock) {
 	if control := root.ShardState.Control; control != nil && root.GetRound() == control.OrderedRound &&
 		(control.Phase == "committed" || control.Phase == "aborted") {
 		x.log.Info("root handoff outcome", "phase", control.Phase, "attempt", control.Attempt,
-			"rootEpoch", control.Epoch, "rootRound", root.GetRound())
+			"rootEpoch", control.Epoch, "rootRound", root.GetRound(), monitoring.Event(monitoring.EvRootHandoffOutcome))
 	}
 	// A lapse is not an ordered record: it is the committed round passing the Prepare's window. Report it once per attempt so the
 	// operator (and the lane) retries at once instead of waiting out its own timeout.
@@ -614,7 +625,7 @@ func (x *BlockStore) logHandoffOutcome(root *ExecutedBlock) {
 		x.lapseLogged, x.lapseLoggedEpoch, x.lapseLoggedAttempt = true, control.Epoch, control.Attempt
 		x.log.Info("root handoff outcome", "phase", "lapsed", "attempt", control.Attempt,
 			"rootEpoch", control.Epoch, "rootRound", root.GetRound(), "preparedRound", control.OrderedRound,
-			"reason", "no Freeze within the endorsement window; the EVM certifies again and the next plan is attempt+1")
+			"reason", "no Freeze within the endorsement window; the EVM certifies again and the next plan is attempt+1", monitoring.Event(monitoring.EvRootHandoffOutcome))
 	}
 }
 
@@ -750,6 +761,9 @@ func (x *BlockStore) Add(block *rctypes.BlockData, verifier IRChangeReqVerifier)
 	}
 	return exeBlock.RootHash, nil
 }
+
+// CommittedRound is the round of the latest committed block: the root of the block tree.
+func (x *BlockStore) CommittedRound() uint64 { return x.tree().Root().BlockData.Round }
 
 func (x *BlockStore) GetHighQc() *rctypes.QuorumCert {
 	return x.tree().HighQc()

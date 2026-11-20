@@ -225,6 +225,9 @@ func (c *Client) Activations(ctx context.Context) ([]Activation, error) {
 	if err := c.vr(ctx, "activationCount", &n); err != nil {
 		return nil, err
 	}
+	if n > vrschema.MaxActivations { // the schedule is bounded by the schema: an answer beyond it is refused before anything is allocated or read
+		return nil, fmt.Errorf("%w: activationCount %d exceeds the schema's %d", ErrVR, n, vrschema.MaxActivations)
+	}
 	out := make([]Activation, 0, n)
 	for i := uint32(0); i < n; i++ {
 		var a Activation

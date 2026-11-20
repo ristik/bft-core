@@ -46,6 +46,10 @@ type Pacemaker struct {
 	statusChan     chan paceMakerStatus
 	stopRoundClock context.CancelFunc
 
+	// roundEnded, when set, is told at the start of every round after the first which round just ended and whether this node sent a vote for
+	// a proposal and a timeout vote in it (VT-12: votes missed)
+	roundEnded func(round uint64, voted, timeoutVoted bool)
+
 	tracer   trace.Tracer
 	roundDur metric.Float64Histogram
 	roundCnt metric.Int64Counter
@@ -278,6 +282,9 @@ func (x *Pacemaker) startNewRound(ctx context.Context, round uint64) {
 
 	x.stopRoundClock()
 	start := time.Now()
+	if prev := x.currentRound.Load(); x.roundEnded != nil && prev != 0 && round > prev {
+		x.roundEnded(prev, x.voteSent != nil, x.timeoutVote != nil)
+	}
 	x.currentQC = nil
 	x.voteSent = nil
 	x.timeoutVote = nil

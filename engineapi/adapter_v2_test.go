@@ -344,7 +344,7 @@ func TestAdapterV2BuildSendsTransitionInEngineSealInput(t *testing.T) {
 	})
 	a, closeFn := newTestAdapterWithVerifier(t, engine, eth, verifier)
 	defer closeFn()
-	_, err = a.buildDerived(context.Background(), params, derived)
+	_, err = a.buildDerived(context.Background(), params, derived, a.feeCollector)
 	require.NoError(t, err)
 	require.Equal(t, []data{data(encoded)}, captured.Transitions)
 }

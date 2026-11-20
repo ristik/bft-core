@@ -32,6 +32,7 @@ import (
 
 	"github.com/unicitynetwork/bft-go-base/types"
 
+	"github.com/unicitynetwork/bft-core/monitoring"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/zkverifier"
 
 	"github.com/unicitynetwork/bft-core/archive"
@@ -60,6 +61,7 @@ import (
 	"github.com/unicitynetwork/bft-core/rootchain/consensus"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
+	"github.com/unicitynetwork/bft-core/rootchain/vrstate"
 	"github.com/unicitynetwork/bft-core/rootinput"
 	"github.com/unicitynetwork/bft-core/shardnode"
 	"github.com/unicitynetwork/bft-core/shardnode/executortest"
@@ -1295,7 +1297,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 					if err := historicalTrust.ActivateHandoff(bundle.Body.Epoch); err != nil {
 						return err
 					}
-					flags.observe.Logger().Info("handoff activated", "rootEpoch", bundle.Body.Epoch)
+					flags.observe.Logger().Info("handoff activated", "rootEpoch", bundle.Body.Epoch, monitoring.Event(monitoring.EvShardHandoffActive))
 					refreshArchivePolicy()
 					return nil
 				}}
@@ -1366,7 +1368,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				InstallEVMTransition: executor.(*engineapi.Adapter).InstallEpochTransition,
 				Activate:             q3Trust.ActivateQ3,
 				Log: func(epoch uint64) {
-					flags.observe.Logger().Info("handoff activated", "rootEpoch", epoch, "q3", true)
+					flags.observe.Logger().Info("handoff activated", "rootEpoch", epoch, "q3", true, monitoring.Event(monitoring.EvShardHandoffActive))
 					if tb, tbErr := q3Trust.Verified().GetByEpoch(ctx, epoch); tbErr == nil {
 						follower.addRoots(tb)
 					}
@@ -1786,6 +1788,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			return trustBases[0].GetEpoch()
 		})
 	}
+	registerShardMonitoring(ctx, flags, flags.observe.Logger(), peer, node, executor, func() []libp2ppeer.ID { return activePeers.Peers() }, nil)
 
 	if err := peer.BootstrapConnect(ctx, flags.observe.Logger()); err != nil {
 		return fmt.Errorf("bootstrap connect: %w", err)
@@ -2166,12 +2169,22 @@ func buildExecutor(ctx context.Context, flags *shardNodeRunFlags, shardConf *typ
 			return nil, fmt.Errorf("parsing JWT secret %q: %w", jwtPath, err)
 		}
 
+		registry, registryCode, vr, err := vrstate.PinsFromPDR(shardConf)
+		if err != nil {
+			return nil, err
+		}
+		var resolveCollector engineapi.FeeCollectorResolver
+		if vr {
+			resolveCollector = vrFeeCollectorResolver(registry, registryCode)
+		}
+
 		adapter := engineapi.NewAdapter(engineapi.Config{
-			EngineURL:    flags.EngineURL,
-			EthURL:       flags.EthURL,
-			Secret:       secret,
-			FeeCollector: [20]byte(common.HexToAddress(flags.EngineFeeCollector)),
-			Verifier:     verifier,
+			EngineURL:        flags.EngineURL,
+			EthURL:           flags.EthURL,
+			Secret:           secret,
+			FeeCollector:     [20]byte(common.HexToAddress(flags.EngineFeeCollector)),
+			ResolveCollector: resolveCollector,
+			Verifier:         verifier,
 		}, flags.observe.Logger())
 
 		// The build path now runs through the seal siblings, so a client that lacks them fails

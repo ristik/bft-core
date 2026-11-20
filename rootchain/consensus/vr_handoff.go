@@ -20,6 +20,7 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/evmroot"
+	"github.com/unicitynetwork/bft-core/monitoring"
 	"github.com/unicitynetwork/bft-core/q3format"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
@@ -838,7 +839,7 @@ func (x *ConsensusManager) vrRecordsForRound(round uint64, parent *storage.Execu
 			return nil, nil
 		}
 	}
-	x.log.Info("VR handoff: ordering the "+step.Kind, "round", round, "attempt", plan.Attempt, "view", plan.Certificate.Assembly.Slot)
+	x.log.Info("VR handoff: ordering the "+step.Kind, "round", round, "attempt", plan.Attempt, "view", plan.Certificate.Assembly.Slot, monitoring.Event(monitoring.EvVRHandoffOrdering))
 	return step.Records, nil
 }
 
@@ -1226,7 +1227,7 @@ func (v *vrHandoff) shardStagedRun(ctx context.Context) {
 		v.shardLast = time.Now()
 		v.stageMu.Unlock()
 		if ver != done {
-			v.cfg.Log.Info("VR handoff: the paired shard node holds the staged successor", "evmNodes", len(ids))
+			v.cfg.Log.Info("VR handoff: the paired shard node holds the staged successor", "evmNodes", len(ids), monitoring.Event(monitoring.EvVRHandoffShardStage))
 		}
 	}
 }

@@ -41,7 +41,20 @@ type blockHeaderJSON struct {
 	Timestamp  quantity `json:"timestamp"`
 }
 
+// A fee proof holds one account path and five storage paths. The 600 KiB cap
+// covers hex expansion of the trie nodes and the JSON envelope.
+const maxFeeProofResponseBytes = 600 << 10
+
+// ErrFeeProofOversized marks a proof response beyond the bounded witness transport.
+var ErrFeeProofOversized = errors.New("engineapi: parent fee proof response exceeds limit")
+
+// CallContext makes the local execution transport available to proof readers.
+func (c *EthClient) CallContext(ctx context.Context, result any, method string, args ...any) error {
+	return c.call(ctx, method, args, result)
+}
+
 func (c *EthClient) call(ctx context.Context, method string, params []any, out any) error {
+	feeProof := method == "eth_getProof"
 	reqBody, err := json.Marshal(rpcRequest{JSONRPC: "2.0", ID: 1, Method: method, Params: params})
 	if err != nil {
 		return fmt.Errorf("engineapi: encoding request for %s: %w", method, err)
@@ -58,19 +71,37 @@ func (c *EthClient) call(ctx context.Context, method string, params []any, out a
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	var reader io.Reader = resp.Body
+	if feeProof {
+		// Read one extra byte to distinguish an oversize body from an exact fit.
+		reader = io.LimitReader(reader, maxFeeProofResponseBytes+1)
+	}
+	body, err := io.ReadAll(reader)
+	if feeProof && len(body) > maxFeeProofResponseBytes {
+		return fmt.Errorf("%w (%d bytes)", ErrFeeProofOversized, maxFeeProofResponseBytes)
+	}
 	if err != nil {
 		return fmt.Errorf("engineapi: reading response for %s: %w", method, err)
 	}
 	if resp.StatusCode != http.StatusOK {
+		if feeProof {
+			return fmt.Errorf("engineapi: %s returned HTTP %d", method, resp.StatusCode)
+		}
 		return fmt.Errorf("engineapi: %s returned HTTP %d: %s", method, resp.StatusCode, string(body))
 	}
 	var rpcResp rpcResponse
 	if err := json.Unmarshal(body, &rpcResp); err != nil {
 		return fmt.Errorf("engineapi: decoding response envelope for %s: %w", method, err)
 	}
+	if feeProof && (rpcResp.JSONRPC != "2.0" || rpcResp.ID != 1 ||
+		(len(rpcResp.Result) == 0) == (rpcResp.Error == nil)) {
+		return errors.New("engineapi: malformed parent fee proof response envelope")
+	}
 	if rpcResp.Error != nil {
 		return fmt.Errorf("engineapi: %s: %w", method, rpcResp.Error)
+	}
+	if feeProof && isJSONNull(rpcResp.Result) {
+		return errors.New("engineapi: empty parent fee proof")
 	}
 	if out == nil {
 		return nil

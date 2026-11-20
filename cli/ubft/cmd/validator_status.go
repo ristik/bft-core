@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -13,8 +14,22 @@ import (
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/spf13/cobra"
 
+	"github.com/unicitynetwork/bft-core/rootchain/vrschedule"
 	"github.com/unicitynetwork/bft-core/vrclient"
+	"github.com/unicitynetwork/bft-core/vrschema"
 )
+
+type validatorFeeSet struct {
+	BaseFeeFloor      uint64         `json:"baseFeeFloor"`
+	ChangeDenominator uint64         `json:"changeDenominator"`
+	FeeCollector      common.Address `json:"feeCollector"`
+}
+
+type validatorFeeState struct {
+	Previous       validatorFeeSet `json:"previous"`
+	Current        validatorFeeSet `json:"current"`
+	EffectiveBlock uint64          `json:"effectiveBlock"`
+}
 
 // validatorStatusReport is `validator status`, as text or --json.
 type validatorStatusReport struct {
@@ -38,24 +53,25 @@ type validatorStatusReport struct {
 	} `json:"staged,omitempty"`
 	LocalKeys string `json:"localKeys,omitempty"` // "current", "staged", "other" or empty when the keys are not readable
 
-	PoaState     string   `json:"poaState,omitempty"`
-	PoaSince     uint64   `json:"poaSinceProgress,omitempty"`
-	Member       bool     `json:"member"`
-	Pending      []string `json:"pendingGovernance,omitempty"`
-	Module       string   `json:"module"`
-	ModuleTag    string   `json:"moduleTag"`
-	Health       string   `json:"health"`
-	Epoch        uint64   `json:"rootEpoch"`
-	EpochStart   uint64   `json:"epochStartProgress"`
-	Committee    []uint64 `json:"committee"`
-	Limits       string   `json:"limits"`
-	Progress     uint64   `json:"progress"`
-	UcTime       uint64   `json:"ucTime"`
-	RecordCursor uint64   `json:"recordCursor"`
-	RecordCount  uint64   `json:"recordCount"`
-	NextBoundary string   `json:"nextBoundary"`
-	Activations  []string `json:"activations,omitempty"`
-	PublicHead   *uint64  `json:"publicHead"` // null when the public head could not be read, never 0
+	PoaState     string            `json:"poaState,omitempty"`
+	PoaSince     uint64            `json:"poaSinceProgress,omitempty"`
+	Member       bool              `json:"member"`
+	Pending      []string          `json:"pendingGovernance,omitempty"`
+	Module       string            `json:"module"`
+	ModuleTag    string            `json:"moduleTag"`
+	Health       string            `json:"health"`
+	Epoch        uint64            `json:"rootEpoch"`
+	EpochStart   uint64            `json:"epochStartProgress"`
+	Committee    []uint64          `json:"committee"`
+	Limits       string            `json:"limits"`
+	Fees         validatorFeeState `json:"fees"`
+	Progress     uint64            `json:"progress"`
+	UcTime       uint64            `json:"ucTime"`
+	RecordCursor uint64            `json:"recordCursor"`
+	RecordCount  uint64            `json:"recordCount"`
+	NextBoundary string            `json:"nextBoundary"`
+	Activations  []string          `json:"activations,omitempty"`
+	PublicHead   *uint64           `json:"publicHead"` // null when the public head could not be read, never 0
 	// PublicHeadUnknown: the public head could not be read, so PublicHead is not a measurement (see Unknown).
 	PublicHeadUnknown bool    `json:"publicHeadUnknown,omitempty"`
 	PublicHeadAge     string  `json:"publicHeadAge"`
@@ -63,16 +79,70 @@ type validatorStatusReport struct {
 	LocalRPC          string  `json:"localRpc,omitempty"`
 	LocalHead         *uint64 `json:"localHead,omitempty"`
 	LocalSync         string  `json:"localSync,omitempty"` // "in sync", "syncing …", "behind by …", "unreachable: …" or "unknown: …"
+	PublicHeadTime    uint64  `json:"publicHeadTime"`
 	// Sync is the catch-up view (VT-11): height, rate, time to the head, and where the node's data came from.
 	Sync *syncView `json:"sync,omitempty"`
+	// The numeric form of what the text fields say, for scripts and the VR exporter (VT-12). Codes are the contract's enums
+	// (vrclient.Poa*, OutputState, Health); they are stable.
+	HealthCode      uint8         `json:"healthCode"`
+	PoaStateCode    *uint8        `json:"poaStateCode,omitempty"`
+	OpenOutput      *statusOutput `json:"openOutput,omitempty"`
+	PendingBoundary bool          `json:"pendingBoundary"`
+	// EarliestBoundaryProgress is the progress at which the next election may be reserved (the epoch's start plus the epoch gap).
+	EarliestBoundaryProgress uint64 `json:"earliestBoundaryProgress"`
+	// CustodyCursor is custody's recordCursor (--custody; a PoS generation), RecordRootTarget the records the root has projected
+	// (--root-metrics: the root's unicity_root_records_projected); both nil when not asked for. The four counters of the catch-up
+	// runbook (root target, imported count = RecordCount, VR cursor = RecordCursor, custody cursor) are read at the same pinned block.
+	CustodyCursor    *uint64 `json:"custodyCursor,omitempty"`
+	RecordRootTarget *uint64 `json:"recordRootTarget,omitempty"`
+	// RecordRootTargetAt is the unix time the root target was sampled: a separate observation of the root, not at the pinned EVM block.
+	RecordRootTargetAt int64 `json:"recordRootTargetAt,omitempty"`
+
+	// Verdict is the status as a script reads it: "ok", "warning", "critical" or "unknown" (some read failed), with the findings behind it.
+	// `status --exit-code` exits 0, 1, 2 or 3 accordingly.
+	Verdict  string    `json:"verdict"`
+	Findings []Finding `json:"findings,omitempty"`
+
+	// UpgradeRequired lists the schedule entries (Active or Latched) whose (rule, release) this binary does not implement; ScheduleKnown is false when the
+	// schedule could not be read (then nothing is said about upgrades either way). The exporter reconciles unicity_upgrade_* from them at every poll.
+	ScheduleKnown   bool            `json:"scheduleKnown"`
+	UpgradeRequired []statusUpgrade `json:"upgradeRequired,omitempty"`
 	// Unknown lists every read that failed; status then exits with an error after printing what it could read.
 	Unknown []string `json:"unknown,omitempty"`
 }
 
+// statusUpgrade is a schedule entry this binary cannot support.
+type statusUpgrade struct {
+	Rule      string `json:"rule"`
+	Release   string `json:"release"`
+	RootEpoch uint64 `json:"rootEpoch"`
+	State     string `json:"state"`
+}
+
+// statusOutput is VR's open output in numbers.
+type statusOutput struct {
+	ID                string `json:"id"`
+	State             string `json:"state"`
+	StateCode         uint8  `json:"stateCode"`
+	Members           int    `json:"members"`
+	Attempt           uint64 `json:"attempt"`
+	ReservedProgress  uint64 `json:"reservedProgress"`
+	ExpiresAtProgress uint64 `json:"expiresAtProgress"`
+	ProgressLeft      int64  `json:"progressLeft"`
+}
+
 type validatorStatusFlags struct {
 	validatorFlags
-	JSON   bool
-	Sample time.Duration
+	JSON     bool
+	Sample   time.Duration
+	ExitCode bool
+	// NoKeys never reads the operator's or the node's key files (the exporter's mode: it needs the identity id, and compares nothing with local keys)
+	NoKeys bool
+	// Custody is the PoS custody contract (holder 0) whose recordCursor joins the record counters; RootMetrics the root's metrics URL its
+	// projected-record count is read from. Both optional.
+	Custody     string
+	RootMetrics string
+	Thresholds  statusThresholds
 }
 
 func validatorStatusCmd(base *baseFlags) *cobra.Command {
@@ -83,6 +153,9 @@ func validatorStatusCmd(base *baseFlags) *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			r, err := validatorStatus(cmd.Context(), f)
 			if r == nil {
+				if f.ExitCode && err != nil {
+					return &ExitCodeError{Code: ExitUnknown, Err: err}
+				}
 				return err
 			}
 			if f.JSON {
@@ -94,12 +167,19 @@ func validatorStatusCmd(base *baseFlags) *cobra.Command {
 			} else {
 				r.text(cmd.OutOrStdout())
 			}
+			if f.ExitCode {
+				return exitForVerdict(r, err)
+			}
 			return err
 		},
 	}
 	f.validatorFlags.add(cmd)
-	cmd.Flags().BoolVar(&f.JSON, "json", false, "print the status as JSON")
 	cmd.Flags().DurationVar(&f.Sample, "sample", 3*time.Second, "how long to sample the local and public heads for the catch-up rate (0: no rate)")
+	cmd.Flags().BoolVar(&f.JSON, "json", false, "print the status as JSON (it carries the numeric fields, the verdict and its findings)")
+	cmd.Flags().BoolVar(&f.ExitCode, "exit-code", false, "exit with the verdict: 0 ok, 1 warning, 2 critical, 3 unknown (a read failed); for scripts and alerting. Without it status exits 0 unless a read failed")
+	cmd.Flags().StringVar(&f.Custody, "custody", "", "PoS generation: the custody contract (holder 0) whose recordCursor is read with the other record counters")
+	cmd.Flags().StringVar(&f.RootMetrics, "root-metrics", "", "the root's metrics URL (http://host:port/api/v1/metrics): its projected-record count joins the record counters")
+	f.Thresholds.add(cmd)
 	return cmd
 }
 
@@ -139,26 +219,34 @@ func validatorStatus(ctx context.Context, f *validatorStatusFlags) (*validatorSt
 	if err != nil {
 		return nil, err
 	}
-	ch, err := v.dial(ctx)
+	ch, err := v.dialWith(ctx, true, true) // one pinned block for everything below, VR's configuration and module included
 	if err != nil {
 		return nil, err
 	}
 	defer ch.close()
-	vr, head, err := ch.vr.Pin(ctx)
-	if err != nil {
-		return nil, err
-	}
-	r := &validatorStatusReport{RPC: v.cfg.RPC, ChainID: ch.chainID.String(), Block: head, Registry: vr.Registry.Hex(),
+	vr, head, cfg := ch.vr, ch.head, ch.cfg
+	r := &validatorStatusReport{Fees: validatorFeeState{
+		Previous:       validatorFeeSet(cfg.FeesPrevious),
+		Current:        validatorFeeSet(cfg.FeesCurrent),
+		EffectiveBlock: cfg.FeesEffectiveBlock,
+	}, RPC: v.cfg.RPC, ChainID: ch.chainID.String(), Block: head, Registry: vr.Registry.Hex(),
 		Module: ch.module.Module.Hex(), ModuleTag: fmt.Sprintf("%x", ch.module.Meta.ModuleTag), Health: vrclient.Health(ch.module.Health),
-		Epoch: ch.cfg.KnownRootEpoch, EpochStart: ch.cfg.EpochStartProgress,
-		Limits: fmt.Sprintf("nMin %d, nTarget %d, nMax %d", ch.cfg.NMin, ch.cfg.NTarget, ch.cfg.NMax)}
+		Epoch: cfg.KnownRootEpoch, EpochStart: cfg.EpochStartProgress,
+		Limits: fmt.Sprintf("nMin %d, nTarget %d, nMax %d", cfg.NMin, cfg.NTarget, cfg.NMax)}
 
 	// the identity: --id or the config's, else the operator account's from VR's logs. Only a lookup that succeeded says "none".
-	keys, kerr := v.keys()
+	var keys *validatorKeys
+	kerr := errors.New("key files are not read in this mode")
+	if !f.NoKeys {
+		keys, kerr = v.keys()
+	}
 	id := v.cfg.ID
 	switch {
 	case id != 0:
 		r.Identity = "found"
+	case f.NoKeys:
+		r.Identity = "unknown"
+		r.Unknown = append(r.Unknown, "identity: no id is configured (set \"id\" in the config or pass --id)")
 	case kerr != nil:
 		r.Identity = "unknown"
 		r.Unknown = append(r.Unknown, fmt.Sprintf("identity: the operator key is not readable, so its identity was not looked up (pass --id): %v", kerr))
@@ -219,6 +307,8 @@ func validatorStatus(ctx context.Context, f *validatorStatusFlags) (*validatorSt
 				return nil, err
 			}
 			r.PoaState, r.PoaSince = vrclient.PoaState(s), since
+			code := uint8(s)
+			r.PoaStateCode = &code
 		}
 	}
 	clock, err := vr.Clock(ctx)
@@ -226,6 +316,8 @@ func validatorStatus(ctx context.Context, f *validatorStatusFlags) (*validatorSt
 		return nil, err
 	}
 	r.Progress, r.UcTime, r.RecordCursor, r.RecordCount = clock.Progress, clock.UcTime, clock.RecordCursor, clock.RecordCount
+	r.HealthCode, r.EarliestBoundaryProgress = ch.module.Health, ch.cfg.EpochStartProgress+vrclient.MinEpochGap
+	r.readCounters(ctx, f, vr)
 
 	// governance in flight that names this identity
 	pending, err := vr.PendingChanges(ctx)
@@ -270,6 +362,7 @@ func validatorStatus(ctx context.Context, f *validatorStatusFlags) (*validatorSt
 	}
 	switch {
 	case pair != ([32]byte{}):
+		r.PendingBoundary = true
 		r.NextBoundary = fmt.Sprintf("output %x is acknowledged; its Boundary record is awaited (the committee changes when it is applied)", pair)
 	case open != ([32]byte{}):
 		o, err := vr.Output(ctx, open)
@@ -283,6 +376,8 @@ func validatorStatus(ctx context.Context, f *validatorStatusFlags) (*validatorSt
 			}
 		}
 		left := int64(o.ExpiresAtProgress) - int64(clock.Progress)
+		r.OpenOutput = &statusOutput{ID: fmt.Sprintf("%x", open), State: vrclient.OutputState(o.State), StateCode: o.State, Members: len(o.Members), Attempt: o.Attempt,
+			ReservedProgress: o.ReservedProgress, ExpiresAtProgress: o.ExpiresAtProgress, ProgressLeft: left}
 		r.NextBoundary = fmt.Sprintf("output %x is %s (%d members, attempt %d), reserved at progress %d, expires at %d (%d to go)%s; its boundary comes when the roots commit its handoff",
 			open, vrclient.OutputState(o.State), len(o.Members), o.Attempt, o.ReservedProgress, o.ExpiresAtProgress, left, in)
 	default:
@@ -299,23 +394,22 @@ func validatorStatus(ctx context.Context, f *validatorStatusFlags) (*validatorSt
 		r.NextBoundary = s
 	}
 
-	acts, err := vr.Activations(ctx)
-	if err != nil {
-		return nil, err
-	}
-	for _, a := range acts {
-		r.Activations = append(r.Activations, fmt.Sprintf("rule %x release %x at root epoch %d, not before UC time %d: %s",
-			a.RuleId, a.ReleaseDigest, a.RootEpoch, a.NotBeforeUcTime, vrclient.ActivationState(a.State)))
-	}
+	r.readActivations(ctx, vr)
 
 	// sync: the public endpoint's head, and this validator's own ureth against it
-	n, ts, err := blockInfo(ctx, ch.rpc, "latest")
+	n, ts, err := blockInfo(ctx, ch.rpc, hexutil.EncodeUint64(head)) // the pinned block, so the public head and VR's state are one point
 	if err != nil {
 		// an unavailable public head (null, an error) leaves the head and everything derived from it unknown; the rest of the report stands
 		r.PublicHeadUnknown = true
 		r.Unknown = append(r.Unknown, "public head: "+err.Error())
 	} else {
-		r.PublicHead = &n
+		if ts == 0 && n > 0 {
+			r.PublicHeadUnknown = true
+			r.Unknown = append(r.Unknown, fmt.Sprintf("public head: block %d carries no timestamp", n))
+		} else {
+			r.PublicHead = &n
+			r.PublicHeadTime = ts
+		}
 		r.PublicHeadAge = time.Since(time.Unix(int64(ts), 0)).Round(time.Second).String()
 	}
 	if busy, err := syncing(ctx, ch.rpc); err != nil {
@@ -340,14 +434,32 @@ func validatorStatus(ctx context.Context, f *validatorStatusFlags) (*validatorSt
 		}
 	}
 	r.Sync = buildSyncView(ctx, v, r, f.Sample)
+	r.judge(f.Thresholds)
 	if len(r.Unknown) > 0 {
 		return r, fmt.Errorf("%w: status is incomplete: %s", ErrValidator, strings.Join(r.Unknown, "; "))
 	}
 	return r, nil
 }
 
+func (r *validatorStatusReport) readActivations(ctx context.Context, vr *vrclient.Client) {
+	acts, err := vr.Activations(ctx)
+	if err != nil {
+		r.Unknown = append(r.Unknown, "activation schedule: "+err.Error())
+		return
+	}
+	r.ScheduleKnown = true
+	for _, a := range acts {
+		if (a.State == 1 || a.State == 3) && !vrschedule.ImplementedRules[[2]vrschema.Word{a.RuleId, a.ReleaseDigest}] { // Active or Latched
+			r.UpgradeRequired = append(r.UpgradeRequired, statusUpgrade{Rule: fmt.Sprintf("%x", a.RuleId[:8]), Release: fmt.Sprintf("%x", a.ReleaseDigest[:8]),
+				RootEpoch: a.RootEpoch, State: vrclient.ActivationState(a.State)})
+		}
+		r.Activations = append(r.Activations, fmt.Sprintf("rule %x release %x at root epoch %d, not before UC time %d: %s",
+			a.RuleId, a.ReleaseDigest, a.RootEpoch, a.NotBeforeUcTime, vrclient.ActivationState(a.State)))
+	}
+}
+
 func localSync(ctx context.Context, url string, publicHead uint64, head **uint64) string {
-	c, err := rpc.DialContext(ctx, url)
+	c, err := dialBounded(ctx, url)
 	if err != nil {
 		return "unreachable: " + err.Error()
 	}
@@ -411,11 +523,17 @@ func (r *validatorStatusReport) text(w io.Writer) {
 		}
 	}
 	fmt.Fprintf(w, "committee: root epoch %d, %d members %v (%s)\n", r.Epoch, len(r.Committee), r.Committee, r.Limits)
+	fmt.Fprintf(w, "fees: current floor %d, denominator %d, collector %s (effective block %d)\n",
+		r.Fees.Current.BaseFeeFloor, r.Fees.Current.ChangeDenominator, r.Fees.Current.FeeCollector.Hex(), r.Fees.EffectiveBlock)
+	fmt.Fprintf(w, "fees: previous floor %d, denominator %d, collector %s\n",
+		r.Fees.Previous.BaseFeeFloor, r.Fees.Previous.ChangeDenominator, r.Fees.Previous.FeeCollector.Hex())
 	fmt.Fprintf(w, "module: %s (tag %s), health %s\n", r.Module, r.ModuleTag, r.Health)
 	fmt.Fprintf(w, "clock: progress %d, UC time %d, epoch started at progress %d; root records %d of %d imported\n", r.Progress, r.UcTime, r.EpochStart,
 		r.RecordCursor, r.RecordCount)
 	fmt.Fprintf(w, "next boundary: %s\n", r.NextBoundary)
-	if len(r.Activations) == 0 {
+	if !r.ScheduleKnown {
+		fmt.Fprintln(w, "activation schedule: unknown")
+	} else if len(r.Activations) == 0 {
 		fmt.Fprintln(w, "activation schedule: empty")
 	}
 	for _, a := range r.Activations {
@@ -437,5 +555,9 @@ func (r *validatorStatusReport) text(w io.Writer) {
 	r.Sync.text(w)
 	for _, u := range r.Unknown {
 		fmt.Fprintf(w, "UNKNOWN: %s\n", u)
+	}
+	fmt.Fprintf(w, "verdict: %s\n", r.Verdict)
+	for _, f := range r.Findings {
+		fmt.Fprintf(w, "  %s %s: %s\n", strings.ToUpper(f.Severity), f.Code, f.Message)
 	}
 }
