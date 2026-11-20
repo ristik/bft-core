@@ -34,14 +34,33 @@ ref 5 "$rid" 9 >"$d/ref59.txt"; ok vrs_check_refusal "$d/ref59.txt" "$rid" $E   
 bad vrs_check_refusal "$d/ref.txt" 0xcd$(printf 'cd%.0s' $(seq 31)) $E
 sed 's/event=upgrade.refused/event=other/' "$d/ref.txt" >"$d/noevent.txt"; bad vrs_check_refusal "$d/noevent.txt" "$rid" $E
 bad vrs_check_refusal "$d/none.txt" "$rid" $E
-# the pending warning
-echo "level=WARN msg=\"UPGRADE REQUIRED\" event=upgrade.required state=pending rule=${rid#0x} activationEpoch=5" >"$d/warn.txt"
-ok  vrs_check_warning "$d/warn.txt" "$rid"
-bad vrs_check_warning "$d/ref.txt" "$rid"
-sed 's/state=pending/state=effective/' "$d/warn.txt" >"$d/warn2.txt"; bad vrs_check_warning "$d/warn2.txt" "$rid"
+# the pending warning: ONE record with the rule, activationEpoch=E and currentEpoch<E
+warn() { echo "level=WARN msg=\"UPGRADE REQUIRED\" event=upgrade.required state=$1 rule=${2#0x} release=11 activationEpoch=$3 currentEpoch=$4 notBeforeUcTime=1"; }
+warn pending "$rid" 5 2 >"$d/warn.txt";                        ok  vrs_check_warning "$d/warn.txt" "$rid" $E
+warn pending "$rid" 5 5 >"$d/w.txt";                           bad vrs_check_warning "$d/w.txt" "$rid" $E      # currentEpoch not below E: not ahead
+warn pending "$rid" 5 7 >"$d/w.txt";                           bad vrs_check_warning "$d/w.txt" "$rid" $E
+warn effective "$rid" 5 2 >"$d/w.txt";                         bad vrs_check_warning "$d/w.txt" "$rid" $E      # wrong state
+warn pending "$rid" 6 2 >"$d/w.txt";                           bad vrs_check_warning "$d/w.txt" "$rid" $E      # another activation epoch
+warn pending 0xcd$(printf 'cd%.0s' $(seq 31)) 5 2 >"$d/w.txt"; bad vrs_check_warning "$d/w.txt" "$rid" $E      # another rule
+{ warn pending "$rid" 6 2; warn pending 0xcd$(printf 'cd%.0s' $(seq 31)) 5 2; warn effective "$rid" 5 2; } >"$d/w.txt"; bad vrs_check_warning "$d/w.txt" "$rid" $E   # the pieces on different records
+echo "event=upgrade.required state=pending rule=${rid#0x} activationEpoch=5" >"$d/w.txt";   bad vrs_check_warning "$d/w.txt" "$rid" $E      # no currentEpoch
+bad vrs_check_warning "$d/ref.txt" "$rid" $E
+bad vrs_check_warning "$d/none.txt" "$rid" $E
+# the metric: a SAMPLE line, value 1, labels rule/epoch/state (not HELP/TYPE)
+other=0xcd$(printf 'cd%.0s' $(seq 31))
+m() { echo "ab_unicity_upgrade_required{epoch=\"$2\",rule=\"${1#0x}\",state=\"$3\",otel_scope_name=\"x\"} $4"; }
+{ echo "# HELP ab_unicity_upgrade_required 1 for each rule"; echo "# TYPE ab_unicity_upgrade_required gauge"; m "$rid" 5 pending 1; } >"$d/m.txt"; ok  vrs_check_metric "$d/m.txt" "$rid" $E pending
+{ echo "# HELP ab_unicity_upgrade_required rule=\"${rid#0x}\" epoch=\"5\" state=\"pending\" 1"; echo "# TYPE ab_unicity_upgrade_required gauge"; } >"$d/m.txt";  bad vrs_check_metric "$d/m.txt" "$rid" $E pending   # HELP/TYPE only
+m "$rid" 5 pending 0 >"$d/m.txt";             bad vrs_check_metric "$d/m.txt" "$rid" $E pending   # value 0
+m "$rid" 5 effective 1 >"$d/m.txt";           bad vrs_check_metric "$d/m.txt" "$rid" $E pending   # wrong state
+m "$rid" 6 pending 1 >"$d/m.txt";             bad vrs_check_metric "$d/m.txt" "$rid" $E pending   # wrong epoch
+m "$other" 5 pending 1 >"$d/m.txt";           bad vrs_check_metric "$d/m.txt" "$rid" $E pending   # another rule
+{ m "$rid" 6 pending 1; m "$other" 5 pending 1; m "$rid" 5 effective 1; } >"$d/m.txt"; bad vrs_check_metric "$d/m.txt" "$rid" $E pending   # labels spread over samples
+: >"$d/m.txt";                                bad vrs_check_metric "$d/m.txt" "$rid" $E pending
+bad vrs_check_metric "$d/missing.txt" "$rid" $E pending
 # ureth's unicity_rulesV1
 r() { echo "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":$1}"; }
-good='{"genesisSpec":"Cancun","known":[{"name":"noop-test-v1","id":"'$rid'"}],"observed":true,"scheduled":[{"ruleId":"'$rid'","releaseDigest":"0x11","rootEpoch":5,"latched":true,"known":true}],"lacking":[]}'
+good='{"genesisSpec":"Cancun","known":[{"name":"noop-test-v1","id":"'$rid'"}],"observed":true,"scheduled":[{"ruleId":"'$rid'","releaseDigest":"'$rid'","rootEpoch":5,"latched":true,"known":true}],"lacking":[]}'
 r "$good" >"$d/u.json";                                              ok  vrs_check_rules "$d/u.json" "$rid" $E true true
 r "${good/\"latched\":true/\"latched\":false}" >"$d/u.json";         bad vrs_check_rules "$d/u.json" "$rid" $E true true
 r "${good/\"rootEpoch\":5/\"rootEpoch\":6}" >"$d/u.json";            bad vrs_check_rules "$d/u.json" "$rid" $E true true
@@ -68,4 +87,13 @@ echo 'garbage' >"$d/b.json";                                      bad vrs_check_
 bad vrs_check_rules_absent "$d/missing.json" "$rid"
 echo '{"result":{"observed":true}}' >"$d/b.json";                bad vrs_check_rules_absent "$d/b.json" "$rid"   # lists missing: malformed
 r "$good" >"$d/b.json";                                         bad vrs_check_rules_absent "$d/b.json" "$rid"   # the rule IS scheduled
+r "${base/\"scheduled\":[]/\"scheduled\":[{}]}" >"$d/b.json";    bad vrs_check_rules_absent "$d/b.json" "$rid"   # astra: scheduled:[{}]
+r "${base/\"scheduled\":[]/\"scheduled\":[{\"ruleId\":\"0x11\"}]}" >"$d/b.json"; bad vrs_check_rules_absent "$d/b.json" "$rid"   # truncated id, missing fields
+r "${base/\"scheduled\":[]/\"scheduled\":[null]}" >"$d/b.json";  bad vrs_check_rules_absent "$d/b.json" "$rid"
+r "${base/\"scheduled\":[]/\"scheduled\":\"none\"}" >"$d/b.json"; bad vrs_check_rules_absent "$d/b.json" "$rid"
+r "${base/\"lacking\":[]/\"lacking\":[{}]}" >"$d/b.json";        bad vrs_check_rules_absent "$d/b.json" "$rid"
+r "${base/\"known\":[{\"name\":\"noop-test-v1\",\"id\":\"$rid\"}]/\"known\":[{}]}" >"$d/b.json"; bad vrs_check_rules_absent "$d/b.json" "$rid"
+r "${base/\"genesisSpec\":\"Cancun\",/}" >"$d/b.json";           bad vrs_check_rules_absent "$d/b.json" "$rid"   # genesisSpec missing
+okentry='{"ruleId":"'$other'","releaseDigest":"'$other'","rootEpoch":9,"latched":false,"known":false}'
+r "${base/\"scheduled\":[]/\"scheduled\":[$okentry]}" >"$d/b.json"; ok vrs_check_rules_absent "$d/b.json" "$rid"   # a well-formed entry for ANOTHER rule is still an absence
 [ "$fails" = 0 ] && echo "vr-schedule checks: all pass" || { echo "vr-schedule checks: $fails failing"; exit 1; }

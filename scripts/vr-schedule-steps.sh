@@ -36,8 +36,27 @@ vrs_check_all_roots() {
 vrs_check_refusal() {
   grep -E 'event=upgrade\.refused' "$1" 2>/dev/null | grep -E "(^|[ ,{])epoch=$3([ ,}\"]|$)" | grep "UpgradeRequired" | grep -q "rule ${2#0x}"
 }
-# vrs_check_warning <log> <ruleId>: the pending warning for this rule (a queued schedule) was logged
-vrs_check_warning() { grep 'upgrade.required' "$1" 2>/dev/null | grep 'state=pending' | grep -qE "rule=(0x)?${2#0x}"; }
+# vrs_check_warning <log> <ruleId> <E>: ONE record is the pending warning (event=upgrade.required state=pending) for this rule with activationEpoch=E and a
+# currentEpoch below E (a warning AHEAD of the activation)
+vrs_check_warning() {
+  grep -E 'event=upgrade\.required' "$1" 2>/dev/null | grep -E 'state=pending' | grep -E "rule=(0x)?${2#0x}" | grep -E "activationEpoch=$3([^0-9]|$)" \
+    | sed -n 's/.*currentEpoch=\([0-9][0-9]*\).*/\1/p' | awk -v e="$3" '$1 < e { ok = 1 } END { exit ok ? 0 : 1 }'
+}
+# vrs_check_metric <metrics text> <ruleId> <E> <state>: a SAMPLE line (not HELP/TYPE) of unicity_upgrade_required with the labels rule, epoch and state and the value 1
+vrs_check_metric() {
+  grep -v '^#' "$1" 2>/dev/null | grep -E 'unicity_upgrade_required[{ ]' | grep -E "rule=\"(0x)?${2#0x}\"" | grep -E "epoch=\"$3\"" | grep -E "state=\"$4\"" \
+    | grep -qE '[} ]1(\.0+)?[[:space:]]*$'
+}
+# vrs_require_roots: THIS lane's roots only (scoped discovery), exactly the expected count, each root's status saved as evidence
+vrs_require_roots() {
+  local want=${validators:-4} r n=0 d; d=$(vrs_dir)
+  local rpcs; rpcs=$(vrb_root_rpcs)
+  for r in $rpcs; do
+    n=$((n+1)); curl -sf -X POST -H 'Content-Type: application/json' -d '{}' "$r/api/v1/q3/status" >"$d/root-status-$n.json" || { vrb_log "FAIL: root $r does not answer"; return 1; }
+  done
+  [ "$n" = "$want" ] || { vrb_log "FAIL: this lane's root discovery found $n roots ($(echo $rpcs)), expected $want"; return 1; }
+  vrb_log "PASS: exactly $want roots of this lane: $(echo $rpcs)"
+}
 # vrs_check_rules <unicity_rulesV1 response> <ruleId> <epoch> <latched true|false> <known true|false>: ureth reports the rule scheduled for E
 vrs_check_rules() {
   python3 - "$@" <<'PY'
@@ -59,17 +78,27 @@ PY
 # a missing, malformed, error or observed=false response is a failure, never "absent"
 vrs_check_rules_absent() {
   python3 - "$@" <<'PY'
-import json, sys
+import json, re, sys
 f, rid = sys.argv[1], sys.argv[2].lower()
+hexid = re.compile(r"^0x[0-9a-fA-F]{64}$")
 try:
     r = json.load(open(f))["result"]
-    assert isinstance(r["known"], list) and isinstance(r["scheduled"], list) and isinstance(r["lacking"], list)
     observed = r["observed"]
+    known, scheduled, lacking = r["known"], r["scheduled"], r["lacking"]
+    assert isinstance(r["genesisSpec"], str)
+    assert isinstance(known, list) and isinstance(scheduled, list) and isinstance(lacking, list)
+    for k in known:
+        assert isinstance(k["name"], str) and hexid.match(k["id"])
+    for e in scheduled:   # every entry well formed: an empty object or a missing field is a malformed response, not an absence
+        assert hexid.match(e["ruleId"]) and hexid.match(e["releaseDigest"]) and type(e["rootEpoch"]) is int
+        assert type(e["latched"]) is bool and type(e["known"]) is bool
+    for e in lacking:
+        assert hexid.match(e["ruleId"]) and hexid.match(e["releaseDigest"]) and type(e["rootEpoch"]) is int
 except Exception as e:
     sys.exit("not a valid unicity_rulesV1 response: %r" % (e,))
 if observed is not True:
     sys.exit("ureth has observed no canonical head")
-bad = [e for e in r["scheduled"] if e.get("ruleId", "").lower() == rid]
+bad = [e for e in scheduled + lacking if e["ruleId"].lower() == rid]
 sys.exit("the rule is already scheduled: %s" % bad if bad else 0)
 PY
 }
@@ -106,6 +135,7 @@ vrs_queue() { # name rule-name release-hex
 }
 vrs_run() {
   local d i; d=$(vrs_dir)
+  vrs_require_roots || return 1
   vrs_queue noop noop-test-v1 0x1111111111111111111111111111111111111111111111111111111111111111 || return 1
   vrs_queue future future-rule-v9 0x2222222222222222222222222222222222222222222222222222222222222222 || return 1
   build/ubft validator upgrade --rpc "$vrb_rpc" >"$d/validator-upgrade.txt" 2>&1; build/ubft validator upgrade --rpc "$vrb_rpc" --json >"$d/validator-upgrade.json" 2>&1
@@ -140,6 +170,11 @@ vrs_roots_at() { # epoch: at least 3 roots report this active epoch
   local r n=0; for r in $(vrb_root_rpcs); do curl -sf -X POST -H 'Content-Type: application/json' -d '{}' "$r/api/v1/q3/status" | grep -q "\"activeEpoch\": *$1" && n=$((n+1)); done; [ "$n" -ge 3 ]
 }
 vrs_rules() { curl -s -X POST -H 'Content-Type: application/json' --data '{"jsonrpc":"2.0","id":1,"method":"unicity_rulesV1","params":[]}' "$vrb_rpc"; }
+vrs_scrape_check() { # state ruleId E: scrape shard node 4's metrics endpoint, keep the text as evidence and check for the sample
+  local d; d=$(vrs_dir)
+  curl -s "http://$(evm_validator_rpc_addr 4)/api/v1/metrics" >"$d/evm4-metric-$1.txt" 2>/dev/null
+  vrs_check_metric "$d/evm4-metric-$1.txt" "$2" "$3" "$1"
+}
 vrs_upgrade_state() { build/ubft validator upgrade --rpc "$vrb_rpc" 2>&1; }
 vrs_upgrade_json() { build/ubft validator upgrade --rpc "$vrb_rpc" --json 2>/dev/null; }
 vrs_rotate() { # a new payee for identity 4 (local keys): the next election is due
@@ -169,6 +204,7 @@ vrs_handoff() { # target epoch: rotate, wait for the new output, the roots' swit
 }
 vrs_long() {
   local d i known E g change waited=0 kd; d=$(vrs_dir)
+  vrs_require_roots || return 1
   known=$(build/ubft validator upgrade --rpc "$vrb_rpc" --json | python3 -c 'import json,sys;print(json.load(sys.stdin)["knownRootEpoch"])'); E=$((known + 3))
   vrs_rules >"$d/ureth-rules-before.json"; vrb_log "ureth rules before: $(cut -c1-300 "$d/ureth-rules-before.json")"
   # 1. shard node 4 as a binary without the test rule
@@ -184,6 +220,7 @@ vrs_long() {
   [ "$rc" = 0 ] || return 1
   # 2. queue and execute the schedule
   vrs_queue noop noop-test-v1 0x1111111111111111111111111111111111111111111111111111111111111111 || return 1
+  vrb_wait 240 "shard node 4 exports unicity_upgrade_required{state=pending} for the queued rule" vrs_scrape_check pending "$(vrs_rule_id noop-test-v1)" "$E" || return 1
   g=$d/noop; change=$(python3 -c "import json;print(json.load(open('$g/proposal.json'))['predictedChangeId'])")
   kd=$(mktemp -d); python3 -c "import json;print(json.load(open('$VR_DIR/dev-keys/keys.json'))['signers'][0]['privateKey'])" >"$kd/sender.key"; chmod 600 "$kd/sender.key"
   vrb_log "waiting out the governance delays (3600 s of certified time) for change $change"
@@ -207,17 +244,16 @@ vrs_long() {
   local r
   for r in 1 2 3 4; do grep -hE 'activation\.latched|activation\.active' "test-nodes/root$r/debug.log" | cut -c1-400 >"$d/root$r-activation-events.txt"; done
   grep -hE 'upgrade\.required|upgrade\.refused|UpgradeRequired' test-nodes/evm4/debug.log | cut -c1-500 >"$d/evm4-upgrade-lines.txt"
-  curl -s "http://$(evm_validator_rpc_addr 4)/api/v1/metrics" | grep -i 'upgrade_required' >"$d/evm4-metric.txt" 2>/dev/null
   vrs_check_all_roots "$d" "$rid" "$E" 1 2 3 4 || { vrb_log "FAIL: not every root logged activation.latched and activation.active for the rule at epoch $E"; return 1; }
   vrb_log "PASS: all 4 roots logged activation.latched and activation.active for rule $rid at epoch $E"
   vrs_check_latched_row "$d/upgrade-epoch$E.json" "$rid" "$E" || { vrb_log "FAIL: VR does not list the schedule as Latched after epoch $E"; return 1; }
   vrb_log "PASS: VR latched the schedule at the Boundary into epoch $E"
   vrs_check_rules "$d/ureth-rules-epoch$E.json" "$rid" "$E" true true || { vrb_log "FAIL: ureth's unicity_rulesV1 does not show the rule latched at epoch $E"; return 1; }
   vrb_log "PASS: ureth unicity_rulesV1 lists the rule at epoch $E as latched and known"
-  vrs_check_warning "$d/evm4-upgrade-lines.txt" "$rid" || { vrb_log "FAIL: shard node 4 logged no pending upgrade.required warning for the rule ahead of E"; return 1; }
+  vrs_check_warning "$d/evm4-upgrade-lines.txt" "$rid" "$E" || { vrb_log "FAIL: shard node 4 logged no pending upgrade.required warning for the rule ahead of E"; return 1; }
   vrb_log "PASS: shard node 4 warned (upgrade.required state=pending) ahead of E"
-  [ -s "$d/evm4-metric.txt" ] || { vrb_log "FAIL: no unicity_upgrade_required sample on shard node 4"; return 1; }
-  vrb_log "PASS: unicity_upgrade_required on shard node 4: $(head -2 "$d/evm4-metric.txt" | tr '\n' ' ' | cut -c1-300)"
+  vrs_scrape_check effective "$rid" "$E" || { vrb_log "FAIL: no unicity_upgrade_required sample (value 1, rule, epoch $E, state=effective) on shard node 4"; return 1; }
+  vrb_log "PASS: unicity_upgrade_required{state=effective} on shard node 4: $(grep -h 'state="effective"' "$d/evm4-metric-effective.txt" | head -1 | cut -c1-300)"
   vrs_check_refusal "$d/evm4-upgrade-lines.txt" "$rid" "$E" || { vrb_log "FAIL: shard node 4 did not refuse with UpgradeRequired for rule $rid at epoch $E"; return 1; }
   vrb_log "PASS: the no_test_rule shard node 4 refused epoch $E with UpgradeRequired for rule $rid"
   return 0
