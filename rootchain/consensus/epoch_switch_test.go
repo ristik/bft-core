@@ -716,13 +716,15 @@ func q3fixtureEntry(t *testing.T, f *q3fixture.Fixture) q3format.Entry {
 	return e
 }
 
+// handoffIntentGen is kept: a monotonic count of intent registrations (handoffIntent itself is installed/cleared by the switch); a token captured before
+// the switch can never equal a later registration's, so it needs no reset.
 // Every field of the manager is accounted for by the switch: kept (a binding of the process, durable-backed, or the switch's own),
 // reset by resetVolatile to what the constructor leaves, or replaced by the install. A field added without a decision fails here.
 func TestInProcessSwitchAccountsForEveryManagerField(t *testing.T) {
 	kept := []string{"timeoutVerify", "shadow", "backoff", "msgSeq", "profile", "certCacheStart", "certReqCh", "certResultCh", "ucSink", "params", "id", "net",
 		"trustBaseStore", "safety", "storeRef", "orchestration", "viewResolver", "frontier", "recoveryProfile2", "utbPrevious", "utbStore", "evidence",
 		"utbConfig", "recoveryHistory", "stageRecovery", "proposalRequestCheck", "posPrefetching", "witnesses", "q3", "primaryWitness",
-		"approvalSink", "judgeHook", "handoffMu", "switcher", "ctxMu", "ctxGen", "switchCtx", "workerRunning", "future", "switchDeclined", "origins", "acq",
+		"approvalSink", "judgeHook", "handoffMu", "handoffIntentGen", "switcher", "ctxMu", "ctxGen", "switchCtx", "workerRunning", "future", "switchDeclined", "origins", "acq",
 		"switchPublished", "log", "tracer", "deferredReady", "admitted", "vr",
 		"lastProposedEpoch", "lastProposedRound", "leaderCnt", "execMsgCnt", "execMsgDur", "voteCnt", "proposedCR", "qcSize", "qcVoters", "susVotes", "recoveryReq", "frontierFault", "addBlockDur"}
 	reset := []string{"pacemaker", "voteBuffer", "recovery", "irReqBuffer", "retained", "leaderCheckedRound", "switchCheckedRound", "posQueue",
