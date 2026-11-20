@@ -412,6 +412,9 @@ if [ "${SIGNING:-local}" = authority ]; then
   cp "$fullShardConf" "test-nodes/shard-conf-${partitionID}_0.json"
   enroll_evm_authorities "$validators" "$partitionID" || exit 1
   echo "enrolled $validators independent signing authorities against the full shard configuration"
+  if [ "${VR_POS:-0}" = 1 ]; then
+    for i in $(seq 1 "$validators"); do vr_pos_pin_authority "$i" || exit 1; done
+  fi
 fi
 
 if [ "${UTB_LANE:-0}" = 1 ]; then

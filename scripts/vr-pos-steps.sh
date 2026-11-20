@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # The PoS-prototype lane's steps (VT-04, ristik/bft-core#1144): sourced by scripts/vr-boundary-steps.sh under VR_LANE=1 VR_POS=1 VR_JOINER=1, after
 # vr-joiner-steps.sh. The generation is the PoS prototype (scripts/lib/vr-lib.sh VR_POS=1): four genesis identities bonded in custody, the
-# PosElectionAdapter as VR's module, nMax 5. SIGNING=local first (authority signing of the P85 possession proof is a follow-up ticket); UTB on
+# PosElectionAdapter as VR's module, nMax 5. SIGNING=local or SIGNING=authority (#1216: the EVM key is the signing authority's; the delegation and
+# assignment possession proofs are its typed operations under the P85 pin of `signing-authority pos-policy`; VR_ARCHIVE=1 restores the joiner's shard node
+# from an incumbent's archive, which refuses a local key); UTB on
 # (UTB_LANE=1: the signed trust-base history, coordinated with bft-core feat/vr-utb: this file adds no UTB wiring).
 #
 #   vrp_apply      the fifth identity joins by stake through `ubft validator apply`: VR.register, custody.register, custody.bond, admitDelegation
@@ -16,7 +18,24 @@
 vrp_election() { jq -r .election "$VR_DIR/contracts/deployment.json"; }
 vrp_custody() { jq -r .custody "$VR_DIR/contracts/deployment.json"; }
 
+# the adapter's deployed code hash and the profile values the lane ran under (#1216 evidence): VR's active module account, its runtime code hash, the
+# election's and the custody's, and the b1 profile's ElectGas, envelope (system, record and companion gas) and MaxGas
+vrp_record_profile() {
+  local mod out=$VR_EVIDENCE/pos-profile.json
+  mod=$(cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'activeModule()(address)' 2>/dev/null || jq -r .module "$VR_DIR/contracts/deployment.json")
+  python3 - "$out" "$VR_DIR/contracts/deployment.json" test-nodes/b1-profile.json "$mod" "$(cast codehash --rpc-url "$vrb_rpc" "$mod" 2>/dev/null || cast keccak "$(cast code --rpc-url "$vrb_rpc" "$mod")")" <<'PY'
+import json, sys
+out, dep, prof, mod, h = sys.argv[1:6]
+d, p = json.load(open(dep)), json.load(open(prof))
+json.dump({"adapter": mod, "adapterCodeHash": h.strip(), "election": d["election"], "custody": d["custody"],
+           "profile": {k: p[k] for k in ("electGas", "systemGas", "forcedGas", "maxGas", "ordinaryCapacity", "restGas", "companionBytes",
+                                         "otherCompanionBytes", "hookRecordGas", "hRecords", "deltaEv", "deltaHold") if k in p}}, open(out, "w"), indent=1)
+print(open(out).read())
+PY
+}
+
 vrp_apply() {
+  vrp_record_profile || vrb_log "note: the adapter's code hash and the profile values could not be recorded"
   vrj_apply || return 1   # `validator apply` dispatches on the active module: on the PoS adapter it registers, bonds and admits the delegation
   local el id=$vrj_id
   el=$(vrp_election)
@@ -25,9 +44,22 @@ vrp_apply() {
   vrb_log "PASS: identity $id registered in VR and custody, bonded, delegation admitted (live count $(cast call --rpc-url "$vrb_rpc" "$el" 'liveCount()(uint32)' | awk '{print $1}'))"
 }
 
-# the EVM key file of every identity, in id order (ids follow ascending root node id; the joiner is 5)
+# the EVM key holder of every identity, in id order (ids follow ascending root node id; the joiner is 5). SIGNING=authority: each identity's EVM key is
+# its signing authority's, reached on the operator channel (--evm-authority id=socket,credential,nodeInfo); the proofs are its typed operation.
 vrp_evm_key_args() {
-  local i eid h ids=()
+  local i eid h ids=() a
+  if [ "${SIGNING:-local}" = authority ]; then
+    for i in 1 2 3 4; do
+      eid=$(python3 -c "import json;print(json.load(open('$VR_DIR/genesis-identities.json'))[$((i - 1))]['evmNodeId'])")
+      for a in test-nodes/auth*/; do
+        [ "$(python3 -c "import json;print(json.load(open('${a}node-info.json'))['nodeId'])")" = "$eid" ] &&
+          ids+=(--evm-authority "$i=$PWD/${a}operator.sock,$PWD/${a}operator.cred,$PWD/${a}node-info.json")
+      done
+    done
+    [ "${VR_JOINER:-0}" != 1 ] || ids+=(--evm-authority "$vrj_id=$PWD/test-nodes/auth$vrj_id/operator.sock,$PWD/test-nodes/auth$vrj_id/operator.cred,$PWD/test-nodes/auth$vrj_id/node-info.json")
+    printf '%s\n' "${ids[@]}"
+    return 0
+  fi
   for i in 1 2 3 4; do
     eid=$(python3 -c "import json;print(json.load(open('$VR_DIR/genesis-identities.json'))[$((i - 1))]['evmNodeId'])")
     for h in test-nodes/evm*/; do
@@ -41,6 +73,13 @@ vrp_evm_key_args() {
 vrp_open_result() { [ "$(cast call --rpc-url "$vrb_rpc" "$(vrp_election)" 'openResult()(bytes32)')" != 0x0000000000000000000000000000000000000000000000000000000000000000 ]; }
 
 # a validator config for the relayer when no joiner created one: the dev-funded operator, the first root's and shard node's keys
+vrp_relay_evm_holder() {
+  if [ "${SIGNING:-local}" = authority ]; then
+    printf '"evmAuthority":{"socket":"%s","credential":"%s","nodeInfo":"%s"}' "$PWD/test-nodes/auth1/operator.sock" "$PWD/test-nodes/auth1/operator.cred" "$PWD/test-nodes/auth1/node-info.json"
+  else
+    printf '"evmKeys":"%s"' "$PWD/test-nodes/evm1/keys.json"
+  fi
+}
 vrp_relay_cfg() {
   [ -n "${vrj_cfg:-}" ] && [ -f "$vrj_cfg/validator.json" ] && return 0
   local d keys; d=$(mktemp -d); vrj_cfg=$d; keys=$VR_DIR/dev-keys/keys.json
@@ -48,7 +87,7 @@ vrp_relay_cfg() {
   openssl rand -hex 32 >"$d/ureth.key"
   cat >"$d/validator.json" <<JSON
 {"format":"unicity.validator.config.v1","rpc":"$vrb_rpc","registry":"$vrb_vr","rootKeys":"$PWD/test-nodes/root1/keys.json",
- "evmKeys":"$PWD/test-nodes/evm1/keys.json","urethKey":"$d/ureth.key","jwt":"$d/none","operatorKey":"$d/operator.key",
+ $(vrp_relay_evm_holder),"urethKey":"$d/ureth.key","jwt":"$d/none","operatorKey":"$d/operator.key",
  "payee":"$(python3 -c "import json;print(json.load(open('$keys'))['signers'][0]['address'])")"}
 JSON
 }
