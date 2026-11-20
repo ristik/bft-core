@@ -31,6 +31,7 @@
 # Needs:  a pinned reth, curl, openssl, python3, go, and a built ./build/ubft. Run from the repo root.
 
 set -uo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/lane-slot.sh" || exit 2   # LANE_SLOT: every port below is shifted into this lane's slot
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 selfTest=false
@@ -39,10 +40,10 @@ if [ "${1:-}" = "--self-test" ]; then selfTest=true; shift; fi
 validators=${1:-3}
 partitionID=8
 chainID=31337
-rethEngineBase=18551
-rethEthBase=18545
-rethP2PBase=30401
-rootBootPort=26662
+rethEngineBase=$((18551+LANE_PORT_OFFSET))
+rethEthBase=$((18545+LANE_PORT_OFFSET))
+rethP2PBase=$((30401+LANE_PORT_OFFSET))
+rootBootPort=$((26662+LANE_PORT_OFFSET))
 
 failures=0
 reached="startup"
@@ -70,7 +71,7 @@ pinnedRethCommit=$URETH_PIN_COMMIT
 # devnet this run did not create. See refuseStaleListeners.
 refuseStaleListeners $(seq -s" " "$rethEngineBase" $((rethEngineBase + validators - 1))) $(seq -s" " "$rethEthBase" $((rethEthBase + validators - 1))) || exit 1
 
-stale=$(pgrep -f 'ubft shard-node run' 2>/dev/null || true)
+stale=$(for p in $(pgrep -f 'ubft shard-node run' 2>/dev/null); do [ "$(readlink "/proc/$p/cwd" 2>/dev/null)" = "$(pwd -P)" ] && echo "$p"; done)   # this checkout's only (other lane slots run concurrently)
 if [ -n "$stale" ]; then
   echo "refusing to start: shard-node processes are already running (pids: $(echo $stale | tr '\n' ' '))" >&2
   echo "  stop them from the checkout that started them (./stop-evm.sh -a there); do not kill them by name" >&2
@@ -152,6 +153,7 @@ for i in $(seq 1 "$validators"); do
   # vacuous. `debug` cannot be wrong about a name.
   [ "$i" = "1" ] && extra+=(--log.stdout.filter debug)
   registry_layout_require || exit 1
+  lane_preflight_ports "reth$i" $((rethEngineBase + i - 1)) $((rethEthBase + i - 1)) "$((rethP2PBase + i - 1))@0.0.0.0" || exit 1
   "$URETH_BIN" node --chain "$chainSpec" --datadir "test-nodes/reth$i/dd" \
     --authrpc.jwtsecret "test-nodes/evm$i/jwt.hex" \
     --authrpc.addr 127.0.0.1 --authrpc.port $((rethEngineBase + i - 1)) \
@@ -324,6 +326,7 @@ restartValidator1() {
   : >test-nodes/evm1/debug.log
   local bootnodes="$rootBoot"
   for j in $(seq 2 "$validators"); do bootnodes+=",$(evm_validator_addr "$j")"; done
+  lane_port_preflight "$evmValidatorPortStart" "validator 1 restart p2p" || return 1
   build/ubft shard-node run --home test-nodes/evm1 --executor engine-api --registry-layout "$(registry_layout)" \
     --address "/ip4/127.0.0.1/tcp/$evmValidatorPortStart" --bootnodes "$bootnodes" \
     --trust-base test-nodes/trust-base.json \
@@ -399,7 +402,7 @@ reached="section 4: the isolated arm"
 echo "=== 4. ISOLATED: BFT evidence reaches it, the payload does not ==="
 isolatedMark=$(markNow)
 note "isolated arm begins"
-restartValidator1 --evidence-recover
+restartValidator1 --evidence-recover || exit 1
 waitFor test-nodes/evm1/debug.log "accepted certificate" 6 180 || { fail "the restarted node received no certificates"; exit 1; }
 # Give it room to try, fail closed and try again. The budget renews per certificate, so this is
 # several attempts, not one.

@@ -70,6 +70,16 @@ class LaneKeysAreNotInherited(unittest.TestCase):
             self.assertEqual(seen[0].get('P85_CAST'),'cast')
 
 
+class PortOffset(unittest.TestCase):
+    """--port-offset (the lane slot scheme, scripts/lib/lane-slot.sh): host-published ports shift together, the default is 8545/8088/9090."""
+    def test_published_ports(self):
+        self.assertEqual(generate.HOST_PORTS,{'rpc':8545,'faucet':8088,'prometheus':9090})
+        self.assertEqual(generate.check_port_offset(0),0); self.assertEqual(generate.check_port_offset(1000),1000)
+    def test_refuses_bad_offsets(self):
+        for bad in (-1,20001,60000):
+            with self.assertRaises(SystemExit): generate.check_port_offset(bad)
+
+
 class ChurnBudget(unittest.TestCase):
     def test_the_generated_evm_configuration_commits_the_testnet_churn_budget(self):
         params=dict(item.split('=',1) for item in generate.evm_partition_params(1337).split(','))

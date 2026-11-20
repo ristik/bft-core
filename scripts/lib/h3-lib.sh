@@ -282,6 +282,7 @@ h3_start_reth() { # spare execution client i, peered with the running ones
   local i=$1 j enode
   openssl rand -hex 32 >"test-nodes/evm$i/jwt.hex"
   mkdir -p "test-nodes/reth$i"
+  lane_preflight_ports "reth$i" $((rethEngineBase + i - 1)) $((rethEthBase + i - 1)) "$((rethP2PBase + i - 1))@0.0.0.0" || return 1
   "$URETH_BIN" node --chain "$chainSpec" --datadir "test-nodes/reth$i/dd" \
     --authrpc.jwtsecret "test-nodes/evm$i/jwt.hex" --authrpc.addr 127.0.0.1 --authrpc.port $((rethEngineBase + i - 1)) \
     --http --http.addr 127.0.0.1 --http.port $((rethEthBase + i - 1)) --http.api eth,net,web3,admin,debug \
@@ -334,7 +335,7 @@ h3_restore_validator() {
   # last process started, not one that is still shutting down).
   local waited=0 alive
   while :; do
-    alive=$(pgrep -f -- "--home test-nodes/evm$i( |$)|test-nodes/reth$i/dd" 2>/dev/null | tr '\n' ' ')
+    alive=$(owned_pids "--home test-nodes/evm$i( |\$)|test-nodes/reth$i/dd" | tr '\n' ' ')   # this checkout's only: another lane's trees use the same relative paths
     [ -z "$alive" ] && break
     waited=$((waited + 1))
     if [ "$waited" -ge 120 ]; then echo "validator $i: process(es) $alive still running after 60s: refusing to clear its state" >&2; return 1; fi

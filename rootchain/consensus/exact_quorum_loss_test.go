@@ -121,6 +121,7 @@ func TestExactQuorumCommitsOverLinksThatLoseSends(t *testing.T) {
 				return tc.deliver, errors.Join(network.ErrNotDelivered, errors.New("lossy link: first attempt reported lost"))
 			}
 			c.stop("c") // H, a and b are exactly the quorum of 3
+			transport.connectAll(c, c.except("c")...)
 			// c signs only in its current round: no certificate of a later round can carry its signature. A certificate of this round or an
 			// earlier one may, even one ahead of the commit (a QC formed just before the stop), so the signer checks apply only beyond it.
 			cutoff := c.state("c").Round

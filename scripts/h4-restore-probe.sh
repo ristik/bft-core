@@ -12,7 +12,7 @@ mkdir -p "$evidence"
 
 survivor_height() {
   local hex
-  hex=$(curl -sS --max-time 5 -X POST http://127.0.0.1:18546 -H 'Content-Type: application/json' \
+  hex=$(curl -sS --max-time 5 -X POST http://127.0.0.1:$((18546+LANE_PORT_OFFSET)) -H 'Content-Type: application/json' \
     -d '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' 2>/dev/null |
     python3 -c 'import json,sys; print(int(json.load(sys.stdin)["result"], 16))' 2>/dev/null) || return 1
   echo "$hex"
@@ -100,32 +100,32 @@ case "$stage" in
     echo 'H4_DISKS_WIPED' >>test-nodes/evm1/debug.log
     registry_layout_require || exit 1
     "$URETH_BIN" node --chain "$EVM_GENESIS_FILE" --datadir test-nodes/reth1/dd \
-      --authrpc.jwtsecret "$evidence/jwt.hex" --authrpc.addr 127.0.0.1 --authrpc.port 18551 \
-      --http --http.addr 127.0.0.1 --http.port 18545 --http.api eth,net,web3,admin,debug \
-      --rpc.eth-proof-window 64 --port 30401 --disable-discovery --ipcdisable \
+      --authrpc.jwtsecret "$evidence/jwt.hex" --authrpc.addr 127.0.0.1 --authrpc.port $((18551+LANE_PORT_OFFSET)) \
+      --http --http.addr 127.0.0.1 --http.port $((18545+LANE_PORT_OFFSET)) --http.api eth,net,web3,admin,debug \
+      --rpc.eth-proof-window 64 --port $((30401+LANE_PORT_OFFSET)) --disable-discovery --ipcdisable \
       --engine.persistence-threshold "${D2C_PERSISTENCE_THRESHOLD:-64}" --builder.gaslimit 30000000 \
       $(urethPinUnicityFlags) >"$evidence/reth.log" 2>&1 &
     echo $! >test-nodes/reth1/pid
     for _ in $(seq 1 120); do
-      if curl -sS --max-time 2 -X POST http://127.0.0.1:18545 -H 'Content-Type: application/json' \
+      if curl -sS --max-time 2 -X POST http://127.0.0.1:$((18545+LANE_PORT_OFFSET)) -H 'Content-Type: application/json' \
           -d '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' 2>/dev/null | grep -q '"result":"0x0"'; then
         break
       fi
       sleep 1
     done
-    curl -sS --max-time 2 -X POST http://127.0.0.1:18545 -H 'Content-Type: application/json' \
+    curl -sS --max-time 2 -X POST http://127.0.0.1:$((18545+LANE_PORT_OFFSET)) -H 'Content-Type: application/json' \
       -d '{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}' | grep -q '"result":"0x0"'
     echo 'H4_FRESH_EL_GENESIS' >>"$evidence/restore.log"
     # Discovery is disabled, so reintroduce the replacement client to surviving peers: as TRUSTED peers, in both directions (ureth's transaction gossip connects to trusted peers only).
     for j in 2 3 4; do
-      enode=$(curl -sS --max-time 5 -X POST "http://127.0.0.1:$((18544+j))" \
+      enode=$(curl -sS --max-time 5 -X POST "http://127.0.0.1:$(((18544+LANE_PORT_OFFSET)+j))" \
         -H 'Content-Type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"admin_nodeInfo","params":[]}' \
         | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["enode"])')
-      curl -sS --max-time 5 -X POST http://127.0.0.1:18545 -H 'Content-Type: application/json' \
+      curl -sS --max-time 5 -X POST http://127.0.0.1:$((18545+LANE_PORT_OFFSET)) -H 'Content-Type: application/json' \
         -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"admin_addTrustedPeer\",\"params\":[\"$enode\"]}" >/dev/null
-      new_enode=${new_enode:-$(curl -sS --max-time 5 -X POST http://127.0.0.1:18545 -H 'Content-Type: application/json' \
+      new_enode=${new_enode:-$(curl -sS --max-time 5 -X POST http://127.0.0.1:$((18545+LANE_PORT_OFFSET)) -H 'Content-Type: application/json' \
         -d '{"jsonrpc":"2.0","id":1,"method":"admin_nodeInfo","params":[]}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["result"]["enode"])')}
-      curl -sS --max-time 5 -X POST "http://127.0.0.1:$((18544+j))" -H 'Content-Type: application/json' \
+      curl -sS --max-time 5 -X POST "http://127.0.0.1:$(((18544+LANE_PORT_OFFSET)+j))" -H 'Content-Type: application/json' \
         -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"admin_addTrustedPeer\",\"params\":[\"$new_enode\"]}" >/dev/null
     done
     pinTrustBase=test-nodes/trust-base.json
@@ -148,8 +148,8 @@ case "$stage" in
     build/ubft shard-node restore --home "$evidence" --executor engine-api \
       --address "/ip4/127.0.0.1/tcp/$evmValidatorPortStart" --bootnodes "$bootnodes" \
       --trust-base test-nodes/trust-base.json --full-shard-conf "$EVM_FULL_SHARD_CONF" \
-      --genesis "$EVM_GENESIS_FILE" --engine-url http://127.0.0.1:18551 \
-      --eth-url http://127.0.0.1:18545 --jwt-secret "$evidence/jwt.hex" \
+      --genesis "$EVM_GENESIS_FILE" --engine-url http://127.0.0.1:$((18551+LANE_PORT_OFFSET)) \
+      --eth-url http://127.0.0.1:$((18545+LANE_PORT_OFFSET)) --jwt-secret "$evidence/jwt.hex" \
       --engine-fee-collector "$EVM_ENGINE_FEE_COLLECTOR" --registry-layout "$(registry_layout)" \
       --execution-journal "$evidence/journal.db" --archive-store "$evidence/archive" --archive-prune \
       ${restoreProfile2Args[@]+"${restoreProfile2Args[@]}"} \

@@ -11,6 +11,7 @@
 #                                          starts no reth, root, validator or aggregator; needs the same env as the run
 #   scripts/anyage-lane.sh                 the run: refuses unless the preflight is entirely ok; then the P85 runner under the devnet lock (owner "anyage")
 set -uo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/lane-slot.sh" || exit 2   # LANE_SLOT: every port below is shifted into this lane's slot
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 AGRE_ROOT=${AGRE_ROOT:-$(cd "$REPO_ROOT/.." && pwd)}
@@ -83,7 +84,7 @@ preflight() {
   fi
   echo "-- aggregator"
   [ -n "${AGG_BIN:-}" ] && [ -x "$AGG_BIN" ] && yes "AGG_BIN $AGG_BIN" || no "set AGG_BIN to the pinned aggregator-go binary"
-  if (exec 3<>/dev/tcp/127.0.0.1/27117) 2>/dev/null; then yes "MongoDB replica set port 27117 answers"; else no "no MongoDB on 127.0.0.1:27117 (colima + the mongo:7 replset container; aggregator-go needs it)"; fi
+  if (exec 3<>/dev/tcp/127.0.0.1/$((27117+LANE_PORT_OFFSET))) 2>/dev/null; then yes "MongoDB replica set port $((27117+LANE_PORT_OFFSET)) answers"; else no "no MongoDB on 127.0.0.1:$((27117+LANE_PORT_OFFSET)) (colima + the mongo:7 replset container; aggregator-go needs it)"; fi
   echo "-- substrate"
   if grep -q 'ANYAGE_LANE' "$REPO_ROOT/scripts/reth-paired-devnet.sh" 2>/dev/null; then yes "reth-paired-devnet.sh supports ANYAGE_LANE (aggregator on the P85 genesis)"; else no "reth-paired-devnet.sh has no ANYAGE_LANE (PoS genesis + aggregator shard in one genesis)"; fi
   check "the combined genesis dry run was done on this HEAD (scripts/anyage-lane.sh --prep): record at briefs/devnet-runs/anyage-prep-<head>.ok" test -e "$AGRE_ROOT/briefs/devnet-runs/anyage-prep-${head:0:12}.ok"

@@ -6,7 +6,7 @@
 # assembler root assembles, a leader orders the Prepare, the Freeze v5 and H, the roots switch to J, the EVM shard acknowledges, and VR
 # applies the Boundary that installs J. Evidence goes to $VR_EVIDENCE (default ~/evidence/vt14/boundary).
 
-VR_EVIDENCE=${VR_EVIDENCE:-$HOME/evidence/vt09}
+VR_EVIDENCE=${VR_EVIDENCE:-$HOME/evidence/vt09${LANE_RUN_TAG:-}}   # one directory per lane slot: parallel lanes never share intents.txt and the other files this reads back
 mkdir -p "$VR_EVIDENCE"
 vrb_log() { echo "vr-boundary: $*" | tee -a "$VR_EVIDENCE/steps.log"; }
 vrb_rpc=http://127.0.0.1:$rethEthBase
@@ -14,7 +14,7 @@ vrb_vr=0xff00000000000000000000000000000000000003
 
 vrb_root_rpcs() {
   local p
-  for p in $(pgrep -f 'ubft root-node run --home test-nodes/root'); do   # this devnet's roots only (never another project's)
+  for p in $(owned_pids 'ubft root-node run --home test-nodes/root'); do   # this checkout's roots only: a lane in another tree (another slot) has the same relative paths
     tr '\0' ' ' </proc/"$p"/cmdline 2>/dev/null | grep -o -- '--rpc-server-address [^ ]*' | awk '{print "http://"$2}'
   done | sort -u
 }

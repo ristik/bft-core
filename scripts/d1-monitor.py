@@ -12,6 +12,10 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+# the lane slot (scripts/lib/lane-slot.sh) moves every port: validator i's HTTP RPC is ETH_BASE + i - 1
+LANE_PORT_OFFSET = int(os.environ.get('LANE_PORT_OFFSET', '0'))
+ETH_BASE = 18545 + LANE_PORT_OFFSET
+
 
 def rpc(port, method, params, timeout=3):
     body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode()
@@ -141,8 +145,8 @@ def check_h4_restore(nodes):
                               capture_output=True).returncode == 0:
             raise RuntimeError(f"restore process exited: {tail(home / 'restore.log')}")
         try:
-            restored = rpc(18545, "eth_getBlockByNumber", [hex(height), False])
-            survivor = rpc(18546, "eth_getBlockByNumber", [hex(height), False])
+            restored = rpc(ETH_BASE, "eth_getBlockByNumber", [hex(height), False])
+            survivor = rpc(ETH_BASE + 1, "eth_getBlockByNumber", [hex(height), False])
         except (OSError, RuntimeError, ValueError):
             time.sleep(2)
             continue
@@ -296,7 +300,7 @@ def check_fault_rejoins(nodes, scenario, final_height, final_hash, recovery_star
             block = None
             head_error = None
             try:
-                port = 18544 + validator
+                port = ETH_BASE - 1 + validator
                 head = int(rpc(port, "eth_blockNumber", []), 16)
                 block = rpc(port, "eth_getBlockByNumber", [hex(final_height), False])
             except (OSError, ValueError, RuntimeError) as exc:
@@ -310,7 +314,7 @@ def check_fault_rejoins(nodes, scenario, final_height, final_hash, recovery_star
                 if peer == validator:
                     continue
                 try:
-                    peer_head = int(rpc(18544 + peer, "eth_blockNumber", []), 16)
+                    peer_head = int(rpc(ETH_BASE - 1 + peer, "eth_blockNumber", []), 16)
                     survivor_heads[peer] = peer_head
                 except (OSError, ValueError, RuntimeError):
                     pass
@@ -319,14 +323,14 @@ def check_fault_rejoins(nodes, scenario, final_height, final_hash, recovery_star
             if common_height is not None:
                 for peer in survivor_heads:
                     try:
-                        peer_block = rpc(18544 + peer, "eth_getBlockByNumber", [hex(common_height), False])
+                        peer_block = rpc(ETH_BASE - 1 + peer, "eth_getBlockByNumber", [hex(common_height), False])
                         survivor_hashes.append(peer_block and peer_block.get("hash", "").removeprefix("0x").lower())
                     except (OSError, ValueError, RuntimeError):
                         survivor_hashes.append(None)
             recovery_hash = None
             if common_height is not None and head is not None and head >= common_height:
                 try:
-                    recovery_block = rpc(18544 + validator, "eth_getBlockByNumber", [hex(common_height), False])
+                    recovery_block = rpc(ETH_BASE - 1 + validator, "eth_getBlockByNumber", [hex(common_height), False])
                     recovery_hash = recovery_block and recovery_block.get("hash", "").removeprefix("0x").lower()
                 except (OSError, ValueError, RuntimeError):
                     pass
@@ -394,17 +398,17 @@ def check_proof_corrupt_recovery(nodes, recovery_started):
                   and (field(line, "round") or "").isdigit()]
         agreed = False
         try:
-            head = int(rpc(18545, "eth_blockNumber", []), 16)
+            head = int(rpc(ETH_BASE, "eth_blockNumber", []), 16)
             survivor_heads = []
             for validator in (2, 3, 4):
-                other_head = int(rpc(18544 + validator, "eth_blockNumber", []), 16)
+                other_head = int(rpc(ETH_BASE - 1 + validator, "eth_blockNumber", []), 16)
                 survivor_heads.append(other_head)
             common_height = min(survivor_heads)
             survivor_hashes = []
             for validator in (2, 3, 4):
-                other = rpc(18544 + validator, "eth_getBlockByNumber", [hex(common_height), False])
+                other = rpc(ETH_BASE - 1 + validator, "eth_getBlockByNumber", [hex(common_height), False])
                 survivor_hashes.append(other and other.get("hash", "").removeprefix("0x").lower())
-            recovered = rpc(18545, "eth_getBlockByNumber", [hex(common_height), False])
+            recovered = rpc(ETH_BASE, "eth_getBlockByNumber", [hex(common_height), False])
             recovered_hash = recovered and recovered.get("hash", "").removeprefix("0x").lower()
             agreed = (head >= common_height and None not in survivor_hashes
                       and len(set(survivor_hashes)) == 1 and recovered_hash == survivor_hashes[0])
@@ -439,7 +443,7 @@ def main():
                         "missing-body", "wrong-genesis", "hostile-builder", "hostile-fee-recipient"), default="")
     parser.add_argument("--capture-t4-traces", type=Path,
                         help="capture each certified block trace immediately into this directory")
-    parser.add_argument("--trace-rpc-base", type=int, default=18545,
+    parser.add_argument("--trace-rpc-base", type=int, default=ETH_BASE,
                         help="first validator's HTTP RPC port for incremental T4 traces")
     args = parser.parse_args()
     if args.validators != 4 or args.blocks < 10:
@@ -473,7 +477,7 @@ def main():
         tips = []
         for i in survivors:
             try:
-                tips.append(int(rpc(18544 + i, "eth_blockNumber", []), 16))
+                tips.append(int(rpc(ETH_BASE - 1 + i, "eth_blockNumber", []), 16))
             except (OSError, ValueError, RuntimeError):
                 pass
         if len(tips) >= required_quorum:
@@ -492,7 +496,7 @@ def main():
             sample_ids = []
             for i in range(1, 5):
                 try:
-                    sampled_height = int(rpc(18544 + i, "eth_blockNumber", []), 16)
+                    sampled_height = int(rpc(ETH_BASE - 1 + i, "eth_blockNumber", []), 16)
                     sampled_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
                     current[i] = {"height": sampled_height, "time": sampled_at, "error": None}
                     if i in survivors and sampled_height >= height:
@@ -530,7 +534,7 @@ def main():
         blocks_by_id = {}
         for i in sample_ids:
             try:
-                blocks_by_id[i] = rpc(18544 + i, "eth_getBlockByNumber", [hex(height), False])
+                blocks_by_id[i] = rpc(ETH_BASE - 1 + i, "eth_getBlockByNumber", [hex(height), False])
             except (OSError, ValueError, RuntimeError) as exc:
                 print(f"height {height}: v{i} block sample unavailable after its fresh head sample: {exc}", flush=True)
         blocks_by_id = {i: block for i, block in blocks_by_id.items() if block is not None}
@@ -663,8 +667,8 @@ def main():
     if args.already_restored_validator:
         validator = args.already_restored_validator
         try:
-            target_block = rpc(18544 + survivors[0], "eth_getBlockByNumber", [hex(target), False])
-            restored_block = rpc(18544 + validator, "eth_getBlockByNumber", [hex(target), False])
+            target_block = rpc(ETH_BASE - 1 + survivors[0], "eth_getBlockByNumber", [hex(target), False])
+            restored_block = rpc(ETH_BASE - 1 + validator, "eth_getBlockByNumber", [hex(target), False])
             if not target_block or not restored_block or restored_block.get("hash") != target_block.get("hash"):
                 raise RuntimeError(f"validator {validator} has not executed the quorum target B{target}")
             admissions = certificate_admissions(

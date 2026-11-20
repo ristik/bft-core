@@ -3,7 +3,8 @@
 # Definitions only: sourcing starts nothing. Needs reth-paired-devnet.sh context (rpc, pyget, validators, ...).
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/portable.sh"
-m2_rpc_port() { echo $((25866 + $1 - 1)); }
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lane-slot.sh"   # LANE_SLOT: ports below are shifted into the lane's slot
+m2_rpc_port() { echo $(((25866+LANE_PORT_OFFSET) + $1 - 1)); }
 m2_p2p_port() { echo $((rootPortStart + $1 - 1)); }
 m2_root_addr() { boot_node "test-nodes/root$1" "$(m2_p2p_port "$1")"; }
 m2_online_validators() {
@@ -39,13 +40,13 @@ m2_start_root() { # node installEpoch bootnode  (an empty install epoch starts a
     declare -F "${VR_ROOT_FLAGS_FN:-}" >/dev/null || { echo "m2_start_root: the VR lane's VR_ROOT_FLAGS_FN is not a defined function" >&2; return 1; }
     [ -s "${VR_DIR:-test-nodes/vr}/vr-deployment.json" ] && [ -s "${VR_DIR:-test-nodes/vr}/genesis-identities.json" ] ||
       { echo "m2_start_root: the VR generation's deployment or identities are missing: refusing to restart root $node outside VR mode" >&2; return 1; }
-    shardConfArgs+=(--q3-lane $("$VR_ROOT_FLAGS_FN" "$node" "http://127.0.0.1:$(( ${rethEthBase:-18545} + node - 1 ))"))
+    shardConfArgs+=(--q3-lane $("$VR_ROOT_FLAGS_FN" "$node" "http://127.0.0.1:$(( ${rethEthBase:-(18545+LANE_PORT_OFFSET)} + node - 1 ))"))
   fi
   if [ "${P85_LANE:-0}" = 1 ]; then   # a restarted root of the proof-of-stake lane runs the same coupled runtime and P85 executor
     # the flags come from the P85 library (its steps file sources it), called through a name the lane exports: the other lanes that source this
     # file (the Q4 dry run resolves every command by name) need not carry the P85 library
     declare -F "${M2_ROOT_FLAGS_FN:-}" >/dev/null || { echo "m2_start_root: the P85 lane's M2_ROOT_FLAGS_FN is not a defined function" >&2; return 1; }
-    shardConfArgs+=(--q3-lane $("$M2_ROOT_FLAGS_FN" "$node" "http://127.0.0.1:${rethEthBase:-18545}"))
+    shardConfArgs+=(--q3-lane $("$M2_ROOT_FLAGS_FN" "$node" "http://127.0.0.1:${rethEthBase:-$((18545+LANE_PORT_OFFSET))}"))
   fi
   # a root of a deployment whose EVM shards carry the B1 registry (--b1-profile) refuses a handoff above the registry's 16 members at admission, as
   # the shards do (owner §49: the generic limit is 256, the B1 member ceiling stays 16)
@@ -68,6 +69,7 @@ m2_start_root() { # node installEpoch bootnode  (an empty install epoch starts a
     declare -F "${UTB_ROOT_FLAGS_FN:-}" >/dev/null || { echo "m2_start_root: the UTB lane's UTB_ROOT_FLAGS_FN is not a defined function" >&2; return 1; }
     shardConfArgs+=($("$UTB_ROOT_FLAGS_FN" "$node")) || return 1
   fi
+  lane_port_preflight "$(m2_p2p_port "$node")" "root$node p2p" && lane_port_preflight "$port" "root$node rpc" || return 1
   mkdir -p "test-nodes/root$node"
   for i in $(seq 1 90); do
     UBFT_Q4_SHIM_DIR="${Q4_SHIM_DIR:+$Q4_SHIM_DIR/root$node}" ${Q4_ROOT_BIN:-build/ubft} root-node run --home "test-nodes/root$node" \
