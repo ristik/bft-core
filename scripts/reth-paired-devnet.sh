@@ -229,6 +229,10 @@ cleanup() {
   for p in $(owned_pids 'reth.* node'); do
     kill -INT "$p" 2>/dev/null || true
   done
+  # the seed servers of a VT-11 run (INT and TERM reach here through the EXIT trap): ownership-checked like every sweep above, before the wait
+  for p in $(owned_pids 'ubft seed serve'); do
+    kill -INT "$p" 2>/dev/null || true
+  done
   wait 2>/dev/null || true
   if [ "${M2_PROFILE2:-0}" = 1 ]; then
     mkdir -p "$M2_RUN_LOG_DIR"
