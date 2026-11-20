@@ -344,7 +344,7 @@ func TestVRRecoveryLeaderOrdersPrepareFreezeAndH(t *testing.T) {
 		return plan.CandidatePreimage, nil
 	}
 	records, err = x.handoffRecordsForRound(freeze.OrderedRound+2, qc)
-	require.NoError(t, err)
+	require.ErrorContains(t, err, "storage error", "the failed read is reported, not swallowed")
 	require.Empty(t, records, "the second lookup fails: the cached quorum-ready plan does not stand in for it")
 	x.vr.retained = func([]byte) ([]byte, error) { return plan.CandidatePreimage, nil }
 	records, err = x.handoffRecordsForRound(freeze.OrderedRound+2, qc)

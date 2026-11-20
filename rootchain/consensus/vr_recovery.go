@@ -200,7 +200,9 @@ func (x *ConsensusManager) vrRecoveryRoute(parent *storage.ExecutedBlock, contro
 		// once the Freeze is committed the retained candidate is authoritative: a missing one orders nothing, whatever plan is cached
 		var held bool
 		if control.Phase == "endorsed" {
-			held = x.committedRecoveryPreimage(control) != nil
+			// a failed lookup is not a miss: the route is taken, and the commit branch reports the error
+			raw, lerr := x.committedRecoveryPreimage(control)
+			held = lerr != nil || raw != nil
 		} else {
 			held = x.heldRecoveryBody(control)
 		}
@@ -315,10 +317,10 @@ func (x *ConsensusManager) planVRRecoveryAt(state *abdrc.StateMsg) (abdrc.Handof
 
 // committedRecoveryPreimage is the retained candidate of the committed Freeze's body when it is an exact recovery, else nil: what lets a root that
 // lost its volatile plan (a restart, a leader change) still order H of a recovery whose Freeze committed.
-func (x *ConsensusManager) committedRecoveryPreimage(control *evmroot.ControlState) []byte {
+func (x *ConsensusManager) committedRecoveryPreimage(control *evmroot.ControlState) ([]byte, error) {
 	previous, err := storage.DecodeOrderedHandoffRecord(control.RecordBytes)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	var raw []byte
 	if x.vr != nil && x.vr.retained != nil {
@@ -326,13 +328,16 @@ func (x *ConsensusManager) committedRecoveryPreimage(control *evmroot.ControlSta
 	} else {
 		raw, err = x.blockStore().HandoffCandidate(previous.NextBodyID)
 	}
-	if err != nil || len(raw) == 0 {
-		return nil
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) == 0 {
+		return nil, nil
 	}
 	if c, err := evmassign.DecodeCandidate(raw); err != nil || c.Kind != evmassign.KindRecovery {
-		return nil
+		return nil, nil
 	}
-	return raw
+	return raw, nil
 }
 
 // vrRecoveryCommit is H of an endorsed exact recovery, derived from the committed Freeze record and the candidate it retained, with no plan or
@@ -341,9 +346,12 @@ func (x *ConsensusManager) vrRecoveryCommit(round uint64, parent *storage.Execut
 	if control.Phase != "endorsed" {
 		return nil, false, nil
 	}
-	preimage := x.committedRecoveryPreimage(control)
+	preimage, err := x.committedRecoveryPreimage(control)
+	if err != nil {
+		return nil, true, fmt.Errorf("%w: the retained candidate of the committed Freeze: %w", ErrHandoffApproval, err)
+	}
 	if preimage == nil {
-		return nil, false, nil
+		return nil, true, nil // routed here as a recovery: a clean miss orders nothing
 	}
 	record, err := storage.DecodeOrderedHandoffRecord(control.RecordBytes)
 	if err != nil {
