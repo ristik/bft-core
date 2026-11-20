@@ -10,6 +10,8 @@ import (
 	"go.opentelemetry.io/otel/metric"
 
 	"github.com/unicitynetwork/bft-core/logger"
+	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
+	"github.com/unicitynetwork/bft-core/vradmit"
 	"github.com/unicitynetwork/bft-core/vrrules"
 	"github.com/unicitynetwork/bft-core/vrschema"
 )
@@ -67,6 +69,45 @@ func (x *ConsensusManager) upgradeFence(epoch uint64) error {
 	if err := vrrules.Fence(sched, x.supportedRules(), epoch); err != nil {
 		x.log.Error("refusing to run past an activation this binary lacks", "event", "upgrade.refused", "epoch", epoch, logger.Error(err))
 		return err
+	}
+	return nil
+}
+
+// ScheduleOfCheckpoint is the activation schedule held by a verified checkpoint's control state (its VR root state, evmroot.ControlState.VR).
+// A checkpoint with no VR state (a pre-VR chain) has no schedule. It is pure: it reads nothing durable.
+func ScheduleOfCheckpoint(controlVR []byte) ([]vrschema.Activation, error) {
+	if len(controlVR) == 0 {
+		return nil, nil
+	}
+	s, err := vradmit.DecodeRootState(controlVR)
+	if err != nil {
+		return nil, fmt.Errorf("decoding the checkpoint's activation schedule: %w", err)
+	}
+	return s.Schedule, nil
+}
+
+// FenceCheckpoint refuses the install or recovery of root epoch target when the schedule of the verified checkpoint head makes a rule this
+// binary lacks effective by then (vrrules.UpgradeRequired). It reads nothing durable and writes nothing: every durable install step
+// (trust base, safety anchor, journal, bundle retention) runs after it.
+func FenceCheckpoint(rules vrrules.Set, head *abdrc.CommittedBlock, target uint64) error {
+	if head == nil || head.Control == nil {
+		return nil
+	}
+	sched, err := ScheduleOfCheckpoint(head.Control.VR)
+	if err != nil {
+		return err
+	}
+	if rules == nil {
+		rules = vrrules.Known()
+	}
+	return vrrules.Fence(sched, rules, target)
+}
+
+// FenceEpoch is q3active.RootFencer: the fence of a verified checkpoint before epoch target's first durable install step.
+func (x *ConsensusManager) FenceEpoch(target uint64, head *abdrc.CommittedBlock) error {
+	if err := FenceCheckpoint(x.supportedRules(), head, target); err != nil {
+		x.log.Error("refusing to install an epoch past an activation this binary lacks", "event", "upgrade.refused", "epoch", target, logger.Error(err))
+		return fmt.Errorf("epoch %d: %w", target, err)
 	}
 	return nil
 }

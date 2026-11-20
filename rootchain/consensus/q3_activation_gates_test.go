@@ -131,7 +131,9 @@ func TestACoupledHandoffIsNotInstalledAsRootOnly(t *testing.T) {
 		omitted.Candidate = nil
 		err := r.rt.Activate(context.Background(), omitted)
 		require.ErrorIs(t, err, ErrQ3Candidate)
-		require.ErrorIs(t, r.rt.Admit(2), q3active.ErrNotActive)
+		// the bundle is authenticated before anything is staged (the startup fence reads the verified checkpoint first): the epoch is
+		// not in the history at all, so it is not admitted
+		require.Error(t, r.rt.Admit(2))
 	})
 	t.Run("a root-only handoff installs without a candidate", func(t *testing.T) {
 		r := newQ3Replica(t, rootOnly, rootOnly.NewNodes[0])
