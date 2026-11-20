@@ -116,14 +116,14 @@ if [ -z "$launcher" ]; then fail "could not extract the launcher block from docs
   [ "$rc" = 0 ] && [ "$held" = 0 ] && grep -q 'mongo-down locks=1' "$log" && pass "launcher: normal exit releases the slot, after the mongo teardown" || fail "launcher normal exit: rc=$rc locks left=$held log=$(cat "$log" 2>/dev/null)"
   rc=$(run_launcher 'exit 7'); held=$(nlocks)
   [ "$rc" = 7 ] && [ "$held" = 0 ] && grep -q 'mongo-down locks=1' "$log" && pass "launcher: a failing lane keeps its exit status (7) and still releases the slot" || fail "launcher failing lane: rc=$rc locks left=$held log=$(cat "$log" 2>/dev/null)"
-  # only the launcher is terminated; the lane takes 1.5 s to exit on its TERM: the slot must stay held until the lane has exited
+  # only the launcher is terminated, twice more while the lane (1.5 s to exit on its TERM) winds down: the slot must stay held until the lane has exited, and the teardown and the release must still follow
   printf '%s\n' 'trap "sleep 1.5; echo lane-exited >>\"\$LAUNCH_LOG\"; exit 0" TERM
 sleep 60 & wait $!' >"$tmp/launch/lane.sh"; make_block; rm -f "$log"
   ( cd "$tmp/launch" && LAUNCH_LOG="$log" LANE_LOCK_DIR="$locks" bash block.sh ) >/dev/null 2>&1 & lp=$!
-  sleep 2; held=$(nlocks); kill -TERM "$lp" 2>/dev/null; sleep 0.7; mid=$(nlocks); wait "$lp" 2>/dev/null; after=$(nlocks)
+  sleep 2; held=$(nlocks); kill -TERM "$lp" 2>/dev/null; sleep 0.5; kill -TERM "$lp" 2>/dev/null; sleep 0.3; kill -HUP "$lp" 2>/dev/null; mid=$(nlocks); wait "$lp" 2>/dev/null; after=$(nlocks)   # a repeated TERM and a HUP during the lane's wind-down
   order=$(grep -n 'lane-exited\|mongo-down' "$log" 2>/dev/null | sed 's/^[0-9]*://' | tr '\n' ' ')
   [ "$held" = 1 ] && [ "$mid" = 1 ] && [ "$after" = 0 ] && case "$order" in "lane-exited mongo-down locks=1 ") true ;; *) false ;; esac \
-    && pass "launcher: a terminated launcher releases the slot only after the lane has exited (held while the lane winds down, then lane exit, mongo teardown, release)" \
+    && pass "launcher: a terminated launcher (TERM, then a repeated TERM and a HUP) releases the slot only after the lane has exited (held while the lane winds down, then lane exit, mongo teardown, release)" \
     || fail "launcher terminated: held=$held mid=$mid after=$after order='$order'"
   # a failed acquire aborts before the lane runs
   mkdir -p "$locks"; for sl in 0 1 2 3; do printf 'owner: z\ntoken: z%s\n' "$sl" >"$locks/slot-$sl.txt"; done
