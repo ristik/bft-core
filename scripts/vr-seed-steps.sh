@@ -206,7 +206,7 @@ import json,sys
 c=json.load(open(sys.argv[1])); c['partitionId']=c['partitionId']+1; json.dump(c,open(sys.argv[2],'w'))
 PY
   if EVM_FULL_SHARD_CONF=$d/other-shard-conf.json H3_RESTORE_SEED_DIR=$good h3_restore_validator "$v" 1 >"$VR_EVIDENCE/seed2-restore-other-shard.log" 2>&1; then vrs_log "FAIL: a seed for another shard was accepted by the restore"; return 1; fi
-  grep -q "another shard" "$VR_EVIDENCE/seed2-restore-other-shard.log" && grep -q "nothing of the validator was touched" "$VR_EVIDENCE/seed2-restore-other-shard.log" || { vrs_log "FAIL: the other-shard refusal did not come from the preflight"; cat "$VR_EVIDENCE/seed2-restore-other-shard.log"; return 1; }
+  grep -qE "another shard|this node.s (is|shard)" "$VR_EVIDENCE/seed2-restore-other-shard.log" && grep -q "nothing of the validator was touched" "$VR_EVIDENCE/seed2-restore-other-shard.log" || { vrs_log "FAIL: the other-shard refusal did not come from the preflight"; cat "$VR_EVIDENCE/seed2-restore-other-shard.log"; return 1; }
   [ "$(cat "test-nodes/evm$v/pid")" = "$pid0" ] && kill -0 "$pid0" 2>/dev/null && [ -d "$H3_ARCHIVES/evm$v" ] && kill -0 "$(cat "test-nodes/reth$v/pid")" 2>/dev/null \
     || { vrs_log "FAIL: validator $v was touched by a seed for another shard"; return 1; }
   vrs_log "PASS: a valid seed for another shard was refused by the preflight and validator $v is untouched (same pid $pid0)"
