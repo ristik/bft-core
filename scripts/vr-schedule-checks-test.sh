@@ -82,6 +82,23 @@ printf '{"schedule":[%s]}' "$(row $rid 6 Latched)" >"$d/up.json";               
 printf '{"schedule":[%s]}' "$(row $rid 5 Queued)" >"$d/up.json";                           bad vrs_check_latched_row "$d/up.json" "$rid" $E
 printf '{"schedule":[]}' >"$d/up.json";                                                    bad vrs_check_latched_row "$d/up.json" "$rid" $E
 echo 'garbage' >"$d/up.json";                                                              bad vrs_check_latched_row "$d/up.json" "$rid" $E
+# the roots' status: activeEpoch is a JSON integer EQUAL to E
+st() { echo "{\"activeEpoch\": $1, \"follower\": false}" >"$d/st.json"; }
+st 5;        ok  vrs_check_status_epoch "$d/st.json" $E
+st 50;       bad vrs_check_status_epoch "$d/st.json" $E     # astra r8: activeEpoch 50 for E=5 (substring/>= matching accepted it)
+st 4;        bad vrs_check_status_epoch "$d/st.json" $E
+st 6;        bad vrs_check_status_epoch "$d/st.json" $E     # not >=
+st '"5"';    bad vrs_check_status_epoch "$d/st.json" $E     # a string, not a JSON integer
+st 5.0;      bad vrs_check_status_epoch "$d/st.json" $E
+st null;     bad vrs_check_status_epoch "$d/st.json" $E
+echo '{"epoch":5}' >"$d/st.json"; bad vrs_check_status_epoch "$d/st.json" $E
+echo 'garbage' >"$d/st.json";     bad vrs_check_status_epoch "$d/st.json" $E
+bad vrs_check_status_epoch "$d/missing.json" $E
+# the short lane uses the same predicates for its queued unsupported rule: a HELP line or a bare warning is no evidence
+fr=0xefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef
+{ echo "# HELP ab_unicity_upgrade_required unsupported rules"; echo "# TYPE ab_unicity_upgrade_required gauge"; } >"$d/m.txt"; bad vrs_check_metric "$d/m.txt" "$fr" 8 pending
+echo 'level=WARN msg="upgrade required"' >"$d/w.txt";                                         bad vrs_check_warning "$d/w.txt" "$fr" 8
+warn pending "$fr" 8 2 >"$d/w.txt";                                                              ok  vrs_check_warning "$d/w.txt" "$fr" 8
 # the baseline: a valid response without the entry passes; anything else fails
 base='{"genesisSpec":"Cancun","known":[{"name":"noop-test-v1","id":"'$rid'"}],"observed":true,"scheduled":[],"lacking":[]}'
 r "$base" >"$d/b.json";                                         ok  vrs_check_rules_absent "$d/b.json" "$rid"

@@ -144,13 +144,11 @@ vrs_run() {
   if grep -q 'UPGRADE REQUIRED' "$d/validator-upgrade.txt" && grep -q 'Queued' "$d/validator-upgrade.txt"; then
     vrb_log "PASS: validator upgrade shows the queued schedules, the unsupported one as UPGRADE REQUIRED"
   else vrb_log "FAIL: validator upgrade does not show the queued schedules"; return 1; fi
-  vrb_wait 200 "a shard node warned of the queued unsupported rule (event=upgrade.required state=pending)" grep -qE 'upgrade.required.*state=pending|state=pending.*upgrade.required' test-nodes/evm1/debug.log || return 1
-  grep -hE 'upgrade.required' test-nodes/evm*/debug.log | cut -c1-400 | head -8 >"$d/shard-warnings.txt"
-  for i in 1 2 3 4; do
-    curl -s "http://$(evm_validator_rpc_addr "$i")/api/v1/metrics" | grep -i 'upgrade_required' >>"$d/shard-metrics.txt"
-  done
-  if [ -s "$d/shard-metrics.txt" ]; then vrb_log "PASS: unicity_upgrade_required gauge on the shard nodes: $(head -1 "$d/shard-metrics.txt" | cut -c1-200)"
-  else vrb_log "FAIL: no unicity_upgrade_required sample on the shard metrics endpoint"; return 1; fi
+  local frid known fE; frid=$(vrs_rule_id future-rule-v9)
+  known=$(build/ubft validator upgrade --rpc "$vrb_rpc" --json | python3 -c 'import json,sys;print(json.load(sys.stdin)["knownRootEpoch"])'); fE=$((known + 3))
+  vrb_wait 240 "every shard node logged ONE pending warning for the queued unsupported rule (rule, activationEpoch=$fE, currentEpoch below it)" vrs_nodes_warned "$frid" "$fE" || return 1
+  grep -hE 'event=upgrade\.required' test-nodes/evm*/debug.log | cut -c1-400 | head -8 >"$d/shard-warnings.txt"
+  vrb_wait 240 "every shard node exports unicity_upgrade_required{rule,epoch=$fE,state=pending} = 1" vrs_nodes_metric pending "$frid" "$fE" || return 1
   ( cd cli/ubft && GOMAXPROCS=4 nice -n 10 go build -tags "${GO_BUILD_TAGS_NTR:-vrdev,no_test_rule}" -o ../../build/ubft-no-test-rule ) || { vrb_log "FAIL: building the no_test_rule binary"; return 1; }
   if build/ubft-no-test-rule validator upgrade --rpc "$vrb_rpc" --exit-code >"$d/no-test-rule-upgrade.txt" 2>&1; then
     vrb_log "FAIL: the no_test_rule binary does not require an upgrade"; return 1
@@ -167,10 +165,29 @@ vrs_run() {
 #   3. `ubft validator rotate` (a new payee for identity 4) drives one handoff per epoch up to E: the schedule is carried by the first handoff, the
 #      warning and ab_unicity_upgrade_required fire on shard node 4 ahead of E, and at the commit into E VR latches the entry and shard node 4 refuses the switch
 #      with UpgradeRequired; ureth's unicity_rulesV1 shows the rule before and after E.
-vrs_roots_at() { # epoch: at least 3 roots report this active epoch
-  local r n=0; for r in $(vrb_root_rpcs); do curl -sf -X POST -H 'Content-Type: application/json' -d '{}' "$r/api/v1/q3/status" | grep -q "\"activeEpoch\": *$1" && n=$((n+1)); done; [ "$n" -ge 3 ]
+# vrs_check_status_epoch <q3/status JSON> <E>: activeEpoch is a JSON integer EQUAL to E (no substring or >= matching)
+vrs_check_status_epoch() {
+  python3 - "$@" <<'PY'
+import json, sys
+try:
+    v = json.load(open(sys.argv[1]))["activeEpoch"]
+except Exception as e:
+    sys.exit("no activeEpoch: %r" % (e,))
+sys.exit(0 if type(v) is int and v == int(sys.argv[2]) else "activeEpoch %r is not %s" % (v, sys.argv[2]))
+PY
+}
+vrs_roots_at() { # epoch: at least 3 of this lane's roots report exactly this active epoch
+  local r n=0 f; f=$(mktemp)
+  for r in $(vrb_root_rpcs); do
+    curl -sf -X POST -H 'Content-Type: application/json' -d '{}' "$r/api/v1/q3/status" >"$f" 2>/dev/null && vrs_check_status_epoch "$f" "$1" 2>/dev/null && n=$((n+1))
+  done
+  rm -f "$f"; [ "$n" -ge 3 ]
 }
 vrs_rules() { curl -s -X POST -H 'Content-Type: application/json' --data '{"jsonrpc":"2.0","id":1,"method":"unicity_rulesV1","params":[]}' "$vrb_rpc"; }
+vrs_nodes_warned() { local i; for i in 1 2 3 4; do vrs_check_warning "test-nodes/evm$i/debug.log" "$1" "$2" || return 1; done; }
+vrs_nodes_metric() { local i d; d=$(vrs_dir); for i in 1 2 3 4; do
+  curl -s "http://$(evm_validator_rpc_addr "$i")/api/v1/metrics" >"$d/evm$i-metric-$1.txt" 2>/dev/null
+  vrs_check_metric "$d/evm$i-metric-$1.txt" "$2" "$3" "$1" || return 1; done; }
 vrs_scrape_check() { # state ruleId E: scrape shard node 4's metrics endpoint, keep the text as evidence and check for the sample
   local d; d=$(vrs_dir)
   curl -s "http://$(evm_validator_rpc_addr 4)/api/v1/metrics" >"$d/evm4-metric-$1.txt" 2>/dev/null
