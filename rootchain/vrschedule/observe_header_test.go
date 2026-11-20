@@ -216,3 +216,76 @@ func TestAFetchedSourceHeightIsRederivedFromTheCertifiedHeader(t *testing.T) {
 	_, err = ResolveFetched(context.Background(), nil, fetched)
 	require.Error(t, err, "without a resolver a fetched height is never trusted")
 }
+
+// A restart between a publication's commit and the success of its header read (astra r10): four fresh stores each hold an earlier source
+// as version 3, observe the next publication with its header unavailable, restart, and then see four later blocks showing the result. Every
+// root recovers the identical source as an uninterrupted observer: the original certifying round, time, hash and the verified height.
+func TestARestartBeforeTheHeaderRetryRecoversTheOriginalPublicationBoundary(t *testing.T) {
+	r0, r1 := vrschema.Word{0x51}, vrschema.Word{0x52}
+	outs := map[[32]byte]*vrhandoff.Output{{2}: published(r0), {3}: published(r0), {4}: published(r1), {5}: published(r1), {6}: published(r1), {7}: published(r1), {8}: published(r1)}
+	numbers := map[[32]byte]uint64{{2}: 12, {4}: 33}
+	ctx := context.Background()
+	drive := func(o *Observer, blocks ...CertifiedEVM) {
+		for _, c := range blocks {
+			require.NoError(t, o.Observe(ctx, c))
+		}
+	}
+	// the uninterrupted reference
+	refSrc, err := NewSources("")
+	require.NoError(t, err)
+	ref := &Observer{Reader: &headerReader{fakeReader: &fakeReader{at: outs}, number: numbers}, Sources: refSrc, Outputs: NewOutputs()}
+	drive(ref, cert(10, 1, 1), cert(11, 2, 2), cert(12, 3, 3), cert(13, 4, 4), cert(14, 5, 5), cert(15, 6, 6), cert(16, 7, 7), cert(17, 8, 8))
+	want, ok := refSrc.Get(r1)
+	require.True(t, ok)
+	require.EqualValues(t, 13, want.CertRootRound)
+	require.EqualValues(t, 33, want.EVMBlockNumber)
+
+	for i := 0; i < 4; i++ {
+		path := filepath.Join(t.TempDir(), "vr-sources.json")
+		src, err := NewSources(path)
+		require.NoError(t, err)
+		reader := &headerReader{fakeReader: &fakeReader{at: outs}, number: numbers}
+		o := &Observer{Reader: reader, Sources: src, Outputs: NewOutputs()}
+		drive(o, cert(10, 1, 1), cert(11, 2, 2), cert(12, 3, 3)) // the earlier result is recorded
+		_, ok := src.Get(r0)
+		require.True(t, ok)
+		reader.err = errors.New("header unavailable")
+		require.Error(t, o.Observe(ctx, cert(13, 4, 4)), "the publication's header is unavailable")
+		_, ok = src.Get(r1)
+		require.False(t, ok)
+
+		// the root restarts before the retry: a new store over the same file, a new observer, the header is available now
+		restarted, err := NewSources(path)
+		require.NoError(t, err)
+		require.Len(t, restarted.Awaiting(), 1, "the publication boundary survived the restart as a durable work item")
+		o2 := &Observer{Reader: &headerReader{fakeReader: &fakeReader{at: outs}, number: numbers}, Sources: restarted, Outputs: NewOutputs()}
+		drive(o2, cert(14, 5, 5), cert(15, 6, 6), cert(16, 7, 7), cert(17, 8, 8)) // four later blocks, all showing r1 Published
+		got, ok := restarted.Get(r1)
+		require.True(t, ok, "root %d recovers the source", i)
+		require.Equal(t, want, got, "root %d: the same source as an uninterrupted observer: round, time, hash and verified height", i)
+		require.Empty(t, restarted.Awaiting(), "the work item is consumed with the source")
+		again, err := NewSources(path)
+		require.NoError(t, err)
+		back, ok := again.Get(r1)
+		require.True(t, ok)
+		require.Equal(t, want, back)
+	}
+}
+
+// A version 3 source row must carry evmBlockNumber (sol r8): an explicit 0 is kept, a row without it is refused.
+func TestAV3RowWithoutEVMBlockNumberIsRefusedAndAnExplicitZeroIsKept(t *testing.T) {
+	row := func(extra string) string {
+		return `{"version":3,"sources":[{"resultId":"0x` + hex.EncodeToString(bytes.Repeat([]byte{0x52}, 32)) + `","evmBlockHash":"0x` + hex.EncodeToString(bytes.Repeat([]byte{0x77}, 32)) +
+			`",` + extra + `"certRootRound":12,"outputCommit":"0x` + hex.EncodeToString(bytes.Repeat([]byte{0xc0}, 32)) + `","certUcTime":1}]}`
+	}
+	path := filepath.Join(t.TempDir(), "vr-sources.json")
+	require.NoError(t, os.WriteFile(path, []byte(row("")), 0o600))
+	_, err := NewSources(path)
+	require.Error(t, err, "a row without evmBlockNumber is refused")
+	require.NoError(t, os.WriteFile(path, []byte(row(`"evmBlockNumber":0,`)), 0o600))
+	s, err := NewSources(path)
+	require.NoError(t, err)
+	got, ok := s.Get(vrschema.Word(bytes.Repeat([]byte{0x52}, 32)))
+	require.True(t, ok)
+	require.EqualValues(t, 0, got.EVMBlockNumber, "an explicit 0 is kept")
+}
