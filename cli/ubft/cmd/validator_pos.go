@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"math/big"
 	"strings"
@@ -437,90 +438,47 @@ func validatorPosPublishCmd(base *baseFlags) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			pubRec, err := ch.vr.Publication(ctx, election, rid)
-			if err != nil {
-				return err
-			}
-			out, err := ch.vr.Output(ctx, rid)
-			if err != nil {
-				return err
-			}
-			plan, err := planPosPublish(len(members), pubRec.PopCount, pubRec.Published, out.State)
-			if err != nil {
-				return err
-			}
-			var pops []vrclient.PoPInput
-			if plan[0] { // holders are read only when proofs must still be submitted: a resumed run needs no key file
-				keys := map[uint64]*KeyConf{}
-				for _, a := range keyArgs {
-					var id uint64
-					var path string
-					if i := strings.Index(a, "="); i > 0 {
-						if _, err := fmt.Sscanf(a[:i], "%d", &id); err != nil {
-							return fmt.Errorf("%w: --evm-keys %q is not id=path", ErrValidator, a)
+			return runPosPublish(ctx, w, posPublishRun{Election: election, Registry: ch.vr.Registry, Rid: rid, Members: members, Chain: posPublishReader{ch, election},
+				Sender: s, DryRun: f.DryRun, Pops: func(ctx context.Context) ([]vrclient.PoPInput, error) {
+					keys := map[uint64]*KeyConf{}
+					for _, a := range keyArgs {
+						var id uint64
+						var path string
+						if i := strings.Index(a, "="); i > 0 {
+							if _, err := fmt.Sscanf(a[:i], "%d", &id); err != nil {
+								return nil, fmt.Errorf("%w: --evm-keys %q is not id=path", ErrValidator, a)
+							}
+							path = a[i+1:]
 						}
-						path = a[i+1:]
+						kc, err := readKeyConf(path)
+						if err != nil {
+							return nil, err
+						}
+						keys[id] = kc
 					}
-					kc, err := readKeyConf(path)
-					if err != nil {
-						return err
+					var pops []vrclient.PoPInput
+					for _, m := range members {
+						kc := keys[m.Id]
+						if kc == nil {
+							return nil, fmt.Errorf("%w: no EVM key file for member %d (--evm-keys %d=path)", ErrValidator, m.Id, m.Id)
+						}
+						nk, err := nodeKeys(kc)
+						if err != nil {
+							return nil, err
+						}
+						pub := nk.Public()
+						d, err := ch.vr.PopDigest(ctx, election, rid, m.Id, [32]byte(ethcrypto.Keccak256(pub)))
+						if err != nil {
+							return nil, err
+						}
+						sig, err := vrclient.SignDigest(nk.Key, d)
+						if err != nil {
+							return nil, err
+						}
+						pops = append(pops, vrclient.PoPInput{Id: m.Id, EvmKey: pub, Signature: sig})
 					}
-					keys[id] = kc
-				}
-				for _, m := range members {
-					kc := keys[m.Id]
-					if kc == nil {
-						return fmt.Errorf("%w: no EVM key file for member %d (--evm-keys %d=path)", ErrValidator, m.Id, m.Id)
-					}
-					nk, err := nodeKeys(kc)
-					if err != nil {
-						return err
-					}
-					pub := nk.Public()
-					d, err := ch.vr.PopDigest(ctx, election, rid, m.Id, [32]byte(ethcrypto.Keccak256(pub)))
-					if err != nil {
-						return err
-					}
-					sig, err := vrclient.SignDigest(nk.Key, d)
-					if err != nil {
-						return err
-					}
-					pops = append(pops, vrclient.PoPInput{Id: m.Id, EvmKey: pub, Signature: sig})
-				}
-			}
-			sub, err := vrclient.PosCalldata(vrclient.PosPublishABI, "submitAssignmentPoPs", rid, pops)
-			if err != nil {
-				return err
-			}
-			fin, err := vrclient.PosCalldata(vrclient.PosPublishABI, "finalizeCandidate", rid)
-			if err != nil {
-				return err
-			}
-			pub, err := vrclient.PosCalldata(vrclient.PosPublishABI, "publish", rid)
-			if err != nil {
-				return err
-			}
-			fmt.Fprintf(w, "result %x with %d members\n", rid, len(members))
-			all := []step{
-				{what: "submit every frozen member's possession proof", tx: vrclient.Tx{To: election, Data: sub}},
-				{what: "finalize the candidate (publish it in P85)", tx: vrclient.Tx{To: election, Data: fin}},
-				{what: "publish the result in VR", tx: vrclient.Tx{To: ch.vr.Registry, Data: pub}},
-			}
-			var steps []step
-			var kinds []int
-			for i, st := range all {
-				if plan[i] {
-					steps = append(steps, st)
-					kinds = append(kinds, i)
-				} else {
-					fmt.Fprintf(w, "already done: %s\n", st.what)
-				}
-			}
-			if len(steps) == 0 {
-				fmt.Fprintln(w, "nothing to do: the result is published in VR")
-				return nil
-			}
-			return runSteps(ctx, w, s, f.DryRun, steps, nil)
+					return pops, nil
+				}})
 		},
 	}
 	f.add(cmd)
@@ -560,10 +518,10 @@ func sameDelegation(a, b vrclient.Delegation) bool {
 
 // verifyPosPublishEffect re-reads the election and VR after one of pos-publish's transactions (kind 0 submit proofs, 1 finalize, 2 VR publish) and
 // requires its intended effect, naming the state found otherwise.
-func verifyPosPublishEffect(ctx context.Context, ch *validatorChain, election common.Address, rid [32]byte, kind, members int) error {
+func verifyPosPublishEffect(ctx context.Context, chain posPublishChain, rid [32]byte, kind, members int) error {
 	switch kind {
 	case 0:
-		p, err := ch.vr.Publication(ctx, election, rid)
+		p, err := chain.Publication(ctx, rid)
 		if err != nil {
 			return err
 		}
@@ -571,7 +529,7 @@ func verifyPosPublishEffect(ctx context.Context, ch *validatorChain, election co
 			return fmt.Errorf("%w: after submitting the possession proofs the election stores %d of %d", ErrValidator, p.PopCount, members)
 		}
 	case 1:
-		p, err := ch.vr.Publication(ctx, election, rid)
+		p, err := chain.Publication(ctx, rid)
 		if err != nil {
 			return err
 		}
@@ -579,7 +537,7 @@ func verifyPosPublishEffect(ctx context.Context, ch *validatorChain, election co
 			return fmt.Errorf("%w: after finalizeCandidate the candidate is not published in the election (lost coverage: %t)", ErrValidator, p.Lost)
 		}
 	case 2:
-		out, err := ch.vr.Output(ctx, rid)
+		out, err := chain.Output(ctx, rid)
 		if err != nil {
 			return err
 		}
@@ -597,4 +555,98 @@ func requireVRPublished(state uint8) error {
 		return nil
 	}
 	return fmt.Errorf("%w: after VR.publish the result's output is %s, not Published (VR.publish returns a status without reverting when it cannot publish)", ErrValidator, vrOutputState(state))
+}
+
+// posPublishChain is what the relayer reads from the election and VR.
+type posPublishChain interface {
+	Publication(ctx context.Context, rid [32]byte) (vrclient.PublicationRecord, error)
+	Output(ctx context.Context, rid [32]byte) (vrclient.OutputView, error)
+}
+
+type posPublishReader struct {
+	ch       *validatorChain
+	election common.Address
+}
+
+func (r posPublishReader) Publication(ctx context.Context, rid [32]byte) (vrclient.PublicationRecord, error) {
+	return r.ch.vr.Publication(ctx, r.election, rid)
+}
+
+func (r posPublishReader) Output(ctx context.Context, rid [32]byte) (vrclient.OutputView, error) {
+	return r.ch.vr.Output(ctx, rid)
+}
+
+// posPublishRun is one relayer run: the open result and its frozen members, how to read the chain, the sender, and Pops, which collects the
+// members' possession proofs and is called only when they must still be submitted.
+type posPublishRun struct {
+	Election, Registry common.Address
+	Rid                [32]byte
+	Members            []vrclient.FrozenMember
+	Chain              posPublishChain
+	Pops               func(ctx context.Context) ([]vrclient.PoPInput, error)
+	Sender             vrclient.Sender
+	DryRun             bool
+}
+
+// runPosPublish plans from the chain's state, sends the unfinished steps and, after each mined transaction, reads the state again and requires
+// its intended effect: a successful receipt is not enough (VR.publish returns a status without reverting when the result was invalidated).
+func runPosPublish(ctx context.Context, w io.Writer, r posPublishRun) error {
+	pubRec, err := r.Chain.Publication(ctx, r.Rid)
+	if err != nil {
+		return err
+	}
+	out, err := r.Chain.Output(ctx, r.Rid)
+	if err != nil {
+		return err
+	}
+	plan, err := planPosPublish(len(r.Members), pubRec.PopCount, pubRec.Published, out.State)
+	if err != nil {
+		return err
+	}
+	var pops []vrclient.PoPInput
+	if plan[0] { // holders are read only when proofs must still be submitted: a resumed run needs no key file
+		if pops, err = r.Pops(ctx); err != nil {
+			return err
+		}
+	}
+	sub, err := vrclient.PosCalldata(vrclient.PosPublishABI, "submitAssignmentPoPs", r.Rid, pops)
+	if err != nil {
+		return err
+	}
+	fin, err := vrclient.PosCalldata(vrclient.PosPublishABI, "finalizeCandidate", r.Rid)
+	if err != nil {
+		return err
+	}
+	pub, err := vrclient.PosCalldata(vrclient.PosPublishABI, "publish", r.Rid)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(w, "result %x with %d members\n", r.Rid, len(r.Members))
+	all := []step{
+		{what: "submit every frozen member's possession proof", tx: vrclient.Tx{To: r.Election, Data: sub}},
+		{what: "finalize the candidate (publish it in P85)", tx: vrclient.Tx{To: r.Election, Data: fin}},
+		{what: "publish the result in VR", tx: vrclient.Tx{To: r.Registry, Data: pub}},
+	}
+	var steps []step
+	var kinds []int
+	for i, st := range all {
+		if plan[i] {
+			steps = append(steps, st)
+			kinds = append(kinds, i)
+		} else {
+			fmt.Fprintf(w, "already done: %s\n", st.what)
+		}
+	}
+	if len(steps) == 0 {
+		fmt.Fprintln(w, "nothing to do: the result is published in VR")
+		return nil
+	}
+	// runSteps replaces the steps after i with the callback's result: the effect check hands the remaining steps back unchanged
+	verify := func(i int, _ *vrclient.Receipt) ([]step, error) {
+		if err := verifyPosPublishEffect(ctx, r.Chain, r.Rid, kinds[i], len(r.Members)); err != nil {
+			return nil, err
+		}
+		return append([]step(nil), steps[i+1:]...), nil
+	}
+	return runSteps(ctx, w, r.Sender, r.DryRun, steps, verify)
 }

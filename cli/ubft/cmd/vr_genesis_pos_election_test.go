@@ -109,3 +109,51 @@ func TestPosElectionInitializationIsBoundToThePlan(t *testing.T) {
 		require.ErrorIs(t, vrCheckPosElection(in, d, network, a), ErrVRGenesis, name)
 	}
 }
+
+// custody's genesis storage is the plan's, slot for slot: the mutations a partial check would miss are refused.
+func TestPosCustodyStorageIsBoundToThePlan(t *testing.T) {
+	in, d, alloc := posElectionFixture(t)
+	network, err := vrHex("network", in.Network, 32)
+	require.NoError(t, err)
+	custody := common.HexToAddress(d.Custody)
+	require.NoError(t, vrCheckPosCustody(in, d, network, alloc), "the generated alloc passes")
+
+	mutate := func(slot vrschema.Word, v vrschema.Word) map[common.Address]vrAllocAccount {
+		out := map[common.Address]vrAllocAccount{}
+		for k, x := range alloc {
+			out[k] = x
+		}
+		a := alloc[custody]
+		st := map[string]string{}
+		for k, x := range a.Storage {
+			if !strings.EqualFold(strings.TrimPrefix(k, "0x"), lowerHex(slot[:])[2:]) {
+				st[k] = x
+			}
+		}
+		st[lowerHex(slot[:])] = lowerHex(v[:])
+		a.Storage = st
+		out[custody] = a
+		return out
+	}
+	one := vrschema.U64(1)
+	eid := vrschema.PoaExposureDigest(vrschema.Word(network), vrschema.U64(in.ChainID), vrschema.ValidatorRegistry, vrschema.Word(mustHex32(t, in.Pos.AssignmentID)), 2)
+	cursor := vrschema.LiabilityNS
+	for name, a := range map[string]map[common.Address]vrAllocAccount{
+		"initialized cleared (genesisStarted kept)": mutate(vrschema.U64(1), packed([3]uint64{0, 1, 1})),
+		"a member digest":          mutate(vrschema.MapSlot(eid, vrschema.U64(40)), one),
+		"a lot's remaining amount": mutate(vrschema.SlotAdd(vrschema.MapSlot(vrschema.U64(3), vrschema.U64(27)), 1), one),
+		"the record cursor":        mutate(cursor, one),
+		"an extra slot":            mutate(vrschema.U64(0x4321), one),
+		"a position's owner":       mutate(vrschema.MapSlot(vrschema.U64(1), vrschema.U64(22)), one),
+		"the exposure digest":      mutate(vrschema.SlotAdd(vrschema.MapSlot(vrschema.Word(mustHex32(t, in.Pos.AssignmentID)), vrschema.U64(32)), 5), one),
+		"no manifest hash":         mutate(vrschema.U64(3), vrschema.Word{}),
+	} {
+		require.ErrorIs(t, vrCheckPosCustody(in, d, network, a), ErrVRGenesis, name)
+	}
+}
+
+func mustHex32(t *testing.T, s string) [32]byte {
+	b, err := vrHex("word", s, 32)
+	require.NoError(t, err)
+	return [32]byte(b)
+}

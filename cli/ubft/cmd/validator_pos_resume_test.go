@@ -1,7 +1,22 @@
 package cmd
 
 import (
+	"context"
+	"encoding/hex"
+	"encoding/json"
+	"math/big"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
+	"time"
+
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/core/types"
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/rpc"
 
 	"github.com/stretchr/testify/require"
 
@@ -58,4 +73,131 @@ func TestRequireVRPublishedNamesTheState(t *testing.T) {
 		require.ErrorIs(t, err, ErrValidator)
 		require.ErrorContains(t, err, name)
 	}
+}
+
+// ---- the command's run against a fake RPC: planning, sending, and the effect check after each mined transaction ----
+
+type fakePosChain struct {
+	mu        sync.Mutex
+	pops      uint32
+	finalized bool
+	vrState   uint8
+	// what each transaction does to the state; publishState is the VR output state after VR.publish (Published unless the result was invalidated)
+	publishState uint8
+	noProofs     bool // submitAssignmentPoPs mines without storing the proofs
+	sent         []string
+}
+
+func (f *fakePosChain) Publication(_ context.Context, _ [32]byte) (vrclient.PublicationRecord, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return vrclient.PublicationRecord{PopCount: f.pops, Published: f.finalized}, nil
+}
+
+func (f *fakePosChain) Output(_ context.Context, _ [32]byte) (vrclient.OutputView, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return vrclient.OutputView{State: f.vrState}, nil
+}
+
+// serve is a JSON-RPC endpoint for the sender: it prices and simulates everything successfully, and applies a mined transaction to the fake state.
+func (f *fakePosChain) serve(t *testing.T, members uint32) *rpc.Client {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ID     json.RawMessage   `json:"id"`
+			Method string            `json:"method"`
+			Params []json.RawMessage `json:"params"`
+		}
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+		var res any
+		switch req.Method {
+		case "eth_getBlockByNumber":
+			res = map[string]any{"baseFeePerGas": "0x7"}
+		case "eth_estimateGas":
+			res = "0x5208"
+		case "eth_getTransactionCount":
+			res = "0x0"
+		case "eth_sendRawTransaction":
+			var raw hexutil.Bytes
+			require.NoError(t, json.Unmarshal(req.Params[0], &raw))
+			var tx types.Transaction
+			require.NoError(t, tx.UnmarshalBinary(raw))
+			f.mu.Lock()
+			switch hex.EncodeToString(tx.Data()[:4]) {
+			case hex.EncodeToString(vrclient.PosPublishABI.Methods["submitAssignmentPoPs"].ID):
+				f.sent = append(f.sent, "submit")
+				if !f.noProofs {
+					f.pops = members
+				}
+			case hex.EncodeToString(vrclient.PosPublishABI.Methods["finalizeCandidate"].ID):
+				f.sent = append(f.sent, "finalize")
+				f.finalized = true
+			case hex.EncodeToString(vrclient.PosPublishABI.Methods["publish"].ID):
+				f.sent = append(f.sent, "publish")
+				f.vrState = f.publishState
+			}
+			f.mu.Unlock()
+			res = tx.Hash()
+		case "eth_getTransactionReceipt":
+			res = map[string]any{"status": "0x1", "blockNumber": "0x1", "gasUsed": "0x1", "logs": []any{}}
+		default:
+			t.Errorf("unexpected RPC %s", req.Method)
+		}
+		out, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": res})
+		require.NoError(t, err)
+		_, _ = w.Write(out)
+	}))
+	t.Cleanup(srv.Close)
+	c, err := rpc.DialHTTP(srv.URL)
+	require.NoError(t, err)
+	t.Cleanup(c.Close)
+	return c
+}
+
+func runFakePosPublish(t *testing.T, f *fakePosChain, members int, pops func() ([]vrclient.PoPInput, error)) (string, error) {
+	key, err := ethcrypto.GenerateKey()
+	require.NoError(t, err)
+	var out strings.Builder
+	err = runPosPublish(context.Background(), &out, posPublishRun{
+		Election: common.Address{0xE1}, Registry: common.Address{0x03}, Rid: [32]byte{1},
+		Members: make([]vrclient.FrozenMember, members), Chain: f,
+		Pops:   func(context.Context) ([]vrclient.PoPInput, error) { return pops() },
+		Sender: vrclient.Sender{RPC: f.serve(t, uint32(members)), Key: key, ChainID: big.NewInt(1), Poll: time.Millisecond}})
+	return out.String(), err
+}
+
+func TestPosPublishCommandRequiresEachEffect(t *testing.T) {
+	noPops := func() ([]vrclient.PoPInput, error) { return []vrclient.PoPInput{{Id: 1}}, nil }
+	t.Run("all steps, every effect present", func(t *testing.T) {
+		f := &fakePosChain{vrState: 1, publishState: 2}
+		_, err := runFakePosPublish(t, f, 4, noPops)
+		require.NoError(t, err)
+		require.Equal(t, []string{"submit", "finalize", "publish"}, f.sent, "the remaining steps survive each check")
+	})
+	t.Run("the result is invalidated before VR.publish executes", func(t *testing.T) {
+		// planning sees Reserved and a finalized candidate; the successful receipt leaves the output Invalidated
+		f := &fakePosChain{pops: 4, finalized: true, vrState: 1, publishState: 3}
+		_, err := runFakePosPublish(t, f, 4, noPops)
+		require.ErrorIs(t, err, ErrValidator)
+		require.ErrorContains(t, err, "Invalidated")
+		require.Equal(t, []string{"publish"}, f.sent)
+	})
+	t.Run("the proofs are not stored after the receipt", func(t *testing.T) {
+		f := &fakePosChain{vrState: 1, publishState: 2, noProofs: true}
+		_, err := runFakePosPublish(t, f, 4, noPops)
+		require.ErrorContains(t, err, "stores 0 of 4")
+		require.Equal(t, []string{"submit"}, f.sent, "nothing is sent after a failed effect")
+	})
+	t.Run("a resumed run needs no holders", func(t *testing.T) {
+		f := &fakePosChain{pops: 4, finalized: true, vrState: 1, publishState: 2}
+		_, err := runFakePosPublish(t, f, 4, func() ([]vrclient.PoPInput, error) { t.Fatal("holders read"); return nil, nil })
+		require.NoError(t, err)
+		require.Equal(t, []string{"publish"}, f.sent)
+	})
+	t.Run("an already invalidated result is refused at planning", func(t *testing.T) {
+		f := &fakePosChain{pops: 4, finalized: true, vrState: 3}
+		_, err := runFakePosPublish(t, f, 4, noPops)
+		require.ErrorContains(t, err, "Invalidated")
+		require.Empty(t, f.sent)
+	})
 }

@@ -182,6 +182,9 @@ func vrCheckPosStack(in vrGenesisInput, d vrDeploymentFile, identities []evmassi
 	if err := vrCheckPosElection(in, d, network, alloc); err != nil {
 		return err
 	}
+	if err := vrCheckPosCustody(in, d, network, alloc); err != nil {
+		return err
+	}
 	chainWord := vrschema.U64(in.ChainID)
 	for i, id := range identities {
 		sid := uint64(i + 1)
@@ -313,3 +316,191 @@ var vrElectionBindingDomain = vrschema.Keccak([]byte("unicity.p85.delegation-bin
 
 // wb is a word as a byte slice.
 func wb(w vrschema.Word) []byte { return w[:] }
+
+// ---- custody's entire planned genesis storage ----------------------------------------------------------------------------------------------
+
+// Fixed by the PoS genesis script (VRPosGenesis.s.sol: the policy) and by the contracts (the genesis assignment's lineage and epochs); not choices of the plan.
+const (
+	vrCustodyLifetimeCapBps   = 500
+	vrCustodyHoldRetirement   = 2_000
+	vrCustodyTimeFloor        = 3_600
+	vrCustodyPolicyID         = 1
+	vrCustodyCatEncumbered    = 2
+	vrCustodyStatusNotEntered = 1 // the reentrancy guard's rest value
+)
+
+var (
+	vrGenesisLineage       = vrschema.Keccak([]byte("p85/lane/lineage"))
+	vrCustodyChainDomain   = vrschema.Keccak([]byte("unicity.p85.exposure-chain"))
+	vrCustodyExpoDigestDom = vrschema.Keccak([]byte("unicity.p85.exposure-digest"))
+	vrCustodyKeyDigestDom  = vrschema.Keccak([]byte("unicity.p85.key-history-digest"))
+)
+
+// vrPosCustodyExpected derives custody's whole genesis storage from the plan, replaying CustodyGenesis.initialize, one seedGenesis per identity
+// and sealGenesis: the wiring, the positions, the root and EVM key claims, one lot per identity (encumbered by its genesis exposure), the
+// genesis assignment and its exposures with the VR member digests, the exposure digest and key digest, and the holder facts at the liability
+// namespace. Nothing else is stored at genesis, so the allocated storage must equal it slot for slot. The manifest hash is the factory's hash of the
+// whole manifest and is taken from the alloc (it must be present).
+func vrPosCustodyExpected(in vrGenesisInput, d vrDeploymentFile, network []byte, manifestHash vrschema.Word) (vrStorage, error) {
+	e := vrStorage{}
+	addr := func(name, s string) (common.Address, error) { return vrAddress("PoS "+name, s) }
+	election, err1 := addr("election", d.Election)
+	evidence, err2 := addr("evidence", d.Evidence)
+	policy, err3 := addr("policy", d.Policy)
+	treasury, err4 := vrAddress("PoS treasury", in.Pos.Treasury)
+	assignment, err5 := vrHex("assignment", in.Pos.AssignmentID, 32)
+	bondUnit, ok := new(big.Int).SetString(in.Pos.BondUnit, 10)
+	if err := errors.Join(err1, err2, err3, err4, err5); err != nil {
+		return nil, err
+	}
+	if !ok || bondUnit.Sign() <= 0 {
+		return nil, fmt.Errorf("%w: the plan's bond unit is not a positive decimal", ErrVRGenesis)
+	}
+	vr := common.Address(vrschema.ValidatorRegistry)
+	chain := vrschema.U64(in.ChainID)
+	net := vrschema.Word(network)
+	asg := vrschema.Word(assignment)
+	U := vrschema.U64
+	A := vrschema.AddrWord
+	e.set(U(0), U(vrCustodyStatusNotEntered))
+	e.set(U(1), packed([3]uint64{0, 1, 1}, [3]uint64{1, 1, 1})) // genesisStarted, initialized
+	e.set(U(2), asg)
+	e.set(U(3), manifestHash)
+	e.set(U(4), net)
+	e.set(U(5), A(election))
+	e.set(U(6), A(evidence))
+	e.set(U(7), A(policy))
+	e.set(U(8), A(common.Address(vrschema.SealRegistry)))
+	e.set(U(9), A(treasury))
+	// bondUnit and minBond (both the plan's unit) share a word: bondUnit low, minBond high
+	var bw vrschema.Word
+	put128(&bw, 0, bondUnit)
+	put128(&bw, 16, bondUnit)
+	e.set(U(10), bw)
+	e.set(U(11), packed([3]uint64{0, 4, uint64(in.Limits.VMax)}, [3]uint64{4, 4, uint64(in.Limits.LMax)}, [3]uint64{8, 4, uint64(in.Limits.RMax)}, [3]uint64{12, 4, uint64(in.Limits.MaxBatch)}))
+	n := uint64(len(in.Identities))
+	e.set(U(12), U(n))
+	e.set(U(13), U(n))
+	e.set(U(14), asg)
+	total := new(big.Int)
+	// positions, keys, lots, exposures
+	expoIDs := make([]vrschema.Word, 0, n)
+	expoDigest, keyDigest := vrCustodyExpoDigestDom, vrCustodyKeyDigestDom
+	nsB := vrschema.LiabilityNS
+	for i, id := range in.Identities {
+		sid := uint64(i + 1)
+		owner, err1 := vrAddress("owner", id.Owner)
+		payee, err2 := vrAddress("payee", id.Payee)
+		rootKey, err3 := vrHex("rootKey", id.RootKey, 33)
+		evmKey, err4 := vrHex("evmKey", id.EVMKey, 33)
+		if err := errors.Join(err1, err2, err3, err4); err != nil {
+			return nil, err
+		}
+		rootHash, evmHash := vrschema.Keccak(rootKey), vrschema.Keccak(evmKey)
+		bond := new(big.Int).Mul(new(big.Int).SetUint64(id.RawWeight), bondUnit)
+		total.Add(total, bond)
+		// positions[id]: owner, withdrawal (= owner), root key hash, staged (zero), then generation 1 / roleNonce 0 / openLots 1 / lotCount 1 / no retirement
+		pos := vrschema.MapSlot(U(sid), U(22))
+		e.set(pos, A(owner))
+		e.set(vrschema.SlotAdd(pos, 1), A(owner))
+		e.set(vrschema.SlotAdd(pos, 2), rootHash)
+		e.set(vrschema.SlotAdd(pos, 4), packed([3]uint64{0, 8, 1}, [3]uint64{16, 4, 1}, [3]uint64{20, 4, 1}))
+		// _keys[hash] = {id, role}
+		e.set(vrschema.MapSlot(rootHash, U(25)), packed([3]uint64{0, 8, sid}, [3]uint64{8, 1, 1}))
+		e.set(vrschema.MapSlot(evmHash, U(25)), packed([3]uint64{0, 8, sid}, [3]uint64{8, 1, 2}))
+		// the lot (id = sid): moved to Encumbered by its genesis exposure
+		lot := vrschema.MapSlot(U(sid), U(27))
+		w0 := packed([3]uint64{0, 8, sid}, [3]uint64{8, 8, 1}) // id, generation 1; initial (uint128) above them
+		put128(&w0, 16, bond)
+		var w1 vrschema.Word // remaining (uint128) in the low half, penalized zero
+		put128(&w1, 0, bond)
+		e.set(lot, w0)
+		e.set(vrschema.SlotAdd(lot, 1), w1)
+		e.set(vrschema.SlotAdd(lot, 2), packed([3]uint64{0, 1, vrCustodyCatEncumbered}, [3]uint64{1, 2, vrCustodyLifetimeCapBps}, [3]uint64{3, 4, 1},
+			[3]uint64{7, 8, vrCustodyHoldRetirement}, [3]uint64{15, 8, vrCustodyTimeFloor}))
+		// _generationLots[id][1] = [lot]
+		gl := vrschema.MapSlot(U(1), vrschema.MapSlot(U(sid), U(26)))
+		e.set(gl, U(1))
+		e.set(vrschema.BytesDataSlot(gl), U(sid))
+		// the exposure at the genesis assignment, in the VR domain
+		eid := vrschema.PoaExposureDigest(net, chain, vr, asg, sid)
+		expoIDs = append(expoIDs, eid)
+		ex := vrschema.MapSlot(eid, U(33))
+		e.set(ex, asg)
+		e.set(vrschema.SlotAdd(ex, 1), packed([3]uint64{0, 8, sid}, [3]uint64{8, 8, 1}, [3]uint64{16, 8, id.RawWeight}, [3]uint64{24, 8, id.RawWeight}))
+		e.set(vrschema.SlotAdd(ex, 2), rootHash)
+		e.set(vrschema.SlotAdd(ex, 3), evmHash)
+		w4 := vrschema.Word{}
+		addrAt(&w4, 0, payee)
+		e.set(vrschema.SlotAdd(ex, 4), w4)
+		e.set(vrschema.SlotAdd(ex, 5), U(1))
+		e.set(vrschema.BytesDataSlot(vrschema.SlotAdd(ex, 5)), U(sid))
+		e.set(vrschema.MapSlot(U(sid), vrschema.MapSlot(eid, U(34))), U(1)) // _exposureHasLot[eid][lot]
+		// the exposure chain of (id, 1) and the holder facts
+		chainWord := vrschema.Keccak(wb(vrCustodyChainDomain), zeroWordBytes(), wb(eid))
+		e.set(vrschema.MapSlot(U(1), vrschema.MapSlot(U(sid), U(29))), chainWord)
+		e.set(vrschema.MapSlot(U(1), vrschema.MapSlot(U(sid), U(31))), U(1))
+		f := vrschema.MapSlot(U(1), vrschema.MapSlot(U(sid), vrschema.SlotAdd(nsB, 1)))
+		e.set(f, packed([3]uint64{1, 4, 1}, [3]uint64{5, 4, 1}))
+		e.set(vrschema.SlotAdd(f, 1), chainWord)
+		// the member digest of the VR domain: VR's seat digest over GENESIS_RESULT
+		member := vrschema.PoaExposureDigest(net, chain, vr, vrschema.GenesisResult, sid)
+		e.set(vrschema.MapSlot(eid, U(40)), member)
+		expoDigest = vrschema.Keccak(wb(expoDigest), wb(eid), wb(U(sid)), wb(U(id.RawWeight)), wb(U(id.RawWeight)), wb(A(payee)), wb(member))
+		keyDigest = vrschema.Keccak(wb(keyDigest), wb(U(sid)), wb(rootHash), wb(evmHash))
+		_ = owner
+	}
+	e.set(U(18), wordOfBig(total)) // totalEncumbered: every genesis lot is encumbered
+	e.set(U(39), A(vr))
+	// the genesis assignment
+	a := vrschema.MapSlot(asg, U(32))
+	e.set(a, U(2)) // Active
+	e.set(vrschema.SlotAdd(a, 1), vrGenesisLineage)
+	e.set(vrschema.SlotAdd(a, 2), packed([3]uint64{0, 8, 1}, [3]uint64{8, 8, 1}, [3]uint64{24, 8, 1})) // rootEpoch 1, evmEpoch 1, firstRound 1 (offset 0)
+	e.set(vrschema.SlotAdd(a, 3), packed([3]uint64{0, 1, 1}))                                          // offsetSet
+	e.set(vrschema.SlotAdd(a, 5), expoDigest)
+	e.set(vrschema.SlotAdd(a, 6), keyDigest)
+	e.set(vrschema.SlotAdd(a, 7), U(vrCustodyPolicyID))
+	e.set(vrschema.SlotAdd(a, 8), U(uint64(len(expoIDs))))
+	for i, eid := range expoIDs {
+		e.set(vrschema.SlotAdd(vrschema.BytesDataSlot(vrschema.SlotAdd(a, 8)), uint64(i)), eid)
+	}
+	return e, nil
+}
+
+func zeroWordBytes() []byte { return make([]byte, 32) }
+
+// put128 writes a uint128 at the byte offset off of a packed word.
+func put128(w *vrschema.Word, off int, b *big.Int) {
+	b.FillBytes(w[32-off-16 : 32-off])
+}
+
+func wordOfBig(b *big.Int) vrschema.Word {
+	var w vrschema.Word
+	b.FillBytes(w[:])
+	return w
+}
+
+// vrCheckPosCustody compares custody's whole allocated storage with the one the plan derives (vrPosCustodyExpected): a cleared `initialized`, a
+// member digest, a lot, the record cursor or any other slot that differs, and any extra slot, is refused.
+func vrCheckPosCustody(in vrGenesisInput, d vrDeploymentFile, network []byte, alloc map[common.Address]vrAllocAccount) error {
+	custody, err := vrAddress("PoS custody", d.Custody)
+	if err != nil {
+		return err
+	}
+	got, err := storageOf(alloc[custody])
+	if err != nil {
+		return err
+	}
+	if got[vrschema.U64(3)] == (vrschema.Word{}) {
+		return fmt.Errorf("%w: custody has no manifest hash: it is not initialized", ErrVRGenesis)
+	}
+	want, err := vrPosCustodyExpected(in, d, network, got[vrschema.U64(3)])
+	if err != nil {
+		return err
+	}
+	if diffs := diffStorage("custody", want, got); len(diffs) > 0 {
+		return fmt.Errorf("%w: custody's storage is not the plan's: %s", ErrVRGenesis, strings.Join(diffs, "; "))
+	}
+	return nil
+}
