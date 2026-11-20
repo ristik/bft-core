@@ -217,30 +217,35 @@ vrp_election_diag() {
 vrp_recovery() {
   vrp_source_q3 || { vrb_log "FAIL: the q3 helpers"; return 1; }
   local first=$vrb_result i rid2 rec
-  # 1. the second election over the same five, published and handed off by the nodes themselves
-  vrb_wait 1500 "the second election reserves J' from stake" vrp_new_open_result || { vrp_election_diag; return 1; }
+  # 1. a committee change makes the second election: unchanged stake elects nothing new (pos7). The joiner (identity $vrj_id) requests retirement
+  # (`validator exit`); the next election reserves J' = the other four, published and handed off by the roots
+  [ "${VR_JOINER:-0}" = 1 ] || { vrb_log "FAIL: the PoS recovery needs the joiner (VR_JOINER=1): a retirement is its committee change"; return 1; }
+  build/ubft validator exit --validator-config "$vrj_cfg/validator.json" 2>&1 | tee "$VR_EVIDENCE/exit.log" || { vrb_log "FAIL: validator exit"; return 1; }
+  vrb_wait 1500 "the election reserves J' (the four) after the retirement" vrp_new_open_result || { vrp_election_diag; return 1; }
   rid2=$(cast call --rpc-url "$vrb_rpc" "$(vrp_election)" 'openResult()(bytes32)')
   vrb_result=$rid2
   vrp_publish || return 1
   vrb_wait 900 "the roots installed J' (root epoch 3)" vrp_root_epoch_is 3 || return 1
   vrb_log "J' = $rid2 is installed at the roots; its VR output state $(vrp_result_state "$rid2") (2 = Published)"
-  # 2. J' stalls: three of the five lose their EVM services, so its EVM quorum (3 of 5) cannot form
-  local before after
-  local n stop; n=$(cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'committeeIds()(uint64[])' | tr -cd ',' | wc -c); n=$((n + 1)); stop=$((n - n / 2))
-  vrb_log "the committee has $n members: the EVM services of the last $stop stop (J' keeps $((n - stop)), the EVM quorum is $((n / 2 + 1)))"
-  for i in $(seq $((n - stop + 1)) "$n"); do stop_one_evm_validator "$i" 2>/dev/null || true; done
+  # 2. J' stalls: two of its four lose their EVM services, so its EVM quorum (3 of 4) cannot form
+  local before after n stop
+  n=$(cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'committeeIds()(uint64[])' | tr -cd ',' | wc -c); n=$((n + 1))   # K, the five
+  local nj=$((n - 1)); stop=$((nj - nj / 2))
+  vrb_log "K has $n members, J' has $nj: the EVM services of the last $stop of J' (identities $(seq -s ' ' $((nj - stop + 1)) "$nj")) stop (J' keeps $((nj - stop)), the EVM quorum is $((nj / 2 + 1)))"
+  for i in $(seq $((nj - stop + 1)) "$nj"); do stop_one_evm_validator "$i" 2>/dev/null || true; done
   before=$(vrp_eth_block); sleep 45; after=$(vrp_eth_block)
   [ "$after" -le "$((before + 1))" ] || { vrb_log "FAIL: J' certified blocks ($before -> $after) without its EVM quorum"; return 1; }
   [ "$(vrp_result_state "$rid2")" = 2 ] || { vrb_log "FAIL: J' is no longer Published in VR"; return 1; }
-  vrb_log "PASS: J' stalls (EVM block $before -> $after in 45 s with 2 of its 5 validators)"
+  vrb_log "PASS: J' stalls (EVM block $before -> $after in 45 s with $((nj - stop)) of its $nj validators)"
   # 3. the recovery: the roots return to K's committee (epoch 4), exact K, no receipts, supersedes J'
   H3_ROOTS="$(seq -s ' ' 1 "$n")"
   Q3_WEIGHTS="$(printf '1 %.0s' $(seq 1 "$n"))" Q3_NEXT_EPOCH=4 q3_trust_base_v3 4 || { vrb_log "FAIL: the recovery's trust base"; return 1; }
+  H3_ROOTS="$(seq -s ' ' 1 "$nj")"   # J''s roots run the recovery handoff; the retired joiner's root is not in epoch 3
   Q3_RECOVERY=1 Q3_SUPERSEDE=1 Q3_NEXT_EPOCH=4 Q3_ASSIGN_TAG=rec Q3_SUFFIX=-2 h3_retry_handoff 3 q3_attempt || { vrb_log "FAIL: the recovery handoff"; return 1; }
   Q3_EXPECT_SWITCHED="$(seq -s ' ' 1 "$n")" q3_install_n 4 || { vrb_log "FAIL: the roots did not install the recovery"; return 1; }
   vrb_log "PASS: the roots installed the recovery K (root epoch 4)"
   # 4. the three stopped validators return into K's scope; VR imports RecoveryAck(J') and the Boundary (recovered)
-  for i in $(seq $((n - stop + 1)) "$n"); do start_one_evm_validator "$i" "${validators:-4}" "$partitionID" "$(m2_root_addr 1)" engine-api rpc "$(evm_bootnodes_for_peers "$(m2_root_addr 1)" "$i" 1 2 3 4)" >/dev/null 2>&1 || true; done
+  for i in $(seq $((nj - stop + 1)) "$nj"); do start_one_evm_validator "$i" "${validators:-4}" "$partitionID" "$(m2_root_addr 1)" engine-api rpc "$(evm_bootnodes_for_peers "$(m2_root_addr 1)" "$i" 1 2 3 4 5)" >/dev/null 2>&1 || true; done
   vrb_wait 900 "VR's output of J' is Recovered (state 6)" bash -c "[ \"\$(cast call --rpc-url $vrb_rpc $vrb_vr 'output(bytes32)' $rid2 | python3 -c \"import sys;h=sys.stdin.read().strip()[2:];print(int(h[128:192],16))\")\" = 6 ]" || return 1
   [ "$(cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'health()(uint8)')" = 0 ] || { vrb_log "FAIL: VR is not Healthy after the recovery"; return 1; }
   [ "$(cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'lastAcked()(bytes32)')" = "$rid2" ] || { vrb_log "FAIL: lastAcked is not J's pair result"; return 1; }
