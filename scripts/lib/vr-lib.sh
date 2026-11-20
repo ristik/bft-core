@@ -72,7 +72,7 @@ vr_prepare_genesis() { # after the profile: dev keys, the plan, the contracts ge
     items+=("{\"rootNodeId\":\"$rid\",\"evmNodeId\":\"$eid\"}")
   done
   printf '[%s]\n' "$(IFS=,; echo "${items[*]}")" >"$VR_DIR/genesis-bindings.json"
-  python3 deploy/testnet/vr_dev_keys.py "$VR_DIR/dev-keys" "$n" || vr_die "generating the dev keys failed" || return 1
+  [ -s "$VR_DIR/dev-keys/keys.json" ] || python3 deploy/testnet/vr_dev_keys.py "$VR_DIR/dev-keys" "$n" || vr_die "generating the dev keys failed" || return 1
   build/ubft vr-genesis plan --trust-base test-nodes/trust-base.json --shard-conf "test-nodes/shard-conf-${partitionID:-8}_0.json" \
     --bindings "$VR_DIR/genesis-bindings.json" --owners "$VR_DIR/dev-keys/owners.json" --b1-profile test-nodes/b1-profile.json \
     --network-word "$(vr_network_word)" --governor-signers "$(tr -d '\n' <"$VR_DIR/dev-keys/signers.txt")" --fee-collector "$(vr_fee_collector)" \
@@ -125,7 +125,9 @@ export VR_ROOT_FLAGS_FN=vr_root_flags
 
 vr_root_flags() { # <i> <ureth rpc>: the VR-mode roots: the genesis committee, the VR deployment, and the execution client VT-05b's root side reads
   # VT-09: the node does its member steps itself; its EVM key (the possession proof) is its paired EVM shard node's, as the validator configuration names it
-  echo --genesis-identities "$VR_DIR/genesis-identities.json" --vr-deployment "$VR_DIR/vr-deployment.json" --pos-evm-rpc "$2" --vr-evm-keys "test-nodes/evm$1/keys.json" --vr-shard-rpc "http://$(evm_validator_rpc_addr "$1")"
+  local evmHolder="--vr-evm-keys test-nodes/evm$1/keys.json"
+  [ "${SIGNING:-local}" != authority ] || evmHolder="--vr-evm-authority-socket test-nodes/auth$1/pop.sock --vr-evm-authority-credential test-nodes/auth$1/pop.cred"
+  echo --genesis-identities "$VR_DIR/genesis-identities.json" --vr-deployment "$VR_DIR/vr-deployment.json" --pos-evm-rpc "$2" $evmHolder --vr-shard-rpc "http://$(evm_validator_rpc_addr "$1")"
 }
 
 vr_readback() { # <ureth rpc>: VR's views at the latest block read back what the plan put there
