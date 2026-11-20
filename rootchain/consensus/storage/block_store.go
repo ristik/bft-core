@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/unicitynetwork/bft-core/rootrecords"
+	basetypes "github.com/unicitynetwork/bft-go-base/types"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -24,6 +25,7 @@ type (
 		// treeRef is the block tree. An epoch install (InstallEpochAnchor) replaces it while an in-process epoch switch (#1086) runs
 		// with the operator and records readers live, so it is read through tree().
 		treeRef       atomic.Pointer[BlockTree]
+		observed      atomic.Pointer[basetypes.PartitionShardID] // the EVM shard whose certified blocks the durable observation queue records (SetObservedShard)
 		storage       PersistentStore
 		orchestration Orchestration
 		profile       uint64
@@ -492,6 +494,7 @@ func (x *BlockStore) tree() *BlockTree { return x.treeRef.Load() }
 
 // withTree sets the store's block tree.
 func withTree(x *BlockStore, t *BlockTree) *BlockStore {
+	t.observed = &x.observed
 	x.treeRef.Store(t)
 	return x
 }

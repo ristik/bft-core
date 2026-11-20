@@ -532,3 +532,19 @@ func (o *Observer) retryAwaiting(ctx context.Context) {
 		}
 	}
 }
+
+// Cursor is the observer's continuity state: the root round it last observed and the result that was the open Published output there
+// (zero when none). The worker stores it with each acknowledged queue entry.
+func (o *Observer) Cursor() (round uint64, prev vrschema.Word) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.lastRound, o.prev
+}
+
+// Resume restores the continuity state of an acknowledged entry after a restart, so the queue's next entry (the committed block that
+// follows it) continues the run instead of priming on a result that was already Published.
+func (o *Observer) Resume(round uint64, prev vrschema.Word) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.primed, o.lastRound, o.prev = true, round, prev
+}

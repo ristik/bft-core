@@ -79,6 +79,7 @@ func (x *BlockStore) InstallEpochAnchor(head *abdrc.CommittedBlock, v evmroot.Ve
 	}
 	root := newNode(oldRoot)
 	tree := &BlockTree{root: root, roundToNode: map[uint64]*node{a.Slot: root}, blocksDB: x.storage}
+	tree.observed = &x.observed
 	x.treeRef.Store(tree)
 	return a, nil
 }

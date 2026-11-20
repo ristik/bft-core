@@ -126,9 +126,9 @@ func (s *frontierPersistentStore) GetCut(key storage.CutKey) (storage.DurableCut
 }
 
 // CommitBlock forwards the atomic commit when the real store has one; otherwise it falls back to the separate writes.
-func (s *frontierPersistentStore) CommitBlock(block *storage.ExecutedBlock, recs []rootrecords.Record, cut *storage.CutEntry) error {
+func (s *frontierPersistentStore) CommitBlock(block *storage.ExecutedBlock, recs []rootrecords.Record, cut *storage.CutEntry, obs []storage.ObservationInput) error {
 	if store, ok := s.PersistentStore.(storage.BlockCommitter); ok {
-		return s.fault(store.CommitBlock(block, recs, cut))
+		return s.fault(store.CommitBlock(block, recs, cut, obs))
 	}
 	// the real store cannot commit atomically: the same writes in the order a crash repeats idempotently
 	if len(recs) > 0 {
@@ -318,4 +318,19 @@ func (s *frontierPersistentStore) InstallEpochAnchorRoot(block *storage.Executed
 		return errors.New("atomic epoch anchor storage unavailable")
 	}
 	return s.fault(store.InstallEpochAnchorRoot(block, a))
+}
+
+// PendingObservations and AckObservation forward the durable observation queue of the real store.
+func (s *frontierPersistentStore) PendingObservations(max int) ([]storage.ObservationInput, storage.ObservationCursor, error) {
+	if q, ok := s.PersistentStore.(storage.ObservationQueue); ok {
+		return q.PendingObservations(max)
+	}
+	return nil, storage.ObservationCursor{}, storage.ErrAssignmentHistory
+}
+
+func (s *frontierPersistentStore) AckObservation(round uint64, cursor storage.ObservationCursor) error {
+	if q, ok := s.PersistentStore.(storage.ObservationQueue); ok {
+		return q.AckObservation(round, cursor)
+	}
+	return storage.ErrAssignmentHistory
 }
