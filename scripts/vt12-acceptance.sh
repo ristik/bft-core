@@ -22,11 +22,16 @@ firing() {
 import json,sys
 name=sys.argv[1]; want=dict(a.split('=',1) for a in sys.argv[2:])
 try:
-    alerts=json.load(sys.stdin)['data']['alerts']
-except (ValueError, KeyError, TypeError):
+    payload=json.load(sys.stdin)
+    alerts=payload['data']['alerts']
+    if payload['status']!='success' or not isinstance(alerts,list):
+        sys.exit(2)
+    for a in alerts:
+        labels=a['labels']
+        if a['state']=='firing' and labels.get('alertname')==name and all(labels.get(k)==v for k,v in want.items()):
+            sys.exit(0)
+except (ValueError, KeyError, TypeError, AttributeError):
     sys.exit(2)
-for a in alerts:
-    if a['state']=='firing' and a['labels'].get('alertname')==name and all(a['labels'].get(k)==v for k,v in want.items()): sys.exit(0)
 sys.exit(1)" "$name" "$@" <<<"$alerts"
 }
 list_firing() { api api/v1/alerts | python3 -c "
