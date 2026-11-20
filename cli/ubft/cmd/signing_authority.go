@@ -309,7 +309,7 @@ func signingAuthorityRun(ctx context.Context, flags *signingAuthorityRunFlags) e
 	}
 	defer authority.Close()
 	if pending {
-		go provisionFenceWhenReady(ctx, log, flags.FenceProvisionFile, policyNetwork, authority, flags.observe.Meter("signingauthority"), func() uint64 { return flags.RootEpoch })
+		go provisionFenceWhenReady(ctx, log, flags.FenceProvisionFile, fenceGen, flags.ActivationSourceURL, authority, flags.observe.Meter("signingauthority"), func() uint64 { return flags.RootEpoch })
 	}
 
 	server, err := service.NewServer(authority, service.Config{OperatorCredential: operatorCredential, PoPCredential: popCredential, Log: log})

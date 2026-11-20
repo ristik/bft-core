@@ -92,11 +92,11 @@ type fenceProvision struct {
 
 // provisionFenceWhenReady waits for the provisioning file, builds the gate from it and hands it to the authority, which then signs. A file
 // that does not provide a complete VR fence is reported and the authority stays disabled.
-func provisionFenceWhenReady(ctx context.Context, log *slog.Logger, path string, network *[32]byte, a *signingauthority.Authority, meter metric.Meter, epoch func() uint64) {
+func provisionFenceWhenReady(ctx context.Context, log *slog.Logger, path string, start vrFence, startURL string, a *signingauthority.Authority, meter metric.Meter, epoch func() uint64) {
 	for ctx.Err() == nil {
 		raw, err := os.ReadFile(path) // #nosec G304 -- operator supplied local file
 		if err == nil {
-			if err := provisionFence(ctx, log, raw, network, a, meter, epoch); err != nil {
+			if err := provisionFence(ctx, log, raw, start, startURL, a, meter, epoch); err != nil {
 				log.Error("the fence provisioning is refused; the authority keeps signing nothing", "file", path, "error", err)
 			}
 			return
@@ -108,7 +108,7 @@ func provisionFenceWhenReady(ctx context.Context, log *slog.Logger, path string,
 	}
 }
 
-func provisionFence(ctx context.Context, log *slog.Logger, raw []byte, network *[32]byte, a *signingauthority.Authority, meter metric.Meter, epoch func() uint64) error {
+func provisionFence(ctx context.Context, log *slog.Logger, raw []byte, start vrFence, startURL string, a *signingauthority.Authority, meter metric.Meter, epoch func() uint64) error {
 	var p fenceProvision
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
@@ -126,7 +126,11 @@ func provisionFence(ctx context.Context, log *slog.Logger, raw []byte, network *
 	if err != nil {
 		return fmt.Errorf("executionGenesisHash: %w", err)
 	}
-	gate, _, err := newActivationGate(ctx, log, p.ActivationSourceURL, vrFence{VR: true, CodeHash: &pf.VRHookMeasurement.RegistryCodeHash, GenesisHash: genesis, NetworkWord: network})
+	pins, err := mergePins(start, startURL, p.ActivationSourceURL, &pf.VRHookMeasurement.RegistryCodeHash, genesis)
+	if err != nil {
+		return err
+	}
+	gate, _, err := newActivationGate(ctx, log, p.ActivationSourceURL, pins)
 	if err != nil {
 		return err
 	}
@@ -142,4 +146,33 @@ func provisionFence(ctx context.Context, log *slog.Logger, raw []byte, network *
 	go gate.Watch(ctx, activationWatchInterval, epoch)
 	log.Info("signing authority fence provisioned: signing is enabled", "source", p.ActivationSourceURL)
 	return nil
+}
+
+// mergePins resolves the deferred fence's pins: those the operator gave at startup (flags, registration policy) and those the provisioning
+// file and its b1 profile supply. A pin given by both must agree (a conflict refuses the provisioning, so signing is never enabled over a
+// contradiction); a pin given by one stands. The gate of a deferred start thereby has the pins of an immediate start.
+func mergePins(start vrFence, startURL, fileURL string, fileCode, fileGenesis *[32]byte) (vrFence, error) {
+	out := start
+	out.VR = true
+	pick := func(name string, have, file *[32]byte) (*[32]byte, error) {
+		switch {
+		case have != nil && file != nil && *have != *file:
+			return nil, fmt.Errorf("the %s given at startup (%x) is not the provisioned one (%x)", name, have[:], file[:])
+		case have != nil:
+			return have, nil
+		default:
+			return file, nil
+		}
+	}
+	var err error
+	if out.CodeHash, err = pick("registry code hash", start.CodeHash, fileCode); err != nil {
+		return out, err
+	}
+	if out.GenesisHash, err = pick("execution genesis hash", start.GenesisHash, fileGenesis); err != nil {
+		return out, err
+	}
+	if startURL != "" && startURL != fileURL {
+		return out, fmt.Errorf("the activation source given at startup (%s) is not the provisioned one (%s)", startURL, fileURL)
+	}
+	return out, nil
 }

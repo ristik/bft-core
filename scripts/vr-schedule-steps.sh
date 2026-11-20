@@ -7,6 +7,51 @@
 #      unicity_upgrade_required gauge;
 #   4. a `ubft` built with -tags no_test_rule reports noop-test-v1 as unsupported (validator upgrade --exit-code fails).
 # The governance delay is NOT waited out here: the latch at E and the refusal past it need further handoffs (not in this lane).
+# ---- the acceptance checks, as pure functions of evidence files: each returns non-zero when the evidence is missing or wrong ------------------------
+# (scripts/vr-schedule-checks-test.sh feeds them canned evidence, so they are proven to fail when it is absent)
+vrs_rule_id() { cast keccak "unicity.rule/$1"; }   # 0x-hex ruleId
+
+# vrs_check_events <file> <ruleId 0x-hex> <epoch> <event>: the file holds a line of that event for exactly this rule and epoch
+vrs_check_events() {
+  local rid=${2#0x}
+  grep -E "(event=)?$4" "$1" 2>/dev/null | grep -E "rule=(0x)?$rid" | grep -qE "epoch=$3([^0-9]|$)"
+}
+# vrs_check_all_roots <dir> <ruleId> <epoch> <roots...>: every listed root logged activation.latched AND activation.active for the rule at E
+vrs_check_all_roots() {
+  local d=$1 rid=$2 e=$3 i; shift 3
+  [ "$#" -gt 0 ] || return 1
+  for i in "$@"; do
+    vrs_check_events "$d/root$i-activation-events.txt" "$rid" "$e" 'activation\.latched' || { echo "root$i did not log activation.latched for rule $rid epoch $e" >&2; return 1; }
+    vrs_check_events "$d/root$i-activation-events.txt" "$rid" "$e" 'activation\.active' || { echo "root$i did not log activation.active for rule $rid epoch $e" >&2; return 1; }
+  done
+}
+# vrs_check_refusal <log> <ruleId> <epoch>: the UpgradeRequired refusal names this very rule and epoch
+vrs_check_refusal() {
+  local rid=${2#0x}
+  grep 'UpgradeRequired' "$1" 2>/dev/null | grep -q "rule $rid" && grep 'UpgradeRequired' "$1" | grep "rule $rid" | grep -qE "root epoch $3([^0-9]|$)"
+}
+# vrs_check_warning <log> <ruleId>: the pending warning for this rule (a queued schedule) was logged
+vrs_check_warning() { grep 'upgrade.required' "$1" 2>/dev/null | grep 'state=pending' | grep -qE "rule=(0x)?${2#0x}"; }
+# vrs_check_rules <unicity_rulesV1 response> <ruleId> <epoch> <latched true|false> <known true|false>: ureth reports the rule scheduled for E
+vrs_check_rules() {
+  python3 - "$@" <<'PY'
+import json, sys
+f, rid, epoch, latched, known = sys.argv[1], sys.argv[2].lower(), int(sys.argv[3]), sys.argv[4] == "true", sys.argv[5] == "true"
+try:
+    r = json.load(open(f))["result"]
+except Exception as e:
+    sys.exit("no unicity_rulesV1 result: %s" % e)
+if not r.get("observed"):
+    sys.exit("ureth has observed no canonical head")
+if known and not any(k["id"].lower() == rid for k in r.get("known", [])):
+    sys.exit("the rule is not among the rules this binary knows")
+hit = [e for e in r.get("scheduled", []) if e["ruleId"].lower() == rid and e["rootEpoch"] == epoch and e["latched"] == latched and e["known"] == known]
+sys.exit(0 if hit else "no scheduled entry for the rule at epoch %d (latched=%s known=%s): %s" % (epoch, latched, known, r.get("scheduled")))
+PY
+}
+# vrs_check_upgrade_state <validator upgrade text> <state>: the schedule is listed in that state
+vrs_check_upgrade_state() { grep -q "$2" "$1" 2>/dev/null; }
+
 vrs_dir() { mkdir -p "$VR_EVIDENCE/schedule" && echo "$VR_EVIDENCE/schedule"; }
 vrs_queue() { # name rule-name release-hex
   local d; d=$(vrs_dir); local g=$d/$1 kd ap=() k known
@@ -31,19 +76,22 @@ vrs_run() {
   vrs_queue future future-rule-v9 0x2222222222222222222222222222222222222222222222222222222222222222 || return 1
   build/ubft validator upgrade --rpc "$vrb_rpc" >"$d/validator-upgrade.txt" 2>&1; build/ubft validator upgrade --rpc "$vrb_rpc" --json >"$d/validator-upgrade.json" 2>&1
   cat "$d/validator-upgrade.txt"
-  grep -q 'UPGRADE REQUIRED' "$d/validator-upgrade.txt" && grep -q 'Queued' "$d/validator-upgrade.txt" \
-    && vrb_log "PASS: validator upgrade shows the queued schedules, the unsupported one as UPGRADE REQUIRED" || { vrb_log "FAIL: validator upgrade does not show the queued schedules"; return 1; }
+  if grep -q 'UPGRADE REQUIRED' "$d/validator-upgrade.txt" && grep -q 'Queued' "$d/validator-upgrade.txt"; then
+    vrb_log "PASS: validator upgrade shows the queued schedules, the unsupported one as UPGRADE REQUIRED"
+  else vrb_log "FAIL: validator upgrade does not show the queued schedules"; return 1; fi
   vrb_wait 200 "a shard node warned of the queued unsupported rule (event=upgrade.required state=pending)" grep -qE 'upgrade.required.*state=pending|state=pending.*upgrade.required' test-nodes/evm1/debug.log || return 1
   grep -hE 'upgrade.required' test-nodes/evm*/debug.log | cut -c1-400 | head -8 >"$d/shard-warnings.txt"
   for i in 1 2 3 4; do
     curl -s "http://$(evm_validator_rpc_addr "$i")/api/v1/metrics" | grep -i 'upgrade_required' >>"$d/shard-metrics.txt"
   done
-  [ -s "$d/shard-metrics.txt" ] && vrb_log "PASS: unicity_upgrade_required gauge on the shard nodes: $(head -1 "$d/shard-metrics.txt" | cut -c1-200)" || vrb_log "info: no unicity_upgrade_required sample on the shard metrics endpoint"
+  if [ -s "$d/shard-metrics.txt" ]; then vrb_log "PASS: unicity_upgrade_required gauge on the shard nodes: $(head -1 "$d/shard-metrics.txt" | cut -c1-200)"
+  else vrb_log "FAIL: no unicity_upgrade_required sample on the shard metrics endpoint"; return 1; fi
   ( cd cli/ubft && GOMAXPROCS=4 nice -n 10 go build -tags "${GO_BUILD_TAGS_NTR:-vrdev,no_test_rule}" -o ../../build/ubft-no-test-rule ) || { vrb_log "FAIL: building the no_test_rule binary"; return 1; }
   if build/ubft-no-test-rule validator upgrade --rpc "$vrb_rpc" --exit-code >"$d/no-test-rule-upgrade.txt" 2>&1; then
     vrb_log "FAIL: the no_test_rule binary does not require an upgrade"; return 1
   fi
-  grep -q 'noop-test-v1\|UPGRADE REQUIRED' "$d/no-test-rule-upgrade.txt" && vrb_log "PASS: a binary built with -tags no_test_rule reports the scheduled rule as unsupported (validator upgrade --exit-code fails)"
+  grep -q 'UPGRADE REQUIRED' "$d/no-test-rule-upgrade.txt" || { vrb_log "FAIL: the no_test_rule binary's report does not say UPGRADE REQUIRED"; return 1; }
+  vrb_log "PASS: a binary built with -tags no_test_rule reports the scheduled rule as unsupported (validator upgrade --exit-code fails)"
   vrb_log "NOT SHOWN here: execution after the governance delay, the latch at E, postponement and the cutoff, a refusal past E, recovery with a pending rule"
 }
 
@@ -112,17 +160,29 @@ vrs_long() {
   vrb_log "PASS: the schedule (change $change, E=$E) was executed after ${waited}s"
   vrs_upgrade_state >"$d/upgrade-after-execute.txt"; cat "$d/upgrade-after-execute.txt"
   # 3. one handoff per epoch up to E
+  local rid; rid=$(vrs_rule_id noop-test-v1)
+  vrs_check_rules "$d/ureth-rules-before.json" "$rid" "$E" false true && { vrb_log "FAIL: ureth lists the rule as scheduled before it was executed"; return 1; }
   for i in $(seq $((known + 1)) "$E"); do
     vrs_handoff "$i" || { vrb_log "FAIL: the handoff into epoch $i"; return 1; }
     vrb_log "PASS: handoff into epoch $i committed"
     vrs_upgrade_state >"$d/upgrade-epoch$i.txt"; vrs_rules >"$d/ureth-rules-epoch$i.json"
-    grep -hE 'upgrade\.required|upgrade\.refused|UpgradeRequired' test-nodes/evm4/debug.log | cut -c1-420 | tail -5 >"$d/evm4-upgrade-lines-epoch$i.txt"
   done
+  # the evidence, then the checks: any missing piece fails the step (and so the lane)
+  local r
+  for r in 1 2 3 4; do grep -hE 'activation\.latched|activation\.active' "test-nodes/root$r/debug.log" | cut -c1-400 >"$d/root$r-activation-events.txt"; done
+  grep -hE 'upgrade\.required|upgrade\.refused|UpgradeRequired' test-nodes/evm4/debug.log | cut -c1-500 >"$d/evm4-upgrade-lines.txt"
   curl -s "http://$(evm_validator_rpc_addr 4)/api/v1/metrics" | grep -i 'upgrade_required' >"$d/evm4-metric.txt" 2>/dev/null
-  for i in 1 2 3 4; do grep -hE 'activation\.latched|activation\.active' "test-nodes/root$i/debug.log" | cut -c1-400 >"$d/root$i-activation-events.txt"; done
-  local nl=0; for i in 1 2 3 4; do grep -q 'activation.latched' "$d/root$i-activation-events.txt" && nl=$((nl+1)); done
-  [ "$nl" -ge 3 ] && vrb_log "PASS: $nl roots logged activation.latched (and activation.active) for the schedule" || vrb_log "FAIL: only $nl roots logged activation.latched"
-  grep -q 'Latched' "$d/upgrade-epoch$E.txt" && vrb_log "PASS: VR latched the schedule at the Boundary into epoch $E" || vrb_log "FAIL: the schedule is not Latched after epoch $E"
-  grep -q 'UpgradeRequired' test-nodes/evm4/debug.log && vrb_log "PASS: the no_test_rule shard node 4 refused epoch $E: $(grep -h 'UpgradeRequired' test-nodes/evm4/debug.log | tail -1 | cut -c1-300)" || vrb_log "FAIL: shard node 4 did not refuse with UpgradeRequired"
-  vrb_log "ureth rules at epoch $E: $(cut -c1-400 "$d/ureth-rules-epoch$E.json")"
+  vrs_check_all_roots "$d" "$rid" "$E" 1 2 3 4 || { vrb_log "FAIL: not every root logged activation.latched and activation.active for the rule at epoch $E"; return 1; }
+  vrb_log "PASS: all 4 roots logged activation.latched and activation.active for rule $rid at epoch $E"
+  vrs_check_upgrade_state "$d/upgrade-epoch$E.txt" Latched || { vrb_log "FAIL: VR does not list the schedule as Latched after epoch $E"; return 1; }
+  vrb_log "PASS: VR latched the schedule at the Boundary into epoch $E"
+  vrs_check_rules "$d/ureth-rules-epoch$E.json" "$rid" "$E" true true || { vrb_log "FAIL: ureth's unicity_rulesV1 does not show the rule latched at epoch $E"; return 1; }
+  vrb_log "PASS: ureth unicity_rulesV1 lists the rule at epoch $E as latched and known"
+  vrs_check_warning "$d/evm4-upgrade-lines.txt" "$rid" || { vrb_log "FAIL: shard node 4 logged no pending upgrade.required warning for the rule ahead of E"; return 1; }
+  vrb_log "PASS: shard node 4 warned (upgrade.required state=pending) ahead of E"
+  [ -s "$d/evm4-metric.txt" ] || { vrb_log "FAIL: no unicity_upgrade_required sample on shard node 4"; return 1; }
+  vrb_log "PASS: unicity_upgrade_required on shard node 4: $(head -2 "$d/evm4-metric.txt" | tr '\n' ' ' | cut -c1-300)"
+  vrs_check_refusal "$d/evm4-upgrade-lines.txt" "$rid" "$E" || { vrb_log "FAIL: shard node 4 did not refuse with UpgradeRequired for rule $rid at epoch $E"; return 1; }
+  vrb_log "PASS: the no_test_rule shard node 4 refused epoch $E with UpgradeRequired for rule $rid"
+  return 0
 }

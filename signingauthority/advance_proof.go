@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	gocrypto "crypto"
+	"errors"
 	"fmt"
 	"github.com/unicitynetwork/bft-core/vradmit"
 	"math"
@@ -228,6 +229,18 @@ type scopeChange struct {
 // own enrollment and key.
 func verifySuccessor(prev, next *activationproof.Lineage, step activationproof.Step, enroll Enrollment, pub []byte) (*scopeChange, error) {
 	t, err := activationproof.ShardTransition(prev, step, enroll.PartitionID, enroll.ShardID, enroll.ShardConfHash)
+	if err != nil && errors.Is(err, activationproof.ErrShard) {
+		// A newly admitted member is enrolled at the SUCCESSOR configuration, which the predecessor's checkpoint does not carry. Its first
+		// handoff is the one that admits it: the predecessor is verified against the configuration the authenticated checkpoint itself
+		// certifies for the shard, and the activation must then yield exactly the configuration this authority is enrolled with (so its key
+		// and configuration are bound to the certified successor before any session is issued).
+		if pre := checkpointConfHash(step, enroll.PartitionID, enroll.ShardID); pre != nil && !bytes.Equal(pre, enroll.ShardConfHash) {
+			if jt, jerr := activationproof.ShardTransition(prev, step, enroll.PartitionID, enroll.ShardID, pre); jerr == nil &&
+				jt.Conf != nil && bytes.Equal(jt.NextConfHash, enroll.ShardConfHash) {
+				t, err = jt, nil
+			}
+		}
+	}
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrLineageUnverified, err)
 	}
@@ -321,4 +334,18 @@ func committeeOf(ctx context.Context, trust TrustBases, l *activationproof.Linea
 		delete(members, n.NodeID) // one-to-one: a member listed twice does not stand in for one left out
 	}
 	return have, want, nil
+}
+
+// checkpointConfHash is the configuration hash the step's checkpoint certifies for the shard, or nil. The checkpoint is authenticated
+// against the verified commit proof by ShardTransition before anything is derived from it.
+func checkpointConfHash(step activationproof.Step, partition types.PartitionID, shard types.ShardID) []byte {
+	if step.Bundle.Snapshot == nil {
+		return nil
+	}
+	for _, si := range step.Bundle.Snapshot.ShardInfo {
+		if si.Partition == partition && si.Shard.Equal(shard) {
+			return si.ShardConfHash
+		}
+	}
+	return nil
 }

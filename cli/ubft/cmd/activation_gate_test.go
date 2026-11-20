@@ -69,3 +69,29 @@ func TestCommittedAnchorNeverPanics(t *testing.T) {
 	require.EqualValues(t, 3, n)
 	require.Equal(t, byte(7), got[0])
 }
+
+func TestDeferredProvisioningCarriesTheStartupPins(t *testing.T) {
+	word, code, gen, other := [32]byte{1}, [32]byte{2}, [32]byte{3}, [32]byte{9}
+	// an explicit --vr-network-word and a startup genesis pin survive provisioning, next to the file's code hash
+	start := vrFence{VR: true, NetworkWord: &word, GenesisHash: &gen}
+	got, err := mergePins(start, "", "http://x", &code, &gen)
+	require.NoError(t, err)
+	require.Equal(t, vrFence{VR: true, NetworkWord: &word, CodeHash: &code, GenesisHash: &gen}, got)
+	// the same pins as an immediate start with everything given
+	imm := vrFence{VR: true, NetworkWord: &word, CodeHash: &code, GenesisHash: &gen}
+	got, err = mergePins(imm, "http://x", "http://x", &code, &gen)
+	require.NoError(t, err)
+	require.Equal(t, imm, got)
+	// a pin only the file gives stands
+	got, err = mergePins(vrFence{VR: true, NetworkWord: &word}, "", "http://x", &code, &gen)
+	require.NoError(t, err)
+	require.Equal(t, &gen, got.GenesisHash)
+	require.Equal(t, &word, got.NetworkWord)
+	// conflicts are refused
+	_, err = mergePins(vrFence{VR: true, GenesisHash: &other}, "", "http://x", &code, &gen)
+	require.Error(t, err)
+	_, err = mergePins(vrFence{VR: true, CodeHash: &other}, "", "http://x", &code, &gen)
+	require.Error(t, err)
+	_, err = mergePins(vrFence{VR: true}, "http://a", "http://b", &code, &gen)
+	require.Error(t, err)
+}
