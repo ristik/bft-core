@@ -346,8 +346,28 @@ class UtbProfile(unittest.TestCase):
         self.assertIsNone(generate.image_sources_error(upstream,'upstream'))
         self.assertIn('differ',generate.image_sources_error(integration,'upstream'))
         self.assertIn('differ',generate.image_sources_error(upstream,'integration'))
-        text=(Path(generate.__file__).with_name('reset.py')).read_text()
-        self.assertLess(text.index('generate.image_sources_error'),text.index("'down'"),'the variant check runs before docker compose down')
+    def test_reset_py_refuses_wrong_images_or_variant_before_any_teardown(self):
+        import tempfile, os, stat
+        here=Path(generate.__file__).parent
+        with tempfile.TemporaryDirectory() as d:
+            d=Path(d); bin=d/'bin'; bin.mkdir(); spy=d/'docker-called'
+            (bin/'docker').write_text('#!/bin/sh\necho "$@" >> %s\n'%spy); (bin/'docker').chmod(0o755)
+            old=d/'tn-old'; old.mkdir(); (old/'manifest.json').write_text(json.dumps({'genesis_hash':'0x1'})); (old/'compose.yaml').write_text('')
+            integration=d/'integration.json'; integration.write_text(json.dumps({'sources':dict(generate.PINS),'images':{}}))
+            upstream=d/'upstream.json'; upstream.write_text(json.dumps({'sources':{**generate.PINS,'aggregator-go':generate.PINS['aggregator-go-upstream']},'images':{}}))
+            def reset(*gen):
+                return subprocess.run([sys.executable,str(here/'reset.py'),'--old',str(old),'--lose-all-assets','--','--out',str(d/'tn-new'),*gen],
+                                      env={**os.environ,'PATH':str(bin)+os.pathsep+os.environ['PATH']},capture_output=True,text=True)
+            for gen,why in ((('--no-utb','--images',str(upstream)),'legacy profile with upstream images'),
+                            (('--utb','--utb-aggregator','upstream','--images',str(integration)),'upstream variant with integration images'),
+                            (('--utb','--utb-aggregator','bogus','--images',str(integration)),'unknown variant'),
+                            (('--no-utb','--utb-aggregator','upstream','--images',str(upstream)),'a variant without the profile')):
+                done=reset(*gen)
+                self.assertEqual(done.returncode,2,(why,done.stderr))
+                self.assertFalse(spy.exists(),why+': docker must not be called')
+                self.assertTrue(old.exists(),why+': the old generation stays')
+            done=reset('--no-utb','--images',str(integration))   # accepted by the preflight: it reaches the teardown (the spy) and fails later in generate
+            self.assertTrue(spy.exists(),'a matching profile proceeds to the teardown')
     def test_the_signed_history_is_on_by_default_and_no_utb_is_the_escape_hatch(self):
         source=(Path(generate.__file__)).read_text()
         self.assertRegex(source,r"add_argument\('--utb',action=argparse\.BooleanOptionalAction,default=True",'--utb defaults on; argparse adds --no-utb')
