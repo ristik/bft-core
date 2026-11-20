@@ -924,31 +924,6 @@ func TestRetentionDoesNotTakeOverAnExistingVersionsDirectory(t *testing.T) {
 	require.Equal(t, ManifestDigest(f.manifest), old.ManifestDigest)
 }
 
-func TestCollectionExpiresRetainedFilesAndSymlinksWithoutFollowing(t *testing.T) {
-	parent := t.TempDir()
-	dst := filepath.Join(parent, "out")
-	vd := versionsDir(dst)
-	require.NoError(t, os.Mkdir(vd, 0o700))
-	require.NoError(t, os.WriteFile(filepath.Join(vd, versionsMarker), nil, 0o600))
-	victim := filepath.Join(parent, "victim")
-	require.NoError(t, os.Mkdir(victim, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(victim, "keep"), []byte("x"), 0o644))
-	old := time.Now().Add(-time.Hour).UnixNano()
-	file := filepath.Join(vd, fmt.Sprint(old))
-	link := filepath.Join(vd, fmt.Sprint(old+1))
-	fresh := filepath.Join(vd, fmt.Sprint(time.Now().UnixNano()))
-	require.NoError(t, os.WriteFile(file, []byte("x"), 0o644))
-	require.NoError(t, os.Symlink(victim, link))
-	require.NoError(t, os.Symlink(victim, fresh))
-	gcOldVersions(vd, "")
-	require.NoFileExists(t, file)
-	_, err := os.Lstat(link)
-	require.True(t, os.IsNotExist(err), "the expired symlink is removed")
-	require.FileExists(t, filepath.Join(victim, "keep"), "the symlink's target is never followed")
-	_, err = os.Lstat(fresh)
-	require.NoError(t, err, "a version inside the grace period stays")
-}
-
 func TestRetentionRefusesAVersionsDirectoryThatIsASymlink(t *testing.T) {
 	f := newFixture(t)
 	parent := t.TempDir()
@@ -985,27 +960,36 @@ func TestRetentionRefusesAVersionsDirectoryThatIsASymlink(t *testing.T) {
 	require.FileExists(t, filepath.Join(expired, "keep"))
 }
 
-// An interrupted creation of the retention directory leaves no unmarked DIR.versions: the next replacement creates it and retains normally.
-func TestInterruptedMarkerCreationIsRetriedNotRefusedForever(t *testing.T) {
+// A symlinked parent (a stable "current" link): the destination's parent is resolved once, up front, and staging, exchange and retention all use the
+// resolved path, so retention never opens a symlinked component after publication.
+func TestReplacementThroughASymlinkedParentRetainsInTheRealParent(t *testing.T) {
 	f := newFixture(t)
-	parent := t.TempDir()
-	dst := filepath.Join(parent, "out")
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "current")
+	require.NoError(t, os.Symlink(real, link))
+	dst := filepath.Join(link, "seed")
 	require.NoError(t, WriteDir(dst, f.files, f.manifest, false))
-	if !canExchange(parent) {
-		t.Skip("no atomic exchange here")
+	if !canExchange(real) {
+		require.ErrorContains(t, WriteDir(dst, f.files, f.manifest, true), "not supported")
+		return
 	}
-	prev := markVersionsDir
-	markVersionsDir = func(int) error { return fmt.Errorf("interrupted") }
 	g := newFixture(t)
-	err := WriteDir(dst, g.files, g.manifest, true)
-	markVersionsDir = prev
-	var re *RetentionError
-	require.ErrorAs(t, err, &re)
-	require.NoDirExists(t, versionsDir(dst), "no half-made retention directory is left in place")
-	// the retry: the creation completes, and the old version of THIS replacement is retained
-	h := newFixture(t)
-	require.NoError(t, WriteDir(dst, h.files, h.manifest, true))
-	require.FileExists(t, filepath.Join(versionsDir(dst), versionsMarker))
-	ents, _ := os.ReadDir(versionsDir(dst))
-	require.Len(t, ents, 2, "the marker and the one retained version")
+	require.NoError(t, WriteDir(dst, g.files, g.manifest, true))
+	v, err := VerifyDir(filepath.Join(real, "seed"), Pins{GenesisID: g.pin})
+	require.NoError(t, err, "the replacement is in the real parent")
+	require.Equal(t, ManifestDigest(g.manifest), v.ManifestDigest)
+	require.FileExists(t, filepath.Join(real, "seed.versions", versionsMarker), "retention works through the symlinked parent")
+	ents, _ := os.ReadDir(filepath.Join(real, "seed.versions"))
+	require.Len(t, ents, 2, "the marker and the retained version")
+	// the same through an import into a home reached by a symlink
+	home := filepath.Join(link, "home")
+	vf, err := VerifyDir(f.dir, Pins{GenesisID: f.pin})
+	require.NoError(t, err)
+	_, err = Import(vf, home, nil, false, time.Now())
+	require.NoError(t, err)
+	other := *vf
+	other.ManifestDigest = "0xfeed"
+	_, err = Import(&other, home, nil, true, time.Now())
+	require.NoError(t, err)
+	require.FileExists(t, filepath.Join(real, "home", "seed.versions", versionsMarker))
 }

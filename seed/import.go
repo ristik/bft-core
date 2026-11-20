@@ -65,6 +65,11 @@ func BeginImport(home string, v *Verified, replace bool) (*ImportTxn, error) {
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		return nil, err
 	}
+	// the home is resolved once (it may be reached through a symlink): the lock, the staging, the exchange and retention all use the resolved path
+	home, err := filepath.EvalSymlinks(home)
+	if err != nil {
+		return nil, err
+	}
 	final := filepath.Join(home, ImportDir)
 	unlock, err := lockDir(final)
 	if err != nil {

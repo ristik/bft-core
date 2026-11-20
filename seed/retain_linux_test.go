@@ -49,3 +49,53 @@ func TestSwapOfTheVersionsDirectoryBetweenOpenAndRenameChangesNothing(t *testing
 	require.Len(t, otherEnts, 2, "the other directory is exactly as it was")
 	require.FileExists(t, filepath.Join(expired, "keep"))
 }
+
+// An interrupted creation of the retention directory leaves no unmarked DIR.versions: the next replacement creates it and retains normally.
+func TestInterruptedMarkerCreationIsRetriedNotRefusedForever(t *testing.T) {
+	f := newFixture(t)
+	parent := t.TempDir()
+	dst := filepath.Join(parent, "out")
+	require.NoError(t, WriteDir(dst, f.files, f.manifest, false))
+	if !canExchange(parent) {
+		t.Skip("no atomic exchange here")
+	}
+	prev := markVersionsDir
+	markVersionsDir = func(int) error { return fmt.Errorf("interrupted") }
+	g := newFixture(t)
+	err := WriteDir(dst, g.files, g.manifest, true)
+	markVersionsDir = prev
+	var re *RetentionError
+	require.ErrorAs(t, err, &re)
+	require.NoDirExists(t, versionsDir(dst), "no half-made retention directory is left in place")
+	// the retry: the creation completes, and the old version of THIS replacement is retained
+	h := newFixture(t)
+	require.NoError(t, WriteDir(dst, h.files, h.manifest, true))
+	require.FileExists(t, filepath.Join(versionsDir(dst), versionsMarker))
+	ents, _ := os.ReadDir(versionsDir(dst))
+	require.Len(t, ents, 2, "the marker and the one retained version")
+}
+
+func TestCollectionExpiresRetainedFilesAndSymlinksWithoutFollowing(t *testing.T) {
+	parent := t.TempDir()
+	dst := filepath.Join(parent, "out")
+	vd := versionsDir(dst)
+	require.NoError(t, os.Mkdir(vd, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(vd, versionsMarker), nil, 0o600))
+	victim := filepath.Join(parent, "victim")
+	require.NoError(t, os.Mkdir(victim, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(victim, "keep"), []byte("x"), 0o644))
+	old := time.Now().Add(-time.Hour).UnixNano()
+	file := filepath.Join(vd, fmt.Sprint(old))
+	link := filepath.Join(vd, fmt.Sprint(old+1))
+	fresh := filepath.Join(vd, fmt.Sprint(time.Now().UnixNano()))
+	require.NoError(t, os.WriteFile(file, []byte("x"), 0o644))
+	require.NoError(t, os.Symlink(victim, link))
+	require.NoError(t, os.Symlink(victim, fresh))
+	gcOldVersions(vd, "")
+	require.NoFileExists(t, file)
+	_, err := os.Lstat(link)
+	require.True(t, os.IsNotExist(err), "the expired symlink is removed")
+	require.FileExists(t, filepath.Join(victim, "keep"), "the symlink's target is never followed")
+	_, err = os.Lstat(fresh)
+	require.NoError(t, err, "a version inside the grace period stays")
+}
