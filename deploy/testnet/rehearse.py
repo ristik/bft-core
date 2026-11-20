@@ -1877,6 +1877,8 @@ class Rehearsal:
         out = subprocess.run([sys.executable, str(Path(__file__).with_name('reset.py')), '--old', str(old), '--lose-all-assets', '--', '--out', str(new),
                               '--validators', str(self.n), '--chain-id', str(self.chain_id), '--ubft', a['ubft'], '--b1genesis', a['b1genesis'], '--keygen', a['keygen'],
                               '--captcha-sitekey', a['captcha_sitekey'], '--captcha-secret-file', a['captcha_secret_file'],
+                              # the replacement keeps the selected signed-history profile (generate.py's default is on)
+                              '--utb' if self.manifest.get('utb') else '--no-utb',
                               # the new network keeps the old one's block interval (bft-core#1167): a generation from before it has none, the cadence it ran at
                               '--block-interval-ms', str(round(self.block_interval_s() * 1000))], check=True, text=True, capture_output=True).stdout
         self.say('  ' + out.strip().splitlines()[-1])

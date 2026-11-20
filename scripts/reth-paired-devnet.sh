@@ -102,10 +102,11 @@ if [ "${VR_LANE:-0}" = 1 ]; then
   case "$VR_UTB" in 0 | 1) ;; *) echo "VR_UTB must be 0 or 1" >&2; exit 2 ;; esac
   if [ "$VR_UTB" = 1 ]; then export UTB_LANE=1 VR_UTB; fi
   # The aggregator partition (aggregator-go as a BFT shard of the same root chain, scripts/lib/agg-lib.sh) is what the signed history is for: it verifies the history
-  # from the pinned genesis and certifies the tokens an old epoch must keep verifying. On with VR_UTB (VR_AGG=0 for a run without it); it takes the any-age lane's
+  # from the pinned genesis and certifies the tokens an old epoch must keep verifying. Off by default (VR_AGG=1 for the aggregator acceptance run, with VR_UTB=1); it takes the any-age lane's
   # aggregator machinery (ANYAGE_LANE is refused from the environment above and set here, after the check). Needs AGG_BIN and MongoDB (agg-lib.sh).
-  VR_AGG=${VR_AGG:-$VR_UTB}
+  VR_AGG=${VR_AGG:-0}
   case "$VR_AGG" in 0 | 1) ;; *) echo "VR_AGG must be 0 or 1" >&2; exit 2 ;; esac
+  [ "$VR_AGG" = 0 ] || [ "$VR_UTB" = 1 ] || { echo "VR_AGG=1 needs VR_UTB=1" >&2; exit 2; }
   if [ "$VR_AGG" = 1 ]; then
     : "${AGG_BIN:?VR_AGG=1 needs AGG_BIN (the pinned aggregator-go binary; VR_AGG=0 runs without the aggregator)}"
     export ANYAGE_LANE=1 VR_AGG

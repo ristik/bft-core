@@ -331,6 +331,9 @@ class UtbProfile(unittest.TestCase):
         source=(Path(generate.__file__)).read_text()
         self.assertRegex(source,r"boot=immutable\(topology\([^\n]*utb=utb_pin",'main() starts the authorities from a compose that carries the UTB pin')
         self.assertIn('check_authorities_unchanged(boot,final,a.validators)',source)
+    def test_the_rehearsal_reset_keeps_the_selected_utb_profile(self):
+        source=(Path(generate.__file__).with_name('rehearse.py')).read_text()
+        self.assertIn("'--utb' if self.manifest.get('utb') else '--no-utb'",source,'the replacement generation of the reset stage must use the old one\'s profile')
     def test_the_signed_history_is_on_by_default_and_no_utb_is_the_escape_hatch(self):
         source=(Path(generate.__file__)).read_text()
         self.assertRegex(source,r"add_argument\('--utb',action=argparse\.BooleanOptionalAction,default=True",'--utb defaults on; argparse adds --no-utb')

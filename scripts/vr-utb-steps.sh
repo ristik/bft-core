@@ -86,8 +86,13 @@ PY
   # the stores of the nodes: every root's and shard node's own finalized entries verify from the pin (an export opens the store with the pin and the genesis entry)
   mkdir -p "$out/stores"
   local bad=0
-  for f in test-nodes/root*/root-utb-entries.db test-nodes/evm*/shard-utb-entries.db; do
-    [ -f "$f" ] || continue
+  # a store is expected for every configured root and shard node, the joiner's included: a missing one is a failure, never a smaller sample
+  local -a stores=()
+  for n in $(seq 1 "${validators:-4}") $([ "${VR_JOINER:-0}" = 1 ] && echo $(( ${validators:-4} + 1 ))); do
+    stores+=("test-nodes/root$n/root-utb-entries.db" "test-nodes/evm$n/shard-utb-entries.db")
+  done
+  for f in "${stores[@]}"; do
+    if [ ! -f "$f" ]; then vrb_log "FAIL: $f is missing: that node holds no signed history store"; bad=$((bad + 1)); continue; fi
     n=$(basename "$(dirname "$f")"); cp "$f" "$out/stores/$n.db"
     if ! build/ubft trust-base utb-export --utb-genesis test-nodes/utb-genesis.cbor --utb-genesis-id "$(utb_pin)" --utb-entries-db "$out/stores/$n.db" --out "$out/stores/$n.cbor" >"$out/stores/$n.export.log" 2>&1; then
       vrb_log "FAIL: $n's entry store does not export from the pinned genesis ($(tail -n 1 "$out/stores/$n.export.log"))"; bad=$((bad + 1))
