@@ -331,9 +331,23 @@ class UtbProfile(unittest.TestCase):
         source=(Path(generate.__file__)).read_text()
         self.assertRegex(source,r"boot=immutable\(topology\([^\n]*utb=utb_pin",'main() starts the authorities from a compose that carries the UTB pin')
         self.assertIn('check_authorities_unchanged(boot,final,a.validators)',source)
-    def test_the_rehearsal_reset_keeps_the_selected_utb_profile(self):
-        source=(Path(generate.__file__).with_name('rehearse.py')).read_text()
-        self.assertIn("'--utb' if self.manifest.get('utb') else '--no-utb'",source,'the replacement generation of the reset stage must use the old one\'s profile')
+    def test_the_rehearsal_reset_keeps_the_selected_utb_profile_and_variant(self):
+        import rehearse
+        class R: pass
+        for manifest,want in (({},['--no-utb']),({'utb':{'aggregator':'integration'}},['--utb','--utb-aggregator','integration']),
+                              ({'utb':{'aggregator':'upstream'}},['--utb','--utb-aggregator','upstream'])):
+            r=R(); r.manifest=manifest
+            self.assertEqual(rehearse.Rehearsal.reset_utb_args(r),want)
+        self.assertIn('*self.reset_utb_args()',(Path(generate.__file__).with_name('rehearse.py')).read_text(),'the reset stage passes them to reset.py')
+    def test_image_records_must_match_the_aggregator_variant_before_a_reset_tears_anything_down(self):
+        integration={'sources':dict(generate.PINS)}
+        upstream={'sources':{**generate.PINS,'aggregator-go':generate.PINS['aggregator-go-upstream']}}
+        self.assertIsNone(generate.image_sources_error(integration,'integration'))
+        self.assertIsNone(generate.image_sources_error(upstream,'upstream'))
+        self.assertIn('differ',generate.image_sources_error(integration,'upstream'))
+        self.assertIn('differ',generate.image_sources_error(upstream,'integration'))
+        text=(Path(generate.__file__).with_name('reset.py')).read_text()
+        self.assertLess(text.index('generate.image_sources_error'),text.index("'down'"),'the variant check runs before docker compose down')
     def test_the_signed_history_is_on_by_default_and_no_utb_is_the_escape_hatch(self):
         source=(Path(generate.__file__)).read_text()
         self.assertRegex(source,r"add_argument\('--utb',action=argparse\.BooleanOptionalAction,default=True",'--utb defaults on; argparse adds --no-utb')

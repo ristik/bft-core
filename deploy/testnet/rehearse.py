@@ -209,6 +209,11 @@ class Rehearsal:
         self.n = self.manifest['validators']
         self.chain_id, self.genesis = self.manifest['chain_id'], self.manifest['genesis_hash'].lower()
 
+    def reset_utb_args(self):
+        """The signed-history profile of the old generation, for the replacement: --no-utb, or --utb with the aggregator variant its manifest records."""
+        utb = self.manifest.get('utb')
+        return ['--utb', '--utb-aggregator', utb.get('aggregator', 'integration')] if utb else ['--no-utb']
+
     def block_interval_s(self):
         """The generation's EVM block interval in seconds (generate.py --block-interval-ms, bft-core#1167); 0 for a fast package or one from before it."""
         return ((self.manifest.get('evm_block') or {}).get('interval_ms') or 0) / 1000
@@ -1878,7 +1883,7 @@ class Rehearsal:
                               '--validators', str(self.n), '--chain-id', str(self.chain_id), '--ubft', a['ubft'], '--b1genesis', a['b1genesis'], '--keygen', a['keygen'],
                               '--captcha-sitekey', a['captcha_sitekey'], '--captcha-secret-file', a['captcha_secret_file'],
                               # the replacement keeps the selected signed-history profile (generate.py's default is on)
-                              '--utb' if self.manifest.get('utb') else '--no-utb',
+                              *self.reset_utb_args(),
                               # the new network keeps the old one's block interval (bft-core#1167): a generation from before it has none, the cadence it ran at
                               '--block-interval-ms', str(round(self.block_interval_s() * 1000))], check=True, text=True, capture_output=True).stdout
         self.say('  ' + out.strip().splitlines()[-1])

@@ -20,6 +20,18 @@ args=a.generator_args
 if args[:1]==['--']: args=args[1:]
 # Preflight new generation args before deleting anything.
 if '--out' not in args: p.error('supply generator --out for a new generation')
+# the image records must be the ones of the selected signed-history aggregator variant (generate.py would refuse them only after the teardown)
+q=argparse.ArgumentParser(add_help=False)
+q.add_argument('--images',type=Path,default=None)
+q.add_argument('--utb',action=argparse.BooleanOptionalAction,default=True)
+q.add_argument('--utb-aggregator',default='integration')
+known,_=q.parse_known_args(args)
+sys.path.insert(0,str(Path(__file__).resolve().parent))
+import generate
+images=known.images or generate.HERE/'artifacts/images.json'
+if known.utb and not images.is_file(): p.error(f'image records {images} not found')
+err=generate.image_sources_error(json.loads(images.read_text()),known.utb_aggregator) if known.utb else None
+if err: p.error(err)
 new=Path(args[args.index('--out')+1]).resolve()
 if new.exists() or old==new or old in new.parents or new in old.parents:
     p.error('new generation must be a distinct, nonexistent directory')

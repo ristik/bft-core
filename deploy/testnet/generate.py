@@ -150,6 +150,14 @@ AGGREGATOR_PORT, AGGREGATOR_BFT_PORT = 8080, 9200   # in validator 1's namespace
 # aggregator-go needs MongoDB as a replica set (transactions and change streams): one member, initiated by the healthcheck on its first run.
 MONGO_REPLICA_SET = "try { quit(rs.status().myState === 1 ? 0 : 1) } catch (e) { rs.initiate({_id: 'rs0', members: [{_id: 0, host: 'mongo:27017'}]}); quit(1) }"
 
+def image_sources_error(records, variant):
+    """None when the image records were built from the pins of the aggregator VARIANT, else the refusal text (also used by reset.py before it tears anything down)."""
+    expected = dict(PINS)
+    if variant == 'upstream': expected['aggregator-go'] = PINS['aggregator-go-upstream']
+    if records['sources'] != expected:
+        return 'image source pins differ'+(' (build-images.py --aggregator-variant upstream for the upstream-facing aggregator)' if variant == 'upstream' else '')
+    return None
+
 def aggregator_environment(root_boot, rpc_bind, utb=None, utb_aggregator='integration'):
     """aggregator-go reads its configuration from the environment. One full-range shard runs SHARDING_MODE=standalone with BFT (aggregator-go refuses
     bft-shard mode for the empty shard ID, scripts/lib/agg-lib.sh). Its signing key is the shard-node key file; BFT_RPC_ADDRESS is root 1's operator
@@ -371,10 +379,8 @@ def main():
     if not re.fullmatch(r'tn-[a-z0-9][a-z0-9_-]*',out.name): p.error('generation directory name must be tn- followed by lowercase letters/digits/dashes')
     if out.exists(): p.error('output exists: choose a new generation directory')
     records=json.loads(a.images.read_text())
-    expected_sources = dict(PINS)
-    if a.utb_aggregator == 'upstream': expected_sources['aggregator-go'] = PINS['aggregator-go-upstream']
     if a.utb_aggregator != 'integration' and not a.utb: p.error('--utb-aggregator needs --utb')
-    if records['sources'] != expected_sources: p.error('image source pins differ'+(' (build-images.py --aggregator-variant upstream for the upstream-facing aggregator)' if a.utb_aggregator == 'upstream' else ''))
+    if image_sources_error(records, a.utb_aggregator): p.error(image_sources_error(records, a.utb_aggregator))
     if any(not re.fullmatch(r'sha256:[0-9a-f]{64}',records['images'].get(k,'')) for k in ('node','guard','signer','rpc')):
         p.error('images must be immutable local image IDs from build-images.py')
     ubft=str(a.ubft.resolve())
