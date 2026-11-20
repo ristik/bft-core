@@ -63,6 +63,7 @@ func (a *UnicityBFTApp) AddSubcommands() {
 	a.baseCmd.AddCommand(newVRHandoffCmd())
 	a.baseCmd.AddCommand(newValidatorCmd(a.baseConfig))
 	a.baseCmd.AddCommand(newGovernanceCmd())
+	a.baseCmd.AddCommand(newSeedCmd(a.baseConfig))
 }
 
 func newBaseCmd(obsF Factory) (*cobra.Command, *baseFlags) {

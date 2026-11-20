@@ -1,6 +1,7 @@
 #!/bin/bash
 
-rootPortStart=26662
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/scripts/lib/lane-slot.sh" || return 2   # LANE_SLOT (bft-core#1218): every port below is shifted into the lane's slot
+rootPortStart=$((26662+LANE_PORT_OFFSET))
 
 # generate logger configuration file
 function generate_log_configuration() {
@@ -104,7 +105,7 @@ function start_root_nodes() {
   # use root node 1 as bootstrap node
   local bootNode=""
   local p2pPort=$rootPortStart
-  local rpcPort=25866
+  local rpcPort=$((25866+LANE_PORT_OFFSET))
   local rpcHost=localhost
   if [ "${M2_PROFILE2:-0}" = 1 ]; then rpcHost=127.0.0.1; fi
 
@@ -127,7 +128,7 @@ function start_root_nodes() {
         elif [ "${VR_LANE:-0}" = 1 ]; then
           # a VR generation (scripts/lib/vr-lib.sh): the genesis committee is the plan's (StakingID = the VR id), and VR-mode services wired
           source scripts/lib/vr-lib.sh
-          profileArgs+=(--q3-lane $(vr_root_flags "$i" "http://127.0.0.1:$(( ${rethEthBase:-18545} + i - 1 ))"))
+          profileArgs+=(--q3-lane $(vr_root_flags "$i" "http://127.0.0.1:$(( ${rethEthBase:-(18545+LANE_PORT_OFFSET)} + i - 1 ))"))
         else
           [ -s test-nodes/genesis-identities.json ] || q3_prepare_genesis_identities || exit 1
           profileArgs+=(--q3-lane --genesis-identities test-nodes/genesis-identities.json)
@@ -140,7 +141,7 @@ function start_root_nodes() {
       if [ "${P85_LANE:-0}" = 1 ]; then
         # proof of stake (briefs/p85-recovery-lane.md): the coupled runtime, the P85 control executor and the genesis committee as K
         source scripts/lib/p85-lib.sh
-        profileArgs+=($(p85_root_flags "$i" "http://127.0.0.1:${rethEthBase:-18545}"))
+        profileArgs+=($(p85_root_flags "$i" "http://127.0.0.1:${rethEthBase:-$((18545+LANE_PORT_OFFSET))}"))
       fi
       if [ "${UTB_LANE:-0}" = 1 ]; then
         # the signed trust-base entry profile from the first voting epoch (scripts/utb-lane.sh): the generated genesis entry and its pin, read from the files
@@ -156,6 +157,7 @@ function start_root_nodes() {
     # ROOT_DEBUG_ROOTS="1 2": those roots log at debug whatever ROOT_LOG_LEVEL says (one root's round/leader lines without 128 debug logs)
     local rootLogLevel="${ROOT_LOG_LEVEL:-debug}"
     case " ${ROOT_DEBUG_ROOTS:-} " in *" $i "*) rootLogLevel=debug ;; esac
+    lane_port_preflight "$p2pPort" "root$i p2p" && lane_port_preflight "$rpcPort" "root$i rpc" || exit 1
     UBFT_Q4_SHIM_DIR="${Q4_SHIM_DIR:+$Q4_SHIM_DIR/root$i}" ${Q4_ROOT_BIN:-build/ubft} root-node run \
                     --home test-nodes/root$i \
                     --address "/ip4/127.0.0.1/tcp/$p2pPort" \
@@ -215,9 +217,9 @@ function start_root_nodes() {
 # them.
 # ============================================================================
 
-evmValidatorPortStart=28111
-evmDisseminationPortStart=28211
-evmRPCPortStart=28311
+evmValidatorPortStart=$((28111+LANE_PORT_OFFSET))
+evmDisseminationPortStart=$((28211+LANE_PORT_OFFSET))
+evmRPCPortStart=$((28311+LANE_PORT_OFFSET))
 
 # evm_validator_rpc_addr - this validator's metrics/health address, for
 # scripts/chaos-evm.sh's post-restart health checks.
@@ -554,6 +556,8 @@ function archive_replicas_of() {
 function start_one_evm_validator() {
   local i=$1 n=$2 partitionID=$3 rootBoot=$4 executor=$5 exposeRPC=${6:-}
   local port=$((evmValidatorPortStart + i - 1))
+  lane_port_preflight "$port" "shard node $i p2p" || return 1
+  [ "${6:-}" != rpc ] || lane_port_preflight "$((evmRPCPortStart + i - 1))" "shard node $i rpc" || return 1
 
   local bootnodes="$rootBoot"
   if [ "$#" -ge 7 ]; then

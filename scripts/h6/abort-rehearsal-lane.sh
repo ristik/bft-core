@@ -70,7 +70,7 @@ selftest() {
     receipts+="${receipts:+,}$tmp/receipt-$i.json"
   done
   python3 scripts/h6/prepare-handoff.py --dry-run --old-trust-base "$tmp/trust-base-epoch1.json" --next-trust-base "$tmp/trust-base-epoch2.json" --receipts "$receipts" \
-    --root-rpc http://127.0.0.1:25866,http://127.0.0.1:25867,http://127.0.0.1:25868,http://127.0.0.1:25869 --out "$tmp/evidence" >"$tmp/dry.out" || { cat "$tmp/dry.out" >&2; rm -rf "$tmp"; fail "selftest: the helper dry run on real trust bases failed"; }
+    --root-rpc http://127.0.0.1:$((25866+${LANE_PORT_OFFSET:-0})),http://127.0.0.1:$((25867+${LANE_PORT_OFFSET:-0})),http://127.0.0.1:$((25868+${LANE_PORT_OFFSET:-0})),http://127.0.0.1:$((25869+${LANE_PORT_OFFSET:-0})) --out "$tmp/evidence" >"$tmp/dry.out" || { cat "$tmp/dry.out" >&2; rm -rf "$tmp"; fail "selftest: the helper dry run on real trust bases failed"; }
   [ ! -e "$tmp/evidence" ] || fail "selftest: the dry run created evidence"
   rm -rf "$tmp"
   pass "selftest: the helper dry run accepts real V3 trust bases and receipt files, and contacts no root"
