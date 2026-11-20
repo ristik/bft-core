@@ -92,6 +92,15 @@ func TestPosElectionInitializationIsBoundToThePlan(t *testing.T) {
 		"the reverse index position removed": mutate(func(a vrAllocAccount) vrAllocAccount {
 			return setSlot(a, vrschema.MapSlot(vrschema.U64(3), vrschema.U64(vrElectionPositionSlot)), vrschema.Word{})
 		}),
+		"the eligibility reader link removed": mutate(func(a vrAllocAccount) vrAllocAccount {
+			return setSlot(a, vrschema.U64(vrElectionReaderSlot), vrschema.Word{})
+		}),
+		"an extra slot":         mutate(func(a vrAllocAccount) vrAllocAccount { return setSlot(a, vrschema.U64(0x1234), vrschema.U64(1)) }),
+		"another policy source": mutate(func(a vrAllocAccount) vrAllocAccount { return setSlot(a, vrschema.U64(7), vrschema.U64(7)) }),
+		"another maxBatch": mutate(func(a vrAllocAccount) vrAllocAccount {
+			return setSlot(a, vrschema.U64(vrElectionMaxBatchSlot), vrschema.U64(1))
+		}),
+		"no manifest hash": mutate(func(a vrAllocAccount) vrAllocAccount { return setSlot(a, vrschema.U64(1), vrschema.Word{}) }),
 		"the live index emptied": mutate(func(a vrAllocAccount) vrAllocAccount {
 			return setSlot(a, vrschema.U64(vrElectionIndexLenSlot), vrschema.U64(0))
 		}),

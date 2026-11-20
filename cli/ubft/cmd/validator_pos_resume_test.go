@@ -50,3 +50,12 @@ func TestSameDelegation(t *testing.T) {
 	require.False(t, sameDelegation(a, b))
 	require.False(t, sameDelegation(a, vrclient.Delegation{}))
 }
+
+func TestRequireVRPublishedNamesTheState(t *testing.T) {
+	require.NoError(t, requireVRPublished(2))
+	for st, name := range map[uint8]string{0: "None", 1: "Reserved", 3: "Invalidated", 4: "Rejected"} {
+		err := requireVRPublished(st)
+		require.ErrorIs(t, err, ErrValidator)
+		require.ErrorContains(t, err, name)
+	}
+}

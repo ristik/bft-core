@@ -507,9 +507,11 @@ func validatorPosPublishCmd(base *baseFlags) *cobra.Command {
 				{what: "publish the result in VR", tx: vrclient.Tx{To: ch.vr.Registry, Data: pub}},
 			}
 			var steps []step
+			var kinds []int
 			for i, st := range all {
 				if plan[i] {
 					steps = append(steps, st)
+					kinds = append(kinds, i)
 				} else {
 					fmt.Fprintf(w, "already done: %s\n", st.what)
 				}
@@ -554,4 +556,45 @@ func vrOutputState(s uint8) string {
 func sameDelegation(a, b vrclient.Delegation) bool {
 	return a.RootNodeID == b.RootNodeID && a.EvmNodeID == b.EvmNodeID && a.OperatorPayee == b.OperatorPayee &&
 		bytes.Equal(a.RootKey, b.RootKey) && bytes.Equal(a.EvmKey, b.EvmKey)
+}
+
+// verifyPosPublishEffect re-reads the election and VR after one of pos-publish's transactions (kind 0 submit proofs, 1 finalize, 2 VR publish) and
+// requires its intended effect, naming the state found otherwise.
+func verifyPosPublishEffect(ctx context.Context, ch *validatorChain, election common.Address, rid [32]byte, kind, members int) error {
+	switch kind {
+	case 0:
+		p, err := ch.vr.Publication(ctx, election, rid)
+		if err != nil {
+			return err
+		}
+		if int(p.PopCount) != members {
+			return fmt.Errorf("%w: after submitting the possession proofs the election stores %d of %d", ErrValidator, p.PopCount, members)
+		}
+	case 1:
+		p, err := ch.vr.Publication(ctx, election, rid)
+		if err != nil {
+			return err
+		}
+		if !p.Published {
+			return fmt.Errorf("%w: after finalizeCandidate the candidate is not published in the election (lost coverage: %t)", ErrValidator, p.Lost)
+		}
+	case 2:
+		out, err := ch.vr.Output(ctx, rid)
+		if err != nil {
+			return err
+		}
+		if err := requireVRPublished(out.State); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// requireVRPublished accepts only a VR output that is Published (or past it); every other state is named in the refusal.
+func requireVRPublished(state uint8) error {
+	switch state {
+	case 2, 5, 6, 7:
+		return nil
+	}
+	return fmt.Errorf("%w: after VR.publish the result's output is %s, not Published (VR.publish returns a status without reverting when it cannot publish)", ErrValidator, vrOutputState(state))
 }

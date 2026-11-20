@@ -206,150 +206,110 @@ const (
 	vrElectionStagedSlot      = 18 // mapping(id => mapping(generation => Staged))
 	vrElectionIndexLenSlot    = 19 // the live index: the length here, the entries (uint64, four to a word) from keccak(19)
 	vrElectionPositionSlot    = 20 // mapping(id => 1-based position in the index)
+	vrElectionMaxBatchSlot    = 15
+	vrElectionReaderSlot      = 21
 	vrElectionHookCallerSlot  = 23
 	vrElectionRegistrySlot    = 24
 )
 
-// vrCheckPosElection binds the election's initialization to the plan: it is initialized, its links (network word, custody, the root records,
-// evidence, selection, the PosElectionAdapter as hook caller, VR as the registry) and its election parameters and cadence are the plan's, its
-// live index holds the genesis identities, and each genesis identity's staged binding at generation 1 is the plan's (node words, key hashes
-// and payee). An alloc that keeps the election's code but drops or alters its storage is refused: the election would otherwise stay
-// uninitialized and refuse its operations.
+// vrPosElectionExpected is the election's ENTIRE planned genesis storage, derived from the plan alone: every slot ElectionPolicy.initialize
+// writes (links, limits, parameters and cadence, the live index with its reverse positions, and each genesis identity's staged binding at
+// generation 1 with its key bytes and hashes). Nothing else is written at genesis, so the allocated storage must equal it slot for slot: an extra slot,
+// a missing one or an altered one is refused. The manifest hash is the factory's hash of the whole manifest and is not derivable from the plan; it
+// must be present and is the one word taken from the alloc.
+func vrPosElectionExpected(in vrGenesisInput, d vrDeploymentFile, network []byte, manifestHash vrschema.Word) (vrStorage, error) {
+	e := vrStorage{}
+	addr := func(name, s string) (common.Address, error) { return vrAddress("PoS "+name, s) }
+	custody, err1 := addr("custody", d.Custody)
+	evidence, err2 := addr("evidence", d.Evidence)
+	selection, err3 := addr("selection", d.Selection)
+	reader, err4 := addr("reader", d.Reader)
+	policy, err5 := addr("policy", d.Policy)
+	if err := errors.Join(err1, err2, err3, err4, err5); err != nil {
+		return nil, err
+	}
+	e.set(vrschema.U64(vrElectionInitializedSlot), vrschema.U64(1))
+	e.set(vrschema.U64(1), manifestHash)
+	e.set(vrschema.U64(vrElectionNetworkSlot), vrschema.Word(network))
+	e.set(vrschema.U64(vrElectionCustodySlot), vrschema.AddrWord(custody))
+	e.set(vrschema.U64(vrElectionRootsSlot), vrschema.AddrWord(common.Address(vrschema.SealRegistry)))
+	e.set(vrschema.U64(vrElectionEvidenceSlot), vrschema.AddrWord(evidence))
+	e.set(vrschema.U64(vrElectionSelectionSlot), vrschema.AddrWord(selection))
+	// policySource (20 bytes) and vMax (uint32) share a word
+	w := packed([3]uint64{20, 4, uint64(in.Limits.VMax)})
+	addrAt(&w, 0, policy)
+	e.set(vrschema.U64(7), w)
+	// ElectionParams: nMin, nTarget, nMax (uint32), maxM, distNum (uint64) in the first word; distDen, cadenceRounds, cadenceSeconds in the next
+	e.set(vrschema.U64(vrElectionParamsSlot), packed([3]uint64{0, 4, uint64(in.Limits.NMin)}, [3]uint64{4, 4, uint64(in.Limits.NTarget)}, [3]uint64{8, 4, uint64(in.Limits.NMax)},
+		[3]uint64{12, 8, in.Continuity.MaxM}, [3]uint64{20, 8, in.Continuity.DistNum}))
+	e.set(vrschema.U64(vrElectionCadenceSlot), packed([3]uint64{0, 8, in.Continuity.DistDen}, [3]uint64{8, 8, in.Pos.CadenceRounds}, [3]uint64{16, 8, in.Pos.CadenceSeconds}))
+	e.set(vrschema.U64(vrElectionMaxBatchSlot), vrschema.U64(uint64(in.Limits.MaxBatch)))
+	e.set(vrschema.U64(vrElectionReaderSlot), vrschema.AddrWord(reader))
+	e.set(vrschema.U64(vrElectionHookCallerSlot), vrschema.AddrWord(vrGenesisAddress(7)))
+	e.set(vrschema.U64(vrElectionRegistrySlot), vrschema.AddrWord(common.Address(vrschema.ValidatorRegistry)))
+	e.set(vrschema.U64(vrElectionIndexLenSlot), vrschema.U64(uint64(len(in.Identities))))
+	for i, id := range in.Identities {
+		sid := uint64(i + 1)
+		rootKey, err1 := vrHex("rootKey", id.RootKey, 33)
+		evmKey, err2 := vrHex("evmKey", id.EVMKey, 33)
+		payee, err3 := vrAddress("payee", id.Payee)
+		if err := errors.Join(err1, err2, err3); err != nil {
+			return nil, err
+		}
+		base := vrschema.MapSlot(vrschema.U64(1), vrschema.MapSlot(vrschema.U64(sid), vrschema.U64(vrElectionStagedSlot)))
+		rootNode, evmNode := vrschema.Keccak([]byte(id.RootNodeID)), vrschema.Keccak([]byte(id.EVMNodeID))
+		e.set(base, rootNode)
+		e.bytesAt(vrschema.SlotAdd(base, 1), rootKey)
+		e.set(vrschema.SlotAdd(base, 2), evmNode)
+		e.bytesAt(vrschema.SlotAdd(base, 3), evmKey)
+		e.set(vrschema.SlotAdd(base, 4), vrschema.AddrWord(payee))
+		e.set(vrschema.SlotAdd(base, 5), vrschema.Keccak(wb(vrElectionBindingDomain), wb(vrschema.U64(sid)), wb(vrschema.U64(1)), wb(rootNode),
+			wb(vrschema.Keccak(rootKey)), wb(evmNode), wb(vrschema.Keccak(evmKey)), wb(vrschema.AddrWord(payee))))
+		e.set(vrschema.SlotAdd(base, 7), vrschema.Keccak(rootKey))
+		e.set(vrschema.SlotAdd(base, 8), vrschema.Keccak(evmKey))
+		// the live index: entry i is identity i+1 (four uint64 to a word), and the reverse position is 1-based
+		entry := vrschema.SlotAdd(vrschema.Keccak(wb(vrschema.U64(vrElectionIndexLenSlot))), uint64(i)/4)
+		cur := e[entry]
+		cur = orWord(cur, packed([3]uint64{(uint64(i) % 4) * 8, 8, sid}))
+		e.set(entry, cur)
+		e.set(vrschema.MapSlot(vrschema.U64(sid), vrschema.U64(vrElectionPositionSlot)), vrschema.U64(sid))
+	}
+	return e, nil
+}
+
+func orWord(a, b vrschema.Word) vrschema.Word {
+	for i := range a {
+		a[i] |= b[i]
+	}
+	return a
+}
+
+// vrCheckPosElection compares the election's whole allocated storage with the one the plan derives (vrPosElectionExpected): a missing link (the
+// eligibility reader included), index entry or key byte, and any extra slot, is refused.
 func vrCheckPosElection(in vrGenesisInput, d vrDeploymentFile, network []byte, alloc map[common.Address]vrAllocAccount) error {
-	fail := func(f string, a ...any) error { return fmt.Errorf("%w: "+f, append([]any{ErrVRGenesis}, a...)...) }
 	election, err := vrAddress("PoS election", d.Election)
 	if err != nil {
 		return err
 	}
-	slots, err := storageOf(alloc[election])
+	got, err := storageOf(alloc[election])
 	if err != nil {
 		return err
 	}
-	word := func(slot uint64) vrschema.Word { return slots[vrschema.U64(slot)] }
-	addrOf := func(name, s string) (vrschema.Word, error) {
-		a, err := vrAddress(name, s)
-		return vrschema.AddrWord(a), err
+	want, err := vrPosElectionExpected(in, d, network, got[vrschema.U64(1)])
+	if err != nil {
+		return err
 	}
-	want := map[string]struct {
-		slot uint64
-		w    vrschema.Word
-	}{}
-	set := func(name string, slot uint64, w vrschema.Word) {
-		want[name] = struct {
-			slot uint64
-			w    vrschema.Word
-		}{slot, w}
+	if got[vrschema.U64(1)] == (vrschema.Word{}) {
+		return fmt.Errorf("%w: the election has no manifest hash: it is not initialized", ErrVRGenesis)
 	}
-	set("initialized", vrElectionInitializedSlot, vrschema.U64(1))
-	set("network word", vrElectionNetworkSlot, vrschema.Word(network))
-	for _, l := range []struct {
-		name, addr string
-		slot       uint64
-	}{{"custody", d.Custody, vrElectionCustodySlot}, {"evidence", d.Evidence, vrElectionEvidenceSlot}, {"selection", d.Selection, vrElectionSelectionSlot}} {
-		w, err := addrOf("PoS "+l.name, l.addr)
-		if err != nil {
-			return err
-		}
-		set(l.name, l.slot, w)
-	}
-	set("root records", vrElectionRootsSlot, vrschema.AddrWord(common.Address(vrschema.SealRegistry)))
-	set("hook caller (the adapter)", vrElectionHookCallerSlot, vrschema.AddrWord(vrGenesisAddress(7)))
-	set("registry (VR)", vrElectionRegistrySlot, vrschema.AddrWord(common.Address(vrschema.ValidatorRegistry)))
-	set("index length", vrElectionIndexLenSlot, vrschema.U64(uint64(len(in.Identities))))
-	for name, x := range want {
-		if got := word(x.slot); got != x.w {
-			return fail("the election's %s (slot %d) is %x, the plan names %x: the election is not initialized as planned", name, x.slot, got, x.w)
-		}
-	}
-	// parameters and cadence: packed fields
-	field := func(w vrschema.Word, offset, size uint64) uint64 {
-		var v uint64
-		for i := uint64(0); i < size; i++ {
-			v |= uint64(w[31-offset-i]) << (8 * i)
-		}
-		return v
-	}
-	params, cadence := word(vrElectionParamsSlot), word(vrElectionCadenceSlot)
-	for _, c := range []struct {
-		name      string
-		got, want uint64
-	}{
-		{"nMin", field(params, 0, 4), uint64(in.Limits.NMin)}, {"nTarget", field(params, 4, 4), uint64(in.Limits.NTarget)}, {"nMax", field(params, 8, 4), uint64(in.Limits.NMax)},
-		{"cadenceRounds", field(cadence, 8, 8), in.Pos.CadenceRounds}, {"cadenceSeconds", field(cadence, 16, 8), in.Pos.CadenceSeconds},
-	} {
-		if c.got != c.want {
-			return fail("the election's %s is %d, the plan names %d", c.name, c.got, c.want)
-		}
-	}
-	for i, id := range in.Identities {
-		sid := uint64(i + 1)
-		base := vrschema.MapSlot(vrschema.U64(1), vrschema.MapSlot(vrschema.U64(sid), vrschema.U64(vrElectionStagedSlot)))
-		rootKey, err2 := vrHex("rootKey", id.RootKey, 33)
-		evmKey, err4 := vrHex("evmKey", id.EVMKey, 33)
-		payee, err5 := vrAddress("payee", id.Payee)
-		if err := errors.Join(err2, err4, err5); err != nil {
-			return err
-		}
-		for _, c := range []struct {
-			name   string
-			offset uint64
-			w      vrschema.Word
-		}{
-			{"root node id", 0, vrschema.Keccak([]byte(id.RootNodeID))}, {"EVM node id", 2, vrschema.Keccak([]byte(id.EVMNodeID))}, {"payee", 4, vrschema.AddrWord(payee)},
-			{"root key hash", 7, vrschema.Keccak(rootKey)}, {"EVM key hash", 8, vrschema.Keccak(evmKey)},
-		} {
-			if got := slots[vrschema.SlotAdd(base, c.offset)]; got != c.w {
-				return fail("the election's staged %s of genesis identity %d is %x, the plan names %x", c.name, sid, got, c.w)
-			}
-		}
-		// the key bytes themselves (eligibility hashes them), then the binding hash the election computed over them
-		for _, k := range []struct {
-			name string
-			slot uint64
-			key  []byte
-		}{{"root key", 1, rootKey}, {"EVM key", 3, evmKey}} {
-			if err := vrCheckLongBytes(slots, vrschema.SlotAdd(base, k.slot), k.key); err != nil {
-				return fail("the election's staged %s of genesis identity %d: %v", k.name, sid, err)
-			}
-		}
-		bh := vrschema.Keccak(wb(vrElectionBindingDomain), wb(vrschema.U64(sid)), wb(vrschema.U64(1)), wb(vrschema.Keccak([]byte(id.RootNodeID))),
-			wb(vrschema.Keccak(rootKey)), wb(vrschema.Keccak([]byte(id.EVMNodeID))), wb(vrschema.Keccak(evmKey)), wb(vrschema.AddrWord(payee)))
-		if got := slots[vrschema.SlotAdd(base, 5)]; got != bh {
-			return fail("the election's staged binding hash of genesis identity %d is %x, the plan's binding hashes to %x", sid, got, bh)
-		}
-		// the live index: entry i is identity i+1, and the reverse position says so
-		entry := vrschema.SlotAdd(vrschema.Keccak(wb(vrschema.U64(vrElectionIndexLenSlot))), uint64(i)/4)
-		if got := field(slots[entry], (uint64(i)%4)*8, 8); got != sid {
-			return fail("the election's index entry %d is %d, the genesis identity is %d", i, got, sid)
-		}
-		if got := slots[vrschema.MapSlot(vrschema.U64(sid), vrschema.U64(vrElectionPositionSlot))]; got != vrschema.U64(sid) {
-			return fail("the election's index position of identity %d is %x, not %d", sid, got, sid)
-		}
+	if diffs := diffStorage("the PoS election", want, got); len(diffs) > 0 {
+		return fmt.Errorf("%w: the election's storage is not the plan's: %s", ErrVRGenesis, strings.Join(diffs, "; "))
 	}
 	return nil
 }
 
 // vrElectionBindingDomain is ElectionPolicy.BINDING_DOMAIN.
 var vrElectionBindingDomain = vrschema.Keccak([]byte("unicity.p85.delegation-binding"))
-
-// vrCheckLongBytes checks a Solidity `bytes` of 32 bytes or more stored at slot: the word holds 2*len+1, the data starts at keccak(slot).
-func vrCheckLongBytes(slots vrStorage, slot vrschema.Word, want []byte) error {
-	if len(want) < 32 {
-		return fmt.Errorf("short key")
-	}
-	if got := slots[slot]; got != vrschema.U64(uint64(len(want))*2+1) {
-		return fmt.Errorf("length word %x, want a %d-byte string", got, len(want))
-	}
-	data := vrschema.Keccak(wb(slot))
-	for off := 0; off < len(want); off += 32 {
-		var w vrschema.Word
-		copy(w[:], want[off:])
-		if got := slots[vrschema.SlotAdd(data, uint64(off/32))]; got != w {
-			return fmt.Errorf("data word %d is %x, want %x", off/32, got, w)
-		}
-	}
-	return nil
-}
 
 // wb is a word as a byte slice.
 func wb(w vrschema.Word) []byte { return w[:] }
