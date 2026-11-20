@@ -128,7 +128,7 @@ for i in $(seq 1 "$validators"); do
   mkdir -p "test-nodes/reth$i"
   openssl rand -hex 32 >"test-nodes/evm$i/jwt.hex"
   registry_layout_require || exit 1
-  lane_preflight_ports "reth$i" $((rethEngineBase + i - 1)) $((rethEthBase + i - 1)) $((rethP2PBase + i - 1)) || exit 1
+  lane_preflight_ports "reth$i" $((rethEngineBase + i - 1)) $((rethEthBase + i - 1)) "$((rethP2PBase + i - 1))@0.0.0.0" || exit 1
   "$URETH_BIN" node --chain test-nodes/evm-genesis.json --datadir "test-nodes/reth$i/dd" \
     --authrpc.jwtsecret "test-nodes/evm$i/jwt.hex" \
     --authrpc.addr 127.0.0.1 --authrpc.port $((rethEngineBase + i - 1)) \
@@ -199,6 +199,7 @@ restartValidator1() {
   : >test-nodes/evm1/debug.log
   local bootnodes="$rootBoot"
   for j in $(seq 2 "$validators"); do bootnodes+=",$(evm_validator_addr "$j")"; done
+  lane_port_preflight "$evmValidatorPortStart" "validator 1 restart p2p" || return 1
   build/ubft shard-node run --home test-nodes/evm1 --executor engine-api --registry-layout "$(registry_layout)" \
     --address "/ip4/127.0.0.1/tcp/$evmValidatorPortStart" --bootnodes "$bootnodes" \
     --trust-base test-nodes/trust-base.json \
@@ -215,7 +216,7 @@ reached="section 2: control arm"
 echo "=== 2. CONTROL: the same node with recovery off refuses for ever ==="
 # Its reth keeps running, so this is the shard-node-only restart of the §1.1 matrix: the executor
 # still holds everything, and what the node lost is its own in-process anchor.
-restartValidator1
+restartValidator1 || exit 1
 waitFor test-nodes/evm1/debug.log "accepted certificate" 5 120 || { fail "the restarted node received no certificates"; exit 1; }
 # Count the REFUSAL, not the word. "no-anchor" also appears in the recovery arm's own "asking peers
 # ... reason=no-anchor" line, so grepping for it counts requests as refusals and reads a working
@@ -241,7 +242,7 @@ cp test-nodes/evm1/debug.log test-nodes/evm1/control.log
 echo
 reached="section 3: recovery arm"
 echo "=== 3. RECOVERY: the same node, same devnet, --evidence-recover ==="
-restartValidator1 --evidence-recover
+restartValidator1 --evidence-recover || exit 1
 waitFor test-nodes/evm1/debug.log "accepted certificate" 6 120 || { fail "the restarted node received no certificates"; exit 1; }
 
 grep -q "anchor recovery finished.*state=ready" test-nodes/evm1/debug.log \

@@ -11,9 +11,8 @@
 #   scripts/lane-slot.sh mongo up|down [LOG_DIR]                          the slot's MongoDB replica set (LANE_SLOT=N), for lanes with the aggregator
 #   scripts/lane-slot.sh selftest                                         ports, literals, lock protocol, process scoping
 # Every acquire, release and status runs under one host-wide flock(1) on $LANE_LOCK_DIR/.lanes.lock (the kernel drops it when the holder dies: nothing to clean up).
-# Launcher (same owner and token on acquire and release; an aborting acquire; mongo down before release; the assignment apart from the export):
-#   owner=VT-07; claim=$(scripts/lane-slot.sh acquire --owner "$owner" --tmux vt07) || exit 1; read -r slot token <<<"$claim"; export LANE_SLOT=$slot
-#   trap 'scripts/lane-slot.sh mongo down "$HOME/lane-mongo" || true; scripts/lane-slot.sh release --owner "$owner" --token "$token"' EXIT
+# Launcher (same owner and token on acquire and release; an aborting acquire; the lane runs as a child, a TERM/INT/HUP of the launcher is forwarded to it and waited
+# for before the mongo teardown and the release; the assignment apart from the export): see docs/lane-slots.md, which scripts/lane-slot-selftest.sh runs.
 # The lock records the owner, tmux session, tree, ports and start time. It does not kill anything and does not detect a dead owner: `status` shows the tree and
 # start, and a stale lock is released by hand (release --force) after checking the owner's processes.
 set -euo pipefail
@@ -25,11 +24,14 @@ lockfile() { echo "$lockdir/slot-$1.txt"; }
 whoami_tag() { echo "${LANE_OWNER:-${USER:-unknown}}"; }
 
 # One host-wide lock around the whole critical section of acquire, release and status, including the cross-slot token scan. flock(1) holds it for the life of
-# this process only: a killed helper leaves nothing behind.
+# this process: a killed helper leaves nothing behind. The slow children (tmux, the port-table subshells, the test stall) run with fd 9 closed, so they cannot keep the
+# lock past the holder's death; a claim is written to a temp file and renamed into place, so an interrupted acquire leaves at most a temp file, which the next
+# acquire or status (both under the lock) removes.
 lanes_lock() {
   command -v flock >/dev/null 2>&1 || { echo "lane-slot.sh needs flock(1) (util-linux)" >&2; exit 2; }
   mkdir -p "$lockdir"; exec 9>"$lockdir/.lanes.lock"
   flock -x -w 30 9 || { echo "lane-slot.sh: could not take $lockdir/.lanes.lock within 30 s" >&2; exit 1; }
+  rm -f "$lockdir"/slot-[0-3].txt.tmp.* 9>&-   # a partial claim of an interrupted acquire (every writer holds the lock, so none is in flight)
 }
 new_token() { cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen 2>/dev/null || mktemp -u XXXXXXXXXXXXXXXXXXXXXXXX; }
 
@@ -61,7 +63,7 @@ case "$cmd" in
         continue
       fi
       if grep -qsxF "token: $token" "$lockdir"/slot-[0-3].txt 2>/dev/null; then echo "acquire: token '$token' is already held by another lock: a claim token must be unique" >&2; exit 1; fi
-      bad=$(lane_slot_ephemeral_conflicts "$s" "$classes" | tr '\n' ' ')
+      bad=$(exec 9>&-; lane_slot_ephemeral_conflicts "$s" "$classes" | tr '\n' ' ')
       if [ -n "$bad" ] && [ "$s" != 0 ]; then
         [ -z "$slot" ] || { echo "slot $s refused: its core listeners fall in this host's ephemeral port range (ip_local_port_range), where an outgoing connection can take the port first: $bad" >&2; exit 1; }
         continue
@@ -74,9 +76,11 @@ case "$cmd" in
         echo "slot: $s"
         echo "token: $token"
         echo "profile: $profile"
-        echo "ports: $(lane_slot_ports "$s" | awk '$3=="core"{n[$1]++; if(!($1 in lo)||$2<lo[$1])lo[$1]=$2; if($2>hi[$1])hi[$1]=$2} END{for(k in lo) printf "%s %d-%d; ", k, lo[k], hi[k]}' | sed 's/; $//')"
+        echo "ports: $(exec 9>&-; lane_slot_ports "$s" | awk '$3=="core"{n[$1]++; if(!($1 in lo)||$2<lo[$1])lo[$1]=$2; if($2>hi[$1])hi[$1]=$2} END{for(k in lo) printf "%s %d-%d; ", k, lo[k], hi[k]}' | sed 's/; $//')"
         echo "start: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-      } >"$f"
+      } >"$f.tmp.$$"
+      [ -z "${LANE_SLOT_TEST_STALL:-}" ] || sleep "$LANE_SLOT_TEST_STALL" 9>&-   # a test hook: a window to interrupt an acquire between writing and publishing
+      mv "$f.tmp.$$" "$f"
       echo "$s $token"; exit 0
     done
     echo "no free lane slot (0..3 all locked or refused); see: $0 status" >&2; exit 1 ;;
@@ -106,7 +110,7 @@ case "$cmd" in
         # a lock names its tmux session (either "tmux: NAME" or "tmux=NAME"): a session that no longer exists is a stale lock. The exact name: -t "=NAME" (a bare NAME also matches a prefix)
         t=$(sed -n -E 's/^tmux: *([^ ]+).*/\1/p; s/.* tmux=([^ ]+).*/\1/p' "$f" | head -n 1)
         note=
-        if [ -n "$t" ] && [ "$t" != none ] && command -v tmux >/dev/null 2>&1 && ! tmux has-session -t "=$t" 2>/dev/null; then
+        if [ -n "$t" ] && [ "$t" != none ] && command -v tmux >/dev/null 2>&1 && ! tmux has-session -t "=$t" 9>&- 2>/dev/null; then
           note=" (STALE? tmux session '$t' does not exist; check the owner's processes, then release --force)"
         fi
         echo "slot $s: LOCKED$note"; sed 's/^/  /' "$f"

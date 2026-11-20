@@ -96,37 +96,52 @@ s0=$(LANE_PORT_RANGE_FILE="$tmp/range" acq --slot 0 --profile f6c --token e0)
 [ -n "$r0" ] && [ "${s0%% *}" = 0 ] && pass "slot 0 is exempt from the hard check (its historical ports): accepted with a note" || fail "slot 0 f6c: conflicts='$r0' acquire='$s0'"
 rel 0 --token e0
 
-# 6. the documented launcher (the fenced block of docs/lane-slots.md, run as written with the lane and the mongo calls replaced): the slot is released, after the
-# mongo teardown, on a normal exit, on a failing lane (set -e), and when the shell is terminated; a failed acquire aborts before the lane starts
+# 6. the documented launcher (the fenced block of docs/lane-slots.md, run as written with the lane and the mongo calls replaced): the slot is released, after the lane
+# has exited and after the mongo teardown, on a normal exit, on a failing lane (set -e), and when only the launcher is terminated; a failed acquire aborts before the
+# lane starts
 launcher=$(awk '/^```$/ { n++; next } n == 1 { print }' "$repo/docs/lane-slots.md" 2>/dev/null)
 if [ -z "$launcher" ]; then fail "could not extract the launcher block from docs/lane-slots.md"; else
   mkdir -p "$tmp/launch/scripts"; ln -sf "$here/lane-slot.sh" "$tmp/launch/scripts/lane-slot.sh"; ln -sfn "$here/lib" "$tmp/launch/scripts/lib"; ln -sfn "$here/ci" "$tmp/launch/scripts/ci"
-  log="$tmp/launch/log"
-  run_launcher() { # LANE_COMMAND [signal]: the block, with the mongo calls and the lane command replaced
+  log="$tmp/launch/log"; locks="$tmp/locks-l"
+  make_block() { # the block with the lane replaced by "bash lane.sh" and the mongo calls by log lines (the teardown records whether the claim is still held)
     printf '%s\n' "$launcher" | sed -e 's#scripts/lane-slot.sh mongo down [^;]*#echo "mongo-down locks=$(ls "$LANE_LOCK_DIR" | grep -c "^slot-")" >>"$LAUNCH_LOG"#' \
-      -e 's#scripts/lane-slot.sh mongo up [^#]*#echo mongo-up >>"$LAUNCH_LOG" #' -e 's#\./scripts/reth-paired-devnet.sh 4 10#'"$1"'#' >"$tmp/launch/block.sh"
-    rm -f "$log"; ( cd "$tmp/launch" && LAUNCH_LOG="$log" LANE_LOCK_DIR="$tmp/locks-l" bash block.sh ) >/dev/null 2>&1; echo $?
+      -e 's#scripts/lane-slot.sh mongo up [^#]*#echo mongo-up >>"$LAUNCH_LOG" #' -e 's#\./scripts/reth-paired-devnet.sh 4 10#bash lane.sh#' >"$tmp/launch/block.sh"
   }
-  rm -rf "$tmp/locks-l"
-  rc=$(run_launcher true); held=$(ls "$tmp/locks-l" 2>/dev/null | grep -c '^slot-')
+  run_launcher() { # LANE_BODY: runs the block to its end; prints its exit status
+    printf '%s\n' "$1" >"$tmp/launch/lane.sh"; make_block; rm -f "$log"; ( cd "$tmp/launch" && LAUNCH_LOG="$log" LANE_LOCK_DIR="$locks" bash block.sh ) >/dev/null 2>&1; echo $?
+  }
+  nlocks() { ls "$locks" 2>/dev/null | grep -c '^slot-'; }
+  rm -rf "$locks"
+  rc=$(run_launcher 'exit 0'); held=$(nlocks)
   [ "$rc" = 0 ] && [ "$held" = 0 ] && grep -q 'mongo-down locks=1' "$log" && pass "launcher: normal exit releases the slot, after the mongo teardown" || fail "launcher normal exit: rc=$rc locks left=$held log=$(cat "$log" 2>/dev/null)"
-  rc=$(run_launcher false); held=$(ls "$tmp/locks-l" 2>/dev/null | grep -c '^slot-')
-  [ "$rc" != 0 ] && [ "$held" = 0 ] && grep -q 'mongo-down locks=1' "$log" && pass "launcher: a failing lane keeps its exit status and still releases the slot" || fail "launcher failing lane: rc=$rc locks left=$held log=$(cat "$log" 2>/dev/null)"
-  # terminated while the lane runs (a tmux kill-session, a kill): the EXIT trap still runs
-  printf '%s\n' "$launcher" | sed -e 's#scripts/lane-slot.sh mongo down [^;]*#echo mongo-down >>"$LAUNCH_LOG"#' -e 's#scripts/lane-slot.sh mongo up [^#]*#true #' -e 's#\./scripts/reth-paired-devnet.sh 4 10#sleep 60#' >"$tmp/launch/block2.sh"
-  ( cd "$tmp/launch" && LAUNCH_LOG="$log" LANE_LOCK_DIR="$tmp/locks-l" bash block2.sh ) >/dev/null 2>&1 & lp=$!
-  sleep 2; held=$(ls "$tmp/locks-l" | grep -c '^slot-'); kill -TERM "$lp" 2>/dev/null; wait "$lp" 2>/dev/null; sleep 0.5; after=$(ls "$tmp/locks-l" | grep -c '^slot-')
-  [ "$held" = 1 ] && [ "$after" = 0 ] && pass "launcher: a terminated launcher releases the slot" || fail "launcher terminated: held=$held after=$after"
+  rc=$(run_launcher 'exit 7'); held=$(nlocks)
+  [ "$rc" = 7 ] && [ "$held" = 0 ] && grep -q 'mongo-down locks=1' "$log" && pass "launcher: a failing lane keeps its exit status (7) and still releases the slot" || fail "launcher failing lane: rc=$rc locks left=$held log=$(cat "$log" 2>/dev/null)"
+  # only the launcher is terminated; the lane takes 1.5 s to exit on its TERM: the slot must stay held until the lane has exited
+  printf '%s\n' 'trap "sleep 1.5; echo lane-exited >>\"\$LAUNCH_LOG\"; exit 0" TERM
+sleep 60 & wait $!' >"$tmp/launch/lane.sh"; make_block; rm -f "$log"
+  ( cd "$tmp/launch" && LAUNCH_LOG="$log" LANE_LOCK_DIR="$locks" bash block.sh ) >/dev/null 2>&1 & lp=$!
+  sleep 2; held=$(nlocks); kill -TERM "$lp" 2>/dev/null; sleep 0.7; mid=$(nlocks); wait "$lp" 2>/dev/null; after=$(nlocks)
+  order=$(grep -n 'lane-exited\|mongo-down' "$log" 2>/dev/null | sed 's/^[0-9]*://' | tr '\n' ' ')
+  [ "$held" = 1 ] && [ "$mid" = 1 ] && [ "$after" = 0 ] && case "$order" in "lane-exited mongo-down locks=1 ") true ;; *) false ;; esac \
+    && pass "launcher: a terminated launcher releases the slot only after the lane has exited (held while the lane winds down, then lane exit, mongo teardown, release)" \
+    || fail "launcher terminated: held=$held mid=$mid after=$after order='$order'"
   # a failed acquire aborts before the lane runs
-  mkdir -p "$tmp/locks-l"; for sl in 0 1 2 3; do echo "owner: z
-token: z$sl" >"$tmp/locks-l/slot-$sl.txt"; done
+  mkdir -p "$locks"; for sl in 0 1 2 3; do printf 'owner: z\ntoken: z%s\n' "$sl" >"$locks/slot-$sl.txt"; done
   rc=$(run_launcher 'touch "$LAUNCH_LOG.lane"'); [ "$rc" != 0 ] && [ ! -e "$log.lane" ] && pass "launcher: a failed acquire aborts before the lane starts" || fail "launcher failed acquire: rc=$rc lane-ran=$([ -e "$log.lane" ] && echo yes)"
-  rm -rf "$tmp/locks-l"
-  # release by token alone (no slot, no LANE_SLOT) finds the claim
-  a=$(LANE_LOCK_DIR="$tmp/locks-l" "$ls_" acquire --owner o --token tt 2>/dev/null); LANE_LOCK_DIR="$tmp/locks-l" env -u LANE_SLOT "$ls_" release --owner o --token tt >/dev/null 2>&1 && [ -z "$(ls "$tmp/locks-l" | grep '^slot-')" ] && pass "release with only the token finds the claim's slot" || fail "release by token alone"
+  rm -rf "$locks"
+  # release by the token alone (no slot, no LANE_SLOT) finds the claim
+  a=$(LANE_LOCK_DIR="$locks" "$ls_" acquire --owner o --token tt 2>/dev/null); LANE_LOCK_DIR="$locks" env -u LANE_SLOT "$ls_" release --owner o --token tt >/dev/null 2>&1 && [ "$(nlocks)" = 0 ] && pass "release with only the token finds the claim's slot" || fail "release by token alone"
+  # an acquire killed between writing its claim and publishing it leaves no claim (at most a temp file); the lock is free at once, the next acquire works and cleans up
+  rm -rf "$locks"
+  ( LANE_LOCK_DIR="$locks" LANE_SLOT_TEST_STALL=20 "$ls_" acquire --slot 1 --owner z --token zz >/dev/null 2>&1 ) & ap=$!
+  sleep 1; tmpf=$(ls "$locks" | grep -c 'slot-1.txt.tmp'); pubf=$(ls "$locks" | grep -c '^slot-1.txt$'); kill -9 "$ap" 2>/dev/null; wait "$ap" 2>/dev/null
+  a=$(LANE_LOCK_DIR="$locks" timeout 10 "$ls_" acquire --slot 1 --owner o --token t5 2>/dev/null); left=$(ls "$locks" | grep -c 'tmp')
+  [ "$tmpf" = 1 ] && [ "$pubf" = 0 ] && [ "${a%% *}" = 1 ] && [ "$left" = 0 ] && pass "an interrupted acquire leaves no claim: the lock is free at once (no child keeps it), the next acquire works and removes the temp file" || fail "interrupted acquire: tmp=$tmpf published=$pubf next='$a' tmp left=$left"
+  LANE_LOCK_DIR="$locks" "$ls_" status >/dev/null 2>&1
 fi
 
-# 7. the bind preflight probes by an actual bind: it refuses a port held by a listening socket AND one that is only bound, and does not need LANE_SLOT (set -u)
+# 7. the bind preflight probes by an actual bind of the address the service binds: it refuses a port held by a listening socket AND one that is only bound, a
+# wildcard-bound service (reth P2P) is probed on 0.0.0.0, and it does not need LANE_SLOT (set -u)
 hold() { python3 -c 'import socket,sys,time
 s=socket.socket()
 if sys.argv[2] == "listen": s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)   # (a holder that is merely bound, without SO_REUSEADDR, blocks a later bind too)
@@ -139,6 +154,12 @@ for mode in listen bound; do
   else case "$out" in *"cannot be bound"*) pass "preflight refuses a port held by a $mode socket, with a clear message (no unbound-variable error)" ;; *) fail "preflight message for a $mode socket: $out" ;; esac; fi
   kill "$hp" 2>/dev/null; wait "$hp" 2>/dev/null
 done
+# a listener on another local address blocks a wildcard bind but not a loopback one: reth P2P (no --addr) must be probed on 0.0.0.0
+port=$((37000 + RANDOM % 900)); python3 -c 'import socket,time
+s=socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); s.bind(("127.0.0.2", '"$port"')); s.listen(1); time.sleep(20)' & hp=$!; sleep 0.7
+lane_port_bindable "$port" 127.0.0.1 && lane_port_bindable "$port" 0.0.0.0 && fail "the wildcard probe missed a listener on 127.0.0.2" || { lane_port_bindable "$port" 127.0.0.1 && ! lane_port_bindable "$port" 0.0.0.0 && pass "a wildcard probe (reth P2P) sees a listener on another local address, which a loopback probe misses" || fail "wildcard vs loopback probe"; }
+env -u LANE_SLOT bash -uc "source '$here/lib/lane-slot.sh'; lane_preflight_ports selftest '$port@0.0.0.0'" >/dev/null 2>&1 && fail "lane_preflight_ports passed PORT@0.0.0.0 over a listener" || pass "lane_preflight_ports honours PORT@ADDR"
+kill "$hp" 2>/dev/null; wait "$hp" 2>/dev/null
 free=$((39000 + RANDOM % 900)); env -u LANE_SLOT bash -uc "source '$here/lib/lane-slot.sh'; lane_port_preflight $free selftest" >/dev/null 2>&1 && pass "preflight passes a free port" || fail "preflight refused a free port"
 
 [ "$fails" = 0 ] || { echo "lane-slot selftest: $fails FAILED" >&2; exit 1; }

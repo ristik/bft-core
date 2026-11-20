@@ -153,7 +153,7 @@ for i in $(seq 1 "$validators"); do
   # vacuous. `debug` cannot be wrong about a name.
   [ "$i" = "1" ] && extra+=(--log.stdout.filter debug)
   registry_layout_require || exit 1
-  lane_preflight_ports "reth$i" $((rethEngineBase + i - 1)) $((rethEthBase + i - 1)) $((rethP2PBase + i - 1)) || exit 1
+  lane_preflight_ports "reth$i" $((rethEngineBase + i - 1)) $((rethEthBase + i - 1)) "$((rethP2PBase + i - 1))@0.0.0.0" || exit 1
   "$URETH_BIN" node --chain "$chainSpec" --datadir "test-nodes/reth$i/dd" \
     --authrpc.jwtsecret "test-nodes/evm$i/jwt.hex" \
     --authrpc.addr 127.0.0.1 --authrpc.port $((rethEngineBase + i - 1)) \
@@ -326,6 +326,7 @@ restartValidator1() {
   : >test-nodes/evm1/debug.log
   local bootnodes="$rootBoot"
   for j in $(seq 2 "$validators"); do bootnodes+=",$(evm_validator_addr "$j")"; done
+  lane_port_preflight "$evmValidatorPortStart" "validator 1 restart p2p" || return 1
   build/ubft shard-node run --home test-nodes/evm1 --executor engine-api --registry-layout "$(registry_layout)" \
     --address "/ip4/127.0.0.1/tcp/$evmValidatorPortStart" --bootnodes "$bootnodes" \
     --trust-base test-nodes/trust-base.json \
@@ -401,7 +402,7 @@ reached="section 4: the isolated arm"
 echo "=== 4. ISOLATED: BFT evidence reaches it, the payload does not ==="
 isolatedMark=$(markNow)
 note "isolated arm begins"
-restartValidator1 --evidence-recover
+restartValidator1 --evidence-recover || exit 1
 waitFor test-nodes/evm1/debug.log "accepted certificate" 6 180 || { fail "the restarted node received no certificates"; exit 1; }
 # Give it room to try, fail closed and try again. The budget renews per certificate, so this is
 # several attempts, not one.

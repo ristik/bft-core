@@ -163,7 +163,7 @@ for i in $(seq 1 "$validators"); do
   extra=(--no-persist-peers)
   [ "$i" = "1" ] && extra+=(--log.stdout.filter debug)
   registry_layout_require || exit 1
-  lane_preflight_ports "reth$i" $((rethEngineBase + i - 1)) $((rethEthBase + i - 1)) $((rethP2PBase + i - 1)) || exit 1
+  lane_preflight_ports "reth$i" $((rethEngineBase + i - 1)) $((rethEthBase + i - 1)) "$((rethP2PBase + i - 1))@0.0.0.0" || exit 1
   "$URETH_BIN" node --chain "$chainSpec" --datadir "test-nodes/reth$i/dd" \
     --authrpc.jwtsecret "test-nodes/evm$i/jwt.hex" \
     --authrpc.addr 127.0.0.1 --authrpc.port $((rethEngineBase + i - 1)) \
@@ -183,7 +183,7 @@ for i in $(seq 1 "$bystanders"); do
   mkdir -p "test-nodes/byst$i"
   openssl rand -hex 32 >"test-nodes/byst$i/jwt.hex"
   registry_layout_require || exit 1
-  lane_preflight_ports "bystander reth$i" $(((18581+LANE_PORT_OFFSET) + i - 1)) $((bystEthBase + i - 1)) $((bystP2PBase + i - 1)) || exit 1
+  lane_preflight_ports "bystander reth$i" $(((18581+LANE_PORT_OFFSET) + i - 1)) $((bystEthBase + i - 1)) "$((bystP2PBase + i - 1))@0.0.0.0" || exit 1
   "$URETH_BIN" node --chain "$chainSpec" --datadir "test-nodes/byst$i/dd" \
     --authrpc.jwtsecret "test-nodes/byst$i/jwt.hex" \
     --authrpc.addr 127.0.0.1 --authrpc.port $(((18581+LANE_PORT_OFFSET) + i - 1)) \
@@ -299,6 +299,7 @@ restartValidator1() {
   : >test-nodes/evm1/debug.log
   local bootnodes="$rootBoot"
   for j in $(seq 2 "$validators"); do bootnodes+=",$(evm_validator_addr "$j")"; done
+  lane_port_preflight "$evmValidatorPortStart" "validator 1 restart p2p" || return 1
   build/ubft shard-node run --home test-nodes/evm1 --executor engine-api --registry-layout "$(registry_layout)" \
     --address "/ip4/127.0.0.1/tcp/$evmValidatorPortStart" --bootnodes "$bootnodes" \
     --trust-base test-nodes/trust-base.json \
@@ -437,7 +438,7 @@ assertBystandersLack "at the start of the arm" "$certifiedHash" "$missedParentHa
 unhelpfulMark=$(markNow)
 unhelpfulAt=$(markNowUTC)
 startPeerMonitor "http://127.0.0.1:$rethEthBase" test-nodes/peermon-unhelpful.log 1
-restartValidator1 --evidence-recover
+restartValidator1 --evidence-recover || exit 1
 waitFor test-nodes/evm1/debug.log "accepted certificate" 6 180 || { fail "the restarted node received no certificates"; exit 1; }
 waitForLinesAfter test-nodes/evm1/debug.log "anchor recovery finished" "outcome=payload-unavailable" 3 240 >/dev/null \
   || info "fewer than 3 unavailability outcomes were logged within 240s; the counts below say what happened"

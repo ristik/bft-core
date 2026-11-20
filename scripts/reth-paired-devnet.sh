@@ -456,7 +456,7 @@ for i in $(seq 1 "$validators"); do
   # satisfy reth - nothing here pre-authenticates on its behalf.
   openssl rand -hex 32 >"test-nodes/evm$i/jwt.hex"
   registry_layout_require || exit 1
-  for p in $((rethEngineBase + i - 1)) $((rethEthBase + i - 1)) $((rethP2PBase + i - 1)); do lane_port_preflight "$p" "reth$i" || exit 1; done
+  lane_preflight_ports "reth$i" $((rethEngineBase + i - 1)) $((rethEthBase + i - 1)) "$((rethP2PBase + i - 1))@0.0.0.0" || exit 1
   "$URETH_BIN" node --chain "$chainSpec" --datadir "test-nodes/reth$i/dd" \
     --authrpc.jwtsecret "test-nodes/evm$i/jwt.hex" \
     --authrpc.addr 127.0.0.1 --authrpc.port $((rethEngineBase + i - 1)) \
@@ -562,7 +562,7 @@ cat >test-nodes/wrong-genesis.json <<'EOF'
 "baseFeePerGas":"0x3b9aca00"}
 EOF
 registry_layout_require || exit 1
-lane_preflight_ports "negative reth (wrong-genesis)" $((18651+LANE_PORT_OFFSET)) $((18645+LANE_PORT_OFFSET)) $((30499+LANE_PORT_OFFSET)) || exit 1
+lane_preflight_ports "negative reth (wrong-genesis)" $((18651+LANE_PORT_OFFSET)) $((18645+LANE_PORT_OFFSET)) "$((30499+LANE_PORT_OFFSET))@0.0.0.0" || exit 1
 "$URETH_BIN" node --chain test-nodes/wrong-genesis.json --datadir test-nodes/reth-wrong/dd \
   --authrpc.jwtsecret test-nodes/evm1/jwt.hex --authrpc.addr 127.0.0.1 --authrpc.port $((18651+LANE_PORT_OFFSET)) \
   --http --http.addr 127.0.0.1 --http.port $((18645+LANE_PORT_OFFSET)) --http.api eth,net,web3 \
@@ -613,7 +613,7 @@ g["config"]["chainId"] = 31338
 json.dump(g, open("test-nodes/wrong-chain-genesis.json", "w"))
 PYGEN
 registry_layout_require || exit 1
-lane_preflight_ports "negative reth (wrong-chain-genesis)" $((18751+LANE_PORT_OFFSET)) $((18745+LANE_PORT_OFFSET)) $((30599+LANE_PORT_OFFSET)) || exit 1
+lane_preflight_ports "negative reth (wrong-chain-genesis)" $((18751+LANE_PORT_OFFSET)) $((18745+LANE_PORT_OFFSET)) "$((30599+LANE_PORT_OFFSET))@0.0.0.0" || exit 1
 "$URETH_BIN" node --chain test-nodes/wrong-chain-genesis.json --datadir test-nodes/reth-wrongchain/dd \
   --authrpc.jwtsecret test-nodes/evm1/jwt.hex --authrpc.addr 127.0.0.1 --authrpc.port $((18751+LANE_PORT_OFFSET)) \
   --http --http.addr 127.0.0.1 --http.port $((18745+LANE_PORT_OFFSET)) --http.api eth,net,web3 \
@@ -653,7 +653,7 @@ g["alloc"]["0x00000000000000000000000000000000000000aa"] = {"balance": "0x1"}
 json.dump(g, open("test-nodes/other-genesis.json", "w"))
 PYGEN
 registry_layout_require || exit 1
-lane_preflight_ports "negative reth (other-genesis)" $((18851+LANE_PORT_OFFSET)) $((18845+LANE_PORT_OFFSET)) $((30699+LANE_PORT_OFFSET)) || exit 1
+lane_preflight_ports "negative reth (other-genesis)" $((18851+LANE_PORT_OFFSET)) $((18845+LANE_PORT_OFFSET)) "$((30699+LANE_PORT_OFFSET))@0.0.0.0" || exit 1
 "$URETH_BIN" node --chain test-nodes/other-genesis.json --datadir test-nodes/reth-othergenesis/dd \
   --authrpc.jwtsecret test-nodes/evm1/jwt.hex --authrpc.addr 127.0.0.1 --authrpc.port $((18851+LANE_PORT_OFFSET)) \
   --http --http.addr 127.0.0.1 --http.port $((18845+LANE_PORT_OFFSET)) --http.api eth,net,web3 \
@@ -779,7 +779,7 @@ g["config"]["pragueTime"] = 4102444800  # 2100-01-01; far enough that it cannot 
 json.dump(g, open("test-nodes/laterfork-genesis.json", "w"))
 PYFORK
 registry_layout_require || exit 1
-lane_preflight_ports "negative reth (laterfork-genesis)" $((18951+LANE_PORT_OFFSET)) $((18945+LANE_PORT_OFFSET)) $((30759+LANE_PORT_OFFSET)) || exit 1
+lane_preflight_ports "negative reth (laterfork-genesis)" $((18951+LANE_PORT_OFFSET)) $((18945+LANE_PORT_OFFSET)) "$((30759+LANE_PORT_OFFSET))@0.0.0.0" || exit 1
 "$URETH_BIN" node --chain test-nodes/laterfork-genesis.json --datadir test-nodes/reth-laterfork/dd \
   --authrpc.jwtsecret test-nodes/evm1/jwt.hex --authrpc.addr 127.0.0.1 --authrpc.port $((18951+LANE_PORT_OFFSET)) \
   --http --http.addr 127.0.0.1 --http.port $((18945+LANE_PORT_OFFSET)) --http.api eth,net,web3 \
@@ -1277,6 +1277,7 @@ if [ "${M1_FEE_ACCOUNTING:-0}" = 1 ]; then
     fi
     if [ "$failures" -eq 0 ]; then
       registry_layout_require || exit 1
+      lane_preflight_ports "reth1 fee-floor restart" "$rethEngineBase" "$rethEthBase" "$rethP2PBase@0.0.0.0" || exit 1
       "$URETH_BIN" node --chain "$chainSpec" --datadir test-nodes/reth1/dd \
         --authrpc.jwtsecret test-nodes/evm1/jwt.hex \
         --authrpc.addr 127.0.0.1 --authrpc.port "$rethEngineBase" \

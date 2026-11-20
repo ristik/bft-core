@@ -282,7 +282,7 @@ h3_start_reth() { # spare execution client i, peered with the running ones
   local i=$1 j enode
   openssl rand -hex 32 >"test-nodes/evm$i/jwt.hex"
   mkdir -p "test-nodes/reth$i"
-  for j in $((rethEngineBase + i - 1)) $((rethEthBase + i - 1)) $((rethP2PBase + i - 1)); do lane_port_preflight "$j" "reth$i" || return 1; done
+  lane_preflight_ports "reth$i" $((rethEngineBase + i - 1)) $((rethEthBase + i - 1)) "$((rethP2PBase + i - 1))@0.0.0.0" || return 1
   "$URETH_BIN" node --chain "$chainSpec" --datadir "test-nodes/reth$i/dd" \
     --authrpc.jwtsecret "test-nodes/evm$i/jwt.hex" --authrpc.addr 127.0.0.1 --authrpc.port $((rethEngineBase + i - 1)) \
     --http --http.addr 127.0.0.1 --http.port $((rethEthBase + i - 1)) --http.api eth,net,web3,admin,debug \

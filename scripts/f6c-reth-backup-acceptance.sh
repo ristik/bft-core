@@ -374,7 +374,7 @@ PY
   } >"$scen/identity.txt" || artifact_error "identity.txt"
 
   for i in 1 2; do
-    lane_preflight_ports "reth$i" $((rethEngineBase + i - 1)) $((rethEthBase + i - 1)) $((rethP2PBase + i - 1)) || return 1
+    lane_preflight_ports "reth$i" $((rethEngineBase + i - 1)) $((rethEthBase + i - 1)) "$((rethP2PBase + i - 1))@0.0.0.0" || return 1
     start_any "reth$i" "$scen/reth$i/reth.log" "$URETH_BIN" node --chain "$scen/evm-genesis-funded.json" \
       --datadir "$scen/reth$i/dd" --authrpc.jwtsecret "$scen/v$i/jwt.hex" \
       --authrpc.addr 127.0.0.1 --authrpc.port $((rethEngineBase + i - 1)) \

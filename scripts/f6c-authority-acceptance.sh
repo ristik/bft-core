@@ -625,6 +625,7 @@ setup_cluster() {
   # Control against the root verifier: the same node, started without the authority flags, signs
   # with the key configuration's key. Its own checkpoint file keeps it from touching the checkpoint
   # the authority-backed node uses.
+  lane_port_preflight "$shardP2PPort" "local-key control shard node p2p" || return 1
   start_bg local-control "$controlLog" shard-node run --home "$scen/shard" --executor fake \
     --address "/ip4/127.0.0.1/tcp/$shardP2PPort" --bootnodes "$rootBoot" \
     --trust-base "$scen/trust-base.json" --shard-conf "$scen/shard-conf-${partitionID}_0.json" \
