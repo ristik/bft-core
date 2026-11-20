@@ -47,13 +47,13 @@ MAX_EPOCHS, DELTA_EV, DELTA_HOLD = 2, 16, 17                      # generate.py
 VR = '0xff00000000000000000000000000000000000003'
 
 # The PoS prototype's choices (VT-04; deploy/testnet/pos.py's lane values). The committee ceiling and the identity pool are the contracts'
-# measured deployment limit (script/VRPosGenesis.s.sol): nMax 6, an index of 8 identities of one lot each.
+# measured deployment limit (script/VRPosGenesis.s.sol): nMax 5, an index of 8 identities of one lot each.
 POS_BOND_UNIT = 100 * 10**18
 POS_TREASURY = '0x00000000000000000000000000000000000000ee'
 POS_REWARD_FUNDING = 10_000 * 10**18
 POS_REWARD_RATE = 10**18
 POS_CADENCE = (400, 300)
-POS_LIMITS = '4,4,6'
+POS_LIMITS = '4,4,5'
 
 
 class VRGenesisError(RuntimeError):
@@ -160,7 +160,7 @@ def pos_module_hash(contracts, work):
     """The PosElectionAdapter's runtime code hash at 0xff..07: its immutables (VR, the election and the custody, both CREATE addresses of fixed
     deployers) are constants of the contracts build, so the contracts genesis of the sample plan names the same module as every generation's."""
     sample = json.loads((contracts / 'test/vr/fixtures/vr-genesis-input.json').read_text())
-    sample['limits'].update(nMax=6, vMax=8, lMax=1, rMax=4)
+    sample['limits'].update(nMax=5, vMax=8, lMax=1, rMax=4)
     sample['pos'] = {'bondUnit': str(POS_BOND_UNIT), 'treasury': POS_TREASURY, 'rootNetwork': 3, 'rootGenesis': '0x' + '11' * 32,
                      'assignmentId': '0x' + '22' * 32, 'rewardFunding': str(POS_REWARD_FUNDING), 'rewardRate': str(POS_REWARD_RATE),
                      'cadenceRounds': POS_CADENCE[0], 'cadenceSeconds': POS_CADENCE[1]}

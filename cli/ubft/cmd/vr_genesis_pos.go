@@ -25,7 +25,7 @@ var (
 // The prototype's measured deployment limit (contracts script/VRPosGenesis.s.sol, test/vr/pos/PosLimit.t.sol): a committee of at most 6 from an
 // index of at most 8 identities of one lot each.
 const (
-	vrPosMaxCommittee = 6
+	vrPosMaxCommittee = 5
 	vrPosMaxPool      = 8
 )
 
