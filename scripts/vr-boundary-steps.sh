@@ -108,8 +108,10 @@ vrb_main() {
   fi
   if [ "${VR_JOINER:-0}" = 1 ]; then
     source scripts/vr-joiner-steps.sh
+    if [ "${VR_SEED:-0}" = 1 ]; then source scripts/vr-seed-steps.sh; vrs_export || return 1; vrs_tamper || return 1; vrs_fetch || return 1; fi
     vrj_start_nodes || return 1
     if [ "${VR_JOINER_FOLLOW:-0}" = 1 ]; then vrj_dev_follow || return 1; fi
+    if [ "${VR_SEED:-0}" = 1 ]; then vrs_finish || return 1; return 0; fi
     if [ "${VR_JOINER_ONLY:-0}" = 1 ]; then
       sleep 60
       for i in 5; do curl -sf -X POST -H 'Content-Type: application/json' -d '{}' "http://127.0.0.1:$(m2_rpc_port $i)/api/v1/q3/status" >"$VR_EVIDENCE/joiner-root-status.json"; done
@@ -217,6 +219,7 @@ EOF
   cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'committee()' >"$VR_EVIDENCE/committee-after.hex"
   cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'identity(uint64)' 4 >"$VR_EVIDENCE/identity4-after.hex"
   vrb_log "PASS: the Boundary installed J"
+  if [ "${VR_SEED2:-0}" = 1 ]; then source scripts/vr-seed-steps.sh; vrs_second || return 1; fi   # VT-11: a seed after the Boundary (trust-base tip epoch 2)
   if [ "${VR_JOINER:-0}" = 1 ]; then vrj_validates || return 1; fi
   if [ "${VR_POS:-0}" = 1 ]; then
     vrp_rotated || return 1
@@ -237,8 +240,10 @@ EOF
 }
 
 if vrb_main; then
+  declare -F vrs_cleanup >/dev/null && vrs_cleanup
   vrb_log "VR BOUNDARY DONE"
 else
+  declare -F vrs_cleanup >/dev/null && vrs_cleanup   # VT-11: the seed servers (the harness trap stops the devnet itself)
   failures=$((failures + 1))
   for i in $(seq 1 "${validators:-4}"); do tail -n 3000 "test-nodes/root$i/debug.log" >"$VR_EVIDENCE/root$i-tail.log" 2>/dev/null; done
   for i in $(seq 1 "${validators:-4}"); do tail -n 1000 "test-nodes/evm$i/debug.log" >"$VR_EVIDENCE/evm$i-tail.log" 2>/dev/null; done

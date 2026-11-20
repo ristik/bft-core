@@ -25,10 +25,15 @@ utb_prepare_genesis() {
 
 # The flags a root or a shard node of the lane starts with. The pin is read from the file the generation wrote, never from a value copied into a script.
 utb_pin() { tr -d '[:space:]' <test-nodes/utb-genesis.id; }
+# the lane's port offset, one definition for every seed port (#1218: LANE_PORT_OFFSET, else LANE_SLOT * 1000)
+seed_port_offset() { echo "${LANE_PORT_OFFSET:-$(( ${LANE_SLOT:-0} * 1000 ))}"; }
 utb_root_flags() { # node (unused: every root has the same profile)
   [ -s test-nodes/utb-genesis.cbor ] && [ -s test-nodes/utb-genesis.id ] || { echo "utb_root_flags: no UTB genesis (utb_prepare_genesis first)" >&2; return 1; }
   mkdir -p "test-nodes/utb-ucresp/root${1:-0}"
-  echo "--utb-genesis test-nodes/utb-genesis.cbor --utb-genesis-id $(utb_pin) --utb-capture-ucresp test-nodes/utb-ucresp/root${1:-0}"
+  local bundle=
+  # VT-11: a seed run gives each root its isolated read-only bundle listener (38600 + the lane's port offset + node - 1), never the operator RPC
+  if [ "${VR_SEED:-0}" = 1 ] || [ "${VR_SEED2:-0}" = 1 ]; then bundle=" --utb-bundle-address 127.0.0.1:$((38600 + $(seed_port_offset) + ${1:-1} - 1))"; fi
+  echo "--utb-genesis test-nodes/utb-genesis.cbor --utb-genesis-id $(utb_pin) --utb-capture-ucresp test-nodes/utb-ucresp/root${1:-0}$bundle"
 }
 # a shard node takes the profile flags only (it sends no certification response, so it captures nothing)
 utb_shard_flags() { echo "--utb-genesis test-nodes/utb-genesis.cbor --utb-genesis-id $(utb_pin)"; }
