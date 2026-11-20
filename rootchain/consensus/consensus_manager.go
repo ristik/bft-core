@@ -2779,7 +2779,9 @@ func (x *ConsensusManager) fetchWitnesses(ctx context.Context, store witnessHold
 		if err := x.checkControlEnvelope(c, block); err != nil {
 			return err
 		}
-		if store.HasWitness(c.WitnessHash) {
+		// a root-only VR control (HandoffView, RuleSupport) carries no witness: its zero hash must not be asked of the peers, or every
+		// block ordering a handoff view beyond view 0 would be refused as "witness unavailable" by every voter, the author included
+		if !c.CarriesWitness() || store.HasWitness(c.WitnessHash) {
 			continue
 		}
 		if peers == nil {
