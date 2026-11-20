@@ -41,7 +41,7 @@ var q4LookupSites = []q4Site{
 	{Func: "handlePacemakerEvent", Arg: "currentRound", Source: "local"},          // leaderAfter: the successor is overflow-checked
 	{Func: "handlePacemakerEvent", Arg: "2", Source: "local"},
 	{Func: "onIRChangeMsg", Arg: "x.pacemaker.GetCurrentRound()", Source: "local"},
-	{Func: "onTimeoutMsg", Arg: "x.pacemaker.GetCurrentRound()", Source: "local"},
+	{Func: "proposeIfLeader", Arg: "x.pacemaker.GetCurrentRound()", Source: "local"},
 	{Func: "castVote", Arg: "x.pacemaker.GetCurrentRound()", Source: "local"},              // the vote of onProposalMsg, or a deferred one (residence rule)
 	{Func: "leaderAfter", Arg: "round + 1", Source: "local"},                               // reached only after the math.MaxUint64 refusal
 	{Func: "timeoutUnknownLeader", Arg: "round", Source: "local"},                          // round := x.pacemaker.GetCurrentRound() on the line above
