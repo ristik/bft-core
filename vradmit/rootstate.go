@@ -36,28 +36,128 @@ type RootState struct {
 	// StagedSupport are the staged primary's own readiness commitments (by J's exact bindings), which enter the support table at its
 	// primary Boundary (MaterializeJ); a recovered Boundary drops them.
 	StagedSupport SupportTable
+	// StagedKSupport is K's own support that the staged primary's Freeze verified (its fresh commitments and K readiness, by K's exact
+	// bindings): a recovered Boundary keeps K installed and promotes it into the table (design section 7.3); a primary one drops it.
+	StagedKSupport SupportTable
 	// AttemptOpenRound and AttemptOpenUCTime are the round and committed UC time of the block whose end opened the stored attempt identity
 	// (the Open step, design section 5.5.2): the intent's attemptOpenRound, of which its anchor is max(source.certRootRound,
 	// attemptOpenRound), and openTime(0) when the anchor is that block (VT-05b). Zero for the genesis attempt, which no block opened.
 	AttemptOpenRound  uint64
 	AttemptOpenUCTime uint64
+	// Schedule is the root's committed activation schedule (design section 7.1, VT-07a): every Accepted ScheduleActivation of a handoff
+	// that committed, in change order, with the latch of the root history applied (an entry whose E <= an installed epoch is Latched at
+	// that commit, permanently). It is the fold's, the cutoff's and the support gates' schedule, and what the fences and the warnings
+	// read; VR's own activations[] follows at the Boundary and is what ureth reads. Bounded by MAX_ACTIVATIONS.
+	Schedule []vrschema.Activation
+	// StagedSchedule are the entries the staged primary's Accepted schedule changes append when its H commits (cleared with the staging:
+	// an Abort before H drops them).
+	StagedSchedule []vrschema.Activation
+}
+
+type activationWire struct {
+	_               struct{} `cbor:",toarray"`
+	RuleID          hex.Bytes
+	ReleaseDigest   hex.Bytes
+	RootEpoch       uint64
+	NotBeforeUcTime uint64
+	State           uint64
+	ChangeID        uint64
+}
+
+func encodeActivations(as []vrschema.Activation) []activationWire {
+	out := make([]activationWire, len(as))
+	for i, a := range as {
+		out[i] = activationWire{RuleID: a.RuleID[:], ReleaseDigest: a.ReleaseDigest[:], RootEpoch: a.RootEpoch, NotBeforeUcTime: a.NotBeforeUcTime,
+			State: uint64(a.State), ChangeID: a.ChangeID}
+	}
+	return out
+}
+
+func decodeActivations(ws []activationWire) ([]vrschema.Activation, error) {
+	if len(ws) > vrschema.MaxActivations {
+		return nil, fmt.Errorf("%w: %d activations", ErrRootState, len(ws))
+	}
+	var out []vrschema.Activation
+	for _, w := range ws {
+		if len(w.RuleID) != 32 || len(w.ReleaseDigest) != 32 || w.State < uint64(vrschema.ActActive) || w.State > uint64(vrschema.ActLatched) {
+			return nil, fmt.Errorf("%w: activation entry", ErrRootState)
+		}
+		out = append(out, vrschema.Activation{RuleID: vrschema.Word(w.RuleID), ReleaseDigest: vrschema.Word(w.ReleaseDigest), RootEpoch: w.RootEpoch,
+			NotBeforeUcTime: w.NotBeforeUcTime, State: uint8(w.State), ChangeID: w.ChangeID})
+	}
+	return out, nil
+}
+
+// StageSchedule records, at a Freeze, the entries its Accepted kind 9 changes append (verdicts index by index, the fold's): they enter
+// Schedule when H commits. A list of another length is refused.
+func (s RootState) StageSchedule(rc []vrschema.RegistryChange, verdicts []uint8) (RootState, error) {
+	if len(verdicts) != len(rc) {
+		return s, fmt.Errorf("%w: %d verdicts for %d changes", ErrRootState, len(verdicts), len(rc))
+	}
+	s.StagedSchedule = nil
+	for i, c := range rc {
+		if uint8(c.Kind) != vrschema.KindScheduleActivation || verdicts[i] != vrschema.VerdictAccepted {
+			continue
+		}
+		sc, err := vrschema.DecodeSchedule(c.Payload)
+		if err != nil {
+			return s, errors.Join(ErrRootState, err)
+		}
+		s.StagedSchedule = append(s.StagedSchedule, vrschema.Activation{RuleID: sc.RuleID, ReleaseDigest: sc.ReleaseDigest, RootEpoch: sc.RootEpoch,
+			NotBeforeUcTime: sc.NotBeforeUcTime, State: vrschema.ActActive, ChangeID: c.ID})
+	}
+	return s, nil
+}
+
+// CommitSchedule is H's commit into root epoch installed: the staged entries append (a change id already present is skipped, so the
+// recovery's second commit of the same result changes nothing), each superseding its rule's earlier effective entry, and every
+// effective entry with E <= installed latches permanently. It is the whole root-history schedule transition (design section 7.1).
+func (s RootState) CommitSchedule(installed uint64) (RootState, error) {
+	sched := append([]vrschema.Activation(nil), s.Schedule...)
+	for _, a := range s.StagedSchedule {
+		seen := false
+		for _, e := range sched {
+			if e.ChangeID == a.ChangeID {
+				seen = true
+				break
+			}
+		}
+		if seen {
+			continue
+		}
+		next, err := vrschema.AppendSchedule(sched, vrschema.Schedule{RuleID: a.RuleID, ReleaseDigest: a.ReleaseDigest, RootEpoch: a.RootEpoch,
+			NotBeforeUcTime: a.NotBeforeUcTime}, a.ChangeID)
+		if errors.Is(err, vrschema.ErrOversize) {
+			// VR's queue-time check counts recorded plus pending schedules against MAX_ACTIVATIONS (64), so this cannot happen against a
+			// correct VR; if it ever does, every root ignores the entry identically rather than halting
+			continue
+		} else if err != nil {
+			return s, errors.Join(ErrRootState, err)
+		}
+		sched = next
+	}
+	s.Schedule = vrschema.Latch(sched, installed)
+	return s, nil
 }
 
 type rootStateWire struct {
-	_             struct{} `cbor:",toarray"`
-	Domain        string
-	Version       uint64
-	Backoff       hex.Bytes
-	OpenUCTime    uint64
-	Support       hex.Bytes
-	Acknowledged  hex.Bytes
-	PrepareUCTime uint64
-	StagedBody    hex.Bytes
-	StagedResult  hex.Bytes
-	StagedBitmap  uint64
-	StagedSupport hex.Bytes
-	AttemptOpen   uint64
-	AttemptOpenUC uint64
+	_              struct{} `cbor:",toarray"`
+	Domain         string
+	Version        uint64
+	Backoff        hex.Bytes
+	OpenUCTime     uint64
+	Support        hex.Bytes
+	Acknowledged   hex.Bytes
+	PrepareUCTime  uint64
+	StagedBody     hex.Bytes
+	StagedResult   hex.Bytes
+	StagedBitmap   uint64
+	StagedSupport  hex.Bytes
+	StagedKSupport hex.Bytes
+	AttemptOpen    uint64
+	AttemptOpenUC  uint64
+	Schedule       []activationWire
+	StagedSched    []activationWire
 }
 
 const rootStateDomain = "UNICITY_VR_ROOT_STATE"
@@ -80,16 +180,21 @@ func (s RootState) Encode() ([]byte, error) {
 	if (s.Backoff.LastView == 0) && s.OpenUCTime != 0 {
 		return nil, fmt.Errorf("%w: an open time without a committed view", ErrRootState)
 	}
-	if (s.StagedBody == [32]byte{}) != (s.StagedResult == vrschema.Word{}) || (s.StagedBody == [32]byte{} && (s.StagedBitmap != 0 || len(s.StagedSupport.Entries) != 0)) {
+	if (s.StagedBody == [32]byte{}) != (s.StagedResult == vrschema.Word{}) || (s.StagedBody == [32]byte{} && (s.StagedBitmap != 0 || len(s.StagedSupport.Entries) != 0 || len(s.StagedKSupport.Entries) != 0 || len(s.StagedSchedule) != 0)) {
 		return nil, fmt.Errorf("%w: a staged boundary without its body or result", ErrRootState)
 	}
 	st, err := s.StagedSupport.Encode()
 	if err != nil {
 		return nil, err
 	}
-	return types.Cbor.Marshal(rootStateWire{Domain: rootStateDomain, Version: 1, Backoff: b, OpenUCTime: s.OpenUCTime, Support: t, StagedSupport: st,
+	sk, err := s.StagedKSupport.Encode()
+	if err != nil {
+		return nil, err
+	}
+	return types.Cbor.Marshal(rootStateWire{Domain: rootStateDomain, Version: 2, Backoff: b, OpenUCTime: s.OpenUCTime, Support: t, StagedSupport: st, StagedKSupport: sk,
 		Acknowledged: s.Acknowledged[:], PrepareUCTime: s.PrepareUCTime, StagedBody: s.StagedBody[:], StagedResult: s.StagedResult[:],
-		StagedBitmap: uint64(s.StagedBitmap), AttemptOpen: s.AttemptOpenRound, AttemptOpenUC: s.AttemptOpenUCTime})
+		StagedBitmap: uint64(s.StagedBitmap), AttemptOpen: s.AttemptOpenRound, AttemptOpenUC: s.AttemptOpenUCTime,
+		Schedule: encodeActivations(s.Schedule), StagedSched: encodeActivations(s.StagedSchedule)})
 }
 
 // Digest is SHA-256 of Encode.
@@ -104,10 +209,21 @@ func (s RootState) Digest() ([32]byte, error) {
 // ErrRootState reports a VR root state encoding that is malformed or not canonical.
 var ErrRootState = errors.New("vradmit: VR root state")
 
+// ErrRootStateV1 is the refusal of a version 1 VR root state (a checkpoint written before the activation schedule joined the committed
+// control state, VT-07a). The change is not backward compatible: the control digest and every replay hash differ, so a v1 chain cannot be
+// continued by this release. A new generation is required.
+var ErrRootStateV1 = fmt.Errorf("%w: a version 1 VR root state: this release adds the committed activation schedule to the control state, which changes its encoding and digest; a new generation is required (a v1 checkpoint cannot be continued)", ErrRootState)
+
 // DecodeRootState accepts exactly the canonical encoding.
 func DecodeRootState(raw []byte) (RootState, error) {
+	var head []any
+	if err := types.Cbor.Unmarshal(raw, &head); err == nil && len(head) >= 2 && head[0] == rootStateDomain {
+		if v, ok := head[1].(uint64); ok && v == 1 {
+			return RootState{}, ErrRootStateV1
+		}
+	}
 	var w rootStateWire
-	if err := types.Cbor.Unmarshal(raw, &w); err != nil || w.Domain != rootStateDomain || w.Version != 1 {
+	if err := types.Cbor.Unmarshal(raw, &w); err != nil || w.Domain != rootStateDomain || w.Version != 2 {
 		return RootState{}, fmt.Errorf("%w: encoding", ErrRootState)
 	}
 	var bw struct {
@@ -127,11 +243,23 @@ func DecodeRootState(raw []byte) (RootState, error) {
 	if err != nil {
 		return RootState{}, errors.Join(ErrRootState, err)
 	}
+	stagedK, err := DecodeSupportTable(w.StagedKSupport)
+	if err != nil {
+		return RootState{}, errors.Join(ErrRootState, err)
+	}
 	if len(w.Acknowledged) != 32 || len(w.StagedBody) != 32 || len(w.StagedResult) != 32 || w.StagedBitmap > 0xFFFF {
 		return RootState{}, fmt.Errorf("%w: field widths", ErrRootState)
 	}
-	s := RootState{Backoff: bw.State, OpenUCTime: w.OpenUCTime, Support: t, Acknowledged: vrschema.Word(w.Acknowledged), PrepareUCTime: w.PrepareUCTime,
-		StagedBody: [32]byte(w.StagedBody), StagedResult: vrschema.Word(w.StagedResult), StagedBitmap: uint16(w.StagedBitmap), StagedSupport: staged,
+	sched, err := decodeActivations(w.Schedule)
+	if err != nil {
+		return RootState{}, err
+	}
+	stagedSched, err := decodeActivations(w.StagedSched)
+	if err != nil {
+		return RootState{}, err
+	}
+	s := RootState{Schedule: sched, StagedSchedule: stagedSched, Backoff: bw.State, OpenUCTime: w.OpenUCTime, Support: t, Acknowledged: vrschema.Word(w.Acknowledged), PrepareUCTime: w.PrepareUCTime,
+		StagedBody: [32]byte(w.StagedBody), StagedResult: vrschema.Word(w.StagedResult), StagedBitmap: uint16(w.StagedBitmap), StagedSupport: staged, StagedKSupport: stagedK,
 		AttemptOpenRound: w.AttemptOpen, AttemptOpenUCTime: w.AttemptOpenUC}
 	again, err := s.Encode()
 	if err != nil || !bytes.Equal(again, raw) {

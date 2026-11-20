@@ -469,7 +469,7 @@ writes the proposal file. The preview shows the decoded call; signers sign what 
 	cmd.AddCommand(govBurnNonceCmd(), govModuleActionCmd("admit", "Admit an applied validator (PoA ModuleAction Admit)", vrclient.ActionAdmit),
 		govModuleActionCmd("confirm-exit", "Confirm a validator's requested exit (PoA ModuleAction ConfirmExit)", vrclient.ActionConfirmExit),
 		govModuleActionCmd("remove", "Remove a validator in any state but None and Exited (PoA ModuleAction Remove)", vrclient.ActionRemove),
-		govForceRemoveCmd(), govCommitteeLimitsCmd(), govFeeParamsCmd(), govCancelCmd(), govRawCmd())
+		govForceRemoveCmd(), govCommitteeLimitsCmd(), govFeeParamsCmd(), govScheduleActivationCmd(), govCancelCmd(), govRawCmd())
 	return cmd
 }
 
@@ -630,6 +630,89 @@ func govFeeParamsCmd() *cobra.Command {
 	_ = cmd.MarkFlagRequired("base-fee-floor")
 	_ = cmd.MarkFlagRequired("change-denominator")
 	_ = cmd.MarkFlagRequired("fee-collector")
+	return cmd
+}
+
+// govScheduleActivationCmd builds kind 9, ScheduleActivation(ruleId, releaseDigest, rootEpoch, notBeforeUcTime, label): a rule of a release
+// switches on at a root epoch (design section 7). The rule is named (ruleId = keccak256("unicity.rule/" + name)) or given as a 32-byte id.
+// A new schedule of a rule that is already scheduled is its postponement (a later epoch, before the cutoff E-2 of the current one).
+func govScheduleActivationCmd() *cobra.Command {
+	f := &proposeFlags{}
+	var rule, ruleIDHex, release, label string
+	var epoch, notBefore uint64
+	var notBeforeIn time.Duration
+	cmd := &cobra.Command{Use: "schedule-activation", Short: "Schedule (or postpone) a protocol rule's activation at a root epoch, with the release digest that supports it",
+		Long: `Builds ScheduleActivation (kind 9). The roots, ureth and nodes enumerate the committed schedule: a binary that lacks the rule refuses to
+run an epoch >= --root-epoch, and warns from the moment the change is queued (ubft validator upgrade). The schedule is accepted only in a
+handoff whose successor epoch is <= E - 2 (a postponement against the current E likewise, and only to a later epoch); afterwards the rule is
+latched. VR requires --root-epoch >= known root epoch + 3 and --not-before-uc-time >= UC time + 3600: --not-before-in sets the latter relative
+to the current UC time (default 2h). The release digest is advisory: it names the release the operators need; rule support decides.`,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			var rid [32]byte
+			switch {
+			case (rule == "") == (ruleIDHex == ""):
+				return fmt.Errorf("%w: exactly one of --rule (a name) and --rule-id (32 bytes, 0x-hex) is required", ErrGovernance)
+			case rule != "":
+				rid = vrschema.RuleID(rule)
+			default:
+				b, err := hexutil.Decode(ruleIDHex)
+				if err != nil || len(b) != 32 {
+					return fmt.Errorf("%w: --rule-id must be 32 bytes of 0x-hex", ErrGovernance)
+				}
+				copy(rid[:], b)
+			}
+			var rel [32]byte
+			b, err := hexutil.Decode(release)
+			if err != nil || len(b) != 32 {
+				return fmt.Errorf("%w: --release-digest must be 32 bytes of 0x-hex (the release's digest)", ErrGovernance)
+			}
+			copy(rel[:], b)
+			gc, err := f.dial(cmd.Context())
+			if err != nil {
+				return err
+			}
+			defer gc.close()
+			clk, err := gc.vr.Clock(cmd.Context())
+			if err != nil {
+				return err
+			}
+			if cmd.Flags().Changed("not-before-uc-time") == cmd.Flags().Changed("not-before-in") && cmd.Flags().Changed("not-before-uc-time") {
+				return fmt.Errorf("%w: give --not-before-uc-time or --not-before-in, not both", ErrGovernance)
+			}
+			if !cmd.Flags().Changed("not-before-uc-time") {
+				notBefore = clk.UcTime + uint64(notBeforeIn/time.Second)
+			}
+			acts, err := gc.vr.Activations(cmd.Context())
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.ErrOrStderr(), "known root epoch %d, UC time %d; rule %x\n", gc.cfg.KnownRootEpoch, clk.UcTime, rid[:])
+			for _, a := range acts {
+				if a.RuleId == rid && a.State != 2 {
+					fmt.Fprintf(cmd.ErrOrStderr(), "the rule is already scheduled for epoch %d (%s): this is its postponement; it must be later and before that epoch's cutoff (E-2)\n",
+						a.RootEpoch, vrclient.ActivationState(a.State))
+				}
+			}
+			payload, err := vrclient.ScheduleActivationPayload(rid, rel, epoch, notBefore, label)
+			if err != nil {
+				return err
+			}
+			data, err := vrclient.QueueCalldata(vrclient.KindScheduleActivation, payload)
+			if err != nil {
+				return err
+			}
+			return propose(cmd, f, gc, gc.vr.Registry, data)
+		}}
+	f.add(cmd)
+	cmd.Flags().StringVar(&rule, "rule", "", "the rule's name (ruleId = keccak256(\"unicity.rule/\" + name))")
+	cmd.Flags().StringVar(&ruleIDHex, "rule-id", "", "the rule id, 32 bytes 0x-hex (instead of --rule)")
+	cmd.Flags().StringVar(&release, "release-digest", "", "the digest of the release that supports the rule, 32 bytes 0x-hex")
+	cmd.Flags().Uint64Var(&epoch, "root-epoch", 0, "the root epoch E from which the rule applies")
+	cmd.Flags().Uint64Var(&notBefore, "not-before-uc-time", 0, "the earliest UC time at which the handoff that nears E may be prepared")
+	cmd.Flags().DurationVar(&notBeforeIn, "not-before-in", 2*time.Hour, "the same, relative to the current UC time (at least 1h)")
+	cmd.Flags().StringVar(&label, "label", "", "a human label for the schedule")
+	_ = cmd.MarkFlagRequired("release-digest")
+	_ = cmd.MarkFlagRequired("root-epoch")
 	return cmd
 }
 

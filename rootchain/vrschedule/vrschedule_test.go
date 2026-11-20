@@ -38,12 +38,21 @@ func (f *fakeReader) OpenOutput(_ context.Context, _, root [32]byte) (*vrhandoff
 	return f.at[root], nil
 }
 
+// HeaderNumber: the fixtures certify block hash {b} at EVM height b (cert), so the true number is the hash's first byte.
+func (f *fakeReader) HeaderNumber(_ context.Context, h [32]byte) (uint64, error) {
+	return uint64(h[0]), nil
+}
+
+func (f *flakyReader) HeaderNumber(_ context.Context, h [32]byte) (uint64, error) {
+	return uint64(h[0]), nil
+}
+
 func published(r vrschema.Word) *vrhandoff.Output {
 	return &vrhandoff.Output{State: vradmit.OutputState{ResultID: r, OpenOutput: r, Output: vrschema.OutputRecord{State: vrschema.OutPublished, OutputCommit: vrschema.Word{0xc0}}}}
 }
 
 func cert(round uint64, block, root byte) CertifiedEVM {
-	return CertifiedEVM{RootRound: round, ParentRound: round - 1, RootUCTime: 1000 + round, BlockHash: [32]byte{block}, StateRoot: [32]byte{root}, BlockNumber: uint64(block)}
+	return CertifiedEVM{RootRound: round, ParentRound: round - 1, RootUCTime: 1000 + round, BlockHash: [32]byte{block}, StateRoot: [32]byte{root}, ShardRound: uint64(block)}
 }
 
 // Stage 0: the first certified block at which R is the open Published output, recorded only after the block before it was observed
@@ -226,8 +235,8 @@ func TestSourcesRefuseRoundZero(t *testing.T) {
 	_, err = s.Record(SourceEntry{Source: vrhandoff.Source{ResultID: make([]byte, 32), EVMBlockHash: make([]byte, 32), OutputCommit: make([]byte, 32)}})
 	require.Error(t, err)
 	path := filepath.Join(t.TempDir(), "bad.json")
-	require.NoError(t, os.WriteFile(path, []byte(`[{"resultId":"0x`+strings.Repeat("11", 32)+`","evmBlockHash":"0x`+strings.Repeat("22", 32)+
-		`","evmBlockNumber":1,"certRootRound":0,"outputCommit":"0x`+strings.Repeat("33", 32)+`","certUcTime":5}]`), 0o600))
+	require.NoError(t, os.WriteFile(path, []byte(`{"version":3,"sources":[{"resultId":"0x`+strings.Repeat("11", 32)+`","evmBlockHash":"0x`+strings.Repeat("22", 32)+
+		`","evmBlockNumber":1,"certRootRound":0,"outputCommit":"0x`+strings.Repeat("33", 32)+`","certUcTime":5}]}`), 0o600))
 	_, err = NewSources(path)
 	require.Error(t, err)
 }
@@ -274,8 +283,9 @@ func TestAFailedSourceWriteIsRetriedAndSurvivesARestart(t *testing.T) {
 	require.NoError(t, os.Mkdir(full.path, 0o700))
 	next := SourceEntry{Source: vrhandoff.Source{ResultID: append([]byte{0xee}, make([]byte, 31)...), EVMBlockHash: make([]byte, 32), CertRootRound: 99,
 		OutputCommit: make([]byte, 32)}}
-	_, err = full.Record(next)
+	failed, err := full.Record(next)
 	require.Error(t, err)
+	require.False(t, failed, "a failed durable insertion reports that nothing was added")
 	_, ok = full.Get(oldest)
 	require.True(t, ok, "a failed write evicts nothing")
 	_, ok = full.Get(vrschema.Word{0xee})

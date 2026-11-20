@@ -139,6 +139,10 @@ func (x *ConsensusManager) InstallVerifiedEpoch(entry q3format.Entry, proof hand
 		return nil, err
 	}
 	v, g, cfg, oldID, oldSigning := c.v, c.g, c.cfg, c.oldID, c.oldSigning
+	// the activation schedule's fence over the verified checkpoint, before the first durable write (safety read, trust entry, anchor)
+	if err := x.FenceEpoch(g.Epoch, head); err != nil {
+		return nil, err
+	}
 	projected := entry.Projection()
 	projected.PreviousEntryHash = oldID
 	signing := votesig.Config{Scheme: cfg.SigningScheme, Network: cfg.Network, Genesis: cfg.Genesis, UTB: cfg.UTB()}

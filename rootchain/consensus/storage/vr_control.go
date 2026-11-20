@@ -159,10 +159,7 @@ func (p *posStep) ruleSupport(c rctypes.PosControl, block *rctypes.BlockData, sv
 	if err != nil {
 		return errors.Join(ErrVRUnavailable, err)
 	}
-	schedule, err := svc.Registry.schedule(block.Epoch)
-	if err != nil {
-		return err
-	}
+	schedule := env.vr.step.state.Schedule
 	cs := make([]vrschema.SupportCommitment, len(c.Support))
 	for i, x := range c.Support {
 		cs[i] = vrschema.SupportCommitment{Network: x.Network, StakingID: x.StakingID, Generation: x.Generation, RootKeyHash: x.RootKeyHash,

@@ -28,14 +28,15 @@ import (
 // the parent) so that the state messages it produces have the relationships between the block, the QCs, the shard
 // states and the committed root which a recovering node has to check.
 type testChain struct {
-	t       testing.TB
-	orch    *partitions.Orchestration
-	store   *BlockStore
-	nodes   map[types.PartitionID]*chainNode
-	highQc  *rctypes.QuorumCert
-	round   uint64
-	log     *slog.Logger
-	counter uint64
+	t            testing.TB
+	orch         *partitions.Orchestration
+	store        *BlockStore
+	nodes        map[types.PartitionID]*chainNode
+	highQc       *rctypes.QuorumCert
+	round        uint64
+	log          *slog.Logger
+	counter      uint64
+	certifiedEVM bool
 }
 
 // chainNode is the single validator of a test shard.
@@ -168,6 +169,10 @@ func (c *testChain) propose(changed, timedOut []types.PartitionID) *rctypes.Quor
 			Version: 1, RoundNumber: si.LastCR.Technical.Round, Epoch: si.LastCR.Technical.Epoch, PreviousHash: si.RootHash,
 			Hash: []byte{byte(c.counter), byte(p), 1}, BlockHash: []byte{byte(c.counter), 2}, SummaryValue: []byte{},
 			Timestamp: si.LastCR.UC.UnicitySeal.Timestamp, SumOfEarnedFees: 3,
+		}
+		if c.certifiedEVM {
+			ir.Hash = append(ir.Hash, make([]byte, 32-len(ir.Hash))...)
+			ir.BlockHash = append(ir.BlockHash, make([]byte, 32-len(ir.BlockHash))...)
 		}
 		bcr := &certification.BlockCertificationRequest{PartitionID: p, ShardID: types.ShardID{}, NodeID: c.nodes[p].info.NodeID, InputRecord: ir, BlockSize: 5, StateSize: 7}
 		require.NoError(c.t, bcr.Sign(c.nodes[p].signer))

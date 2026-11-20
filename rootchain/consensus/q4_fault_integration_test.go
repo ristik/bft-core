@@ -177,8 +177,8 @@ func (s *q4HistoryStore) WriteBlock(b *storage.ExecutedBlock, root bool) error {
 }
 
 // CommitBlock is the atomic commit of a block with its records and cut; the observation is the same as for the plain root write.
-func (s *q4HistoryStore) CommitBlock(b *storage.ExecutedBlock, recs []rootrecords.Record, cut *storage.CutEntry) error {
-	return s.observed(b, true, func() error { return s.BoltDB.CommitBlock(b, recs, cut) })
+func (s *q4HistoryStore) CommitBlock(b *storage.ExecutedBlock, recs []rootrecords.Record, cut *storage.CutEntry, obs []storage.ObservationInput) error {
+	return s.observed(b, true, func() error { return s.BoltDB.CommitBlock(b, recs, cut, obs) })
 }
 
 func (s *q4HistoryStore) observed(b *storage.ExecutedBlock, root bool, write func() error) error {

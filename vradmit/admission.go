@@ -168,6 +168,9 @@ type Verified struct {
 	V5        evmassign.Candidate
 	Successor []byte
 	Verdicts  []uint8
+	// KSupport is K's own rule support this Freeze's evidence verified (by K's exact bindings), retained with the primary and promoted on
+	// a recovery acknowledgement (design section 7.3).
+	KSupport SupportTable
 }
 
 // V5Of is the candidate v6 as the v5 candidate the H3 checks and the install path read: the same fields, Version 5, no Changes and no
@@ -314,9 +317,13 @@ func VerifyRegistryOutput(a Admission) (Verified, error) {
 	if err := VerifyRuleSupport(sup); err != nil {
 		return out, errors.Join(ErrActivation, err)
 	}
+	kSupport, err := KEvidenceSupport(sup)
+	if err != nil {
+		return out, errors.Join(ErrActivation, err)
+	}
 	// (8)
 	if s.Status.Health == vrschema.HealthInconsistent {
 		return out, ErrInconsistent
 	}
-	return Verified{V5: v5, Successor: c.Assignment, Verdicts: verdicts}, nil
+	return Verified{V5: v5, Successor: c.Assignment, Verdicts: verdicts, KSupport: kSupport}, nil
 }

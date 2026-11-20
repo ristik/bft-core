@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/unicitynetwork/bft-core/evmroot"
 	rcnet "github.com/unicitynetwork/bft-core/network/protocol/abdrc"
@@ -33,8 +34,9 @@ type (
 		roundToNode map[uint64]*node
 		highQc      *abdrc.QuorumCert
 		blocksDB    PersistentStore
-		cuts        cutRing      // control cuts of recent commits, for the shards' authenticated record feed
-		log         *slog.Logger // optional: set by the BlockStore that owns the tree
+		cuts        cutRing                                     // control cuts of recent commits, for the shards' authenticated record feed
+		log         *slog.Logger                                // optional: set by the BlockStore that owns the tree
+		observed    *atomic.Pointer[basetypes.PartitionShardID] // the BlockStore's observed EVM shard: its certified blocks are queued at every commit (nil: none)
 		m           sync.RWMutex
 	}
 )
@@ -73,7 +75,19 @@ NewBlockTreeWithRootBlock creates BlockTree with given block as root node.
 Intended use-case is for recovery - acquire latest committed block and build on that state.
 */
 func NewBlockTreeWithRootBlock(block *ExecutedBlock, bDB PersistentStore) (*BlockTree, error) {
-	if err := bDB.WriteBlock(block, true); err != nil {
+	return newBlockTreeWithRootBlock(block, bDB, nil)
+}
+
+func newBlockTreeWithRootBlock(block *ExecutedBlock, bDB PersistentStore, obs []ObservationInput) (*BlockTree, error) {
+	var err error
+	if len(obs) == 0 {
+		err = bDB.WriteBlock(block, true)
+	} else if committer, ok := bDB.(BlockCommitter); ok {
+		err = committer.CommitBlock(block, nil, nil, obs)
+	} else {
+		return nil, refusedBeforeWrite{ErrNoAtomicObservationCommit}
+	}
+	if err != nil {
 		return nil, fmt.Errorf("block write failed: %w", err)
 	}
 	rootNode := newNode(block)
@@ -471,7 +485,11 @@ func (bt *BlockTree) Commit(commitQc *abdrc.QuorumCert, logs ...*slog.Logger) ([
 	// before the block becomes the root and before any certificate it generated is visible: a crash leaves the prior state or the
 	// complete new one, and a repeat is idempotent. A block whose cut cannot be retained is not committed (persistence uncertain), so a
 	// certificate is never visible without the cut a shard needs to replay its origin.
-	if err := bt.persistCommit(commitNode.data, committedRecords(path)); err != nil {
+	var observed *basetypes.PartitionShardID
+	if bt.observed != nil {
+		observed = bt.observed.Load()
+	}
+	if err := bt.persistCommit(commitNode.data, committedRecords(path), observationsOf(path, observed)); err != nil {
 		return nil, persistenceUncertain(err)
 	}
 
@@ -482,7 +500,7 @@ func (bt *BlockTree) Commit(commitQc *abdrc.QuorumCert, logs ...*slog.Logger) ([
 
 // persistCommit stores the committed block with its records and cut. A store that can commit atomically does; one that cannot gets the
 // same three writes in the order that a crash repeats idempotently (records, cut, then the block that makes the commit visible).
-func (bt *BlockTree) persistCommit(block *ExecutedBlock, recs []rootrecords.Record) error {
+func (bt *BlockTree) persistCommit(block *ExecutedBlock, recs []rootrecords.Record, obs []ObservationInput) error {
 	cut, err := cutEntryOf(block)
 	if err != nil {
 		return err
@@ -498,10 +516,13 @@ func (bt *BlockTree) persistCommit(block *ExecutedBlock, recs []rootrecords.Reco
 		}
 	}
 	if committer, ok := bt.blocksDB.(BlockCommitter); ok {
-		if err := committer.CommitBlock(block, recs, cut); err != nil {
+		if err := committer.CommitBlock(block, recs, cut, obs); err != nil {
 			return err
 		}
 	} else {
+		if len(obs) > 0 {
+			return ErrNoAtomicObservationCommit
+		}
 		if len(recs) > 0 {
 			if err := bt.blocksDB.(RecordStore).AppendRecords(recs); err != nil {
 				return err
