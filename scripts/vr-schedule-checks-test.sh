@@ -61,6 +61,30 @@ proof_flags_are() {
 ok env -u VR_ARCHIVE_STATE_PROOFS VR_LANE=1 bash -c 'source scripts/lib/reth-pin.sh; [ "$(urethPinStateProofFlags)" = --unicity.archive-state-proofs ]'
 ok env VR_LANE=1 VR_ARCHIVE_STATE_PROOFS=0 bash -c 'source scripts/lib/reth-pin.sh; [ "$(urethPinStateProofFlags)" = --unicity.archive-state-proofs ]'
 cases=$((cases+1)); VR_LANE=0 VR_ARCHIVE_STATE_PROOFS=1 proof_flags_are '--rpc.eth-proof-window 64' || fail "ordinary paired lane lost its 64-block window"
+# Another lane may resolve its own pin while the first lane still needs an archive-capable restart.
+pinned_restarts() (
+  unset URETH_BIN
+  export URETH_PIN_CACHE_DIR=$d/ureth-cache
+  local vr=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ordinary=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  local vr_cache ordinary_cache vr_binary
+  vr_cache=$(urethPinCacheEntry "$URETH_PIN_CACHE_DIR" "$vr")
+  ordinary_cache=$(urethPinCacheEntry "$URETH_PIN_CACHE_DIR" "$ordinary")
+  mkdir -p "$URETH_PIN_CACHE_DIR" || return 1
+  printf '#!/usr/bin/env bash\ncase "$*" in --version) echo "Commit SHA: %s";; "node --help") echo "  --unicity.archive-state-proofs";; esac\n' "$vr" >"$vr_cache"
+  printf '#!/usr/bin/env bash\necho "Commit SHA: %s"\n' "$ordinary" >"$ordinary_cache"
+  chmod +x "$vr_cache" "$ordinary_cache" || return 1
+  URETH_PIN_COMMIT=$vr
+  urethPinResolve || return 1
+  vr_binary=$URETH_BIN
+  unset URETH_BIN
+  URETH_PIN_COMMIT=$ordinary
+  urethPinResolve || return 1
+  [ "$vr_binary" != "$URETH_BIN" ] &&
+    urethPinVerifyBinary "$vr_binary" "$vr" &&
+    VR_LANE=1 urethPinRequireStateProofs "$vr_binary"
+)
+ok pinned_restarts
+
 # ---- the roots' activation events: every root, rule, epoch E, latched AND active with currentEpoch >= E ------------------------------------------------
 mkroots "$d/rg"; roots_pred() { vrs_check_all_roots "$1" "$rid" $E 1 2 3 4; }
 edit() { mkroots "$d/rb"; "$@"; }   # a bad copy: a fresh good set, then ONE edit
