@@ -39,6 +39,10 @@ vrp_apply() {
   vrj_apply || return 1   # `validator apply` dispatches on the active module: on the PoS adapter it registers, bonds and admits the delegation
   local el id=$vrj_id
   el=$(vrp_election)
+  # the joiner's authority is pinned to the id VR and custody confirmed at registration (the apply's receipts; saved in its validator config), never a guess
+  local cid; cid=$(jq -r '.id // empty' "$vrj_cfg/validator.json")
+  [ -n "$cid" ] && [ "$cid" = "$vrj_id" ] || { vrb_log "FAIL: the joiner's confirmed identity ($cid) is not the id its lane expects ($vrj_id)"; return 1; }
+  vr_pos_pin_authority "$vrj_id" "$cid" || { vrb_log "FAIL: the joiner's P85 pin"; return 1; }
   local indexed; indexed=$(cast call --rpc-url "$vrb_rpc" "$el" 'isIndexed(uint64)(bool)' "$id")
   [ "$indexed" = true ] || { vrb_log "FAIL: identity $id is not in the election's live index after apply"; return 1; }
   vrb_log "PASS: identity $id registered in VR and custody, bonded, delegation admitted (live count $(cast call --rpc-url "$vrb_rpc" "$el" 'liveCount()(uint32)' | awk '{print $1}'))"

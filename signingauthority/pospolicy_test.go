@@ -19,7 +19,7 @@ func posRequest() PosPoPRequest {
 func newPosAuthority(t *testing.T, pin *PosPolicy) *Authority {
 	t.Helper()
 	f := newFixture(t, 1)
-	var opts []Option
+	opts := []Option{WithLatePosPolicy()}
 	if pin != nil {
 		opts = append(opts, WithPosPolicy(*pin))
 	}
@@ -105,4 +105,66 @@ func ethSigToPub(digest [32]byte, sig []byte) ([]byte, error) {
 		return nil, err
 	}
 	return ethcrypto.CompressPubkey(pub), nil
+}
+
+// The pin binds the older election possession (SignElectionPoP) as well: the same PoPDigest must not be obtainable outside it.
+func TestPosPolicyBindsTheElectionPoPToo(t *testing.T) {
+	a, req, _ := electionPoFixtureForPin(t)
+	_, id, err := evmassign.ElectionPoPDigest(req.Candidate, req.Deployment, req.Attempt, mustPub(t, a), testNodeID)
+	require.NoError(t, err)
+	d := req.Deployment
+	pin := PosPolicy{Network: d.NetworkWord, ChainID: d.ChainID, Election: d.Election, IDs: []uint64{id}}
+	require.NoError(t, a.SetPosPolicy(pin))
+	_, err = a.SignElectionPoP(req)
+	require.NoError(t, err, "inside the pin")
+
+	other := req
+	other.Deployment.Election = [20]byte{0xEE}
+	_, err = a.SignElectionPoP(other)
+	require.ErrorIs(t, err, ErrPosPolicy, "another election")
+	other = req
+	other.Deployment.ChainID = [32]byte{31: 9}
+	_, err = a.SignElectionPoP(other)
+	require.ErrorIs(t, err, ErrPosPolicy, "another chain")
+}
+
+func TestRequirePosPolicyRefusesAllThreeUntilPinned(t *testing.T) {
+	f := newFixture(t, 1)
+	a, err := New(f.enroll, trustStub{tb: f.tb}, WithRequirePosPolicy(), WithLatePosPolicy())
+	require.NoError(t, err)
+	_, err = a.SignPosPoP(posRequest())
+	require.ErrorIs(t, err, ErrPosPolicy)
+	_, err = a.SignDelegationPossession(DelegationPossessionRequest{})
+	require.ErrorIs(t, err, ErrPosPolicy)
+	_, err = a.SignElectionPoP(ElectionPoPRequest{})
+	require.Error(t, err)
+	require.NoError(t, a.SetPosPolicy(posPin()))
+	_, err = a.SignPosPoP(posRequest())
+	require.NoError(t, err)
+}
+
+func electionPoFixtureForPin(t *testing.T) (*Authority, ElectionPoPRequest, []byte) {
+	a, req, pub := electionPoPFixture(t)
+	a.latePos = true
+	return a, req, pub
+}
+
+func mustPub(t *testing.T, a *Authority) []byte {
+	pub, err := a.SigningPublicKey()
+	require.NoError(t, err)
+	return pub
+}
+
+// Without the development opt-in the operator channel cannot install the pin: it comes from startup.
+func TestPosPolicyNotInstallableAtRunTimeInProduction(t *testing.T) {
+	f := newFixture(t, 1)
+	a, err := New(f.enroll, trustStub{tb: f.tb}, WithRequirePosPolicy())
+	require.NoError(t, err)
+	require.ErrorIs(t, a.SetPosPolicy(posPin()), ErrPosPolicy)
+	b, err := New(f.enroll, trustStub{tb: f.tb}, WithPosPolicy(posPin()))
+	require.NoError(t, err)
+	require.NoError(t, b.SetPosPolicy(posPin()), "the same pin as at startup is a no-op")
+	other := posPin()
+	other.Election = [20]byte{0xEE}
+	require.ErrorIs(t, b.SetPosPolicy(other), ErrPosPolicyConflict)
 }

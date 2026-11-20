@@ -90,6 +90,10 @@ type Authority struct {
 	registration *RegistrationPolicy
 	// pos is the pinned scope of the P85 possession signatures (WithPosPolicy, SetPosPolicy); nil: SignPosPoP is refused.
 	pos *PosPolicy
+	// requirePos refuses every P85 possession signature until pos is set (WithRequirePosPolicy).
+	requirePos bool
+	// latePos allows the operator channel to pin the election at run time (WithLatePosPolicy): development only.
+	latePos bool
 }
 
 // WithAdvanceHook calls hook at the start of every proof verification, outside the authority's locks. It changes no decision; it exists

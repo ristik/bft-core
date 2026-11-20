@@ -90,6 +90,10 @@ type signingAuthorityRunFlags struct {
 	RegistrationPolicy string
 	// the P85 election this authority may sign possession proofs for (#1216); empty: pinned later by `signing-authority pos-policy`, or never
 	PosPolicy string
+	// RequirePosPolicy refuses every P85 possession signature until the pin is set (the production profile: give --pos-policy at startup)
+	RequirePosPolicy bool
+	// LatePosPolicy lets `signing-authority pos-policy` pin the election on the running authority: development only
+	LatePosPolicy bool
 
 	AuthorityID string
 	NodeID      string
@@ -125,6 +129,8 @@ key exists: the authority starts pending and admits no client until complete-enr
 	cmd.Flags().StringVar(&flags.PoPCredential, "pop-credential", "", "path to the member's credential (see `signing-authority credential`); a credential of its own, not the operator's. The root process must run as the authority's uid to reach the socket (its directory is 0700), so keep the operator credential file unreadable by the root process: the member credential is then the only thing it can use")
 	cmd.Flags().StringVar(&flags.RegistrationPolicy, "registration-policy", "", "JSON file pinning the VR deployment and listing the registrations this authority may sign for its EVM key (VT-10): without it the authority signs none. Fixed for the authority's lifetime")
 	cmd.Flags().StringVar(&flags.PosPolicy, "pos-policy", "", "JSON file pinning the P85 election (network word, chain id, ElectionPolicy address) and the identity ids this authority's EVM key may sign possession proofs for (#1216): without a pin the authority signs no P85 assignment possession. Fixed for the authority's lifetime; `signing-authority pos-policy` pins it once on a running authority")
+	cmd.Flags().BoolVar(&flags.RequirePosPolicy, "require-pos-policy", false, "refuse every P85 possession signature (election, delegation, assignment) until the P85 pin is set; with --pos-policy the pin is fixed from startup")
+	cmd.Flags().BoolVar(&flags.LatePosPolicy, "dev-allow-late-pos-policy", false, "DEVELOPMENT ONLY: let `signing-authority pos-policy` pin the P85 election on this running authority. The pin then comes from the operator credential that also asks for signatures, so it restricts nothing against a compromised credential; production gives --pos-policy at startup")
 	cmd.Flags().StringVar(&flags.AuthorityID, "authority-id", "", "operator-assigned name for this authority lifetime, for diagnostics")
 	cmd.Flags().StringVar(&flags.NodeID, "node-id", "", "the shard validator this authority signs for (`ubft node-id` on the shard node's key configuration)")
 	cmd.Flags().Uint16Var(&flags.NetworkID, "network-id", 0, "network identifier")
@@ -202,6 +208,12 @@ func signingAuthorityRun(ctx context.Context, flags *signingAuthorityRunFlags) e
 			return err
 		}
 		opts = append(opts, signingauthority.WithPosPolicy(pin))
+	}
+	if flags.LatePosPolicy {
+		opts = append(opts, signingauthority.WithLatePosPolicy())
+	}
+	if flags.RequirePosPolicy {
+		opts = append(opts, signingauthority.WithRequirePosPolicy())
 	}
 	// The key is generated here. The enrollment has no configuration hash yet, on purpose.
 	authority, err := signingauthority.New(signingauthority.Enrollment{

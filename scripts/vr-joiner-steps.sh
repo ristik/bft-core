@@ -28,7 +28,6 @@ vrj_start_nodes() {
   h3_start_reth "$i" || { vrj_log "FAIL: the joiner's execution client"; return 1; }
   if [ "${SIGNING:-local}" = authority ]; then   # its EVM key is its authority's, pending at shard epoch 1 until J's configuration names it
     h3_spare_authority "$i" 1 1 trust-base.json || { vrj_log "FAIL: the joiner's signing authority"; return 1; }
-    vr_pos_pin_authority "$i" "$i" || { vrj_log "FAIL: the joiner's P85 pin"; return 1; }
   fi
   boot=$(m2_root_addr 1)
   { m2_start_root "$i" 1 "$boot"; } >/dev/null 2>&1 || true   # its readiness check needs lsof: the RPC is the check

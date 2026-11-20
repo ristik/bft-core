@@ -59,6 +59,34 @@ func (p PosPolicy) same(q PosPolicy) bool {
 	return p.Network == q.Network && p.ChainID == q.ChainID && p.Election == q.Election && slices.Equal(a, b)
 }
 
+// WithRequirePosPolicy makes every P85 possession signature (SignElectionPoP, SignDelegationPossession, SignPosPoP) refused until the pin is
+// set: the production profile, in which the deployment arrives by startup configuration (WithPosPolicy) and nothing is signed for an election the
+// operator has not stated. Without it an unpinned authority keeps the earlier behavior of the first two (the deployment from the request).
+func WithRequirePosPolicy() Option {
+	return func(a *Authority) error { a.requirePos = true; return nil }
+}
+
+// WithLatePosPolicy lets the operator channel pin the election on a running authority (SetPosPolicy). It is a DEVELOPMENT opt-in: the
+// first pin then comes from the same credential that asks for signatures, so it is no restriction against a compromised operator
+// credential. A production authority gets its pin from startup configuration (WithPosPolicy) and refuses SetPosPolicy.
+func WithLatePosPolicy() Option {
+	return func(a *Authority) error { a.latePos = true; return nil }
+}
+
+// checkPosScope is the one check of all three P85 possession signatures against the pin. The caller holds a.mu.
+func (a *Authority) checkPosScope(network, chain [32]byte, election [20]byte, id uint64) error {
+	if a.pos == nil {
+		if a.requirePos {
+			return fmt.Errorf("%w: this authority requires a P85 election pin and has none", ErrPosPolicy)
+		}
+		return nil
+	}
+	if network != a.pos.Network || chain != a.pos.ChainID || election != a.pos.Election || !slices.Contains(a.pos.IDs, id) {
+		return fmt.Errorf("%w: another election, chain, network word or identity than this authority's pin", ErrPosPolicy)
+	}
+	return nil
+}
+
 // WithPosPolicy pins the P85 possession scope at startup.
 func WithPosPolicy(p PosPolicy) Option {
 	return func(a *Authority) error {
@@ -74,12 +102,16 @@ func WithPosPolicy(p PosPolicy) Option {
 // SetPosPolicy pins the P85 possession scope of a running authority, for an operator that only knows the election after the authority
 // started (it is deployed in the genesis). Once pinned it never changes: the same pin again succeeds, another is ErrPosPolicyConflict.
 func (a *Authority) SetPosPolicy(p PosPolicy) error {
+	// a startup pin and a later pin go through the same equality and conflict rule below
 	if err := p.valid(); err != nil {
 		return err
 	}
 	p.IDs = slices.Clone(p.IDs)
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if !a.latePos && a.pos == nil {
+		return fmt.Errorf("%w: this authority takes its P85 pin from startup configuration only (--pos-policy), not from the operator channel", ErrPosPolicy)
+	}
 	if a.pos != nil {
 		if !a.pos.same(p) {
 			return fmt.Errorf("%w: this authority is pinned to another election or identity set", ErrPosPolicyConflict)
@@ -104,8 +136,8 @@ func (a *Authority) SignPosPoP(req PosPoPRequest) (evmassign.EVMPoP, error) {
 	if a.pos == nil {
 		return evmassign.EVMPoP{}, fmt.Errorf("%w: this authority has no P85 election pin", ErrPosPolicy)
 	}
-	if !slices.Contains(a.pos.IDs, req.ID) {
-		return evmassign.EVMPoP{}, fmt.Errorf("%w: identity %d is not one this authority proves for", ErrPosPolicy, req.ID)
+	if err := a.checkPosScope(a.pos.Network, a.pos.ChainID, a.pos.Election, req.ID); err != nil {
+		return evmassign.EVMPoP{}, err
 	}
 	if req.ResultID == [32]byte{} || req.AssignmentID == [32]byte{} || req.Snapshot == [32]byte{} || req.Generation == 0 {
 		return evmassign.EVMPoP{}, fmt.Errorf("%w: the request names no result, assignment, snapshot or generation", ErrContextMismatch)

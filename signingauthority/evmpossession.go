@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"slices"
 
 	"github.com/unicitynetwork/bft-core/evmassign"
 )
@@ -96,6 +95,11 @@ func (a *Authority) SignElectionPoP(req ElectionPoPRequest) (evmassign.EVMPoP, e
 	if err != nil {
 		return evmassign.EVMPoP{}, fmt.Errorf("%w: %v", ErrContextMismatch, err)
 	}
+	// the same digest as SignPosPoP: the pin (when there is one, or when one is required) binds both entry points
+	d := req.Deployment
+	if err := a.checkPosScope(d.NetworkWord, d.ChainID, d.Election, id); err != nil {
+		return evmassign.EVMPoP{}, err
+	}
 	sig, err := ethSign(hs, digest)
 	if err != nil {
 		return evmassign.EVMPoP{}, err
@@ -112,11 +116,8 @@ func (a *Authority) SignDelegationPossession(req DelegationPossessionRequest) ([
 	if err != nil {
 		return nil, err
 	}
-	if a.pos != nil {
-		// a pinned authority signs delegations only for its pinned election and identities
-		if req.Network != a.pos.Network || req.Chain != a.pos.ChainID || req.Election != a.pos.Election || !slices.Contains(a.pos.IDs, req.Request.Id) {
-			return nil, fmt.Errorf("%w: the delegation is for another election, chain or identity than this authority's pin", ErrPosPolicy)
-		}
+	if err := a.checkPosScope(req.Network, req.Chain, req.Election, req.Request.Id); err != nil {
+		return nil, err
 	}
 	word, err := evmassign.NodeIDWord(a.enroll.NodeID)
 	if err != nil {
