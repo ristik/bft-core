@@ -1149,6 +1149,7 @@ func (x *ConsensusManager) onHandoffApprovalMsg(_ context.Context, msg *abdrc.Ha
 		return err
 	}
 	id := plan.body.id
+	x.pruneSpentPlans()
 	x.handoffMu.Lock()
 	defer x.handoffMu.Unlock()
 	if x.handoffPlans == nil {
@@ -1295,6 +1296,12 @@ func (x *ConsensusManager) handoffRecordsForRound(round uint64, parentQC *rctype
 			return nil, nil
 		}
 		return x.prepareRecordFor(*intent, control, round)
+	}
+	if x.vr != nil && len(control.VR) != 0 && phase == "endorsed" {
+		// an endorsed exact recovery needs no plan in memory to order its H
+		if records, ok, err := x.vrRecoveryCommit(round, parent, control); ok {
+			return records, err
+		}
 	}
 	plan, err := x.readyHandoff(expectedAttempt)
 	if err != nil {

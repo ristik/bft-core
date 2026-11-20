@@ -9,6 +9,7 @@ import (
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
+	"github.com/unicitynetwork/bft-core/vradmit"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -97,7 +98,22 @@ func (x *ConsensusManager) vrRecoveryEligibleAt(parent *storage.ExecutedBlock, c
 	if err != nil {
 		return errors.Join(ErrVRRecoveryIneligible, err)
 	}
-	return recoveryEligible(c, lctx, installed)
+	if err := recoveryEligible(c, lctx, installed); err != nil {
+		return err
+	}
+	// a distributed plan's supersession is compared with this root's own committed chain, as the executor does (storage.verifySupersession), and
+	// a recovery is change-free: nothing is spent on a Prepare whose Freeze the executor would refuse
+	chain, err := storage.CommittedChain(x.orchestration, si.PartitionID, si.ShardID, si.IR.Epoch)
+	if err != nil {
+		return errors.Join(ErrVRRecoveryIneligible, err)
+	}
+	if err := evmassign.VerifyChain(c.Supersedes, chain); err != nil {
+		return errors.Join(ErrVRRecoveryIneligible, err)
+	}
+	if len(c.Changes) != 0 {
+		return fmt.Errorf("%w: a recovery carries no changes", ErrVRRecoveryIneligible)
+	}
+	return nil
 }
 
 // isRecoveryPlan reports whether a plan's candidate preimage is an exact recovery.
@@ -168,7 +184,7 @@ func (x *ConsensusManager) vrRecoveryRoute(parent *storage.ExecutedBlock, contro
 	lapsed := storage.PrepareLapsed(control, round)
 	switch {
 	case control.Phase == "endorsed", control.Phase == "prepared" && !lapsed:
-		held := x.heldRecoveryBody(control)
+		held := x.heldRecoveryBody(control) || (control.Phase == "endorsed" && x.committedRecoveryPreimage(control) != nil)
 		if held {
 			x.log.Info("VR recovery: the leader follows the exact recovery", "round", round, "phase", control.Phase, "attempt", control.Attempt)
 		}
@@ -176,12 +192,17 @@ func (x *ConsensusManager) vrRecoveryRoute(parent *storage.ExecutedBlock, contro
 	case control.Phase != "idle" && control.Phase != "aborted" && !lapsed:
 		return false
 	}
-	attempt := uint64(0)
-	if control.Phase != "idle" {
-		if control.Attempt == ^uint64(0) {
-			return false
-		}
-		attempt = control.Attempt + 1
+	if lapsed && !storage.PrepareMayFollowLapse(control, round) {
+		return false
+	}
+	// the attempt the primary proposer would use, and it must already be the stored backoff identity: a Prepare in the block whose end opens
+	// its attempt is refused (vrschedule.LeaderRecords)
+	attempt, ok, err := vradmit.PlannedAttempt(control, round)
+	if err != nil || !ok {
+		return false
+	}
+	if st, err := vradmit.DecodeRootState(control.VR); err != nil || st.Backoff.Epoch != control.Epoch || st.Backoff.Attempt != attempt {
+		return false
 	}
 	intent := x.pendingIntent(attempt)
 	if intent == nil {
@@ -271,4 +292,78 @@ func (x *ConsensusManager) planVRRecoveryAt(state *abdrc.StateMsg) (abdrc.Handof
 	}
 	x.setHandoffIntent(plan)
 	return plan, nil
+}
+
+// committedRecoveryPreimage is the retained candidate of the committed Freeze's body when it is an exact recovery, else nil: what lets a root that
+// lost its volatile plan (a restart, a leader change) still order H of a recovery whose Freeze committed.
+func (x *ConsensusManager) committedRecoveryPreimage(control *evmroot.ControlState) []byte {
+	previous, err := storage.DecodeOrderedHandoffRecord(control.RecordBytes)
+	if err != nil {
+		return nil
+	}
+	var raw []byte
+	if x.vr != nil && x.vr.retained != nil {
+		raw, err = x.vr.retained(previous.NextBodyID)
+	} else {
+		raw, err = x.blockStore().HandoffCandidate(previous.NextBodyID)
+	}
+	if err != nil || len(raw) == 0 {
+		return nil
+	}
+	if c, err := evmassign.DecodeCandidate(raw); err != nil || c.Kind != evmassign.KindRecovery {
+		return nil
+	}
+	return raw
+}
+
+// vrRecoveryCommit is H of an endorsed exact recovery, derived from the committed Freeze record and the candidate it retained, with no plan or
+// endorsement in memory (the old quorum's Freeze is committed: nothing more is needed from it). ok is false when the control state is not one.
+func (x *ConsensusManager) vrRecoveryCommit(round uint64, parent *storage.ExecutedBlock, control *evmroot.ControlState) ([][]byte, bool, error) {
+	if control.Phase != "endorsed" {
+		return nil, false, nil
+	}
+	preimage := x.committedRecoveryPreimage(control)
+	if preimage == nil {
+		return nil, false, nil
+	}
+	record, err := storage.DecodeOrderedHandoffRecord(control.RecordBytes)
+	if err != nil {
+		return nil, true, err
+	}
+	if reason := x.frozenParentLoss(parent, control.FrozenParent, control.FrozenParent); reason != "" {
+		return nil, true, nil
+	}
+	activation, ok := storage.CommitActivationRound(record.ActivationRound, round)
+	if !ok {
+		return nil, true, ErrHandoffApproval
+	}
+	key, err := x.blockStore().CertifiedEVMShardAt(parent.GetRound(), control.FrozenParent)
+	if err != nil {
+		return nil, true, fmt.Errorf("%w: %w", ErrHandoffApproval, err)
+	}
+	record.OrderedRound, record.ActivationRound, record.Kind = round, activation, "commit"
+	record.SuccessorTRHash, err = storage.AssignmentSuccessorTRHash(parent.ShardState.States[key], preimage, activation, x.params.HashAlgorithm)
+	if err != nil {
+		return nil, true, err
+	}
+	return [][]byte{record.Bytes()}, true, nil
+}
+
+// pruneSpentPlans forgets the endorsed plans of attempts the authenticated control state has moved past (an aborted or lapsed attempt, a
+// lower attempt, another epoch), so that repeated lapses cannot fill the small plan cache with entries nothing can use again.
+func (x *ConsensusManager) pruneSpentPlans() {
+	state, err := x.blockStore().GetState()
+	if err != nil || state == nil || state.CommittedHead == nil || state.CommittedHead.Block == nil || state.CommittedHead.Control == nil {
+		return
+	}
+	control, round := state.CommittedHead.Control, state.CommittedHead.Block.Round
+	x.handoffMu.Lock()
+	defer x.handoffMu.Unlock()
+	for id, p := range x.handoffPlans {
+		spent := p.body.epoch < control.Epoch+1 || p.plan.Attempt < control.Attempt ||
+			(p.plan.Attempt == control.Attempt && (control.Phase == "aborted" || storage.PrepareLapsed(control, round)))
+		if spent {
+			delete(x.handoffPlans, id)
+		}
+	}
 }

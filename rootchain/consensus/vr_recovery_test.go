@@ -15,6 +15,7 @@ import (
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootchain/vrschedule"
+	"github.com/unicitynetwork/bft-core/vradmit"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -113,6 +114,16 @@ func TestRecoveryEligiblePureRule(t *testing.T) {
 	require.ErrorIs(t, recoveryEligible(w.candidate, used, w.installed), evmassign.ErrRecoveryUsed)
 }
 
+// vrBytes is a VR root state whose stored backoff attempt is the given one.
+func vrBytes(t *testing.T, epoch, attempt uint64) []byte {
+	t.Helper()
+	st := vradmit.GenesisRootState(epoch, 4)
+	st.Backoff.Attempt = attempt
+	raw, err := st.Encode()
+	require.NoError(t, err)
+	return raw
+}
+
 func recoveryPlanOf(w *recoveryWorld, attempt uint64, id byte) abdrc.HandoffApprovalMsg {
 	return abdrc.HandoffApprovalMsg{Attempt: attempt, CandidatePreimage: w.second.Candidate, Body: []byte{id}, Candidate: bytes.Repeat([]byte{id}, 32)}
 }
@@ -124,7 +135,7 @@ func TestVRRecoveryRoute(t *testing.T) {
 	judged := 0
 	w.r.manager.vr = &vrHandoff{recoveryEligible: func(*storage.ExecutedBlock, evmassign.Candidate) error { judged++; return verdict }}
 	x := w.r.manager
-	idle := &evmroot.ControlState{Epoch: 2, Phase: "idle", VR: []byte{1}}
+	idle := &evmroot.ControlState{Epoch: 2, Phase: "idle", VR: vrBytes(t, 2, 0)}
 
 	require.False(t, x.vrRecoveryRoute(w.block, idle, 20), "no request: the VR path")
 	require.Zero(t, judged)
@@ -148,9 +159,9 @@ func TestVRRecoveryRoute(t *testing.T) {
 
 	// an aborted attempt plans the next one
 	x.setHandoffIntent(recoveryPlanOf(w, 4, 3))
-	aborted := &evmroot.ControlState{Epoch: 2, Phase: "aborted", Attempt: 3, VR: []byte{1}}
+	aborted := &evmroot.ControlState{Epoch: 2, Phase: "aborted", Attempt: 3, VR: vrBytes(t, 2, 4)}
 	require.True(t, x.vrRecoveryRoute(w.block, aborted, 30))
-	require.False(t, x.vrRecoveryRoute(w.block, &evmroot.ControlState{Epoch: 2, Phase: "aborted", Attempt: 7, VR: []byte{1}}, 30), "another attempt's intent is dead")
+	require.False(t, x.vrRecoveryRoute(w.block, &evmroot.ControlState{Epoch: 2, Phase: "aborted", Attempt: 7, VR: vrBytes(t, 2, 8)}, 30), "another attempt's intent is dead")
 }
 
 func TestVRRecoveryRouteFollowsTheCommittedPrepare(t *testing.T) {
@@ -160,7 +171,7 @@ func TestVRRecoveryRouteFollowsTheCommittedPrepare(t *testing.T) {
 	body := bytes.Repeat([]byte{0x77}, 32)
 	prepare := evmroot.OrderedHandoffRecord{Network: 5, Epoch: 2, Attempt: 0, OrderedRound: 10, ActivationRound: 200, PredecessorBodyID: bytes.Repeat([]byte{1}, 32),
 		NextBodyID: body, FrozenID: make([]byte, 32), SuccessorTRHash: make([]byte, 32), Kind: "prepare"}
-	prepared := &evmroot.ControlState{Epoch: 2, Phase: "prepared", Attempt: 0, OrderedRound: 10, RecordBytes: prepare.Bytes(), VR: []byte{1}}
+	prepared := &evmroot.ControlState{Epoch: 2, Phase: "prepared", Attempt: 0, OrderedRound: 10, RecordBytes: prepare.Bytes(), VR: vrBytes(t, 2, 0)}
 
 	require.False(t, x.vrRecoveryRoute(w.block, prepared, 12), "a Prepare of no plan this root holds (a VR primary's, or a restart lost the plan)")
 
@@ -179,7 +190,8 @@ func TestVRRecoveryRouteFollowsTheCommittedPrepare(t *testing.T) {
 	x.handoffPlans = nil
 	x.vr.recoveryEligible = func(*storage.ExecutedBlock, evmassign.Candidate) error { return nil }
 	x.setHandoffIntent(recoveryPlanOf(w, 1, 5))
-	lapsedAt := uint64(10) + storage.PrepareFreezeLapseRounds + 1
+	lapsedAt := uint64(10) + storage.PrepareFreezeLapseRounds + 1000
+	prepared.VR = vrBytes(t, 2, 1)
 	require.True(t, storage.PrepareLapsed(prepared, lapsedAt), "premise")
 	require.True(t, x.vrRecoveryRoute(w.block, prepared, lapsedAt))
 }
@@ -189,7 +201,7 @@ func TestVRRecoveryRouteFollowsTheCommittedPrepare(t *testing.T) {
 func (w *recoveryWorld) idleVRParent(t *testing.T, parentHash []byte) (*rctypes.QuorumCert, *storage.ExecutedBlock) {
 	t.Helper()
 	x := w.r.manager
-	w.block.ShardState.Control = &evmroot.ControlState{Network: 5, Epoch: 2, Phase: "idle", VR: []byte{1}, PredecessorBodyID: w.block.ShardState.Control.PredecessorBodyID}
+	w.block.ShardState.Control = &evmroot.ControlState{Network: 5, Epoch: 2, Phase: "idle", VR: vrBytes(t, 2, 0), PredecessorBodyID: w.block.ShardState.Control.PredecessorBodyID}
 	si := w.block.ShardState.States[w.key]
 	si.IR.BlockHash = bytes.Clone(parentHash)
 	// the committed root block is the one CommittedFrozenParent reads
@@ -325,6 +337,50 @@ func TestVRRecoveryLeaderOrdersPrepareFreezeAndH(t *testing.T) {
 	require.Equal(t, "commit", h.Kind)
 	require.Equal(t, body.id[:], h.NextBodyID)
 	require.NotEqual(t, make([]byte, 32), h.SuccessorTRHash)
+
+	// a root that lost its plan (a restart, a leader change) orders the same H from the committed Freeze and the candidate it retained
+	x.handoffMu.Lock()
+	x.handoffPlans, x.handoffIntent = nil, nil
+	x.handoffMu.Unlock()
+	x.vr.retained = func(id []byte) ([]byte, error) {
+		require.Equal(t, body.id[:], id)
+		return plan.CandidatePreimage, nil
+	}
+	again, err := x.handoffRecordsForRound(freeze.OrderedRound+2, qc)
+	require.NoError(t, err)
+	require.Equal(t, records, again, "H without any volatile plan")
+	x.vr.retained = func([]byte) ([]byte, error) { return nil, nil }
+	none, err := x.handoffRecordsForRound(freeze.OrderedRound+2, qc)
+	require.NoError(t, err)
+	require.Empty(t, none, "no retained recovery candidate: nothing is invented")
+}
+
+// A plan distributed through the intent endpoint is judged against this root's own committed chain before a Prepare is spent on it.
+func TestVRRecoveryRefusesASupersessionThatIsNotTheCommittedChain(t *testing.T) {
+	w := newRecoveryWorld(t)
+	x := w.r.manager
+	require.NoError(t, x.vrRecoveryEligibleAt(w.block, w.candidate))
+	bad := w.candidate
+	sup := *w.candidate.Supersedes
+	sup.ChainCommitment = bytes.Repeat([]byte{0xee}, 32)
+	bad.Supersedes = &sup
+	require.ErrorIs(t, x.vrRecoveryEligibleAt(w.block, bad), ErrVRRecoveryIneligible)
+	bad = w.candidate
+	bad.Supersedes = nil
+	require.ErrorIs(t, x.vrRecoveryEligibleAt(w.block, bad), ErrVRRecoveryIneligible)
+}
+
+// Endorsed plans of attempts the committed control state has moved past are forgotten, so repeated lapses cannot fill the cache.
+func TestSpentRecoveryPlansArePruned(t *testing.T) {
+	w := newRecoveryWorld(t)
+	x := w.r.manager
+	x.handoffPlans = map[[32]byte]*pendingHandoff{
+		{1}: {plan: abdrc.HandoffApprovalMsg{Attempt: 0}, body: planBody{epoch: 1}}, // of an epoch already installed
+		{2}: {plan: abdrc.HandoffApprovalMsg{Attempt: 0}, body: planBody{epoch: 3}}, // the next epoch's: kept
+	}
+	x.pruneSpentPlans()
+	require.Len(t, x.handoffPlans, 1)
+	require.Contains(t, x.handoffPlans, [32]byte{2})
 }
 
 // pendingPrimaryAs is pendingPrimary for root number index of the chain (a fixture given: that chain).

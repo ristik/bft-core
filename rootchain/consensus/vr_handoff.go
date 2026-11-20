@@ -147,6 +147,8 @@ type vrHandoff struct {
 	reject  func(ctx context.Context, parentRound, round uint64, qc *rctypes.QuorumCert) bool
 	// recoveryEligible judges a held exact-recovery candidate at the parent block (the manager's own when nil; replaced in tests)
 	recoveryEligible func(*storage.ExecutedBlock, evmassign.Candidate) error
+	// retained is the retained candidate of a body (the block store's when nil; replaced in tests)
+	retained func(bodyID []byte) ([]byte, error)
 }
 
 // vrOperator is the sender identity of the loopback operator endpoints.
