@@ -5,11 +5,16 @@
 #   scripts/vt12-monitoring.sh stop
 #   scripts/vt12-monitoring.sh status
 #
-# Run it from the lane's checkout (the directory holding test-nodes/ and build/ubft). Ports follow the lane's fixed ports (root RPC 25866+i-1, shard RPC
+# Run it from the lane's checkout (the directory holding test-nodes/ and build/ubft). Run on lane slot 0. Ports follow the lane's fixed ports (root RPC 25866+i-1, shard RPC
 # 28311+i-1, authority metrics 29301+i-1, reth 18545+i-1); the exporters take 29401+i-1, Prometheus MON_PROM_PORT (default 19090), Grafana MON_GRAFANA_PORT
 # (default 13000, only with MON_GRAFANA=1 and an image the host can pull). Only processes this script started (pidfiles under test-nodes/monitoring) are
 # stopped. Docker runs Prometheus with host networking, so it scrapes the loopback listeners directly.
 set -euo pipefail
+source ./helper.sh
+if [ "${LANE_SLOT:-0}" != 0 ]; then
+  echo "VT-12 monitoring currently requires a slot 0 lane" >&2
+  exit 2
+fi
 MON=${MON_DIR:-test-nodes/monitoring}
 PROM_PORT=${MON_PROM_PORT:-19090}
 GRAFANA_PORT=${MON_GRAFANA_PORT:-13000}
@@ -23,26 +28,60 @@ VR=${MON_VR:-0xff00000000000000000000000000000000000003}
 
 validators() { ls -d test-nodes/root[0-9]* 2>/dev/null | sed 's#.*/root##' | sort -n; }
 
+validator_id() {
+  python3 - "${VR_DIR:-test-nodes/vr}" "$1" <<'PYID'
+import base64
+import json
+import sys
+
+vr, node = sys.argv[1:]
+with open(f"test-nodes/root{node}/node-info.json") as source:
+    root = json.load(source)["nodeId"]
+with open(f"{vr}/genesis-identities.json") as source:
+    identities = json.load(source)
+matches = [identity for identity in identities if identity["rootNodeId"] == root]
+if len(matches) != 1:
+    sys.exit(f"Root {node} has no unique identity in this lane's genesis")
+identity = int.from_bytes(base64.b64decode(matches[0]["stakingId"], validate=True), "big")
+if not 0 < identity < (1 << 64):
+    sys.exit(f"Root {node} has an invalid validator ID")
+print(identity)
+PYID
+}
+
+start_exporter() {
+  local i=$1 custody=
+  local -a extra=()
+  if [ -r "${VR_DIR:-test-nodes/vr}/contracts/deployment.json" ]; then
+    custody=$(jq -r '.custody // empty' "${VR_DIR:-test-nodes/vr}/contracts/deployment.json")
+    [ -z "$custody" ] || extra+=(--custody "$custody")
+  fi
+  build/ubft validator exporter --validator-config "$MON/v$i.json" --listen "127.0.0.1:$((29400 + i))" --interval 5s \
+    --root-metrics "http://127.0.0.1:$(lane_port "$((25865 + i))")/api/v1/metrics" --disk-path "ureth=test-nodes/reth$i" "${extra[@]}" \
+    --log-format text --log-level info >"$MON/exporter$i.log" 2>&1 &
+  echo $! >"$MON/exporter$i.pid"
+}
+
 start_exporters() {
-  local n; n=$(validators | wc -l | tr -d ' ')
-  local custody=""
-  [ -r "${VR_DIR:-test-nodes/vr}/contracts/deployment.json" ] && custody=$(jq -r .custody "${VR_DIR:-test-nodes/vr}/contracts/deployment.json" 2>/dev/null || true)
-  for i in $(validators); do
-    local pub=$(( (i % n) + 1 ))   # a validator's exporter reads the public chain through a sibling's ureth, so stopping its own ureth shows as lag
-    cat >"$MON/v$i.json" <<JSON
-{"format":"unicity.validator.config.v1","rpc":"http://127.0.0.1:$((18544 + pub))","localRpc":"http://127.0.0.1:$((18544 + i))","registry":"$VR","rootKeys":"","evmKeys":"","urethKey":"","jwt":"","operatorKey":"","payee":"0x0000000000000000000000000000000000000000","id":$i}
+  local i pub id local_rpc public_rpc
+  local -a nodes
+  read -r -a nodes <<<"$(validators | paste -sd' ' -)"
+  # Set up and validate every identity before starting any exporter.
+  for i in "${!nodes[@]}"; do
+    pub=${nodes[$(((i + 1) % ${#nodes[@]}))]}
+    local_rpc=$(lane_port "$((18544 + nodes[i]))")
+    public_rpc=$(lane_port "$((18544 + pub))")
+    id=$(validator_id "${nodes[i]}")
+    cat >"$MON/v${nodes[i]}.json" <<JSON
+{"format":"unicity.validator.config.v1","rpc":"http://127.0.0.1:$public_rpc","localRpc":"http://127.0.0.1:$local_rpc","registry":"$VR","rootKeys":"","evmKeys":"","urethKey":"","jwt":"","operatorKey":"","payee":"0x0000000000000000000000000000000000000000","id":$id}
 JSON
-    local extra=()
-    [ -z "$custody" ] || [ "$custody" = null ] || extra+=(--custody "$custody")
-    build/ubft validator exporter --validator-config "$MON/v$i.json" --listen "127.0.0.1:$((29401 + i - 1))" --interval 5s \
-      --root-metrics "http://127.0.0.1:$((25866 + i - 1))/api/v1/metrics" --disk-path "ureth=test-nodes/reth$i" ${extra[@]+"${extra[@]}"} --log-format text --log-level info >"$MON/exporter$i.log" 2>&1 &
-    echo $! >"$MON/exporter$i.pid"
   done
+  for i in "${nodes[@]}"; do start_exporter "$i"; done
 }
 
 scrapes() {
   local job port base
-  for spec in "root:25866:/api/v1/metrics" "shard:28311:/api/v1/metrics" "authority:29301:/metrics" "vrexporter:29401:/metrics"; do
+  for spec in "root:$(lane_port 25866):/api/v1/metrics" "shard:$(lane_port 28311):/api/v1/metrics" "authority:29301:/metrics" "vrexporter:29401:/metrics"; do
     IFS=: read -r job base path <<<"$spec"
     echo "  - job_name: $job"
     echo "    metrics_path: $path"
@@ -61,7 +100,7 @@ render_prometheus() {
 import sys,subprocess,os
 mon=sys.argv[1]
 tmpl=open('deploy/testnet/monitoring/prometheus-validator.yml.tmpl').read()
-scr=subprocess.run(['bash','-c','source scripts/vt12-monitoring.sh >/dev/null 2>&1; scrapes'],capture_output=True,text=True,env=dict(os.environ,VT12_SOURCE_ONLY='1')).stdout
+scr=subprocess.run(['bash','-c','source scripts/vt12-monitoring.sh >/dev/null 2>&1; scrapes'],capture_output=True,text=True,check=True,env=dict(os.environ,VT12_SOURCE_ONLY='1')).stdout
 open(mon+'/prometheus.yml','w').write(tmpl.replace('@SCRAPES@',scr))
 PY
 }
@@ -92,7 +131,7 @@ case "${1:-}" in
     echo "monitoring up: Prometheus http://127.0.0.1:$PROM_PORT, exporters 29401.."
     ;;
   stop)
-    for f in "$MON"/exporter*.pid; do [ -e "$f" ] && kill "$(cat "$f")" 2>/dev/null || true; done
+    for f in "$MON"/exporter*.pid; do stop_pidfile "$f" 'ubft validator exporter'; done
     docker rm -f "$NAME-prom" "$NAME-grafana" "$NAME-renderer" >/dev/null 2>&1 || true
     ;;
   status)
