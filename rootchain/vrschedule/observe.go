@@ -24,8 +24,10 @@ type SourceEntry struct {
 	CertUCTime uint64
 }
 
-// sourcesFileV2 is the persisted form: versioned, so a file written before the source carried the verified EVM block number (a bare JSON
-// array, whose evmBlockNumber is the shard round) is recognised and re-resolved by its certified hash before any entry is served.
+// sourcesFileV2 is the persisted form: versioned. A file of an earlier build (a bare JSON array, or entries marked pending) holds shard
+// rounds where this build records verified EVM heights. Sources are re-derivable (a root re-observes them from certified blocks, or fetches
+// them from the incumbents with the height verified locally), so such a file is discarded at startup, never migrated: the root then behaves
+// exactly like a fresh root until it re-learns the source.
 type sourcesFileV2 struct {
 	Version int          `json:"version"`
 	Sources []sourceFile `json:"sources"`
@@ -38,8 +40,7 @@ type sourceFile struct {
 	CertRootRound  uint64    `json:"certRootRound"`
 	OutputCommit   hex.Bytes `json:"outputCommit"`
 	CertUCTime     uint64    `json:"certUcTime"`
-	// Pending marks an entry of an earlier build whose number is still a shard round: it is kept in the file, never served, and migrated
-	// only once its corrected version is durably written.
+	// Pending was written by a build that migrated entries in place: such an entry has no verified height and is discarded on load.
 	Pending bool `json:"pending,omitempty"`
 }
 
@@ -50,21 +51,22 @@ const maxSources = 8
 // restarted root keeps what it learned (a source the root never observed stays unavailable). The file is trusted as this root's own record:
 // an entry cannot be re-validated on load (that needs the EVM state of every certified block before it). Since the observer only records
 // from an unbroken run, a wrong entry needs a tampered or foreign file; removing the file (or the entry) makes the result unavailable here,
-// never wrong.
+// never wrong. The order and the map change together, under one lock, in one helper (insertLocked).
 type Sources struct {
 	mu    sync.RWMutex
 	path  string
 	order []vrschema.Word
 	by    map[vrschema.Word]SourceEntry
-	// legacy are the entries of a version 1 file: their number is the shard round of the build that wrote them. They are never served; Upgrade
-	// re-resolves each by its certified block hash (header hash verified) and replaces the number, so a restarted root and a fresh root
-	// derive the same intent digest.
-	legacy map[vrschema.Word]SourceEntry
 }
 
-// NewSources reads path (if it exists); an empty path keeps the sources in memory.
+// LegacyDiscardedEvent is the stable log event of a sources file of an earlier build discarded at startup.
+const LegacyDiscardedEvent = "vr.sources.legacy_discarded"
+
+// NewSources reads path (if it exists); an empty path keeps the sources in memory. A file of an earlier build (version 1, or with an entry
+// without a verified height) is discarded: a warning with event=vr.sources.legacy_discarded and the entry count is logged, a copy is kept
+// beside it as <path>.v1.bak, and the store starts empty.
 func NewSources(path string) (*Sources, error) {
-	s := &Sources{path: path, by: map[vrschema.Word]SourceEntry{}, legacy: map[vrschema.Word]SourceEntry{}}
+	s := &Sources{path: path, by: map[vrschema.Word]SourceEntry{}}
 	if path == "" {
 		return s, nil
 	}
@@ -76,18 +78,35 @@ func NewSources(path string) (*Sources, error) {
 		return nil, err
 	}
 	var fs []sourceFile
-	legacy := false
+	legacy := 0
 	if t := bytes.TrimSpace(raw); len(t) > 0 && t[0] == '[' {
-		legacy = true
 		if err := json.Unmarshal(raw, &fs); err != nil {
 			return nil, fmt.Errorf("vrschedule: %s: %w", path, err)
 		}
+		legacy = len(fs)
 	} else {
 		var v2 sourcesFileV2
 		if err := json.Unmarshal(raw, &v2); err != nil || v2.Version != 2 {
 			return nil, fmt.Errorf("vrschedule: %s: not a sources file of version 2: %v", path, err)
 		}
 		fs = v2.Sources
+		for _, f := range fs {
+			if f.Pending {
+				legacy = len(fs)
+				break
+			}
+		}
+	}
+	if legacy > 0 {
+		if err := os.WriteFile(path+".v1.bak", raw, 0o600); err != nil { // #nosec G304 -- beside the root's own state file
+			return nil, fmt.Errorf("vrschedule: keeping a copy of %s: %w", path, err)
+		}
+		slog.Warn("VR sources file of an earlier build discarded: its heights are not verified EVM heights; the sources are re-learned",
+			"event", LegacyDiscardedEvent, "count", legacy, "path", path, "backup", path+".v1.bak")
+		if err := writeDurable(path, mustSourcesJSON(nil)); err != nil {
+			return nil, err
+		}
+		return s, nil
 	}
 	for _, f := range fs {
 		if len(f.ResultID) != 32 || len(f.EVMBlockHash) != 32 || len(f.OutputCommit) != 32 || f.CertRootRound == 0 {
@@ -95,83 +114,21 @@ func NewSources(path string) (*Sources, error) {
 		}
 		r := vrschema.Word(f.ResultID)
 		s.order = append(s.order, r)
-		e := SourceEntry{Source: vrhandoff.Source{ResultID: f.ResultID, EVMBlockHash: f.EVMBlockHash, EVMBlockNumber: f.EVMBlockNumber,
+		s.by[r] = SourceEntry{Source: vrhandoff.Source{ResultID: f.ResultID, EVMBlockHash: f.EVMBlockHash, EVMBlockNumber: f.EVMBlockNumber,
 			CertRootRound: f.CertRootRound, OutputCommit: f.OutputCommit}, CertUCTime: f.CertUCTime}
-		if legacy || f.Pending {
-			s.legacy[r] = e
-		} else {
-			s.by[r] = e
-		}
 	}
 	return s, nil
 }
 
-// HasLegacy reports whether entries of a version 1 file still await Upgrade.
-func (s *Sources) HasLegacy() bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return len(s.legacy) > 0
-}
-
-// Upgrade re-resolves every legacy entry by its certified block hash (hr verifies the header's hash) and serves it with the true EVM
-// block number. The headers are resolved WITHOUT the store's lock (an RPC wait never blocks a Get); each entry is migrated only after the
-// file holding its corrected version, with every unresolved entry still marked pending, is durably written, and only then is it served.
-// It stops at the first failure and leaves the rest pending (never dropped, never wrong): the observer retries with its next observation.
-// It returns how many entries it upgraded and how many changed their number.
-//
-// Rollout boundary: an intent already bound (committed Prepare) to a digest over the old number keeps that digest; the corrected number
-// yields another, so such an intent is abandoned on restart like any intent whose source changed. VT-07a is scoped to fresh generations,
-// where no such intent exists.
-func (s *Sources) Upgrade(ctx context.Context, hr HeaderReader) (upgraded, changed int, err error) {
-	s.mu.RLock()
-	todo := make([]SourceEntry, 0, len(s.legacy))
-	for _, r := range s.order {
-		if e, ok := s.legacy[r]; ok {
-			todo = append(todo, e)
-		}
+func mustSourcesJSON(fs []sourceFile) []byte {
+	if fs == nil {
+		fs = []sourceFile{}
 	}
-	s.mu.RUnlock()
-	for _, e := range todo {
-		var h [32]byte
-		copy(h[:], e.EVMBlockHash)
-		n, herr := hr.HeaderNumber(ctx, h) // no lock held
-		if herr != nil {
-			return upgraded, changed, herr
-		}
-		r := vrschema.Word(e.ResultID)
-		s.mu.Lock()
-		if _, still := s.legacy[r]; !still {
-			s.mu.Unlock()
-			continue
-		}
-		fixed := e
-		fixed.EVMBlockNumber = n
-		stillPending := map[vrschema.Word]SourceEntry{}
-		for k, v := range s.legacy {
-			if k != r {
-				stillPending[k] = v
-			}
-		}
-		perr := s.persistWith(s.order, func(x vrschema.Word) SourceEntry {
-			if x == r {
-				return fixed
-			}
-			return s.by[x]
-		}, stillPending)
-		if perr == nil {
-			s.by[r] = fixed
-			delete(s.legacy, r)
-		}
-		s.mu.Unlock()
-		if perr != nil {
-			return upgraded, changed, perr
-		}
-		if n != e.EVMBlockNumber {
-			changed++
-		}
-		upgraded++
+	raw, err := json.MarshalIndent(sourcesFileV2{Version: 2, Sources: fs}, "", " ")
+	if err != nil {
+		panic(err) // plain structs: cannot fail
 	}
-	return upgraded, changed, nil
+	return raw
 }
 
 // Get is R's committed source.
@@ -194,56 +151,45 @@ func (s *Sources) Record(e SourceEntry) (bool, error) {
 	if _, ok := s.by[r]; ok {
 		return false, nil
 	}
-	if _, ok := s.legacy[r]; ok {
-		return false, nil // a legacy entry of R is re-resolved by Upgrade, never replaced by a fresh observation
-	}
+	return true, s.insertLocked(r, e)
+}
+
+// insertLocked adds e as the newest source, evicts the oldest beyond maxSources, writes the file, and only then updates the order and the
+// map together: a failed write changes nothing, and memory and disk never disagree. The caller holds s.mu for writing.
+func (s *Sources) insertLocked(r vrschema.Word, e SourceEntry) error {
 	order := append(append([]vrschema.Word(nil), s.order...), r)
 	evicted := map[vrschema.Word]bool{}
 	for len(order) > maxSources {
 		evicted[order[0]] = true
 		order = order[1:]
 	}
-	by := func(x vrschema.Word) SourceEntry {
+	if err := s.persist(order, func(x vrschema.Word) SourceEntry {
 		if x == r {
 			return e
 		}
 		return s.by[x]
-	}
-	if err := s.persist(order, by); err != nil {
-		return false, err
+	}); err != nil {
+		return err
 	}
 	s.by[r] = e
 	for x := range evicted {
 		delete(s.by, x)
 	}
 	s.order = order
-	return true, nil
+	return nil
 }
 
 func (s *Sources) persist(order []vrschema.Word, by func(vrschema.Word) SourceEntry) error {
-	return s.persistWith(order, by, s.legacy)
-}
-
-// persistWith writes the file with every entry of order: those in pending are written marked pending (their number is a shard round of an
-// earlier build), so a write never drops an entry that has not been migrated yet.
-func (s *Sources) persistWith(order []vrschema.Word, by func(vrschema.Word) SourceEntry, pending map[vrschema.Word]SourceEntry) error {
 	if s.path == "" {
 		return nil
 	}
 	fs := make([]sourceFile, 0, len(order))
 	for _, r := range order {
-		e, isPending := pending[r]
-		if !isPending {
-			e = by(r)
-		}
+		e := by(r)
 		fs = append(fs, sourceFile{ResultID: e.ResultID, EVMBlockHash: e.EVMBlockHash, EVMBlockNumber: e.EVMBlockNumber, CertRootRound: e.CertRootRound,
-			OutputCommit: e.OutputCommit, CertUCTime: e.CertUCTime, Pending: isPending})
+			OutputCommit: e.OutputCommit, CertUCTime: e.CertUCTime})
 	}
-	raw, err := json.MarshalIndent(sourcesFileV2{Version: 2, Sources: fs}, "", " ")
-	if err != nil {
-		return err
-	}
-	return writeDurable(s.path, raw)
+	return writeDurable(s.path, mustSourcesJSON(fs))
 }
 
 // writeDurable replaces path with data atomically and durably: the data is synced in a temporary file, renamed over path, and the directory
@@ -379,18 +325,6 @@ type Observer struct {
 func (o *Observer) Observe(ctx context.Context, c CertifiedEVM) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	if hr, ok := o.Reader.(HeaderReader); ok && o.Sources != nil && o.Sources.HasLegacy() {
-		// a file of an earlier build: its numbers are shard rounds. They are re-resolved by hash before any source is served or recorded
-		up, changed, err := o.Sources.Upgrade(ctx, hr)
-		if o.Log != nil && up > 0 {
-			o.Log.Warn("VR sources of an earlier build re-resolved by their certified hashes", "sources", up, "numberCorrected", changed)
-		}
-		if err != nil && o.Log != nil {
-			// an unavailable historical header leaves those entries pending (kept, never served); it never stops the observation of new
-			// publications
-			o.Log.Warn("VR sources of an earlier build are not yet re-resolved", "error", err)
-		}
-	}
 	primed, lastRound := o.primed, o.lastRound
 	continuous := primed && c.RootRound > 0 && c.ParentRound == lastRound
 	out, cached := o.Outputs.At(c.StateRoot)

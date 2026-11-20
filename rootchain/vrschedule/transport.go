@@ -375,7 +375,8 @@ type WeightedPeer struct {
 // FetchSource asks the weighted peers for the source of result and returns it once identical answers of distinct authenticated peers carry a
 // combined weight strictly above SourceFaulty(total), where total is the installed committee's total weight (this root's own included when it
 // is one) and the peers and total come from ONE trust-base snapshot: at least one honest root observed exactly this source, whatever the weights.
-// Each peer counts once, whatever it sends; answers that differ do not combine; a peer that did not observe it, or does not answer, counts for
+// Each peer counts once, whatever it sends; answers that differ in an attested field do not combine (the height is not attested: the returned
+// entry's height must be re-derived with ResolveFetched); a peer that did not observe it, or does not answer, counts for
 // nothing. Honest incumbents observed the same first Published block, so honest answers are identical (stage 0 is fixed by committed history).
 func FetchSource(ctx context.Context, opener Opener, peers []WeightedPeer, result [32]byte, total uint64) (SourceEntry, error) {
 	type ans struct {
@@ -408,13 +409,18 @@ func FetchSource(ctx context.Context, opener Opener, peers []WeightedPeer, resul
 		if !a.ok || a.e.ResultID == nil || !bytes.Equal(a.e.ResultID, result[:]) {
 			continue
 		}
-		k, err := types.Cbor.Marshal(a.e)
+		// the peers attest the result, the certified block hash, the round, the time and the commitment; the HEIGHT is not attested (a
+		// pre-fix incumbent reports the shard round, a fixed one the EVM number): answers are grouped without it and the caller derives the
+		// height itself (ResolveFetched), so mixed-version replies agree
+		blind := a.e
+		blind.EVMBlockNumber = 0
+		k, err := types.Cbor.Marshal(blind)
 		if err != nil {
 			continue
 		}
 		weights[string(k)] += a.w // one answer per distinct peer: the channel carries exactly one per peer queried
 		if weights[string(k)] > need {
-			return a.e, nil
+			return a.e, nil // its height is whatever this peer said: never used as it stands
 		}
 	}
 	return SourceEntry{}, fmt.Errorf("%w: no identical answers above weight %d for the source of %x", ErrUnavailable, need, result[:8])

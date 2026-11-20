@@ -6,9 +6,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"math/big"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	gethtypes "github.com/ethereum/go-ethereum/core/types"
@@ -77,47 +79,105 @@ func TestVerifiedHeaderNumber(t *testing.T) {
 	require.ErrorIs(t, err, ErrRead, "an altered number no longer hashes to the certified block")
 }
 
-// Restart (astra r6): a vr-sources.json written by an earlier build (a bare array whose evmBlockNumber is the shard round 4) is not served
-// as it stands; the observer re-resolves it by its certified hash (EVM block 3) before anything else, rewrites the file as version 2, and a
-// restarted root then serves 3, like a fresh root. An unavailable header leaves the entry unavailable (never wrong).
-func TestRestartedRootReResolvesALegacySourceByItsCertifiedHash(t *testing.T) {
+// Pre-production simplification (astra r8): a sources file of an earlier build is DISCARDED at startup (never migrated), a copy is kept as
+// .v1.bak and the event is logged with the count. Until the source is re-learned the root behaves exactly like a fresh root, and once it
+// re-observes the publication it holds the same source (so derives the same intent digest) as a fresh root.
+func TestAV1SourcesFileIsDiscardedAndTheRootBehavesLikeAFreshRoot(t *testing.T) {
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
 	r := vrschema.Word{0x52}
 	hash := bytes.Repeat([]byte{0x77}, 32)
-	legacy := `[{"resultId":"` + "0x" + hex.EncodeToString(r[:]) + `","evmBlockHash":"` + "0x" + hex.EncodeToString(hash) + `","evmBlockNumber":4,"certRootRound":12,"outputCommit":"` +
-		"0x" + hex.EncodeToString(bytes.Repeat([]byte{0xc0}, 32)) + `","certUcTime":1012}]`
+	legacy := `[{"resultId":"0x` + hex.EncodeToString(r[:]) + `","evmBlockHash":"0x` + hex.EncodeToString(hash) + `","evmBlockNumber":4,"certRootRound":12,"outputCommit":"0x` +
+		hex.EncodeToString(bytes.Repeat([]byte{0xc0}, 32)) + `","certUcTime":1012}]`
 	path := filepath.Join(t.TempDir(), "vr-sources.json")
 	require.NoError(t, os.WriteFile(path, []byte(legacy), 0o600))
 
-	sources, err := NewSources(path)
+	restarted, err := NewSources(path)
 	require.NoError(t, err)
-	_, ok := sources.Get(r)
-	require.False(t, ok, "a legacy entry is never served with its shard round")
-	require.True(t, sources.HasLegacy())
+	fresh, err := NewSources("")
+	require.NoError(t, err)
+	_, ok := restarted.Get(r)
+	require.False(t, ok, "the shard-round entry is not served")
+	_, ok = fresh.Get(r)
+	require.False(t, ok)
+	require.Contains(t, logs.String(), "event=vr.sources.legacy_discarded")
+	require.Contains(t, logs.String(), "count=1")
+	bak, err := os.ReadFile(path + ".v1.bak")
+	require.NoError(t, err)
+	require.Equal(t, legacy, string(bak), "the old file is kept")
 
+	// both roots observe the same publication (EVM block 3 certified at shard round 4) and hold the identical source
 	var h [32]byte
 	copy(h[:], hash)
-	reader := &headerReader{fakeReader: &fakeReader{at: map[[32]byte]*vrhandoff.Output{}}, number: map[[32]byte]uint64{h: 3}, err: errors.New("header unavailable")}
-	o := &Observer{Reader: reader, Sources: sources, Outputs: NewOutputs()}
-	require.NoError(t, o.Observe(context.Background(), cert(20, 9, 9)), "an unavailable historical header never stops observing")
-	_, ok = sources.Get(r)
-	require.False(t, ok)
-
-	reader.err = nil
-	require.NoError(t, o.Observe(context.Background(), cert(21, 9, 9)))
-	got, ok := sources.Get(r)
+	obs := func(src *Sources) {
+		reader := &headerReader{fakeReader: &fakeReader{at: map[[32]byte]*vrhandoff.Output{{2}: published(r)}}, number: map[[32]byte]uint64{{2}: 3}}
+		o := &Observer{Reader: reader, Sources: src, Outputs: NewOutputs()}
+		require.NoError(t, o.Observe(context.Background(), cert(10, 1, 1)))
+		pub := cert(11, 2, 2)
+		pub.ShardRound = 4
+		require.NoError(t, o.Observe(context.Background(), pub))
+	}
+	obs(restarted)
+	obs(fresh)
+	a, ok := restarted.Get(r)
 	require.True(t, ok)
-	require.EqualValues(t, 3, got.EVMBlockNumber, "the verified EVM height, not the shard round")
-	require.False(t, sources.HasLegacy())
-
-	// the file is now version 2, and a restarted root serves the same entry as the one that upgraded
+	b, ok := fresh.Get(r)
+	require.True(t, ok)
+	require.Equal(t, a, b, "the restarted root and the fresh root hold the same source")
+	require.EqualValues(t, 3, a.EVMBlockNumber)
+	// and the file the restarted root now writes is a version 2 file it reloads as it is
 	again, err := NewSources(path)
 	require.NoError(t, err)
-	got2, ok := again.Get(r)
+	c, ok := again.Get(r)
 	require.True(t, ok)
-	require.Equal(t, got, got2)
-	raw, err := os.ReadFile(path)
+	require.Equal(t, a, c)
+}
+
+// The order and the map change together: recording more than the capacity while lookups are in flight leaves the memory, the order and the
+// file in agreement.
+func TestEvictionKeepsTheOrderTheMapAndTheFileTogether(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "vr-sources.json")
+	sources, err := NewSources(path)
 	require.NoError(t, err)
-	require.Contains(t, string(raw), `"version": 2`)
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					for b := 0; b < 20; b++ {
+						sources.Get(vrschema.Word{byte(b)})
+					}
+				}
+			}
+		}()
+	}
+	total := maxSources + 5
+	for i := 0; i < total; i++ {
+		_, err := sources.Record(SourceEntry{Source: vrhandoff.Source{ResultID: bytes.Repeat([]byte{byte(i)}, 32), EVMBlockHash: bytes.Repeat([]byte{1}, 32), EVMBlockNumber: uint64(i),
+			CertRootRound: uint64(i + 1), OutputCommit: bytes.Repeat([]byte{2}, 32)}})
+		require.NoError(t, err)
+	}
+	close(stop)
+	wg.Wait()
+	require.Len(t, sources.order, maxSources)
+	require.Len(t, sources.by, maxSources)
+	for _, r := range sources.order {
+		_, ok := sources.by[r]
+		require.True(t, ok, "every retained result is in the map")
+	}
+	reloaded, err := NewSources(path)
+	require.NoError(t, err)
+	require.Equal(t, sources.order, reloaded.order, "the file holds exactly the retained results")
+	require.Equal(t, sources.by, reloaded.by)
 }
 
 // A reader that cannot resolve a block's number records no source: the shard round is never recorded as a height.
@@ -138,73 +198,6 @@ type plainReader struct{ f *fakeReader }
 
 func (p *plainReader) OpenOutput(ctx context.Context, b, root [32]byte) (*vrhandoff.Output, error) {
 	return p.f.OpenOutput(ctx, b, root)
-}
-
-// Partial migration (astra r7): two legacy entries, the second's header unavailable. Recording another result writes a file that KEEPS the
-// unresolved entry marked pending; after a restart the second survives and is still pending, and a later resolution migrates it.
-func TestAPartialMigrationNeverDropsAnUnresolvedLegacyEntry(t *testing.T) {
-	r1, r2, r3 := vrschema.Word{0x51}, vrschema.Word{0x52}, vrschema.Word{0x53}
-	h1, h2 := bytes.Repeat([]byte{0x71}, 32), bytes.Repeat([]byte{0x72}, 32)
-	entry := func(r vrschema.Word, h []byte, round uint64) string {
-		return `{"resultId":"0x` + hex.EncodeToString(r[:]) + `","evmBlockHash":"0x` + hex.EncodeToString(h) + `","evmBlockNumber":` + "4" + `,"certRootRound":` +
-			string(rune('0'+round)) + `,"outputCommit":"0x` + hex.EncodeToString(bytes.Repeat([]byte{0xc0}, 32)) + `","certUcTime":1}`
-	}
-	path := filepath.Join(t.TempDir(), "vr-sources.json")
-	require.NoError(t, os.WriteFile(path, []byte("["+entry(r1, h1, 5)+","+entry(r2, h2, 6)+"]"), 0o600))
-	sources, err := NewSources(path)
-	require.NoError(t, err)
-	var k1, k2 [32]byte
-	copy(k1[:], h1)
-	copy(k2[:], h2)
-	reader := &partialReader{headerReader: &headerReader{fakeReader: &fakeReader{at: map[[32]byte]*vrhandoff.Output{{2}: published(r3)}}, number: map[[32]byte]uint64{k1: 3, k2: 8}},
-		unavailable: map[[32]byte]bool{k2: true}}
-	o := &Observer{Reader: reader, Sources: sources, Outputs: NewOutputs()}
-	ctx := context.Background()
-	require.NoError(t, o.Observe(ctx, cert(10, 1, 1)))
-	got, ok := sources.Get(r1)
-	require.True(t, ok)
-	require.EqualValues(t, 3, got.EVMBlockNumber, "the first entry migrated")
-	_, ok = sources.Get(r2)
-	require.False(t, ok, "the second is unavailable, not wrong")
-	require.True(t, sources.HasLegacy())
-
-	// recording another result must not drop the unresolved one
-	require.NoError(t, o.Observe(ctx, cert(11, 2, 2)))
-	_, ok = sources.Get(r3)
-	require.True(t, ok)
-
-	again, err := NewSources(path)
-	require.NoError(t, err)
-	require.True(t, again.HasLegacy(), "the unresolved entry survived the restart and is still pending")
-	_, ok = again.Get(r2)
-	require.False(t, ok)
-	g1, ok := again.Get(r1)
-	require.True(t, ok)
-	require.EqualValues(t, 3, g1.EVMBlockNumber)
-
-	// once its header is available the pending entry migrates, durably
-	reader.unavailable = nil
-	o2 := &Observer{Reader: reader, Sources: again, Outputs: NewOutputs()}
-	require.NoError(t, o2.Observe(ctx, cert(20, 9, 9)))
-	g2, ok := again.Get(r2)
-	require.True(t, ok)
-	require.EqualValues(t, 8, g2.EVMBlockNumber)
-	final, err := NewSources(path)
-	require.NoError(t, err)
-	require.False(t, final.HasLegacy())
-}
-
-// partialReader fails the header of chosen blocks.
-type partialReader struct {
-	*headerReader
-	unavailable map[[32]byte]bool
-}
-
-func (p *partialReader) HeaderNumber(ctx context.Context, h [32]byte) (uint64, error) {
-	if p.unavailable[h] {
-		return 0, errors.New("header unavailable")
-	}
-	return p.headerReader.HeaderNumber(ctx, h)
 }
 
 // A fetched source's height is never trusted (sol r5): incumbents of an earlier build agree on the shard round 4, and the root records the
