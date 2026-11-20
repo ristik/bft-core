@@ -41,9 +41,9 @@ elif [ -n "${POST_M2A_URETH_BIN:-}" ] || [ -n "${POST_M2A_URETH_COMMIT:-}" ]; th
   M2_RUN_LOG_DIR=${M2_RUN_LOG_DIR:-/Users/risto/uni/agre/briefs/devnet-runs/m2-p2${LANE_RUN_TAG}-$(date -u +%Y%m%dT%H%M%SZ)}
   echo "profile-2 logs: $M2_RUN_LOG_DIR"
 elif [ "${VR_LANE:-0}" = 1 ] && [ "${M2_PROFILE2:-0}" = 1 ]; then
-  # a VR generation runs the client of the combined lane (ureth main), the pin scripts/ci/lane-pins.json holds: an older client (the vt15 lane pin)
-  # fails engine-api's execution-profile check (bft-core#1200). POST_M2A_URETH_BIN and _COMMIT (above) still name another client explicitly.
-  URETH_PIN_COMMIT=$(python3 -I -c 'import json,sys;import re;c=json.load(open(sys.argv[1]))["components"]["ureth"]["commit"];assert isinstance(c,str) and re.fullmatch("[0-9a-f]{40}",c),"not a 40-hex commit: %r"%(c,);print(c)' scripts/ci/lane-pins.json) || { echo "the ureth pin of scripts/ci/lane-pins.json is unreadable" >&2; exit 2; }
+  # The VR roots replay historical observations from their paired client. Use the VR resolver and
+  # archive-proof support from ureth #106 until the shared lane pin includes those changes.
+  URETH_PIN_COMMIT=46fdcfc05d1a178dd61dc6e2b364c4a0b42032a7
   M2_RUN_LOG_DIR=${M2_RUN_LOG_DIR:-/Users/risto/uni/agre/briefs/devnet-runs/m2-p2${LANE_RUN_TAG}-$(date -u +%Y%m%dT%H%M%SZ)}
   echo "profile-2 logs: $M2_RUN_LOG_DIR"
 elif [ "${M2_PROFILE2:-0}" = 1 ]; then
@@ -151,6 +151,8 @@ echo "ureth engine.persistence-threshold=$d2cPersistenceThreshold blocks (D2C re
 # client and verifies it by revision. It used to run the stock `reth` on PATH; that client cannot
 # start a shard node, so every paired lane was pointed at a client it would refuse.
 urethPinResolve || exit 1
+urethPinRequireStateProofs "$URETH_BIN" || exit 2
+if [ "${VR_LANE:-0}" = 1 ]; then export VR_ARCHIVE_STATE_PROOFS=1; fi
 export URETH_PIN_FEE_COLLECTOR
 bftSourceCommit=${BFT_SOURCE_COMMIT:-$(git rev-parse HEAD 2>/dev/null)}
 echo "bft source commit=$bftSourceCommit"
@@ -461,10 +463,6 @@ fi
 echo
 echo "=== 2. start one reth per validator on that chain spec ==="
 rethStorageArgs=()
-rethStateProofArgs=(--rpc.eth-proof-window 64)
-if [ "${VR_LANE:-0}" = 1 ] && [ "${VR_ARCHIVE_STATE_PROOFS:-0}" = 1 ]; then
-  rethStateProofArgs=(--unicity.archive-state-proofs)
-fi
 if [ "$postM2aMode" = t1 ] || [ "$postM2aMode" = t4 ]; then rethStorageArgs=(--storage.v2 false); fi
 for i in $(seq 1 "$validators"); do
   mkdir -p "test-nodes/reth$i"
@@ -478,7 +476,7 @@ for i in $(seq 1 "$validators"); do
     --authrpc.jwtsecret "test-nodes/evm$i/jwt.hex" \
     --authrpc.addr 127.0.0.1 --authrpc.port $((rethEngineBase + i - 1)) \
     --http --http.addr 127.0.0.1 --http.port $((rethEthBase + i - 1)) \
-    --http.api eth,net,web3,admin,debug "${rethStateProofArgs[@]}" \
+    --http.api eth,net,web3,admin,debug $(urethPinStateProofFlags) \
     --port $((rethP2PBase + i - 1)) --disable-discovery \
     --ipcdisable --engine.persistence-threshold "$d2cPersistenceThreshold" \
     --builder.gaslimit "${URETH_BUILDER_GASLIMIT:-30000000}" \
@@ -1111,7 +1109,7 @@ fi
 
 echo
 echo "=== 6. D1 continuous certified execution through block $rounds ==="
-echo "timing: witness attempt=400ms episode=500ms, T2=5000ms, state proofs: ${rethStateProofArgs[*]}"
+echo "timing: witness attempt=400ms episode=500ms, T2=5000ms, state proofs: $(urethPinStateProofFlags)"
 probeArgs=()
 faultArgs=()
 traceArgs=()
@@ -1299,7 +1297,7 @@ if [ "${M1_FEE_ACCOUNTING:-0}" = 1 ]; then
         --authrpc.jwtsecret test-nodes/evm1/jwt.hex \
         --authrpc.addr 127.0.0.1 --authrpc.port "$rethEngineBase" \
         --http --http.addr 127.0.0.1 --http.port "$rethEthBase" \
-        --http.api eth,net,web3,admin,debug --rpc.eth-proof-window 64 \
+        --http.api eth,net,web3,admin,debug $(urethPinStateProofFlags) \
         --port "$rethP2PBase" --disable-discovery --ipcdisable \
         --engine.persistence-threshold "$d2cPersistenceThreshold" --builder.gaslimit "${URETH_BUILDER_GASLIMIT:-30000000}" \
         $(urethPinUnicityFlags) >test-nodes/reth1/reth-restart.log 2>&1 &

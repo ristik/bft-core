@@ -48,6 +48,19 @@ cases=$((cases+1)); [ "$(unset rethEthBase; LANE_SLOT=0 bash -c 'source scripts/
 cases=$((cases+1)); [ "$(unset LANE_SLOT rethEthBase; bash -c 'source scripts/lib/lane-slot.sh; lane_reth_eth_port 2')" = 18546 ] || fail "the default slot validator 2 is not on 18546"
 cases=$((cases+1)); [ "$(LANE_SLOT=2 rethEthBase=20545 bash -c 'source scripts/lib/lane-slot.sh; lane_reth_eth_port 4')" = 20548 ] || fail "an explicit rethEthBase is not honoured"
 cases=$((cases+1)); grep -q 'lane_reth_eth_port' helper.sh && ! grep -q 'rethEthBase:-18545' helper.sh || fail "helper.sh still falls back to slot 0's port"
+# A paired VR launch enables archive proofs without an opt-in. Ordinary lanes keep the proof window.
+source scripts/lib/reth-pin.sh
+archive_preflight() { VR_LANE=1 urethPinRequireStateProofs "$1"; }
+printf '#!/usr/bin/env bash\necho "  --unicity.archive-state-proofs"\n' >"$d/archive-reth"
+printf '#!/usr/bin/env bash\necho "  --rpc.eth-proof-window <BLOCKS>"\n' >"$d/window-reth"
+chmod +x "$d/archive-reth" "$d/window-reth"
+mf "paired VR: old ureth is refused in preflight" archive_preflight "$d/archive-reth" "$d/window-reth" 'VR_LANE=1 requires .*--unicity.archive-state-proofs'
+proof_flags_are() {
+  [ "$(urethPinStateProofFlags)" = "$1" ]
+}
+ok env -u VR_ARCHIVE_STATE_PROOFS VR_LANE=1 bash -c 'source scripts/lib/reth-pin.sh; [ "$(urethPinStateProofFlags)" = --unicity.archive-state-proofs ]'
+ok env VR_LANE=1 VR_ARCHIVE_STATE_PROOFS=0 bash -c 'source scripts/lib/reth-pin.sh; [ "$(urethPinStateProofFlags)" = --unicity.archive-state-proofs ]'
+cases=$((cases+1)); VR_LANE=0 VR_ARCHIVE_STATE_PROOFS=1 proof_flags_are '--rpc.eth-proof-window 64' || fail "ordinary paired lane lost its 64-block window"
 # ---- the roots' activation events: every root, rule, epoch E, latched AND active with currentEpoch >= E ------------------------------------------------
 mkroots "$d/rg"; roots_pred() { vrs_check_all_roots "$1" "$rid" $E 1 2 3 4; }
 edit() { mkroots "$d/rb"; "$@"; }   # a bad copy: a fresh good set, then ONE edit

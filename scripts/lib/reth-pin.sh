@@ -13,6 +13,26 @@
 # inline workflow steps they can only run on a hosted runner; here the workflow and a local run
 # execute the same functions, and the self-test executes their failure paths deliberately.
 
+# The queue may replay observations older than the ordinary proof window. Every paired VR client
+# (including spare execution clients) needs archive proofs for the same role.
+urethPinStateProofFlags() {
+  if [ "${VR_LANE:-0}" = 1 ]; then
+    echo --unicity.archive-state-proofs
+  else
+    echo --rpc.eth-proof-window 64
+  fi
+}
+
+urethPinRequireStateProofs() {
+  [ "${VR_LANE:-0}" = 1 ] || return 0
+  local help
+  if ! help=$(rethPinRunBounded 5 "$1" node --help) ||
+     ! grep -Eq -- '(^|[[:space:]])--unicity\.archive-state-proofs([[:space:]]|$)' <<<"$help"; then
+    rethPinErr "VR_LANE=1 requires a paired ureth with --unicity.archive-state-proofs for historical VR observations ($1)"
+    return 1
+  fi
+}
+
 # --- the pin ------------------------------------------------------------------------------------
 #
 # The approved execution client: ristik/ureth branch unicity/main, byte-identical today to upstream
