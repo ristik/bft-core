@@ -29,7 +29,7 @@ firing Probe validator=2
 expect_quiet Probe validator=1
 echo "PASS: only valid Prometheus responses can satisfy an alert check"
 
-for failure in timeout evidence interrupt restart none; do
+for failure in timeout evidence interrupt restart launch-interrupt probe-interrupt none; do
   set +e
   (
     set -e
@@ -51,6 +51,9 @@ for failure in timeout evidence interrupt restart none; do
       [ "$1" = 3 ]
       echo restart >>"$tmp/$failure.trace"
       restart_attempts=$((restart_attempts+1))
+      if [ "$failure" = launch-interrupt ]; then builtin kill -TERM "$BASHPID"; fi
+      echo 913 >"$MON/exporter3.pid"
+      if [ "$failure" = probe-interrupt ]; then builtin kill -TERM "$BASHPID"; fi
       [ "$failure" != restart ] || [ "$restart_attempts" -gt 1 ]
     }
     expect_quiet() { :; }
@@ -60,7 +63,7 @@ for failure in timeout evidence interrupt restart none; do
     snap() { [ "$failure" != evidence ]; }
     restore_scrapes() { :; }
     trap cleanup EXIT
-    trap 'exit 143' TERM
+    trap interrupt_acceptance TERM
     check_scrape
   )
   rc=$?
@@ -68,11 +71,11 @@ for failure in timeout evidence interrupt restart none; do
   expected=1
   trace=$'stop\nrestart'
   case "$failure" in
-    interrupt) expected=143 ;;
+    interrupt|launch-interrupt|probe-interrupt) expected=143 ;;
     restart) trace=$'stop\nrestart\nrestart' ;;
     none) expected=0 ;;
   esac
-  if [ "$rc" != "$expected" ] || [ "$(cat "$tmp/$failure.trace")" != "$trace" ]; then
+  if [ "$rc" != "$expected" ] || [ "$(cat "$tmp/$failure.trace")" != "$trace" ] || [ "$(cat "$tmp/exporter3.pid")" != 913 ]; then
     echo "Scrape check violated the exporter restart contract ($failure, exit $rc)" >&2
     exit 1
   fi

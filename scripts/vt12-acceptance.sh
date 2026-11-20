@@ -112,9 +112,16 @@ restore_scrapes() {
   cat "$work/prometheus.yml" >"$MON/prometheus.yml"
   curl -fsS --max-time 10 -X POST "$PROM/-/reload" >/dev/null
 }
+interrupt_acceptance() {
+  if [ "${exporter_restarting:-0}" = 1 ]; then
+    restart_interrupted=1
+    return
+  fi
+  exit 143
+}
 restart_stopped_exporter() {
   [ -n "$stopped_exporter_pid" ] || return 0
-  local attempt pattern='ubft validator exporter.*v3.json'
+  local attempt rc=0 pattern='ubft validator exporter.*v3.json'
   # The trap may run before the original process finishes shutting down.
   if owned_pid "$stopped_exporter_pid" "$pattern"; then
     kill "$stopped_exporter_pid" 2>/dev/null || true
@@ -127,8 +134,16 @@ restart_stopped_exporter() {
       return 1
     fi
   fi
-  start_exporter 3 || return 1
-  stopped_exporter_pid=
+  # Publish and probe the replacement before an interrupt can enter cleanup and start a second one.
+  exporter_restarting=1
+  start_exporter 3 || rc=$?
+  if [ "$rc" = 0 ]; then stopped_exporter_pid=; fi
+  exporter_restarting=0
+  if [ "${restart_interrupted:-0}" = 1 ]; then
+    restart_interrupted=0
+    exit 143
+  fi
+  return "$rc"
 }
 cleanup() {
   trap '' INT TERM HUP
@@ -294,7 +309,7 @@ work=$(mktemp -d)
 test -r "$MON/prometheus.yml"
 cp "$MON/prometheus.yml" "$work/prometheus.yml"
 trap cleanup EXIT
-trap 'exit 143' INT TERM HUP
+trap interrupt_acceptance INT TERM HUP
 
 log "== baseline: targets, scraped unicity_* series, rule evaluation"
 api api/v1/targets >"$EVID/targets.json"
