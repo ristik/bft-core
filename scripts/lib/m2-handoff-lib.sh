@@ -69,6 +69,7 @@ m2_start_root() { # node installEpoch bootnode  (an empty install epoch starts a
     declare -F "${UTB_ROOT_FLAGS_FN:-}" >/dev/null || { echo "m2_start_root: the UTB lane's UTB_ROOT_FLAGS_FN is not a defined function" >&2; return 1; }
     shardConfArgs+=($("$UTB_ROOT_FLAGS_FN" "$node")) || return 1
   fi
+  lane_port_preflight "$(m2_p2p_port "$node")" "root$node p2p" && lane_port_preflight "$port" "root$node rpc" || return 1
   mkdir -p "test-nodes/root$node"
   for i in $(seq 1 90); do
     UBFT_Q4_SHIM_DIR="${Q4_SHIM_DIR:+$Q4_SHIM_DIR/root$node}" ${Q4_ROOT_BIN:-build/ubft} root-node run --home "test-nodes/root$node" \

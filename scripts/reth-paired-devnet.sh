@@ -456,6 +456,7 @@ for i in $(seq 1 "$validators"); do
   # satisfy reth - nothing here pre-authenticates on its behalf.
   openssl rand -hex 32 >"test-nodes/evm$i/jwt.hex"
   registry_layout_require || exit 1
+  for p in $((rethEngineBase + i - 1)) $((rethEthBase + i - 1)) $((rethP2PBase + i - 1)); do lane_port_preflight "$p" "reth$i" || exit 1; done
   "$URETH_BIN" node --chain "$chainSpec" --datadir "test-nodes/reth$i/dd" \
     --authrpc.jwtsecret "test-nodes/evm$i/jwt.hex" \
     --authrpc.addr 127.0.0.1 --authrpc.port $((rethEngineBase + i - 1)) \
@@ -775,7 +776,7 @@ registry_layout_require || exit 1
 "$URETH_BIN" node --chain test-nodes/laterfork-genesis.json --datadir test-nodes/reth-laterfork/dd \
   --authrpc.jwtsecret test-nodes/evm1/jwt.hex --authrpc.addr 127.0.0.1 --authrpc.port $((18951+LANE_PORT_OFFSET)) \
   --http --http.addr 127.0.0.1 --http.port $((18945+LANE_PORT_OFFSET)) --http.api eth,net,web3 \
-  --port $((30799+LANE_PORT_OFFSET)) --disable-discovery --ipcdisable \
+  --port $((30759+LANE_PORT_OFFSET)) --disable-discovery --ipcdisable \
   $(urethPinUnicityFlags) \
   >test-nodes/reth-laterfork/reth.log 2>&1 &
 echo $! >test-nodes/reth-laterfork/pid

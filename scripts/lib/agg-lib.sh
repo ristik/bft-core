@@ -17,7 +17,9 @@ ANYAGE_SHARD_CONF_FN=agg_conf   # the callback scripts/lib/m2-handoff-lib.sh m2_
 # aggregator-go (internal/config/config.go Validate): a shard conf with a non-empty shard ID REQUIRES SHARDING_MODE=bft-shard (with BFT_ENABLED,
 # the shard's own conf/PDR and signing key, and SHARDING_CHILD_SHARD_ID unset); the empty shard 0x80 of a one-shard partition REQUIRES standalone.
 agg_mode() { if [ "$aggShards" = 1 ]; then echo standalone; else echo bft-shard; fi; }
-agg_port() { echo $((${AGG_PORT:-$((3001+LANE_PORT_OFFSET))} + $1 - 1)); }
+# The aggregator ports are slot-derived and nothing else: an absolute AGG_PORT would escape the slot reservation (and could meet another slot's aggregator).
+[ -z "${AGG_PORT:-}" ] || [ "$AGG_PORT" = "$((3001+LANE_PORT_OFFSET))" ] || { echo "AGG_PORT=$AGG_PORT is not the slot-derived $((3001+LANE_PORT_OFFSET)) (LANE_SLOT=$LANE_SLOT): unset it; the slot sets the aggregator's port" >&2; return 1 2>/dev/null || exit 1; }
+agg_port() { echo $((3001+LANE_PORT_OFFSET + $1 - 1)); }
 
 # The aggregator shard configurations, written under test-nodes/ BEFORE the roots start (the roots register every test-nodes/shard-conf-* file).
 # The root's aggregator_rsmt_v1 verifier demands an SMT consistency proof with every non-empty certification request; aggregator-go ae08165
@@ -39,6 +41,7 @@ agg_prepare_confs() {
 start_agg() { # K (1-based): one aggregator-go shard
   local k=${1:-1} d port
   d=$(agg_dir "$k"); port=$(agg_port "$k")
+  lane_port_preflight "$port" "aggregator $k" && lane_port_preflight "$((29100+LANE_PORT_OFFSET + k))" "aggregator $k bft p2p" || return 1
   : "${AGG_BIN:?set AGG_BIN to the pinned aggregator-go binary}"
   : "${AGG_MONGO:=mongodb://127.0.0.1:$((27117+LANE_PORT_OFFSET))/aggregator?replicaSet=rs0&directConnection=true}"
   local boot

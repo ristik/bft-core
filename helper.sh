@@ -157,6 +157,7 @@ function start_root_nodes() {
     # ROOT_DEBUG_ROOTS="1 2": those roots log at debug whatever ROOT_LOG_LEVEL says (one root's round/leader lines without 128 debug logs)
     local rootLogLevel="${ROOT_LOG_LEVEL:-debug}"
     case " ${ROOT_DEBUG_ROOTS:-} " in *" $i "*) rootLogLevel=debug ;; esac
+    lane_port_preflight "$p2pPort" "root$i p2p" && lane_port_preflight "$rpcPort" "root$i rpc" || exit 1
     UBFT_Q4_SHIM_DIR="${Q4_SHIM_DIR:+$Q4_SHIM_DIR/root$i}" ${Q4_ROOT_BIN:-build/ubft} root-node run \
                     --home test-nodes/root$i \
                     --address "/ip4/127.0.0.1/tcp/$p2pPort" \
@@ -555,6 +556,7 @@ function archive_replicas_of() {
 function start_one_evm_validator() {
   local i=$1 n=$2 partitionID=$3 rootBoot=$4 executor=$5 exposeRPC=${6:-}
   local port=$((evmValidatorPortStart + i - 1))
+  lane_port_preflight "$port" "shard node $i p2p" || return 1
 
   local bootnodes="$rootBoot"
   if [ "$#" -ge 7 ]; then

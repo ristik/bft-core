@@ -25,10 +25,21 @@ lane_slot_init() {
 }
 lane_slot_init || { return 2 2>/dev/null || exit 2; }
 
+# lane_port_preflight PORT LABEL: refuse, clearly, to start a listener on a port something already listens on (another lane, a stale process), instead of
+# colliding silently. A node just stopped may still hold its port for a moment: it is retried for 5 s. Called right before each listener starts.
+lane_port_listening() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
+lane_port_preflight() {
+  local i
+  for i in 1 2 3 4 5 6 7 8 9 10; do lane_port_listening "$1" || return 0; sleep 0.5; done
+  echo "lane slot $LANE_SLOT: $2 port $1 is already in use (something listens on it: another lane, or a stale process). Not starting it; free the port or use another slot." >&2
+  return 1
+}
+
 # lane_port DEFAULT: the default port shifted into this lane's slot
 lane_port() { echo $(($1 + LANE_PORT_OFFSET)); }
 
-# The table: name, default port (slot 0), count, class (core: every paired lane; aux: one lane's, see above). Everything a lane listens on; the lane scripts take their ports from here by value.
+# The table: name, default port (slot 0), count, class. Classes: core (every paired lane), neg (the section-3 negative clients the default paired invocation
+# starts), f8, f6c, seed (one lane's each). A lane profile (below) is a set of classes. Everything a lane listens on; the lane scripts take their ports from here by value.
 lane_port_table() {
   cat <<'EOF'
 reth-eth 18545 6
@@ -39,52 +50,65 @@ reth-engine-bystander 18581 4
 reth-p2p-bystander 30421 4
 d2c-proof-proxy 18645 1
 d2c-engine-proxy 18651 1
-neg-reth-wrong-engine 18699 1 aux
-neg-reth-wrongchain 18745 1 aux
-neg-reth-wrongchain-engine 18751 1 aux
-neg-reth-othergenesis 18845 1 aux
-neg-reth-othergenesis-engine 18851 1 aux
-neg-reth-laterfork 18945 1 aux
-neg-reth-laterfork-engine 18951 1 aux
-neg-reth-p2p 30499 1 aux
-neg-reth-p2p-2 30599 1 aux
-neg-reth-p2p-3 30699 1 aux
-neg-reth-p2p-4 30799 1 aux
-neg-shard-p2p 28001 4 aux
+neg-reth-wrong-engine 18699 1 neg
+neg-reth-wrongchain 18745 1 neg
+neg-reth-wrongchain-engine 18751 1 neg
+neg-reth-othergenesis 18845 1 neg
+neg-reth-othergenesis-engine 18851 1 neg
+neg-reth-laterfork 18945 1 neg
+neg-reth-laterfork-engine 18951 1 neg
+neg-reth-p2p 30499 1 neg
+neg-reth-p2p-2 30599 1 neg
+neg-reth-p2p-3 30699 1 neg
+neg-reth-p2p-4 30759 1 neg
+neg-shard-p2p 28001 4 neg
 root-rpc 25866 8
 root-p2p 26662 8
 mongo 27117 1
 shard-p2p 28111 6
 shard-dissemination 28211 6
 shard-rpc 28311 6
-f8-http 28601 3 aux
+f8-http 28601 3 f8
 aggregator-bft-p2p 29101 2
 aggregator-http 3001 2
-seed-serve 38480 4 aux
-seed-bundle 38600 8 aux
-f6c-root-p2p 36662 1 aux
-f6c-root-rpc 36866 1 aux
-f6c-shard-p2p 36111 1 aux
-f6c-shard-rpc 36311 1 aux
-f6c-backup-root-p2p 46662 1 aux
-f6c-backup-root-rpc 46866 1 aux
-f6c-backup-val-p2p 46111 6 aux
-f6c-backup-val-rpc 46311 6 aux
-f6c-backup-reth-engine 48551 6 aux
-f6c-backup-reth-eth 48545 6 aux
-f6c-backup-reth-p2p 40401 6 aux
+seed-serve 38480 4 seed
+seed-bundle 38600 8 seed
+f6c-root-p2p 36662 1 f6c
+f6c-root-rpc 36866 1 f6c
+f6c-shard-p2p 36111 1 f6c
+f6c-shard-rpc 36311 1 f6c
+f6c-backup-root-p2p 46662 1 f6c
+f6c-backup-root-rpc 46866 1 f6c
+f6c-backup-val-p2p 46111 6 f6c
+f6c-backup-val-rpc 46311 6 f6c
+f6c-backup-reth-engine 48551 6 f6c
+f6c-backup-reth-eth 48545 6 f6c
+f6c-backup-reth-p2p 40401 6 f6c
 EOF
 }
 
 # lane_slot_ports [SLOT]: "name port" for every port of the slot (the signing-authority sockets are paths under the tree's test-nodes/, not ports)
-# lane_slot_ephemeral_conflicts SLOT [CLASS]: "name port" of the slot's listeners (default class: core) inside the host's ephemeral range
+# lane_profile_classes PROFILE[,PROFILE...]: the classes of the listeners the lane profile(s) start
+#   paired-default (the default; reth-paired-devnet.sh with its section 3)  core neg      f6b  core      f6c  f6c      seed  core seed      f8  core neg f8
+lane_profile_classes() {
+  local p out=
+  for p in $(echo "$1" | tr ',' ' '); do
+    case "$p" in
+      paired-default) out="$out core neg" ;; f6b) out="$out core" ;; f6c) out="$out f6c" ;; seed) out="$out core seed" ;; f8) out="$out core neg f8" ;;
+      *) echo "unknown lane profile '$p' (paired-default, f6b, f6c, seed, f8)" >&2; return 2 ;;
+    esac
+  done
+  echo $out | tr ' ' '\n' | sort -u | tr '\n' ' '
+}
+
+# lane_slot_ephemeral_conflicts SLOT [CLASSES]: "name port" of the slot's listeners of those classes (default: core) inside the host's ephemeral range
 # (ip_local_port_range) and not in ip_local_reserved_ports. Prints nothing where /proc/sys/net/ipv4 is absent (not Linux).
 lane_slot_ephemeral_conflicts() {
-  local slot=$1 class=${2:-core} lo hi reserved name port c
+  local slot=$1 classes=${2:-core} lo hi reserved name port c
   read -r lo hi <"${LANE_PORT_RANGE_FILE:-/proc/sys/net/ipv4/ip_local_port_range}" 2>/dev/null || return 0
   reserved=$(cat "${LANE_PORT_RESERVED_FILE:-/proc/sys/net/ipv4/ip_local_reserved_ports}" 2>/dev/null || true)
   while read -r name port c; do
-    [ "$c" = "$class" ] || continue
+    case " $classes " in *" $c "*) ;; *) continue ;; esac
     [ "$port" -ge "$lo" ] && [ "$port" -le "$hi" ] || continue
     if [ -n "$reserved" ] && echo "$reserved" | tr ',' '\n' | awk -F- -v p="$port" '{a=$1; b=($2==""?$1:$2)} a!=""&&p>=a&&p<=b{f=1} END{exit !f}'; then continue; fi
     echo "$name $port"
