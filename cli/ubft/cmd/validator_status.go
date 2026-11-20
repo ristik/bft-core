@@ -55,7 +55,7 @@ type validatorStatusReport struct {
 	RecordCount  uint64   `json:"recordCount"`
 	NextBoundary string   `json:"nextBoundary"`
 	Activations  []string `json:"activations,omitempty"`
-	PublicHead   uint64   `json:"publicHead"`
+	PublicHead   *uint64  `json:"publicHead"` // null when the public head could not be read, never 0
 	// PublicHeadUnknown: the public head could not be read, so PublicHead is not a measurement (see Unknown).
 	PublicHeadUnknown bool    `json:"publicHeadUnknown,omitempty"`
 	PublicHeadAge     string  `json:"publicHeadAge"`
@@ -315,7 +315,7 @@ func validatorStatus(ctx context.Context, f *validatorStatusFlags) (*validatorSt
 		r.PublicHeadUnknown = true
 		r.Unknown = append(r.Unknown, "public head: "+err.Error())
 	} else {
-		r.PublicHead = n
+		r.PublicHead = &n
 		r.PublicHeadAge = time.Since(time.Unix(int64(ts), 0)).Round(time.Second).String()
 	}
 	if busy, err := syncing(ctx, ch.rpc); err != nil {
@@ -425,10 +425,10 @@ func (r *validatorStatusReport) text(w io.Writer) {
 	if r.PublicSyncing != nil {
 		pub = fmt.Sprintf("syncing %v", *r.PublicSyncing)
 	}
-	if r.PublicHeadUnknown {
+	if r.PublicHeadUnknown || r.PublicHead == nil {
 		fmt.Fprintf(w, "sync: public head UNKNOWN (%s)", pub)
 	} else {
-		fmt.Fprintf(w, "sync: public head %d (%s old, %s)", r.PublicHead, r.PublicHeadAge, pub)
+		fmt.Fprintf(w, "sync: public head %d (%s old, %s)", *r.PublicHead, r.PublicHeadAge, pub)
 	}
 	if r.LocalRPC != "" {
 		fmt.Fprintf(w, "; local ureth %s: %s", r.LocalRPC, r.LocalSync)

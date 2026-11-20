@@ -15,8 +15,9 @@ import (
 // syncView is the sync part of `ubft validator status` (VT-11): the node's height, how fast it closes the gap to the head, the time that takes, and
 // the sources its data came from.
 type syncView struct {
-	LocalHead  *uint64 `json:"localHead,omitempty"`
-	PublicHead uint64  `json:"publicHead"`
+	LocalHead *uint64 `json:"localHead,omitempty"`
+	// PublicHead is null when the public head could not be read (never 0).
+	PublicHead *uint64 `json:"publicHead"`
 	// PublicHeadUnknown: the public head could not be read; no behind-count, rate or ETA is computed.
 	PublicHeadUnknown bool   `json:"publicHeadUnknown,omitempty"`
 	Behind            *int64 `json:"behind,omitempty"`
@@ -66,11 +67,11 @@ func buildSyncView(ctx context.Context, v *loadedValidator, r *validatorStatusRe
 	if r.LocalHead == nil {
 		return s
 	}
-	behind := int64(r.PublicHead) - int64(*r.LocalHead)
+	behind := int64(*r.PublicHead) - int64(*r.LocalHead)
 	s.Behind = &behind
 	if sample > 0 && v.cfg.LocalRPC != "" {
 		s.ETA = "unknown (a head sample was unavailable)"
-		l0, p0, t0 := *r.LocalHead, r.PublicHead, time.Now()
+		l0, p0, t0 := *r.LocalHead, *r.PublicHead, time.Now()
 		select {
 		case <-ctx.Done():
 			return s
@@ -84,7 +85,7 @@ func buildSyncView(ctx context.Context, v *loadedValidator, r *validatorStatusRe
 			dt := time.Since(t0).Seconds()
 			rate, hrate := float64(int64(l1)-int64(l0))/dt, float64(int64(p1)-int64(p0))/dt
 			s.RateBlocksPerSec, s.HeadRateBlocksPerSec = &rate, &hrate
-			s.LocalHead, s.PublicHead = &l1, p1
+			s.LocalHead, s.PublicHead = &l1, &p1
 			b := int64(p1) - int64(l1)
 			s.Behind = &b
 			s.ETA = etaOf(b, rate, hrate)
@@ -97,9 +98,9 @@ func (s *syncView) text(w io.Writer) {
 	if s == nil {
 		return
 	}
-	line := fmt.Sprintf("catch-up: public head %d", s.PublicHead)
-	if s.PublicHeadUnknown {
-		line = "catch-up: public head unknown"
+	line := "catch-up: public head unknown"
+	if s.PublicHead != nil && !s.PublicHeadUnknown {
+		line = fmt.Sprintf("catch-up: public head %d", *s.PublicHead)
 	}
 	if s.LocalHead != nil {
 		line += fmt.Sprintf(", local head %d", *s.LocalHead)

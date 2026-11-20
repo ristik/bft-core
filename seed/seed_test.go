@@ -768,3 +768,50 @@ func TestResolveShardConfCarriesTheConfigurationThroughTheActivations(t *testing
 	_, err = resolveShardConf(&supplied, 1, []confStep{bad})
 	require.ErrorContains(t, err, "does not verify")
 }
+
+func TestAReaderKeepsItsVersionAcrossAReplacement(t *testing.T) {
+	f := newFixture(t)
+	parent := t.TempDir()
+	dst := filepath.Join(parent, "out")
+	require.NoError(t, WriteDir(dst, f.files, f.manifest, false))
+	if !canExchange(parent) {
+		t.Skip("no atomic exchange on this filesystem: replacement is refused, the destination is never replaced under a reader")
+	}
+	// a reader opens the directory and reads the manifest ...
+	d, err := openSeedDir(dst)
+	require.NoError(t, err)
+	defer d.Close()
+	m, err := d.read(ManifestName, MaxManifestBytes)
+	require.NoError(t, err)
+	// ... the destination is replaced (twice) mid-read ...
+	g := newFixture(t)
+	require.NoError(t, WriteDir(dst, g.files, g.manifest, true))
+	require.NoError(t, WriteDir(dst, g.files, g.manifest, true))
+	// ... and the reader still reads the payload of ITS version, completely, from the old entries
+	for _, n := range PayloadFiles {
+		b, err := d.read(n, fileLimits[n])
+		require.NoError(t, err, n)
+		require.Equal(t, f.files[n], b, "%s must be the version the reader opened", n)
+	}
+	require.Equal(t, f.manifest, m)
+	// a new reader sees the new version
+	v, err := VerifyDir(dst, Pins{GenesisID: g.pin})
+	require.NoError(t, err)
+	require.Equal(t, ManifestDigest(g.manifest), v.ManifestDigest)
+	// replaced versions are removed only after the grace period, by a later publication
+	old, _ := filepath.Glob(dst + ".old.*")
+	require.NotEmpty(t, old)
+	prev := oldVersionGrace
+	oldVersionGrace = 0
+	defer func() { oldVersionGrace = prev }()
+	require.NoError(t, WriteDir(dst, g.files, g.manifest, true))
+	left, _ := filepath.Glob(dst + ".old.*")
+	require.Len(t, left, 1, "the older versions are collected once past the grace period; only the version this replacement displaced remains")
+}
+
+func TestSourcesWithAQueryOrFragmentAreRefused(t *testing.T) {
+	for _, u := range []string{"http://h/seed?", "http://h/seed?x=1", "http://h/seed#", "http://h/seed#f", "http://h/seed/?"} {
+		_, err := normalize(u)
+		require.ErrorIs(t, err, ErrSeed, u)
+	}
+}

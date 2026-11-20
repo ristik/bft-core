@@ -2,7 +2,12 @@ package seed
 
 import (
 	"errors"
+	"fmt"
 	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
 )
 
 // publishDir puts the staged directory at dir, exclusively. A lock file created with O_EXCL beside dir (dir + ".lock") serialises publications of the
@@ -44,9 +49,44 @@ func publishLocked(stage, dir string, replace bool) error {
 		return os.Rename(stage, dir)
 	}
 	if ok, err := exchangeDirs(stage, dir); ok || err != nil {
-		return err // stage now holds the old directory; the caller removes the stage
+		if ok {
+			// stage now holds the OLD version. A reader that opened the old directory still has its descriptor on it, so the old entries must survive:
+			// the version is kept beside the destination (dir.old.<unix nano>) and removed only after oldVersionGrace, by a later publication
+			kept := fmt.Sprintf("%s.old.%d", dir, time.Now().UnixNano())
+			_ = os.Rename(stage, kept)
+			gcOldVersions(dir, kept)
+		}
+		return err
 	}
 	// No atomic exchange here (macOS, a filesystem without RENAME_EXCHANGE). Nothing has been moved: the existing directory stays exactly as it is, so
 	// its import.json is never absent. Remove it by hand and publish again.
 	return refuse("replacing %s atomically is not supported on this system; nothing was changed: remove it first and publish again", dir)
+}
+
+// oldVersionGrace is how long a replaced version stays on disk for readers that opened it before the replacement (a verification or an HTTP response
+// in flight holds a descriptor on one version and reads its files relative to it).
+var oldVersionGrace = 10 * time.Minute
+
+// gcOldVersions removes the replaced versions of dir (siblings named <dir>.old.<unix nano>) that are older than the grace period (never the one just displaced, keep). Only names of exactly
+// that form are touched.
+func gcOldVersions(dir, keep string) {
+	parent, base := filepath.Split(dir)
+	if parent == "" {
+		parent = "."
+	}
+	ents, err := os.ReadDir(parent)
+	if err != nil {
+		return
+	}
+	for _, e := range ents {
+		rest, ok := strings.CutPrefix(e.Name(), base+".old.")
+		if !ok {
+			continue
+		}
+		ns, err := strconv.ParseInt(rest, 10, 64)
+		if filepath.Join(parent, e.Name()) == keep || err != nil || time.Since(time.Unix(0, ns)) < oldVersionGrace {
+			continue
+		}
+		_ = os.RemoveAll(filepath.Join(parent, e.Name()))
+	}
 }

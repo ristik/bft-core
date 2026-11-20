@@ -40,8 +40,9 @@ func defaultClient() *http.Client {
 // apart (localhost, 127.0.0.1, a DNS alias): independence of the mirrors is the operator's choice.
 func normalize(src string) (string, error) {
 	u, err := url.Parse(strings.TrimSpace(src))
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
-		return "", refuse("source %q is not an http(s) URL without credentials", src)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.User != nil ||
+		strings.ContainsAny(src, "?#") {
+		return "", refuse("source %q is not an http(s) URL without credentials, query or fragment", src)
 	}
 	scheme := strings.ToLower(u.Scheme)
 	host := strings.ToLower(u.Hostname())

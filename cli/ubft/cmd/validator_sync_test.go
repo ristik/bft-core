@@ -2,9 +2,11 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/rpc"
@@ -47,5 +49,28 @@ func TestBlockInfoRefusesAnUnavailableHead(t *testing.T) {
 	n, ts, err := blockInfo(context.Background(), staticRPC(t, `{"number":"0x0","timestamp":"0x5"}`), "latest")
 	if err != nil || n != 0 || ts != 5 {
 		t.Errorf("genesis block: %d %d %v", n, ts, err)
+	}
+}
+
+// An unavailable public head serializes as null, never 0, at the top level and in the nested sync view.
+func TestUnknownPublicHeadSerializesAsNull(t *testing.T) {
+	r := &validatorStatusReport{PublicHeadUnknown: true, Sync: &syncView{PublicHeadUnknown: true, Sources: []string{}}}
+	raw, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(raw), `"publicHead":null`) != 2 || strings.Contains(string(raw), `"publicHead":0`) {
+		t.Fatalf("publicHead must be null in both places: %s", raw)
+	}
+	var sb strings.Builder
+	r.text(&sb)
+	if !strings.Contains(sb.String(), "public head UNKNOWN") || !strings.Contains(sb.String(), "public head unknown") {
+		t.Fatalf("the text report must say the head is unknown: %q", sb.String())
+	}
+	n := uint64(0) // a genuine block 0 is a head and is serialized as 0
+	r2 := &validatorStatusReport{PublicHead: &n}
+	raw, _ = json.Marshal(r2)
+	if !strings.Contains(string(raw), `"publicHead":0`) {
+		t.Fatalf("a genuine head 0 must stay 0: %s", raw)
 	}
 }
