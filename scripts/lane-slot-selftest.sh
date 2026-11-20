@@ -96,7 +96,37 @@ s0=$(LANE_PORT_RANGE_FILE="$tmp/range" acq --slot 0 --profile f6c --token e0)
 [ -n "$r0" ] && [ "${s0%% *}" = 0 ] && pass "slot 0 is exempt from the hard check (its historical ports): accepted with a note" || fail "slot 0 f6c: conflicts='$r0' acquire='$s0'"
 rel 0 --token e0
 
-# 6. the bind preflight probes by an actual bind: it refuses a port held by a listening socket AND one that is only bound, and does not need LANE_SLOT (set -u)
+# 6. the documented launcher (the fenced block of docs/lane-slots.md, run as written with the lane and the mongo calls replaced): the slot is released, after the
+# mongo teardown, on a normal exit, on a failing lane (set -e), and when the shell is terminated; a failed acquire aborts before the lane starts
+launcher=$(awk '/^```$/ { n++; next } n == 1 { print }' "$repo/docs/lane-slots.md" 2>/dev/null)
+if [ -z "$launcher" ]; then fail "could not extract the launcher block from docs/lane-slots.md"; else
+  mkdir -p "$tmp/launch/scripts"; ln -sf "$here/lane-slot.sh" "$tmp/launch/scripts/lane-slot.sh"; ln -sfn "$here/lib" "$tmp/launch/scripts/lib"; ln -sfn "$here/ci" "$tmp/launch/scripts/ci"
+  log="$tmp/launch/log"
+  run_launcher() { # LANE_COMMAND [signal]: the block, with the mongo calls and the lane command replaced
+    printf '%s\n' "$launcher" | sed -e 's#scripts/lane-slot.sh mongo down [^;]*#echo "mongo-down locks=$(ls "$LANE_LOCK_DIR" | grep -c "^slot-")" >>"$LAUNCH_LOG"#' \
+      -e 's#scripts/lane-slot.sh mongo up [^#]*#echo mongo-up >>"$LAUNCH_LOG"#' -e 's#\./scripts/reth-paired-devnet.sh 4 10#'"$1"'#' >"$tmp/launch/block.sh"
+    rm -f "$log"; ( cd "$tmp/launch" && LAUNCH_LOG="$log" LANE_LOCK_DIR="$tmp/locks-l" bash block.sh ) >/dev/null 2>&1; echo $?
+  }
+  rm -rf "$tmp/locks-l"
+  rc=$(run_launcher true); held=$(ls "$tmp/locks-l" 2>/dev/null | grep -c '^slot-')
+  [ "$rc" = 0 ] && [ "$held" = 0 ] && grep -q 'mongo-down locks=1' "$log" && pass "launcher: normal exit releases the slot, after the mongo teardown" || fail "launcher normal exit: rc=$rc locks left=$held log=$(cat "$log" 2>/dev/null)"
+  rc=$(run_launcher false); held=$(ls "$tmp/locks-l" 2>/dev/null | grep -c '^slot-')
+  [ "$rc" != 0 ] && [ "$held" = 0 ] && grep -q 'mongo-down locks=1' "$log" && pass "launcher: a failing lane keeps its exit status and still releases the slot" || fail "launcher failing lane: rc=$rc locks left=$held log=$(cat "$log" 2>/dev/null)"
+  # terminated while the lane runs (a tmux kill-session, a kill): the EXIT trap still runs
+  printf '%s\n' "$launcher" | sed -e 's#scripts/lane-slot.sh mongo down [^;]*#echo mongo-down >>"$LAUNCH_LOG"#' -e 's#scripts/lane-slot.sh mongo up [^#]*#true#' -e 's#\./scripts/reth-paired-devnet.sh 4 10#sleep 60#' >"$tmp/launch/block2.sh"
+  ( cd "$tmp/launch" && LAUNCH_LOG="$log" LANE_LOCK_DIR="$tmp/locks-l" bash block2.sh ) >/dev/null 2>&1 & lp=$!
+  sleep 2; held=$(ls "$tmp/locks-l" | grep -c '^slot-'); kill -TERM "$lp" 2>/dev/null; wait "$lp" 2>/dev/null; sleep 0.5; after=$(ls "$tmp/locks-l" | grep -c '^slot-')
+  [ "$held" = 1 ] && [ "$after" = 0 ] && pass "launcher: a terminated launcher releases the slot" || fail "launcher terminated: held=$held after=$after"
+  # a failed acquire aborts before the lane runs
+  mkdir -p "$tmp/locks-l"; for sl in 0 1 2 3; do echo "owner: z
+token: z$sl" >"$tmp/locks-l/slot-$sl.txt"; done
+  rc=$(run_launcher 'touch "$LAUNCH_LOG.lane"'); [ "$rc" != 0 ] && [ ! -e "$log.lane" ] && pass "launcher: a failed acquire aborts before the lane starts" || fail "launcher failed acquire: rc=$rc lane-ran=$([ -e "$log.lane" ] && echo yes)"
+  rm -rf "$tmp/locks-l"
+  # release by token alone (no slot, no LANE_SLOT) finds the claim
+  a=$(LANE_LOCK_DIR="$tmp/locks-l" "$ls_" acquire --owner o --token tt 2>/dev/null); LANE_LOCK_DIR="$tmp/locks-l" env -u LANE_SLOT "$ls_" release --owner o --token tt >/dev/null 2>&1 && [ -z "$(ls "$tmp/locks-l" | grep '^slot-')" ] && pass "release with only the token finds the claim's slot" || fail "release by token alone"
+fi
+
+# 7. the bind preflight probes by an actual bind: it refuses a port held by a listening socket AND one that is only bound, and does not need LANE_SLOT (set -u)
 hold() { python3 -c 'import socket,sys,time
 s=socket.socket()
 if sys.argv[2] == "listen": s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)   # (a holder that is merely bound, without SO_REUSEADDR, blocks a later bind too)

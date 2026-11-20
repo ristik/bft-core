@@ -5,7 +5,7 @@
 #        pick the lowest free slot (or N), write the lock, print "SLOT TOKEN". The claim token is generated (uuid) unless --token gives one; it is unique across all locks.
 #        Refuses an occupied slot, and (slots 1..3) a slot whose listeners for the profile fall in the host's ephemeral port range and are not reserved. Profiles:
 #        paired-default (default: the paired devnet with its section-3 negative clients), f6b, f6c, seed, f8. Slot 0 keeps its historical ports and is not refused: it is covered by the bind preflight.
-#   scripts/lane-slot.sh release [N] --token T [--owner NAME] [--force]   remove the lock of the claim with token T, owned by NAME (default $LANE_OWNER, else $USER); --force skips both checks. N defaults to $LANE_SLOT
+#   scripts/lane-slot.sh release [N] --token T [--owner NAME] [--force]   remove the lock of the claim with token T, owned by NAME (default $LANE_OWNER, else $USER); --force skips both checks. N defaults to $LANE_SLOT, else the slot the token names
 #   scripts/lane-slot.sh status                                           every slot: free, or its lock; a lock whose tmux session is gone is flagged
 #   scripts/lane-slot.sh ports [N]                                        "name port" of every port of slot N
 #   scripts/lane-slot.sh mongo up|down [LOG_DIR]                          the slot's MongoDB replica set (LANE_SLOT=N), for lanes with the aggregator
@@ -83,9 +83,13 @@ case "$cmd" in
   release)
     slot=${LANE_SLOT:-} force=0 token=${LANE_SLOT_TOKEN:-} rowner=$(whoami_tag)
     while [ $# -gt 0 ]; do case "$1" in --force) force=1; shift ;; --token) token=${2:?--token T}; shift 2 ;; --owner) rowner=${2:?--owner NAME}; shift 2 ;; [0-3]) slot=$1; shift ;; *) echo "release: unknown argument $1" >&2; exit 2 ;; esac; done
-    [ -n "$slot" ] || { echo "release: give the slot (or set LANE_SLOT)" >&2; exit 2; }
-    f=$(lockfile "$slot")
     lanes_lock
+    # the claim token names its own lock: without a slot (and without LANE_SLOT), find it by token, so a trap that lost the slot still releases the right claim
+    if [ -z "$slot" ] && [ -n "$token" ]; then
+      for c in 0 1 2 3; do grep -qsxF "token: $token" "$(lockfile "$c")" && { slot=$c; break; }; done
+    fi
+    [ -n "$slot" ] || { echo "release: give the slot (or set LANE_SLOT), or a --token that names a held claim" >&2; exit 2; }
+    f=$(lockfile "$slot")
     if [ ! -f "$f" ]; then echo "slot $slot is not locked"; exit 0; fi
     owner=$(sed -n 's/^owner: //p' "$f"); held=$(sed -n 's/^token: //p' "$f")
     if [ "$force" != 1 ]; then
