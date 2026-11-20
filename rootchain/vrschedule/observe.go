@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/unicitynetwork/bft-core/vrhandoff"
 	"github.com/unicitynetwork/bft-core/vrschema"
@@ -219,6 +220,15 @@ type Reader interface {
 	OpenOutput(ctx context.Context, blockHash, stateRoot [32]byte) (*vrhandoff.Output, error)
 }
 
+// QueuedReader is the optional read of the ScheduleActivation changes VR still holds at a certified block, bound into an output or not
+// (RPC implements it): the warning's source before any binding.
+type QueuedReader interface {
+	QueuedSchedules(ctx context.Context, blockNumber uint64) ([]vrschema.Activation, error)
+}
+
+// QueuedEvery is the least time between two reads of VR's queued changes (they change at governance speed, never per round).
+const QueuedEvery = 10 * time.Second
+
 // Observer is stage 0: for every committed root block, in commit order, the designated EVM shard's certified block is read and VR's open
 // output there is cached. A result's committed source is the first certified block at which it is the open Published output, so it is
 // recorded only from an unbroken run of observations: each observed committed block must be the child of the previously observed one
@@ -234,6 +244,12 @@ type Observer struct {
 	// state Active, E and T as queued; none when there is no open output): the root's early warning (design section 7.4). It is telemetry
 	// only: nothing is enforced from it, and a change not yet bound into an output is not visible to a root.
 	OnPending func([]vrschema.Activation)
+	// SyncQueued reads the queued changes inside Observe (tests); production reads them in the background, never delaying the run.
+	SyncQueued bool
+	queuedAt   time.Time
+	queuedBusy bool
+	boundNow   []vrschema.Activation
+	queuedNow  []vrschema.Activation // the last read of VR's queued changes: reported with every observation until the next read
 
 	mu        sync.Mutex
 	primed    bool
@@ -261,7 +277,9 @@ func (o *Observer) Observe(ctx context.Context, c CertifiedEVM) error {
 	prev := o.prev
 	o.primed, o.lastRound, o.prev = true, c.RootRound, vrschema.Word{}
 	if o.OnPending != nil {
-		o.OnPending(PendingSchedules(out))
+		o.boundNow = PendingSchedules(out)
+		o.OnPending(o.merged())
+		o.observeQueued(ctx, c.BlockNumber)
 	}
 	if out == nil {
 		return nil
@@ -307,4 +325,52 @@ func PendingSchedules(out *vrhandoff.Output) []vrschema.Activation {
 			State: vrschema.ActActive, ChangeID: c.ID})
 	}
 	return res
+}
+
+// observeQueued reads VR's queued ScheduleActivation changes at the certified block (at most once per QueuedEvery, one read at a time) and
+// reports them with the changes bound into the open output: a change still Queued, with no open output at all, is warned of (design 7.4).
+// Telemetry only: a failed read changes nothing.
+func (o *Observer) observeQueued(ctx context.Context, blockNumber uint64) {
+	qr, ok := o.Reader.(QueuedReader)
+	if !ok || o.queuedBusy || time.Since(o.queuedAt) < QueuedEvery {
+		return
+	}
+	o.queuedAt, o.queuedBusy = time.Now(), true
+	read := func(ctx context.Context) {
+		qs, err := qr.QueuedSchedules(ctx, blockNumber)
+		o.mu.Lock()
+		o.queuedBusy = false
+		if err == nil {
+			o.queuedNow = qs
+		}
+		merged := o.merged()
+		o.mu.Unlock()
+		if err != nil {
+			if o.Log != nil {
+				o.Log.Debug("VR queued schedules not read", "error", err)
+			}
+			return
+		}
+		o.OnPending(merged)
+	}
+	if o.SyncQueued {
+		o.mu.Unlock()
+		read(ctx)
+		o.mu.Lock()
+		return
+	}
+	go read(context.WithoutCancel(ctx))
+}
+
+// merged is the changes bound into the open output and the queued ones, each change once (by id). The caller holds o.mu.
+func (o *Observer) merged() []vrschema.Activation {
+	seen := map[uint64]bool{}
+	var out []vrschema.Activation
+	for _, a := range append(append([]vrschema.Activation(nil), o.boundNow...), o.queuedNow...) {
+		if !seen[a.ChangeID] {
+			seen[a.ChangeID] = true
+			out = append(out, a)
+		}
+	}
+	return out
 }

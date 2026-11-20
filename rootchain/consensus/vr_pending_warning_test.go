@@ -3,6 +3,7 @@ package consensus
 import (
 	"bytes"
 	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -32,4 +33,20 @@ func TestRootWarnsOfAQueuedChangeWithAnEmptyEffectiveSchedule(t *testing.T) {
 	x.upgrades.mu.Lock()
 	require.Empty(t, x.upgrades.queued)
 	x.upgrades.mu.Unlock()
+}
+
+// The stable lifecycle events: a latched entry logs activation.latched once, and an entry whose E has been reached logs activation.active
+// once, on every call of the committed-schedule note (VT-12's catalogue).
+func TestRootLogsTheActivationLifecycleEvents(t *testing.T) {
+	var logs bytes.Buffer
+	x := &ConsensusManager{log: slog.New(slog.NewTextHandler(&logs, nil)), rules: vrrules.Set{vrschema.RuleID("r"): "r"}}
+	a := vrschema.Activation{RuleID: vrschema.RuleID("r"), ReleaseDigest: vrschema.Word{9}, RootEpoch: 6, State: vrschema.ActActive, ChangeID: 1}
+	x.noteSchedule([]vrschema.Activation{a}, 5)
+	require.NotContains(t, logs.String(), "activation.latched")
+	require.NotContains(t, logs.String(), "activation.active")
+	a.State = vrschema.ActLatched
+	x.noteSchedule([]vrschema.Activation{a}, 6)
+	x.noteSchedule([]vrschema.Activation{a}, 7)
+	require.Equal(t, 1, strings.Count(logs.String(), "event=activation.latched"))
+	require.Equal(t, 1, strings.Count(logs.String(), "event=activation.active"))
 }

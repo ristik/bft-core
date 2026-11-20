@@ -45,6 +45,23 @@ func (x *ConsensusManager) noteSchedule(schedule []vrschema.Activation, epoch ui
 	if w.logged == nil {
 		w.logged = map[string]bool{}
 	}
+	// the stable lifecycle events of the committed schedule (VT-12's catalogue): the latch at the commit into E, and the rule in force
+	// from root epoch E, once per entry per process
+	for _, a := range vrschema.Effective(schedule) {
+		rule, rel := fmt.Sprintf("%x", a.RuleID[:]), fmt.Sprintf("%x", a.ReleaseDigest[:])
+		if a.State == vrschema.ActLatched {
+			if k := fmt.Sprintf("latched/%s/%d", rule, a.RootEpoch); !w.logged[k] {
+				w.logged[k] = true
+				x.log.Info("activation latched", "event", "activation.latched", "rule", rule, "epoch", a.RootEpoch, "digest", rel, "currentEpoch", epoch)
+			}
+		}
+		if a.RootEpoch <= epoch {
+			if k := fmt.Sprintf("active/%s/%d", rule, a.RootEpoch); !w.logged[k] {
+				w.logged[k] = true
+				x.log.Info("activation in force", "event", "activation.active", "rule", rule, "epoch", a.RootEpoch, "digest", rel, "currentEpoch", epoch)
+			}
+		}
+	}
 	for _, a := range pend {
 		k := fmt.Sprintf("%x/%x/%d", a.RuleID[:], a.ReleaseDigest[:], a.RootEpoch)
 		if w.logged[k] {

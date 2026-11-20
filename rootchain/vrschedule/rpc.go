@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/unicitynetwork/bft-core/vrclient"
 	"strings"
 	"time"
 
@@ -213,6 +214,37 @@ func (r RPC) call(ctx context.Context, blockHash [32]byte, method string, args .
 	out, err := parsedABI.Unpack(method, ret)
 	if err != nil || len(out) != 1 {
 		return nil, errors.Join(ErrRead, fmt.Errorf("decoding %s: %w", method, err))
+	}
+	return out, nil
+}
+
+// QueuedSchedules are the ScheduleActivation changes VR still holds (Queued, Scheduled or Bound) at the certified block, from its
+// pendingChanges and change views by an eth_call at that block: the root's early warning before a change is bound into any output
+// (design section 7.4). It is telemetry: nothing here is verified or enforced, and a failed read is simply no warning this time.
+func (r RPC) QueuedSchedules(ctx context.Context, blockNumber uint64) ([]vrschema.Activation, error) {
+	ctx, cancel := context.WithTimeout(ctx, r.timeout())
+	defer cancel()
+	c := vrclient.New(r.Client, common.Address(r.Pins.Registry))
+	c.Block = hexutil.EncodeUint64(blockNumber)
+	ids, err := c.PendingChanges(ctx)
+	if err != nil {
+		return nil, errors.Join(ErrRead, err)
+	}
+	var out []vrschema.Activation
+	for _, id := range ids {
+		ch, err := c.Change(ctx, id)
+		if err != nil {
+			return nil, errors.Join(ErrRead, err)
+		}
+		if ch.Kind != vrclient.KindScheduleActivation {
+			continue
+		}
+		sc, err := vrschema.DecodeSchedule(ch.Payload)
+		if err != nil {
+			continue
+		}
+		out = append(out, vrschema.Activation{RuleID: sc.RuleID, ReleaseDigest: sc.ReleaseDigest, RootEpoch: sc.RootEpoch, NotBeforeUcTime: sc.NotBeforeUcTime,
+			State: vrschema.ActActive, ChangeID: id})
 	}
 	return out, nil
 }
