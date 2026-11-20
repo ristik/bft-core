@@ -2,6 +2,15 @@
 
 Notes for upgrades which need more than replacing the binary of one node at a time.
 
+## Validator registry activation schedule
+
+Start VT-07 on a fresh generation. In VR mode, point each root's `--pos-evm-rpc` at a private
+execution endpoint that can serve historical state proofs for every queued certified block hash.
+For paired ureth, enable `--unicity.archive-state-proofs` and retain account and storage history.
+The ordinary bounded proof window can leave an old observation waiting for a proof after an
+execution-client outage. The root retains that observation and resumes replay when its proof
+becomes available.
+
 ## Strict signature rule (bft-go-base `uc-consolidation`)
 
 The technical reasoning, the example and the full procedure are in

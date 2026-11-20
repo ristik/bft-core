@@ -152,7 +152,8 @@ echo "ureth engine.persistence-threshold=$d2cPersistenceThreshold blocks (D2C re
 # start a shard node, so every paired lane was pointed at a client it would refuse.
 urethPinResolve || exit 1
 export URETH_PIN_FEE_COLLECTOR
-echo "bft source commit=$(git rev-parse HEAD)"
+bftSourceCommit=${BFT_SOURCE_COMMIT:-$(git rev-parse HEAD 2>/dev/null)}
+echo "bft source commit=$bftSourceCommit"
 echo "ureth source commit=$URETH_PIN_COMMIT binary sha256=$(shasum -a 256 "$URETH_BIN" | cut -d' ' -f1)"
 
 failures=0
@@ -460,6 +461,10 @@ fi
 echo
 echo "=== 2. start one reth per validator on that chain spec ==="
 rethStorageArgs=()
+rethStateProofArgs=(--rpc.eth-proof-window 64)
+if [ "${VR_LANE:-0}" = 1 ] && [ "${VR_ARCHIVE_STATE_PROOFS:-0}" = 1 ]; then
+  rethStateProofArgs=(--unicity.archive-state-proofs)
+fi
 if [ "$postM2aMode" = t1 ] || [ "$postM2aMode" = t4 ]; then rethStorageArgs=(--storage.v2 false); fi
 for i in $(seq 1 "$validators"); do
   mkdir -p "test-nodes/reth$i"
@@ -473,7 +478,7 @@ for i in $(seq 1 "$validators"); do
     --authrpc.jwtsecret "test-nodes/evm$i/jwt.hex" \
     --authrpc.addr 127.0.0.1 --authrpc.port $((rethEngineBase + i - 1)) \
     --http --http.addr 127.0.0.1 --http.port $((rethEthBase + i - 1)) \
-    --http.api eth,net,web3,admin,debug --rpc.eth-proof-window 64 \
+    --http.api eth,net,web3,admin,debug "${rethStateProofArgs[@]}" \
     --port $((rethP2PBase + i - 1)) --disable-discovery \
     --ipcdisable --engine.persistence-threshold "$d2cPersistenceThreshold" \
     --builder.gaslimit "${URETH_BUILDER_GASLIMIT:-30000000}" \
@@ -1106,7 +1111,7 @@ fi
 
 echo
 echo "=== 6. D1 continuous certified execution through block $rounds ==="
-echo "timing: witness attempt=400ms episode=500ms, T2=5000ms, proof window=64 blocks"
+echo "timing: witness attempt=400ms episode=500ms, T2=5000ms, state proofs: ${rethStateProofArgs[*]}"
 probeArgs=()
 faultArgs=()
 traceArgs=()

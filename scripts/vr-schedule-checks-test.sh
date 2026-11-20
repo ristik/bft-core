@@ -204,13 +204,18 @@ sstat "$(sline "$rid" 8 Superseded)" >"$d/pb.json";                             
 echo '{"activations": "none"}' >"$d/pb.json";                                      mf "postponed: activations is not a list" pp_pred "$d/pg.json" "$d/pb.json" 'not a list'
 echo '{}' >"$d/pb.json";                                                           mf "postponed: no activations" pp_pred "$d/pg.json" "$d/pb.json" 'no activations'
 sstat "$(sline "$rid" 8 Superseded) and Active at root epoch 10: Active" >"$d/pb.json"; mf "postponed: both facts in ONE line" pp_pred "$d/pg.json" "$d/pb.json" 'no Superseded'
-# the change state of the refused postponement: Rejected with reason 6 on one line
+# The registry records a generic rejection. The committed candidate names the exact fold verdict.
 gl() { printf '  #7 schedule\n      state %s\n' "$1"; }
-gl "Rejected (reason 6)" >"$d/cg.txt"; cs_pred() { vrs_check_change_state "$1" Rejected 6; }
-gl "Rejected (reason 5)" >"$d/cb.txt"; mf "change: Rejected with another reason" cs_pred "$d/cg.txt" "$d/cb.txt"
-gl "Rejected" >"$d/cb.txt";            mf "change: Rejected without a reason" cs_pred "$d/cg.txt" "$d/cb.txt"
-gl "Active" >"$d/cb.txt";              mf "change: Active (accepted, not rejected)" cs_pred "$d/cg.txt" "$d/cb.txt"
-gl "Queued" >"$d/cb.txt";              mf "change: still Queued" cs_pred "$d/cg.txt" "$d/cb.txt"
-printf '  #7 schedule\n      note Rejected (reason 6)\n' >"$d/cb.txt"; mf "change: the words on another line" cs_pred "$d/cg.txt" "$d/cb.txt"
-: >"$d/cb.txt";                        mf "change: empty output" cs_pred "$d/cg.txt" "$d/cb.txt"
+gl "Rejected (reason 1)" >"$d/cg.txt"; cs_pred() { vrs_check_change_state "$1" Rejected; }
+gl "Active" >"$d/cb.txt"; mf "change: accepted" cs_pred "$d/cg.txt" "$d/cb.txt"
+gl "Queued" >"$d/cb.txt"; mf "change: still queued" cs_pred "$d/cg.txt" "$d/cb.txt"
+printf '  #7 schedule\n      note Rejected (reason 1)\n' >"$d/cb.txt"; mf "change: the words on another line" cs_pred "$d/cg.txt" "$d/cb.txt"
+: >"$d/cb.txt"; mf "change: empty output" cs_pred "$d/cg.txt" "$d/cb.txt"
+vdoc() { printf '{"epoch":%s,"registryChanges":[{"ID":%s,"Kind":%s,"Verdict":%s}]}\n' "$@"; }
+vdoc 5 7 9 6 >"$d/vg.json"; cv_pred() { vrs_check_candidate_verdict "$1" 5 7 6; }
+vdoc 5 7 9 1 >"$d/vb.json"; mf "verdict: generic rejection is not PastCutoff" cv_pred "$d/vg.json" "$d/vb.json" 'no matching'
+vdoc 4 7 9 6 >"$d/vb.json"; mf "verdict: wrong epoch" cv_pred "$d/vg.json" "$d/vb.json" 'wrong activation epoch'
+vdoc 5 8 9 6 >"$d/vb.json"; mf "verdict: wrong change" cv_pred "$d/vg.json" "$d/vb.json" 'no matching'
+vdoc 5 7 7 6 >"$d/vb.json"; mf "verdict: wrong change kind" cv_pred "$d/vg.json" "$d/vb.json" 'no matching'
+vdoc 5 7 9 '"6"' >"$d/vb.json"; mf "verdict: string verdict" cv_pred "$d/vg.json" "$d/vb.json" 'no matching'
 if [ "$fails" = 0 ]; then echo "vr-schedule checks: all $cases cases pass"; else echo "vr-schedule checks: $fails failing of $cases"; exit 1; fi
