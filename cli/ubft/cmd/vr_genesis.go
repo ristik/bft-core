@@ -1052,6 +1052,7 @@ func newVRGenesisCmd() *cobra.Command {
 func newVRGenesisPlanCmd() *cobra.Command {
 	var trustBaseFile, shardConfFile, bindingsFile, ownersFile, profileFile, networkWord, governors, limits, feeCollector, outInput, outIDs string
 	var baseFeeFloor, changeDenominator uint64
+	var utbEntry, utbID string
 	cmd := &cobra.Command{Use: "plan", Short: "Write the contracts genesis input and the roots' genesis identities of a VR generation",
 		Long: "Identities 1..n are the coupled genesis entities in ascending root node id; each is a member of the genesis committee with its\n" +
 			"trust-base stake as raw weight. StakingID is the VR id as a 32-byte big-endian word. MaxGas and SystemGas come from the B1 profile,\n" +
@@ -1101,6 +1102,15 @@ func newVRGenesisPlanCmd() *cobra.Command {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "wrote %s (%d identities, chain %d) and %s\n", outInput, len(ids), input.ChainID, outIDs)
+			if on, err := vrUTBPair(utbEntry, utbID); err != nil {
+				return err
+			} else if on {
+				pin, err := writeVRUTBGenesis(tb, utbEntry, utbID)
+				if err != nil {
+					return err
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "wrote the UTB genesis entry %s (pin %s) and %s\n", utbEntry, pin, utbID)
+			}
 			return nil
 		}}
 	f := cmd.Flags()
@@ -1117,6 +1127,7 @@ func newVRGenesisPlanCmd() *cobra.Command {
 	f.Uint64Var(&changeDenominator, "change-denominator", 8, "the base-fee change denominator (ureth --unicity.base-fee-change-denominator)")
 	f.StringVar(&outInput, "out-input", "", "the contracts genesis input to write")
 	f.StringVar(&outIDs, "out-identities", "", "the roots' genesis identities to write")
+	vrUTBFlags(f, &utbEntry, &utbID, "write")
 	for _, n := range []string{"trust-base", "shard-conf", "bindings", "b1-profile", "network-word", "governor-signers", "fee-collector", "out-input", "out-identities"} {
 		_ = cmd.MarkFlagRequired(n)
 	}
@@ -1126,7 +1137,7 @@ func newVRGenesisPlanCmd() *cobra.Command {
 func newVRGenesisVerifyCmd() *cobra.Command {
 	var inputFile, deploymentFile, genesisFile, shardConfFile, trustBaseFile, profileFile, idsFile, freshFile, urethLine, feeCollector, out string
 	var partial bool
-	var fundedFile, devGeneration string
+	var fundedFile, devGeneration, utbEntry, utbID string
 	cmd := &cobra.Command{Use: "verify", Short: "Refuse any mismatch between the artifacts of a VR generation, and write the roots' --vr-deployment",
 		Long: "Checks the finished generation against the plan, never a report's description of it:\n" +
 			"  - the finalized EVM genesis by the B1 rules (SealRegistry code and state, chain id, seal_registry_genesis), its gasLimit = MaxGas\n" +
@@ -1192,6 +1203,13 @@ func newVRGenesisVerifyCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if on, err := vrUTBPair(utbEntry, utbID); err != nil {
+				return err
+			} else if on {
+				if _, err := checkVRUTBGenesis(v.tb, utbEntry, utbID); err != nil {
+					return err
+				}
+			}
 			if out != "" {
 				if err := writeJSONFile(out, dep); err != nil {
 					return err
@@ -1217,6 +1235,7 @@ func newVRGenesisVerifyCmd() *cobra.Command {
 	f.StringVar(&devGeneration, "dev-generation", "", "the development generation's name: its network word must be sha256(\"unicity.dev.vr.\" + name); dev funding is refused for any other generation")
 	f.BoolVar(&partial, "partial", false, "check the files only, without --ureth-flags and --fee-collector (refused with them): exits non-zero with PARTIAL even when the files agree, certifies nothing, writes no root deployment")
 	f.StringVar(&out, "out-root-deployment", "", "write the roots' --vr-deployment here once everything agrees")
+	vrUTBFlags(f, &utbEntry, &utbID, "check")
 	for _, n := range []string{"input", "deployment", "genesis", "shard-conf", "trust-base", "b1-profile", "genesis-identities", "vr-hook-measurement"} {
 		_ = cmd.MarkFlagRequired(n)
 	}

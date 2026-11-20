@@ -95,6 +95,23 @@ if [ "${VR_LANE:-0}" = 1 ]; then
     [ "${!vrConflict:-0}" = 0 ] || { echo "VR_LANE=1 refuses $vrConflict=${!vrConflict}: its steps do not run on a VR generation" >&2; exit 2; }
   done
   [ -z "$postM2aMode" ] || { echo "VR_LANE=1 refuses POST_M2A_MODE=$postM2aMode: the manifest genesis path bypasses the VR plan and verify" >&2; exit 2; }
+  # The signed trust-base history (UTB, briefs/utb-signed-entries-design.md) is ON in a VR generation: its handoffs install epoch E+1 and an old-epoch token has to
+  # keep verifying across them. VR_UTB=0 runs without it (the runs before VT-UTB did). The UTB profile is the one the UTB lane runs with (scripts/lib/utb-lib.sh,
+  # UTB_LANE's consumers in helper.sh, h3-lib.sh and m2-handoff-lib.sh), so a VR run switches it on there; UTB_LANE itself is still refused from the environment above.
+  VR_UTB=${VR_UTB:-1}
+  case "$VR_UTB" in 0 | 1) ;; *) echo "VR_UTB must be 0 or 1" >&2; exit 2 ;; esac
+  if [ "$VR_UTB" = 1 ]; then export UTB_LANE=1 VR_UTB; fi
+  # The aggregator partition (aggregator-go as a BFT shard of the same root chain, scripts/lib/agg-lib.sh) is what the signed history is for: it verifies the history
+  # from the pinned genesis and certifies the tokens an old epoch must keep verifying. On with VR_UTB (VR_AGG=0 for a run without it); it takes the any-age lane's
+  # aggregator machinery (ANYAGE_LANE is refused from the environment above and set here, after the check). Needs AGG_BIN and MongoDB (agg-lib.sh).
+  VR_AGG=${VR_AGG:-$VR_UTB}
+  case "$VR_AGG" in 0 | 1) ;; *) echo "VR_AGG must be 0 or 1" >&2; exit 2 ;; esac
+  if [ "$VR_AGG" = 1 ]; then
+    : "${AGG_BIN:?VR_AGG=1 needs AGG_BIN (the pinned aggregator-go binary; VR_AGG=0 runs without the aggregator)}"
+    export ANYAGE_LANE=1 VR_AGG
+    chainID=$postM2aChainID partitionID=8 rootRpcPort=25866
+    source scripts/lib/agg-lib.sh
+  fi
   source scripts/lib/vr-lib.sh || exit 2
   vr_check_inputs || exit 2
 fi
@@ -395,12 +412,21 @@ fi
 
 if [ "${UTB_LANE:-0}" = 1 ]; then
   # the combined UTB lane (scripts/utb-lane.sh): the any-age machinery with the signed trust-base entry profile on from the first voting epoch. The genesis
-  # entry, its pin and the deployment manifest are generated once, here, from the epoch-1 trust base the roots will start with.
-  [ "${ANYAGE_LANE:-0}" = 1 ] || { echo "UTB_LANE=1 requires ANYAGE_LANE=1 (the aggregator partition)" >&2; exit 2; }
+  # entry, its pin and the deployment manifest are generated once, here, from the epoch-1 trust base the roots will start with. A VR generation (VR_UTB) has
+  # no aggregator partition of its own here: its genesis entry came from `vr-genesis plan` and was checked by `vr-genesis verify`; the manifest is generated
+  # from the same trust base and must hold the same entry.
+  [ "${ANYAGE_LANE:-0}" = 1 ] || [ "${VR_UTB:-0}" = 1 ] || { echo "UTB_LANE=1 requires ANYAGE_LANE=1 (the aggregator partition)" >&2; exit 2; }
   source scripts/lib/utb-lib.sh
   UTB_ROOT_FLAGS_FN=utb_root_flags UTB_AGG_ENV_FN=utb_agg_env
   export UTB_ROOT_FLAGS_FN UTB_AGG_ENV_FN
+  if [ "${VR_UTB:-0}" = 1 ]; then
+    cp test-nodes/utb-genesis.cbor "$VR_DIR/utb-genesis.plan.cbor" && cp test-nodes/utb-genesis.id "$VR_DIR/utb-genesis.plan.id" || { echo "vr: the plan wrote no UTB genesis entry" >&2; exit 1; }
+  fi
   UTB_COMPONENTS=${UTB_COMPONENTS:-$(utb_lane_components)} utb_prepare_genesis test-nodes/trust-base.json || { echo "the UTB genesis could not be generated" >&2; exit 1; }
+  if [ "${VR_UTB:-0}" = 1 ]; then
+    cmp -s "$VR_DIR/utb-genesis.plan.cbor" test-nodes/utb-genesis.cbor && cmp -s "$VR_DIR/utb-genesis.plan.id" test-nodes/utb-genesis.id ||
+      { echo "vr: the manifest's UTB genesis entry is not the one vr-genesis plan emitted" >&2; exit 1; }
+  fi
   echo "UTB genesis entry $(utb_pin) (manifest $UTB_DIR/utb-manifest.json)"
 fi
 

@@ -5,6 +5,7 @@
 #
 #   vr_lane_conf            the EVM shard configuration pins VR (validator_registry, validator_registry_code_hash) from the measurement
 #   vr_profile_args         the b1-profile flags of a VR generation (both hooks on VR, priced from the measurement)
+#   vr_utb_args             the vr-genesis flags of the UTB genesis entry (VR_UTB=1)
 #   vr_prepare_genesis      dev keys -> vr-genesis plan -> contracts genesis (test-nodes/vr/*)
 #   vr_merge_alloc <src>    adds the VR accounts and the dev premine to a genesis source's alloc
 #   vr_verify <genesis> <full-conf>   vr-genesis verify of the finished set; writes the roots' --vr-deployment
@@ -58,6 +59,10 @@ PY
   echo "vr: the EVM shard configuration pins VR $(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["registryCodeHash"])' "$VR_MEASUREMENT")"
 }
 
+# VR_UTB=1 (the default, reth-paired-devnet.sh): plan emits the UTB genesis entry and its pin where the roots, shard nodes and aggregator read them
+# (test-nodes/utb-genesis.cbor, utb-genesis.id: the files scripts/lib/utb-lib.sh uses), and verify checks them against the epoch-1 trust base.
+vr_utb_args() { [ "${VR_UTB:-0}" != 1 ] || echo --utb-genesis test-nodes/utb-genesis.cbor --utb-genesis-id test-nodes/utb-genesis.id; }
+
 vr_profile_args() { echo --vr-hook-measurement "$VR_MEASUREMENT"; }
 
 vr_network_word() { printf '0x%s\n' "$(printf 'unicity.dev.vr.%s' "$VR_GENERATION" | shasum -a 256 | cut -d' ' -f1)"; }
@@ -76,7 +81,7 @@ vr_prepare_genesis() { # after the profile: dev keys, the plan, the contracts ge
   build/ubft vr-genesis plan --trust-base test-nodes/trust-base.json --shard-conf "test-nodes/shard-conf-${partitionID:-8}_0.json" \
     --bindings "$VR_DIR/genesis-bindings.json" --owners "$VR_DIR/dev-keys/owners.json" --b1-profile test-nodes/b1-profile.json \
     --network-word "$(vr_network_word)" --governor-signers "$(tr -d '\n' <"$VR_DIR/dev-keys/signers.txt")" --fee-collector "$(vr_fee_collector)" \
-    --out-input "$VR_DIR/input.json" --out-identities "$VR_DIR/genesis-identities.json" || return 1
+    --out-input "$VR_DIR/input.json" --out-identities "$VR_DIR/genesis-identities.json" $(vr_utb_args) || return 1
   ( cd "$VR_CONTRACTS" && HOME=${VR_FORGE_HOME:-$HOME} script/vr-genesis.sh "$OLDPWD/$VR_DIR/input.json" "$OLDPWD/$VR_DIR/contracts" ) ||
     vr_die "the contracts genesis failed" || return 1
 }
@@ -117,7 +122,7 @@ vr_verify() { # <finalized genesis> <full shard conf>
     --trust-base test-nodes/trust-base.json --b1-profile test-nodes/b1-profile.json --genesis-identities "$VR_DIR/genesis-identities.json" \
     --vr-hook-measurement "$VR_FRESH_MEASUREMENT" --ureth-flags "$(URETH_GENESIS_SPEC=$1 vr_ureth_vector)" \
     --fee-collector "$(vr_fee_collector)" --funded-accounts "$VR_DIR/funded-accounts.json" --dev-generation "$VR_GENERATION" \
-    --out-root-deployment "$VR_DIR/vr-deployment.json" || vr_die "vr-genesis verify refused the generation" || return 1
+    --out-root-deployment "$VR_DIR/vr-deployment.json" $(vr_utb_args) || vr_die "vr-genesis verify refused the generation" || return 1
 }
 
 # the name m2_start_root calls a restarted VR root's flags through (scripts/lib/m2-handoff-lib.sh)

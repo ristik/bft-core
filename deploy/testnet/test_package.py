@@ -331,6 +331,13 @@ class UtbProfile(unittest.TestCase):
         source=(Path(generate.__file__)).read_text()
         self.assertRegex(source,r"boot=immutable\(topology\([^\n]*utb=utb_pin",'main() starts the authorities from a compose that carries the UTB pin')
         self.assertIn('check_authorities_unchanged(boot,final,a.validators)',source)
+    def test_the_signed_history_is_on_by_default_and_no_utb_is_the_escape_hatch(self):
+        source=(Path(generate.__file__)).read_text()
+        self.assertRegex(source,r"add_argument\('--utb',action=argparse\.BooleanOptionalAction,default=True",'--utb defaults on; argparse adds --no-utb')
+        for wf in ('testnet-rehearsal.yml','testnet-bridge.yml'):   # the hosted rehearsals keep the package without the profile (what they exercised before the default flipped)
+            text=(Path(generate.__file__).resolve().parents[2]/'.github/workflows'/wf).read_text()
+            for call in re.findall(r"deploy/testnet/generate\.py.*?(?=\n\s*- name:|\n\s*\n|\Z)",text,re.S):
+                self.assertIn('--no-utb',call,wf)
     def test_the_aggregator_gets_the_pin_and_a_writable_store_of_its_own(self):
         agg=self.topo(4,self.PIN)['services']['aggregator']
         env=agg['environment']
