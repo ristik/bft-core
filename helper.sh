@@ -267,6 +267,8 @@ function init_evm_authorities() {
       fi
       vrArgs=(--pop-socket "$home/pop.sock" --pop-credential "$home/pop.cred" --registration-policy "$home/registration-policy.json")
     fi
+    # the PoS lane pins the election after the genesis (DEVELOPMENT opt-in; production gives --pos-policy at startup and --require-pos-policy)
+    [ "${VR_POS:-0}" != 1 ] || vrArgs+=(--dev-allow-late-pos-policy)
     build/ubft signing-authority run --home "$home" ${vrArgs[@]+"${vrArgs[@]}"} \
       --client-socket "$home/client.sock" --operator-socket "$home/operator.sock" \
       --operator-credential "$home/operator.cred" --authority-id "paired-evm-$i" \

@@ -132,3 +132,38 @@ func foreignKey(t *testing.T) []byte {
 	require.NoError(t, err)
 	return ethcrypto.CompressPubkey(&k.PublicKey)
 }
+
+// The pinned P85 possession: the operator channel pins once, signs the pinned election's digest and refuses the rest; the client channel
+// never reaches either operation.
+func TestTheOperatorChannelSignsThePinnedPosPoP(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	_, key, err := f.operator.Enrollment(ctx)
+	require.NoError(t, err)
+	req := signingauthority.PosPoPRequest{ResultID: [32]byte{1}, AssignmentID: [32]byte{2}, Snapshot: [32]byte{3}, Attempt: 2, ID: 5, Generation: 1}
+	_, err = f.operator.SignPosPoP(ctx, req)
+	require.ErrorIs(t, err, signingauthority.ErrPosPolicy, "no pin, no proof")
+
+	pin := signingauthority.PosPolicy{Network: [32]byte{7}, ChainID: [32]byte{31: 0x7a}, Election: [20]byte{0xF6}, IDs: []uint64{5}}
+	require.NoError(t, f.operator.SetPosPolicy(ctx, pin))
+	require.NoError(t, f.operator.SetPosPolicy(ctx, pin))
+	other := pin
+	other.Election = [20]byte{0xF7}
+	require.ErrorIs(t, f.operator.SetPosPolicy(ctx, other), signingauthority.ErrPosPolicyConflict)
+
+	pop, err := f.operator.SignPosPoP(ctx, req)
+	require.NoError(t, err)
+	var d evmassign.ElectionDeployment
+	d.NetworkWord, d.ChainID, d.Election = pin.Network, pin.ChainID, pin.Election
+	require.Equal(t, key, recovers(t, evmassign.PoPDigest(d, req.ResultID, req.AssignmentID, req.Snapshot, req.Attempt, req.ID, req.Generation, key), pop.Signature))
+	req.ID = 4
+	_, err = f.operator.SignPosPoP(ctx, req)
+	require.ErrorIs(t, err, signingauthority.ErrPosPolicy)
+
+	client := f.admit(t)
+	for _, o := range []op{opSignPosPoP, opSetPosPolicy} {
+		answer, err := rawCall(t, f.clientDir, wireRequest{Version: protocolVersion, Op: uint64(o), Credential: client.ex.credential, Payload: []byte{0x80}})
+		require.NoError(t, err)
+		require.Equal(t, errWrongEndpoint.Error(), answer.Refusal, "%v", o)
+	}
+}

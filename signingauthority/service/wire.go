@@ -78,6 +78,10 @@ const (
 	// opReloadRegistrationPolicy replaces the authorized registrations of a running authority; the deployment pin, key and record are
 	// untouched. Operator channel only.
 	opReloadRegistrationPolicy op = 111
+	// opSignPosPoP asks for the P85 assignment possession proof of the pinned election; opSetPosPolicy pins that election once (#1216).
+	// Operator channel only.
+	opSignPosPoP   op = 112
+	opSetPosPolicy op = 113
 )
 
 // MaxAdvanceProofBytes is the largest activation bundle one opAdvanceWithProof can carry: the frame less an allowance for the request's
@@ -100,7 +104,7 @@ func (o op) servedToPoP() bool { return o == opSignHandoffPoP }
 func (o op) servedToOperator() bool {
 	switch o {
 	case opReplaceSession, opStatus, opEnrollment, opCompleteEnrollment, opAdvanceEpoch, opSignHandoffPoP, opSignElectionPoP, opSignDelegationPossession,
-		opAdvanceWithProof, opSignRegistration, opReloadRegistrationPolicy:
+		opAdvanceWithProof, opSignRegistration, opReloadRegistrationPolicy, opSignPosPoP, opSetPosPolicy:
 		return true
 	}
 	return false
@@ -140,6 +144,10 @@ func (o op) String() string {
 		return "sign-registration"
 	case opReloadRegistrationPolicy:
 		return "reload-registration-policy"
+	case opSignPosPoP:
+		return "sign-pos-pop"
+	case opSetPosPolicy:
+		return "set-pos-policy"
 	}
 	return fmt.Sprintf("unknown(%d)", uint64(o))
 }
@@ -349,6 +357,20 @@ type delegationPayload struct {
 	RoleNonce       uint64
 	DelegationNonce uint64
 	Expiry          uint64
+}
+
+// posPoPPayload is the structured request of opSignPosPoP: the frozen result's fields; the election, chain and network are the authority's pin.
+type posPoPPayload struct {
+	_                                struct{} `cbor:",toarray"`
+	ResultID, AssignmentID, Snapshot []byte
+	Attempt, ID, Generation          uint64
+}
+
+// posPolicyPayload is the structured request of opSetPosPolicy.
+type posPolicyPayload struct {
+	_                          struct{} `cbor:",toarray"`
+	Network, ChainID, Election []byte
+	IDs                        []uint64
 }
 
 type advanceEpochPayload struct {

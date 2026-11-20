@@ -53,6 +53,7 @@ var PosElectionABI = mustABI(`[
 var PosPublishABI = mustABI(`[
  {"type":"function","name":"openResult","stateMutability":"view","inputs":[],"outputs":[{"name":"","type":"bytes32"}]},
  {"type":"function","name":"publication","stateMutability":"view","inputs":[{"name":"resultID","type":"bytes32"}],"outputs":[{"name":"","type":"tuple","components":[{"name":"primaryHash","type":"bytes32"},{"name":"kCommit","type":"bytes32"},{"name":"incumbent","type":"bytes32"},{"name":"incumbentExposureDigest","type":"bytes32"},{"name":"incumbentKeyDigest","type":"bytes32"},{"name":"policyDigest","type":"bytes32"},{"name":"contractsDigest","type":"bytes32"},{"name":"snapshotDigest","type":"bytes32"},{"name":"assignmentID","type":"bytes32"},{"name":"popSetDigest","type":"bytes32"},{"name":"published","type":"bool"},{"name":"popCount","type":"uint32"},{"name":"attempt","type":"uint64"},{"name":"lost","type":"bool"}]}]},
+ {"type":"function","name":"result","stateMutability":"view","inputs":[{"name":"resultID","type":"bytes32"}],"outputs":[{"name":"","type":"tuple","components":[{"name":"state","type":"uint8"},{"name":"reason","type":"uint8"},{"name":"attempt","type":"uint64"},{"name":"progress","type":"uint64"},{"name":"ucTime","type":"uint64"},{"name":"policyID","type":"uint32"},{"name":"origin","type":"bytes32"},{"name":"predecessor","type":"bytes32"},{"name":"assignmentID","type":"bytes32"},{"name":"snapshotDigest","type":"bytes32"}]}]},
  {"type":"function","name":"popDigest","stateMutability":"view","inputs":[{"name":"resultID","type":"bytes32"},{"name":"id","type":"uint64"},{"name":"evmKeyHash","type":"bytes32"}],"outputs":[{"name":"","type":"bytes32"}]},
  {"type":"function","name":"frozenMembers","stateMutability":"view","inputs":[{"name":"resultID","type":"bytes32"}],"outputs":[{"name":"","type":"tuple[]","components":[{"name":"id","type":"uint64"},{"name":"generation","type":"uint64"},{"name":"weight","type":"uint64"},{"name":"raw","type":"uint64"},{"name":"bindingHash","type":"bytes32"}]}]},
  {"type":"function","name":"submitAssignmentPoPs","stateMutability":"nonpayable","inputs":[{"name":"resultID","type":"bytes32"},{"name":"pops","type":"tuple[]","components":[{"name":"id","type":"uint64"},{"name":"evmKey","type":"bytes"},{"name":"signature","type":"bytes"}]}],"outputs":[]},
@@ -196,6 +197,41 @@ func (c *Client) Publication(ctx context.Context, election ethcommon.Address, ri
 		return p, fmt.Errorf("%w: decoding publication: %v", ErrVR, err)
 	}
 	return *abi.ConvertType(vals[0], new(PublicationRecord)).(*PublicationRecord), nil
+}
+
+// ResultRecord is the part of ElectionPolicy.Result the possession digest binds.
+type ResultRecord struct {
+	State          uint8
+	Reason         uint8
+	Attempt        uint64
+	Progress       uint64
+	UcTime         uint64
+	PolicyID       uint32
+	Origin         [32]byte
+	Predecessor    [32]byte
+	AssignmentID   [32]byte
+	SnapshotDigest [32]byte
+}
+
+// Result reads a reserved result's record: the attempt, assignment and snapshot a possession proof binds.
+func (c *Client) Result(ctx context.Context, election ethcommon.Address, rid [32]byte) (r ResultRecord, err error) {
+	data, err := PosPublishABI.Pack("result", rid)
+	if err != nil {
+		return r, fmt.Errorf("%w: packing result: %v", ErrVR, err)
+	}
+	ret, err := c.CallRaw(ctx, election, data)
+	if err != nil {
+		return r, fmt.Errorf("result: %w", err)
+	}
+	return decodeResultRecord(ret)
+}
+
+func decodeResultRecord(ret []byte) (r ResultRecord, err error) {
+	vals, err := PosPublishABI.Methods["result"].Outputs.Unpack(ret)
+	if err != nil || len(vals) != 1 {
+		return r, fmt.Errorf("%w: decoding result: %v", ErrVR, err)
+	}
+	return *abi.ConvertType(vals[0], new(ResultRecord)).(*ResultRecord), nil
 }
 
 func (c *Client) PopDigest(ctx context.Context, election ethcommon.Address, rid [32]byte, id uint64, evmKeyHash [32]byte) (d [32]byte, err error) {

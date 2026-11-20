@@ -171,6 +171,16 @@ vr_root_flags() { # <i> <ureth rpc>: the VR-mode roots: the genesis committee, t
   echo --genesis-identities "$VR_DIR/genesis-identities.json" --vr-deployment "$VR_DIR/vr-deployment.json" --pos-evm-rpc "$2" $evmHolder --vr-shard-rpc "http://$(evm_validator_rpc_addr "$1")"
 }
 
+# #1216: pin the P85 election in authority <i> (its identity's id and the generation's election, network word and chain). The election is in the
+# genesis, so every authority is pinned once its enrollment is complete; the pin cannot change afterwards.
+vr_pos_pin_authority() { # <i> [<identity id>]
+  [ "${VR_POS:-0}" = 1 ] && [ "${SIGNING:-local}" = authority ] || return 0
+  local home=test-nodes/auth$1
+  python3 scripts/vr-pos-authority-policy.py "$home/pos-policy.json" "$@" || return 1
+  build/ubft signing-authority pos-policy --operator-socket "$home/operator.sock" --operator-credential "$home/operator.cred" --policy "$home/pos-policy.json" ||
+    vr_die "pinning the P85 election in authority $1 failed" || return 1
+}
+
 vr_readback() { # <ureth rpc>: VR's views at the latest block read back what the plan put there
   local rpc=$1 vr=0xff00000000000000000000000000000000000003 ids want raw module acked health
   ids=$(cast call --rpc-url "$rpc" "$vr" 'committeeIds()(uint64[])') || vr_die "committeeIds() failed" || return 1

@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # The PoS-prototype lane's steps (VT-04, ristik/bft-core#1144): sourced by scripts/vr-boundary-steps.sh under VR_LANE=1 VR_POS=1 VR_JOINER=1, after
 # vr-joiner-steps.sh. The generation is the PoS prototype (scripts/lib/vr-lib.sh VR_POS=1): four genesis identities bonded in custody, the
-# PosElectionAdapter as VR's module, nMax 5. SIGNING=local first (authority signing of the P85 possession proof is a follow-up ticket); UTB on
+# PosElectionAdapter as VR's module, nMax 5. SIGNING=local or SIGNING=authority (#1216: the EVM key is the signing authority's; the delegation and
+# assignment possession proofs are its typed operations under the P85 pin of `signing-authority pos-policy`; VR_ARCHIVE=1 restores the joiner's shard node
+# from an incumbent's archive, which refuses a local key); UTB on
 # (UTB_LANE=1: the signed trust-base history, coordinated with bft-core feat/vr-utb: this file adds no UTB wiring).
 #
 #   vrp_apply      the fifth identity joins by stake through `ubft validator apply`: VR.register, custody.register, custody.bond, admitDelegation
@@ -16,18 +18,52 @@
 vrp_election() { jq -r .election "$VR_DIR/contracts/deployment.json"; }
 vrp_custody() { jq -r .custody "$VR_DIR/contracts/deployment.json"; }
 
+# the adapter's deployed code hash and the profile values the lane ran under (#1216 evidence): VR's active module account, its runtime code hash, the
+# election's and the custody's, and the b1 profile's ElectGas, envelope (system, record and companion gas) and MaxGas
+vrp_record_profile() {
+  local mod out=$VR_EVIDENCE/pos-profile.json
+  mod=$(cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'activeModule()(address)' 2>/dev/null || jq -r .module "$VR_DIR/contracts/deployment.json")
+  python3 - "$out" "$VR_DIR/contracts/deployment.json" test-nodes/b1-profile.json "$mod" "$(cast codehash --rpc-url "$vrb_rpc" "$mod" 2>/dev/null || cast keccak "$(cast code --rpc-url "$vrb_rpc" "$mod")")" <<'PY'
+import json, sys
+out, dep, prof, mod, h = sys.argv[1:6]
+d, p = json.load(open(dep)), json.load(open(prof))
+json.dump({"adapter": mod, "adapterCodeHash": h.strip(), "election": d["election"], "custody": d["custody"],
+           "profile": {k: p[k] for k in ("electGas", "systemGas", "forcedGas", "maxGas", "ordinaryCapacity", "restGas", "companionBytes",
+                                         "otherCompanionBytes", "hookRecordGas", "hRecords", "deltaEv", "deltaHold") if k in p}}, open(out, "w"), indent=1)
+print(open(out).read())
+PY
+}
+
 vrp_apply() {
+  vrp_record_profile || vrb_log "note: the adapter's code hash and the profile values could not be recorded"
   vrj_apply || return 1   # `validator apply` dispatches on the active module: on the PoS adapter it registers, bonds and admits the delegation
   local el id=$vrj_id
   el=$(vrp_election)
+  # the joiner's authority is pinned to the id VR and custody confirmed at registration (the apply's receipts; saved in its validator config), never a guess
+  local cid; cid=$(jq -r '.id // empty' "$vrj_cfg/validator.json")
+  [ -n "$cid" ] && [ "$cid" = "$vrj_id" ] || { vrb_log "FAIL: the joiner's confirmed identity ($cid) is not the id its lane expects ($vrj_id)"; return 1; }
+  M2_CHAIN_ID="${M2_CHAIN_ID:-$postM2aChainID}" vr_pos_pin_authority "$vrj_id" "$cid" || { vrb_log "FAIL: the joiner's P85 pin"; return 1; }
   local indexed; indexed=$(cast call --rpc-url "$vrb_rpc" "$el" 'isIndexed(uint64)(bool)' "$id")
   [ "$indexed" = true ] || { vrb_log "FAIL: identity $id is not in the election's live index after apply"; return 1; }
   vrb_log "PASS: identity $id registered in VR and custody, bonded, delegation admitted (live count $(cast call --rpc-url "$vrb_rpc" "$el" 'liveCount()(uint32)' | awk '{print $1}'))"
 }
 
-# the EVM key file of every identity, in id order (ids follow ascending root node id; the joiner is 5)
+# the EVM key holder of every identity, in id order (ids follow ascending root node id; the joiner is 5). SIGNING=authority: each identity's EVM key is
+# its signing authority's, reached on the operator channel (--evm-authority id=socket,credential,nodeInfo); the proofs are its typed operation.
 vrp_evm_key_args() {
-  local i eid h ids=()
+  local i eid h ids=() a
+  if [ "${SIGNING:-local}" = authority ]; then
+    for i in 1 2 3 4; do
+      eid=$(python3 -c "import json;print(json.load(open('$VR_DIR/genesis-identities.json'))[$((i - 1))]['evmNodeId'])")
+      for a in test-nodes/auth*/; do
+        [ "$(python3 -c "import json;print(json.load(open('${a}node-info.json'))['nodeId'])")" = "$eid" ] &&
+          ids+=(--evm-authority "$i=$PWD/${a}operator.sock,$PWD/${a}operator.cred,$PWD/${a}node-info.json")
+      done
+    done
+    [ "${VR_JOINER:-0}" != 1 ] || ids+=(--evm-authority "$vrj_id=$PWD/test-nodes/auth$vrj_id/operator.sock,$PWD/test-nodes/auth$vrj_id/operator.cred,$PWD/test-nodes/auth$vrj_id/node-info.json")
+    printf '%s\n' "${ids[@]}"
+    return 0
+  fi
   for i in 1 2 3 4; do
     eid=$(python3 -c "import json;print(json.load(open('$VR_DIR/genesis-identities.json'))[$((i - 1))]['evmNodeId'])")
     for h in test-nodes/evm*/; do
@@ -41,6 +77,13 @@ vrp_evm_key_args() {
 vrp_open_result() { [ "$(cast call --rpc-url "$vrb_rpc" "$(vrp_election)" 'openResult()(bytes32)')" != 0x0000000000000000000000000000000000000000000000000000000000000000 ]; }
 
 # a validator config for the relayer when no joiner created one: the dev-funded operator, the first root's and shard node's keys
+vrp_relay_evm_holder() {
+  if [ "${SIGNING:-local}" = authority ]; then
+    printf '"evmAuthority":{"socket":"%s","credential":"%s","nodeInfo":"%s"}' "$PWD/test-nodes/auth1/operator.sock" "$PWD/test-nodes/auth1/operator.cred" "$PWD/test-nodes/auth1/node-info.json"
+  else
+    printf '"evmKeys":"%s"' "$PWD/test-nodes/evm1/keys.json"
+  fi
+}
 vrp_relay_cfg() {
   [ -n "${vrj_cfg:-}" ] && [ -f "$vrj_cfg/validator.json" ] && return 0
   local d keys; d=$(mktemp -d); vrj_cfg=$d; keys=$VR_DIR/dev-keys/keys.json
@@ -48,7 +91,7 @@ vrp_relay_cfg() {
   openssl rand -hex 32 >"$d/ureth.key"
   cat >"$d/validator.json" <<JSON
 {"format":"unicity.validator.config.v1","rpc":"$vrb_rpc","registry":"$vrb_vr","rootKeys":"$PWD/test-nodes/root1/keys.json",
- "evmKeys":"$PWD/test-nodes/evm1/keys.json","urethKey":"$d/ureth.key","jwt":"$d/none","operatorKey":"$d/operator.key",
+ $(vrp_relay_evm_holder),"urethKey":"$d/ureth.key","jwt":"$d/none","operatorKey":"$d/operator.key",
  "payee":"$(python3 -c "import json;print(json.load(open('$keys'))['signers'][0]['address'])")"}
 JSON
 }
@@ -58,7 +101,9 @@ vrp_publish() {
   vrb_wait 1500 "the hook's election reserves a result from stake (cadence passed)" vrp_open_result || return 1
   local rid; rid=$(cast call --rpc-url "$vrb_rpc" "$(vrp_election)" 'openResult()(bytes32)')
   vrb_log "the election reserved $rid; VR's open output is $(vrb_open_output)"
-  build/ubft validator pos-publish --validator-config "$vrj_cfg/validator.json" $(vrp_evm_key_args | tr '\n' ' ') 2>&1 | tee "$VR_EVIDENCE/pos-publish.log" || { vrb_log "FAIL: pos-publish"; return 1; }
+  local -a holders=(); local line
+  while IFS= read -r line; do [ -z "$line" ] || holders+=("$line"); done < <(vrp_evm_key_args)
+  build/ubft validator pos-publish --validator-config "$vrj_cfg/validator.json" ${holders[@]+"${holders[@]}"} 2>&1 | tee "$VR_EVIDENCE/pos-publish.log" || { vrb_log "FAIL: pos-publish"; return 1; }
   vrb_log "PASS: every possession proof submitted, the candidate finalized and the result published in VR"
 }
 
@@ -178,30 +223,36 @@ vrp_election_diag() {
 vrp_recovery() {
   vrp_source_q3 || { vrb_log "FAIL: the q3 helpers"; return 1; }
   local first=$vrb_result i rid2 rec
-  # 1. the second election over the same five, published and handed off by the nodes themselves
-  vrb_wait 1500 "the second election reserves J' from stake" vrp_new_open_result || { vrp_election_diag; return 1; }
+  # 1. a committee change makes the second election: unchanged stake elects nothing new (pos7). The joiner (identity $vrj_id) requests retirement
+  # (`validator exit`); the next election reserves J' = the other four, published and handed off by the roots
+  [ "${VR_JOINER:-0}" = 1 ] || { vrb_log "FAIL: the PoS recovery needs the joiner (VR_JOINER=1): a retirement is its committee change"; return 1; }
+  build/ubft validator exit --validator-config "$vrj_cfg/validator.json" 2>&1 | tee "$VR_EVIDENCE/exit.log" || { vrb_log "FAIL: validator exit"; return 1; }
+  vrb_wait 1500 "the election reserves J' (the four) after the retirement" vrp_new_open_result || { vrp_election_diag; return 1; }
   rid2=$(cast call --rpc-url "$vrb_rpc" "$(vrp_election)" 'openResult()(bytes32)')
   vrb_result=$rid2
   vrp_publish || return 1
   vrb_wait 900 "the roots installed J' (root epoch 3)" vrp_root_epoch_is 3 || return 1
   vrb_log "J' = $rid2 is installed at the roots; its VR output state $(vrp_result_state "$rid2") (2 = Published)"
-  # 2. J' stalls: three of the five lose their EVM services, so its EVM quorum (3 of 5) cannot form
-  local before after
-  local n stop; n=$(cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'committeeIds()(uint64[])' | tr -cd ',' | wc -c); n=$((n + 1)); stop=$((n - n / 2))
-  vrb_log "the committee has $n members: the EVM services of the last $stop stop (J' keeps $((n - stop)), the EVM quorum is $((n / 2 + 1)))"
-  for i in $(seq $((n - stop + 1)) "$n"); do stop_one_evm_validator "$i" 2>/dev/null || true; done
+  # 2. J' stalls: two of its four lose their EVM services, so its EVM quorum (3 of 4) cannot form
+  local before after n stop
+  n=$(cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'committeeIds()(uint64[])' | tr -cd ',' | wc -c); n=$((n + 1))   # K, the five
+  local nj=$((n - 1)); stop=$((nj - nj / 2))
+  vrb_log "K has $n members, J' has $nj: the EVM services of the last $stop of J' (identities $(seq -s ' ' $((nj - stop + 1)) "$nj")) stop (J' keeps $((nj - stop)), the EVM quorum is $((nj / 2 + 1)))"
+  for i in $(seq $((nj - stop + 1)) "$nj"); do stop_one_evm_validator "$i" 2>/dev/null || true; done
   before=$(vrp_eth_block); sleep 45; after=$(vrp_eth_block)
   [ "$after" -le "$((before + 1))" ] || { vrb_log "FAIL: J' certified blocks ($before -> $after) without its EVM quorum"; return 1; }
   [ "$(vrp_result_state "$rid2")" = 2 ] || { vrb_log "FAIL: J' is no longer Published in VR"; return 1; }
-  vrb_log "PASS: J' stalls (EVM block $before -> $after in 45 s with 2 of its 5 validators)"
+  vrb_log "PASS: J' stalls (EVM block $before -> $after in 45 s with $((nj - stop)) of its $nj validators)"
   # 3. the recovery: the roots return to K's committee (epoch 4), exact K, no receipts, supersedes J'
+  build/ubft q3 trust-base --root-rpc "http://127.0.0.1:$(m2_rpc_port 1)" --epoch 3 --out test-nodes/trust-base-epoch3.json || { vrb_log "FAIL: the trust base of epoch 3"; return 1; }
   H3_ROOTS="$(seq -s ' ' 1 "$n")"
-  Q3_WEIGHTS="$(printf '1 %.0s' $(seq 1 "$n"))" Q3_NEXT_EPOCH=4 q3_trust_base_v3 4 || { vrb_log "FAIL: the recovery's trust base"; return 1; }
+  Q3_WEIGHTS="$(for _ in $(seq 1 "$n"); do printf '1 '; done | sed 's/ $//')" Q3_NEXT_EPOCH=4 q3_trust_base_v3 4 || { vrb_log "FAIL: the recovery's trust base"; return 1; }
+  H3_ROOTS="$(seq -s ' ' 1 "$nj")"   # J''s roots run the recovery handoff; the retired joiner's root is not in epoch 3
   Q3_RECOVERY=1 Q3_SUPERSEDE=1 Q3_NEXT_EPOCH=4 Q3_ASSIGN_TAG=rec Q3_SUFFIX=-2 h3_retry_handoff 3 q3_attempt || { vrb_log "FAIL: the recovery handoff"; return 1; }
   Q3_EXPECT_SWITCHED="$(seq -s ' ' 1 "$n")" q3_install_n 4 || { vrb_log "FAIL: the roots did not install the recovery"; return 1; }
   vrb_log "PASS: the roots installed the recovery K (root epoch 4)"
   # 4. the three stopped validators return into K's scope; VR imports RecoveryAck(J') and the Boundary (recovered)
-  for i in $(seq $((n - stop + 1)) "$n"); do start_one_evm_validator "$i" "${validators:-4}" "$partitionID" "$(m2_root_addr 1)" engine-api rpc "$(evm_bootnodes_for_peers "$(m2_root_addr 1)" "$i" 1 2 3 4)" >/dev/null 2>&1 || true; done
+  for i in $(seq $((nj - stop + 1)) "$nj"); do start_one_evm_validator "$i" "${validators:-4}" "$partitionID" "$(m2_root_addr 1)" engine-api rpc "$(evm_bootnodes_for_peers "$(m2_root_addr 1)" "$i" 1 2 3 4 5)" >/dev/null 2>&1 || true; done
   vrb_wait 900 "VR's output of J' is Recovered (state 6)" bash -c "[ \"\$(cast call --rpc-url $vrb_rpc $vrb_vr 'output(bytes32)' $rid2 | python3 -c \"import sys;h=sys.stdin.read().strip()[2:];print(int(h[128:192],16))\")\" = 6 ]" || return 1
   [ "$(cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'health()(uint8)')" = 0 ] || { vrb_log "FAIL: VR is not Healthy after the recovery"; return 1; }
   [ "$(cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'lastAcked()(bytes32)')" = "$rid2" ] || { vrb_log "FAIL: lastAcked is not J's pair result"; return 1; }

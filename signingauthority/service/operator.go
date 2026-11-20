@@ -212,6 +212,34 @@ func (o *OperatorClient) SignDelegationPossession(ctx context.Context, req signi
 	return o.ex.call(ctx, opSignDelegationPossession, payload)
 }
 
+// SignPosPoP asks the authority for the P85 assignment possession proof its own key owes a frozen member (see signingauthority.SignPosPoP).
+func (o *OperatorClient) SignPosPoP(ctx context.Context, req signingauthority.PosPoPRequest) (evmassign.EVMPoP, error) {
+	payload, err := types.Cbor.Marshal(posPoPPayload{ResultID: req.ResultID[:], AssignmentID: req.AssignmentID[:], Snapshot: req.Snapshot[:],
+		Attempt: req.Attempt, ID: req.ID, Generation: req.Generation})
+	if err != nil {
+		return evmassign.EVMPoP{}, err
+	}
+	answer, err := o.ex.call(ctx, opSignPosPoP, payload)
+	if err != nil {
+		return evmassign.EVMPoP{}, err
+	}
+	var pop evmassign.EVMPoP
+	if err := types.Cbor.Unmarshal(answer, &pop); err != nil {
+		return evmassign.EVMPoP{}, fmt.Errorf("decoding the P85 possession proof: %w", err)
+	}
+	return pop, nil
+}
+
+// SetPosPolicy pins the P85 election scope of the running authority (see signingauthority.SetPosPolicy); it cannot be changed afterwards.
+func (o *OperatorClient) SetPosPolicy(ctx context.Context, p signingauthority.PosPolicy) error {
+	payload, err := types.Cbor.Marshal(posPolicyPayload{Network: p.Network[:], ChainID: p.ChainID[:], Election: p.Election[:], IDs: p.IDs})
+	if err != nil {
+		return err
+	}
+	_, err = o.ex.call(ctx, opSetPosPolicy, payload)
+	return err
+}
+
 // SignRegistration asks the authority for the EVM possession signature of a VR registration or binding proposal (see
 // signingauthority.SignRegistration). It carries the typed fields, never a digest; the authority computes the digest from its pinned
 // deployment.

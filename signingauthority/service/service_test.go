@@ -93,7 +93,7 @@ func newFixtureWith(t *testing.T, log *slog.Logger, options func(tb *types.RootT
 		AuthorityID: "authority-1", NodeID: "node-1", NetworkID: 5, PartitionID: testPartitionID,
 		ShardID: types.ShardID{}, ShardEpoch: 0, RootEpoch: signingauthority.PinRootEpoch(1),
 		ShardConfHash: confHash, Profile: signingauthority.ProfileLegacyBCRv1,
-	}, staticTrust{tb: tb}, fixtureOptions(options, tb)...)
+	}, staticTrust{tb: tb}, append(fixtureOptions(options, tb), signingauthority.WithLatePosPolicy())...)
 	require.NoError(t, err)
 	t.Cleanup(authority.Close)
 
@@ -399,7 +399,7 @@ func TestTheClientOffersSigningAndReadOnlyRestoreStatus(t *testing.T) {
 	for i := 0; i < reflect.TypeOf(&OperatorClient{}).NumMethod(); i++ {
 		operatorMethods = append(operatorMethods, reflect.TypeOf(&OperatorClient{}).Method(i).Name)
 	}
-	require.ElementsMatch(t, []string{"AdvanceEpoch", "AdvanceWithProof", "Close", "CompleteEnrollment", "Enrollment", "ReplaceSession", "SignDelegationPossession", "SignElectionPoP", "SignHandoffPoP", "SignRegistration", "ReloadRegistrationPolicy", "Status"}, operatorMethods,
+	require.ElementsMatch(t, []string{"AdvanceEpoch", "AdvanceWithProof", "Close", "CompleteEnrollment", "Enrollment", "ReplaceSession", "SignDelegationPossession", "SignElectionPoP", "SignHandoffPoP", "SignRegistration", "SignPosPoP", "SetPosPolicy", "ReloadRegistrationPolicy", "Status"}, operatorMethods,
 		"and the control plane signs nothing but the three possession messages (its own key, each recomputed from typed inputs), never a certification")
 }
 
