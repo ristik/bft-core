@@ -41,6 +41,13 @@ status() { echo "{\"activeEpoch\": $1, \"follower\": false}"; }
 upgrade() { printf '{"schedule":[%s]}' "$1"; }
 urow() { echo '{"ruleId":"'$1'","rootEpoch":'$2',"state":"'$3'"}'; }
 
+# ---- the activation source port of an authority: the slot's own reth eth port, never slot 0's by accident ----------------------------------------------------
+cases=$((cases+1)); [ "$(unset rethEthBase; LANE_SLOT=2 bash -c 'source scripts/lib/lane-slot.sh; lane_reth_eth_port 1')" = 20545 ] || fail "slot 2 validator 1 is not on 20545"
+cases=$((cases+1)); [ "$(unset rethEthBase; LANE_SLOT=2 bash -c 'source scripts/lib/lane-slot.sh; lane_reth_eth_port 3')" = 20547 ] || fail "slot 2 validator 3 is not on 20547"
+cases=$((cases+1)); [ "$(unset rethEthBase; LANE_SLOT=0 bash -c 'source scripts/lib/lane-slot.sh; lane_reth_eth_port 1')" = 18545 ] || fail "slot 0 validator 1 is not on 18545"
+cases=$((cases+1)); [ "$(unset LANE_SLOT rethEthBase; bash -c 'source scripts/lib/lane-slot.sh; lane_reth_eth_port 2')" = 18546 ] || fail "the default slot validator 2 is not on 18546"
+cases=$((cases+1)); [ "$(LANE_SLOT=2 rethEthBase=20545 bash -c 'source scripts/lib/lane-slot.sh; lane_reth_eth_port 4')" = 20548 ] || fail "an explicit rethEthBase is not honoured"
+cases=$((cases+1)); grep -q 'lane_reth_eth_port' helper.sh && ! grep -q 'rethEthBase:-18545' helper.sh || fail "helper.sh still falls back to slot 0's port"
 # ---- the roots' activation events: every root, rule, epoch E, latched AND active with currentEpoch >= E ------------------------------------------------
 mkroots "$d/rg"; roots_pred() { vrs_check_all_roots "$1" "$rid" $E 1 2 3 4; }
 edit() { mkroots "$d/rb"; "$@"; }   # a bad copy: a fresh good set, then ONE edit
@@ -161,7 +168,7 @@ echo garbage >"$d/lb.json";                                                     
 upgrade "$(urow "$rid" 5 Latched | sed 's/"rootEpoch":5/"rootEpoch":"5"/')" >"$d/lb.json"; mf "latched row: string epoch" lr_pred "$d/lg.json" "$d/lb.json" 'no Latched row'
 
 # the predicates run under PYTHONOPTIMIZE=1 (which strips `assert`) and still reject the bad inputs
-cases=$((cases+1)); grep -nE '^[[:space:]]*assert[[:space:]]' scripts/vr-schedule-steps.sh >/dev/null && fail "an assert statement is left in vr-schedule-steps.sh"
+cases=$((cases+1)); grep -nE '(^|[^A-Za-z0-9_])assert([^A-Za-z0-9_]|$)' scripts/vr-schedule-steps.sh | grep -vE '^[0-9]+:[[:space:]]*#' >/dev/null && fail "an assert statement is left in vr-schedule-steps.sh"
 export PYTHONOPTIMIZE=1
 rules "$row" >"$d/pg.json"; rules "$(echo "$row" | sed 's/"latched":true/"latched":1/')" >"$d/pb.json"
 cases=$((cases+1)); vrs_check_rules "$d/pg.json" "$rid" $E true true 2>/dev/null || fail "PYTHONOPTIMIZE: the good row no longer passes"
@@ -171,6 +178,13 @@ for f in 's/"rootEpoch":5/"rootEpoch":-5/' 's/"rootEpoch":5/"rootEpoch":5.0/' 's
   cases=$((cases+1)); rules "$(echo "$row" | sed "$f")" >"$d/pb.json"; vrs_check_rules "$d/pb.json" "$rid" $E true true 2>/dev/null && fail "PYTHONOPTIMIZE: $f passes"
 done
 unset PYTHONOPTIMIZE
+# ---- the no-assert guard matches `assert` followed by ANY non-identifier character: a space, a tab, a parenthesis ----------------------------------------
+noassert() { ! grep -nE '(^|[^A-Za-z0-9_])assert([^A-Za-z0-9_]|$)' "$1" | grep -vE '^[0-9]+:[[:space:]]*#' >/dev/null; }
+printf 'x = 1\n' >"$d/as_good.py"; cases=$((cases+1)); noassert "$d/as_good.py" || fail "the guard flags a file without assert"
+printf 'x = 1\n# an assert in a comment is not code\nassertion = 2\nreassert(x)\n' >"$d/as_good2.py"; cases=$((cases+1)); noassert "$d/as_good2.py" || fail "the guard flags a comment or a longer identifier"
+for body in '    assert x' '    assert(x)' $'    assert\tx' 'assert x, "m"' 'if y: assert(x)' '    assert'; do
+  printf '%s\n' "$body" >"$d/as_bad.py"; cases=$((cases+1)); noassert "$d/as_bad.py" && fail "the guard misses: $body"
+done
 # ---- a command's failure survives vrs_logged (no `| tee`/`| tail` masking) ----------------------------------------------------------------------------
 cases=$((cases+1)); vrs_logged "$d/l1.log" sh -c 'echo boom >&2; exit 7' >/dev/null 2>&1; [ "$?" = 7 ] || fail "vrs_logged lost the failing command's status"
 cases=$((cases+1)); vrs_logged "$d/l2.log" sh -c 'echo fine' >/dev/null 2>&1 || fail "vrs_logged failed a succeeding command"

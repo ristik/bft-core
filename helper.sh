@@ -313,7 +313,7 @@ function provision_authority_fence() {
   local i=$1 home="test-nodes/auth$1" gen
   gen=$(cat test-nodes/execution-genesis-hash 2>/dev/null) && [ -n "$gen" ] || { echo "authority $i: no execution genesis hash to provision" >&2; return 1; }
   printf '{"b1Profile":"%s","activationSourceUrl":"http://127.0.0.1:%s","executionGenesisHash":"%s"}\n' \
-    "${EVM_B1_PROFILE:-test-nodes/b1-profile.json}" "$(( ${rethEthBase:-18545} + i - 1 ))" "$gen" >"$home/fence.json.tmp" && mv "$home/fence.json.tmp" "$home/fence.json" || return 1
+    "${EVM_B1_PROFILE:-test-nodes/b1-profile.json}" "$(lane_reth_eth_port "$i")" "$gen" >"$home/fence.json.tmp" && mv "$home/fence.json.tmp" "$home/fence.json" || return 1
   for _ in $(seq 1 100); do
     grep -q 'fence provisioned' "$home/authority.log" 2>/dev/null && return 0
     sleep 0.1

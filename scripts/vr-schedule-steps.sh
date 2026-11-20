@@ -80,7 +80,7 @@ vrs_validate_rules() {
   python3 - "$@" <<'PY'
 import json, re, sys
 hexid = re.compile(r"^0x[0-9a-fA-F]{64}$")
-def invalid(why):   # explicit exits, never `assert`: asserts vanish under PYTHONOPTIMIZE=1
+def invalid(why):   # explicit exits: the optimizable check statement vanishes under PYTHONOPTIMIZE=1
     sys.exit("not a valid unicity_rulesV1 response: %s" % why)
 def is_u64(v):
     return type(v) is int and 0 <= v < 2**64
