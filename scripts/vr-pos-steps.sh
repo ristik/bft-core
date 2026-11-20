@@ -238,6 +238,7 @@ vrp_recovery() {
   [ "$(vrp_result_state "$rid2")" = 2 ] || { vrb_log "FAIL: J' is no longer Published in VR"; return 1; }
   vrb_log "PASS: J' stalls (EVM block $before -> $after in 45 s with $((nj - stop)) of its $nj validators)"
   # 3. the recovery: the roots return to K's committee (epoch 4), exact K, no receipts, supersedes J'
+  build/ubft q3 trust-base --root-rpc "http://127.0.0.1:$(m2_rpc_port 1)" --epoch 3 --out test-nodes/trust-base-epoch3.json || { vrb_log "FAIL: the trust base of epoch 3"; return 1; }
   H3_ROOTS="$(seq -s ' ' 1 "$n")"
   Q3_WEIGHTS="$(printf '1 %.0s' $(seq 1 "$n"))" Q3_NEXT_EPOCH=4 q3_trust_base_v3 4 || { vrb_log "FAIL: the recovery's trust base"; return 1; }
   H3_ROOTS="$(seq -s ' ' 1 "$nj")"   # J''s roots run the recovery handoff; the retired joiner's root is not in epoch 3
