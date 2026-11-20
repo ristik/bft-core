@@ -211,6 +211,7 @@ check_disk() {
   dpid=
   sudo -n umount "$d"
   disk_mount=
+  restore_scrapes
 }
 
 check_scrape() {

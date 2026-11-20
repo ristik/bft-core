@@ -54,9 +54,11 @@ type Authority struct {
 	generation uint64
 	// state latches faulted on a detected inconsistency and never recovers within this lifetime.
 	state health
-	// signs and lastSign are the diagnostic activity counters behind Activity (monitoring only; never consulted by a decision).
-	signs    uint64
-	lastSign time.Time
+	// Signing activity is for monitoring. It is never consulted by an admission or signing decision.
+	signatures        uint64
+	sessionIssuedAt   time.Time
+	sessionLastSign   time.Time
+	sessionSignatures uint64
 	// rec is the one reservation this authority holds.
 	rec          record
 	scopeVersion uint64
@@ -289,6 +291,9 @@ func (a *Authority) ReplaceSession() (Session, error) {
 	}
 	a.generation++
 	a.sessionIssued = true
+	a.sessionIssuedAt = time.Now()
+	a.sessionLastSign = time.Time{}
+	a.sessionSignatures = 0
 	return Session{authority: a.instance, generation: a.generation}, nil
 }
 
@@ -406,6 +411,10 @@ type Status struct {
 func (a *Authority) Status() Status {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	return a.statusLocked()
+}
+
+func (a *Authority) statusLocked() Status {
 	return Status{
 		RootEpoch:        pinnedRootEpoch(a.enroll.RootEpoch),
 		ShardEpoch:       a.enroll.ShardEpoch,
@@ -589,18 +598,33 @@ func (a *Authority) Sign(s Session) error {
 		return fmt.Errorf("%w: the signed record would be %d bytes, limit is %d", ErrRequestTooLarge, size, MaxRecordBytes)
 	}
 	a.rec = candidate
-	a.signs++
-	a.lastSign = time.Now()
+	a.signatures++
+	a.sessionSignatures++
+	a.sessionLastSign = time.Now()
 	return nil
 }
 
-// Activity is the diagnostic count of signatures this authority lifetime made and when the last one was made (the zero time when none).
-// It is read by the monitoring endpoint and says nothing about what was signed. It is a function, not a method, so the authority's method
-// surface (pinned by TestAuthorityOffersNoGenericSigningOrKeyImport) stays what it was.
-func Activity(a *Authority) (signs uint64, last time.Time) {
+// SigningActivity is a single diagnostic snapshot of the authority and its current client session.
+type SigningActivity struct {
+	Status
+	Enrolled          bool
+	Signatures        uint64
+	SessionIssuedAt   time.Time
+	SessionLastSign   time.Time
+	SessionSignatures uint64
+}
+
+// Activity returns signing counters and times without exposing signed data. The package function keeps the authority's method surface unchanged.
+func Activity(a *Authority) SigningActivity {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.signs, a.lastSign
+	s := SigningActivity{Status: a.statusLocked(), Enrolled: a.enroll.complete(), Signatures: a.signatures}
+	if s.SessionIssued {
+		s.SessionIssuedAt = a.sessionIssuedAt
+		s.SessionLastSign = a.sessionLastSign
+		s.SessionSignatures = a.sessionSignatures
+	}
+	return s
 }
 
 // RetainResponse makes the signed response replayable before any of it can leave.

@@ -262,9 +262,9 @@ func (e *validatorExporter) Collect(ch chan<- prometheus.Metric) {
 	}
 	g(dMember, b(r.Member))
 	g(dStaged, b(r.Staged != nil))
-	g(dActs, float64(len(r.Activations)))
 	g(dSchedule, b(r.ScheduleKnown))
 	if r.ScheduleKnown {
+		g(dActs, float64(len(r.Activations)))
 		g(dUpReq, b(len(r.UpgradeRequired) > 0))
 		least, have := int64(0), false
 		for _, u := range r.UpgradeRequired {

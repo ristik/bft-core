@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +17,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/require"
 
+	"github.com/unicitynetwork/bft-core/seed"
 	"github.com/unicitynetwork/bft-core/vrclient/vrfake"
 )
 
@@ -50,6 +53,72 @@ func TestStatusExitCode(t *testing.T) {
 	_, err = runValidator(t, home, "status")
 	var c2 *ExitCodeError
 	require.False(t, errors.As(err, &c2))
+}
+
+func TestStatusVerdictIncludesSeedRecordError(t *testing.T) {
+	chain, url := fakeNetwork(t)
+	chain.With(func(c *vrfake.Chain) { c.HeadTime = uint64(time.Now().Unix()) })
+	home := initHome(t, url)
+	_, err := runValidator(t, home, "status", "--json", "--exit-code")
+	require.NoError(t, err)
+	seedDir := filepath.Join(home, seed.ImportDir)
+	require.NoError(t, os.Mkdir(seedDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(seedDir, seed.ImportRecordName), []byte("{"), 0o600))
+
+	out, err := runValidator(t, home, "status", "--json", "--exit-code")
+	var coded *ExitCodeError
+	require.ErrorAs(t, err, &coded)
+	require.Equal(t, ExitUnknown, coded.ExitCode())
+	var report validatorStatusReport
+	require.NoError(t, json.Unmarshal([]byte(out), &report))
+	require.Equal(t, "unknown", report.Verdict)
+	require.Len(t, report.Unknown, 1)
+	require.Contains(t, report.Unknown[0], "seed import record:")
+}
+
+func TestStatusAndExporterPreserveModuleFaultWhenScheduleIsUnknown(t *testing.T) {
+	chain, url := fakeNetwork(t)
+	chain.With(func(c *vrfake.Chain) {
+		c.HeadTime = uint64(time.Now().Unix())
+		c.Health = 1
+		c.FailActivations = true
+	})
+	home := initHome(t, url)
+	out, err := runValidator(t, home, "status", "--json", "--exit-code", "--id", "1")
+	var coded *ExitCodeError
+	require.ErrorAs(t, err, &coded)
+	require.Equal(t, ExitCritical, coded.ExitCode())
+	var report validatorStatusReport
+	require.NoError(t, json.Unmarshal([]byte(out), &report))
+	require.False(t, report.ScheduleKnown)
+	require.Equal(t, "Faulted", report.Health)
+	require.Equal(t, "critical", report.Verdict)
+	require.Len(t, report.Unknown, 1)
+	require.Contains(t, report.Unknown[0], "activation schedule:")
+	require.Equal(t, "module_unhealthy", report.Findings[0].Code)
+
+	e := &validatorExporter{
+		flags: &validatorStatusFlags{validatorFlags: validatorFlags{baseFlags: &baseFlags{}, Config: filepath.Join(home, validatorConfigFile), ID: 1}},
+		log:   slog.Default(),
+	}
+	e.flags.NoKeys = true
+	e.poll(context.Background())
+	metrics := gather(t, e)
+	require.Equal(t, []float64{1}, metrics["unicity_vr_module_health"])
+	require.Equal(t, []float64{0}, metrics["unicity_upgrade_schedule_known"])
+	require.NotContains(t, metrics, "unicity_upgrade_required")
+	require.NotContains(t, metrics, "unicity_vr_activations")
+}
+
+func TestHeadOfRejectsOversizedResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":{"number":"0x1","timestamp":"0x1","extra":"`)
+		_, _ = io.WriteString(w, strings.Repeat("x", maxRPCBody))
+		_, _ = io.WriteString(w, `"}}`)
+	}))
+	defer srv.Close()
+	_, err := headOf(context.Background(), srv.URL)
+	require.ErrorContains(t, err, errRPCBodyTooLarge.Error())
 }
 
 // TestJudge: the findings and the verdict they make.

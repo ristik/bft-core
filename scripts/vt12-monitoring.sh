@@ -56,9 +56,9 @@ start_exporter() {
     custody=$(jq -r '.custody // empty' "${VR_DIR:-test-nodes/vr}/contracts/deployment.json")
     [ -z "$custody" ] || extra+=(--custody "$custody")
   fi
-  build/ubft validator exporter --validator-config "$MON/v$i.json" --listen "127.0.0.1:$((29400 + i))" --interval 5s \
+  nohup build/ubft validator exporter --validator-config "$MON/v$i.json" --listen "127.0.0.1:$((29400 + i))" --interval 5s \
     --root-metrics "http://127.0.0.1:$(lane_port "$((25865 + i))")/api/v1/metrics" --disk-path "ureth=test-nodes/reth$i" "${extra[@]}" \
-    --log-format text --log-level info >"$MON/exporter$i.log" 2>&1 &
+    --log-format text --log-level info >"$MON/exporter$i.log" 2>&1 </dev/null &
   echo $! >"$MON/exporter$i.pid"
 }
 

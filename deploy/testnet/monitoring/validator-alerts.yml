@@ -1,7 +1,6 @@
 # VT-12 validator alert pack (bft-core#1152). One file; every alert has a runbook in docs/operations/monitoring/runbooks.md.
 # Metrics: docs/operations/monitoring/metrics-catalogue.md. The label `validator` is set by the scrape configuration (prometheus-validator.yml.tmpl).
-# Stall windows (changes() over a window) also require count_over_time(): they assume a scrape interval of at most 20 s, and a series that has just begun
-# to be scraped cannot page. Check with: promtool check rules validator-alerts.yml; promtool test rules validator-alerts.test.yml
+# Stall rules require recent samples at both ends of the elapsed observation window and enough observations within it. The tolerance is one 20 s scrape interval. Check with: promtool check rules validator-alerts.yml; promtool test rules validator-alerts.test.yml
 groups:
   - name: unicity-validator
     rules:
@@ -15,7 +14,12 @@ groups:
           description: 'Prometheus cannot scrape {{ $labels.job }} on {{ $labels.instance }} (validator {{ $labels.validator }}): the process is down, hung or unreachable.'
           runbook: docs/operations/monitoring/runbooks.md#unicitytargetdown
       - alert: UnicityRootStalled
-        expr: changes(unicity_root_committed_round[3m]) == 0 and count_over_time(unicity_root_committed_round[3m]) >= 8 and on(instance) unicity_root_member == 1
+        expr: |
+          changes(unicity_root_committed_round[3m20s]) == 0
+          and present_over_time(unicity_root_committed_round[20s] offset 3m)
+          and present_over_time(unicity_root_committed_round[20s])
+          and count_over_time(unicity_root_committed_round[3m]) >= 8
+          and on(instance) unicity_root_member == 1
         for: 1m
         labels:
           severity: critical
@@ -186,7 +190,11 @@ groups:
           description: 'The shard node of validator {{ $labels.validator }} has no session to sign through: replace-session is needed.'
           runbook: docs/operations/monitoring/runbooks.md#unicityauthoritynosession
       - alert: UnicityAuthoritySigningStalled
-        expr: (unicity_authority_session_issued == 1 and unicity_authority_retired == 0 and ((unicity_authority_session_signatures == 0 and unicity_authority_session_age_seconds > 180) or unicity_authority_last_signature_age_seconds > 120)) and on(validator) unicity_shard_active == 1
+        expr: |
+          (unicity_authority_session_issued == 1 and unicity_authority_retired == 0
+            and ((unicity_authority_session_signatures == 0 and unicity_authority_session_age_seconds > 180)
+              or (unicity_authority_session_signatures > 0 and unicity_authority_last_signature_age_seconds > 120)))
+          and on(validator) unicity_shard_active == 1
         for: 2m
         labels:
           severity: critical
@@ -231,7 +239,12 @@ groups:
           description: 'Import lag {{ $value }} on validator {{ $labels.validator }} persists after a burst.'
           runbook: docs/operations/monitoring/runbooks.md#unicityrecordimportlag
       - alert: UnicityRecordCursorStuck
-        expr: changes(unicity_vr_record_cursor[10m]) == 0 and count_over_time(unicity_vr_record_cursor[10m]) >= 20 and unicity_vr_record_application_lag > 0
+        expr: |
+          changes(unicity_vr_record_cursor[10m20s]) == 0
+          and present_over_time(unicity_vr_record_cursor[20s] offset 10m)
+          and present_over_time(unicity_vr_record_cursor[20s])
+          and count_over_time(unicity_vr_record_cursor[10m]) >= 20
+          and unicity_vr_record_application_lag > 0
         for: 5m
         labels:
           severity: critical

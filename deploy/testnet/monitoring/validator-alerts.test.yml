@@ -2,7 +2,7 @@
 # threshold-boundary, retired and reset series staying quiet. Run: promtool test rules validator-alerts.test.yml
 rule_files:
   - validator-alerts.yml
-evaluation_interval: 15s
+evaluation_interval: 5s
 tests:
   - interval: 15s
     input_series:
@@ -29,6 +29,27 @@ tests:
         values: '1x80'
     alert_rule_test:
       - eval_time: 18m
+        alertname: UnicityRootStalled
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              instance: "a"
+              validator: "1"
+            exp_annotations:
+              description: "Root 1 sees no new committed root block: the committee has lost quorum or this node is cut off."
+              runbook: "docs/operations/monitoring/runbooks.md#unicityrootstalled"
+              summary: "The root chain has committed nothing for 3 minutes."
+  - interval: 5s
+    input_series:
+      - series: 'unicity_root_committed_round{instance="a",validator="1"}'
+        values: '100x50'
+      - series: 'unicity_root_member{instance="a",validator="1"}'
+        values: '1x50'
+    alert_rule_test:
+      - eval_time: 3m55s
+        alertname: UnicityRootStalled
+        exp_alerts: []
+      - eval_time: 4m
         alertname: UnicityRootStalled
         exp_alerts:
           - exp_labels:
@@ -504,6 +525,27 @@ tests:
               description: "Records are imported but VR applies none: the records hook is not running."
               runbook: "docs/operations/monitoring/runbooks.md#unicityrecordcursorstuck"
               summary: "VR's record cursor does not move while records are waiting."
+  - interval: 5s
+    input_series:
+      - series: 'unicity_vr_record_cursor{instance="a",validator="1"}'
+        values: '10x183'
+      - series: 'unicity_vr_record_application_lag{instance="a",validator="1"}'
+        values: '5x183'
+    alert_rule_test:
+      - eval_time: 14m55s
+        alertname: UnicityRecordCursorStuck
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: UnicityRecordCursorStuck
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              instance: "a"
+              validator: "1"
+            exp_annotations:
+              description: "Records are imported but VR applies none: the records hook is not running."
+              runbook: "docs/operations/monitoring/runbooks.md#unicityrecordcursorstuck"
+              summary: "VR's record cursor does not move while records are waiting."
   - interval: 15s
     input_series:
       - series: 'unicity_vr_custody_cursor_minus_vr_cursor{instance="a",validator="1"}'
@@ -762,4 +804,23 @@ tests:
     alert_rule_test:
       - eval_time: 18m
         alertname: UnicityScrapeTargetsAbsent
+        exp_alerts: []
+
+  - interval: 5s
+    input_series:
+      - series: 'unicity_authority_session_issued{instance="a",validator="1"}'
+        values: '1x40'
+      - series: 'unicity_authority_retired{instance="a",validator="1"}'
+        values: '0x40'
+      - series: 'unicity_authority_session_signatures{instance="a",validator="1"}'
+        values: '0x40'
+      - series: 'unicity_authority_session_age_seconds{instance="a",validator="1"}'
+        values: '0+5x40'
+      - series: 'unicity_authority_last_signature_age_seconds{instance="a",validator="1"}'
+        values: '300+5x40'
+      - series: 'unicity_shard_active{validator="1",instance="y"}'
+        values: '1x40'
+    alert_rule_test:
+      - eval_time: 2m30s
+        alertname: UnicityAuthoritySigningStalled
         exp_alerts: []

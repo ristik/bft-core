@@ -82,10 +82,10 @@ as well (`network="shard"` for the peers: the validators of the installed assign
 | `unicity_authority_shard_epoch` | gauge | | shard epoch enrolled for |
 | `unicity_authority_lineage_pinned` | gauge | | 1 when it verifies its own epoch advances |
 | `unicity_authority_lineage_epoch` | gauge | | last root epoch its lineage holds |
-| `unicity_authority_session_age_seconds` | gauge | | seconds since the current client session was first seen by the endpoint (a new generation restarts it); absent without a session |
-| `unicity_authority_session_signatures` | gauge | | signatures since the current session was first seen; a session that stays at 0 never started signing |
+| `unicity_authority_session_age_seconds` | gauge | | seconds since the authority issued the current client session. Absent without a session |
+| `unicity_authority_session_signatures` | gauge | | certification signatures made in the current client session. Absent without a session |
 | `unicity_authority_signatures_total` | counter | | signatures made in this lifetime |
-| `unicity_authority_last_signature_age_seconds` | gauge | | seconds since the last signature; absent before the first |
+| `unicity_authority_last_signature_age_seconds` | gauge | | seconds since the last certification signature in the current client session. Absent before its first signature |
 
 ## VR exporter (`ubft validator exporter`)
 
@@ -158,6 +158,6 @@ Not covered here: the aggregator (a separate repository outside ristik/*; its `/
 - Nodes: start the root and shard node with `--metrics prometheus --rpc-server-address 127.0.0.1:PORT`, the authority with `--metrics-address 127.0.0.1:PORT`.
 - Exporter (one per validator, next to its nodes): `ubft validator exporter --validator-config validator.json --listen 127.0.0.1:9180 --root-metrics http://127.0.0.1:PORT/api/v1/metrics [--custody 0x..] [--disk-path ureth=/data/ureth]`. The config needs `rpc` (the public endpoint), `localRpc` (this validator's own ureth, for the lag) and `id`.
 - Prometheus: `deploy/testnet/monitoring/prometheus-validator.yml.tmpl` shows the scrape jobs and the `validator` label; `deploy/testnet/monitoring/validator-alerts.yml` is the alert pack (`promtool check rules`, `promtool test rules validator-alerts.test.yml`); `grafana-validator.json` is the one-validator dashboard.
-- On a slot 0 development lane with authority signing and a certified VR genesis, start the lane with `MONITORING=1`. Run `MON_GRAFANA=1 scripts/vt12-monitoring.sh start`, then run `scripts/vt12-acceptance.sh` from the lane checkout. The launcher builds each exporter config from the corresponding root's genesis identity. The acceptance script stores scrape outputs, firing alerts and a dashboard PNG in `$EVID` (default `~/evidence/vt12/live`).
+- On a slot 0 development lane with authority signing and a certified VR genesis, start the lane with `MONITORING=1`. Run `MON_GRAFANA=1 scripts/vt12-monitoring.sh start`, then run `scripts/vt12-acceptance.sh` from the lane checkout. For the EVM-stop check, set `MON_VR_ROOT1_RPC` on the lane launcher to reth2's loopback RPC so root 1 can keep reading VR when reth1 stops. Shard 1 and exporter 1 still use reth1 for local execution and lag. The monitoring launcher builds each exporter config from the corresponding root's genesis identity. The acceptance script stores scrape outputs, firing alerts and a dashboard PNG in `$EVID` (default `~/evidence/vt12/live`).
 - To check the pending-upgrade alert against an active VT-07 development lane on the same host, set `VT12_VT07_PORT` to its metrics port and `VT12_VT07_VALIDATOR` to its validator label (default `4`). The acceptance script temporarily scrapes only its `ab_unicity_upgrade_required` samples. With no port supplied, the acceptance script serves a local fixture for the upgrade rules.
 - Scripts and alerting: `ubft validator status --json --exit-code` (exit 0 ok, 1 warning, 2 critical, 3 unknown).

@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"sync"
 	"time"
 
 	"github.com/ainvaltin/httpsrv"
@@ -37,28 +36,13 @@ func checkAuthorityMetricsAddress(addr string) error {
 // authorityCollector exports the authority's diagnostic Status (never request or signature bytes) as unicity_authority_* gauges.
 type authorityCollector struct {
 	a *signingauthority.Authority
-
-	mu           sync.Mutex
-	sessionSeen  bool
-	generation   uint64
-	sessionSince time.Time
-	signsAtStart uint64
 }
 
-// session tracks when the current client session was first seen and how many signatures were made since: the age and the count that tell a
-// signer that never started (a session issued, no first signature) from one that stopped.
-func (c *authorityCollector) session(issued bool, generation, signs uint64) (age time.Duration, since uint64, ok bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if !issued {
-		c.sessionSeen = false
-		return 0, 0, false
-	}
-	if !c.sessionSeen || generation != c.generation {
-		c.sessionSeen, c.generation, c.sessionSince, c.signsAtStart = true, generation, time.Now(), signs
-	}
-	return time.Since(c.sessionSince), signs - c.signsAtStart, true
-}
+const (
+	authoritySessionAgeHelp   = "Seconds since the current client session was issued; absent without a session."
+	authoritySessionSignsHelp = "Certification signatures made in the current client session; absent without a session."
+	authorityLastSignHelp     = "Seconds since the last certification signature in the current client session; absent before its first."
+)
 
 var authorityGauges = []struct{ name, help string }{
 	{"unicity_authority_enrolled", "1 once the enrollment is complete (the shard configuration hash is bound)."},
@@ -81,9 +65,9 @@ func (c *authorityCollector) Describe(ch chan<- *prometheus.Desc) {
 		ch <- prometheus.NewDesc(g.name, g.help, nil, nil)
 	}
 	ch <- prometheus.NewDesc("unicity_authority_signatures_total", "Signatures made in this authority lifetime.", nil, nil)
-	ch <- prometheus.NewDesc("unicity_authority_last_signature_age_seconds", "Seconds since the last signature; absent before the first.", nil, nil)
-	ch <- prometheus.NewDesc("unicity_authority_session_age_seconds", "Seconds since the current client session was first seen by this endpoint (a new generation restarts it); absent without a session.", nil, nil)
-	ch <- prometheus.NewDesc("unicity_authority_session_signatures", "Signatures made since the current client session was first seen; absent without a session.", nil, nil)
+	ch <- prometheus.NewDesc("unicity_authority_last_signature_age_seconds", authorityLastSignHelp, nil, nil)
+	ch <- prometheus.NewDesc("unicity_authority_session_age_seconds", authoritySessionAgeHelp, nil, nil)
+	ch <- prometheus.NewDesc("unicity_authority_session_signatures", authoritySessionSignsHelp, nil, nil)
 	ch <- prometheus.NewDesc("unicity_authority_up", "Always 1 while the authority process answers.", nil, nil)
 }
 
@@ -94,21 +78,20 @@ func (c *authorityCollector) Collect(ch chan<- prometheus.Metric) {
 		}
 		return 0
 	}
-	st, en := c.a.Status(), c.a.Enrollment()
-	vals := []float64{b(len(en.ShardConfHash) != 0), b(st.Faulted), b(st.KeyLost), b(st.Retired), b(st.SessionIssued), b(st.HasReservation), b(st.ResponseRetained),
+	st := signingauthority.Activity(c.a)
+	vals := []float64{b(st.Enrolled), b(st.Faulted), b(st.KeyLost), b(st.Retired), b(st.SessionIssued), b(st.HasReservation), b(st.ResponseRetained),
 		float64(st.Generation), float64(st.ReservedRound), float64(st.RootEpoch), float64(st.ShardEpoch), b(st.LineagePinned), float64(st.LineageEpoch)}
 	for i, g := range authorityGauges {
 		ch <- prometheus.MustNewConstMetric(prometheus.NewDesc(g.name, g.help, nil, nil), prometheus.GaugeValue, vals[i])
 	}
-	signs, last := signingauthority.Activity(c.a)
-	ch <- prometheus.MustNewConstMetric(prometheus.NewDesc("unicity_authority_signatures_total", "Signatures made in this authority lifetime.", nil, nil), prometheus.CounterValue, float64(signs))
-	if !last.IsZero() {
-		ch <- prometheus.MustNewConstMetric(prometheus.NewDesc("unicity_authority_last_signature_age_seconds", "Seconds since the last signature; absent before the first.", nil, nil),
-			prometheus.GaugeValue, time.Since(last).Seconds())
+	ch <- prometheus.MustNewConstMetric(prometheus.NewDesc("unicity_authority_signatures_total", "Signatures made in this authority lifetime.", nil, nil), prometheus.CounterValue, float64(st.Signatures))
+	if !st.SessionLastSign.IsZero() {
+		ch <- prometheus.MustNewConstMetric(prometheus.NewDesc("unicity_authority_last_signature_age_seconds", authorityLastSignHelp, nil, nil),
+			prometheus.GaugeValue, time.Since(st.SessionLastSign).Seconds())
 	}
-	if age, since, ok := c.session(st.SessionIssued, st.Generation, signs); ok {
-		ch <- prometheus.MustNewConstMetric(prometheus.NewDesc("unicity_authority_session_age_seconds", "Seconds since the current client session was first seen by this endpoint (a new generation restarts it); absent without a session.", nil, nil), prometheus.GaugeValue, age.Seconds())
-		ch <- prometheus.MustNewConstMetric(prometheus.NewDesc("unicity_authority_session_signatures", "Signatures made since the current client session was first seen; absent without a session.", nil, nil), prometheus.GaugeValue, float64(since))
+	if st.SessionIssued {
+		ch <- prometheus.MustNewConstMetric(prometheus.NewDesc("unicity_authority_session_age_seconds", authoritySessionAgeHelp, nil, nil), prometheus.GaugeValue, time.Since(st.SessionIssuedAt).Seconds())
+		ch <- prometheus.MustNewConstMetric(prometheus.NewDesc("unicity_authority_session_signatures", authoritySessionSignsHelp, nil, nil), prometheus.GaugeValue, float64(st.SessionSignatures))
 	}
 	ch <- prometheus.MustNewConstMetric(prometheus.NewDesc("unicity_authority_up", "Always 1 while the authority process answers.", nil, nil), prometheus.GaugeValue, 1)
 }

@@ -377,19 +377,7 @@ func validatorStatus(ctx context.Context, f *validatorStatusFlags) (*validatorSt
 		r.NextBoundary = s
 	}
 
-	acts, err := vr.Activations(ctx)
-	if err != nil {
-		return nil, err
-	}
-	r.ScheduleKnown = true
-	for _, a := range acts {
-		if (a.State == 1 || a.State == 3) && !vrschedule.ImplementedRules[[2]vrschema.Word{a.RuleId, a.ReleaseDigest}] { // Active or Latched
-			r.UpgradeRequired = append(r.UpgradeRequired, statusUpgrade{Rule: fmt.Sprintf("%x", a.RuleId[:8]), Release: fmt.Sprintf("%x", a.ReleaseDigest[:8]),
-				RootEpoch: a.RootEpoch, State: vrclient.ActivationState(a.State)})
-		}
-		r.Activations = append(r.Activations, fmt.Sprintf("rule %x release %x at root epoch %d, not before UC time %d: %s",
-			a.RuleId, a.ReleaseDigest, a.RootEpoch, a.NotBeforeUcTime, vrclient.ActivationState(a.State)))
-	}
+	r.readActivations(ctx, vr)
 
 	// sync: the public endpoint's head, and this validator's own ureth against it
 	n, ts, err := blockInfo(ctx, ch.rpc, hexutil.EncodeUint64(head)) // the pinned block, so the public head and VR's state are one point
@@ -428,12 +416,29 @@ func validatorStatus(ctx context.Context, f *validatorStatusFlags) (*validatorSt
 			r.Unknown = append(r.Unknown, "local sync: "+strings.TrimPrefix(r.LocalSync, "unknown: "))
 		}
 	}
-	r.judge(f.Thresholds)
 	r.Sync = buildSyncView(ctx, v, r, f.Sample)
+	r.judge(f.Thresholds)
 	if len(r.Unknown) > 0 {
 		return r, fmt.Errorf("%w: status is incomplete: %s", ErrValidator, strings.Join(r.Unknown, "; "))
 	}
 	return r, nil
+}
+
+func (r *validatorStatusReport) readActivations(ctx context.Context, vr *vrclient.Client) {
+	acts, err := vr.Activations(ctx)
+	if err != nil {
+		r.Unknown = append(r.Unknown, "activation schedule: "+err.Error())
+		return
+	}
+	r.ScheduleKnown = true
+	for _, a := range acts {
+		if (a.State == 1 || a.State == 3) && !vrschedule.ImplementedRules[[2]vrschema.Word{a.RuleId, a.ReleaseDigest}] { // Active or Latched
+			r.UpgradeRequired = append(r.UpgradeRequired, statusUpgrade{Rule: fmt.Sprintf("%x", a.RuleId[:8]), Release: fmt.Sprintf("%x", a.ReleaseDigest[:8]),
+				RootEpoch: a.RootEpoch, State: vrclient.ActivationState(a.State)})
+		}
+		r.Activations = append(r.Activations, fmt.Sprintf("rule %x release %x at root epoch %d, not before UC time %d: %s",
+			a.RuleId, a.ReleaseDigest, a.RootEpoch, a.NotBeforeUcTime, vrclient.ActivationState(a.State)))
+	}
 }
 
 func localSync(ctx context.Context, url string, publicHead uint64, head **uint64) string {
