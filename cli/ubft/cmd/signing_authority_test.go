@@ -407,3 +407,49 @@ func certifiedWork(t *testing.T, rootSigner abcrypto.Signer, conf *types.Partiti
 	}
 	return uc, tr, proposed
 }
+
+// On a VR generation the authority refuses to start without its activation source and generation pins, before it serves anything: the
+// requirement comes from trusted deployment data (a VR registration policy, a b1 profile with the VR measurement, or the harmless
+// --vr-generation), never from an opt-in.
+func TestSigningAuthorityRefusesToStartOnAVRGenerationWithoutTheFence(t *testing.T) {
+	ctx := context.Background()
+	logF := testobserve.NewFactory(t)
+	sockets := authoritySocketDir(t)
+	home := t.TempDir()
+	clientSocket := filepath.Join(sockets, "client", "client.sock")
+	operatorSocket := filepath.Join(sockets, "operator", "operator.sock")
+	operatorCredential := filepath.Join(home, "operator.cred")
+	run := func(args ...string) error {
+		c := New(logF)
+		c.baseCmd.SetOut(io.Discard)
+		c.baseCmd.SetArgs(args)
+		return c.Execute(ctx)
+	}
+	keyConf, err := (&keyConfFlags{KeyConfFile: filepath.Join(home, keyConfFileName)}).loadKeyConf(&baseFlags{}, true)
+	require.NoError(t, err)
+	nodeID, err := keyConf.NodeID()
+	require.NoError(t, err)
+	rootSigner, err := abcrypto.NewInMemorySecp256K1Signer()
+	require.NoError(t, err)
+	tb, ok := testtrustbase.NewTrustBase(t, rootSigner).(*types.RootTrustBaseV1)
+	require.True(t, ok)
+	trustBasePath := filepath.Join(home, "trust-base.json")
+	require.NoError(t, util.WriteJsonFile(trustBasePath, tb))
+	require.NoError(t, run("signing-authority", "credential", "--out", operatorCredential))
+
+	args := []string{
+		"signing-authority", "run", "--home", home,
+		"--client-socket", clientSocket, "--operator-socket", operatorSocket, "--operator-credential", operatorCredential,
+		"--trust-base", trustBasePath, "--authority-id", "authority-1", "--node-id", nodeID.String(),
+		"--network-id", "5", "--partition-id", "7", "--shard-epoch", "0", "--root-epoch", strconv.FormatUint(tb.GetEpoch(), 10),
+	}
+	// the activation options omitted: refused, and no socket was ever opened
+	err = run(append(append([]string{}, args...), "--vr-generation")...)
+	require.ErrorIs(t, err, errVRFenceRequired)
+	require.NoFileExists(t, clientSocket)
+	require.NoFileExists(t, operatorSocket)
+	// the URL alone is not enough: the generation pins are mandatory too
+	err = run(append(append([]string{}, args...), "--vr-generation", "--activation-source-url", "http://127.0.0.1:1")...)
+	require.ErrorIs(t, err, errVRFenceRequired)
+	require.NoFileExists(t, clientSocket)
+}

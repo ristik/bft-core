@@ -782,6 +782,23 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		}
 		if pf.VRHookMeasurement != nil {
 			fenceGen = vrFence{VR: true, CodeHash: &pf.VRHookMeasurement.RegistryCodeHash}
+			switch { // the generation: the verified genesis origin's block 0, or the operator's pinned genesis hash
+			case origin.Valid():
+				gh := [32]byte(origin.BlockHash())
+				fenceGen.GenesisHash = &gh
+			case flags.ExpectedGenesisHash != "":
+				h, herr := hexToHash(flags.ExpectedGenesisHash)
+				if herr != nil {
+					return herr
+				}
+				gh := [32]byte(h)
+				fenceGen.GenesisHash = &gh
+			}
+			// the read is made at this node's own committed EVM block, never at whatever head the endpoint serves
+			fenceGen.Anchor = func(ctx context.Context) ([32]byte, uint64, error) {
+				ref, herr := executor.Head(ctx)
+				return [32]byte(ref.Hash), ref.Number, herr
+			}
 			if sourceURL == "" {
 				sourceURL = flags.EthURL
 			}
@@ -815,7 +832,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		}
 		defer historyDB.Close()
 		var historyOpts []shardnode.HistoryOption
-		historyOpts = append(historyOpts, shardnode.WithFence(activationGate))
+		historyOpts = append(historyOpts, shardnode.WithFence(gateCheckpoint(activationGate)))
 		if flags.UTBGenesisFile != "" { // the V2 handoffs this shard follows were committed by a UTB root: their certificates are version 3, also when the store reopens
 			historyOpts = append(historyOpts, shardnode.WithUTBProfile())
 		}
@@ -873,7 +890,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				return fmt.Errorf("q3 runtime: %w", jErr)
 			}
 			if activationGate != nil {
-				q3rt.SetFence(activationGate.Check)
+				q3rt.SetFence(gateCheckpoint(activationGate))
 			}
 			if q3Admit, jErr = wireQ3Pair(executor, q3rt, uint64(shardConf.NetworkID), origin.Valid(), [32]byte(origin.BlockHash())); jErr != nil {
 				return jErr

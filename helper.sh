@@ -266,6 +266,16 @@ function init_evm_authorities() {
         python3 scripts/vr-authority-policy.py "$home/registration-policy.json" register "$i" || return 1
       fi
       vrArgs=(--pop-socket "$home/pop.sock" --pop-credential "$home/pop.cred" --registration-policy "$home/registration-policy.json")
+      # the activation-schedule fence is mandatory on a VR generation (design 7.4): the authority reads the schedule from this validator's own ureth,
+      # checked against the generation's b1 profile (VR registry code hash) and its execution genesis hash; it refuses to start without them
+      local ethURL="http://127.0.0.1:$(( ${rethEthBase:-18545} + i - 1 ))" gen="" try
+      for try in $(seq 1 60); do
+        gen=$(curl -s -X POST -H 'content-type: application/json' --data '{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":["0x0",false]}' "$ethURL" \
+          | python3 -c 'import sys,json; print(json.load(sys.stdin)["result"]["hash"])' 2>/dev/null) && [ -n "$gen" ] && break
+        sleep 1
+      done
+      [ -n "$gen" ] || { echo "authority $i: no execution genesis from $ethURL" >&2; return 1; }
+      vrArgs+=(--b1-profile "${EVM_B1_PROFILE:-test-nodes/b1-profile.json}" --activation-source-url "$ethURL" --execution-genesis-hash "$gen")
     fi
     # the PoS lane pins the election after the genesis (DEVELOPMENT opt-in; production gives --pos-policy at startup and --require-pos-policy)
     [ "${VR_POS:-0}" != 1 ] || vrArgs+=(--dev-allow-late-pos-policy)

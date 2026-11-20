@@ -5,6 +5,7 @@ import (
 	"context"
 	gocrypto "crypto"
 	"fmt"
+	"github.com/unicitynetwork/bft-core/vradmit"
 	"math"
 
 	"github.com/unicitynetwork/bft-core/activationproof"
@@ -115,8 +116,18 @@ func (a *Authority) AdvanceWithProof(ctx context.Context, bundle []byte) (Advanc
 	if err != nil {
 		return AdvanceResult{}, fmt.Errorf("%w: %w", ErrLineageUnverified, err)
 	}
-	if !step.Replay && step.Epoch > current { // the lineage's catch-up of earlier epochs installs nothing to sign for
-		if err := a.fence.Check(ctx, step.Epoch); err != nil {
+	if a.fence != nil && step.Epoch >= current { // earlier steps are the lineage's catch-up: nothing to sign for
+		// the schedule of the checkpoint this authority just verified (VerifySnapshot, against the entry's control digest): it holds every
+		// entry with E <= the epoch, so it decides without an endpoint and whatever Boundaries the EVM skipped
+		v, _, ok := step.Entry.Handoff()
+		if !ok || step.Bundle.Snapshot == nil {
+			return AdvanceResult{}, fmt.Errorf("%w: epoch %d has no verified checkpoint", ErrLineageUnverified, step.Epoch)
+		}
+		sched, err := vradmit.AuthenticatedSchedule(step.Bundle.Snapshot.Control, v.ControlDigest)
+		if err != nil {
+			return AdvanceResult{}, fmt.Errorf("%w: %w", ErrLineageUnverified, err)
+		}
+		if err := a.fence.CheckCheckpoint(step.Epoch, sched); err != nil {
 			return AdvanceResult{}, fmt.Errorf("advancing to root epoch %d: %w", step.Epoch, err)
 		}
 	}

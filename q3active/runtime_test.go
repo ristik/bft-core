@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto"
 	"errors"
+	"github.com/unicitynetwork/bft-core/vrschema"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -645,11 +646,15 @@ func TestActivateAndRecoverAreFenced(t *testing.T) {
 	require.NoError(t, rt.Recover(ctx))
 	refuse := errors.New("UpgradeRequired")
 	var seen []uint64
-	rt.SetFence(func(_ context.Context, epoch uint64) error { seen = append(seen, epoch); return refuse })
+	rt.SetFence(func(epoch uint64, sched []vrschema.Activation) error {
+		seen = append(seen, epoch)
+		require.Empty(t, sched)
+		return refuse
+	})
 	require.ErrorIs(t, rt.Activate(ctx, p.bundle()), refuse)
-	require.Equal(t, []uint64{2}, seen)
+	require.Equal(t, []uint64{2}, seen, "decided from the authenticated checkpoint of the bundle, with no endpoint")
 	require.Nil(t, rt.Snapshot(), "nothing of the refused epoch is staged or published")
 	require.Equal(t, 0, p.root.Installs)
-	rt.SetFence(func(context.Context, uint64) error { return nil })
+	rt.SetFence(func(uint64, []vrschema.Activation) error { return nil })
 	require.NoError(t, rt.Activate(ctx, p.bundle()), "the same bundle installs once the fence passes")
 }

@@ -15,7 +15,8 @@ import (
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
 	"github.com/unicitynetwork/bft-core/trustactivation"
 	"github.com/unicitynetwork/bft-core/trusthistorystore"
-	"github.com/unicitynetwork/bft-core/vrrules"
+	"github.com/unicitynetwork/bft-core/vradmit"
+	"github.com/unicitynetwork/bft-core/vrschema"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -26,7 +27,7 @@ type HistoricalTrustBaseStore struct {
 	profile2 bool
 	active   atomic.Uint64
 	utb      atomic.Bool
-	fence    *vrrules.Gate
+	fence    func(epoch uint64, schedule []vrschema.Activation) error
 }
 
 // EnableUTBProfile is WithUTBProfile for a store that is already open; a node of the profile uses the option, because the opening itself verifies the stored handoffs.
@@ -49,10 +50,11 @@ type HistoryOption func(*HistoricalTrustBaseStore)
 // stored activation proof, and those handoffs were committed in the version 3 envelope.
 func WithUTBProfile() HistoryOption { return func(s *HistoricalTrustBaseStore) { s.utb.Store(true) } }
 
-// WithFence makes InstallHandoff refuse an epoch >= E of an effective rule of the committed activation schedule that this binary lacks
-// (design 7.4, journal-staged: nothing of the epoch is appended). A nil gate fences nothing.
-func WithFence(g *vrrules.Gate) HistoryOption {
-	return func(s *HistoricalTrustBaseStore) { s.fence = g }
+// WithFence makes InstallHandoff apply f (vrrules.Gate.CheckCheckpoint) to the activation schedule of the verified checkpoint the bundle
+// carries, before anything of the epoch is appended (design 7.4). The schedule is authenticated by the handoff's control digest, so the
+// decision needs no endpoint and holds for a recovery that skips an intermediate Boundary. A nil f fences nothing.
+func WithFence(f func(epoch uint64, schedule []vrschema.Activation) error) HistoryOption {
+	return func(s *HistoricalTrustBaseStore) { s.fence = f }
 }
 
 func NewHistoricalTrustBaseStore(ctx context.Context, db keyvaluedb.KeyValueDB, anchor *types.RootTrustBaseV1, executionID [32]byte, profile2 bool, opts ...HistoryOption) (*HistoricalTrustBaseStore, error) {
@@ -122,9 +124,6 @@ func (s *HistoricalTrustBaseStore) InstallHandoff(ctx context.Context, bundle ha
 	if !s.profile2 || bundle.Proof.Record.Epoch == ^uint64(0) {
 		return handoffdelivery.Verified{}, trusthistorystore.ErrUnsupportedV2
 	}
-	if err := s.fence.Check(ctx, bundle.Body.Epoch); err != nil {
-		return handoffdelivery.Verified{}, fmt.Errorf("handoff into root epoch %d: %w", bundle.Body.Epoch, err)
-	}
 	prior, err := s.history.ByEpoch(bundle.Proof.Record.Epoch)
 	if err != nil {
 		return handoffdelivery.Verified{}, err
@@ -147,6 +146,15 @@ func (s *HistoricalTrustBaseStore) InstallHandoff(ctx context.Context, bundle ha
 	verified, err := handoffdelivery.VerifySigning(bundle, old, s.BundleSigning(old), partition, shard, confHash)
 	if err != nil {
 		return handoffdelivery.Verified{}, err
+	}
+	if s.fence != nil {
+		sched, err := vradmit.AuthenticatedSchedule(bundle.Snapshot.Control, verified.Genesis.ControlDigest)
+		if err != nil {
+			return handoffdelivery.Verified{}, errors.Join(handoffdelivery.ErrBundle, err)
+		}
+		if err := s.fence(bundle.Body.Epoch, sched); err != nil {
+			return handoffdelivery.Verified{}, fmt.Errorf("handoff into root epoch %d: %w", bundle.Body.Epoch, err)
+		}
 	}
 	id := bundle.Body.Identity()
 	interval := m2contract.TrustInterval{Body: bundle.Body, Activation: evmroot.ActivatedTrustBase{

@@ -25,6 +25,13 @@ type ScheduleSource struct {
 	Client *Client
 	// RegistryCode is the pinned runtime code hash of VR's core (the b1 profile's VR measurement); nil leaves the code unchecked.
 	RegistryCode *[32]byte
+	// GenesisHash is this deployment's execution genesis (block 0) hash, and NetworkWord VR's network word: the generation the node
+	// belongs to. A read of a chain with another genesis, or whose config() names another network, is refused, so a generation with
+	// the same code and another schedule is never taken for this one. Nil leaves that check off.
+	GenesisHash, NetworkWord *[32]byte
+	// Anchor, when set, names the block the read is made at: the node's own certified EVM block (never whatever head the endpoint
+	// serves). Nil reads the endpoint's head.
+	Anchor func(ctx context.Context) (hash [32]byte, number uint64, err error)
 }
 
 type pinnedCall struct {
@@ -44,7 +51,34 @@ func (s ScheduleSource) Read(ctx context.Context) (vrrules.Evidence, error) {
 		Hash   common.Hash    `json:"hash"`
 		Number hexutil.Uint64 `json:"number"`
 	}
-	if err := s.Client.RPC.CallContext(ctx, &head, "eth_getBlockByNumber", "latest", false); err != nil {
+	if s.GenesisHash != nil {
+		var g struct {
+			Hash common.Hash `json:"hash"`
+		}
+		if err := s.Client.RPC.CallContext(ctx, &g, "eth_getBlockByNumber", "0x0", false); err != nil {
+			return ev, err
+		}
+		if g.Hash != common.Hash(*s.GenesisHash) {
+			return ev, fmt.Errorf("%w: the endpoint's execution genesis %s is not this deployment's %s", ErrVR, g.Hash.Hex(), common.Hash(*s.GenesisHash).Hex())
+		}
+	}
+	if s.Anchor != nil {
+		h, n, err := s.Anchor(ctx)
+		if err != nil {
+			return ev, fmt.Errorf("the node's certified EVM block: %w", err)
+		}
+		var b struct {
+			Hash   common.Hash    `json:"hash"`
+			Number hexutil.Uint64 `json:"number"`
+		}
+		if err := s.Client.RPC.CallContext(ctx, &b, "eth_getBlockByHash", common.Hash(h), false); err != nil {
+			return ev, err
+		}
+		if b.Hash != common.Hash(h) || uint64(b.Number) != n {
+			return ev, fmt.Errorf("%w: the endpoint does not hold the node's certified block %s (number %d): not on its branch, or behind it", ErrVR, common.Hash(h).Hex(), n)
+		}
+		head = b
+	} else if err := s.Client.RPC.CallContext(ctx, &head, "eth_getBlockByNumber", "latest", false); err != nil {
 		return ev, err
 	}
 	if head.Hash == (common.Hash{}) {
@@ -74,6 +108,9 @@ func (s ScheduleSource) Read(ctx context.Context) (vrrules.Evidence, error) {
 	}
 	if count > vrrules.MaxActivations || len(pending) > vrrules.MaxPending {
 		return ev, fmt.Errorf("%w: VR reports %d activations and %d pending changes, past its bounds", ErrVR, count, len(pending))
+	}
+	if s.NetworkWord != nil && cfg.Network != *s.NetworkWord {
+		return ev, fmt.Errorf("%w: VR's network word %x is not this deployment's %x", ErrVR, cfg.Network, *s.NetworkWord)
 	}
 	ev.CoveredEpoch = cfg.KnownRootEpoch
 

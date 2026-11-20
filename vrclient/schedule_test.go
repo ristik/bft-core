@@ -25,6 +25,8 @@ type schedChain struct {
 	pending   []uint64
 	changes   map[uint64]ChangeView
 	count     uint32 // reported activationCount (len(acts) when zero and acts set)
+	genesis   common.Hash
+	network   [32]byte
 	blocks    []string
 	roundTrip int
 }
@@ -33,6 +35,14 @@ func (c *schedChain) eval(method string, params []any) (any, error) {
 	blk := func(v any) string { b, _ := json.Marshal(v); return string(b) }
 	switch method {
 	case "eth_getBlockByNumber":
+		if params[0] == "0x0" {
+			return map[string]any{"hash": c.genesis, "number": hexutil.Uint64(0)}, nil
+		}
+		return map[string]any{"hash": c.head, "number": hexutil.Uint64(9)}, nil
+	case "eth_getBlockByHash":
+		if params[0].(common.Hash) != c.head {
+			return nil, nil
+		}
 		return map[string]any{"hash": c.head, "number": hexutil.Uint64(9)}, nil
 	case "eth_getCode":
 		c.blocks = append(c.blocks, blk(params[1]))
@@ -52,7 +62,7 @@ func (c *schedChain) eval(method string, params []any) (any, error) {
 		var out any
 		switch m.Name {
 		case "config":
-			out = ConfigView{KnownRootEpoch: c.known}
+			out = ConfigView{Network: c.network, KnownRootEpoch: c.known}
 		case "activationCount":
 			n := c.count
 			if n == 0 {
@@ -142,6 +152,24 @@ func TestScheduleSourcePinnedRead(t *testing.T) {
 	require.ErrorIs(t, err, ErrVR)
 	_, err = ScheduleSource{Client: New(plainRPC{ch}, common.Address{1})}.Read(context.Background())
 	require.ErrorIs(t, err, ErrVR)
+
+	// two generations with the same code and different schedules: the genesis, network word and certified-block pins tell them apart
+	genesis := [32]byte{0x6e}
+	ch.genesis = common.Hash(genesis)
+	ch.network = [32]byte{0x01}
+	ch.count = 0
+	mk := func(g, n *[32]byte, anchor func(context.Context) ([32]byte, uint64, error)) error {
+		_, err := ScheduleSource{Client: New(plainRPC{ch}, common.Address{}), RegistryCode: &hash, GenesisHash: g, NetworkWord: n, Anchor: anchor}.Read(context.Background())
+		return err
+	}
+	otherGenesis, otherNet := [32]byte{0x6f}, [32]byte{0x02}
+	require.NoError(t, mk(&genesis, &ch.network, nil))
+	require.ErrorIs(t, mk(&otherGenesis, nil, nil), ErrVR, "another generation's genesis")
+	require.ErrorIs(t, mk(nil, &otherNet, nil), ErrVR, "another generation's network word")
+	own := func(context.Context) ([32]byte, uint64, error) { return [32]byte(ch.head), 9, nil }
+	require.NoError(t, mk(&genesis, nil, own), "the node's own certified block is held by the endpoint")
+	foreign := func(context.Context) ([32]byte, uint64, error) { return [32]byte{0xde}, 9, nil }
+	require.ErrorIs(t, mk(&genesis, nil, foreign), ErrVR, "a block the endpoint does not hold: not this branch")
 
 	// a count past VR's bound is refused before anything is allocated or read
 	ch.count = 65

@@ -166,6 +166,29 @@ func (g *Gate) Check(ctx context.Context, epoch uint64) error {
 	return nil
 }
 
+// CheckCheckpoint is Check over an AUTHENTICATED checkpoint: sched is the committed schedule of the verified handoff checkpoint that
+// installs root epoch epoch (vradmit.AuthenticatedSchedule). By design 7.2 it holds every entry with E <= epoch, whichever VR blocks the
+// EVM has reached, so it needs no read and no coverage: a recovery that skips an intermediate Boundary (K to K+2) decides here. It is
+// kept as evidence for epochs up to epoch.
+func (g *Gate) CheckCheckpoint(epoch uint64, sched []vrschema.Activation) error {
+	if g == nil {
+		return nil
+	}
+	if len(sched) > MaxActivations {
+		return fmt.Errorf("checkpoint schedule exceeds VR's bound (%d entries)", len(sched))
+	}
+	ev := Evidence{CoveredEpoch: CoverNeeded(epoch), Schedule: sched}
+	g.mu.Lock()
+	g.noteLocked(ev, epoch)
+	g.mu.Unlock()
+	if err := Fence(sched, g.rules, epoch); err != nil {
+		g.log.Error("refusing to install an epoch past an activation this binary lacks", "event", "upgrade.refused", "epoch", epoch, "source", "checkpoint", "error", err)
+		return err
+	}
+	g.remember(ev)
+	return nil
+}
+
 // remember keeps the evidence that covers the most epochs (the later block on a tie).
 func (g *Gate) remember(ev Evidence) {
 	g.mu.Lock()

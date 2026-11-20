@@ -25,10 +25,14 @@ func TestActivationGateIsMandatoryOnAVRGeneration(t *testing.T) {
 	require.Nil(t, g)
 	closeFn()
 
+	pin1 := [32]byte{1}
+	_, _, err = newActivationGate(ctx, log, "http://127.0.0.1:1", vrFence{VR: true, CodeHash: &pin1})
+	require.ErrorIs(t, err, errVRFenceRequired, "the generation's genesis pin is mandatory too")
+
 	// with the pin and a URL the gate exists (the connection is lazy, nothing is read here)
 	pin, err := parseCodeHash("0x" + string(make([]byte, 0)) + "0000000000000000000000000000000000000000000000000000000000000001")
 	require.NoError(t, err)
-	g, closeFn, err = newActivationGate(ctx, log, "http://127.0.0.1:1", vrFence{VR: true, CodeHash: pin})
+	g, closeFn, err = newActivationGate(ctx, log, "http://127.0.0.1:1", vrFence{VR: true, CodeHash: pin, GenesisHash: &pin1})
 	require.NoError(t, err)
 	require.NotNil(t, g)
 	closeFn()

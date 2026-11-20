@@ -13,6 +13,7 @@ import (
 
 	"github.com/unicitynetwork/bft-core/vrclient"
 	"github.com/unicitynetwork/bft-core/vrrules"
+	"github.com/unicitynetwork/bft-core/vrschema"
 )
 
 const activationSourceUsage = "EVM JSON-RPC URL of the node that serves the validator registry: the node reads the committed activation schedule from it (one pinned block, " +
@@ -28,6 +29,10 @@ var errVRFenceRequired = errors.New("this deployment pins the validator registry
 type vrFence struct {
 	VR       bool
 	CodeHash *[32]byte
+	// GenesisHash is this deployment's execution genesis hash and NetworkWord VR's network word (optional): the generation the endpoint must be.
+	GenesisHash, NetworkWord *[32]byte
+	// Anchor names the node's own certified EVM block for the read (nil: the endpoint's head).
+	Anchor func(ctx context.Context) ([32]byte, uint64, error)
 }
 
 // newActivationGate is the fence of a non-root role over VR's activation schedule read at url. On a VR generation an empty url is an
@@ -43,11 +48,14 @@ func newActivationGate(ctx context.Context, log *slog.Logger, url string, g vrFe
 	if g.VR && g.CodeHash == nil {
 		return nil, nil, fmt.Errorf("%w: the VR registry code hash pin is missing", errVRFenceRequired)
 	}
+	if g.VR && g.GenesisHash == nil {
+		return nil, nil, fmt.Errorf("%w: the deployment's execution genesis hash pin is missing (the generation the endpoint must be)", errVRFenceRequired)
+	}
 	c, err := rpc.DialContext(ctx, url)
 	if err != nil {
 		return nil, nil, fmt.Errorf("activation schedule source %q: %w", url, err)
 	}
-	src := vrclient.ScheduleSource{Client: vrclient.New(c, [20]byte{}), RegistryCode: g.CodeHash}
+	src := vrclient.ScheduleSource{Client: vrclient.New(c, [20]byte{}), RegistryCode: g.CodeHash, GenesisHash: g.GenesisHash, NetworkWord: g.NetworkWord, Anchor: g.Anchor}
 	return vrrules.NewGate(src, nil, log), c.Close, nil
 }
 
@@ -55,9 +63,17 @@ func newActivationGate(ctx context.Context, log *slog.Logger, url string, g vrFe
 func parseCodeHash(s string) (*[32]byte, error) {
 	b, err := hex.DecodeString(strings.TrimPrefix(s, "0x"))
 	if err != nil || len(b) != 32 {
-		return nil, fmt.Errorf("--vr-registry-code-hash must be 32 bytes of hex")
+		return nil, fmt.Errorf("a pin must be 32 bytes of hex")
 	}
 	var out [32]byte
 	copy(out[:], b)
 	return &out, nil
+}
+
+// gateCheckpoint is the gate's decision over an authenticated checkpoint schedule (nil for no gate: the roots fence).
+func gateCheckpoint(g *vrrules.Gate) func(uint64, []vrschema.Activation) error {
+	if g == nil {
+		return nil
+	}
+	return g.CheckCheckpoint
 }

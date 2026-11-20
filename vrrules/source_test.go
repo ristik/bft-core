@@ -135,3 +135,39 @@ func TestNoSourceIsNoFence(t *testing.T) {
 	require.Empty(t, g.Pending())
 	require.Empty(t, g.Preview())
 }
+
+// Recovery from K to K+2 with VR still at K: the superseded primary at K+1 never gets its Boundary, so VR never knows epoch K+1. The
+// authenticated checkpoint of the install decides, with no coverage to wait for; the endpoint (stale at K) is never asked.
+func TestCheckpointDecidesAKToKPlus2Recovery(t *testing.T) {
+	const k = 5
+	stale := &scripted{ev: Evidence{CoveredEpoch: k}} // VR is still at K
+	later := vrschema.RuleID("due-at-k2")
+	entry := func(e uint64) []vrschema.Activation {
+		return []vrschema.Activation{{RuleID: later, ReleaseDigest: vrschema.Word{8}, RootEpoch: e, State: vrschema.ActActive, ChangeID: 1}}
+	}
+	ctx := context.Background()
+
+	// without the checkpoint the coverage rule would wait for epoch K+1: K+2 needs K+1
+	g := NewGate(stale, Set{}, quiet())
+	require.ErrorIs(t, g.Check(ctx, k+2), ErrNotCovered)
+	stale.reads = 0
+
+	// an empty schedule passes without stalling
+	g = NewGate(stale, Set{}, quiet())
+	require.NoError(t, g.CheckCheckpoint(k+2, nil))
+	require.Zero(t, stale.reads)
+	// a supported schedule passes
+	g = NewGate(stale, Set{later: "due-at-k2"}, quiet())
+	require.NoError(t, g.CheckCheckpoint(k+2, entry(k+2)))
+	// an unknown rule due at K+2 is refused at K+2 (and later), allowed before
+	g = NewGate(stale, Set{}, quiet())
+	require.NoError(t, g.CheckCheckpoint(k+1, entry(k+2)), "K+1 is before E")
+	require.ErrorIs(t, g.CheckCheckpoint(k+2, entry(k+2)), ErrUpgradeRequired)
+	require.ErrorIs(t, g.CheckCheckpoint(k+3, entry(k+2)), ErrUpgradeRequired)
+	// the checkpoint evidence of the install also serves the signer of that epoch without a read
+	g = NewGate(stale, Set{}, quiet())
+	require.NoError(t, g.CheckCheckpoint(k+2, nil))
+	require.NoError(t, g.Check(ctx, k+2))
+	require.Zero(t, stale.reads)
+	require.Error(t, g.Check(ctx, k+4), "but not an epoch the checkpoint does not cover: the stale source is not enough")
+}
