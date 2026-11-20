@@ -3,6 +3,7 @@ package vrschedule
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/unicitynetwork/bft-core/vrclient"
@@ -12,6 +13,7 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	gethtypes "github.com/ethereum/go-ethereum/core/types"
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/unicitynetwork/bft-core/evmassign"
@@ -247,4 +249,37 @@ func (r RPC) QueuedSchedules(ctx context.Context, blockHash [32]byte) ([]vrschem
 			State: vrschema.ActActive, ChangeID: id})
 	}
 	return out, nil
+}
+
+// HeaderNumber is the EVM block number of the certified block: the execution header resolved by the certified block hash (eth_getBlockByHash),
+// its hash recomputed from the header fields and required to equal the certified hash, and its number returned. It is the true height the
+// freshness proof is compared with (design section 5.3: P at or after source.evmBlockNumber), never the shard round, which differs after a
+// skipped round.
+func (r RPC) HeaderNumber(ctx context.Context, blockHash [32]byte) (uint64, error) {
+	ctx, cancel := context.WithTimeout(ctx, r.timeout())
+	defer cancel()
+	var raw json.RawMessage
+	if err := r.Client.CallContext(ctx, &raw, "eth_getBlockByHash", hexutil.Encode(blockHash[:]), false); err != nil {
+		return 0, errors.Join(ErrRead, fmt.Errorf("eth_getBlockByHash: %w", err))
+	}
+	return VerifiedHeaderNumber(raw, blockHash)
+}
+
+// VerifiedHeaderNumber decodes an execution header (as eth_getBlockByHash serves it), recomputes its hash and returns its number only if the
+// hash is the expected one: a client that serves another block, or altered fields, is refused.
+func VerifiedHeaderNumber(raw json.RawMessage, want [32]byte) (uint64, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return 0, errors.Join(ErrRead, errors.New("the execution client does not hold the certified block"))
+	}
+	var h gethtypes.Header
+	if err := json.Unmarshal(raw, &h); err != nil {
+		return 0, errors.Join(ErrRead, fmt.Errorf("decoding the header: %w", err))
+	}
+	if h.Number == nil || !h.Number.IsUint64() {
+		return 0, errors.Join(ErrRead, errors.New("the header carries no block number"))
+	}
+	if h.Hash() != common.Hash(want) {
+		return 0, errors.Join(ErrRead, fmt.Errorf("the header's hash %x is not the certified block %x", h.Hash(), want))
+	}
+	return h.Number.Uint64(), nil
 }
