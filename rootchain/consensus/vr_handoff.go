@@ -179,7 +179,8 @@ func (x *ConsensusManager) EnableVRHandoff(ctx context.Context, cfg VRHandoffCon
 	cfg.Intents.Config = x.q3.ProtocolConfig
 	svc.Registry.Intents = cfg.Intents
 	v := &vrHandoff{cfg: cfg, commits: make(chan []vrschedule.CertifiedEVM, 1024), prefetch: make(chan vrschedule.CertifiedEVM, 64),
-		observer: &vrschedule.Observer{Reader: cfg.Reader, Sources: cfg.Intents.Sources, Outputs: cfg.Intents.Outputs, Log: cfg.Log}}
+		observer: &vrschedule.Observer{Reader: cfg.Reader, Sources: cfg.Intents.Sources, Outputs: cfg.Intents.Outputs, Log: cfg.Log,
+			OnPending: func(a []vrschema.Activation) { x.notePending(a, x.InstalledRootEpoch()) }}}
 	v.svc = vrschedule.NewService(vrschedule.ServiceConfig{Self: x.id.String(), Signer: cfg.Signer, Log: cfg.Log, Send: func(m vrschedule.Message) { v.send(ctx, m) }})
 	v.queue = vrschedule.NewQueue(v.svc, cfg.PiMax)
 	v.kick = make(chan struct{}, 1)

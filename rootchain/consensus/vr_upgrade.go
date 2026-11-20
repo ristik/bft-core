@@ -22,7 +22,8 @@ import (
 // upgradeWatch is the warning state: the entries this binary lacks, as last seen in the committed schedule.
 type upgradeWatch struct {
 	mu      sync.Mutex
-	pending []vrschema.Activation
+	pending []vrschema.Activation // unsupported entries of the committed (effective) schedule
+	queued  []vrschema.Activation // unsupported ScheduleActivation changes bound into the open output, not yet committed (warning only)
 	logged  map[string]bool
 }
 
@@ -53,6 +54,35 @@ func (x *ConsensusManager) noteSchedule(schedule []vrschema.Activation, epoch ui
 		x.log.Warn("UPGRADE REQUIRED: the committed activation schedule holds a rule this binary does not support",
 			"event", "upgrade.required", "rule", fmt.Sprintf("%x", a.RuleID[:]), "release", fmt.Sprintf("%x", a.ReleaseDigest[:]),
 			"activationEpoch", a.RootEpoch, "currentEpoch", epoch, "notBeforeUcTime", a.NotBeforeUcTime)
+	}
+}
+
+// notePending records the unsupported ScheduleActivation changes of the open VR output (warning and gauge only; enforcement stays on the
+// committed schedule).
+func (x *ConsensusManager) notePending(entries []vrschema.Activation, epoch uint64) {
+	var unsupported []vrschema.Activation
+	set := x.supportedRules()
+	for _, a := range entries {
+		if !set.Has(a.RuleID) {
+			unsupported = append(unsupported, a)
+		}
+	}
+	w := &x.upgrades
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.queued = unsupported
+	if w.logged == nil {
+		w.logged = map[string]bool{}
+	}
+	for _, a := range unsupported {
+		k := fmt.Sprintf("q/%x/%x/%d", a.RuleID[:], a.ReleaseDigest[:], a.RootEpoch)
+		if w.logged[k] {
+			continue
+		}
+		w.logged[k] = true
+		x.log.Warn("UPGRADE REQUIRED SOON: a scheduled activation of a rule this binary does not support is queued in the open VR output",
+			"event", "upgrade.required", "state", "pending", "rule", fmt.Sprintf("%x", a.RuleID[:]), "release", fmt.Sprintf("%x", a.ReleaseDigest[:]),
+			"activationEpoch", a.RootEpoch, "currentEpoch", epoch)
 	}
 }
 
@@ -121,7 +151,11 @@ func (x *ConsensusManager) registerUpgradeMetric(m metric.Meter) error {
 			defer x.upgrades.mu.Unlock()
 			for _, a := range x.upgrades.pending {
 				o.Observe(1, metric.WithAttributes(attribute.String("rule", fmt.Sprintf("%x", a.RuleID[:])),
-					attribute.String("epoch", strconv.FormatUint(a.RootEpoch, 10))))
+					attribute.String("epoch", strconv.FormatUint(a.RootEpoch, 10)), attribute.String("state", "effective")))
+			}
+			for _, a := range x.upgrades.queued {
+				o.Observe(1, metric.WithAttributes(attribute.String("rule", fmt.Sprintf("%x", a.RuleID[:])),
+					attribute.String("epoch", strconv.FormatUint(a.RootEpoch, 10)), attribute.String("state", "pending")))
 			}
 			return nil
 		}))
