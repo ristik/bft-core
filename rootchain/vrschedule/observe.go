@@ -38,6 +38,9 @@ type sourceFile struct {
 	CertRootRound  uint64    `json:"certRootRound"`
 	OutputCommit   hex.Bytes `json:"outputCommit"`
 	CertUCTime     uint64    `json:"certUcTime"`
+	// Pending marks an entry of an earlier build whose number is still a shard round: it is kept in the file, never served, and migrated
+	// only once its corrected version is durably written.
+	Pending bool `json:"pending,omitempty"`
 }
 
 // maxSources bounds the retained sources: VR has at most one open output, so a few suffice for the current and the previous intents.
@@ -94,7 +97,7 @@ func NewSources(path string) (*Sources, error) {
 		s.order = append(s.order, r)
 		e := SourceEntry{Source: vrhandoff.Source{ResultID: f.ResultID, EVMBlockHash: f.EVMBlockHash, EVMBlockNumber: f.EVMBlockNumber,
 			CertRootRound: f.CertRootRound, OutputCommit: f.OutputCommit}, CertUCTime: f.CertUCTime}
-		if legacy {
+		if legacy || f.Pending {
 			s.legacy[r] = e
 		} else {
 			s.by[r] = e
@@ -111,34 +114,62 @@ func (s *Sources) HasLegacy() bool {
 }
 
 // Upgrade re-resolves every legacy entry by its certified block hash (hr verifies the header's hash) and serves it with the true EVM
-// block number; the file is rewritten as version 2. It stops at the first failure and leaves the rest unavailable (never wrong): the
-// observer retries it with its next observation. It returns how many entries it upgraded and how many changed their number.
+// block number. The headers are resolved WITHOUT the store's lock (an RPC wait never blocks a Get); each entry is migrated only after the
+// file holding its corrected version, with every unresolved entry still marked pending, is durably written, and only then is it served.
+// It stops at the first failure and leaves the rest pending (never dropped, never wrong): the observer retries with its next observation.
+// It returns how many entries it upgraded and how many changed their number.
+//
+// Rollout boundary: an intent already bound (committed Prepare) to a digest over the old number keeps that digest; the corrected number
+// yields another, so such an intent is abandoned on restart like any intent whose source changed. VT-07a is scoped to fresh generations,
+// where no such intent exists.
 func (s *Sources) Upgrade(ctx context.Context, hr HeaderReader) (upgraded, changed int, err error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, r := range append([]vrschema.Word(nil), s.order...) {
-		e, ok := s.legacy[r]
-		if !ok {
-			continue
+	s.mu.RLock()
+	todo := make([]SourceEntry, 0, len(s.legacy))
+	for _, r := range s.order {
+		if e, ok := s.legacy[r]; ok {
+			todo = append(todo, e)
 		}
+	}
+	s.mu.RUnlock()
+	for _, e := range todo {
 		var h [32]byte
 		copy(h[:], e.EVMBlockHash)
-		n, herr := hr.HeaderNumber(ctx, h)
+		n, herr := hr.HeaderNumber(ctx, h) // no lock held
 		if herr != nil {
 			return upgraded, changed, herr
+		}
+		r := vrschema.Word(e.ResultID)
+		s.mu.Lock()
+		if _, still := s.legacy[r]; !still {
+			s.mu.Unlock()
+			continue
+		}
+		fixed := e
+		fixed.EVMBlockNumber = n
+		stillPending := map[vrschema.Word]SourceEntry{}
+		for k, v := range s.legacy {
+			if k != r {
+				stillPending[k] = v
+			}
+		}
+		perr := s.persistWith(s.order, func(x vrschema.Word) SourceEntry {
+			if x == r {
+				return fixed
+			}
+			return s.by[x]
+		}, stillPending)
+		if perr == nil {
+			s.by[r] = fixed
+			delete(s.legacy, r)
+		}
+		s.mu.Unlock()
+		if perr != nil {
+			return upgraded, changed, perr
 		}
 		if n != e.EVMBlockNumber {
 			changed++
 		}
-		e.EVMBlockNumber = n
-		s.by[r] = e
-		delete(s.legacy, r)
 		upgraded++
-	}
-	if upgraded > 0 {
-		if perr := s.persist(s.order, func(x vrschema.Word) SourceEntry { return s.by[x] }); perr != nil {
-			return upgraded, changed, perr
-		}
 	}
 	return upgraded, changed, nil
 }
@@ -190,17 +221,23 @@ func (s *Sources) Record(e SourceEntry) (bool, error) {
 }
 
 func (s *Sources) persist(order []vrschema.Word, by func(vrschema.Word) SourceEntry) error {
+	return s.persistWith(order, by, s.legacy)
+}
+
+// persistWith writes the file with every entry of order: those in pending are written marked pending (their number is a shard round of an
+// earlier build), so a write never drops an entry that has not been migrated yet.
+func (s *Sources) persistWith(order []vrschema.Word, by func(vrschema.Word) SourceEntry, pending map[vrschema.Word]SourceEntry) error {
 	if s.path == "" {
 		return nil
 	}
 	fs := make([]sourceFile, 0, len(order))
 	for _, r := range order {
-		e := by(r)
-		if _, legacy := s.legacy[r]; legacy {
-			continue // an unresolved legacy entry is not rewritten as a verified one
+		e, isPending := pending[r]
+		if !isPending {
+			e = by(r)
 		}
 		fs = append(fs, sourceFile{ResultID: e.ResultID, EVMBlockHash: e.EVMBlockHash, EVMBlockNumber: e.EVMBlockNumber, CertRootRound: e.CertRootRound,
-			OutputCommit: e.OutputCommit, CertUCTime: e.CertUCTime})
+			OutputCommit: e.OutputCommit, CertUCTime: e.CertUCTime, Pending: isPending})
 	}
 	raw, err := json.MarshalIndent(sourcesFileV2{Version: 2, Sources: fs}, "", " ")
 	if err != nil {
@@ -348,8 +385,10 @@ func (o *Observer) Observe(ctx context.Context, c CertifiedEVM) error {
 		if o.Log != nil && up > 0 {
 			o.Log.Warn("VR sources of an earlier build re-resolved by their certified hashes", "sources", up, "numberCorrected", changed)
 		}
-		if err != nil {
-			return err
+		if err != nil && o.Log != nil {
+			// an unavailable historical header leaves those entries pending (kept, never served); it never stops the observation of new
+			// publications
+			o.Log.Warn("VR sources of an earlier build are not yet re-resolved", "error", err)
 		}
 	}
 	primed, lastRound := o.primed, o.lastRound

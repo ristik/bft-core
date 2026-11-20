@@ -419,3 +419,24 @@ func FetchSource(ctx context.Context, opener Opener, peers []WeightedPeer, resul
 	}
 	return SourceEntry{}, fmt.Errorf("%w: no identical answers above weight %d for the source of %x", ErrUnavailable, need, result[:8])
 }
+
+// ResolveFetched is the local verification of a fetched source (mixed-version rollout): the incumbents' agreement fixes the result, the
+// block hash, the round and the commitment, but never the height, which a pre-fix incumbent still reports as the shard round. The height is
+// re-derived by resolving the certified hash to its execution header (hash verified) and the entry is returned with that verified number.
+// An unresolvable header returns the error: the source is not recorded yet and the fetch is retried.
+func ResolveFetched(ctx context.Context, hr HeaderReader, e SourceEntry) (SourceEntry, error) {
+	if hr == nil {
+		return SourceEntry{}, errors.New("vrschedule: no header resolver: a fetched height is never trusted")
+	}
+	if len(e.EVMBlockHash) != 32 {
+		return SourceEntry{}, errors.New("vrschedule: a fetched source without a block hash")
+	}
+	var h [32]byte
+	copy(h[:], e.EVMBlockHash)
+	n, err := hr.HeaderNumber(ctx, h)
+	if err != nil {
+		return SourceEntry{}, err
+	}
+	e.EVMBlockNumber = n
+	return e, nil
+}

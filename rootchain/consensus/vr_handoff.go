@@ -1053,11 +1053,18 @@ func (v *vrHandoff) fetchSource(ctx context.Context, r [32]byte) {
 			v.cfg.Log.Debug("VR handoff: the source of a result is not available from the incumbents yet", "result", fmt.Sprintf("%x", r[:8]), "error", err)
 			return
 		}
+		// a fetched height is never trusted (incumbents of an earlier build report the shard round): it is re-derived from the certified
+		// block's header, and a source whose header cannot be resolved yet stays unrecorded and is fetched again
+		hr, _ := v.cfg.Reader.(vrschedule.HeaderReader)
+		if e, err = vrschedule.ResolveFetched(ctx, hr, e); err != nil {
+			v.cfg.Log.Debug("VR handoff: a fetched source is not recorded: its height is not verified yet", "result", fmt.Sprintf("%x", r[:8]), "error", err)
+			return
+		}
 		if _, err := v.cfg.Intents.Sources.Record(e); err != nil {
 			v.cfg.Log.Warn("VR handoff: recording a fetched source failed", "error", err)
 			return
 		}
-		v.cfg.Log.Info("VR handoff: the committed source of a result was fetched from the incumbents", "result", fmt.Sprintf("%x", r[:8]), "shardRound", e.EVMBlockNumber, "certRootRound", e.CertRootRound)
+		v.cfg.Log.Info("VR handoff: the committed source of a result was fetched from the incumbents", "result", fmt.Sprintf("%x", r[:8]), "evmBlockNumber", e.EVMBlockNumber, "certRootRound", e.CertRootRound)
 		v.wake()
 	}()
 }
