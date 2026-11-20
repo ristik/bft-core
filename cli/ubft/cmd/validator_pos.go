@@ -394,3 +394,97 @@ func claimStep(ctx context.Context, ch *validatorChain, custody common.Address, 
 }
 
 var _ = ethcrypto.Keccak256
+
+// validatorPosPublishCmd is the development relayer of the PoS lane: the result a hook reserved becomes Ready once every frozen member's
+// possession proof is in and `finalizeCandidate` has published it; then anyone publishes it in VR. Proofs are permissionless to relay, so a
+// lane that holds every member's EVM key (SIGNING=local) submits them all here. Production members submit their own.
+func validatorPosPublishCmd(base *baseFlags) *cobra.Command {
+	f := &txFlags{validatorFlags: validatorFlags{baseFlags: base}}
+	var keyArgs []string
+	cmd := &cobra.Command{
+		Use:   "pos-publish",
+		Short: "PoS lane relayer: submit every frozen member's possession proof, finalizeCandidate, then VR.publish",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx := cmd.Context()
+			w := cmd.OutOrStdout()
+			_, _, ch, s, err := openTx(cmd, f)
+			if err != nil {
+				return err
+			}
+			defer ch.close()
+			_, election, err := ch.posAddrs(ctx)
+			if err != nil {
+				return err
+			}
+			rid, err := ch.vr.OpenResult(ctx, election)
+			if err != nil {
+				return err
+			}
+			if rid == ([32]byte{}) {
+				return fmt.Errorf("%w: the election has no open result (no election has been reserved)", ErrValidator)
+			}
+			members, err := ch.vr.FrozenMembers(ctx, election, rid)
+			if err != nil {
+				return err
+			}
+			keys := map[uint64]*KeyConf{}
+			for _, a := range keyArgs {
+				var id uint64
+				var path string
+				if i := strings.Index(a, "="); i > 0 {
+					if _, err := fmt.Sscanf(a[:i], "%d", &id); err != nil {
+						return fmt.Errorf("%w: --evm-keys %q is not id=path", ErrValidator, a)
+					}
+					path = a[i+1:]
+				}
+				kc, err := readKeyConf(path)
+				if err != nil {
+					return err
+				}
+				keys[id] = kc
+			}
+			var pops []vrclient.PoPInput
+			for _, m := range members {
+				kc := keys[m.Id]
+				if kc == nil {
+					return fmt.Errorf("%w: no EVM key file for member %d (--evm-keys %d=path)", ErrValidator, m.Id, m.Id)
+				}
+				nk, err := nodeKeys(kc)
+				if err != nil {
+					return err
+				}
+				pub := nk.Public()
+				d, err := ch.vr.PopDigest(ctx, election, rid, m.Id, [32]byte(ethcrypto.Keccak256(pub)))
+				if err != nil {
+					return err
+				}
+				sig, err := vrclient.SignDigest(nk.Key, d)
+				if err != nil {
+					return err
+				}
+				pops = append(pops, vrclient.PoPInput{Id: m.Id, EvmKey: pub, Signature: sig})
+			}
+			sub, err := vrclient.PosCalldata(vrclient.PosPublishABI, "submitAssignmentPoPs", rid, pops)
+			if err != nil {
+				return err
+			}
+			fin, err := vrclient.PosCalldata(vrclient.PosPublishABI, "finalizeCandidate", rid)
+			if err != nil {
+				return err
+			}
+			pub, err := vrclient.PosCalldata(vrclient.VRABI, "publish", rid)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(w, "result %x with %d members\n", rid, len(members))
+			return runSteps(ctx, w, s, f.DryRun, []step{
+				{what: "submit every frozen member's possession proof", tx: vrclient.Tx{To: election, Data: sub}},
+				{what: "finalize the candidate (publish it in P85)", tx: vrclient.Tx{To: election, Data: fin}},
+				{what: "publish the result in VR", tx: vrclient.Tx{To: ch.vr.Registry, Data: pub}},
+			}, nil)
+		},
+	}
+	f.add(cmd)
+	cmd.Flags().StringArrayVar(&keyArgs, "evm-keys", nil, "id=path of a member's EVM shard node key file (repeat per member)")
+	return cmd
+}

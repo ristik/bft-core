@@ -48,6 +48,31 @@ var PosElectionABI = mustABI(`[
 	`}],"outputs":[{"name":"","type":"bytes32"}]},
  {"type":"function","name":"delegation","stateMutability":"view","inputs":[{"name":"id","type":"uint64"},{"name":"generation","type":"uint64"}],"outputs":[{"name":"binding","type":"tuple","components":[{"name":"rootNodeID","type":"bytes32"},{"name":"rootKey","type":"bytes"},{"name":"evmNodeID","type":"bytes32"},{"name":"evmKey","type":"bytes"},{"name":"operatorPayee","type":"address"}]},{"name":"bindingHash","type":"bytes32"},{"name":"nextNonce","type":"uint64"}]}]`)
 
+// PosPublishABI is the election's publication path: the result a hook reserved, its frozen members, the possession proofs and
+// finalizeCandidate. The proofs are permissionless to relay; a lane relayer that holds the members' EVM keys submits them all.
+var PosPublishABI = mustABI(`[
+ {"type":"function","name":"openResult","stateMutability":"view","inputs":[],"outputs":[{"name":"","type":"bytes32"}]},
+ {"type":"function","name":"popDigest","stateMutability":"view","inputs":[{"name":"resultID","type":"bytes32"},{"name":"id","type":"uint64"},{"name":"evmKeyHash","type":"bytes32"}],"outputs":[{"name":"","type":"bytes32"}]},
+ {"type":"function","name":"frozenMembers","stateMutability":"view","inputs":[{"name":"resultID","type":"bytes32"}],"outputs":[{"name":"","type":"tuple[]","components":[{"name":"id","type":"uint64"},{"name":"generation","type":"uint64"},{"name":"weight","type":"uint64"},{"name":"raw","type":"uint64"},{"name":"bindingHash","type":"bytes32"}]}]},
+ {"type":"function","name":"submitAssignmentPoPs","stateMutability":"nonpayable","inputs":[{"name":"resultID","type":"bytes32"},{"name":"pops","type":"tuple[]","components":[{"name":"id","type":"uint64"},{"name":"evmKey","type":"bytes"},{"name":"signature","type":"bytes"}]}],"outputs":[]},
+ {"type":"function","name":"finalizeCandidate","stateMutability":"nonpayable","inputs":[{"name":"resultID","type":"bytes32"}],"outputs":[]}]`)
+
+// PoPInput is one member's possession proof (ElectionPolicy.PoPInput).
+type PoPInput struct {
+	Id        uint64
+	EvmKey    []byte
+	Signature []byte
+}
+
+// FrozenMember is one member of a reserved result (ElectionPolicy.Frozen).
+type FrozenMember struct {
+	Id          uint64
+	Generation  uint64
+	Weight      uint64
+	Raw         uint64
+	BindingHash [32]byte
+}
+
 // Delegation is the P85 staged binding.
 type Delegation struct {
 	RootNodeID    [32]byte
@@ -101,6 +126,23 @@ func (c *Client) CallPos(ctx context.Context, to ethcommon.Address, a abi.ABI, m
 }
 
 // PosContracts reads the generation's custody (the liability holder of the active module) and its election.
+func (c *Client) posPublishCall(ctx context.Context, to ethcommon.Address, method string, out any, args ...any) error {
+	return c.call(ctx, to, PosPublishABI, method, out, args...)
+}
+
+// OpenResult is the election's unresolved result, zero when none; FrozenMembers its members; PopDigest what a member's EVM key signs.
+func (c *Client) OpenResult(ctx context.Context, election ethcommon.Address) (rid [32]byte, err error) {
+	return rid, c.posPublishCall(ctx, election, "openResult", &rid)
+}
+
+func (c *Client) FrozenMembers(ctx context.Context, election ethcommon.Address, rid [32]byte) (out []FrozenMember, err error) {
+	return out, c.posPublishCall(ctx, election, "frozenMembers", &out, rid)
+}
+
+func (c *Client) PopDigest(ctx context.Context, election ethcommon.Address, rid [32]byte, id uint64, evmKeyHash [32]byte) (d [32]byte, err error) {
+	return d, c.posPublishCall(ctx, election, "popDigest", &d, rid, id, evmKeyHash)
+}
+
 func (c *Client) PosContracts(ctx context.Context, m ModuleView) (custody, election ethcommon.Address, err error) {
 	custody = m.Meta.LiabilityHolder
 	if custody == (ethcommon.Address{}) {

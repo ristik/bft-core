@@ -66,7 +66,7 @@ func DecodeCall(data []byte) (Call, error) {
 	for _, c := range []struct {
 		name string
 		a    *abi.ABI
-	}{{"ValidatorRegistry", &VRABI}, {"PoaElection", &PoaABI}, {"FoundationMultisig", &MultisigABI}, {"StakeCustody", &CustodyABI}, {"ElectionPolicy", &PosElectionABI}} {
+	}{{"ValidatorRegistry", &VRABI}, {"PoaElection", &PoaABI}, {"FoundationMultisig", &MultisigABI}, {"StakeCustody", &CustodyABI}, {"ElectionPolicy", &PosElectionABI}, {"ElectionPolicy", &PosPublishABI}} {
 		m, err := c.a.MethodById(data[:4])
 		if err != nil {
 			continue
