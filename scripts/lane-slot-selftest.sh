@@ -13,7 +13,7 @@ cleanup() {
   rm -rf "$tmp"
 }
 # the processes whose working directory is under $1: this selftest's own fakes, found by directory, never by name
-pids_under() { local d p; for d in /proc/[0-9]*; do p=${d#/proc/}; case "$(readlink "$d/cwd" 2>/dev/null)" in "$1"/*) echo "$p" ;; esac; done; }
+pids_under() { local d p; for d in /proc/[0-9]*; do p=${d#/proc/}; case "$(readlink "$d/cwd" 2>/dev/null)" in "$1" | "$1"/*) echo "$p" ;; esac; done; }
 trap cleanup EXIT
 
 # 1. the table
