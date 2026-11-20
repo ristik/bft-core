@@ -437,13 +437,14 @@ var _ = ethcrypto.Keccak256
 func validatorPosPublishCmd(base *baseFlags) *cobra.Command {
 	f := &txFlags{validatorFlags: validatorFlags{baseFlags: base}}
 	var keyArgs, authArgs []string
+	var ownProof bool
 	cmd := &cobra.Command{
 		Use:   "pos-publish",
-		Short: "PoS lane relayer: submit every frozen member's possession proof, finalizeCandidate, then VR.publish",
+		Short: "Submit P85 possession proofs or finalize and publish an election result",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx := cmd.Context()
 			w := cmd.OutOrStdout()
-			_, _, ch, s, err := openTx(cmd, f)
+			v, keys, ch, s, err := openTx(cmd, f)
 			if err != nil {
 				return err
 			}
@@ -462,6 +463,9 @@ func validatorPosPublishCmd(base *baseFlags) *cobra.Command {
 			members, err := ch.vr.FrozenMembers(ctx, election, rid)
 			if err != nil {
 				return err
+			}
+			if ownProof {
+				return publishOwnPosProof(ctx, w, v, keys, ch, s, election, rid, members, f.DryRun)
 			}
 			return runPosPublish(ctx, w, posPublishRun{Election: election, Registry: ch.vr.Registry, Rid: rid, Members: members, Chain: posPublishReader{ch, election},
 				Sender: s, DryRun: f.DryRun, Pops: func(ctx context.Context) ([]vrclient.PoPInput, error) {
@@ -502,21 +506,11 @@ func validatorPosPublishCmd(base *baseFlags) *cobra.Command {
 							if keys[m.Id] != nil {
 								return nil, fmt.Errorf("%w: member %d has both --evm-keys and --evm-authority", ErrValidator, m.Id)
 							}
-							// the EVM key stays in its signing authority: it signs the digest it recomputes from the frozen result and its pin, and the
-							// election's own popDigest must verify that signature, or the authority's pin and the contracts disagree
-							pop, err := ea.PosPoP(ctx, signingauthority.PosPoPRequest{ResultID: rid, AssignmentID: rec.AssignmentID, Snapshot: rec.SnapshotDigest,
-								Attempt: rec.Attempt, ID: m.Id, Generation: m.Generation})
+							proof, err := authorityPosProof(ctx, ch, election, rid, rec, m, ea)
 							if err != nil {
 								return nil, err
 							}
-							d, err := ch.vr.PopDigest(ctx, election, rid, m.Id, [32]byte(ethcrypto.Keccak256(pop.EVMKey)))
-							if err != nil {
-								return nil, err
-							}
-							if err := checkRecovers(d, pop.Signature, pop.EVMKey); err != nil {
-								return nil, fmt.Errorf("%w: member %d: the authority's proof does not verify against the election's popDigest: %w", ErrValidator, m.Id, err)
-							}
-							pops = append(pops, vrclient.PoPInput{Id: m.Id, EvmKey: pop.EVMKey, Signature: pop.Signature})
+							pops = append(pops, proof)
 							continue
 						}
 						kc := keys[m.Id]
@@ -543,9 +537,63 @@ func validatorPosPublishCmd(base *baseFlags) *cobra.Command {
 		},
 	}
 	f.add(cmd)
+	cmd.Flags().BoolVar(&ownProof, "own-proof", false, "submit only the configured validator's authority-held proof; leave finalization to a relayer")
 	cmd.Flags().StringArrayVar(&authArgs, "evm-authority", nil, "id=socket,credential,nodeInfo of the signing authority that holds a member's EVM key (repeat per member; instead of --evm-keys)")
 	cmd.Flags().StringArrayVar(&keyArgs, "evm-keys", nil, "id=path of a member's EVM shard node key file (repeat per member)")
+	cmd.MarkFlagsMutuallyExclusive("own-proof", "evm-authority")
+	cmd.MarkFlagsMutuallyExclusive("own-proof", "evm-keys")
 	return cmd
+}
+
+func publishOwnPosProof(ctx context.Context, w io.Writer, v *loadedValidator, keys *validatorKeys, ch *validatorChain, sender vrclient.Sender,
+	election common.Address, result [32]byte, members []vrclient.FrozenMember, dryRun bool) error {
+	if keys.EVMAuth == nil {
+		return fmt.Errorf("%w: --own-proof requires the configured signing authority", ErrValidator)
+	}
+	id, found, err := findID(ctx, v, ch, sender.From())
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("%w: apply before submitting an assignment proof", ErrValidator)
+	}
+	for _, member := range members {
+		if member.Id != id {
+			continue
+		}
+		record, err := ch.vr.Result(ctx, election, result)
+		if err != nil {
+			return err
+		}
+		proof, err := authorityPosProof(ctx, ch, election, result, record, member, keys.EVMAuth)
+		if err != nil {
+			return err
+		}
+		data, err := vrclient.PosCalldata(vrclient.PosPublishABI, "submitAssignmentPoPs", result, []vrclient.PoPInput{proof})
+		if err != nil {
+			return err
+		}
+		return runSteps(ctx, w, sender, dryRun, []step{{what: fmt.Sprintf("submit identity %d's possession proof for result %x", id, result),
+			tx: vrclient.Tx{To: election, Data: data}}}, nil)
+	}
+	return fmt.Errorf("%w: identity %d is not a frozen member of result %x", ErrValidator, id, result)
+}
+
+func authorityPosProof(ctx context.Context, ch *validatorChain, election common.Address, result [32]byte,
+	record vrclient.ResultRecord, member vrclient.FrozenMember, authority *evmAuthority) (vrclient.PoPInput, error) {
+	proof, err := authority.PosPoP(ctx, signingauthority.PosPoPRequest{ResultID: result, AssignmentID: record.AssignmentID, Snapshot: record.SnapshotDigest,
+		Attempt: record.Attempt, ID: member.Id, Generation: member.Generation})
+	if err != nil {
+		return vrclient.PoPInput{}, err
+	}
+	digest, err := ch.vr.PopDigest(ctx, election, result, member.Id, [32]byte(ethcrypto.Keccak256(proof.EVMKey)))
+	if err != nil {
+		return vrclient.PoPInput{}, err
+	}
+	if err := checkRecovers(digest, proof.Signature, proof.EVMKey); err != nil {
+		return vrclient.PoPInput{}, fmt.Errorf("%w: member %d: the authority's proof does not verify against the election's popDigest: %w", ErrValidator, member.Id, err)
+	}
+	return vrclient.PoPInput{Id: member.Id, EvmKey: proof.EVMKey, Signature: proof.Signature}, nil
 }
 
 // planPosPublish says which of the relayer's three steps (submit the possession proofs, finalize the candidate, publish in VR) are still to do,

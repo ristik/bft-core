@@ -408,7 +408,14 @@ func rpcChecks(v *loadedValidator, h hostFacts) []doctorCheck {
 				return false, err.Error(), "check --registry and that the endpoint serves this network"
 			}
 			defer ch.close()
-			if _, err := ch.poa(); err != nil {
+			mode := "PoA"
+			if ch.isPoS() {
+				mode = "PoS"
+				_, _, err = ch.posAddrs(ctx)
+			} else {
+				_, err = ch.poa()
+			}
+			if err != nil {
 				return false, err.Error(), ""
 			}
 			n, ts, err := blockInfo(ctx, ch.rpc, "latest")
@@ -416,7 +423,7 @@ func rpcChecks(v *loadedValidator, h hostFacts) []doctorCheck {
 				return false, err.Error(), ""
 			}
 			age := h.Now().Sub(time.Unix(int64(ts), 0)) // #nosec G115 -- a block timestamp
-			d := fmt.Sprintf("%s, PoA module %s, %s; root epoch %d; head %d (%s old)", ch.vr.Registry.Hex(), ch.module.Module.Hex(),
+			d := fmt.Sprintf("%s, %s module %s, %s; root epoch %d; head %d (%s old)", ch.vr.Registry.Hex(), mode, ch.module.Module.Hex(),
 				"health "+vrclient.Health(ch.module.Health), ch.cfg.KnownRootEpoch, n, age.Round(time.Second))
 			if age < -maxSkew {
 				return false, d, "the head block is from the future: the local clock is behind"
@@ -452,7 +459,7 @@ func rpcChecks(v *loadedValidator, h hostFacts) []doctorCheck {
 		}
 		d := fmt.Sprintf("%s holds %s wei", addr.Hex(), bal.ToInt())
 		if bal.ToInt().Sign() == 0 {
-			return true, d, "fund the operator account: apply sends two transactions"
+			return true, d, "fund the operator account for gas and any required stake"
 		}
 		return true, d, ""
 	}})
