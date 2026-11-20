@@ -162,7 +162,10 @@ def check_fixture_copies(contracts, ureth):
     ureth's copy, so a copy that differs from the contracts the generation allocates measures other code (VT-04b: a stale copy pinned wrong numbers)."""
     for name in ('vr-hook.json', 'vr-hook-pos.json'):
         c, u = contracts / 'test/vr/fixtures' / name, ureth / 'crates/unicity/execution/testdata' / name
-        if c.is_file() and u.is_file() and c.read_bytes() != u.read_bytes():
+        for f in (c, u):
+            if not f.is_file():
+                raise VRGenesisError(f'{f} is missing: both fixture files must exist before the copies are compared')
+        if c.read_bytes() != u.read_bytes():
             raise VRGenesisError(f'ureth {u} is not the contracts checkout\'s {c}: regenerate and copy the fixture before measuring')
 
 
