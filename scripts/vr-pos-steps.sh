@@ -161,11 +161,23 @@ print("holder facts equal custody's state for", n, "identities")
 PY
 }
 
+# why no election was reserved: the cadence thresholds against the clock, the last attempt and its recorded reason, VR's health and cursors
+vrp_election_diag() {
+  local el seal=0xff00000000000000000000000000000000000002 last; el=$(vrp_election)
+  {
+    echo "election thresholds (progress, ucTime): $(cast call --rpc-url "$vrb_rpc" "$el" 'thresholds()(uint256,uint256)' | tr '\n' ' ')"
+    echo "clock (progress, ucTime): $(cast call --rpc-url "$vrb_rpc" "$seal" 'progress()(uint64)') $(cast call --rpc-url "$vrb_rpc" "$seal" 'ucTime()(uint64)')"
+    last=$(cast call --rpc-url "$vrb_rpc" "$el" 'lastAttemptResult()(bytes32)'); echo "last attempt result $last"
+    echo "result (state, reason, attempt, ...): $(cast call --rpc-url "$vrb_rpc" "$el" 'result(bytes32)((uint8,uint8,uint64,uint64,uint64,uint32,bytes32,bytes32,bytes32,bytes32))' "$last" | tr '\n' ' ')"
+    echo "VR health $(cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'health()(uint8)'), open output $(vrb_open_output), VR cursor $(cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'recordCursor()(uint64)'), custody cursor $(cast call --rpc-url "$vrb_rpc" "$(vrp_custody)" 'recordCursor()(uint64)')"
+  } 2>&1 | tee "$VR_EVIDENCE/second-election-diagnostics.txt"
+}
+
 vrp_recovery() {
   vrp_source_q3 || { vrb_log "FAIL: the q3 helpers"; return 1; }
   local first=$vrb_result i rid2 rec
   # 1. the second election over the same five, published and handed off by the nodes themselves
-  vrb_wait 1500 "the second election reserves J' from stake" vrp_new_open_result || return 1
+  vrb_wait 1500 "the second election reserves J' from stake" vrp_new_open_result || { vrp_election_diag; return 1; }
   rid2=$(cast call --rpc-url "$vrb_rpc" "$(vrp_election)" 'openResult()(bytes32)')
   vrb_result=$rid2
   vrp_publish || return 1
