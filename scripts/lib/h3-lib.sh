@@ -320,7 +320,7 @@ h3_restore_validator() {
   # last process started, not one that is still shutting down).
   local waited=0 alive
   while :; do
-    alive=$(pgrep -f -- "--home test-nodes/evm$i( |$)|test-nodes/reth$i/dd" 2>/dev/null | tr '\n' ' ')
+    alive=$(owned_pids "--home test-nodes/evm$i( |\$)|test-nodes/reth$i/dd" | tr '\n' ' ')   # this checkout's only: another lane's trees use the same relative paths
     [ -z "$alive" ] && break
     waited=$((waited + 1))
     if [ "$waited" -ge 120 ]; then echo "validator $i: process(es) $alive still running after 60s: refusing to clear its state" >&2; return 1; fi

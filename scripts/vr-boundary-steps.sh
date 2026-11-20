@@ -14,7 +14,7 @@ vrb_vr=0xff00000000000000000000000000000000000003
 
 vrb_root_rpcs() {
   local p
-  for p in $(pgrep -f 'ubft root-node run --home test-nodes/root'); do   # this devnet's roots only (never another project's)
+  for p in $(owned_pids 'ubft root-node run --home test-nodes/root'); do   # this checkout's roots only: a lane in another tree (another slot) has the same relative paths
     tr '\0' ' ' </proc/"$p"/cmdline 2>/dev/null | grep -o -- '--rpc-server-address [^ ]*' | awk '{print "http://"$2}'
   done | sort -u
 }

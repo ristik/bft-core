@@ -76,7 +76,7 @@ pinnedRethCommit=$URETH_PIN_COMMIT
 # devnet this run did not create. See refuseStaleListeners.
 refuseStaleListeners $(seq -s" " "$rethEngineBase" $((rethEngineBase + validators - 1))) $(seq -s" " "$rethEthBase" $((rethEthBase + validators - 1))) $(seq -s" " "$bystEthBase" $((bystEthBase + bystanders - 1))) || exit 1
 
-stale=$(pgrep -f 'ubft shard-node run' 2>/dev/null || true)
+stale=$(for p in $(pgrep -f 'ubft shard-node run' 2>/dev/null); do [ "$(readlink "/proc/$p/cwd" 2>/dev/null)" = "$(pwd -P)" ] && echo "$p"; done)   # this checkout's only (other lane slots run concurrently)
 if [ -n "$stale" ]; then
   echo "refusing to start: shard-node processes are already running (pids: $(echo $stale | tr '\n' ' '))" >&2
   echo "  stop them from the checkout that started them (./stop-evm.sh -a there); do not kill them by name" >&2
