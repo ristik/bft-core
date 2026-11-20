@@ -24,7 +24,6 @@ const (
 func registerRootMonitoring(ctx context.Context, flags *rootNodeRunFlags, log *slog.Logger, host *network.Peer, cm interface{ Validators() peer.IDSlice }) {
 	mon := monitoring.New(flags.observe.PrometheusRegisterer())
 	monitoring.RegisterBuildInfo(mon, "root")
-	monitoring.RegisterUpgrades(mon, monitoring.Upgrades)
 	if flags.baseFlags != nil {
 		monitoring.RegisterDisk(mon, log, monitoring.Volume{Name: "home", Path: flags.HomeDir})
 	}
@@ -38,7 +37,6 @@ func registerShardMonitoring(ctx context.Context, flags *shardNodeRunFlags, log 
 	exec shardnode.Executor, shardPeers, rootPeers func() []peer.ID) {
 	mon := monitoring.New(flags.observe.PrometheusRegisterer())
 	monitoring.RegisterBuildInfo(mon, "shard")
-	monitoring.RegisterUpgrades(mon, monitoring.Upgrades)
 	shardnode.RegisterUnicityMetrics(mon, node.Health(), exec)
 	if flags.baseFlags != nil {
 		monitoring.RegisterDisk(mon, log, monitoring.Volume{Name: "home", Path: flags.HomeDir})

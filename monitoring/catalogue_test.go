@@ -1,10 +1,14 @@
 package monitoring
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -59,10 +63,31 @@ func sourceFiles(t *testing.T) []string {
 	return files
 }
 
-// TestEventCatalogue guards the event names: the catalogue document lists exactly the names the code registers, every registered event is
-// logged next to its pinned message in its source file, and no log line uses an event name that is not registered.
+// goldenEvents reads the published names and the key from testdata/events.golden: literals, independent of the constants in events.go.
+func goldenEvents(t *testing.T) (key string, names []string) {
+	t.Helper()
+	b, err := os.ReadFile("testdata/events.golden")
+	require.NoError(t, err)
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case line == "" || strings.HasPrefix(line, "#"):
+		case strings.HasPrefix(line, "key "):
+			key = strings.TrimPrefix(line, "key ")
+		default:
+			names = append(names, line)
+		}
+	}
+	sort.Strings(names)
+	return key, names
+}
+
+// TestEventCatalogue guards the event names as a compatibility promise: the published literals (testdata/events.golden) are exactly the registered
+// names (plus VT-07's external ones), the log key is the published one, the catalogue document lists the same names, and every registered event is
+// the LAST argument of every log call that carries its message (checked on the syntax tree, per call site, so one of two sites losing it fails).
 func TestEventCatalogue(t *testing.T) {
-	doc := firstColumn(read(t, "docs/operations/monitoring/events.md"), regexp.MustCompile(`[a-z]+(\.[a-z_]+)+`))
+	key, golden := goldenEvents(t)
+	require.Equal(t, key, EventKey, "the log key is published as %q", key)
 	var code []string
 	seen := map[string]bool{}
 	for _, e := range Events {
@@ -72,52 +97,122 @@ func TestEventCatalogue(t *testing.T) {
 	}
 	code = append(code, ExternalEvents...)
 	sort.Strings(code)
-	require.Equal(t, code, doc, "docs/operations/monitoring/events.md and monitoring.Events differ: a name was renamed, removed or not documented")
+	require.Equal(t, golden, code, "monitoring.Events differs from testdata/events.golden: a published name was renamed or removed, or a new one is not in the golden list")
+	doc := firstColumn(read(t, "docs/operations/monitoring/events.md"), regexp.MustCompile(`[a-z]+(\.[a-z_]+)+`))
+	require.Equal(t, golden, doc, "docs/operations/monitoring/events.md differs from the published names")
 
-	// every constant is registered
 	consts := regexp.MustCompile(`(?m)^\s+(Ev[A-Za-z]+)\s+= "([a-z_.]+)"`)
-	for _, m := range consts.FindAllStringSubmatch(read(t, "monitoring/events.go"), -1) {
-		require.True(t, seen[m[2]], "%s = %q is not in monitoring.Events", m[1], m[2])
-	}
-
-	// the source: each event is logged beside its message
 	constName := map[string]string{}
 	for _, m := range consts.FindAllStringSubmatch(read(t, "monitoring/events.go"), -1) {
 		constName[m[2]] = m[1]
-	}
-	for _, e := range Events {
-		src := read(t, e.File)
-		use := "monitoring.Event(monitoring." + constName[e.Name] + ")"
-		if e.Via != "" {
-			use = "monitoring.Event(monitoring." + e.Via
-		}
-		if e.File == "monitoring/disk.go" || e.File == "monitoring/peers.go" {
-			use = "Event(" + constName[e.Name] + ")"
-		}
-		msg := strings.TrimRight(e.Msg, " ")
-		i := strings.Index(src, `"`+msg)
-		require.GreaterOrEqual(t, i, 0, "event %s: message %q is gone from %s (lane scripts grep it)", e.Name, e.Msg, e.File)
-		end := min(len(src), i+700)
-		require.Contains(t, src[i:end], use, "event %s: the log line %q lost its event attribute", e.Name, e.Msg)
+		require.True(t, seen[m[2]], "%s = %q is not in monitoring.Events", m[1], m[2])
 	}
 
-	// no unregistered use
-	use := regexp.MustCompile(`monitoring\.Event\(monitoring\.(Ev[A-Za-z]+)\)`)
+	// the call sites
+	sites := map[string]int{}
+	fset := token.NewFileSet()
 	for _, f := range sourceFiles(t) {
-		b, err := os.ReadFile(f) // #nosec G304
-		require.NoError(t, err)
-		for _, m := range use.FindAllStringSubmatch(string(b), -1) {
-			_, ok := map[string]bool{}[m[1]]
-			_ = ok
-			found := false
-			for _, name := range constName {
-				if name == m[1] {
-					found = true
+		file, err := parser.ParseFile(fset, f, nil, 0)
+		require.NoError(t, err, f)
+		rel := filepath.ToSlash(strings.TrimPrefix(f, repoRoot+string(filepath.Separator)))
+		ast.Inspect(file, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			lit := ""
+			for _, a := range call.Args {
+				if l := leftmostString(a); l != "" {
+					lit = l
+					break
 				}
 			}
-			require.True(t, found, "%s uses the unknown event %s", f, m[1])
+			for _, e := range Events {
+				if e.File != rel || !msgMatches(lit, e.Msg) {
+					continue
+				}
+				sites[e.Name]++
+				require.Equal(t, e.File, rel)
+				last := call.Args[len(call.Args)-1]
+				want := constName[e.Name]
+				if e.Via != "" {
+					want = strings.TrimSuffix(e.Via, "(")
+				}
+				require.True(t, isEventArg(last, want), "%s: the call logging %q at %s must carry event %s as its last argument", rel, e.Msg, fset.Position(call.Pos()), e.Name)
+			}
+			return true
+		})
+	}
+	// each registered event has a call site; the identity events share one
+	for _, e := range Events {
+		if e.Via == "" {
+			require.NotZero(t, sites[e.Name], "event %s: no log call with message %q in %s (lane scripts grep the message)", e.Name, e.Msg, e.File)
 		}
 	}
+	require.Equal(t, 2, sites[EvShardHandoffActive], "handoff activated is logged at two sites, both with the event")
+	require.Equal(t, 2, sites[EvRootHandoffOutcome], "root handoff outcome is logged at two sites, both with the event")
+}
+
+func leftmostString(e ast.Expr) string {
+	switch v := e.(type) {
+	case *ast.BasicLit:
+		if v.Kind == token.STRING {
+			s, err := strconv.Unquote(v.Value)
+			if err == nil {
+				return s
+			}
+		}
+	case *ast.BinaryExpr:
+		return leftmostString(v.X)
+	}
+	return ""
+}
+
+// msgMatches: the literal is the message; or the message continued by ":" or " (" (a long message whose head is the pinned one); or, for a
+// pinned message that ends in a space (a computed message), any literal with that prefix.
+func msgMatches(lit, msg string) bool {
+	if lit == "" || msg == "" || !strings.HasPrefix(lit, msg) {
+		return false
+	}
+	if strings.HasSuffix(msg, " ") || len(lit) == len(msg) {
+		return true
+	}
+	rest := lit[len(msg):]
+	return strings.HasPrefix(rest, ":") || strings.HasPrefix(rest, " (")
+}
+
+// isEventArg: the argument is monitoring.Event(monitoring.<name>) (or Event(<name>) inside the package); for a computed event, Event(<fn>(...)).
+func isEventArg(a ast.Expr, name string) bool {
+	c, ok := a.(*ast.CallExpr)
+	if !ok || len(c.Args) != 1 {
+		return false
+	}
+	switch f := c.Fun.(type) {
+	case *ast.SelectorExpr:
+		if f.Sel.Name != "Event" {
+			return false
+		}
+	case *ast.Ident:
+		if f.Name != "Event" {
+			return false
+		}
+	default:
+		return false
+	}
+	switch v := c.Args[0].(type) {
+	case *ast.SelectorExpr:
+		return v.Sel.Name == name
+	case *ast.Ident:
+		return v.Name == name
+	case *ast.CallExpr:
+		switch f := v.Fun.(type) {
+		case *ast.SelectorExpr:
+			return f.Sel.Name == name
+		case *ast.Ident:
+			return f.Name == name
+		}
+	}
+	return false
 }
 
 // TestMetricsCatalogue guards the metric names: every unicity_* name the code registers is in the catalogue document and every name in the

@@ -76,7 +76,7 @@ func (p *Peers) Watch(ctx context.Context, interval, grace time.Duration) {
 					if !was && time.Since(since[s.Network]) >= grace {
 						p.low[s.Network] = true
 						p.mu.Unlock()
-						p.log.Warn("connected peers are below the committee", Event(EvNodePeersLow), "network", s.Network, "connected", c, "expected", e)
+						p.log.Warn("connected peers are below the committee", "network", s.Network, "connected", c, "expected", e, Event(EvNodePeersLow))
 						continue
 					}
 				} else {
@@ -84,7 +84,7 @@ func (p *Peers) Watch(ctx context.Context, interval, grace time.Duration) {
 					if was {
 						p.low[s.Network] = false
 						p.mu.Unlock()
-						p.log.Info("connected peers are back to the committee", Event(EvNodePeersRecovered), "network", s.Network, "connected", c, "expected", e)
+						p.log.Info("connected peers are back to the committee", "network", s.Network, "connected", c, "expected", e, Event(EvNodePeersRecovered))
 						continue
 					}
 				}

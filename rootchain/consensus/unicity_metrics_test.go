@@ -50,3 +50,18 @@ func got(t *testing.T, x *ConsensusManager, reason string) float64 {
 	require.NoError(t, x.votesMissed.WithLabelValues(reason).Write(&m))
 	return m.GetCounter().GetValue()
 }
+
+func TestRoundTimeoutCountsOncePerRound(t *testing.T) {
+	x := &ConsensusManager{}
+	x.roundTimeout = monitoring.New(prometheus.NewRegistry()).Counter("unicity_root_round_timeouts_total", "x")
+	read := func() float64 {
+		var m dto.Metric
+		require.NoError(t, x.roundTimeout.Write(&m))
+		return m.GetCounter().GetValue()
+	}
+	x.noteRoundTimeout(7)
+	x.noteRoundTimeout(7) // the re-broadcast timer for the same round
+	require.Equal(t, 1.0, read())
+	x.noteRoundTimeout(8)
+	require.Equal(t, 2.0, read())
+}

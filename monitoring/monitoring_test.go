@@ -26,27 +26,6 @@ func TestNilRegistryIsUsable(t *testing.T) {
 	r := New(nil)
 	r.Counter("unicity_x_total", "x").Inc()
 	r.GaugeFunc("unicity_y", "y", func() float64 { return 1 })
-	RegisterUpgrades(r, &UpgradeTracker{rules: map[[32]byte]UpgradeRule{}})
-}
-
-func TestUpgradeMetric(t *testing.T) {
-	reg := prometheus.NewRegistry()
-	tr := &UpgradeTracker{rules: map[[32]byte]UpgradeRule{}}
-	RegisterUpgrades(New(reg), tr)
-	v, ok := value(t, reg, "unicity_upgrade_required")
-	require.True(t, ok)
-	require.Zero(t, v)
-	_, ok = value(t, reg, "unicity_upgrade_activation_epoch")
-	require.False(t, ok)
-	tr.Require(UpgradeRule{RuleID: [32]byte{1}, RootEpoch: 7})
-	v, _ = value(t, reg, "unicity_upgrade_required")
-	require.Equal(t, 1.0, v)
-	v, ok = value(t, reg, "unicity_upgrade_activation_epoch")
-	require.True(t, ok)
-	require.Equal(t, 7.0, v)
-	tr.Clear([32]byte{1})
-	_, ok = value(t, reg, "unicity_upgrade_activation_epoch")
-	require.False(t, ok)
 }
 
 func TestDiskMetrics(t *testing.T) {

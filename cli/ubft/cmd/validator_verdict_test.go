@@ -1,9 +1,13 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -71,8 +75,30 @@ func TestJudge(t *testing.T) {
 		{"record lag", func(r *validatorStatusReport) { r.RecordCount, r.RecordCursor = 500, 100 }, "warning", "record_lag"},
 		{"parked", func(r *validatorStatusReport) { r.PoaState = "Parked" }, "warning", "identity_parked"},
 		{"local down", func(r *validatorStatusReport) { r.LocalSync = "unreachable: connection refused" }, "critical", "local_unreachable"},
-		{"local behind", func(r *validatorStatusReport) { r.LocalSync = "behind by 9 blocks" }, "warning", "local_behind"},
-		{"local far behind", func(r *validatorStatusReport) { r.LocalSync = "behind by 80 blocks" }, "critical", "local_behind"},
+		{"local behind", func(r *validatorStatusReport) {
+			h := uint64(91)
+			r.PublicHead, r.LocalHead, r.LocalSync = 100, &h, "behind by 9 blocks"
+		}, "warning", "local_behind"},
+		{"local far behind", func(r *validatorStatusReport) {
+			h := uint64(20)
+			r.PublicHead, r.LocalHead, r.LocalSync = 100, &h, "behind by 80 blocks"
+		}, "critical", "local_behind"},
+		{"syncing far behind is critical, not a warning", func(r *validatorStatusReport) {
+			h := uint64(1)
+			r.PublicHead, r.LocalHead, r.LocalSync = 1000, &h, "syncing (block 1 of 1000)"
+		}, "critical", "local_behind"},
+		{"syncing close behind", func(r *validatorStatusReport) {
+			h := uint64(99)
+			r.PublicHead, r.LocalHead, r.LocalSync = 100, &h, "syncing (block 99 of 100)"
+		}, "warning", "local_syncing"},
+		{"upgrade far", func(r *validatorStatusReport) {
+			r.Epoch = 3
+			r.UpgradeRequired = []statusUpgrade{{Rule: "r", Release: "x", RootEpoch: 9}}
+		}, "warning", "upgrade_required"},
+		{"upgrade imminent", func(r *validatorStatusReport) {
+			r.Epoch = 8
+			r.UpgradeRequired = []statusUpgrade{{Rule: "r", Release: "x", RootEpoch: 9}}
+		}, "critical", "upgrade_imminent"},
 		{"unknown", func(r *validatorStatusReport) { r.Unknown = []string{"identity: x"} }, "unknown", ""},
 		{"critical beats unknown", func(r *validatorStatusReport) { r.Unknown = []string{"x"}; r.Health = "Faulted" }, "critical", "module_unhealthy"},
 	}
@@ -111,4 +137,101 @@ func TestExporterMetrics(t *testing.T) {
 	for _, n := range []string{"unicity_vr_record_application_lag", "unicity_vr_identity_state", "unicity_vr_custody_cursor_minus_vr_cursor", "unicity_evm_head_lag_blocks"} {
 		require.True(t, seen[n], n)
 	}
+}
+
+// TestHeadResponses: a null block or a header without its fields is an error, never height 0 at time 0; block 0 itself is a real answer.
+func TestHeadResponses(t *testing.T) {
+	answer := ""
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":`+answer+`}`)
+	}))
+	defer srv.Close()
+	c, err := dialBounded(context.Background(), srv.URL)
+	require.NoError(t, err)
+	defer c.Close()
+	for _, bad := range []string{`null`, `{}`, `{"number":"0x5"}`, `{"timestamp":"0x5"}`} {
+		answer = bad
+		_, _, err := blockInfo(context.Background(), c, "latest")
+		require.Error(t, err, bad)
+	}
+	answer = `{"number":"0x0","timestamp":"0x0"}`
+	n, ts, err := blockInfo(context.Background(), c, "latest")
+	require.NoError(t, err)
+	require.Zero(t, n+ts)
+}
+
+// TestRPCResponseIsBounded: a response beyond the bound is refused, not read.
+func TestRPCResponseIsBounded(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"jsonrpc":"2.0","id":1,"result":"`)
+		chunk := strings.Repeat("a", 1<<20)
+		for i := 0; i < maxRPCBody>>20+2; i++ {
+			_, _ = io.WriteString(w, chunk)
+		}
+		_, _ = io.WriteString(w, `"}`)
+	}))
+	defer srv.Close()
+	c, err := dialBounded(context.Background(), srv.URL)
+	require.NoError(t, err)
+	defer c.Close()
+	var out string
+	require.Error(t, c.CallContext(context.Background(), &out, "eth_blockNumber"))
+}
+
+func TestParseCount(t *testing.T) {
+	for in, want := range map[string]uint64{"0": 0, "12": 12, "1.2e+06": 1200000} {
+		got, err := parseCount("m", in)
+		require.NoError(t, err, in)
+		require.Equal(t, want, got)
+	}
+	for _, bad := range []string{"NaN", "+Inf", "-1", "1.5", "1e300", "abc", ""} {
+		_, err := parseCount("m", bad)
+		require.Error(t, err, bad)
+	}
+}
+
+func gather(t *testing.T, e *validatorExporter) map[string][]float64 {
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(e)
+	mfs, err := reg.Gather()
+	require.NoError(t, err)
+	out := map[string][]float64{}
+	for _, mf := range mfs {
+		for _, m := range mf.GetMetric() {
+			out[mf.GetName()] = append(out[mf.GetName()], m.GetGauge().GetValue())
+		}
+	}
+	return out
+}
+
+// TestExporterUnknownIsAbsent: an unreachable local client that was never seen has no lag value; the root target and the upgrade series are absent
+// when unknown, and the upgrade series follow the schedule (they clear when it no longer holds the rule).
+func TestExporterUnknownIsAbsent(t *testing.T) {
+	var logs strings.Builder
+	rep := &validatorStatusReport{Identity: "found", Health: "Healthy", PublicHead: 100, LocalRPC: "x", Epoch: 3, Verdict: "ok"}
+	e := &validatorExporter{log: slog.New(slog.NewTextHandler(&logs, nil)), rep: rep}
+	m := gather(t, e)
+	require.NotContains(t, m, "unicity_evm_head_lag_blocks", "no local head was ever observed")
+	require.Equal(t, []float64{0}, m["unicity_evm_local_up"])
+	require.NotContains(t, m, "unicity_vr_record_root_target")
+	require.Equal(t, []float64{0}, m["unicity_upgrade_schedule_known"])
+	require.NotContains(t, m, "unicity_upgrade_required", "an unreadable schedule is unknown, not 0")
+
+	rep.ScheduleKnown = true
+	rep.UpgradeRequired = []statusUpgrade{{Rule: "ab", Release: "cd", RootEpoch: 6, State: "Active"}}
+	m = gather(t, e)
+	require.Equal(t, []float64{1}, m["unicity_upgrade_required"])
+	require.Equal(t, []float64{3}, m["unicity_upgrade_epochs_remaining"])
+	rep.UpgradeRequired = nil // superseded or implemented: the next poll's schedule no longer holds it
+	m = gather(t, e)
+	require.Equal(t, []float64{0}, m["unicity_upgrade_required"])
+	require.NotContains(t, m, "unicity_upgrade_epochs_remaining")
+
+	// a head seen once, then the client stops: the lag is measured against the highest head it showed
+	h := uint64(90)
+	rep.LocalHead = &h
+	e.localMax, e.localSeen = 90, true
+	rep.LocalHead = nil
+	m = gather(t, e)
+	require.Equal(t, []float64{10}, m["unicity_evm_head_lag_blocks"])
 }

@@ -63,13 +63,13 @@ Severity: warning.
 
 Severity: warning.
 
-**What it means.** The local round timer fired more than 20 times in 5 minutes: proposals do not arrive in time.
+**What it means.** A committee root's round timer fired in more than 20 distinct rounds in 5 minutes (a follower root times out every round and is excluded): proposals do not arrive in time.
 
-**Confirm.** `increase(unicity_root_round_timeouts_total[5m])` on all roots, `event=root.round.timeout` in the log, `ab_round_duration_seconds`.
+**Confirm.** `increase(unicity_root_round_timeouts_total[5m])` (counted once per round) on all roots, `event=root.round.timeout` in the log, `ab_round_duration_seconds`.
 
 **Fix.** Find the leader(s) that fail to propose (the log names the leader per round), fix their host or network. Check clock skew (NTP) across the committee.
 
-**Escalate when.** Escalate when the rate is chain-wide and growing.
+**Escalate when.** The rate is chain-wide and growing.
 
 ## UnicityRootNotMember
 
@@ -243,25 +243,25 @@ Severity: warning.
 
 Severity: critical.
 
-**What it means.** The authority is enrolled but no client session is issued: the shard node has nothing to sign through.
+**What it means.** The authority is enrolled and not retired, but no client session is issued: the shard node has nothing to sign through. (A retired authority legitimately has no session and does not alert here.)
 
-**Confirm.** `unicity_authority_enrolled == 1`, `unicity_authority_session_issued == 0`, `unicity_authority_generation`.
+**Confirm.** `unicity_authority_enrolled == 1`, `unicity_authority_retired == 0`, `unicity_authority_session_issued == 0`, `unicity_authority_generation`.
 
-**Fix.** Issue a session with `ubft signing-authority replace-session` (operator socket and credential) and restart the shard node if it does not pick it up. See the authority runbook in `docs/operations/m2-runbook.md`.
+**Fix.** Issue a session with `ubft signing-authority replace-session` (operator socket and credential) and restart the shard node if it does not pick it up. See `docs/operations/m2-runbook.md`.
 
-**Escalate when.** Escalate when replace-session is refused.
+**Escalate when.** `replace-session` is refused: if the authority is retired the validator was removed, which is not an incident to fix by a session.
 
 ## UnicityAuthoritySigningStalled
 
 Severity: critical.
 
-**What it means.** The authority signed nothing for 2 minutes while the shard node is active.
+**What it means.** A client session is issued, the authority is not retired and the shard node is active, but the authority signs nothing: either the session never made a first signature (`unicity_authority_session_signatures == 0` for 3 minutes) or the last signature is more than 2 minutes old.
 
-**Confirm.** `unicity_authority_last_signature_age_seconds`, `unicity_shard_certified_lag_rounds`; the shard node log for authority errors.
+**Confirm.** `unicity_authority_session_age_seconds`, `unicity_authority_session_signatures`, `unicity_authority_last_signature_age_seconds`, `unicity_shard_certified_lag_rounds`; the shard node log for authority errors.
 
-**Fix.** Check the client socket and the shard node's session (UnicityAuthorityNoSession) and that the shard has work (a quiet shard certifies empty rounds). Restart the shard node, not the authority.
+**Fix.** Check the client socket and that the shard node uses the issued session's credential (a session issued but never used means the shard node holds an old credential: restart it). A quiet shard certifies empty rounds, so a healthy signer signs continuously. Restart the shard node, not the authority.
 
-**Escalate when.** Escalate when signing does not resume after the shard node restart.
+**Escalate when.** Signing does not start or resume after the shard node restart.
 
 ## UnicityVRModuleUnhealthy
 
@@ -279,13 +279,13 @@ Severity: critical.
 
 Severity: warning.
 
-**What it means.** The VR exporter cannot read VR through its RPC.
+**What it means.** The VR exporter cannot read VR (`unicity_vr_up == 0`), or its last complete read is more than 2 minutes old (`unicity_vr_last_success_timestamp_seconds`): the exporter answers its scrape but serves a stale snapshot.
 
-**Confirm.** `unicity_vr_up == 0`, `unicity_vr_read_errors_total`; the exporter log (`validator state could not be read`); `ubft validator status` from the same host.
+**Confirm.** `unicity_vr_read_errors_total`; the exporter log (`validator state could not be read`); `ubft validator status` from the same host. A dead exporter is UnicityTargetDown instead.
 
 **Fix.** Check the public RPC the exporter uses (is its ureth up, UnicityEvmUnreachable) and the validator config. The exporter holds no state: restart it.
 
-**Escalate when.** Escalate when the public RPC is up and the exporter still fails.
+**Escalate when.** The public RPC is up and the exporter still fails.
 
 ## UnicityRecordApplicationLag
 
@@ -371,29 +371,17 @@ Severity: warning.
 
 **Escalate when.** Escalate to the governance signers if you did not cause it.
 
-## UnicityKeysMismatch
-
-Severity: critical.
-
-**What it means.** The node's keys match neither the current nor the staged binding in VR: its root and shard node sign with keys the network does not expect.
-
-**Confirm.** `unicity_vr_identity_local_keys == 0`; `ubft validator status` prints `local keys DO NOT match the binding`.
-
-**Fix.** Restore the keys the binding names, or stage the new binding (`ubft validator rotate`) and wait for the boundary that installs it. Never overwrite key files without a backup.
-
-**Escalate when.** Escalate at once if the keys changed without a rotation.
-
 ## UnicityUpgradeRequired
 
 Severity: warning.
 
-**What it means.** The committed activation schedule holds a rule (with its release digest) this binary does not implement. The node signs no readiness for a handoff that needs it, and refuses to run past the activation.
+**What it means.** VR's activation schedule holds an Active or Latched rule (rule, release) that this binary does not implement (`unicity_upgrade_required`, reconciled from the schedule by the exporter at every poll, or VT-07's `ab_unicity_upgrade_required{state="effective"}`). The node signs no readiness for a handoff that needs it and refuses to run past the activation.
 
-**Confirm.** `unicity_upgrade_required == 1`, `unicity_upgrade_rule_info`, `unicity_upgrade_activation_epoch - unicity_root_epoch` (epochs left), `event=vr.upgrade.required`, `ubft validator upgrade`.
+**Confirm.** `unicity_upgrade_rule_info` names the rule and release, `unicity_upgrade_epochs_remaining` the epochs left on this validator, `event=upgrade.required` and `ubft validator status` (finding `upgrade_required`).
 
-**Fix.** Install the release that implements the rule (its digest is in the rule info), restart the node. The metric clears when the binary implements the rule.
+**Fix.** Install the release that implements the rule (its digest is in the rule info) and restart the node; the series clears at the next poll once the binary implements the rule or the schedule supersedes it. The exporter must be of the node's release, or it judges by the wrong binary.
 
-**Escalate when.** Escalate when the release is not available, or fewer than 2 epochs remain (UnicityUpgradeImminent).
+**Escalate when.** The release is not available, or fewer than 2 epochs remain (UnicityUpgradeImminent).
 
 ## UnicityUpgradePending
 
@@ -411,10 +399,46 @@ Severity: warning.
 
 Severity: critical.
 
-**What it means.** An unsupported activation rule is at most two root epochs away.
+**What it means.** An unsupported rule activates within two root epochs of THIS validator's current epoch (`unicity_upgrade_epochs_remaining <= 2`).
 
-**Confirm.** As UnicityUpgradeRequired; the margin is `unicity_upgrade_activation_epoch - unicity_root_epoch`.
+**Confirm.** As UnicityUpgradeRequired.
 
-**Fix.** Upgrade now. A node that is not upgraded at the activation refuses to continue; the validator leaves the committee's signers until it is.
+**Fix.** Upgrade now. A node that is not upgraded at the activation refuses to continue and drops out of the signers.
 
-**Escalate when.** Escalate at once if you cannot upgrade before the activation.
+**Escalate when.** You cannot upgrade before the activation.
+
+## UnicityVRSeriesMissing
+
+Severity: warning.
+
+**What it means.** A VR exporter target answers its scrape (`up == 1`) but does not carry `unicity_vr_up`: an old or wrong binary, or a broken exporter.
+
+**Confirm.** `curl` the exporter's /metrics and look for `unicity_vr_*`.
+
+**Fix.** Run `ubft validator exporter` from the node's release; restart it.
+
+**Escalate when.** The binary is right and the series stays missing.
+
+## UnicityScrapeTargetsAbsent
+
+Severity: critical.
+
+**What it means.** Prometheus has no target at all for the job `vrexporter`, `root` or `shard`: the validators are not monitored (a missing scrape configuration or service discovery, not a down target).
+
+**Confirm.** `up{job=...}` in Prometheus' targets page; the scrape configuration.
+
+**Fix.** Restore the scrape configuration or discovery (see `prometheus-validator.yml.tmpl`).
+
+**Escalate when.** The configuration is correct and the targets do not appear.
+
+## UnicityUpgradeScheduleUnknown
+
+Severity: warning.
+
+**What it means.** The exporter could not read VR's activation schedule for 10 minutes (`unicity_upgrade_schedule_known == 0`): whether an upgrade is required is unknown, not "no". The upgrade series are absent meanwhile.
+
+**Confirm.** `unicity_vr_up`, `unicity_vr_read_errors_total`, the exporter log, `ubft validator status` (the `Activations` read).
+
+**Fix.** As UnicityVRExporterDown: the public RPC or VR read is failing. An `activationCount` above the schema's bound of 64 is refused by design and means the contract is not the expected VR.
+
+**Escalate when.** The read keeps failing with a healthy RPC.

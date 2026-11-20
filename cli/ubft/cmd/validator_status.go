@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -13,7 +14,9 @@ import (
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/spf13/cobra"
 
+	"github.com/unicitynetwork/bft-core/rootchain/vrschedule"
 	"github.com/unicitynetwork/bft-core/vrclient"
+	"github.com/unicitynetwork/bft-core/vrschema"
 )
 
 // validatorStatusReport is `validator status`, as text or --json.
@@ -75,14 +78,28 @@ type validatorStatusReport struct {
 	// runbook (root target, imported count = RecordCount, VR cursor = RecordCursor, custody cursor) are read at the same pinned block.
 	CustodyCursor    *uint64 `json:"custodyCursor,omitempty"`
 	RecordRootTarget *uint64 `json:"recordRootTarget,omitempty"`
+	// RecordRootTargetAt is the unix time the root target was sampled: a separate observation of the root, not at the pinned EVM block.
+	RecordRootTargetAt int64 `json:"recordRootTargetAt,omitempty"`
 
 	// Verdict is the status as a script reads it: "ok", "warning", "critical" or "unknown" (some read failed), with the findings behind it.
 	// `status --exit-code` exits 0, 1, 2 or 3 accordingly.
 	Verdict  string    `json:"verdict"`
 	Findings []Finding `json:"findings,omitempty"`
 
+	// UpgradeRequired lists the schedule entries (Active or Latched) whose (rule, release) this binary does not implement; ScheduleKnown is false when the
+	// schedule could not be read (then nothing is said about upgrades either way). The exporter reconciles unicity_upgrade_* from them at every poll.
+	ScheduleKnown   bool            `json:"scheduleKnown"`
+	UpgradeRequired []statusUpgrade `json:"upgradeRequired,omitempty"`
 	// Unknown lists every read that failed; status then exits with an error after printing what it could read.
 	Unknown []string `json:"unknown,omitempty"`
+}
+
+// statusUpgrade is a schedule entry this binary cannot support.
+type statusUpgrade struct {
+	Rule      string `json:"rule"`
+	Release   string `json:"release"`
+	RootEpoch uint64 `json:"rootEpoch"`
+	State     string `json:"state"`
 }
 
 // statusOutput is VR's open output in numbers.
@@ -101,6 +118,8 @@ type validatorStatusFlags struct {
 	validatorFlags
 	JSON     bool
 	ExitCode bool
+	// NoKeys never reads the operator's or the node's key files (the exporter's mode: it needs the identity id, and compares nothing with local keys)
+	NoKeys bool
 	// Custody is the PoS custody contract (holder 0) whose recordCursor joins the record counters; RootMetrics the root's metrics URL its
 	// projected-record count is read from. Both optional.
 	Custody     string
@@ -146,14 +165,18 @@ func validatorStatusCmd(base *baseFlags) *cobra.Command {
 }
 
 func blockInfo(ctx context.Context, c *rpc.Client, tag string) (number, ts uint64, err error) {
-	var h struct {
-		Number    hexutil.Uint64 `json:"number"`
-		Timestamp hexutil.Uint64 `json:"timestamp"`
+	// pointers: a null block or a missing field is an error, never height 0 at time 0 (block 0 itself is a real answer)
+	var h *struct {
+		Number    *hexutil.Uint64 `json:"number"`
+		Timestamp *hexutil.Uint64 `json:"timestamp"`
 	}
 	if err := c.CallContext(ctx, &h, "eth_getBlockByNumber", tag, false); err != nil {
 		return 0, 0, err
 	}
-	return uint64(h.Number), uint64(h.Timestamp), nil
+	if h == nil || h.Number == nil || h.Timestamp == nil {
+		return 0, 0, fmt.Errorf("eth_getBlockByNumber(%s) returned no usable block header", tag)
+	}
+	return uint64(*h.Number), uint64(*h.Timestamp), nil
 }
 
 // syncing is eth_syncing: false, or a progress object (true). Any other answer is an error.
@@ -177,26 +200,30 @@ func validatorStatus(ctx context.Context, f *validatorStatusFlags) (*validatorSt
 	if err != nil {
 		return nil, err
 	}
-	ch, err := v.dial(ctx)
+	ch, err := v.dialWith(ctx, true, true) // one pinned block for everything below, VR's configuration and module included
 	if err != nil {
 		return nil, err
 	}
 	defer ch.close()
-	vr, head, err := ch.vr.Pin(ctx)
-	if err != nil {
-		return nil, err
-	}
+	vr, head := ch.vr, ch.head
 	r := &validatorStatusReport{RPC: v.cfg.RPC, ChainID: ch.chainID.String(), Block: head, Registry: vr.Registry.Hex(),
 		Module: ch.module.Module.Hex(), ModuleTag: fmt.Sprintf("%x", ch.module.Meta.ModuleTag), Health: vrclient.Health(ch.module.Health),
 		Epoch: ch.cfg.KnownRootEpoch, EpochStart: ch.cfg.EpochStartProgress,
 		Limits: fmt.Sprintf("nMin %d, nTarget %d, nMax %d", ch.cfg.NMin, ch.cfg.NTarget, ch.cfg.NMax)}
 
 	// the identity: --id or the config's, else the operator account's from VR's logs. Only a lookup that succeeded says "none".
-	keys, kerr := v.keys()
+	var keys *validatorKeys
+	kerr := errors.New("key files are not read in this mode")
+	if !f.NoKeys {
+		keys, kerr = v.keys()
+	}
 	id := v.cfg.ID
 	switch {
 	case id != 0:
 		r.Identity = "found"
+	case f.NoKeys:
+		r.Identity = "unknown"
+		r.Unknown = append(r.Unknown, "identity: no id is configured (set \"id\" in the config or pass --id)")
 	case kerr != nil:
 		r.Identity = "unknown"
 		r.Unknown = append(r.Unknown, fmt.Sprintf("identity: the operator key is not readable, so its identity was not looked up (pass --id): %v", kerr))
@@ -348,15 +375,23 @@ func validatorStatus(ctx context.Context, f *validatorStatusFlags) (*validatorSt
 	if err != nil {
 		return nil, err
 	}
+	r.ScheduleKnown = true
 	for _, a := range acts {
+		if (a.State == 1 || a.State == 3) && !vrschedule.ImplementedRules[[2]vrschema.Word{a.RuleId, a.ReleaseDigest}] { // Active or Latched
+			r.UpgradeRequired = append(r.UpgradeRequired, statusUpgrade{Rule: fmt.Sprintf("%x", a.RuleId[:8]), Release: fmt.Sprintf("%x", a.ReleaseDigest[:8]),
+				RootEpoch: a.RootEpoch, State: vrclient.ActivationState(a.State)})
+		}
 		r.Activations = append(r.Activations, fmt.Sprintf("rule %x release %x at root epoch %d, not before UC time %d: %s",
 			a.RuleId, a.ReleaseDigest, a.RootEpoch, a.NotBeforeUcTime, vrclient.ActivationState(a.State)))
 	}
 
 	// sync: the public endpoint's head, and this validator's own ureth against it
-	n, ts, err := blockInfo(ctx, ch.rpc, "latest")
+	n, ts, err := blockInfo(ctx, ch.rpc, hexutil.EncodeUint64(head)) // the pinned block, so the public head and VR's state are one point
 	if err != nil {
 		return nil, err
+	}
+	if ts == 0 && n > 0 {
+		return nil, fmt.Errorf("%w: the public head %d carries no timestamp", ErrValidator, n)
 	}
 	r.PublicHead = n
 	r.PublicHeadTime = ts
@@ -383,7 +418,7 @@ func validatorStatus(ctx context.Context, f *validatorStatusFlags) (*validatorSt
 }
 
 func localSync(ctx context.Context, url string, publicHead uint64, head **uint64) string {
-	c, err := rpc.DialContext(ctx, url)
+	c, err := dialBounded(ctx, url)
 	if err != nil {
 		return "unreachable: " + err.Error()
 	}

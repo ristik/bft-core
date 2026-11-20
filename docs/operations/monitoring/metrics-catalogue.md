@@ -10,7 +10,7 @@ Where each metric is served:
 | root node | `ubft root-node run --metrics prometheus --rpc-server-address 127.0.0.1:P`, `GET /api/v1/metrics` | the operator listener is loopback only; the testnet package relays it (`metrics_relay.py`) |
 | shard node | the same flags on `ubft shard-node run` | `unicity_shard_*`, `unicity_evm_head_*`, node-level metrics |
 | signing authority | `ubft signing-authority run --metrics-address 127.0.0.1:P`, `GET /metrics` | off by default; loopback only; no key, request or response bytes |
-| VR exporter | `ubft validator exporter --listen 127.0.0.1:P`, `GET /metrics` | reads VR and the public RPC; read-only, holds no key |
+| VR exporter | `ubft validator exporter --listen 127.0.0.1:P`, `GET /metrics` | reads VR and the public RPC at one pinned block; read-only, opens no key file, needs the identity id; every response is size-bounded |
 | ureth | its own `--metrics` (reth's `reth_*` series); the head lag is exported by the VR exporter and by the shard node | no `unicity_*` series are added in ureth |
 
 Labels `instance`, `job` and `validator` come from Prometheus' scrape configuration (`deploy/testnet/monitoring/prometheus-validator.yml`).
@@ -25,27 +25,22 @@ Labels `instance`, `job` and `validator` come from Prometheus' scrape configurat
 | `unicity_root_round_lag` | gauge | | round in progress minus committed round; about 3 when healthy, grows while rounds time out or the node is behind |
 | `unicity_root_member` | gauge | | 1 while this root is in the epoch's committee, 0 for a follower |
 | `unicity_root_committee_size` | gauge | | root nodes in the epoch's committee |
-| `unicity_root_proposals_total` | counter | | proposals this root signed as leader |
+| `unicity_root_proposals_total` | counter | | proposals this root signed and sent as leader |
 | `unicity_root_votes_missed_total` | counter | `reason` = `no_vote`, `timeout_only` | rounds a committee member ended without voting: `no_vote` signed nothing, `timeout_only` signed only a timeout vote |
-| `unicity_root_round_timeouts_total` | counter | | times the local round timer fired |
-| `unicity_root_records_projected` | gauge | | records the committed root chain has projected (the root target of the catch-up counters) |
+| `unicity_root_round_timeouts_total` | counter | | rounds in which the local round timer fired, counted once per round; a follower root times out every round |
+| `unicity_root_records_projected` | gauge | | records the committed root chain has projected (the root target of the catch-up counters); absent while the record store cannot be read |
 | `unicity_peers_connected` | gauge | `network` | connected peers of the network (`root`, `shard`), this node excluded |
 | `unicity_peers_expected` | gauge | `network` | peers the node should be connected to (the committee, the shard's validators) |
 | `unicity_disk_free_bytes` | gauge | `volume` | bytes available on the volume's filesystem: `home` (the node's home) from the nodes, any `--disk-path name=path` (for example `ureth`, the execution client's data directory) from the VR exporter |
 | `unicity_disk_total_bytes` | gauge | `volume` | filesystem size |
 | `unicity_disk_free_ratio` | gauge | `volume` | free fraction, 0..1; the node logs `node.disk.low` below 0.10 |
 | `unicity_disk_stat_error` | gauge | `volume` | 1 when the filesystem could not be read |
-| `unicity_upgrade_required` | gauge | | 1 while the committed activation schedule holds a rule this binary does not implement (VT-07), see below |
-| `unicity_upgrade_activation_epoch` | gauge | | the earliest root epoch of such a rule; absent while none |
-| `unicity_upgrade_rule_info` | gauge | `rule`, `release`, `activation_epoch` | one series (value 1) per such rule |
 | `unicity_build_info` | gauge | `component`, `revision`, `go` | always 1 |
 
-VT-07 (#1228) also exposes the OpenTelemetry gauge `ab_unicity_upgrade_required{rule,epoch,state}` on the roots (`state` is `pending`: a ScheduleActivation bound into the open VR output, or `effective`: in the committed schedule); the namespace prefix `ab_` is added by the exporter. The alert pack watches both forms.
-
-`unicity_upgrade_required` is node-native and the same in the root and the shard node. Semantics agreed with VT-07 (`briefs/vt07-vt12-metric.md`):
-the activation-schedule code calls `monitoring.Upgrades.Require(rule)` when the committed schedule holds a (ruleId, releaseDigest) this binary does
-not implement, and `Clear(ruleId)` when the schedule no longer holds it; the metric is 1 while any rule is required. The alert fires on it, and
-`unicity_upgrade_activation_epoch - unicity_root_epoch` is the number of epochs left to upgrade in.
+Upgrade metrics are not node-native: the schedule is the source of truth, so they are exported by the VR exporter (below), reconciled from VR's
+activation schedule at every poll. VT-07 (#1228) additionally exposes the OpenTelemetry gauge `ab_unicity_upgrade_required{rule,epoch,state}` on
+the roots (`state` is `pending`: a ScheduleActivation bound into the open VR output, or `effective`: in the committed schedule; `ab_` is the
+exporter namespace). The alert pack watches both.
 
 ## Shard node (`component=shard`)
 
@@ -66,7 +61,7 @@ not implement, and `Clear(ruleId)` when the schedule no longer holds it; the met
 | `unicity_evm_head_stuck_seconds` | gauge | | seconds the head has not advanced (seen at scrapes) |
 | `unicity_evm_unreachable` | gauge | | 1 when the execution client's head could not be read |
 
-The node-level metrics of the root (`unicity_peers_*`, `unicity_disk_*`, `unicity_upgrade_*`, `unicity_build_info`) are registered by the shard node
+The node-level metrics of the root (`unicity_peers_*`, `unicity_disk_*`, `unicity_build_info`) are registered by the shard node
 as well (`network="shard"` for the peers: the validators of the installed assignment).
 
 ## Signing authority (`component=authority`)
@@ -87,6 +82,8 @@ as well (`network="shard"` for the peers: the validators of the installed assign
 | `unicity_authority_shard_epoch` | gauge | | shard epoch enrolled for |
 | `unicity_authority_lineage_pinned` | gauge | | 1 when it verifies its own epoch advances |
 | `unicity_authority_lineage_epoch` | gauge | | last root epoch its lineage holds |
+| `unicity_authority_session_age_seconds` | gauge | | seconds since the current client session was first seen by the endpoint (a new generation restarts it); absent without a session |
+| `unicity_authority_session_signatures` | gauge | | signatures since the current session was first seen; a session that stays at 0 never started signing |
 | `unicity_authority_signatures_total` | counter | | signatures made in this lifetime |
 | `unicity_authority_last_signature_age_seconds` | gauge | | seconds since the last signature; absent before the first |
 
@@ -111,6 +108,7 @@ One poll is one pinned EVM block, so the four record counters belong to the same
 | `unicity_vr_open_output_progress_left` | gauge | | progress left until the open output expires; absent without one |
 | `unicity_vr_boundary_pending` | gauge | | 1 while an acknowledged output awaits its Boundary record |
 | `unicity_vr_record_root_target` | gauge | | counter 1 of 4: records the root has projected (`--root-metrics`) |
+| `unicity_vr_record_root_target_sample_timestamp_seconds` | gauge | | unix time the root target was sampled from the root's metrics (a separate observation, not at the pinned block) |
 | `unicity_vr_record_imported` | gauge | | counter 2 of 4: SealRegistry's imported count (`recordCount`) |
 | `unicity_vr_record_cursor` | gauge | | counter 3 of 4: VR's `recordCursor` |
 | `unicity_vr_custody_record_cursor` | gauge | | counter 4 of 4: custody's `recordCursor` (`--custody`, PoS generations) |
@@ -122,13 +120,16 @@ One poll is one pinned EVM block, so the four record counters belong to the same
 | `unicity_vr_identity_info` | gauge | `id`, `state` | the watched identity (value 1) |
 | `unicity_vr_identity_member` | gauge | | 1 when the identity is in the committee |
 | `unicity_vr_identity_staged_binding` | gauge | | 1 when a binding is staged |
-| `unicity_vr_identity_local_keys` | gauge | | 1 local keys match the current binding, 2 the staged one, 0 neither |
 | `unicity_vr_activations` | gauge | | entries in VR's activation schedule |
+| `unicity_upgrade_schedule_known` | gauge | | 1 when VR's activation schedule was read at the last poll, 0 when it could not be (the upgrade series are then absent) |
+| `unicity_upgrade_required` | gauge | | 1 while the schedule holds an Active or Latched rule (rule, release) this binary does not implement; reconciled every poll, so it clears on supersession or when the binary implements the rule (the exporter must be the node's release) |
+| `unicity_upgrade_epochs_remaining` | gauge | | root epochs until the earliest unsupported rule activates (negative: past); absent while none |
+| `unicity_upgrade_rule_info` | gauge | `rule`, `release`, `activation_epoch`, `state` | one series (value 1) per unsupported rule |
 | `unicity_evm_public_head_number` | gauge | | head of the public RPC |
 | `unicity_evm_public_head_age_seconds` | gauge | | age of that head block: the eligible-block cadence going wrong |
 | `unicity_evm_local_up` | gauge | | 1 when the local execution client answers (`localRpc` in the validator config) |
 | `unicity_evm_local_head_number` | gauge | | head of the local execution client |
-| `unicity_evm_head_lag_blocks` | gauge | | public head minus local head; while the client is unreachable, minus the highest head it showed |
+| `unicity_evm_head_lag_blocks` | gauge | | public head minus local head; while the client is unreachable, minus the highest head it showed; absent until a local head was observed |
 
 ## Existing metrics (not changed by VT-12)
 

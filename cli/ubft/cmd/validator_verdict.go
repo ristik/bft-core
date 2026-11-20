@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -112,7 +113,7 @@ func (r *validatorStatusReport) judge(t statusThresholds) {
 	if r.Staged != nil && r.LocalKeys == "staged" {
 		r.find("warning", "staged_binding", "the keys match the STAGED binding: they sign only once it is installed")
 	}
-	if r.PublicHeadTime != 0 {
+	if r.PublicHeadTime != 0 || r.PublicHead > 0 {
 		age := time.Since(time.Unix(int64(r.PublicHeadTime), 0))
 		switch {
 		case age > t.MaxHeadAge:
@@ -124,24 +125,38 @@ func (r *validatorStatusReport) judge(t statusThresholds) {
 	if r.RecordCount > r.RecordCursor && r.RecordCount-r.RecordCursor > t.MaxRecordLag {
 		r.find("warning", "record_lag", "VR has applied %d of the %d imported root records (lag %d)", r.RecordCursor, r.RecordCount, r.RecordCount-r.RecordCursor)
 	}
+	for _, u := range r.UpgradeRequired {
+		left := int64(u.RootEpoch) - int64(r.Epoch)
+		if left <= 2 {
+			r.find("critical", "upgrade_imminent", "rule %s (release %s) activates at root epoch %d (%d epochs left, now %d) and this binary does not implement it", u.Rule, u.Release, u.RootEpoch, left, r.Epoch)
+		} else {
+			r.find("warning", "upgrade_required", "rule %s (release %s) activates at root epoch %d (%d epochs left) and this binary does not implement it", u.Rule, u.Release, u.RootEpoch, left)
+		}
+	}
 	if r.OpenOutput != nil && r.OpenOutput.ProgressLeft < 0 {
 		r.find("warning", "output_expired", "the open output %s is past its expiry (progress %d)", r.OpenOutput.ID[:8], r.OpenOutput.ExpiresAtProgress)
 	}
+	// the local execution client: the numeric gap is judged whatever eth_syncing says (a syncing client far behind is critical), and the
+	// client's own claim of syncing is a warning when the gap is small
 	switch {
 	case r.LocalRPC == "":
 	case strings.HasPrefix(r.LocalSync, "unreachable"):
 		r.find("critical", "local_unreachable", "the local execution client does not answer: %s", r.LocalSync)
-	case strings.HasPrefix(r.LocalSync, "behind by "):
-		n, _ := strconv.ParseUint(strings.Fields(strings.TrimPrefix(r.LocalSync, "behind by "))[0], 10, 64)
-		sev := "warning"
-		if n > 10*t.MaxLocalBlock {
-			sev = "critical"
+	case r.LocalHead == nil:
+		// the head is unknown (eth_syncing or the block read failed): listed in Unknown, never "in sync"
+	default:
+		var gap uint64
+		if r.PublicHead > *r.LocalHead {
+			gap = r.PublicHead - *r.LocalHead
 		}
-		if n > t.MaxLocalBlock {
-			r.find(sev, "local_behind", "the local execution client is %d blocks behind the public head", n)
+		switch {
+		case gap > 10*t.MaxLocalBlock:
+			r.find("critical", "local_behind", "the local execution client is %d blocks behind the public head (%s)", gap, r.LocalSync)
+		case gap > t.MaxLocalBlock:
+			r.find("warning", "local_behind", "the local execution client is %d blocks behind the public head (%s)", gap, r.LocalSync)
+		case strings.HasPrefix(r.LocalSync, "syncing"):
+			r.find("warning", "local_syncing", "the local execution client is syncing: %s", r.LocalSync)
 		}
-	case strings.HasPrefix(r.LocalSync, "syncing"):
-		r.find("warning", "local_syncing", "the local execution client is syncing: %s", r.LocalSync)
 	}
 	switch {
 	case hasSeverity(r.Findings, "critical"):
@@ -208,6 +223,7 @@ func (r *validatorStatusReport) readCounters(ctx context.Context, f *validatorSt
 			r.Unknown = append(r.Unknown, "root target: "+err.Error())
 		} else {
 			r.RecordRootTarget = &v
+			r.RecordRootTargetAt = time.Now().Unix()
 		}
 	}
 }
@@ -215,7 +231,7 @@ func (r *validatorStatusReport) readCounters(ctx context.Context, f *validatorSt
 // RootTargetMetric is the root's metric that holds the records it has projected (committed).
 const RootTargetMetric = "unicity_root_records_projected"
 
-// fetchRootTarget reads RootTargetMetric from a root's Prometheus text endpoint.
+// fetchRootTarget reads RootTargetMetric from a root's Prometheus text endpoint. The value must be a finite, whole, non-negative count below 2^53.
 func fetchRootTarget(ctx context.Context, url string) (uint64, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -234,17 +250,24 @@ func fetchRootTarget(ctx context.Context, url string) (uint64, error) {
 	sc := bufio.NewScanner(io.LimitReader(resp.Body, 8<<20))
 	sc.Buffer(make([]byte, 64*1024), 1<<20)
 	for sc.Scan() {
-		line := sc.Text()
-		if rest, ok := strings.CutPrefix(line, RootTargetMetric+" "); ok {
-			f, err := strconv.ParseFloat(strings.TrimSpace(rest), 64)
-			if err != nil || f < 0 {
-				return 0, fmt.Errorf("%s: unreadable value %q", RootTargetMetric, rest)
-			}
-			return uint64(f), nil
+		if rest, ok := strings.CutPrefix(sc.Text(), RootTargetMetric+" "); ok {
+			return parseCount(RootTargetMetric, rest)
 		}
 	}
 	if err := sc.Err(); err != nil {
 		return 0, err
 	}
-	return 0, errors.New(RootTargetMetric + " is not in the root's metrics")
+	return 0, errors.New(RootTargetMetric + " is not in the root's metrics (the root cannot read its record store)")
+}
+
+func parseCount(name, text string) (uint64, error) {
+	fields := strings.Fields(text)
+	if len(fields) == 0 {
+		return 0, fmt.Errorf("%s: no value", name)
+	}
+	f, err := strconv.ParseFloat(fields[0], 64)
+	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) || f < 0 || f != math.Trunc(f) || f > 1<<53 {
+		return 0, fmt.Errorf("%s: %q is not a whole count", name, text)
+	}
+	return uint64(f), nil
 }

@@ -70,8 +70,8 @@ func (c *diskCollector) edge(v Volume, ratio float64, free uint64) {
 	c.mu.Unlock()
 	switch {
 	case now && !was:
-		c.log.Warn("disk space is low", Event(EvDiskLow), "volume", v.Name, "path", v.Path, "freeBytes", free, "freeRatio", ratio)
+		c.log.Warn("disk space is low", "volume", v.Name, "path", v.Path, "freeBytes", free, "freeRatio", ratio, Event(EvDiskLow))
 	case !now && was:
-		c.log.Info("disk space recovered", Event(EvDiskRecovered), "volume", v.Name, "path", v.Path, "freeBytes", free, "freeRatio", ratio)
+		c.log.Info("disk space recovered", "volume", v.Name, "path", v.Path, "freeBytes", free, "freeRatio", ratio, Event(EvDiskRecovered))
 	}
 }

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -23,16 +24,17 @@ type validatorExporter struct {
 	flags *validatorStatusFlags
 	log   *slog.Logger
 
-	mu       sync.Mutex
-	rep      *validatorStatusReport
-	lastOK   time.Time
-	errs     uint64
-	lastErr  string
-	prevPoa  string
-	prevHlth string
-	headSeen uint64
-	headMove time.Time
-	localMax uint64 // the highest local head seen: a stopped ureth's lag keeps growing against it
+	mu        sync.Mutex
+	rep       *validatorStatusReport
+	lastOK    time.Time
+	errs      uint64
+	lastErr   string
+	prevPoa   string
+	prevHlth  string
+	headSeen  uint64
+	headMove  time.Time
+	localMax  uint64 // the highest local head seen: a stopped ureth's lag keeps growing against it
+	localSeen bool   // a local head was observed at least once (the lag is unknown before that)
 }
 
 func validatorExporterCmd(base *baseFlags) *cobra.Command {
@@ -47,9 +49,18 @@ func validatorExporterCmd(base *baseFlags) *cobra.Command {
 			"it on --listen at /metrics. It logs vr.identity.* and vr.module.health_changed events when the validator's PoA state or the module's health changes. " +
 			"Read-only: it holds no key and sends no transaction.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if every <= 0 {
+				return fmt.Errorf("--interval must be positive, got %s", every)
+			}
+			f.NoKeys = true // the exporter reads public data only: no key file is opened
 			log := slog.Default()
 			if f.baseFlags != nil && f.observe != nil {
 				log = f.observe.Logger()
+			}
+			if v, err := f.load(); err != nil {
+				return err
+			} else if f.ID == 0 && v.cfg.ID == 0 {
+				return errors.New("the exporter needs the identity: set \"id\" in the validator config or pass --id (it does not scan logs for it)")
 			}
 			e := &validatorExporter{flags: f, log: log}
 			reg := prometheus.NewRegistry()
@@ -128,8 +139,8 @@ func (e *validatorExporter) poll(ctx context.Context) {
 		e.flags.ID = r.ID // the identity is found once (a log scan); later polls read it directly
 	}
 	e.rep = r
-	if r.LocalHead != nil && *r.LocalHead > e.localMax {
-		e.localMax = *r.LocalHead
+	if r.LocalHead != nil && (!e.localSeen || *r.LocalHead > e.localMax) {
+		e.localMax, e.localSeen = *r.LocalHead, true
 	}
 	if r.PublicHead != e.headSeen || e.headMove.IsZero() {
 		e.headSeen, e.headMove = r.PublicHead, time.Now()
@@ -139,7 +150,7 @@ func (e *validatorExporter) poll(ctx context.Context) {
 		state = "None"
 	}
 	if r.Identity != "unknown" && state != e.prevPoa {
-		e.log.Info("validator state changed", monitoring.Event(monitoring.IdentityEvent(state)), "id", r.ID, "state", state, "previous", e.prevPoa, "member", r.Member, "progress", r.Progress)
+		e.log.Info("validator state changed", "id", r.ID, "state", state, "previous", e.prevPoa, "member", r.Member, "progress", r.Progress, monitoring.Event(monitoring.IdentityEvent(state)))
 		e.prevPoa = state
 	}
 	if r.Health != e.prevHlth {
@@ -177,7 +188,11 @@ var (
 	dIdInfo   = prometheus.NewDesc("unicity_vr_identity_info", "The watched identity (value 1).", []string{"id", "state"}, nil)
 	dMember   = prometheus.NewDesc("unicity_vr_identity_member", "1 when the watched identity is in the committee.", nil, nil)
 	dStaged   = prometheus.NewDesc("unicity_vr_identity_staged_binding", "1 when a binding is staged for the watched identity.", nil, nil)
-	dKeys     = prometheus.NewDesc("unicity_vr_identity_local_keys", "How the local keys relate to the binding: 1 current, 2 staged, 0 other or unreadable.", nil, nil)
+	dTargetAt = prometheus.NewDesc("unicity_vr_record_root_target_sample_timestamp_seconds", "Unix time the root target was sampled from the root's metrics: a separate observation, not at the pinned EVM block.", nil, nil)
+	dSchedule = prometheus.NewDesc("unicity_upgrade_schedule_known", "1 when VR's activation schedule was read at the last poll, 0 when it could not be (the upgrade series are then absent: unknown, not zero).", nil, nil)
+	dUpReq    = prometheus.NewDesc("unicity_upgrade_required", "1 while VR's activation schedule holds an Active or Latched rule (rule, release) this binary does not implement; reconciled from the schedule at every poll, so it clears on supersession or when the binary implements the rule.", nil, nil)
+	dUpLeft   = prometheus.NewDesc("unicity_upgrade_epochs_remaining", "Root epochs left before the earliest unsupported rule activates (negative: already past); absent while none is required.", nil, nil)
+	dUpInfo   = prometheus.NewDesc("unicity_upgrade_rule_info", "A schedule rule this binary does not implement (value 1).", []string{"rule", "release", "activation_epoch", "state"}, nil)
 	dActs     = prometheus.NewDesc("unicity_vr_activations", "Entries in VR's activation schedule.", nil, nil)
 	dVerdict  = prometheus.NewDesc("unicity_vr_status_verdict", "validator status verdict: 0 ok, 1 warning, 2 critical, 3 unknown.", nil, nil)
 	dPubHead  = prometheus.NewDesc("unicity_evm_public_head_number", "Block number of the public RPC's head.", nil, nil)
@@ -189,7 +204,7 @@ var (
 
 func (e *validatorExporter) Describe(ch chan<- *prometheus.Desc) {
 	for _, d := range []*prometheus.Desc{dUp, dErrs, dLastOK, dHealth, dBlock, dEpoch, dCommit, dProgress, dToBound, dOutState, dOutLeft, dPending, dTarget, dImported, dVRCursor,
-		dCustody, dImpLag, dAppLag, dCustDiff, dIdKnown, dIdState, dIdInfo, dMember, dStaged, dKeys, dActs, dVerdict, dPubHead, dPubAge, dLocalUp, dLocalHd, dLocalLag} {
+		dCustody, dImpLag, dAppLag, dCustDiff, dIdKnown, dIdState, dIdInfo, dMember, dStaged, dActs, dTargetAt, dSchedule, dUpReq, dUpLeft, dUpInfo, dVerdict, dPubHead, dPubAge, dLocalUp, dLocalHd, dLocalLag} {
 		ch <- d
 	}
 }
@@ -233,6 +248,7 @@ func (e *validatorExporter) Collect(ch chan<- prometheus.Metric) {
 	g(dAppLag, float64(int64(r.RecordCount)-int64(r.RecordCursor)))
 	if r.RecordRootTarget != nil {
 		g(dTarget, float64(*r.RecordRootTarget))
+		g(dTargetAt, float64(r.RecordRootTargetAt))
 		g(dImpLag, float64(int64(*r.RecordRootTarget)-int64(r.RecordCount)))
 	}
 	if r.CustodyCursor != nil {
@@ -246,15 +262,21 @@ func (e *validatorExporter) Collect(ch chan<- prometheus.Metric) {
 	}
 	g(dMember, b(r.Member))
 	g(dStaged, b(r.Staged != nil))
-	switch r.LocalKeys {
-	case "current":
-		g(dKeys, 1)
-	case "staged":
-		g(dKeys, 2)
-	case "other":
-		g(dKeys, 0)
-	}
 	g(dActs, float64(len(r.Activations)))
+	g(dSchedule, b(r.ScheduleKnown))
+	if r.ScheduleKnown {
+		g(dUpReq, b(len(r.UpgradeRequired) > 0))
+		least, have := int64(0), false
+		for _, u := range r.UpgradeRequired {
+			ch <- prometheus.MustNewConstMetric(dUpInfo, prometheus.GaugeValue, 1, u.Rule, u.Release, fmt.Sprint(u.RootEpoch), u.State)
+			if left := int64(u.RootEpoch) - int64(r.Epoch); !have || left < least {
+				least, have = left, true
+			}
+		}
+		if have {
+			g(dUpLeft, float64(least))
+		}
+	}
 	switch r.Verdict {
 	case "ok":
 		g(dVerdict, 0)
@@ -272,15 +294,18 @@ func (e *validatorExporter) Collect(ch chan<- prometheus.Metric) {
 	if r.LocalRPC != "" {
 		up := r.LocalHead != nil
 		g(dLocalUp, b(up))
-		ref := e.localMax
+		ref, known := e.localMax, e.localSeen
 		if up {
 			g(dLocalHd, float64(*r.LocalHead))
-			ref = *r.LocalHead
+			ref, known = *r.LocalHead, true
 		}
-		if r.PublicHead > ref {
-			g(dLocalLag, float64(r.PublicHead-ref))
-		} else {
-			g(dLocalLag, 0)
+		// the lag needs a local head to measure against: none was ever observed, so there is no lag value (not "the whole chain")
+		if known {
+			if r.PublicHead > ref {
+				g(dLocalLag, float64(r.PublicHead-ref))
+			} else {
+				g(dLocalLag, 0)
+			}
 		}
 	}
 }

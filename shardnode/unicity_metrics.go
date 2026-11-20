@@ -104,6 +104,8 @@ func (c *evmCollector) refresh() {
 	if h.Number != c.lastHead || c.lastHeadMoved.IsZero() {
 		c.lastHead, c.lastHeadMoved = h.Number, time.Now()
 	}
+	// the finalized block is read afresh every refresh: when the read fails the previous value is dropped, not published as current
+	c.finalKnown = false
 	if f, ok := c.exec.(finalizer); ok {
 		if fb, err := f.Finalized(ctx); err == nil {
 			c.final, c.finalKnown = fb.Number, true

@@ -1,5 +1,5 @@
-# promtool unit tests of the alert pack: every alert fires on a synthetic series and stays quiet on a healthy one.
-# Run: promtool test rules validator-alerts.test.yml
+# promtool unit tests of the alert pack (VT-12): every alert fires on a synthetic series; the negative cases show healthy, young, stale-free,
+# threshold-boundary, retired and reset series staying quiet. Run: promtool test rules validator-alerts.test.yml
 rule_files:
   - validator-alerts.yml
 evaluation_interval: 15s
@@ -78,6 +78,8 @@ tests:
     input_series:
       - series: 'unicity_root_round_timeouts_total{instance="a",validator="1"}'
         values: '0+8x80'
+      - series: 'unicity_root_member{instance="a",validator="1"}'
+        values: '1x80'
     alert_rule_test:
       - eval_time: 18m
         alertname: UnicityRootRoundTimeouts
@@ -87,9 +89,9 @@ tests:
               instance: "a"
               validator: "1"
             exp_annotations:
-              description: "The round timer of root 1 fired 160 times in 5 minutes: leaders are missing or the network is partitioned."
+              description: "The round timer of committee root 1 fired in 160 distinct rounds in 5 minutes: leaders are missing or the network is partitioned."
               runbook: "docs/operations/monitoring/runbooks.md#unicityrootroundtimeouts"
-              summary: "Root rounds keep timing out."
+              summary: "A committee root timed out in more than 20 rounds in 5 minutes."
   - interval: 15s
     input_series:
       - series: 'unicity_root_member{instance="a",validator="1"}'
@@ -330,6 +332,8 @@ tests:
         values: '1x80'
       - series: 'unicity_authority_session_issued{instance="a",validator="1"}'
         values: '0x80'
+      - series: 'unicity_authority_retired{instance="a",validator="1"}'
+        values: '0x80'
     alert_rule_test:
       - eval_time: 18m
         alertname: UnicityAuthorityNoSession
@@ -344,8 +348,14 @@ tests:
               summary: "No client session on an enrolled authority."
   - interval: 15s
     input_series:
-      - series: 'unicity_authority_last_signature_age_seconds{validator="1",instance="x"}'
-        values: '500x80'
+      - series: 'unicity_authority_session_issued{instance="a",validator="1"}'
+        values: '1x80'
+      - series: 'unicity_authority_retired{instance="a",validator="1"}'
+        values: '0x80'
+      - series: 'unicity_authority_session_signatures{instance="a",validator="1"}'
+        values: '0x80'
+      - series: 'unicity_authority_session_age_seconds{instance="a",validator="1"}'
+        values: '400x80'
       - series: 'unicity_shard_active{validator="1",instance="y"}'
         values: '1x80'
     alert_rule_test:
@@ -354,12 +364,12 @@ tests:
         exp_alerts:
           - exp_labels:
               severity: critical
+              instance: "a"
               validator: "1"
-              instance: "x"
             exp_annotations:
-              description: "Authority of validator 1: last signature 500 seconds ago."
+              description: "Authority of validator 1: a session is issued and either no signature was ever made in it (3 minutes) or the last one is more than 2 minutes old."
               runbook: "docs/operations/monitoring/runbooks.md#unicityauthoritysigningstalled"
-              summary: "The authority has signed nothing for 2 minutes while the shard node is active."
+              summary: "The authority has a session but signs nothing while the shard node is active."
   - interval: 15s
     input_series:
       - series: 'unicity_vr_module_health{instance="a",validator="1"}'
@@ -389,9 +399,61 @@ tests:
               instance: "a"
               validator: "1"
             exp_annotations:
-              description: "The exporter of validator 1 could not read VR through its RPC for 2 minutes."
+              description: "The exporter of validator 1 has reported no complete read of VR for 2 minutes."
               runbook: "docs/operations/monitoring/runbooks.md#unicityvrexporterdown"
-              summary: "The VR exporter cannot read VR."
+              summary: "The VR exporter cannot read VR, or its last complete read is stale."
+  - interval: 15s
+    input_series:
+      - series: 'unicity_vr_up{instance="a",validator="1"}'
+        values: '1x80'
+      - series: 'unicity_vr_last_success_timestamp_seconds{instance="a",validator="1"}'
+        values: '0x80'
+    alert_rule_test:
+      - eval_time: 18m
+        alertname: UnicityVRExporterDown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: "a"
+              validator: "1"
+            exp_annotations:
+              description: "The exporter of validator 1 has reported no complete read of VR for 2 minutes."
+              runbook: "docs/operations/monitoring/runbooks.md#unicityvrexporterdown"
+              summary: "The VR exporter cannot read VR, or its last complete read is stale."
+  - interval: 15s
+    input_series:
+      - series: 'up{job="vrexporter",instance="a",validator="1"}'
+        values: '1x80'
+    alert_rule_test:
+      - eval_time: 18m
+        alertname: UnicityVRSeriesMissing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: "vrexporter"
+              instance: "a"
+              validator: "1"
+            exp_annotations:
+              description: "The exporter of validator 1 is reachable but does not carry its VR series: a wrong or old binary, or a broken exporter."
+              runbook: "docs/operations/monitoring/runbooks.md#unicityvrseriesmissing"
+              summary: "A VR exporter answers its scrape without reporting unicity_vr_up."
+  - interval: 15s
+    input_series:
+      - series: 'up{job="root",instance="a",validator="1"}'
+        values: '1x80'
+      - series: 'up{job="shard",instance="a",validator="1"}'
+        values: '1x80'
+    alert_rule_test:
+      - eval_time: 18m
+        alertname: UnicityScrapeTargetsAbsent
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: "vrexporter"
+            exp_annotations:
+              description: "No target of one of the jobs vrexporter, root or shard is configured or discovered: the validators are not monitored at all."
+              runbook: "docs/operations/monitoring/runbooks.md#unicityscrapetargetsabsent"
+              summary: "A whole class of monitoring targets is missing from Prometheus."
   - interval: 15s
     input_series:
       - series: 'unicity_vr_record_application_lag{instance="a",validator="1"}'
@@ -510,30 +572,10 @@ tests:
               summary: "The validator identity is Parked."
   - interval: 15s
     input_series:
-      - series: 'unicity_vr_identity_known{instance="a",validator="1"}'
-        values: '1x80'
-      - series: 'unicity_vr_identity_local_keys{instance="a",validator="1"}'
-        values: '0x80'
-    alert_rule_test:
-      - eval_time: 18m
-        alertname: UnicityKeysMismatch
-        exp_alerts:
-          - exp_labels:
-              severity: critical
-              instance: "a"
-              validator: "1"
-            exp_annotations:
-              description: "The node keys of validator 1 match neither the current nor the staged binding."
-              runbook: "docs/operations/monitoring/runbooks.md#unicitykeysmismatch"
-              summary: "The local keys do not match the binding in VR."
-  - interval: 15s
-    input_series:
       - series: 'unicity_upgrade_required{instance="a",validator="1"}'
         values: '1x80'
-      - series: 'unicity_upgrade_activation_epoch{instance="a",validator="1"}'
-        values: '9x80'
-      - series: 'unicity_root_epoch{instance="a",validator="1"}'
-        values: '3x80'
+      - series: 'unicity_upgrade_epochs_remaining{instance="a",validator="1"}'
+        values: '6x80'
     alert_rule_test:
       - eval_time: 18m
         alertname: UnicityUpgradeRequired
@@ -543,17 +585,15 @@ tests:
               instance: "a"
               validator: "1"
             exp_annotations:
-              description: "Upgrade validator 1 before root epoch 9."
+              description: "Validator 1: VR's activation schedule holds a rule this binary does not implement; upgrade before its root epoch (unicity_upgrade_epochs_remaining)."
               runbook: "docs/operations/monitoring/runbooks.md#unicityupgraderequired"
               summary: "The activation schedule needs a release this binary lacks."
   - interval: 15s
     input_series:
       - series: 'unicity_upgrade_required{instance="a",validator="1"}'
         values: '1x80'
-      - series: 'unicity_upgrade_activation_epoch{instance="a",validator="1"}'
-        values: '9x80'
-      - series: 'unicity_root_epoch{instance="a",validator="1"}'
-        values: '8x80'
+      - series: 'unicity_upgrade_epochs_remaining{instance="a",validator="1"}'
+        values: '2x80'
     alert_rule_test:
       - eval_time: 18m
         alertname: UnicityUpgradeImminent
@@ -563,9 +603,25 @@ tests:
               instance: "a"
               validator: "1"
             exp_annotations:
-              description: "This node will refuse to run past the activation; upgrade now."
+              description: "Validator 1: an unsupported rule activates within two root epochs; this node will refuse to run past the activation."
               runbook: "docs/operations/monitoring/runbooks.md#unicityupgradeimminent"
               summary: "An unsupported rule activates within two epochs."
+  - interval: 15s
+    input_series:
+      - series: 'unicity_upgrade_schedule_known{instance="a",validator="1"}'
+        values: '0x80'
+    alert_rule_test:
+      - eval_time: 18m
+        alertname: UnicityUpgradeScheduleUnknown
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: "a"
+              validator: "1"
+            exp_annotations:
+              description: "Validator 1: the upgrade series are unknown, not zero, until the schedule can be read."
+              runbook: "docs/operations/monitoring/runbooks.md#unicityupgradescheduleunknown"
+              summary: "The exporter cannot read VR's activation schedule."
   - interval: 15s
     input_series:
       - series: 'ab_unicity_upgrade_required{rule="r1",epoch="9",state="pending",instance="a",validator="1"}'
@@ -585,3 +641,125 @@ tests:
               description: "A ScheduleActivation bound into VR's open output names rule r1 for root epoch 9, which this binary does not implement: upgrade validator 1 ahead of the epoch."
               runbook: "docs/operations/monitoring/runbooks.md#unicityupgradepending"
               summary: "A pending activation needs a release this binary lacks."
+  - interval: 15s
+    input_series:
+      - series: 'unicity_root_committed_round{instance="a",validator="1"}'
+        values: '_x60 100x8'
+      - series: 'unicity_root_member{instance="a",validator="1"}'
+        values: '1x80'
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: UnicityRootStalled
+        exp_alerts: []
+  - interval: 15s
+    input_series:
+      - series: 'unicity_root_committed_round{instance="a",validator="1"}'
+        values: '0+1x80'
+      - series: 'unicity_root_member{instance="a",validator="1"}'
+        values: '1x80'
+    alert_rule_test:
+      - eval_time: 18m
+        alertname: UnicityRootStalled
+        exp_alerts: []
+  - interval: 15s
+    input_series:
+      - series: 'unicity_evm_head_lag_blocks{instance="a",validator="1"}'
+        values: '5x80'
+    alert_rule_test:
+      - eval_time: 18m
+        alertname: UnicityEvmHeadLag
+        exp_alerts: []
+  - interval: 15s
+    input_series:
+      - series: 'unicity_disk_free_ratio{volume="home",instance="a",validator="1"}'
+        values: '0.10x80'
+    alert_rule_test:
+      - eval_time: 18m
+        alertname: UnicityDiskLow
+        exp_alerts: []
+  - interval: 15s
+    input_series:
+      - series: 'unicity_authority_enrolled{instance="a",validator="1"}'
+        values: '1x80'
+      - series: 'unicity_authority_session_issued{instance="a",validator="1"}'
+        values: '0x80'
+      - series: 'unicity_authority_retired{instance="a",validator="1"}'
+        values: '1x80'
+    alert_rule_test:
+      - eval_time: 18m
+        alertname: UnicityAuthorityNoSession
+        exp_alerts: []
+  - interval: 15s
+    input_series:
+      - series: 'unicity_authority_session_issued{instance="a",validator="1"}'
+        values: '1x80'
+      - series: 'unicity_authority_retired{instance="a",validator="1"}'
+        values: '0x80'
+      - series: 'unicity_authority_session_signatures{instance="a",validator="1"}'
+        values: '5x80'
+      - series: 'unicity_authority_session_age_seconds{instance="a",validator="1"}'
+        values: '400x80'
+      - series: 'unicity_authority_last_signature_age_seconds{instance="a",validator="1"}'
+        values: '10x80'
+      - series: 'unicity_shard_active{validator="1",instance="y"}'
+        values: '1x80'
+    alert_rule_test:
+      - eval_time: 18m
+        alertname: UnicityAuthoritySigningStalled
+        exp_alerts: []
+  - interval: 15s
+    input_series:
+      - series: 'unicity_authority_session_issued{instance="a",validator="1"}'
+        values: '1x80'
+      - series: 'unicity_authority_retired{instance="a",validator="1"}'
+        values: '1x80'
+      - series: 'unicity_authority_session_signatures{instance="a",validator="1"}'
+        values: '0x80'
+      - series: 'unicity_authority_session_age_seconds{instance="a",validator="1"}'
+        values: '400x80'
+      - series: 'unicity_shard_active{validator="1",instance="y"}'
+        values: '1x80'
+    alert_rule_test:
+      - eval_time: 18m
+        alertname: UnicityAuthoritySigningStalled
+        exp_alerts: []
+  - interval: 15s
+    input_series:
+      - series: 'unicity_vr_up{instance="a",validator="1"}'
+        values: '1x80'
+      - series: 'unicity_vr_last_success_timestamp_seconds{instance="a",validator="1"}'
+        values: '0+15x80'
+    alert_rule_test:
+      - eval_time: 18m
+        alertname: UnicityVRExporterDown
+        exp_alerts: []
+  - interval: 15s
+    input_series:
+      - series: 'up{job="vrexporter",instance="a",validator="1"}'
+        values: '1x80'
+      - series: 'unicity_vr_up{instance="a",validator="1"}'
+        values: '1x80'
+    alert_rule_test:
+      - eval_time: 18m
+        alertname: UnicityVRSeriesMissing
+        exp_alerts: []
+  - interval: 15s
+    input_series:
+      - series: 'unicity_evm_public_head_number{instance="a",validator="1"}'
+        values: '1000+4x40 10+4x39'
+    alert_rule_test:
+      - eval_time: 18m
+        alertname: UnicityBlockCadenceLow
+        exp_alerts: []
+  - interval: 15s
+    input_series:
+      - series: 'up{job="root",instance="a",validator="1"}'
+        values: '1x80'
+      - series: 'up{job="shard",instance="a",validator="1"}'
+        values: '1x80'
+      - series: 'up{job="vrexporter",instance="a",validator="1"}'
+        values: '1x80'
+    alert_rule_test:
+      - eval_time: 18m
+        alertname: UnicityScrapeTargetsAbsent
+        exp_alerts: []

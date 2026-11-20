@@ -130,12 +130,13 @@ type (
 		// multiple times (votes are buffered for single round only)
 		voteBuffer map[string]*abdrc.VoteMsg
 		// the unicity_* metrics (VT-12, docs/operations/monitoring/metrics-catalogue.md); nil-safe
-		mon            *monitoring.Registry
-		votesMissed    *prometheus.CounterVec
-		proposals      prometheus.Counter
-		roundTimeout   prometheus.Counter
-		memberOverride func() bool // test seam for the committee membership
-		missedRun      int         // consecutive rounds this member ended without any vote; owned by the manager loop
+		mon              *monitoring.Registry
+		votesMissed      *prometheus.CounterVec
+		proposals        prometheus.Counter
+		roundTimeout     prometheus.Counter
+		memberOverride   func() bool // test seam for the committee membership
+		lastTimeoutRound uint64      // the round of the last counted local timeout (a round counts once); owned by the manager loop
+		missedRun        int         // consecutive rounds this member ended without any vote; owned by the manager loop
 		// whether the CM is in recovery mode, trying to get into the same state as other CMs
 		recovery         *recoveryState
 		frontier         *frontierSampler
@@ -568,7 +569,9 @@ func (x *ConsensusManager) initMetrics(observe Observability) (err error) {
 	}
 
 	x.initUnicityMetrics()
-	x.pacemaker.roundEnded = x.roundEnded
+	if x.pacemaker != nil {
+		x.pacemaker.roundEnded = x.roundEnded
+	}
 	return nil
 }
 
@@ -947,7 +950,7 @@ func (x *ConsensusManager) onLocalTimeout(ctx context.Context) {
 	ctx, span := x.tracer.Start(ctx, "ConsensusManager.onLocalTimeout")
 	defer span.End()
 	x.log.InfoContext(ctx, "local timeout", "round", x.pacemaker.GetCurrentRound(), monitoring.Event(monitoring.EvRootRoundTimeout))
-	x.noteRoundTimeout()
+	x.noteRoundTimeout(x.pacemaker.GetCurrentRound())
 	x.sendTimeoutVote(ctx)
 }
 
@@ -1945,7 +1948,6 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 	}
 
 	x.leaderCnt.Add(ctx, 1)
-	x.noteProposal()
 	// x.log.InfoContext(ctx, "new round start, node is leader")
 
 	// the proposal extends the block of the high QC (the epoch's anchor for its first block), only changes in that branch are in the way
@@ -2147,6 +2149,8 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 	}
 	if err = x.net.Send(ctx, proposalMsg, slices.Collect(maps.Keys(sendTo))...); err != nil {
 		x.log.WarnContext(ctx, "error on broadcasting proposal message", logger.Error(err))
+	} else {
+		x.noteProposal() // signed and sent (unicity_root_proposals_total)
 	}
 	for _, cr := range proposalMsg.Block.Payload.Requests {
 		x.proposedCR.Add(ctx, 1, observability.Shard(cr.Partition, cr.Shard, attribute.String("reason", cr.CertReason.String())))

@@ -3,6 +3,8 @@ package consensus
 import (
 	"log/slog"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/unicitynetwork/bft-core/monitoring"
 )
 
@@ -17,8 +19,8 @@ func (x *ConsensusManager) initUnicityMetrics() {
 	m := x.mon
 	x.votesMissed = m.CounterVec("unicity_root_votes_missed_total",
 		"Rounds this root ended, as a member of the epoch's committee, without sending a vote of the given kind: no_vote (it signed nothing in the round) or timeout_only (it signed a timeout vote but no vote for a proposal).", "reason")
-	x.proposals = m.Counter("unicity_root_proposals_total", "Proposals this root signed as the round's leader.")
-	x.roundTimeout = m.Counter("unicity_root_round_timeouts_total", "Times this root's round timer fired (no QC or TC ended the round in time).")
+	x.proposals = m.Counter("unicity_root_proposals_total", "Proposals this root signed and sent as the round's leader.")
+	x.roundTimeout = m.Counter("unicity_root_round_timeouts_total", "Rounds in which this root's round timer fired (counted once per round; no QC or TC ended the round in time). A follower root also times out every round.")
 	m.GaugeFunc("unicity_root_round", "The root round this node is in.", func() float64 { return float64(x.pacemaker.GetCurrentRound()) })
 	m.GaugeFunc("unicity_root_epoch", "The root epoch (trust base epoch) this node is in.", func() float64 { return float64(x.trustBase.Load().Epoch) })
 	m.GaugeFunc("unicity_root_committed_round", "The round of the latest committed root block.", func() float64 {
@@ -35,14 +37,12 @@ func (x *ConsensusManager) initUnicityMetrics() {
 		}
 		return 0
 	})
-	m.GaugeFunc("unicity_root_records_projected", "Root records (P85/VR source log) the committed root chain has projected: the root target of the record catch-up counters. Absent from the VR counters' point of view until the first record.", func() float64 {
+	m.Collector(&recordsProjected{count: func() (uint64, bool) {
 		if s := x.blockStore(); s != nil {
-			if n, ok := s.RecordCount(); ok {
-				return float64(n)
-			}
+			return s.RecordCount()
 		}
-		return 0
-	})
+		return 0, false
+	}})
 	m.GaugeFunc("unicity_root_member", "1 while this root is a member of its epoch's root committee (signs), 0 for a follower.", func() float64 {
 		if x.isCommitteeMember() {
 			return 1
@@ -74,7 +74,13 @@ func (x *ConsensusManager) noteProposal() {
 	}
 }
 
-func (x *ConsensusManager) noteRoundTimeout() {
+// noteRoundTimeout counts the first local timeout of a round: the timer fires again for a round that stays open (the vote is re-broadcast), and
+// those repeats are the same round.
+func (x *ConsensusManager) noteRoundTimeout(round uint64) {
+	if round == x.lastTimeoutRound {
+		return
+	}
+	x.lastTimeoutRound = round
 	if x.roundTimeout != nil {
 		x.roundTimeout.Inc()
 	}
@@ -98,5 +104,20 @@ func (x *ConsensusManager) roundEnded(round uint64, voted, timeoutVoted bool) {
 	if x.missedRun == missedVoteWarnRun && x.log != nil {
 		x.log.Warn("this root ended rounds without a vote", slog.Uint64("round", round), slog.Int("consecutiveRounds", x.missedRun),
 			slog.Bool("timeoutVoted", timeoutVoted), monitoring.Event(monitoring.EvRootVoteMissed))
+	}
+}
+
+// recordsProjected exports unicity_root_records_projected, and nothing when the record store is unavailable or unreadable: an unknown count
+// is absent, never zero (zero would say the root projected nothing and silence the import-lag alert).
+type recordsProjected struct{ count func() (uint64, bool) }
+
+var recordsProjectedDesc = prometheus.NewDesc("unicity_root_records_projected",
+	"Root records (P85/VR source log) the committed root chain has projected: the root target of the record catch-up counters. Absent while the record store cannot be read.", nil, nil)
+
+func (c *recordsProjected) Describe(ch chan<- *prometheus.Desc) { ch <- recordsProjectedDesc }
+
+func (c *recordsProjected) Collect(ch chan<- prometheus.Metric) {
+	if n, ok := c.count(); ok {
+		ch <- prometheus.MustNewConstMetric(recordsProjectedDesc, prometheus.GaugeValue, float64(n))
 	}
 }

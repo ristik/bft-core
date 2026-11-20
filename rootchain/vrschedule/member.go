@@ -603,7 +603,6 @@ func (m *Member) stepReadiness(st memberState) error {
 						m.upgrade = map[vrschema.Word]bool{}
 					}
 					m.upgrade[a.RuleID] = true
-					monitoring.Upgrades.Require(monitoring.UpgradeRule{RuleID: a.RuleID, ReleaseDigest: a.ReleaseDigest, RootEpoch: a.RootEpoch})
 					m.log().Warn("VR handoff member: UpgradeRequired: the committed schedule holds a rule this binary does not implement; this node signs no readiness (it does not support it)",
 						"ruleId", fmt.Sprintf("%x", a.RuleID[:8]), "releaseDigest", fmt.Sprintf("%x", a.ReleaseDigest[:8]), "rootEpoch", a.RootEpoch, monitoring.Event(monitoring.EvVRUpgradeRequired))
 				}

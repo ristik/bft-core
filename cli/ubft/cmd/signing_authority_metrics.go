@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/ainvaltin/httpsrv"
@@ -36,6 +37,27 @@ func checkAuthorityMetricsAddress(addr string) error {
 // authorityCollector exports the authority's diagnostic Status (never request or signature bytes) as unicity_authority_* gauges.
 type authorityCollector struct {
 	a *signingauthority.Authority
+
+	mu           sync.Mutex
+	sessionSeen  bool
+	generation   uint64
+	sessionSince time.Time
+	signsAtStart uint64
+}
+
+// session tracks when the current client session was first seen and how many signatures were made since: the age and the count that tell a
+// signer that never started (a session issued, no first signature) from one that stopped.
+func (c *authorityCollector) session(issued bool, generation, signs uint64) (age time.Duration, since uint64, ok bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !issued {
+		c.sessionSeen = false
+		return 0, 0, false
+	}
+	if !c.sessionSeen || generation != c.generation {
+		c.sessionSeen, c.generation, c.sessionSince, c.signsAtStart = true, generation, time.Now(), signs
+	}
+	return time.Since(c.sessionSince), signs - c.signsAtStart, true
 }
 
 var authorityGauges = []struct{ name, help string }{
@@ -54,16 +76,18 @@ var authorityGauges = []struct{ name, help string }{
 	{"unicity_authority_lineage_epoch", "The last root epoch the authority's own lineage holds (0 without a pin)."},
 }
 
-func (c authorityCollector) Describe(ch chan<- *prometheus.Desc) {
+func (c *authorityCollector) Describe(ch chan<- *prometheus.Desc) {
 	for _, g := range authorityGauges {
 		ch <- prometheus.NewDesc(g.name, g.help, nil, nil)
 	}
 	ch <- prometheus.NewDesc("unicity_authority_signatures_total", "Signatures made in this authority lifetime.", nil, nil)
 	ch <- prometheus.NewDesc("unicity_authority_last_signature_age_seconds", "Seconds since the last signature; absent before the first.", nil, nil)
+	ch <- prometheus.NewDesc("unicity_authority_session_age_seconds", "Seconds since the current client session was first seen by this endpoint (a new generation restarts it); absent without a session.", nil, nil)
+	ch <- prometheus.NewDesc("unicity_authority_session_signatures", "Signatures made since the current client session was first seen; absent without a session.", nil, nil)
 	ch <- prometheus.NewDesc("unicity_authority_up", "Always 1 while the authority process answers.", nil, nil)
 }
 
-func (c authorityCollector) Collect(ch chan<- prometheus.Metric) {
+func (c *authorityCollector) Collect(ch chan<- prometheus.Metric) {
 	b := func(v bool) float64 {
 		if v {
 			return 1
@@ -82,6 +106,10 @@ func (c authorityCollector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(prometheus.NewDesc("unicity_authority_last_signature_age_seconds", "Seconds since the last signature; absent before the first.", nil, nil),
 			prometheus.GaugeValue, time.Since(last).Seconds())
 	}
+	if age, since, ok := c.session(st.SessionIssued, st.Generation, signs); ok {
+		ch <- prometheus.MustNewConstMetric(prometheus.NewDesc("unicity_authority_session_age_seconds", "Seconds since the current client session was first seen by this endpoint (a new generation restarts it); absent without a session.", nil, nil), prometheus.GaugeValue, age.Seconds())
+		ch <- prometheus.MustNewConstMetric(prometheus.NewDesc("unicity_authority_session_signatures", "Signatures made since the current client session was first seen; absent without a session.", nil, nil), prometheus.GaugeValue, float64(since))
+	}
 	ch <- prometheus.MustNewConstMetric(prometheus.NewDesc("unicity_authority_up", "Always 1 while the authority process answers.", nil, nil), prometheus.GaugeValue, 1)
 }
 
@@ -93,7 +121,7 @@ func serveAuthorityMetrics(ctx context.Context, log *slog.Logger, addr string, a
 	reg := prometheus.NewRegistry()
 	mon := monitoring.New(reg)
 	monitoring.RegisterBuildInfo(mon, "authority")
-	mon.Collector(authorityCollector{a: a})
+	mon.Collector(&authorityCollector{a: a})
 	h := promhttp.HandlerFor(reg, promhttp.HandlerOpts{MaxRequestsInFlight: 1})
 	mux := http.NewServeMux()
 	mux.Handle("GET /metrics", h)

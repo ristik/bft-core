@@ -42,7 +42,7 @@ Severity is the level the line is logged at.
 | `vr.recovery.followed` | info | root | VR recovery: the leader follows the exact recovery | a leader follows the recovery in progress |
 | `vr.recovery.dropped` | info | root | VR recovery: the request is dropped | a recovery request was dropped |
 | `root.handoff.outcome` | info | root | root handoff outcome | the handoff committed, aborted or lapsed (attribute `phase`) |
-| `root.epoch.switch` | info | root | switching epoch in process at the committed activation | joined: the root switched into the successor epoch |
+| `root.epoch.switch` | info | root | switching epoch in process at the committed activation | joined: the root began its in-process switch into the successor epoch (logged before the installation, which can still fail: see `root.epoch.switch_failed`) |
 | `root.epoch.switch_failed` | error | root | in-process epoch switch failed | the switch failed; signing stays fenced and the process exits to its recovery |
 | `shard.handoff.activated` | info | shard | handoff activated | active: the shard node activated the successor assignment |
 | `exit.retirement.requested` | info | root | retirement requested | exit: a retirement request was discovered |
