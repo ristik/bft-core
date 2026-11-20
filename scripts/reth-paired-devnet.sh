@@ -43,7 +43,7 @@ elif [ -n "${POST_M2A_URETH_BIN:-}" ] || [ -n "${POST_M2A_URETH_COMMIT:-}" ]; th
 elif [ "${VR_LANE:-0}" = 1 ] && [ "${M2_PROFILE2:-0}" = 1 ]; then
   # The VR roots replay historical observations from their paired client. Use the VR resolver and
   # archive-proof support from ureth #106 until the shared lane pin includes those changes.
-  URETH_PIN_COMMIT=46fdcfc05d1a178dd61dc6e2b364c4a0b42032a7
+  URETH_PIN_COMMIT=b8bd8ef4aefb050defd4322bdd0c64ca480a038f
   M2_RUN_LOG_DIR=${M2_RUN_LOG_DIR:-/Users/risto/uni/agre/briefs/devnet-runs/m2-p2${LANE_RUN_TAG}-$(date -u +%Y%m%dT%H%M%SZ)}
   echo "profile-2 logs: $M2_RUN_LOG_DIR"
 elif [ "${M2_PROFILE2:-0}" = 1 ]; then
