@@ -99,3 +99,38 @@ func TestCollectionExpiresRetainedFilesAndSymlinksWithoutFollowing(t *testing.T)
 	_, err = os.Lstat(fresh)
 	require.NoError(t, err, "a version inside the grace period stays")
 }
+
+// Entries are classified by fstatat relative to the real directory descriptor, never by a listing's type: files, directories and symlinks (also to
+// directories) are told apart, and a nested expired version is removed completely.
+func TestEntriesAreClassifiedByFstatatNotByTheListing(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "f"), []byte("x"), 0o644))
+	require.NoError(t, os.Mkdir(filepath.Join(dir, "d"), 0o755))
+	require.NoError(t, os.Symlink(filepath.Join(dir, "d"), filepath.Join(dir, "l")))
+	fd, err := unix.Open(dir, openDirFlags, 0)
+	require.NoError(t, err)
+	defer unix.Close(fd)
+	for name, want := range map[string]bool{"f": false, "d": true, "l": false} {
+		got, err := isDirAt(fd, name)
+		require.NoError(t, err)
+		require.Equal(t, want, got, name)
+	}
+	_, err = isDirAt(fd, "missing")
+	require.Error(t, err)
+	require.ElementsMatch(t, []string{"f", "d", "l"}, namesAt(fd))
+
+	// a nested expired version (directories inside directories, files and a symlink to a directory) is removed completely, nothing outside it touched
+	outside := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(outside, "keep"), []byte("x"), 0o644))
+	vd := filepath.Join(t.TempDir(), "v.versions")
+	require.NoError(t, os.Mkdir(vd, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(vd, versionsMarker), nil, 0o600))
+	old := filepath.Join(vd, fmt.Sprint(time.Now().Add(-time.Hour).UnixNano()))
+	require.NoError(t, os.MkdirAll(filepath.Join(old, "a", "b"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(old, "a", "b", "f"), []byte("x"), 0o644))
+	require.NoError(t, os.Symlink(outside, filepath.Join(old, "a", "link")))
+	gcOldVersions(vd, "")
+	_, err = os.Lstat(old)
+	require.True(t, os.IsNotExist(err), "the expired nested version is removed")
+	require.FileExists(t, filepath.Join(outside, "keep"), "a symlink inside it is removed itself, never followed")
+}

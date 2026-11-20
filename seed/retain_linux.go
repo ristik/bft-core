@@ -126,27 +126,44 @@ func gcOldVersions(vd, keep string) {
 	collectExpired(vfd, baseOf(keep))
 }
 
-// collectExpired removes the timestamp-named entries older than the grace period (never keep) relative to vfd. Directories are removed recursively
-// relative to their own descriptors, files and symlinks with unlinkat (a symlink is removed itself, never followed).
-func collectExpired(vfd int, keep string) {
-	f := os.NewFile(uintptr(mustDup(vfd)), "versions")
+// isDirAt classifies name inside dirfd with fstatat(AT_SYMLINK_NOFOLLOW), relative to the real directory descriptor. It never relies on the d_type a
+// directory listing may omit (and a listing's fallback lstat would resolve against a synthetic name); a symlink, even to a directory, is not a directory.
+func isDirAt(dirfd int, name string) (bool, error) {
+	var st unix.Stat_t
+	if err := unix.Fstatat(dirfd, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return false, err
+	}
+	return st.Mode&unix.S_IFMT == unix.S_IFDIR, nil
+}
+
+// namesAt lists the entry names of the directory vfd without types (so every classification goes through isDirAt).
+func namesAt(vfd int) []string {
+	f := os.NewFile(uintptr(mustDup(vfd)), "dir")
 	if f == nil {
-		return
+		return nil
 	}
 	defer f.Close()
-	ents, err := f.ReadDir(-1)
-	if err != nil {
-		return
-	}
-	for _, e := range ents {
-		ns, err := strconv.ParseInt(e.Name(), 10, 64)
-		if err != nil || e.Name() == keep || time.Since(time.Unix(0, ns)) < oldVersionGrace {
+	names, _ := f.Readdirnames(-1)
+	return names
+}
+
+// collectExpired removes the timestamp-named entries older than the grace period (never keep) relative to vfd. Directories are removed recursively
+// relative to their own descriptors, files and symlinks with unlinkat (a symlink is removed itself, never followed). Entries are classified by fstatat on
+// vfd, not by the listing.
+func collectExpired(vfd int, keep string) {
+	for _, name := range namesAt(vfd) {
+		ns, err := strconv.ParseInt(name, 10, 64)
+		if err != nil || name == keep || time.Since(time.Unix(0, ns)) < oldVersionGrace {
 			continue
 		}
-		if e.IsDir() {
-			removeAllAt(vfd, e.Name())
+		isDir, err := isDirAt(vfd, name)
+		if err != nil {
+			continue
+		}
+		if isDir {
+			removeAllAt(vfd, name)
 		} else {
-			_ = unix.Unlinkat(vfd, e.Name(), 0)
+			_ = unix.Unlinkat(vfd, name, 0)
 		}
 	}
 }
@@ -165,15 +182,13 @@ func removeAllAt(dirfd int, name string) {
 	if err != nil {
 		return
 	}
-	f := os.NewFile(uintptr(fd), name)
-	ents, _ := f.ReadDir(-1)
-	for _, e := range ents {
-		if e.IsDir() {
-			removeAllAt(fd, e.Name())
+	for _, e := range namesAt(fd) {
+		if isDir, err := isDirAt(fd, e); err == nil && isDir {
+			removeAllAt(fd, e)
 		} else {
-			_ = unix.Unlinkat(fd, e.Name(), 0)
+			_ = unix.Unlinkat(fd, e, 0)
 		}
 	}
-	f.Close()
+	_ = unix.Close(fd)
 	_ = unix.Unlinkat(dirfd, name, unix.AT_REMOVEDIR)
 }
