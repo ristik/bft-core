@@ -11,7 +11,7 @@
 #   vrp_rotated    the ordinary rotation completed: VR's committee has five members, lastAcked is the result, custody's last acknowledged
 #                  assignment is the result's, the election's open result is cleared, the holder facts and cursors match
 #   vrp_utb        the new epoch's trust-base entry, signed by the predecessor quorum, is served at /api/v1/trustbases
-#   vrp_recovery   one recovery (install K): see the function; NOT run yet
+#   vrp_recovery   one recovery (install K) with the saved-closure path (VR_POS_RECOVERY=1): see the function; written before its first live run
 
 vrp_election() { jq -r .election "$VR_DIR/contracts/deployment.json"; }
 vrp_custody() { jq -r .custody "$VR_DIR/contracts/deployment.json"; }
@@ -72,12 +72,93 @@ vrp_utb() {
   vrb_log "PASS: /api/v1/trustbases captured per root (the epoch-2 entry and its predecessor signatures are in $VR_EVIDENCE/trustbases-*.json)"
 }
 
-# One recovery (install K) through VR. Not run yet: after the ordinary rotation a second election reserves J' over the same five; the lane then
-# stops the EVM services of enough members that J' cannot certify (scripts/p85-recovery-steps.sh "J stalls": the joiner and two retained members
-# lose their EVM services, their roots stay for the root quorum), so the root derives the recovery K; expect custody's RecoveryAck then the
-# Boundary(recovered): VR's output Recovered, healthy, custody lastAcked = the recovery assignment, cursors and holder facts equal. With K = 5 the
-# one-record RecoveryAck callback is 1.69 M plain and 1.85 M with the closures staged (contracts PosLimit.t.sol).
+# ---- the recovery (install K) through VR -------------------------------------------------------------------------------------------------
+# After the ordinary rotation (K = the five of epoch 2) a second election reserves J' over the same five. J' is handed off by the nodes themselves;
+# once its H has committed the lane stops the EVM services of three of the five (J' has 2 of 5, EVM quorum 3: it cannot certify), so the shard never
+# acknowledges J'. The roots then derive the recovery (exactly K, no receipts, supersedes J') with the harness commands of the P85 recovery lane
+# (`root handoff evm-assemble --recovery --supersede`, `root handoff propose --q3`), and VR applies RecoveryAck(J') and the Boundary (recovered)
+# that keeps K. Because the roots close the incumbent K when J' installs and stage J''s own closure when the recovery supersedes it, the
+# RecoveryAck record carries the saved-closure path (the contracts' PosLimit saved-closure fixture, K = 5: 1.85 M callback).
+# Expected end state: VR output Recovered, VR Healthy, VR's lastAcked = J' (the pair's result), custody's last acknowledged assignment = the recovery
+# assignment, the election's result Recovered, custody and VR cursors equal, every holder fact equal to custody's own state. Written before its
+# first live run: its timing and the harness helpers it borrows (q3-flow-lib) are what the run fixes.
+
+vrp_source_q3() {
+  declare -F q3_trust_base_v3 >/dev/null || source scripts/lib/q3-lib.sh || return 1
+  declare -F q3_attempt >/dev/null || source scripts/lib/q3-flow-lib.sh || return 1
+  Q3_DIR=${Q3_DIR:-$H3_DIR}; mkdir -p "$Q3_DIR"
+  # the recovery's assignment is the derived one: no proofs, no authorities
+  q3_build_assignment() {
+    build/ubft root handoff evm-context --root-rpc "$(h3_rpc_url "$(h3_first_root)")" --out "$Q3_DIR/$1-context.json" || return 1
+    build/ubft root handoff evm-assemble --context "$Q3_DIR/$1-context.json" --recovery --supersede --out "$Q3_DIR/$1-assignment.json"
+  }
+}
+
+vrp_result_state() { cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'output(bytes32)' "$1" 2>/dev/null | python3 -c "import sys;h=sys.stdin.read().strip()[2:];w=[h[i:i+64] for i in range(0,len(h),64)];print(int(w[2],16))"; }
+vrp_new_open_result() { local r; r=$(cast call --rpc-url "$vrb_rpc" "$(vrp_election)" 'openResult()(bytes32)'); [ "$r" != 0x0000000000000000000000000000000000000000000000000000000000000000 ] && [ "$r" != "$vrb_result" ]; }
+vrp_root_epoch_is() { curl -sf -X POST -H 'Content-Type: application/json' -d '{}' "http://127.0.0.1:$(m2_rpc_port 1)/api/v1/q3/status" | python3 -c "import json,sys;sys.exit(0 if json.load(sys.stdin).get('activeEpoch')==$1 else 1)"; }
+vrp_eth_block() { cast block-number --rpc-url "$vrb_rpc"; }
+
+# the holder facts (design 3.9.2) read from custody's storage at the frozen slots equal custody's own getters, for every identity at generation 1
+vrp_facts_ok() {
+  local cu; cu=$(vrp_custody)
+  python3 - "$vrb_rpc" "$cu" <<'PY' || return 1
+import subprocess, sys
+rpc, cu = sys.argv[1:3]
+def cast(*a): return subprocess.check_output(["cast", *a, "--rpc-url", rpc]).decode().strip()
+def kk(h): return "0x" + subprocess.check_output(["cast", "keccak", h]).decode().strip()[2:]
+def word(x): return "0x" + int(x).to_bytes(32, "big").hex()
+B = int("0xb2905100cfe7c1af5dee2b1b6726fdfd755820e0f51ef675ed653be4f1102d00", 16)
+n = int(cast("call", cu, "nextStakingID()(uint64)").split()[0])
+for i in range(1, n + 1):
+    q = kk(word(i) + word(B + 1)[2:])
+    s = kk(word(1) + q[2:])
+    w0 = int(cast("storage", cu, s), 16)
+    w1 = cast("storage", cu, hex(int(s, 16) + 1))
+    live = int(cast("call", cu, "liveExposures(uint64,uint64)(uint32)", str(i), "1").split()[0])
+    anchor = int(cast("call", cu, "maxLiabilityAnchor(uint64,uint64)(uint64)", str(i), "1").split()[0])
+    chain = cast("call", cu, "exposureChain(uint64,uint64)(bytes32)", str(i), "1")
+    assert (w0 >> 136) == 0, f"id {i}: reserved bits"
+    assert ((w0 >> 8) & 0xffffffff) == live, f"id {i}: liveExposures {(w0 >> 8) & 0xffffffff} != {live}"
+    assert ((w0 >> 72) & 0xffffffffffffffff) == anchor, f"id {i}: anchor"
+    assert w1.lower() == chain.lower(), f"id {i}: refDigest"
+cursor = int(cast("storage", cu, hex(B)), 16)
+assert cursor == int(cast("call", cu, "recordCursor()(uint64)").split()[0]), "facts cursor"
+print("holder facts equal custody's state for", n, "identities")
+PY
+}
+
 vrp_recovery() {
-  vrb_log "FAIL: vrp_recovery is not implemented yet (it needs the live run to fix its timing)"
-  return 1
+  vrp_source_q3 || { vrb_log "FAIL: the q3 helpers"; return 1; }
+  local first=$vrb_result i rid2 rec
+  # 1. the second election over the same five, published and handed off by the nodes themselves
+  vrb_wait 1500 "the second election reserves J' from stake" vrp_new_open_result || return 1
+  rid2=$(cast call --rpc-url "$vrb_rpc" "$(vrp_election)" 'openResult()(bytes32)')
+  vrb_result=$rid2
+  vrp_publish || return 1
+  vrb_wait 900 "the roots installed J' (root epoch 3)" vrp_root_epoch_is 3 || return 1
+  vrb_log "J' = $rid2 is installed at the roots; its VR output state $(vrp_result_state "$rid2") (2 = Published)"
+  # 2. J' stalls: three of the five lose their EVM services, so its EVM quorum (3 of 5) cannot form
+  local before after
+  for i in 3 4 5; do stop_one_evm_validator "$i" 2>/dev/null || true; done
+  before=$(vrp_eth_block); sleep 45; after=$(vrp_eth_block)
+  [ "$after" -le "$((before + 1))" ] || { vrb_log "FAIL: J' certified blocks ($before -> $after) with 2 of 5 validators"; return 1; }
+  [ "$(vrp_result_state "$rid2")" = 2 ] || { vrb_log "FAIL: J' is no longer Published in VR"; return 1; }
+  vrb_log "PASS: J' stalls (EVM block $before -> $after in 45 s with 2 of its 5 validators)"
+  # 3. the recovery: the roots return to K's committee (epoch 4), exact K, no receipts, supersedes J'
+  H3_ROOTS="1 2 3 4 5"
+  Q3_WEIGHTS="1 1 1 1 1" Q3_NEXT_EPOCH=4 q3_trust_base_v3 4 || { vrb_log "FAIL: the recovery's trust base"; return 1; }
+  Q3_RECOVERY=1 Q3_SUPERSEDE=1 Q3_NEXT_EPOCH=4 Q3_ASSIGN_TAG=rec Q3_SUFFIX=-2 h3_retry_handoff 3 q3_attempt || { vrb_log "FAIL: the recovery handoff"; return 1; }
+  Q3_EXPECT_SWITCHED="1 2 3 4 5" q3_install_n 4 || { vrb_log "FAIL: the roots did not install the recovery"; return 1; }
+  vrb_log "PASS: the roots installed the recovery K (root epoch 4)"
+  # 4. the three stopped validators return into K's scope; VR imports RecoveryAck(J') and the Boundary (recovered)
+  for i in 3 4 5; do start_one_evm_validator "$i" "${validators:-4}" "$partitionID" "$(m2_root_addr 1)" engine-api rpc "$(evm_bootnodes_for_peers "$(m2_root_addr 1)" "$i" 1 2 3 4)" >/dev/null 2>&1 || true; done
+  vrb_wait 900 "VR's output of J' is Recovered (state 6)" bash -c "[ \"\$(cast call --rpc-url $vrb_rpc $vrb_vr 'output(bytes32)' $rid2 | python3 -c \"import sys;h=sys.stdin.read().strip()[2:];print(int(h[128:192],16))\")\" = 6 ]" || return 1
+  [ "$(cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'health()(uint8)')" = 0 ] || { vrb_log "FAIL: VR is not Healthy after the recovery"; return 1; }
+  [ "$(cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'lastAcked()(bytes32)')" = "$rid2" ] || { vrb_log "FAIL: lastAcked is not J's pair result"; return 1; }
+  vrb_wait 300 "custody and VR have applied the same records" vrp_cursors_match || return 1
+  rec=$(cast call --rpc-url "$vrb_rpc" "$(vrp_custody)" 'lastAckedAssignment()(bytes32)')
+  vrb_log "custody's last acknowledged assignment is the recovery assignment $rec"
+  vrp_facts_ok || { vrb_log "FAIL: the holder facts differ from custody's state"; return 1; }
+  vrb_log "PASS: the recovery (install K) completed through VR: Recovered, Healthy, cursors and holder facts match"
 }
