@@ -39,7 +39,7 @@ vrs_run() {
     curl -s "http://$(evm_validator_rpc_addr "$i")/api/v1/metrics" | grep -i 'upgrade_required' >>"$d/shard-metrics.txt"
   done
   [ -s "$d/shard-metrics.txt" ] && vrb_log "PASS: unicity_upgrade_required gauge on the shard nodes: $(head -1 "$d/shard-metrics.txt" | cut -c1-200)" || vrb_log "info: no unicity_upgrade_required sample on the shard metrics endpoint"
-  ( cd cli/ubft && go build -tags "${GO_BUILD_TAGS_NTR:-vrdev,no_test_rule}" -o ../../build/ubft-no-test-rule ) || { vrb_log "FAIL: building the no_test_rule binary"; return 1; }
+  ( cd cli/ubft && GOMAXPROCS=4 nice -n 10 go build -tags "${GO_BUILD_TAGS_NTR:-vrdev,no_test_rule}" -o ../../build/ubft-no-test-rule ) || { vrb_log "FAIL: building the no_test_rule binary"; return 1; }
   if build/ubft-no-test-rule validator upgrade --rpc "$vrb_rpc" --exit-code >"$d/no-test-rule-upgrade.txt" 2>&1; then
     vrb_log "FAIL: the no_test_rule binary does not require an upgrade"; return 1
   fi
@@ -89,7 +89,7 @@ vrs_long() {
   known=$(build/ubft validator upgrade --rpc "$vrb_rpc" --json | python3 -c 'import json,sys;print(json.load(sys.stdin)["knownRootEpoch"])'); E=$((known + 3))
   vrs_rules >"$d/ureth-rules-before.json"; vrb_log "ureth rules before: $(cut -c1-300 "$d/ureth-rules-before.json")"
   # 1. shard node 4 as a binary without the test rule
-  ( cd cli/ubft && go build -tags "${GO_BUILD_TAGS_NTR:-vrdev,no_test_rule}" -o ../../build/ubft-ntr ) || { vrb_log "FAIL: building the no_test_rule binary"; return 1; }
+  ( cd cli/ubft && GOMAXPROCS=4 nice -n 10 go build -tags "${GO_BUILD_TAGS_NTR:-vrdev,no_test_rule}" -o ../../build/ubft-ntr ) || { vrb_log "FAIL: building the no_test_rule binary"; return 1; }
   cp build/ubft build/ubft.default && mv build/ubft-ntr build/ubft
   declare -F m2_start_root >/dev/null || source scripts/lib/m2-handoff-lib.sh
   local rootBoot bootnodes online; rootBoot=$(m2_root_addr 1); online=$(m2_online_validators)
