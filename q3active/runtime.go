@@ -407,9 +407,14 @@ func (r *Runtime) Recover(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		// the fence is monotone in the epoch: the newest staged one decides for all, one check however many epochs the journal holds
+		var top uint64
 		for _, a := range pending {
-			if err := r.fence(ctx, a.Claim.Epoch); err != nil {
-				return fmt.Errorf("staged epoch %d: %w", a.Claim.Epoch, err)
+			top = max(top, a.Claim.Epoch)
+		}
+		if len(pending) > 0 {
+			if err := r.fence(ctx, top); err != nil {
+				return fmt.Errorf("staged epoch %d: %w", top, err)
 			}
 		}
 	}

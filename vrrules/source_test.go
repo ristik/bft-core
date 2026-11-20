@@ -13,16 +13,19 @@ import (
 
 func quiet() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
-type flaky struct {
-	entries []vrschema.Activation
-	fail    bool
+// scripted is a Source whose evidence and failure the test changes, counting reads.
+type scripted struct {
+	ev    Evidence
+	fail  bool
+	reads int
 }
 
-func (f *flaky) Schedule(context.Context) ([]vrschema.Activation, error) {
-	if f.fail {
-		return nil, errors.New("rpc down")
+func (s *scripted) Read(context.Context) (Evidence, error) {
+	s.reads++
+	if s.fail {
+		return Evidence{}, errors.New("rpc down")
 	}
-	return f.entries, nil
+	return s.ev, nil
 }
 
 func TestGateFence(t *testing.T) {
@@ -47,42 +50,81 @@ func TestGateFence(t *testing.T) {
 	require.Len(t, g.Pending(), 1, "the warning state holds the entry before E")
 }
 
-func TestGateKnownRulePasses(t *testing.T) {
+// The test rule is known only in the default build profile: the expectation is explicit for each.
+func TestGateTestRuleByBuildProfile(t *testing.T) {
 	r := vrschema.RuleID(TestRuleName)
-	g := NewGate(StaticSource{Entries: []vrschema.Activation{{RuleID: r, RootEpoch: 3, State: vrschema.ActActive, ChangeID: 1}}}, nil, quiet())
+	g := NewGate(StaticSource{Entries: []vrschema.Activation{{RuleID: r, ReleaseDigest: vrschema.Word{4}, RootEpoch: 3, State: vrschema.ActActive, ChangeID: 1}}}, nil, quiet())
+	err := g.Check(context.Background(), 50)
+	if testRuleKnown {
+		require.NoError(t, err)
+		require.Empty(t, g.Pending())
+	} else {
+		require.ErrorIs(t, err, ErrUpgradeRequired)
+		require.Len(t, g.Pending(), 1)
+	}
+}
+
+func TestGateExplicitKnownRulePasses(t *testing.T) {
+	r := vrschema.RuleID("any")
+	g := NewGate(StaticSource{Entries: []vrschema.Activation{{RuleID: r, RootEpoch: 3, State: vrschema.ActActive, ChangeID: 1}}}, Set{r: "any"}, quiet())
 	require.NoError(t, g.Check(context.Background(), 50))
-	require.Empty(t, g.Pending())
 }
 
-func TestGateSourceErrorFailsClosedUnlessEpochKnown(t *testing.T) {
-	src := &flaky{}
-	g := NewGate(src, Set{}, quiet())
+func TestGateFailsClosedWithoutAdequateEvidence(t *testing.T) {
 	ctx := context.Background()
-	require.NoError(t, g.Check(ctx, 4))
-	src.fail = true
-	require.NoError(t, g.Check(ctx, 4), "the schedule last read for this epoch stands")
-	err := g.Check(ctx, 5)
-	require.Error(t, err, "no schedule known for this epoch: refuse, never pass silently")
-	require.NotErrorIs(t, err, ErrUpgradeRequired)
-	src.fail = false
-	require.NoError(t, g.Check(ctx, 5), "retry succeeds once the source is back")
-}
-
-func TestGateCachedFallbackStillFences(t *testing.T) {
-	r := vrschema.RuleID("new-rule")
-	src := &flaky{entries: []vrschema.Activation{{RuleID: r, RootEpoch: 4, State: vrschema.ActActive, ChangeID: 1}}}
+	rule := vrschema.RuleID("new")
+	src := &scripted{fail: true}
 	g := NewGate(src, Set{}, quiet())
-	require.ErrorIs(t, g.Check(context.Background(), 7), ErrUpgradeRequired)
+	require.Error(t, g.Check(ctx, 5), "no evidence at all")
+
+	src.fail = false
+	src.ev = Evidence{CoveredEpoch: 3, Schedule: []vrschema.Activation{{RuleID: rule, RootEpoch: 6, State: vrschema.ActActive, ChangeID: 1}}}
+	// epoch 5 needs VR to know epoch 4: a state that knows 3 is behind, never passed
+	err := g.Check(ctx, 5)
+	require.ErrorIs(t, err, ErrNotCovered)
+	require.NotErrorIs(t, err, ErrUpgradeRequired)
+	// epoch 4 needs 3: covered, and E=6 is later
+	require.NoError(t, g.Check(ctx, 4))
+
+	// once VR caught up, the same retry decides: the new rule fences epoch 6, and the cached evidence serves lower epochs without a read
+	src.ev.CoveredEpoch = 6
+	require.ErrorIs(t, g.Check(ctx, 6), ErrUpgradeRequired)
+	reads := src.reads
 	src.fail = true
-	require.ErrorIs(t, g.Check(context.Background(), 7), ErrUpgradeRequired)
+	require.ErrorIs(t, g.Check(ctx, 7), ErrUpgradeRequired, "evidence covering epoch 6 covers epoch 7")
+	require.NoError(t, g.Check(ctx, 5), "an outage does not matter for an epoch the evidence covers")
+	require.Error(t, g.Check(ctx, 9), "evidence that does not cover epoch 9 and a failing source: refuse")
+	require.Equal(t, reads+1, src.reads, "only the uncovered epoch reads")
 }
 
-func TestGateCacheIsBounded(t *testing.T) {
-	g := NewGate(StaticSource{}, Set{}, quiet())
-	for e := uint64(0); e < 3*MaxCachedEpochs; e++ {
+func TestGateReplayOfManyEpochsCostsOneRead(t *testing.T) {
+	src := &scripted{ev: Evidence{CoveredEpoch: 100}}
+	g := NewGate(src, Set{}, quiet())
+	for e := uint64(1); e <= 101; e++ {
 		require.NoError(t, g.Check(context.Background(), e))
 	}
-	require.LessOrEqual(t, len(g.cache), MaxCachedEpochs)
+	require.Equal(t, 1, src.reads)
+}
+
+func TestGateRefusesEvidencePastVRBounds(t *testing.T) {
+	g := NewGate(StaticSource{Entries: make([]vrschema.Activation, MaxActivations+1)}, Set{}, quiet())
+	require.Error(t, g.Check(context.Background(), 3))
+	g = NewGate(StaticSource{Pending: make([]PendingEntry, MaxPending+1)}, Set{}, quiet())
+	require.Error(t, g.Poll(context.Background(), 1))
+}
+
+func TestPendingChangesWarnButNeverEnforce(t *testing.T) {
+	rule := vrschema.RuleID("queued")
+	src := StaticSource{Pending: []PendingEntry{{State: "Queued", Activation: vrschema.Activation{RuleID: rule, ReleaseDigest: vrschema.Word{5}, RootEpoch: 4}}}}
+	g := NewGate(src, Set{}, quiet())
+	require.NoError(t, g.Poll(context.Background(), 1))
+	require.Len(t, g.Preview(), 1, "the Queued entry warns")
+	require.Empty(t, g.Pending(), "and is not an effective entry")
+	require.NoError(t, g.Check(context.Background(), 100), "enforcement stays on the committed schedule")
+	// a supported rule warns nothing
+	g = NewGate(src, Set{rule: "queued"}, quiet())
+	require.NoError(t, g.Poll(context.Background(), 1))
+	require.Empty(t, g.Preview())
 }
 
 func TestNoSourceIsNoFence(t *testing.T) {
@@ -91,4 +133,5 @@ func TestNoSourceIsNoFence(t *testing.T) {
 	require.NoError(t, g.Check(context.Background(), 1<<40))
 	require.NoError(t, g.Poll(context.Background(), 1))
 	require.Empty(t, g.Pending())
+	require.Empty(t, g.Preview())
 }

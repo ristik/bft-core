@@ -771,7 +771,23 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	if closer, ok := executor.(interface{ Close() }); ok {
 		defer closer.Close()
 	}
-	activationGate, closeGate, err := newActivationGate(ctx, operatorLog, flags.ActivationSourceURL)
+	// On a VR generation (the b1 profile carries the VR hook measurement) the fence is mandatory and reads the shard's own execution
+	// client, checked against the profile's pinned registry code hash; --activation-source-url may name another endpoint.
+	fenceGen := vrFence{}
+	sourceURL := flags.ActivationSourceURL
+	if flags.B1Profile != "" {
+		_, pf, perr := readB1ProfileFile(flags.B1Profile)
+		if perr != nil {
+			return perr
+		}
+		if pf.VRHookMeasurement != nil {
+			fenceGen = vrFence{VR: true, CodeHash: &pf.VRHookMeasurement.RegistryCodeHash}
+			if sourceURL == "" {
+				sourceURL = flags.EthURL
+			}
+		}
+	}
+	activationGate, closeGate, err := newActivationGate(ctx, operatorLog, sourceURL, fenceGen)
 	if err != nil {
 		return err
 	}

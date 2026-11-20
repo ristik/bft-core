@@ -80,6 +80,8 @@ type signingAuthorityRunFlags struct {
 	trustBaseFlags
 
 	ActivationSourceURL string
+	VRGeneration        bool
+	VRRegistryCodeHash  string
 	ClientSocket        string
 	OperatorSocket      string
 	OperatorCredential  string
@@ -133,6 +135,8 @@ key exists: the authority starts pending and admits no client until complete-enr
 	cmd.Flags().BoolVar(&flags.RequirePosPolicy, "require-pos-policy", false, "refuse every P85 possession signature (election, delegation, assignment) until the P85 pin is set; with --pos-policy the pin is fixed from startup")
 	cmd.Flags().BoolVar(&flags.LatePosPolicy, "dev-allow-late-pos-policy", false, "DEVELOPMENT ONLY: let `signing-authority pos-policy` pin the P85 election on this running authority. The pin then comes from the operator credential that also asks for signatures, so it restricts nothing against a compromised credential; production gives --pos-policy at startup")
 	cmd.Flags().StringVar(&flags.ActivationSourceURL, "activation-source-url", "", activationSourceUsage)
+	cmd.Flags().BoolVar(&flags.VRGeneration, "vr-generation", false, "this deployment pins the validator registry: --activation-source-url and --vr-registry-code-hash are then mandatory and the authority refuses to start without them")
+	cmd.Flags().StringVar(&flags.VRRegistryCodeHash, "vr-registry-code-hash", "", "0x-prefixed runtime code hash of the pinned VR core (the b1 profile's VR measurement) that the activation source's registry must have")
 	cmd.Flags().StringVar(&flags.AuthorityID, "authority-id", "", "operator-assigned name for this authority lifetime, for diagnostics")
 	cmd.Flags().StringVar(&flags.NodeID, "node-id", "", "the shard validator this authority signs for (`ubft node-id` on the shard node's key configuration)")
 	cmd.Flags().Uint16Var(&flags.NetworkID, "network-id", 0, "network identifier")
@@ -220,7 +224,15 @@ func signingAuthorityRun(ctx context.Context, flags *signingAuthorityRunFlags) e
 	if flags.RequirePosPolicy {
 		opts = append(opts, signingauthority.WithRequirePosPolicy())
 	}
-	activationGate, closeGate, err := newActivationGate(ctx, log, flags.ActivationSourceURL)
+	// A standalone authority has no execution client of its own: on a VR generation it must be told so (--vr-generation) and given an
+	// endpoint serving VR with the pinned registry code hash, or it refuses to start (design 7.4).
+	fenceGen := vrFence{VR: flags.VRGeneration}
+	if flags.VRRegistryCodeHash != "" {
+		if fenceGen.CodeHash, err = parseCodeHash(flags.VRRegistryCodeHash); err != nil {
+			return err
+		}
+	}
+	activationGate, closeGate, err := newActivationGate(ctx, log, flags.ActivationSourceURL, fenceGen)
 	if err != nil {
 		return err
 	}
