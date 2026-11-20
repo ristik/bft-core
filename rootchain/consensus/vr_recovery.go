@@ -153,7 +153,11 @@ func (x *ConsensusManager) vrRecoveryRoute(parent *storage.ExecutedBlock, contro
 	lapsed := storage.PrepareLapsed(control, round)
 	switch {
 	case control.Phase == "endorsed", control.Phase == "prepared" && !lapsed:
-		return x.heldRecoveryBody(control)
+		held := x.heldRecoveryBody(control)
+		if held {
+			x.log.Info("VR recovery: the leader follows the exact recovery", "round", round, "phase", control.Phase, "attempt", control.Attempt)
+		}
+		return held
 	case control.Phase != "idle" && control.Phase != "aborted" && !lapsed:
 		return false
 	}
@@ -181,6 +185,7 @@ func (x *ConsensusManager) vrRecoveryRoute(parent *storage.ExecutedBlock, contro
 		x.dropRecoveryIntent(attempt)
 		return false
 	}
+	x.log.Info("VR recovery: the leader orders the Prepare of the exact recovery", "round", round, "attempt", attempt)
 	return true
 }
 
