@@ -157,6 +157,15 @@ def fresh_measurement(a, out, module_hash=None):
                     'host': socket.gethostname(), 'startedUtc': started, 'log': str(out / 'vr-hook-measurement-fresh.log')}
 
 
+def check_fixture_copies(contracts, ureth):
+    """ureth's testdata/vr-hook*.json are verbatim copies of the contracts checkout's test/vr/fixtures/vr-hook*.json: the measurement is taken over
+    ureth's copy, so a copy that differs from the contracts the generation allocates measures other code (VT-04b: a stale copy pinned wrong numbers)."""
+    for name in ('vr-hook.json', 'vr-hook-pos.json'):
+        c, u = contracts / 'test/vr/fixtures' / name, ureth / 'crates/unicity/execution/testdata' / name
+        if c.is_file() and u.is_file() and c.read_bytes() != u.read_bytes():
+            raise VRGenesisError(f'ureth {u} is not the contracts checkout\'s {c}: regenerate and copy the fixture before measuring')
+
+
 def pos_module_hash(contracts, work):
     """The PosElectionAdapter's runtime code hash at 0xff..07: its immutables (VR, the election and the custody, both CREATE addresses of fixed
     deployers) are constants of the contracts build, so the contracts genesis of the sample plan names the same module as every generation's."""
@@ -190,6 +199,8 @@ def plan(a):
         raise VRGenesisError(f'{out} exists: a generation is never regenerated in place')
     ubft, contracts = str(Path(a.ubft).resolve()), Path(a.contracts).resolve()
     pos_hash = None
+    if a.ureth:
+        check_fixture_copies(contracts, Path(a.ureth).resolve())
     if a.pos:
         if not (contracts / 'script/vr-pos-genesis.sh').is_file():
             raise VRGenesisError(f'{contracts} has no script/vr-pos-genesis.sh: not a PoS-capable contracts checkout')

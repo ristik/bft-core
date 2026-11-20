@@ -175,12 +175,12 @@ func TestTheVRMeasurementJSONIsStrict(t *testing.T) {
 //
 // Caps 5.0 / 1.5 / 2.5 M. H = 16 (at H = 32 the record callbacks alone reach 80 M and the margin takes the batch to 100 M before VR's own
 // work). The figures are ureth's complete-path measurement on the PoS-capable build (tests/vr_hook.rs, VR_HOOK_BUILD=pos) over the fixture
-// test/vr/fixtures/vr-hook-pos.json, whose maximum scenarios run at the frozen ceilings: 32 pending changes, 60 activations (45 due at the
-// Boundary) plus the 4 the output binds, HolderRetirement fillers. R_16 = 43,605,367 (the batch of 16 HolderRetirements at the 2.5 M record
-// cap; the closure batch is 43,320,364), B = 19,855,486 (the worst switching Boundary at that occupancy), E = 9,596,639, so
+// test/vr/fixtures/vr-hook-pos.json, whose maximum scenarios run at the frozen ceilings: 32 pending changes, 60 activations (all 60 due together at the
+// Boundary, after an intervening ordinary Boundary) plus the 4 the output binds, HolderRetirement fillers. R_16 = 43,605,367 (the batch of 16 HolderRetirements at the 2.5 M record
+// cap; the closure batch is 43,320,364), B = 19,926,554 (the worst switching Boundary at that occupancy, all 60 entries due together), E = 9,596,639, so
 //
-//	M_16 = R_16 + B = 63,460,853, allowance ceil(5 M_16 / 4) = 79,326,067, HookRecordGas ceil(allowance / 16) = 4,957,880 (16 x = 79,326,080),
-//	ElectGas ceil(5 E / 4) = 11,995,799, envelope 150,000 + 79,326,080 + 11,995,799 = 91,471,879.
+//	M_16 = R_16 + B = 63,531,921, allowance ceil(5 M_16 / 4) = 79,414,902, HookRecordGas ceil(allowance / 16) = 4,963,432 (16 x = 79,414,912),
+//	ElectGas ceil(5 E / 4) = 11,995,799, envelope 150,000 + 79,414,912 + 11,995,799 = 91,560,711.
 var (
 	posRegistryCode = VRBuildPos.RegistryCodeHash
 	posModuleCode   = [32]byte{0x61}
@@ -188,9 +188,9 @@ var (
 
 func reviewedPos() VRHookMeasurement {
 	m := VRHookMeasurement{Invariant: VRSingleLiveOutput, H: 16, Registry: testVR, RegistryCodeHash: posRegistryCode, ModuleCodeHash: posModuleCode, Caps: VRCapsPos, Ceilings: VRLimits,
-		Records: 43_605_367, Boundary: 19_855_486, Elect: 9_596_639, Source: "test"}
+		Records: 43_605_367, Boundary: 19_926_554, Elect: 9_596_639, Source: "test"}
 	// the three combined fixtures at their measured reservations (all within R_16 + B)
-	m.Combined = []VRCombined{{"mixed-first", 16, 59_831_005}, {"mixed-middle", 16, 59_262_162}, {"mixed-last", 16, 58_743_932}}
+	m.Combined = []VRCombined{{"mixed-first", 16, 59_902_074}, {"mixed-middle", 16, 59_333_230}, {"mixed-last", 16, 58_815_000}}
 	return m
 }
 
@@ -198,11 +198,11 @@ func TestThePoSBuildGivesTheDerivedPins(t *testing.T) {
 	m := reviewedPos()
 	mh, err := m.BatchRequirement()
 	require.NoError(t, err)
-	require.EqualValues(t, 63_460_853, mh, "R_16 + B; no combined fixture exceeds it")
+	require.EqualValues(t, 63_531_921, mh, "R_16 + B; no combined fixture exceeds it")
 	allowance, per, err := VRRecordsAllowance(m)
 	require.NoError(t, err)
-	require.EqualValues(t, 79_326_067, allowance)
-	require.EqualValues(t, 4_957_880, per)
+	require.EqualValues(t, 79_414_902, allowance)
+	require.EqualValues(t, 4_963_432, per)
 	elect, err := PinElectGas(m.Elect)
 	require.NoError(t, err)
 	require.EqualValues(t, 11_995_799, elect)
@@ -210,9 +210,9 @@ func TestThePoSBuildGivesTheDerivedPins(t *testing.T) {
 	require.NoError(t, CheckVRHookGas(p, posRegistryCode, posModuleCode, m))
 	env, err := p.HookEnvelopeGas()
 	require.NoError(t, err)
-	require.EqualValues(t, 91_471_879, env, "below the PoA build's 97,927,220")
+	require.EqualValues(t, 91_560_711, env, "below the PoA build's 97,927,220")
 
-	require.ErrorIs(t, CheckVRHookGas(vrProfile(16, per-1, elect), posRegistryCode, posModuleCode, m), ErrVRHookGas, "16 x 4,957,879 = 79,326,064 < 79,326,067")
+	require.ErrorIs(t, CheckVRHookGas(vrProfile(16, per-1, elect), posRegistryCode, posModuleCode, m), ErrVRHookGas, "16 x 4,963,431 = 79,414,896 < 79,414,902")
 	require.ErrorIs(t, CheckVRHookGas(vrProfile(16, per, elect-1), posRegistryCode, posModuleCode, m), ErrVRHookGas)
 	require.ErrorIs(t, CheckVRHookGas(vrProfile(32, per, elect), posRegistryCode, posModuleCode, m), ErrVRHookGas, "never raise H while keeping the rate")
 	require.ErrorIs(t, CheckVRHookGas(vrProfile(8, per, elect), posRegistryCode, posModuleCode, m), ErrVRHookGas, "never lower H while keeping the rate")
@@ -234,7 +234,7 @@ func TestThePoSEnvelopeIsWhatTheSystemGasAdds(t *testing.T) {
 	p.RecordsCustody, p.HRecords, p.HookRecordGas, p.ElectionContract, p.ElectGas = [20]byte{}, 0, 0, [20]byte{}, 0
 	without, err := p.RequiredSystemGas()
 	require.NoError(t, err)
-	require.EqualValues(t, 91_471_879, with-without, "SystemGas = non-hook requirement + the hook envelope")
+	require.EqualValues(t, 91_560_711, with-without, "SystemGas = non-hook requirement + the hook envelope")
 }
 
 // The cap tuple is bound to the build whose code enforces it: the PoS-capable runtime carries the PoS caps and only them, any other runtime
