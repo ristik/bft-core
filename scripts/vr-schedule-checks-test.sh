@@ -47,7 +47,7 @@ cases=$((cases+1)); [ "$(unset rethEthBase; LANE_SLOT=2 bash -c 'source scripts/
 cases=$((cases+1)); [ "$(unset rethEthBase; LANE_SLOT=0 bash -c 'source scripts/lib/lane-slot.sh; lane_reth_eth_port 1')" = 18545 ] || fail "slot 0 validator 1 is not on 18545"
 cases=$((cases+1)); [ "$(unset LANE_SLOT rethEthBase; bash -c 'source scripts/lib/lane-slot.sh; lane_reth_eth_port 2')" = 18546 ] || fail "the default slot validator 2 is not on 18546"
 cases=$((cases+1)); [ "$(LANE_SLOT=2 rethEthBase=20545 bash -c 'source scripts/lib/lane-slot.sh; lane_reth_eth_port 4')" = 20548 ] || fail "an explicit rethEthBase is not honoured"
-cases=$((cases+1)); grep -q 'lane_reth_eth_port' helper.sh && ! grep -q 'rethEthBase:-18545' helper.sh || fail "helper.sh still falls back to slot 0's port"
+cases=$((cases+1)); grep -q 'lane_reth_eth_port' helper.sh && ! grep -q 'rethEthBase:-18545' helper.sh || fail "helper.sh still falls back to slot 0's port"  # lane-port-ok: static rejection check
 # A paired VR launch enables archive proofs without an opt-in. Ordinary lanes keep the proof window.
 source scripts/lib/reth-pin.sh
 archive_preflight() { VR_LANE=1 urethPinRequireStateProofs "$1"; }
