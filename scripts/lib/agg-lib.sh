@@ -45,7 +45,13 @@ start_agg() { # K (1-based): one aggregator-go shard
   mkdir -p "$d/logs"
   # the UTB lane's patched aggregator takes its genesis history by environment (UTB_AGG_ENV_FN, scripts/lib/utb-lib.sh); no other lane sets it
   local -a utbEnv=()
-  [ -z "${UTB_AGG_ENV_FN:-}" ] || utbEnv=($("$UTB_AGG_ENV_FN" "$k"))
+  if [ -n "${UTB_AGG_ENV_FN:-}" ]; then
+    # the callback's status is checked BEFORE its output is split: an incomplete UTB environment is refused, never run without the UTB settings
+    local utbOut line
+    utbOut=$("$UTB_AGG_ENV_FN" "$k") || { echo "start_agg: the UTB environment of aggregator $k could not be built; not starting it without" >&2; return 1; }
+    [ -n "$utbOut" ] || { echo "start_agg: the UTB environment callback printed nothing" >&2; return 1; }
+    while IFS= read -r line; do utbEnv+=("$line"); done <<<"$utbOut"   # one assignment per line: paths with spaces stay whole
+  fi
   env PORT=$port HOST=127.0.0.1 ENABLE_DOCS=false ENABLE_CORS=true \
     MONGODB_URI="$AGG_MONGO" MONGODB_DATABASE="$(cat "$d/dbname" 2>/dev/null || { n=dnb_agg${k}_$(date +%s); echo $n | tee "$d/dbname"; })" DISABLE_HIGH_AVAILABILITY=true USE_REDIS_FOR_COMMITMENTS=false \
     SMT_BACKEND=memory SHARDING_MODE=$(agg_mode) LOG_LEVEL=info LOG_FORMAT=text LOG_ENABLE_JSON=false LOG_FILE_PATH="$PWD/$d/logs/aggregator.log" \

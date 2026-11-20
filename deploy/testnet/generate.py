@@ -150,6 +150,16 @@ AGGREGATOR_PORT, AGGREGATOR_BFT_PORT = 8080, 9200   # in validator 1's namespace
 # aggregator-go needs MongoDB as a replica set (transactions and change streams): one member, initiated by the healthcheck on its first run.
 MONGO_REPLICA_SET = "try { quit(rs.status().myState === 1 ? 0 : 1) } catch (e) { rs.initiate({_id: 'rs0', members: [{_id: 0, host: 'mongo:27017'}]}); quit(1) }"
 
+UTB_AGGREGATORS=('integration','upstream')
+
+def image_sources_error(records, variant):
+    """None when the image records were built from the pins of the aggregator VARIANT, else the refusal text (also used by reset.py before it tears anything down)."""
+    expected = dict(PINS)
+    if variant == 'upstream': expected['aggregator-go'] = PINS['aggregator-go-upstream']
+    if records['sources'] != expected:
+        return 'image source pins differ'+(' (build-images.py --aggregator-variant upstream for the upstream-facing aggregator)' if variant == 'upstream' else '')
+    return None
+
 def aggregator_environment(root_boot, rpc_bind, utb=None, utb_aggregator='integration'):
     """aggregator-go reads its configuration from the environment. One full-range shard runs SHARDING_MODE=standalone with BFT (aggregator-go refuses
     bft-shard mode for the empty shard ID, scripts/lib/agg-lib.sh). Its signing key is the shard-node key file; BFT_RPC_ADDRESS is root 1's operator
@@ -334,8 +344,8 @@ def main():
     p.add_argument('--pos-weights',default=None,help='proof-of-stake genesis weights, comma separated, one per validator (default all 1; the genesis rules accept only 1, see pos.genesis_weights)')
     p.add_argument('--pos-cadence-rounds',type=int,default=pos.CADENCE_ROUNDS,help='election cadence: ordinary root rounds after the last acknowledged rotation')
     p.add_argument('--pos-cadence-seconds',type=int,default=pos.CADENCE_SECONDS,help='election cadence: UC seconds after the last acknowledged rotation')
-    p.add_argument('--utb',action='store_true',help='the signed trust-base entry (UTB) profile: the roots produce and serve the signed history, shard nodes and the aggregator verify it from the genesis entry pinned in the manifest')
-    p.add_argument('--utb-aggregator',choices=('integration','upstream'),default='integration',help='with --utb: which aggregator the images carry (build-images.py --aggregator-variant): the integration aggregator (genesis entry file, own store) or the upstream-facing one (one-entry bundle, expected network, history in its MongoDB)')
+    p.add_argument('--utb',action=argparse.BooleanOptionalAction,default=True,help='the signed trust-base entry (UTB) profile, ON by default: the roots produce and serve the signed history, shard nodes and the aggregator verify it from the genesis entry pinned in the manifest. --no-utb is the escape hatch for the package without it (old tests)')
+    p.add_argument('--utb-aggregator',choices=UTB_AGGREGATORS,default='integration',help='with --utb: which aggregator the images carry (build-images.py --aggregator-variant): the integration aggregator (genesis entry file, own store) or the upstream-facing one (one-entry bundle, expected network, history in its MongoDB)')
     p.add_argument('--captcha-sitekey',required=True)
     p.add_argument('--captcha-secret-file',required=True,type=Path)
     p.add_argument('--faucet-payout',default=FAUCET_PAYOUT,help=f'UCT per faucet claim, decimal (default {FAUCET_PAYOUT}): the signer\'s payout and the guard\'s check of it')
@@ -371,10 +381,8 @@ def main():
     if not re.fullmatch(r'tn-[a-z0-9][a-z0-9_-]*',out.name): p.error('generation directory name must be tn- followed by lowercase letters/digits/dashes')
     if out.exists(): p.error('output exists: choose a new generation directory')
     records=json.loads(a.images.read_text())
-    expected_sources = dict(PINS)
-    if a.utb_aggregator == 'upstream': expected_sources['aggregator-go'] = PINS['aggregator-go-upstream']
     if a.utb_aggregator != 'integration' and not a.utb: p.error('--utb-aggregator needs --utb')
-    if records['sources'] != expected_sources: p.error('image source pins differ'+(' (build-images.py --aggregator-variant upstream for the upstream-facing aggregator)' if a.utb_aggregator == 'upstream' else ''))
+    if image_sources_error(records, a.utb_aggregator): p.error(image_sources_error(records, a.utb_aggregator))
     if any(not re.fullmatch(r'sha256:[0-9a-f]{64}',records['images'].get(k,'')) for k in ('node','guard','signer','rpc')):
         p.error('images must be immutable local image IDs from build-images.py')
     ubft=str(a.ubft.resolve())

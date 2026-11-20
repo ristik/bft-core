@@ -331,6 +331,50 @@ class UtbProfile(unittest.TestCase):
         source=(Path(generate.__file__)).read_text()
         self.assertRegex(source,r"boot=immutable\(topology\([^\n]*utb=utb_pin",'main() starts the authorities from a compose that carries the UTB pin')
         self.assertIn('check_authorities_unchanged(boot,final,a.validators)',source)
+    def test_the_rehearsal_reset_keeps_the_selected_utb_profile_and_variant(self):
+        import rehearse
+        class R: pass
+        for manifest,want in (({},['--no-utb']),({'utb':{'aggregator':'integration'}},['--utb','--utb-aggregator','integration']),
+                              ({'utb':{'aggregator':'upstream'}},['--utb','--utb-aggregator','upstream'])):
+            r=R(); r.manifest=manifest
+            self.assertEqual(rehearse.Rehearsal.reset_utb_args(r),want)
+        self.assertIn('*self.reset_utb_args()',(Path(generate.__file__).with_name('rehearse.py')).read_text(),'the reset stage passes them to reset.py')
+    def test_image_records_must_match_the_aggregator_variant_before_a_reset_tears_anything_down(self):
+        integration={'sources':dict(generate.PINS)}
+        upstream={'sources':{**generate.PINS,'aggregator-go':generate.PINS['aggregator-go-upstream']}}
+        self.assertIsNone(generate.image_sources_error(integration,'integration'))
+        self.assertIsNone(generate.image_sources_error(upstream,'upstream'))
+        self.assertIn('differ',generate.image_sources_error(integration,'upstream'))
+        self.assertIn('differ',generate.image_sources_error(upstream,'integration'))
+    def test_reset_py_refuses_wrong_images_or_variant_before_any_teardown(self):
+        import tempfile, os, stat
+        here=Path(generate.__file__).parent
+        with tempfile.TemporaryDirectory() as d:
+            d=Path(d); bin=d/'bin'; bin.mkdir(); spy=d/'docker-called'
+            (bin/'docker').write_text('#!/bin/sh\necho "$@" >> %s\n'%spy); (bin/'docker').chmod(0o755)
+            old=d/'tn-old'; old.mkdir(); (old/'manifest.json').write_text(json.dumps({'genesis_hash':'0x1'})); (old/'compose.yaml').write_text('')
+            integration=d/'integration.json'; integration.write_text(json.dumps({'sources':dict(generate.PINS),'images':{}}))
+            upstream=d/'upstream.json'; upstream.write_text(json.dumps({'sources':{**generate.PINS,'aggregator-go':generate.PINS['aggregator-go-upstream']},'images':{}}))
+            def reset(*gen):
+                return subprocess.run([sys.executable,str(here/'reset.py'),'--old',str(old),'--lose-all-assets','--','--out',str(d/'tn-new'),*gen],
+                                      env={**os.environ,'PATH':str(bin)+os.pathsep+os.environ['PATH']},capture_output=True,text=True)
+            for gen,why in ((('--no-utb','--images',str(upstream)),'legacy profile with upstream images'),
+                            (('--utb','--utb-aggregator','upstream','--images',str(integration)),'upstream variant with integration images'),
+                            (('--utb','--utb-aggregator','bogus','--images',str(integration)),'unknown variant'),
+                            (('--no-utb','--utb-aggregator','upstream','--images',str(upstream)),'a variant without the profile')):
+                done=reset(*gen)
+                self.assertEqual(done.returncode,2,(why,done.stderr))
+                self.assertFalse(spy.exists(),why+': docker must not be called')
+                self.assertTrue(old.exists(),why+': the old generation stays')
+            done=reset('--no-utb','--images',str(integration))   # accepted by the preflight: it reaches the teardown (the spy) and fails later in generate
+            self.assertTrue(spy.exists(),'a matching profile proceeds to the teardown')
+    def test_the_signed_history_is_on_by_default_and_no_utb_is_the_escape_hatch(self):
+        source=(Path(generate.__file__)).read_text()
+        self.assertRegex(source,r"add_argument\('--utb',action=argparse\.BooleanOptionalAction,default=True",'--utb defaults on; argparse adds --no-utb')
+        for wf in ('testnet-rehearsal.yml','testnet-bridge.yml'):   # the hosted rehearsals keep the package without the profile (what they exercised before the default flipped)
+            text=(Path(generate.__file__).resolve().parents[2]/'.github/workflows'/wf).read_text()
+            for call in re.findall(r"deploy/testnet/generate\.py.*?(?=\n\s*- name:|\n\s*\n|\Z)",text,re.S):
+                self.assertIn('--no-utb',call,wf)
     def test_the_aggregator_gets_the_pin_and_a_writable_store_of_its_own(self):
         agg=self.topo(4,self.PIN)['services']['aggregator']
         env=agg['environment']

@@ -20,6 +20,19 @@ args=a.generator_args
 if args[:1]==['--']: args=args[1:]
 # Preflight new generation args before deleting anything.
 if '--out' not in args: p.error('supply generator --out for a new generation')
+# the image records must be the ones of the profile the replacement is generated with, for EVERY profile (--no-utb needs the integration images):
+# generate.py would refuse them only after the teardown. The variant choices are the generator's own.
+sys.path.insert(0,str(Path(__file__).resolve().parent))
+import generate
+q=argparse.ArgumentParser(add_help=False)
+q.add_argument('--images',type=Path,default=generate.HERE/'artifacts/images.json')
+q.add_argument('--utb',action=argparse.BooleanOptionalAction,default=True)
+q.add_argument('--utb-aggregator',choices=generate.UTB_AGGREGATORS,default='integration')
+known,_=q.parse_known_args(args)
+if not known.utb and known.utb_aggregator!='integration': p.error('--utb-aggregator needs --utb')
+if not known.images.is_file(): p.error(f'image records {known.images} not found')
+err=generate.image_sources_error(json.loads(known.images.read_text()),known.utb_aggregator if known.utb else 'integration')
+if err: p.error(err)
 new=Path(args[args.index('--out')+1]).resolve()
 if new.exists() or old==new or old in new.parents or new in old.parents:
     p.error('new generation must be a distinct, nonexistent directory')

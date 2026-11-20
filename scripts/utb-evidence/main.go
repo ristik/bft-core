@@ -5,6 +5,7 @@
 //	utb-evidence fetch    --url U --out FILE                       the complete history as one tagged bundle (pages followed to the end)
 //	utb-evidence verify   --bundle FILE --pin 0x..                 every record verified from its predecessor; one line per record
 //	utb-evidence extract  --bundle FILE --epoch N --out FILE       the canonical signed bytes of one record
+//	utb-evidence members  --bundle FILE --epoch N                  the committee one record names: "member NODEID weight W key 0x.." lines, then its threshold
 //	utb-evidence client   --url U --store DB --genesis FILE --pin 0x..   a reference client with its own durable store: syncs the missing suffix
 //	utb-evidence ucresp   --file FILE --entry FILE                 a captured version 2 certification response whose attachment is exactly the entry
 //	utb-evidence uc-verify --token FILE --bundle FILE [--shard-conf FILE]  every certificate in a saved token verified under its own epoch's committee
@@ -47,6 +48,8 @@ func main() {
 		err = cmdVerify(os.Args[2:])
 	case "extract":
 		err = cmdExtract(os.Args[2:])
+	case "members":
+		err = cmdMembers(os.Args[2:])
 	case "client":
 		err = cmdClient(os.Args[2:])
 	case "ucresp":
@@ -212,6 +215,30 @@ func cmdExtract(args []string) error {
 		if e.Epoch == *epoch {
 			return os.WriteFile(*out, b.Raw[i], 0o644)
 		}
+	}
+	return fmt.Errorf("the bundle holds no epoch %d", *epoch)
+}
+
+func cmdMembers(args []string) error {
+	fs := flag.NewFlagSet("members", flag.ExitOnError)
+	path := fs.String("bundle", "", "bundle file")
+	epoch := fs.Uint64("epoch", 0, "epoch")
+	_ = fs.Parse(args)
+	b, err := readBundle(*path)
+	if err != nil {
+		return err
+	}
+	for _, e := range b.Entries {
+		if e.Epoch != *epoch {
+			continue
+		}
+		nodes := append([]*types.NodeInfo(nil), e.RootNodes...)
+		sort.Slice(nodes, func(i, j int) bool { return nodes[i].NodeID < nodes[j].NodeID })
+		for _, n := range nodes {
+			fmt.Printf("member %s weight %d key 0x%x\n", n.NodeID, n.Stake, n.SigKey)
+		}
+		fmt.Printf("epoch %d start %d threshold %d members %d\n", e.Epoch, e.EpochStart, e.QuorumThreshold, len(nodes))
+		return nil
 	}
 	return fmt.Errorf("the bundle holds no epoch %d", *epoch)
 }
