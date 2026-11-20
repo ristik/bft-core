@@ -161,7 +161,7 @@ func (c *Client) callBatch(ctx context.Context, calls []pinnedCall) error {
 	if b, ok := c.RPC.(BatchRPC); ok {
 		elems := make([]rpc.BatchElem, len(calls))
 		for i := range calls {
-			elems[i] = rpc.BatchElem{Method: "eth_call", Args: []any{map[string]any{"to": c.Registry, "data": hexutil.Bytes(datas[i])}, c.blockArg()}, Result: &rets[i]}
+			elems[i] = rpc.BatchElem{Method: "eth_call", Args: []any{map[string]any{"to": c.Registry, "data": hexutil.Bytes(datas[i])}, c.blockParam()}, Result: &rets[i]}
 		}
 		if err := b.BatchCallContext(ctx, elems); err != nil {
 			return err

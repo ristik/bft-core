@@ -70,10 +70,14 @@ func (c *Client) Pin(ctx context.Context) (*Client, uint64, error) {
 	return &p, uint64(head), nil
 }
 
-// blockArg is the block parameter of eth_call.
-func (c *Client) blockArg() any {
+// blockParam is the eth_call block argument: a pinned BlockHash, or a 32-byte hash Block (0x + 64 hex), is sent as the EIP-1898 {"blockHash": ...}
+// object, so the read is of that exact block and never of whatever block carries its number; anything else is a number or tag.
+func (c *Client) blockParam() any {
 	if c.BlockHash != "" {
-		return map[string]any{"blockHash": c.BlockHash}
+		return map[string]string{"blockHash": c.BlockHash}
+	}
+	if len(c.Block) == 66 {
+		return map[string]string{"blockHash": c.Block}
 	}
 	return c.block()
 }
@@ -89,7 +93,7 @@ func (c *Client) block() string {
 func (c *Client) CallRaw(ctx context.Context, to ethcommon.Address, data []byte) ([]byte, error) {
 	var out hexutil.Bytes
 	arg := map[string]any{"to": to, "data": hexutil.Bytes(data)}
-	if err := c.RPC.CallContext(ctx, &out, "eth_call", arg, c.blockArg()); err != nil {
+	if err := c.RPC.CallContext(ctx, &out, "eth_call", arg, c.blockParam()); err != nil {
 		return nil, WrapRevert(err)
 	}
 	return out, nil
@@ -99,7 +103,7 @@ func (c *Client) CallRaw(ctx context.Context, to ethcommon.Address, data []byte)
 func (c *Client) CallRawFrom(ctx context.Context, from ethcommon.Address, tx Tx) ([]byte, error) {
 	var out hexutil.Bytes
 	arg := map[string]any{"from": from, "to": tx.To, "data": hexutil.Bytes(tx.Data)}
-	if err := c.RPC.CallContext(ctx, &out, "eth_call", arg, c.blockArg()); err != nil {
+	if err := c.RPC.CallContext(ctx, &out, "eth_call", arg, c.blockParam()); err != nil {
 		return nil, WrapRevert(err)
 	}
 	return out, nil

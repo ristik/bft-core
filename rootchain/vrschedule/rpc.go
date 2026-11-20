@@ -218,14 +218,14 @@ func (r RPC) call(ctx context.Context, blockHash [32]byte, method string, args .
 	return out, nil
 }
 
-// QueuedSchedules are the ScheduleActivation changes VR still holds (Queued, Scheduled or Bound) at the certified block, from its
+// QueuedSchedules are the ScheduleActivation changes VR still holds (Queued, Scheduled or Bound) at the certified block (by hash), from its
 // pendingChanges and change views by an eth_call at that block: the root's early warning before a change is bound into any output
 // (design section 7.4). It is telemetry: nothing here is verified or enforced, and a failed read is simply no warning this time.
-func (r RPC) QueuedSchedules(ctx context.Context, blockNumber uint64) ([]vrschema.Activation, error) {
+func (r RPC) QueuedSchedules(ctx context.Context, blockHash [32]byte) ([]vrschema.Activation, error) {
 	ctx, cancel := context.WithTimeout(ctx, r.timeout())
 	defer cancel()
 	c := vrclient.New(r.Client, common.Address(r.Pins.Registry))
-	c.Block = hexutil.EncodeUint64(blockNumber)
+	c.Block = hexutil.Encode(blockHash[:]) // the certified block by hash (EIP-1898), never by a number
 	ids, err := c.PendingChanges(ctx)
 	if err != nil {
 		return nil, errors.Join(ErrRead, err)

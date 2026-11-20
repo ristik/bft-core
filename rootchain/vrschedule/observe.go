@@ -223,7 +223,7 @@ type Reader interface {
 // QueuedReader is the optional read of the ScheduleActivation changes VR still holds at a certified block, bound into an output or not
 // (RPC implements it): the warning's source before any binding.
 type QueuedReader interface {
-	QueuedSchedules(ctx context.Context, blockNumber uint64) ([]vrschema.Activation, error)
+	QueuedSchedules(ctx context.Context, blockHash [32]byte) ([]vrschema.Activation, error)
 }
 
 // QueuedEvery is the least time between two reads of VR's queued changes (they change at governance speed, never per round).
@@ -279,7 +279,7 @@ func (o *Observer) Observe(ctx context.Context, c CertifiedEVM) error {
 	if o.OnPending != nil {
 		o.boundNow = PendingSchedules(out)
 		o.OnPending(o.merged())
-		o.observeQueued(ctx, c.BlockNumber)
+		o.observeQueued(ctx, c.BlockHash)
 	}
 	if out == nil {
 		return nil
@@ -330,14 +330,14 @@ func PendingSchedules(out *vrhandoff.Output) []vrschema.Activation {
 // observeQueued reads VR's queued ScheduleActivation changes at the certified block (at most once per QueuedEvery, one read at a time) and
 // reports them with the changes bound into the open output: a change still Queued, with no open output at all, is warned of (design 7.4).
 // Telemetry only: a failed read changes nothing.
-func (o *Observer) observeQueued(ctx context.Context, blockNumber uint64) {
+func (o *Observer) observeQueued(ctx context.Context, blockHash [32]byte) {
 	qr, ok := o.Reader.(QueuedReader)
 	if !ok || o.queuedBusy || time.Since(o.queuedAt) < QueuedEvery {
 		return
 	}
 	o.queuedAt, o.queuedBusy = time.Now(), true
 	read := func(ctx context.Context) {
-		qs, err := qr.QueuedSchedules(ctx, blockNumber)
+		qs, err := qr.QueuedSchedules(ctx, blockHash)
 		o.mu.Lock()
 		o.queuedBusy = false
 		if err == nil {
