@@ -77,6 +77,31 @@ case "$cmd" in
   ports) LANE_SLOT=${1:-${LANE_SLOT:-0}}; source "$here/lib/lane-slot.sh"; lane_slot_ports "$LANE_SLOT" ;;
   mongo) [ "${1:-}" = up ] || [ "${1:-}" = down ] || { echo "usage: $0 mongo up|down [LOG_DIR]" >&2; exit 2; }
     action=$1; shift; exec "$here/ci/mongo-up.sh" "$action" "${1:-${TMPDIR:-/tmp}/lane-mongo-slot${LANE_SLOT:-0}}" ;;
-  selftest) source "$here/lib/lane-slot.sh"; lane_slot_selftest ;;
+  selftest)
+    source "$here/lib/lane-slot.sh"; lane_slot_selftest
+    # Two trees with the same relative layout (test-nodes/root1, test-nodes/reth5/dd) run the same command lines at once, as two lane slots do.
+    # Every lookup the lanes use must see only its own tree's processes (helper.sh owned_pids: command AND cwd), never a relative pattern alone.
+    repo=$(cd "$here/.." && pwd); tmp=$(mktemp -d); fake='import time; time.sleep(120)'; pa= pb=
+    mkdir -p "$tmp/a" "$tmp/b"
+    for t in a b; do
+      ( cd "$tmp/$t" && python3 -c "$fake" ubft root-node run --home test-nodes/root1 >/dev/null 2>&1 & )
+      ( cd "$tmp/$t" && python3 -c "$fake" reth node --datadir test-nodes/reth5/dd --home test-nodes/evm5 >/dev/null 2>&1 & )
+    done
+    sleep 1
+    fails=0
+    for pat in 'ubft root-node run --home test-nodes/root1' '--home test-nodes/evm5( |$)|test-nodes/reth5/dd'; do
+      for t in a b; do
+        got=$( cd "$tmp/$t" && source "$repo/helper.sh" && owned_pids "$pat" | while read -r p; do [ "$(readlink /proc/$p/cwd 2>/dev/null || lsof -a -p "$p" -d cwd -Fn | sed -n 's/^n//p')" = "$(cd "$tmp/$t" && pwd -P)" ] && echo "$p"; done | wc -l | tr -d ' ')
+        all=$( cd "$tmp/$t" && source "$repo/helper.sh" && owned_pids "$pat" | wc -l | tr -d ' ')
+        if [ "$all" = 1 ] && [ "$got" = 1 ]; then echo "  selftest PASS: tree $t sees only its own process for '$pat'"; else echo "  selftest FAIL: tree $t sees $all processes ($got of its own) for '$pat'" >&2; fails=$((fails+1)); fi
+      done
+    done
+    both=$(pgrep -f 'ubft root-node run --home test-nodes/root1' | while read -r p; do case "$(readlink /proc/$p/cwd 2>/dev/null)" in "$tmp"/*) echo "$p";; esac; done | wc -l | tr -d ' ')
+    [ "$(uname)" != Linux ] || [ "$both" = 2 ] || { echo "  selftest FAIL: the control (a name-only pgrep) should see both trees' roots, saw $both" >&2; fails=$((fails+1)); }
+    # static: the lane libraries and steps find processes through owned_pids, not a bare pgrep/ps pattern
+    bare=$(grep -nE '(^|[^_a-z])pgrep -f|pidof|ps -e|ps aux' "$repo/helper.sh" "$repo"/scripts/lib/{h3,q3,vr,h3-q3,q3-flow,m2-handoff,utb,agg,p85}-lib.sh "$repo"/scripts/*steps.sh "$repo"/scripts/vr-*.sh 2>/dev/null | grep -vE ':[0-9]+:\s*#|helper.sh:7[0-9][0-9]:|q3-lib.sh:2[67][0-9]:' || true)
+    [ -z "$bare" ] || { echo "  selftest FAIL: bare process pattern lookups (use owned_pids):" >&2; echo "$bare" >&2; fails=$((fails+1)); }
+    for p in $(pgrep -f 'time.sleep\(120\)' ); do case "$(readlink /proc/$p/cwd 2>/dev/null)" in "$tmp"/*) kill "$p" 2>/dev/null ;; esac; done
+    rm -rf "$tmp"; [ "$fails" = 0 ] || exit 1 ;;
   *) sed -n '2,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
 esac
