@@ -6,12 +6,14 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"log/slog"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/archive"
 	"github.com/unicitynetwork/bft-core/configuredprogress"
+	"github.com/unicitynetwork/bft-core/engineapi"
 	"github.com/unicitynetwork/bft-core/frontier"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/shardnode"
@@ -339,4 +341,44 @@ func TestExecutionRecoveryCancellationAndNewTarget(t *testing.T) {
 	_, err = r.Recover(context.Background(), nil)
 	require.NoError(t, err)
 	require.Equal(t, e.refs[6], e.head)
+}
+
+type feeProofFaultDuringReplay struct {
+	*replayExecutor
+	faults   []error
+	attempts int
+}
+
+func (e *feeProofFaultDuringReplay) Verify(ctx context.Context, b shardnode.Block, p shardnode.RoundParams) (shardnode.Status, error) {
+	e.attempts++
+	if len(e.faults) != 0 {
+		err := e.faults[0]
+		e.faults = e.faults[1:]
+		return shardnode.StatusSyncing, errors.Join(engineapi.ErrFeeProofUnavailable, err)
+	}
+	return e.replayExecutor.Verify(ctx, b, p)
+}
+
+func TestCertifiedRecoveryRetriesAndSurvivesLocalFeeProofFaults(t *testing.T) {
+	r, underlying, _ := replayFixture()
+	r.Limits.Retries = 1
+	var alert bytes.Buffer
+	r.Log = slog.New(slog.NewTextHandler(&alert, nil))
+	exec := &feeProofFaultDuringReplay{replayExecutor: underlying, faults: []error{
+		errors.New("malformed local proof"), engineapi.ErrFeeProofOversized,
+	}}
+	r.Executor = exec
+	_, err := r.Recover(t.Context(), nil)
+	require.ErrorIs(t, err, ErrRecoveryUnavailable)
+	require.False(t, r.Terminal(err))
+	require.Contains(t, err.Error(), engineapi.ErrFeeProofOversized.Error())
+	require.Contains(t, alert.String(), "execution recovery deferred after retries")
+	require.Equal(t, 2, exec.attempts)
+	require.Equal(t, underlying.refs[0], underlying.finalized)
+	require.Empty(t, underlying.verify, "the unavailable proof did not reach block verification")
+
+	head, err := r.Recover(t.Context(), nil)
+	require.NoError(t, err)
+	require.Equal(t, underlying.refs[5], head)
+	require.Equal(t, []uint64{1, 2, 3, 4, 5}, underlying.verify)
 }

@@ -85,6 +85,39 @@ func complete(t *testing.T, a *Authority, s Session, req Request) []byte {
 	return response
 }
 
+func TestSigningActivityIsScopedToTheCurrentSession(t *testing.T) {
+	f := newFixture(t, 1)
+	a, session := f.session(t)
+	req := f.assignment(t, 5, 11)
+	complete(t, a, session, req)
+
+	// The first observation includes signatures made before any scrape.
+	first := Activity(a)
+	require.True(t, first.Enrolled && first.SessionIssued)
+	require.False(t, first.SessionLastSign.Before(first.SessionIssuedAt))
+	require.False(t, first.SessionIssuedAt.IsZero())
+	require.EqualValues(t, 1, first.Signatures)
+	require.EqualValues(t, 1, first.SessionSignatures)
+
+	replacement, err := a.ReplaceSession()
+	require.NoError(t, err)
+	replaced := Activity(a)
+	require.Greater(t, replaced.Generation, first.Generation)
+	require.False(t, replaced.SessionIssuedAt.Before(first.SessionLastSign))
+	require.True(t, replaced.SessionLastSign.IsZero())
+	require.Zero(t, replaced.SessionSignatures)
+	require.Equal(t, first.Signatures, replaced.Signatures)
+
+	// Retained responses are replayed without a signature in the replacement session.
+	complete(t, a, replacement, req)
+	require.Zero(t, Activity(a).SessionSignatures)
+	complete(t, a, replacement, f.assignment(t, 6, 11))
+	current := Activity(a)
+	require.EqualValues(t, 2, current.Signatures)
+	require.EqualValues(t, 1, current.SessionSignatures)
+	require.False(t, current.SessionLastSign.Before(current.SessionIssuedAt))
+}
+
 func TestTheAssignedRoundIsTheLock(t *testing.T) {
 	ctx := context.Background()
 

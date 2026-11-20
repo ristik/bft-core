@@ -281,3 +281,68 @@ func TestChangeReadsVerifiedPayload(t *testing.T) {
 	require.Equal(t, c.PayloadHash, vrschema.PayloadHash(payload))
 	require.NoError(t, accs[0].Unused())
 }
+
+// Verify both sides of the frozen fee transition through real account and storage proofs.
+func TestFeeTransitionThroughParentProof(t *testing.T) {
+	type fee struct {
+		Floor     uint64 `json:"baseFeeFloor,string"`
+		Denom     uint64 `json:"changeDenominator"`
+		Collector string `json:"feeCollector"`
+	}
+	params := func(f fee) vrschema.FeeParams {
+		return vrschema.FeeParams{BaseFeeFloor: f.Floor, ChangeDenominator: f.Denom, FeeCollector: addr(t, f.Collector)}
+	}
+	count := 0
+	for _, v := range loadVectors(t, "arithmetic.json").Vectors {
+		if v.Op != "fee.transition" {
+			continue
+		}
+		count++
+		var in struct {
+			Previous fee
+			New      fee
+			BAck     uint64
+		}
+		var want struct {
+			EffectiveBlock uint64
+			Blocks         []struct {
+				Block       uint64
+				FN          fee
+				FNminus1    fee
+				Beneficiary string
+			}
+		}
+		require.NoError(t, json.Unmarshal(v.Input, &in))
+		require.NoError(t, json.Unmarshal(v.Expect, &want))
+		previous := vrschema.Fees{Previous: params(in.Previous), Current: params(in.Previous)}
+		current := vrschema.ApplyFeeBoundary(previous, params(in.New), in.BAck)
+		require.Equal(t, want.EffectiveBlock, current.EffectiveBlock)
+
+		world := func(fees vrschema.Fees) *evmstatetest.World {
+			words, err := fees.Words()
+			require.NoError(t, err)
+			slots := make(map[vrschema.Word]vrschema.Word)
+			for i, word := range words {
+				slots[vrschema.VRSlot(vrschema.SlotFeesPrevious+uint64(i))] = word
+			}
+			return evmstatetest.NewWorld(t, evmstatetest.Contract{Addr: vrschema.ValidatorRegistry, CodeHash: vrCode, Storage: slots})
+		}
+		before, after := world(previous), world(current)
+		for _, row := range want.Blocks {
+			parent := before
+			if row.Block > in.BAck {
+				parent = after
+			}
+			fees, err := ReadFees(t.Context(), parent, vrschema.ValidatorRegistry, vrCode, parent.Root())
+			require.NoError(t, err)
+			require.Equal(t, params(row.FN), vrschema.FeesFor(row.Block, fees))
+			require.Equal(t, params(row.FNminus1), vrschema.FeesFor(row.Block-1, fees))
+			require.Equal(t, addr(t, row.Beneficiary), vrschema.FeesFor(row.Block, fees).FeeCollector)
+		}
+		_, err := ReadFees(t.Context(), after, vrschema.ValidatorRegistry, vrCode, before.Root())
+		require.ErrorIs(t, err, evmstate.ErrProof)
+		_, err = ReadFees(t.Context(), after, vrschema.ValidatorRegistry, sealCode, after.Root())
+		require.ErrorIs(t, err, ErrState)
+	}
+	require.Equal(t, 1, count)
+}

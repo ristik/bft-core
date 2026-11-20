@@ -280,6 +280,9 @@ func (r *ExecutionRecovery) status(ctx context.Context, label string, fn func() 
 			return fmt.Errorf("%w: %s returned INVALID: %v", ErrRecoveryConflict, label, err)
 		}
 		if attempt == r.limits().Retries {
+			if err != nil && r.Log != nil {
+				r.Log.WarnContext(ctx, "execution recovery deferred after retries", "operation", label, "error", err)
+			}
 			return fmt.Errorf("%w: %s remains %s after %d retries: %v", ErrRecoveryUnavailable, label, s, attempt, err)
 		}
 		select {
@@ -834,8 +837,14 @@ func (r *ExecutionRecovery) verifyFetched(ctx context.Context, parent shardnode.
 	}); ok {
 		bindingCtx = historical.HistoricalContext(ctx)
 	}
-	if err := r.Executor.CheckBlockBinding(bindingCtx, b, p); err != nil {
+	err = shardnode.RetryBlockBinding(bindingCtx, func(ctx context.Context) error {
+		return r.Executor.CheckBlockBinding(ctx, b, p)
+	})
+	if err != nil {
 		if errors.Is(err, shardnode.ErrBlockBindingUnavailable) {
+			if r.Log != nil {
+				r.Log.WarnContext(ctx, "execution recovery deferred while local block binding is unavailable", "block", fmt.Sprintf("%x", b.Hash), "error", err)
+			}
 			return none(fmt.Errorf("%w: fetched block binding for %x: %w", ErrRecoveryUnavailable, b.Hash, err))
 		}
 		return none(fmt.Errorf("%w: fetched block binding for %x: %w", ErrRecoveryInvalid, b.Hash, err))

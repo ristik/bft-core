@@ -166,9 +166,11 @@ export VR_ROOT_FLAGS_FN=vr_root_flags
 
 vr_root_flags() { # <i> <ureth rpc>: the VR-mode roots: the genesis committee, the VR deployment, and the execution client VT-05b's root side reads
   # VT-09: the node does its member steps itself; its EVM key (the possession proof) is its paired EVM shard node's, as the validator configuration names it
-  local evmHolder="--vr-evm-keys test-nodes/evm$1/keys.json"
+  local rpc=$2 evmHolder="--vr-evm-keys test-nodes/evm$1/keys.json"
+  # The VT-12 EVM-stop test keeps root 1's VR reads on a healthy sibling while its own shard loses execution.
+  if [ "${MONITORING:-0}" = 1 ] && [ "$1" = 1 ]; then rpc=${MON_VR_ROOT1_RPC:-$rpc}; fi
   [ "${SIGNING:-local}" != authority ] || evmHolder="--vr-evm-authority-socket test-nodes/auth$1/pop.sock --vr-evm-authority-credential test-nodes/auth$1/pop.cred"
-  echo --genesis-identities "$VR_DIR/genesis-identities.json" --vr-deployment "$VR_DIR/vr-deployment.json" --pos-evm-rpc "$2" $evmHolder --vr-shard-rpc "http://$(evm_validator_rpc_addr "$1")"
+  echo --genesis-identities "$VR_DIR/genesis-identities.json" --vr-deployment "$VR_DIR/vr-deployment.json" --pos-evm-rpc "$rpc" $evmHolder --vr-shard-rpc "http://$(evm_validator_rpc_addr "$1")"
 }
 
 # #1216: pin the P85 election in authority <i> (its identity's id and the generation's election, network word and chain). The election is in the

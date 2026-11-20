@@ -1,0 +1,1222 @@
+{
+ "uid": "unicity-validator",
+ "title": "Unicity validator",
+ "tags": [
+  "unicity",
+  "validator"
+ ],
+ "schemaVersion": 39,
+ "version": 1,
+ "refresh": "15s",
+ "time": {
+  "from": "now-1h",
+  "to": "now"
+ },
+ "templating": {
+  "list": [
+   {
+    "name": "DS",
+    "type": "datasource",
+    "query": "prometheus",
+    "label": "Datasource"
+   },
+   {
+    "name": "validator",
+    "type": "query",
+    "label": "Validator",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "${DS}"
+    },
+    "query": {
+     "query": "label_values(unicity_build_info, validator)",
+     "refId": "v"
+    },
+    "refresh": 2,
+    "sort": 1
+   }
+  ]
+ },
+ "annotations": {
+  "list": []
+ },
+ "panels": [
+  {
+   "id": 1,
+   "type": "row",
+   "title": "Validator",
+   "gridPos": {
+    "x": 0,
+    "y": 0,
+    "w": 24,
+    "h": 1
+   },
+   "collapsed": false,
+   "panels": []
+  },
+  {
+   "id": 2,
+   "type": "stat",
+   "title": "Status verdict",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${DS}"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 1,
+    "w": 4,
+    "h": 4
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "unicity_vr_status_verdict{validator=\"$validator\"}",
+     "legendFormat": "verdict",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS}"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 1
+       },
+       {
+        "color": "red",
+        "value": 2
+       }
+      ]
+     },
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "0": {
+         "text": "ok"
+        },
+        "1": {
+         "text": "warning"
+        },
+        "2": {
+         "text": "critical"
+        },
+        "3": {
+         "text": "unknown"
+        }
+       }
+      }
+     ]
+    },
+    "overrides": []
+   },
+   "options": {}
+  },
+  {
+   "id": 3,
+   "type": "stat",
+   "title": "PoA state",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${DS}"
+   },
+   "gridPos": {
+    "x": 4,
+    "y": 1,
+    "w": 4,
+    "h": 4
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "unicity_vr_identity_state{validator=\"$validator\"}",
+     "legendFormat": "state",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS}"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "0": {
+         "text": "None"
+        },
+        "1": {
+         "text": "Applied"
+        },
+        "2": {
+         "text": "Admitted"
+        },
+        "3": {
+         "text": "Joining"
+        },
+        "4": {
+         "text": "Active"
+        },
+        "5": {
+         "text": "ExitRequested"
+        },
+        "6": {
+         "text": "Removing"
+        },
+        "7": {
+         "text": "Leaving"
+        },
+        "8": {
+         "text": "Exited"
+        },
+        "9": {
+         "text": "Parked"
+        }
+       }
+      }
+     ]
+    },
+    "overrides": []
+   },
+   "options": {}
+  },
+  {
+   "id": 4,
+   "type": "stat",
+   "title": "Committee member",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${DS}"
+   },
+   "gridPos": {
+    "x": 8,
+    "y": 1,
+    "w": 4,
+    "h": 4
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "unicity_vr_identity_member{validator=\"$validator\"}",
+     "legendFormat": "VR committee",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS}"
+     }
+    },
+    {
+     "refId": "B",
+     "expr": "unicity_root_member{validator=\"$validator\"}",
+     "legendFormat": "root follows as member",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS}"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "options": {}
+  },
+  {
+   "id": 5,
+   "type": "stat",
+   "title": "Module health",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${DS}"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 1,
+    "w": 4,
+    "h": 4
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "unicity_vr_module_health{validator=\"$validator\"}",
+     "legendFormat": "health",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS}"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     },
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "0": {
+         "text": "Healthy"
+        },
+        "1": {
+         "text": "Faulted"
+        },
+        "2": {
+         "text": "Stalled"
+        },
+        "3": {
+         "text": "Inconsistent"
+        }
+       }
+      }
+     ]
+    },
+    "overrides": []
+   },
+   "options": {}
+  },
+  {
+   "id": 6,
+   "type": "stat",
+   "title": "Upgrade required",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${DS}"
+   },
+   "gridPos": {
+    "x": 16,
+    "y": 1,
+    "w": 4,
+    "h": 4
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "unicity_upgrade_required{validator=\"$validator\"}",
+     "legendFormat": "required",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS}"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 1
+       }
+      ]
+     },
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "0": {
+         "text": "no"
+        },
+        "1": {
+         "text": "YES"
+        }
+       }
+      }
+     ]
+    },
+    "overrides": []
+   },
+   "options": {}
+  },
+  {
+   "id": 7,
+   "type": "stat",
+   "title": "Authority",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${DS}"
+   },
+   "gridPos": {
+    "x": 20,
+    "y": 1,
+    "w": 4,
+    "h": 4
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "unicity_authority_faulted{validator=\"$validator\"} + unicity_authority_key_lost{validator=\"$validator\"}",
+     "legendFormat": "faulted/lost",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS}"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     },
+     "mappings": [
+      {
+       "type": "value",
+       "options": {
+        "0": {
+         "text": "healthy"
+        }
+       }
+      }
+     ]
+    },
+    "overrides": []
+   },
+   "options": {}
+  },
+  {
+   "id": 8,
+   "type": "row",
+   "title": "Root chain",
+   "gridPos": {
+    "x": 0,
+    "y": 5,
+    "w": 24,
+    "h": 1
+   },
+   "collapsed": false,
+   "panels": []
+  },
+  {
+   "id": 9,
+   "type": "timeseries",
+   "title": "Root round and committed round",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${DS}"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 6,
+    "w": 8,
+    "h": 7
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "unicity_root_round{validator=\"$validator\"}",
+     "legendFormat": "round",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS}"
+     }
+    },
+    {
+     "refId": "B",
+     "expr": "unicity_root_committed_round{validator=\"$validator\"}",
+     "legendFormat": "committed",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS}"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "options": {}
+  },
+  {
+   "id": 10,
+   "type": "timeseries",
+   "title": "Round lag (about 3 when healthy)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${DS}"
+   },
+   "gridPos": {
+    "x": 8,
+    "y": 6,
+    "w": 8,
+    "h": 7
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "unicity_root_round_lag{validator=\"$validator\"}",
+     "legendFormat": "lag",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS}"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 30
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {}
+  },
+  {
+   "id": 11,
+   "type": "timeseries",
+   "title": "Votes missed and round timeouts (5m)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${DS}"
+   },
+   "gridPos": {
+    "x": 16,
+    "y": 6,
+    "w": 8,
+    "h": 7
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "increase(unicity_root_votes_missed_total{validator=\"$validator\"}[5m])",
+     "legendFormat": "missed {{reason}}",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS}"
+     }
+    },
+    {
+     "refId": "B",
+     "expr": "increase(unicity_root_round_timeouts_total{validator=\"$validator\"}[5m])",
+     "legendFormat": "timeouts",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS}"
+     }
+    },
+    {
+     "refId": "C",
+     "expr": "increase(unicity_root_proposals_total{validator=\"$validator\"}[5m])",
+     "legendFormat": "proposals",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS}"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "options": {}
+  },
+  {
+   "id": 12,
+   "type": "timeseries",
+   "title": "Peers connected vs expected",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${DS}"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 13,
+    "w": 8,
+    "h": 7
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "unicity_peers_connected{validator=\"$validator\"}",
+     "legendFormat": "connected {{job}} {{network}}",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS}"
+     }
+    },
+    {
+     "refId": "B",
+     "expr": "unicity_peers_expected{validator=\"$validator\"}",
+     "legendFormat": "expected {{job}} {{network}}",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS}"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "options": {}
+  },
+  {
+   "id": 13,
+   "type": "timeseries",
+   "title": "Root epoch",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${DS}"
+   },
+   "gridPos": {
+    "x": 8,
+    "y": 13,
+    "w": 8,
+    "h": 7
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "unicity_root_epoch{validator=\"$validator\"}",
+     "legendFormat": "root",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS}"
+     }
+    },
+    {
+     "refId": "B",
+     "expr": "unicity_vr_root_epoch{validator=\"$validator\"}",
+     "legendFormat": "VR",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS}"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "options": {}
+  },
+  {
+   "id": 14,
+   "type": "timeseries",
+   "title": "Committee size",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${DS}"
+   },
+   "gridPos": {
+    "x": 16,
+    "y": 13,
+    "w": 8,
+    "h": 7
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "unicity_root_committee_size{validator=\"$validator\"}",
+     "legendFormat": "root",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS}"
+     }
+    },
+    {
+     "refId": "B",
+     "expr": "unicity_vr_committee_size{validator=\"$validator\"}",
+     "legendFormat": "VR",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS}"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "options": {}
+  },
+  {
+   "id": 15,
+   "type": "row",
+   "title": "Shard and EVM",
+   "gridPos": {
+    "x": 0,
+    "y": 20,
+    "w": 24,
+    "h": 1
+   },
+   "collapsed": false,
+   "panels": []
+  },
+  {
+   "id": 16,
+   "type": "timeseries",
+   "title": "Shard certified lag (rounds)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${DS}"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 21,
+    "w": 8,
+    "h": 7
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "unicity_shard_certified_lag_rounds{validator=\"$validator\"}",
+     "legendFormat": "submitted - certified",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS}"
+     }
+    },
+    {
+     "refId": "B",
+     "expr": "ab_shardnode_certification_no_progress_age_seconds{validator=\"$validator\"}",
+     "legendFormat": "no-progress age (s)",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS}"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "options": {}
+  },
+  {
+   "id": 17,
+   "type": "timeseries",
+   "title": "EVM head lag (blocks)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${DS}"
+   },
+   "gridPos": {
+    "x": 8,
+    "y": 21,
+    "w": 8,
+    "h": 7
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "unicity_evm_head_lag_blocks{validator=\"$validator\"}",
+     "legendFormat": "public - local",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS}"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 5
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {}
+  },
+  {
+   "id": 18,
+   "type": "timeseries",
+   "title": "EVM heads",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${DS}"
+   },
+   "gridPos": {
+    "x": 16,
+    "y": 21,
+    "w": 8,
+    "h": 7
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "unicity_evm_public_head_number{validator=\"$validator\"}",
+     "legendFormat": "public",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS}"
+     }
+    },
+    {
+     "refId": "B",
+     "expr": "unicity_evm_local_head_number{validator=\"$validator\"}",
+     "legendFormat": "local (exporter)",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS}"
+     }
+    },
+    {
+     "refId": "C",
+     "expr": "unicity_evm_head_number{validator=\"$validator\"}",
+     "legendFormat": "shard node view",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS}"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "options": {}
+  },
+  {
+   "id": 19,
+   "type": "timeseries",
+   "title": "Public head age (s)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${DS}"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 28,
+    "w": 8,
+    "h": 7
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "unicity_evm_public_head_age_seconds{validator=\"$validator\"}",
+     "legendFormat": "age",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS}"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 120
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {}
+  },
+  {
+   "id": 20,
+   "type": "timeseries",
+   "title": "Local ureth up / executor ok",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${DS}"
+   },
+   "gridPos": {
+    "x": 8,
+    "y": 28,
+    "w": 8,
+    "h": 7
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "unicity_evm_local_up{validator=\"$validator\"}",
+     "legendFormat": "ureth answers",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS}"
+     }
+    },
+    {
+     "refId": "B",
+     "expr": "unicity_shard_executor_ok{validator=\"$validator\"}",
+     "legendFormat": "executor ok",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS}"
+     }
+    },
+    {
+     "refId": "C",
+     "expr": "unicity_shard_voting{validator=\"$validator\"}",
+     "legendFormat": "voting",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS}"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "options": {}
+  },
+  {
+   "id": 21,
+   "type": "timeseries",
+   "title": "Disk free ratio",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${DS}"
+   },
+   "gridPos": {
+    "x": 16,
+    "y": 28,
+    "w": 8,
+    "h": 7
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "unicity_disk_free_ratio{validator=\"$validator\"}",
+     "legendFormat": "{{job}} {{volume}}",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS}"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "percentunit",
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "red",
+        "value": null
+       },
+       {
+        "color": "orange",
+        "value": 0.03
+       },
+       {
+        "color": "green",
+        "value": 0.1
+       }
+      ]
+     }
+    },
+    "overrides": []
+   },
+   "options": {}
+  },
+  {
+   "id": 22,
+   "type": "row",
+   "title": "Registry and record counters",
+   "gridPos": {
+    "x": 0,
+    "y": 35,
+    "w": 24,
+    "h": 1
+   },
+   "collapsed": false,
+   "panels": []
+  },
+  {
+   "id": 23,
+   "type": "timeseries",
+   "title": "The four record counters",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${DS}"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 36,
+    "w": 12,
+    "h": 8
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "unicity_vr_record_root_target{validator=\"$validator\"}",
+     "legendFormat": "root target",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS}"
+     }
+    },
+    {
+     "refId": "B",
+     "expr": "unicity_vr_record_imported{validator=\"$validator\"}",
+     "legendFormat": "imported",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS}"
+     }
+    },
+    {
+     "refId": "C",
+     "expr": "unicity_vr_record_cursor{validator=\"$validator\"}",
+     "legendFormat": "VR cursor",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS}"
+     }
+    },
+    {
+     "refId": "D",
+     "expr": "unicity_vr_custody_record_cursor{validator=\"$validator\"}",
+     "legendFormat": "custody cursor",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS}"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "options": {}
+  },
+  {
+   "id": 24,
+   "type": "timeseries",
+   "title": "Record lags",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${DS}"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 36,
+    "w": 12,
+    "h": 8
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "unicity_vr_record_import_lag{validator=\"$validator\"}",
+     "legendFormat": "import lag",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS}"
+     }
+    },
+    {
+     "refId": "B",
+     "expr": "unicity_vr_record_application_lag{validator=\"$validator\"}",
+     "legendFormat": "application lag",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS}"
+     }
+    },
+    {
+     "refId": "C",
+     "expr": "unicity_vr_custody_cursor_minus_vr_cursor{validator=\"$validator\"}",
+     "legendFormat": "custody - VR (signed)",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS}"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "options": {}
+  },
+  {
+   "id": 25,
+   "type": "timeseries",
+   "title": "Open output state / progress left",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${DS}"
+   },
+   "gridPos": {
+    "x": 0,
+    "y": 44,
+    "w": 12,
+    "h": 7
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "unicity_vr_open_output_state{validator=\"$validator\"}",
+     "legendFormat": "output state",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS}"
+     }
+    },
+    {
+     "refId": "B",
+     "expr": "unicity_vr_open_output_progress_left{validator=\"$validator\"}",
+     "legendFormat": "progress left",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS}"
+     }
+    },
+    {
+     "refId": "C",
+     "expr": "unicity_vr_progress_to_next_boundary{validator=\"$validator\"}",
+     "legendFormat": "progress to next boundary",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS}"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "options": {}
+  },
+  {
+   "id": 26,
+   "type": "timeseries",
+   "title": "Authority: session, signatures",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "${DS}"
+   },
+   "gridPos": {
+    "x": 12,
+    "y": 44,
+    "w": 12,
+    "h": 7
+   },
+   "targets": [
+    {
+     "refId": "A",
+     "expr": "unicity_authority_session_issued{validator=\"$validator\"}",
+     "legendFormat": "session issued",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS}"
+     }
+    },
+    {
+     "refId": "B",
+     "expr": "unicity_authority_last_signature_age_seconds{validator=\"$validator\"}",
+     "legendFormat": "last signature age (s)",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS}"
+     }
+    },
+    {
+     "refId": "C",
+     "expr": "rate(unicity_authority_signatures_total{validator=\"$validator\"}[1m])",
+     "legendFormat": "signatures/s",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "${DS}"
+     }
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short"
+    },
+    "overrides": []
+   },
+   "options": {}
+  }
+ ]
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
@@ -198,4 +199,73 @@ func TestJournaledDifferentLeaderProposalDeclinesWithoutStopping(t *testing.T) {
 		require.NotEqual(t, "stopped", health.Snapshot().ExecutionRecovery)
 	}
 	require.Contains(t, reasons(), "leader_candidate_conflict_declined")
+}
+
+type bindingRetries struct {
+	shardnode.Executor
+	bindingCalls int
+	faults       int
+}
+
+func (e *bindingRetries) CheckBlockBinding(context.Context, shardnode.Block, shardnode.RoundParams) error {
+	e.bindingCalls++
+	if e.bindingCalls <= e.faults {
+		return shardnode.ErrBlockBindingUnavailable
+	}
+	return nil
+}
+
+func (e *bindingRetries) Verify(context.Context, shardnode.Block, shardnode.RoundParams) (shardnode.Status, error) {
+	return shardnode.StatusValid, nil
+}
+
+type countingFollowerJournal struct {
+	beforeWrite func()
+	calls       int
+}
+
+func (j *countingFollowerJournal) RetainCandidate(context.Context, shardnode.Block, shardnode.RoundParams, bool) error {
+	j.beforeWrite()
+	j.calls++
+	return nil
+}
+
+func TestJournaledFollowerRetriesBindingBeforeRetentionOrSigning(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		faults int
+	}{
+		{"one local proof failure", 1},
+		{"both attempts unavailable", 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			signer, err := abcrypto.NewInMemorySecp256K1Signer()
+			require.NoError(t, err)
+			exec := &bindingRetries{Executor: executortest.New(), faults: tc.faults}
+			genesis, err := exec.GenesisBlock(t.Context())
+			require.NoError(t, err)
+			proposal := followerProposal{shardnode.Block{
+				Number: 1, Hash: []byte("block hash"), ParentHash: genesis.Hash,
+				StateRoot: []byte("state root"), Raw: []byte("payload"),
+			}}
+			sub := &recordingSubmitter{}
+			round := shardnode.NewRound("follower", 8, types.ShardID{}, exec, proposal, signer, sub, nil)
+			round.SetAwaitTimeout(2 * time.Second)
+			journal := &countingFollowerJournal{beforeWrite: func() { require.Equal(t, 2, exec.bindingCalls) }}
+			round.SetProposalJournal(journal)
+			start := time.Now()
+			err = round.HandleCertificate(t.Context(), genesisUC(1000), tr(1, 0, "leader"))
+			require.Equal(t, 2, exec.bindingCalls)
+			require.GreaterOrEqual(t, time.Since(start), 500*time.Millisecond)
+			if tc.faults == 2 {
+				require.ErrorIs(t, err, shardnode.ErrBlockBindingUnavailable)
+				require.Zero(t, journal.calls)
+				require.Empty(t, sub.got)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, 1, journal.calls)
+			require.Len(t, sub.got, 1)
+		})
+	}
 }

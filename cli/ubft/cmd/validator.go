@@ -797,13 +797,13 @@ func validatorInit(cmd *cobra.Command, f *validatorInitFlags) error {
 func newValidatorCmd(base *baseFlags) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "validator",
-		Short: "Operate a validator: init, doctor, status, upgrade, apply, exit, rejoin, rotate",
+		Short: "Operate a validator: init, doctor, status, exporter, upgrade, apply, exit, rejoin, rotate",
 		Long: `The operator's side of the validator registry under proof of authority, in the Ethereum order:
 apply (deposit) -> the Foundation admits (activation at the next boundary) -> exit (voluntary exit) -> the Foundation confirms.
 Reads and transactions go to a public JSON-RPC endpoint only. Every transaction is previewed decoded and simulated first;
 --dry-run stops there.`,
 	}
-	cmd.AddCommand(validatorInitCmd(base), validatorDoctorCmd(base), validatorStatusCmd(base), validatorApplyCmd(base),
+	cmd.AddCommand(validatorInitCmd(base), validatorDoctorCmd(base), validatorStatusCmd(base), validatorExporterCmd(base), validatorApplyCmd(base),
 		validatorUpgradeCmd(base), validatorExitCmd(base), validatorRejoinCmd(base), validatorRotateCmd(base), validatorClaimCmd(base), validatorPosPublishCmd(base))
 	return cmd
 }
