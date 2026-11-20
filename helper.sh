@@ -753,6 +753,18 @@ function owned_pids() {
   return 0
 }
 
+# reth_node_pattern [binary] matches the node subcommand of a resolved client. A supervisor
+# that did not resolve its children's executables can match stock and commit-pinned clients.
+function reth_node_pattern() {
+  local binary=${1:-}
+  if [ -n "$binary" ]; then
+    binary=$(printf '%s' "$binary" | sed 's/[][(){}.^$*+?|\\]/\\&/g')
+    printf '(^|[[:space:]])%s[[:space:]]+node([[:space:]]|$)\n' "$binary"
+  else
+    printf '(^|[[:space:]/])(reth|unicity-reth(-[0-9a-f]{40}-[[:alnum:]_-]+)?)[[:space:]]+node([[:space:]]|$)\n'
+  fi
+}
+
 # stop_pidfile <pidfile> <command-regex> [signal] signals the process a pid file records only if it
 # is this checkout's (see owned_pid), and removes the pid file either way: a stale one is never
 # acted on, and never left for the next caller to act on.
