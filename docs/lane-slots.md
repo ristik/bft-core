@@ -23,27 +23,31 @@ to one. `acquire --profile P` (default `paired-default`; also `f6b`, `f6c`, `see
 (the table's classes: `core`; `neg` = the section-3 negative clients the default paired invocation starts; `f6c`, `seed`, `f8`) against the range and
 `ip_local_reserved_ports`, and refuses slots 1..3 on a conflict. On a default host slot 3 is refused (reth devp2p 33401..), slots 1 and 2 are not. **Slot 0 is
 exempt**: its historical ports have run for months and CI depends on them (f6c and seed listen in the range there). Every slot is covered instead by a **bind
-preflight**: right before a root, shard node, reth, or aggregator starts (`lane_port_preflight`, `scripts/lib/lane-slot.sh`), it checks that nothing listens on
-its ports (retrying 5 s for a node that just stopped) and fails with a clear message instead of colliding silently.
+preflight**: right before a root, shard node (P2P and RPC), reth (the paired lane's, section 3's negative clients, F6B's and F6C's, the F6B bystanders), the F6C root and
+shard nodes, or the aggregator starts (`lane_port_preflight`, `scripts/lib/lane-slot.sh`), it probes by an actual bind of 127.0.0.1:PORT (TCP, `SO_REUSEADDR` as the Go
+and Rust listeners set it), which also catches a socket that is bound but not listening. The lanes run reth with `--disable-discovery`, so no UDP listener is probed.
+A node just stopped may still hold its port for a moment: the probe retries for 5 s, then fails with a clear message. **The preflight cannot reserve a port**: another
+process can take it between the probe and the service's own bind, and that bind failure still fails the lane.
 
 Paths: `test-nodes/` (including the signing-authority sockets `test-nodes/authN/*.sock`) is relative to the tree, so **each lane needs its own tree copy**.
 `M2_RUN_LOG_DIR` and the VR `VR_EVIDENCE` default to a directory with a `-slotN` suffix off slot 0.
 
 ## Host lock and helper
 
-`scripts/lane-slot.sh acquire|release|status|ports|mongo|selftest`. The lock is `~/host-lock/slot-N.txt` (owner, tmux, tree, token, profile, ports, start).
-`acquire` needs a unique claim `--token` (no tokenless claims), picks the lowest free slot (or `--slot N`), writes the lock under a per-slot mutex (holder pid
-inside; a mutex whose pid is dead is broken by `acquire` and reported and cleared by `status`) and refuses an occupied slot. `release` needs the same `--owner` and
-`--token` and is atomic against `acquire`, so a delayed duplicate release cannot remove a newer claim; `--force` skips both after you checked the owner's
-processes. `status` also flags a lock whose tmux session (exact name) is gone.
+`scripts/lane-slot.sh acquire|release|status|ports|mongo|selftest`. The lock is `~/host-lock/slot-N.txt` (owner, tmux, tree, token, profile, ports, start), written
+and removed only while holding one host-wide `flock(1)` on `~/host-lock/.lanes.lock` (acquire, release and status each take it for their whole critical section,
+including the check that a token is unique across all slots; the kernel drops it when the holder dies, so there is nothing to clean up after a killed helper).
+`acquire` generates the claim token (a uuid; `--token` gives one), prints `SLOT TOKEN`, picks the lowest free slot (or `--slot N`) and refuses an occupied slot.
+`release` needs the same `--owner` and the claim's `--token`, so a delayed duplicate release cannot remove a newer claim; `--force` skips both after you checked the
+owner's processes. `status` also flags a lock whose tmux session (exact name) is gone. Needs `flock` (util-linux), i.e. Linux.
 
 Launcher: the same owner and token on acquire and release, an aborting acquire, the assignment apart from the `export`, and the Mongo teardown before the release:
 
 ```
 set -e
-owner=VT-07; token=$owner-$$-$(date +%s)
-slot=$(scripts/lane-slot.sh acquire --owner "$owner" --token "$token" --tmux vt07)   # aborts here when acquire fails
-export LANE_SLOT=$slot
+owner=VT-07
+claim=$(scripts/lane-slot.sh acquire --owner "$owner" --tmux vt07)   # aborts here when acquire fails
+read -r slot token <<<"$claim"; export LANE_SLOT=$slot
 trap 'scripts/lane-slot.sh mongo down ~/lane-mongo || true; scripts/lane-slot.sh release --owner "$owner" --token "$token"' EXIT
 scripts/lane-slot.sh mongo up ~/lane-mongo     # only for lanes with the aggregator (VR_AGG=1, UTB)
 ./scripts/reth-paired-devnet.sh 4 10
