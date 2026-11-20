@@ -230,6 +230,10 @@ type Observer struct {
 	Sources *Sources
 	Outputs *Outputs
 	Log     *slog.Logger
+	// OnPending, when set, receives the ScheduleActivation changes bound into the open output of every observed block (as activations in
+	// state Active, E and T as queued; none when there is no open output): the root's early warning (design section 7.4). It is telemetry
+	// only: nothing is enforced from it, and a change not yet bound into an output is not visible to a root.
+	OnPending func([]vrschema.Activation)
 
 	mu        sync.Mutex
 	primed    bool
@@ -256,6 +260,9 @@ func (o *Observer) Observe(ctx context.Context, c CertifiedEVM) error {
 	}
 	prev := o.prev
 	o.primed, o.lastRound, o.prev = true, c.RootRound, vrschema.Word{}
+	if o.OnPending != nil {
+		o.OnPending(PendingSchedules(out))
+	}
 	if out == nil {
 		return nil
 	}
@@ -279,4 +286,25 @@ func (o *Observer) Observe(ctx context.Context, c CertifiedEVM) error {
 		o.Log.Info("VR output published: source recorded", "result", fmt.Sprintf("%x", r[:8]), "evmBlock", c.BlockNumber, "certRootRound", c.RootRound)
 	}
 	return nil
+}
+
+// PendingSchedules are the ScheduleActivation changes bound into an output, as Active entries (the warning's view of what the next
+// handoff may commit); nil for no output. Verdicts are not known yet, so a change the fold will reject is included: telemetry only.
+func PendingSchedules(out *vrhandoff.Output) []vrschema.Activation {
+	if out == nil {
+		return nil
+	}
+	var res []vrschema.Activation
+	for _, c := range out.Changes {
+		if uint8(c.Kind) != vrschema.KindScheduleActivation {
+			continue
+		}
+		s, err := vrschema.DecodeSchedule(c.Payload)
+		if err != nil {
+			continue
+		}
+		res = append(res, vrschema.Activation{RuleID: s.RuleID, ReleaseDigest: s.ReleaseDigest, RootEpoch: s.RootEpoch, NotBeforeUcTime: s.NotBeforeUcTime,
+			State: vrschema.ActActive, ChangeID: c.ID})
+	}
+	return res
 }
