@@ -240,7 +240,7 @@ vrp_recovery() {
   # 3. the recovery: the roots return to K's committee (epoch 4), exact K, no receipts, supersedes J'
   build/ubft q3 trust-base --root-rpc "http://127.0.0.1:$(m2_rpc_port 1)" --epoch 3 --out test-nodes/trust-base-epoch3.json || { vrb_log "FAIL: the trust base of epoch 3"; return 1; }
   H3_ROOTS="$(seq -s ' ' 1 "$n")"
-  Q3_WEIGHTS="$(printf '1 %.0s' $(seq 1 "$n"))" Q3_NEXT_EPOCH=4 q3_trust_base_v3 4 || { vrb_log "FAIL: the recovery's trust base"; return 1; }
+  Q3_WEIGHTS="$(for _ in $(seq 1 "$n"); do printf '1 '; done | sed 's/ $//')" Q3_NEXT_EPOCH=4 q3_trust_base_v3 4 || { vrb_log "FAIL: the recovery's trust base"; return 1; }
   H3_ROOTS="$(seq -s ' ' 1 "$nj")"   # J''s roots run the recovery handoff; the retired joiner's root is not in epoch 3
   Q3_RECOVERY=1 Q3_SUPERSEDE=1 Q3_NEXT_EPOCH=4 Q3_ASSIGN_TAG=rec Q3_SUFFIX=-2 h3_retry_handoff 3 q3_attempt || { vrb_log "FAIL: the recovery handoff"; return 1; }
   Q3_EXPECT_SWITCHED="$(seq -s ' ' 1 "$n")" q3_install_n 4 || { vrb_log "FAIL: the roots did not install the recovery"; return 1; }
