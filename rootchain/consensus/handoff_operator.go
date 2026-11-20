@@ -1299,9 +1299,10 @@ func (x *ConsensusManager) handoffRecordsForRound(round uint64, parentQC *rctype
 	}
 	if x.vr != nil && len(control.VR) != 0 && phase == "endorsed" {
 		// an endorsed exact recovery needs no plan in memory to order its H
-		if records, ok, err := x.vrRecoveryCommit(round, parent, control); ok {
-			return records, err
-		}
+		// (routed here only for a recovery whose retained candidate identified it: if that lookup fails now, nothing is ordered, and the cached
+		// plan is never a substitute for the retained candidate)
+		records, _, err := x.vrRecoveryCommit(round, parent, control)
+		return records, err
 	}
 	plan, err := x.readyHandoff(expectedAttempt)
 	if err != nil {

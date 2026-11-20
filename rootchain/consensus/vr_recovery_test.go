@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -334,6 +335,17 @@ func TestVRRecoveryLeaderOrdersPrepareFreezeAndH(t *testing.T) {
 	records, err = x.handoffRecordsForRound(freeze.OrderedRound+2, qc)
 	require.NoError(t, err)
 	require.Empty(t, records, "no retained recovery candidate, a quorum-ready plan still cached: nothing is ordered")
+	calls := 0
+	x.vr.retained = func([]byte) ([]byte, error) {
+		calls++
+		if calls > 1 {
+			return nil, errors.New("storage error")
+		}
+		return plan.CandidatePreimage, nil
+	}
+	records, err = x.handoffRecordsForRound(freeze.OrderedRound+2, qc)
+	require.NoError(t, err)
+	require.Empty(t, records, "the second lookup fails: the cached quorum-ready plan does not stand in for it")
 	x.vr.retained = func([]byte) ([]byte, error) { return plan.CandidatePreimage, nil }
 	records, err = x.handoffRecordsForRound(freeze.OrderedRound+2, qc)
 	require.NoError(t, err)
