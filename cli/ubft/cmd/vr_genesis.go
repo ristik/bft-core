@@ -325,7 +325,8 @@ func vrPlan(in vrPlanInput) (vrGenesisInput, []evmassign.Identity, error) {
 	l := vrInputLimits{NMin: in.limits.NMin, NTarget: in.limits.NTarget, NMax: in.limits.NMax, VMax: vrschema.MaxCommittee, LMax: 1, RMax: 4,
 		MaxBatch: b1state.HookMaxRecords}
 	if in.pos != nil {
-		l.VMax = vrPosMaxPool // the PoS prototype's measured index ceiling (script/VRPosGenesis.s.sol MAX_POOL)
+		l.MaxBatch = in.profile.HRecords // the PoS-capable VR admits exactly the profile's H (a PoA generation keeps custody's ceiling)
+		l.VMax = vrPosMaxPool            // the PoS prototype's measured index ceiling (script/VRPosGenesis.s.sol MAX_POOL)
 		if l.NMax > vrPosMaxCommittee {
 			return out, nil, fmt.Errorf("%w: a PoS generation's nMax is at most %d (the contracts' measured limit), got %d", ErrVRGenesis, vrPosMaxCommittee, l.NMax)
 		}
@@ -962,6 +963,13 @@ func vrVerify(v vrVerifyInput) (vrRootDeployment, error) {
 	}
 	if hashes["governanceFacet"] == hashes["repairFacet"] || hashes["repairFacet"] == hashes["recordsFacet"] || hashes["governanceFacet"] == hashes["recordsFacet"] {
 		return fail("two facet roles carry the same code")
+	}
+	// a known build's cap tuple is bound to its runtime AND its facets (astra's caps ruling, item 3): the caps are compile-time constants in the core
+	// and the facets, so the measurement's tuple means nothing for a core that delegates to other facets
+	if gov, rep, rec, known := b1state.VRFacetsFor(hashes["registry"]); known {
+		if hashes["governanceFacet"] != gov || hashes["repairFacet"] != rep || hashes["recordsFacet"] != rec {
+			return fail("the allocated facets are not the ones the PoS-capable VR build binds to its caps")
+		}
 	}
 	composerHash, governorHash := hashes["composer"], hashes["governor"]
 	if in.Pos == nil && (lowerHex(composerHash[:]) != vrReviewedComposerCodeHash || !inertCode(codes["composer"])) {

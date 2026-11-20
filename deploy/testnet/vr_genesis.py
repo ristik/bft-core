@@ -144,7 +144,8 @@ def fresh_measurement(a, out, module_hash=None):
                                                         'host': socket.gethostname(),
                                                         'receivedUtc': datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds')}
     target = out / 'vr-hook-measurement-fresh.json'
-    env = dict(os.environ, VR_HOOK_MEASUREMENT=str(target), **({'VR_HOOK_MODULE_CODE_HASH': module_hash} if module_hash else {}))
+    # a PoS generation (a module hash is given) is measured on the PoS-capable build: its fixture, caps and H (ureth VR_HOOK_BUILD=pos)
+    env = dict(os.environ, VR_HOOK_MEASUREMENT=str(target), **({'VR_HOOK_MODULE_CODE_HASH': module_hash, 'VR_HOOK_BUILD': 'pos'} if module_hash else {}))
     command = ['cargo', 'test', '-p', 'reth-unicity-execution', '--features', 'test-utils', '--test', 'vr_hook', '--', '--ignored', '--exact',
                'vr_hook_measurement', '--nocapture']
     started = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds')
@@ -172,10 +173,11 @@ def pos_module_hash(contracts, work):
 
 def pos_measurement(a, out, module_hash, name):
     """ureth's complete-path measurement with the PoS module's code hash (VR_HOOK_MODULE_CODE_HASH; every module path of the measurement is the
-    cap-bounded test module, so the numbers are the generation's). Taken twice: the recorded one the profile is pinned from, the fresh one verify holds
+    cap-bounded test module, so the numbers are the generation's; VR_HOOK_BUILD=pos selects the PoS-capable VR build's fixture, caps and H = 16).
+    Taken twice: the recorded one the profile is pinned from, the fresh one verify holds
     the generation to."""
     target = out / name
-    env = dict(os.environ, VR_HOOK_MEASUREMENT=str(target), VR_HOOK_MODULE_CODE_HASH=module_hash)
+    env = dict(os.environ, VR_HOOK_MEASUREMENT=str(target), VR_HOOK_MODULE_CODE_HASH=module_hash, VR_HOOK_BUILD='pos')
     log = run('cargo', 'test', '-p', 'reth-unicity-execution', '--features', 'test-utils', '--test', 'vr_hook', '--', '--ignored', '--exact',
               'vr_hook_measurement', '--nocapture', cwd=Path(a.ureth).resolve(), env=env)
     (out / (name + '.log')).write_text(log)
