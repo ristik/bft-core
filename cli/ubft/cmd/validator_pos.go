@@ -145,7 +145,7 @@ func validatorApplyPoS(cmd *cobra.Command, f *txFlags, pf *posFlags) error {
 			LotCount            uint32
 			RetirementRequested bool
 		}
-		if err := ch.vr.CallPos(ctx, custody, vrclient.CustodyABI, "positions", &pos, id); err != nil {
+		if err := ch.vr.CallPosMulti(ctx, custody, vrclient.CustodyABI, "positions", &pos, id); err != nil {
 			return nil, err
 		}
 		var d struct {
@@ -153,7 +153,7 @@ func validatorApplyPoS(cmd *cobra.Command, f *txFlags, pf *posFlags) error {
 			BindingHash [32]byte
 			NextNonce   uint64
 		}
-		if err := ch.vr.CallPos(ctx, election, vrclient.PosElectionABI, "delegation", &d, id, pos.Generation); err != nil {
+		if err := ch.vr.CallPosMulti(ctx, election, vrclient.PosElectionABI, "delegation", &d, id, pos.Generation); err != nil {
 			return nil, err
 		}
 		req := vrclient.DelegationRequest{Id: id, Generation: pos.Generation, RoleNonce: pos.RoleNonce, DelegationNonce: d.NextNonce, Expiry: math.MaxUint64,
@@ -190,7 +190,7 @@ func validatorApplyPoS(cmd *cobra.Command, f *txFlags, pf *posFlags) error {
 			LotCount            uint32
 			RetirementRequested bool
 		}
-		if err := ch.vr.CallPos(ctx, custody, vrclient.CustodyABI, "positions", &pos, id); err != nil {
+		if err := ch.vr.CallPosMulti(ctx, custody, vrclient.CustodyABI, "positions", &pos, id); err != nil {
 			return err
 		}
 		fmt.Fprintf(w, "identity %d is registered in VR\n", id)
@@ -348,7 +348,7 @@ goes to the address that received it (the withdrawal address); this command clai
 				LotCount            uint32
 				RetirementRequested bool
 			}
-			if err := ch.vr.CallPos(ctx, custody, vrclient.CustodyABI, "positions", &generation, id); err != nil {
+			if err := ch.vr.CallPosMulti(ctx, custody, vrclient.CustodyABI, "positions", &generation, id); err != nil {
 				return err
 			}
 			var lots []*big.Int

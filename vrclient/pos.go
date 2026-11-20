@@ -130,6 +130,27 @@ func (c *Client) posPublishCall(ctx context.Context, to ethcommon.Address, metho
 	return c.call(ctx, to, PosPublishABI, method, out, args...)
 }
 
+// CallPosMulti is an eth_call of a view with several return values, copied into out (a pointer to a struct whose exported fields carry the
+// return names).
+func (c *Client) CallPosMulti(ctx context.Context, to ethcommon.Address, a abi.ABI, method string, out any, args ...any) error {
+	data, err := a.Pack(method, args...)
+	if err != nil {
+		return fmt.Errorf("%w: packing %s: %v", ErrVR, method, err)
+	}
+	ret, err := c.CallRaw(ctx, to, data)
+	if err != nil {
+		return fmt.Errorf("%s: %w", method, err)
+	}
+	if len(ret) == 0 {
+		return fmt.Errorf("%w: %s at %s returned nothing", ErrVR, method, to.Hex())
+	}
+	vals, err := a.Methods[method].Outputs.Unpack(ret)
+	if err != nil {
+		return fmt.Errorf("%w: decoding %s: %v", ErrVR, method, err)
+	}
+	return a.Methods[method].Outputs.Copy(out, vals)
+}
+
 // OpenResult is the election's unresolved result, zero when none; FrozenMembers its members; PopDigest what a member's EVM key signs.
 func (c *Client) OpenResult(ctx context.Context, election ethcommon.Address) (rid [32]byte, err error) {
 	return rid, c.posPublishCall(ctx, election, "openResult", &rid)
