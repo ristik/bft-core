@@ -24,8 +24,9 @@ Over any rolling window of **ten eligible EVM blocks**:
 - against **160 application slots** (10 blocks x H = 16) when work is available.
 
 That leaves a service surplus of 88 slots per window and bounds the accumulated backlog to one burst plus the import cap plus the steady
-arrivals. If the published limit applies only to background traffic, budget the handoff records separately and on top: the qualification test
-adds them (an election's Ack, Boundary and incumbent Closure) to the stream.
+arrivals. If the published limit applies only to background traffic, budget the handoff records separately and on top: the **overload** run
+of the qualification test adds them (an election's Ack, Boundary and incumbent Closure) on top of the stream; the at-the-limit run counts them
+inside the allowance.
 
 Planning assumptions behind the numbers, not guarantees: an EVM block about every **10 s** and a root round about every **1 s**, so about 10 root
 blocks per EVM block. The limit is tight in those terms: 72 arrivals per ten EVM blocks is 0.72 per root block on average, a steady 1.6 per root
@@ -49,7 +50,7 @@ handles that ordering; a custody lead alone needs no intervention. Compare the c
 difference". Also record the **eligible-block cadence** (blocks per minute, gaps), the VR **module health**
 (Healthy / Faulted / Stalled / Inconsistent), and the election state (due, reserved, open output).
 
-The qualification run observed peaks of 91 (import lag), 64 (application lag) and 75 (backlog). They were taken at different points in the block
+The **overload** run observed peaks of 91 (import lag), 64 (application lag) and 75 (backlog); the at-the-limit run 89, 61 and 73. They were taken at different points in the block
 and are fixture observations, **not alarm thresholds**.
 
 ## Alerts
