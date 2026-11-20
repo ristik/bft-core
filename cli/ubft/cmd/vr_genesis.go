@@ -474,8 +474,8 @@ type vrDeploymentFile struct {
 	Module                  string `json:"module"`
 	ModuleCodeHash          string `json:"moduleCodeHash"`
 	ModuleTag               string `json:"moduleTag"`
-	Composer                string `json:"composer"`
-	ComposerCodeHash        string `json:"composerCodeHash"`
+	Composer                string `json:"composer,omitempty"`
+	ComposerCodeHash        string `json:"composerCodeHash,omitempty"`
 	Governor                string `json:"governor"`
 	GovernorCodeHash        string `json:"governorCodeHash"`
 	CommitteeDigest         string `json:"committeeDigest"`
