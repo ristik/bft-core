@@ -31,7 +31,7 @@ vrp_evm_key_args() {
   for i in 1 2 3 4; do
     eid=$(python3 -c "import json;print(json.load(open('$VR_DIR/genesis-identities.json'))[$((i - 1))]['evmNodeId'])")
     for h in test-nodes/evm*/; do
-      [ "$(build/ubft node-id --home "$h" 2>/dev/null | tail -n1)" = "$eid" ] && ids+=(--evm-keys "$i=$PWD/${h%/}keys.json")
+      [ "$(build/ubft node-id --home "$h" 2>/dev/null | tail -n1)" = "$eid" ] && ids+=(--evm-keys "$i=$PWD/${h%/}/keys.json")
     done
   done
   ids+=(--evm-keys "$vrj_id=$PWD/test-nodes/evm$vrj_id/keys.json")
