@@ -149,6 +149,8 @@ type vrHandoff struct {
 	recoveryEligible func(*storage.ExecutedBlock, evmassign.Candidate) error
 	// retained is the retained candidate of a body (the block store's when nil; replaced in tests)
 	retained func(bodyID []byte) ([]byte, error)
+	// resolved says whether the branch ending at the round has resolved (closed or acknowledged) the result (the block store's when nil; replaced in tests)
+	resolved func(parentRound uint64, result [32]byte) bool
 }
 
 // vrOperator is the sender identity of the loopback operator endpoints.
@@ -774,6 +776,19 @@ func (x *ConsensusManager) vrRecordsForRound(round uint64, parent *storage.Execu
 		if derr != nil || !derivable || d.Digest != plan.Intent {
 			x.log.Debug("VR handoff: the planned intent is not the one derivable at this parent", "round", round, "error", derr)
 			return nil, nil
+		}
+		// A result the branch already resolved (a recovery superseded it, or it was acknowledged) is never prepared again, though VR's output on the
+		// EVM may still read Published until the EVM imports the record that resolved it: a Prepare freezes that very EVM, so it would keep the
+		// record from ever arriving, and its Freeze is refused (#1221 live run).
+		if rid := d.Intent.Source.ResultID; len(rid) == 32 {
+			resolved := func(r uint64, id [32]byte) bool { return x.blockStore().RejectionResolved(r, id) }
+			if v.resolved != nil {
+				resolved = v.resolved
+			}
+			if resolved(parentQC.GetRound(), [32]byte(rid)) {
+				x.log.Info("VR handoff: the planned result is already resolved at this parent; no Prepare", "round", round, "attempt", plan.Attempt)
+				return nil, nil
+			}
 		}
 		// the activation time gate (design 7.1): the Prepare's UC time is at least T of every effective schedule with E <= e_J + 1
 		if q.Root != nil {

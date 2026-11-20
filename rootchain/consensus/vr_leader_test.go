@@ -125,6 +125,17 @@ func TestVRRecordsForRoundOrdersThePrepareOnlyWhenItsChecksHold(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, recs, 1, "every check holds: the Prepare is ordered")
 
+	// a result the branch already resolved is not prepared again (#1221)
+	derived.Intent.Source.ResultID = bytes.Repeat([]byte{0x52}, 32)
+	resolved := true
+	v.resolved = func(uint64, [32]byte) bool { return resolved }
+	recs, _ = x.vrRecordsForRound(10, parent, qc)
+	require.Empty(t, recs, "the result is resolved: no Prepare")
+	resolved = false
+	recs, _ = x.vrRecordsForRound(10, parent, qc)
+	require.Len(t, recs, 1)
+	derived.Intent.Source.ResultID = nil
+
 	derived.Digest = [32]byte{0xdd}
 	recs, _ = x.vrRecordsForRound(10, parent, qc)
 	require.Empty(t, recs, "the planned intent is not the one derivable at this parent")
