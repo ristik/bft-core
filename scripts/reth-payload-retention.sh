@@ -13,12 +13,13 @@
 # Needs a pinned reth, curl, openssl, python3, and test-nodes/evm-genesis.json.
 
 set -uo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/lane-slot.sh" || exit 2   # LANE_SLOT: every port below is shifted into this lane's slot
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 pinnedRethCommit=189c0df32617afc488e0f091dbface1bd72cceb4
 genesis=test-nodes/evm-genesis.json
-enginePort=18951
-ethPort=18945
+enginePort=$((18951+LANE_PORT_OFFSET))
+ethPort=$((18945+LANE_PORT_OFFSET))
 
 pass() { echo "  PASS: $1"; }
 fail() { echo "  FAIL: $1"; failures=$((failures + 1)); }
@@ -70,7 +71,7 @@ startReth() {
   reth node --chain "$genesis" --datadir "$work/dd" \
     --authrpc.jwtsecret "$jwt" --authrpc.addr 127.0.0.1 --authrpc.port "$enginePort" \
     --http --http.addr 127.0.0.1 --http.port "$ethPort" --http.api eth,net,web3 \
-    --disable-discovery --ipcdisable --port 30699 >>"$work/reth.log" 2>&1 &
+    --disable-discovery --ipcdisable --port $((30699+LANE_PORT_OFFSET)) >>"$work/reth.log" 2>&1 &
   rethPid=$!
   disown "$rethPid" 2>/dev/null || true   # keep the shell from reporting the kill as an abort
   local waited=0

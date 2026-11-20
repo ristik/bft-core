@@ -8,7 +8,7 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-ETH_BASE = 18545
+ETH_BASE = 18545 + int(__import__('os').environ.get('LANE_PORT_OFFSET', '0'))   # the lane slot (scripts/lib/lane-slot.sh)
 COLLECTOR = "0x000000000000000000000000000000000000dead"
 
 

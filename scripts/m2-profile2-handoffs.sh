@@ -37,13 +37,13 @@ if [ "${M2A_FINAL_RESTORE:-0}" = 1 ]; then
   m2_wait_certified_idle 1 || return 1
 fi
 m2_config_only_handoff 2 '1 2 3 4' \
-  'http://127.0.0.1:25866,http://127.0.0.1:25867,http://127.0.0.1:25868,http://127.0.0.1:25869' || return 1
+  "http://127.0.0.1:$((25866+LANE_PORT_OFFSET)),http://127.0.0.1:$((25867+LANE_PORT_OFFSET)),http://127.0.0.1:$((25868+LANE_PORT_OFFSET)),http://127.0.0.1:$((25869+LANE_PORT_OFFSET))" || return 1
 if [ "${F8_MIXED_LANE:-0}" = 1 ]; then
   echo "F8 mixed lane completed one root handoff while all aggregator shards remained active"
   return 0
 fi
 m2_config_only_handoff 3 '1 2 3 4' \
-  'http://127.0.0.1:25866,http://127.0.0.1:25867,http://127.0.0.1:25868,http://127.0.0.1:25869' || return 1
+  "http://127.0.0.1:$((25866+LANE_PORT_OFFSET)),http://127.0.0.1:$((25867+LANE_PORT_OFFSET)),http://127.0.0.1:$((25868+LANE_PORT_OFFSET)),http://127.0.0.1:$((25869+LANE_PORT_OFFSET))" || return 1
 if [ "${M2A_FINAL_RESTORE:-0}" = 1 ]; then
   # M2a final restore on the fresh-B1 layout. A V3 handoff needs a readiness receipt from EVERY successor entity, so validator 1 is wiped after the second
   # handoff (not before the first): it comes back from nothing but its signing authority, the genesis trust base and a surviving validator's archive, and
