@@ -35,7 +35,7 @@ with tempfile.TemporaryDirectory(prefix='tnops-validation-',dir='/tmp') as tmp:
         generation=base/f'tn-ceremony-{i}'
         subprocess.run([sys.executable,str(HERE/'generate.py'),'--out',str(generation),'--validators','3',
             '--ubft',str(a.ubft.resolve()),'--keygen',str(a.keygen.resolve()),'--b1genesis',str(a.b1genesis.resolve()),'--images',str(images),
-            '--offline-validation','--captcha-sitekey','fixture','--captcha-secret-file',str(base/'captcha'),'--block-interval-ms','0'],check=True,stdout=subprocess.DEVNULL)
+            '--offline-validation','--captcha-sitekey','fixture','--captcha-secret-file',str(base/'captcha'),'--block-interval-ms','0','--no-utb'],check=True,stdout=subprocess.DEVNULL)
         subprocess.run(['docker','compose','-f',str(generation/'compose.yaml'),'--profile','OFFLINE-VALIDATION-DO-NOT-START','config','--quiet'],check=True)
         flags_ok(generation)
         if a.check_prometheus:
@@ -87,7 +87,7 @@ with tempfile.TemporaryDirectory(prefix='tnops-validation-',dir='/tmp') as tmp:
         generation=base/'tn-ceremony-pos'
         subprocess.run([sys.executable,str(HERE/'generate.py'),'--out',str(generation),'--validators','4',
             '--ubft',str(a.ubft.resolve()),'--keygen',str(a.keygen.resolve()),'--b1genesis',str(a.b1genesis.resolve()),'--images',str(images),
-            '--offline-validation','--captcha-sitekey','fixture','--captcha-secret-file',str(base/'captcha'),'--block-interval-ms','0',
+            '--offline-validation','--captcha-sitekey','fixture','--captcha-secret-file',str(base/'captcha'),'--block-interval-ms','0','--no-utb',
             '--pos','--pos-contracts',str(a.pos_contracts.resolve())],check=True,stdout=subprocess.DEVNULL)
         subprocess.run(['docker','compose','-f',str(generation/'compose.yaml'),'--profile','OFFLINE-VALIDATION-DO-NOT-START','config','--quiet'],check=True)
         flags_ok(generation)

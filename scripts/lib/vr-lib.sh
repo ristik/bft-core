@@ -5,6 +5,7 @@
 #
 #   vr_lane_conf            the EVM shard configuration pins VR (validator_registry, validator_registry_code_hash) from the measurement
 #   vr_profile_args         the b1-profile flags of a VR generation (both hooks on VR, priced from the measurement)
+#   vr_utb_args             the vr-genesis flags of the UTB genesis entry (VR_UTB=1)
 #   vr_prepare_genesis      dev keys -> vr-genesis plan -> contracts genesis (test-nodes/vr/*)
 #   vr_merge_alloc <src>    adds the VR accounts and the dev premine to a genesis source's alloc
 #   vr_verify <genesis> <full-conf>   vr-genesis verify of the finished set; writes the roots' --vr-deployment
@@ -63,6 +64,10 @@ PY
   echo "vr: the EVM shard configuration pins VR $(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["registryCodeHash"])' "$VR_MEASUREMENT")"
 }
 
+# VR_UTB=1 (the default, reth-paired-devnet.sh): plan emits the UTB genesis entry and its pin where the roots, shard nodes and aggregator read them
+# (test-nodes/utb-genesis.cbor, utb-genesis.id: the files scripts/lib/utb-lib.sh uses), and verify checks them against the epoch-1 trust base.
+vr_utb_args() { [ "${VR_UTB:-0}" != 1 ] || echo --utb-genesis test-nodes/utb-genesis.cbor --utb-genesis-id test-nodes/utb-genesis.id; }
+
 vr_profile_args() { echo --vr-hook-measurement "$VR_MEASUREMENT"; }
 
 vr_network_word() { printf '0x%s\n' "$(printf 'unicity.dev.vr.%s' "$VR_GENERATION" | shasum -a 256 | cut -d' ' -f1)"; }
@@ -89,13 +94,13 @@ vr_plan() { # <genesis assignment id: only a PoS plan carries it>
   if [ "${VR_POS:-0}" = 1 ]; then
     local g; g=$(build/ubft trust-base utb-manifest --trust-base test-nodes/trust-base.json --out-dir "$VR_DIR/root-identity" | sed -n 's/^root genesis id *\(0x[0-9a-f]\{64\}\)$/\1/p')
     [ -n "$g" ] || vr_die "the manifest tool printed no root genesis id" || return 1
-    pos=(--pos --limits 4,4,5 --pos-bond-unit 100000000000000000000 --pos-treasury 0x00000000000000000000000000000000000000ee
+    pos=(--pos --limits "${VR_POS_LIMITS:-4,5,5}" --pos-bond-unit 100000000000000000000 --pos-treasury 0x00000000000000000000000000000000000000ee
          --pos-root-genesis "$g" --pos-assignment-id "$1" --pos-cadence-rounds "${VR_POS_CADENCE_ROUNDS:-400}" --pos-cadence-seconds "${VR_POS_CADENCE_SECONDS:-300}")
   fi
   build/ubft vr-genesis plan --trust-base test-nodes/trust-base.json --shard-conf "test-nodes/shard-conf-${partitionID:-8}_0.json" \
     --bindings "$VR_DIR/genesis-bindings.json" --owners "$VR_DIR/dev-keys/owners.json" --b1-profile test-nodes/b1-profile.json \
     --network-word "$(vr_network_word)" --governor-signers "$(tr -d '\n' <"$VR_DIR/dev-keys/signers.txt")" --fee-collector "$(vr_fee_collector)" \
-    --out-input "$VR_DIR/input.json" --out-identities "$VR_DIR/genesis-identities.json" "${pos[@]}"
+    --out-input "$VR_DIR/input.json" --out-identities "$VR_DIR/genesis-identities.json" "${pos[@]}" $(vr_utb_args) || return 1
 }
 
 vr_contracts_genesis() {
@@ -153,7 +158,7 @@ vr_verify() { # <finalized genesis> <full shard conf>
     --trust-base test-nodes/trust-base.json --b1-profile test-nodes/b1-profile.json --genesis-identities "$VR_DIR/genesis-identities.json" \
     --vr-hook-measurement "$VR_FRESH_MEASUREMENT" --ureth-flags "$(URETH_GENESIS_SPEC=$1 vr_ureth_vector)" \
     --fee-collector "$(vr_fee_collector)" --funded-accounts "$VR_DIR/funded-accounts.json" --dev-generation "$VR_GENERATION" \
-    --out-root-deployment "$VR_DIR/vr-deployment.json" || vr_die "vr-genesis verify refused the generation" || return 1
+    --out-root-deployment "$VR_DIR/vr-deployment.json" $(vr_utb_args) || vr_die "vr-genesis verify refused the generation" || return 1
 }
 
 # the name m2_start_root calls a restarted VR root's flags through (scripts/lib/m2-handoff-lib.sh)

@@ -42,7 +42,8 @@ utb_agg_env() { # K (1-based)
   # BFT_RPC_ADDRESS stays the live root's operator RPC that start_agg sets (scripts/lib/agg-lib.sh): in UTB mode the aggregator takes its trust bases from the signed history, never from
   # root REST, but it reads the successor shard configuration of a validator-registry kind 6 or 8 change from the root's guarded POST /api/v1/q3/shard-conf there (its checkpoint is per
   # aggregator, in its own directory). JSON logs: the evidence reads the log lines by their exact messages (the markers of the aggregator's UTB history code: internal/bft/utb.go).
-  echo "UTB_GENESIS_FILE=$PWD/test-nodes/utb-genesis.cbor UTB_GENESIS_ID=$(utb_pin) UTB_ENTRIES_DB=$PWD/test-nodes/utb-agg$k.db LOG_LEVEL=debug LOG_FORMAT=json LOG_ENABLE_JSON=true"
+  # one assignment per line: the launcher reads them into an array (a read loop), so a path with spaces is never split
+  printf '%s\n' "UTB_GENESIS_FILE=$PWD/test-nodes/utb-genesis.cbor" "UTB_GENESIS_ID=$(utb_pin)" "UTB_ENTRIES_DB=$PWD/test-nodes/utb-agg$k.db" LOG_LEVEL=debug LOG_FORMAT=json LOG_ENABLE_JSON=true
 }
 # The aggregator's read-only binary history range (design 11.3 item 4): GET /api/v1/trustbases?from=E[&to=E]..., the PR6 response codec. The same endpoint serves the
 # lane's reference client; port is the aggregator's (agg_port from scripts/lib/agg-lib.sh when it is loaded).

@@ -193,7 +193,7 @@ The faucet's settings are generator options: `--faucet-payout` (UCT per claim, d
 A public generation behind one name (e.g. pos.staging.unicity.network):
 
 ```
-generate.py --out /srv/testnet/tn-NAME ... --pos --utb [--faucet-subnet A --edge-subnet B]
+generate.py --out /srv/testnet/tn-NAME ... --pos [--no-utb] [--faucet-subnet A --edge-subnet B]
 rehearse.py --generation G --evidence E --stages up,identity,first-tx,pos-smoke
 docker compose -f G/compose.yaml --project-directory G up -d --no-deps signer
 bridge/nb2/deploy_nb2.py G --nb2-evidence BIN   # the native bridge v2 (bridge/README.md)
@@ -504,4 +504,4 @@ required above. Local validation is deferred to PR CI for this revision.
 
 ### Signed trust-base history (UTB) profile
 
-`generate.py --utb` gives every root, shard node and the aggregator the signed-history profile with one pin (the genesis EntryID in `network/utb-genesis.id`, passed as its own argument). `--utb-aggregator integration` (default) is the integration aggregator (genesis entry file, own append-only store); `--utb-aggregator upstream` is the upstream-facing aggregator (a one-entry tagged bundle `network/utb-bundle.cbor`, `UTB_EXPECTED_NETWORK`, its history in its MongoDB). The images must be built with the matching `build-images.py --aggregator-variant` (pins `aggregator-go` / `aggregator-go-upstream`); `generate.py` refuses a mismatch. After the handoff stages, the rehearsal stage `utb-live` checks that the aggregator's history holds exactly the roots' epochs, each entry admitted once, nothing refused and no version 1 trust base consulted.
+`generate.py --utb` (ON by default since the VR/UTB work; `--no-utb` generates the package without the profile, as the hosted rehearsals still do) gives every root, shard node and the aggregator the signed-history profile with one pin (the genesis EntryID in `network/utb-genesis.id`, passed as its own argument). `--utb-aggregator integration` (default) is the integration aggregator (genesis entry file, own append-only store); `--utb-aggregator upstream` is the upstream-facing aggregator (a one-entry tagged bundle `network/utb-bundle.cbor`, `UTB_EXPECTED_NETWORK`, its history in its MongoDB). The images must be built with the matching `build-images.py --aggregator-variant` (pins `aggregator-go` / `aggregator-go-upstream`); `generate.py` refuses a mismatch. After the handoff stages, the rehearsal stage `utb-live` checks that the aggregator's history holds exactly the roots' epochs, each entry admitted once, nothing refused and no version 1 trust base consulted.

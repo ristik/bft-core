@@ -118,6 +118,7 @@ vrb_main() {
     fi
   fi
   vrb_log "roots: $(vrb_root_rpcs | tr '\n' ' ')"
+  if [ "${VR_UTB:-0}" = 1 ] && [ "${VR_AGG:-0}" = 1 ]; then source scripts/vr-utb-steps.sh; vru_before || return 1; fi
   if [ "${VR_RESTART_BETWEEN:-0}" = 1 ]; then vrb_hold 1 || return 1; fi
   if [ "${VR_RESTART_EARLY:-0}" = 1 ]; then vrb_hold 2 || return 1; fi
   if [ "${VR_POS:-0}" = 1 ] && [ "${VR_JOINER:-0}" != 1 ]; then
@@ -219,9 +220,10 @@ EOF
   if [ "${VR_JOINER:-0}" = 1 ]; then vrj_validates || return 1; fi
   if [ "${VR_POS:-0}" = 1 ]; then
     vrp_rotated || return 1
-    if [ "${UTB_LANE:-0}" = 1 ]; then vrp_utb 2 || return 1; fi
+    if [ "${UTB_LANE:-0}" = 1 ] || [ "${VR_UTB:-0}" = 1 ]; then vrp_utb || return 1; fi
     if [ "${VR_POS_RECOVERY:-0}" = 1 ]; then vrp_recovery || return 1; fi
   fi
+  if [ "${VR_UTB:-0}" = 1 ] && [ "${VR_AGG:-0}" = 1 ]; then vru_after || return 1; fi
   for i in $(seq 1 "${validators:-4}") $([ "${VR_JOINER:-0}" = 1 ] && echo 5); do
     grep -E 'VR handoff|VR output published|root handoff outcome|switched|epoch' "test-nodes/root$i/debug.log" | tail -n 400 >"$VR_EVIDENCE/root$i-vr.log"
     cp "test-nodes/root$i/vr-member.json" "$VR_EVIDENCE/root$i-vr-member.json" 2>/dev/null || true

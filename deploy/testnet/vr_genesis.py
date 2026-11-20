@@ -53,7 +53,7 @@ POS_TREASURY = '0x00000000000000000000000000000000000000ee'
 POS_REWARD_FUNDING = 10_000 * 10**18
 POS_REWARD_RATE = 10**18
 POS_CADENCE = (400, 300)
-POS_LIMITS = '4,4,5'
+POS_LIMITS = '4,5,5'   # nMin,nTarget,nMax: nTarget 5 so the fifth identity (the joiner) is elected
 
 
 class VRGenesisError(RuntimeError):
@@ -269,7 +269,9 @@ def plan(a):
         run(ubft, 'vr-genesis', 'plan', '--trust-base', trust, '--shard-conf', conf, '--bindings', out / 'genesis-bindings.json',
             '--b1-profile', out / 'b1-profile.json', '--network-word', word, '--governor-signers', ','.join(signers),
             '--limits', POS_LIMITS if a.pos else a.limits, '--fee-collector', FEE_COLLECTOR, '--out-input', out / 'vr/input.json',
-            '--out-identities', out / 'genesis-identities.json', *(['--owners', owners_file] if owners_file else []), *pos_args)
+            '--out-identities', out / 'genesis-identities.json',
+            '--utb-genesis', out / 'utb-genesis.cbor', '--utb-genesis-id', out / 'utb-genesis.id',   # the signed trust-base history's genesis entry and its pin
+            *(['--owners', owners_file] if owners_file else []), *pos_args)
 
     reconciled = None
     if a.pos:
@@ -314,11 +316,12 @@ def plan(a):
                    '--shard-conf', out / 'full-shard-conf.json', '--trust-base', trust, '--b1-profile', out / 'b1-profile.json',
                    '--genesis-identities', out / 'genesis-identities.json', '--vr-hook-measurement', fresh,
                    '--ureth-flags', ureth, '--fee-collector', FEE_COLLECTOR, '--out-root-deployment', out / 'vr-deployment.json',
+                   '--utb-genesis', out / 'utb-genesis.cbor', '--utb-genesis-id', out / 'utb-genesis.id',
                    *(['--funded-accounts', out / 'dev-funded-accounts.json', '--dev-generation', generation] if a.dev_fund else []))
     print(verified.strip())
     summary = {'generation': generation, 'validators': a.validators, 'chainId': a.chain_id, 'networkId': NETWORK_ID,
                'deployment': json.loads((out / 'vr/deployment.json').read_text()), 'profile': {k: profile[k] for k in ('hRecords', 'hookRecordGas', 'electGas', 'systemGas', 'maxGas')},
-               'ureth': ureth, 'roots': roots, 'evms': evms, 'freshMeasurement': provenance, 'devFunded': funded}
+               'utbGenesisId': (out / 'utb-genesis.id').read_text().strip(), 'ureth': ureth, 'roots': roots, 'evms': evms, 'freshMeasurement': provenance, 'devFunded': funded}
     (out / 'vr-genesis-summary.json').write_text(json.dumps(summary, indent=1) + '\n')
     return summary
 
