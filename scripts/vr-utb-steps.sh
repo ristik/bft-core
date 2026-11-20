@@ -5,7 +5,8 @@
 # lib/api/bft/trustbase/TrustBaseHistory.js). Nothing here trusts a node's own claim: every number comes from the history bytes a client would fetch.
 #
 #   vru_before   before the handoff: the aggregator holds epoch 1 only; a certificate of epoch 1 is saved (its digest is recorded) and verifies under it
-#   vru_after    after the Boundary installed J: epochs 1 and 2 are served (aggregator and every root), epoch 2 is signed by epoch 1's quorum, it names the
+#   vru_after    after the Boundary installed J: epochs 1 and 2 are served (the aggregator's /api/v1/trustbases; a root's own REST serves the V1 runtime
+#                projection, so a root's signed history is read from its entry store below), epoch 2 is signed by epoch 1's quorum, it names the
 #                committee the VR generation installed, the epoch-1 certificate still verifies under the history, a post-switch certificate verifies under epoch 2,
 #                the SDK client holding the genesis alone fetches and verifies both, and a forged entry is refused; every root and shard node's own store
 #                exports a history that verifies from the pin
@@ -43,11 +44,6 @@ vru_before() {
   vrb_log "PASS: before the handoff the aggregator holds epoch 1 from the pin; an epoch-1 certificate ($(cut -c1-12 "$out/proofs/epoch1-token.sha256")...) verifies under it"
 }
 
-# the entry's members of one epoch of a verified bundle, "nodeId:weight" sorted, from utb-evidence verify's own line count only (the committee itself is checked against the roots below)
-vru_root_history() { # root N, OUT: the root's own GET /api/v1/trustbases range as a bundle
-  vru_ev fetch --url "http://127.0.0.1:$(m2_rpc_port "$1")/api/v1/trustbases" --out "$2"
-}
-
 vru_after() {
   local out i n t rc; out=$(vru_dir)
   vru_wait_tip 2 300 || return 1
@@ -67,14 +63,6 @@ print("epoch 2: predecessor epoch 1, signers %d of %d members of epoch 2's recor
 PY
   vru_ev extract --bundle "$out/bundle/final.cbor" --epoch 2 --out "$out/entries/epoch2.cbor" >/dev/null || return 1
   vru_ev extract --bundle "$out/bundle/final.cbor" --epoch 1 --out "$out/entries/epoch1.cbor" >/dev/null || return 1
-  # the roots serve the same history, byte for byte (the joiner's root included once it follows)
-  for n in 1 2 3 4 5; do
-    [ -d "test-nodes/root$n" ] || continue
-    vru_root_history "$n" "$out/bundle/root$n.cbor" >/dev/null 2>&1 || { [ "$n" = 5 ] && [ "${VR_JOINER:-0}" != 1 ] && continue; vru_fail "root $n serves no history at /api/v1/trustbases"; return 1; }
-    vru_ev verify --bundle "$out/bundle/root$n.cbor" --pin "$(utb_pin)" | grep -q '^ok: epochs 1\.\.2,' || { vru_fail "root $n's history is not epochs 1..2 from the pin"; return 1; }
-    cmp -s "$out/bundle/root$n.cbor" "$out/bundle/final.cbor" || vrb_log "note: root $n's bundle bytes differ from the aggregator's (compared per entry below)"
-    vru_ev extract --bundle "$out/bundle/root$n.cbor" --epoch 2 --out "$out/entries/root$n-epoch2.cbor" >/dev/null && cmp -s "$out/entries/root$n-epoch2.cbor" "$out/entries/epoch2.cbor" || { vru_fail "root $n's epoch-2 entry differs from the aggregator's"; return 1; }
-  done
   # the entry covers exactly the committee and weights VR installed: compare it with the committee the roots themselves report for epoch 2
   vru_ev members --bundle "$out/bundle/final.cbor" --epoch 2 >"$out/entries/epoch2.members" || return 1
   cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'committee()' >"$out/vr-committee-after.hex" || return 1
@@ -97,11 +85,19 @@ PY
   [ "${n:-0}" = 0 ] || { vru_fail "$n UTB successor refusals in the roots' logs (see $out/root-log-refusals.txt)"; return 1; }
   # the stores of the nodes: every root's and shard node's own finalized entries verify from the pin (an export opens the store with the pin and the genesis entry)
   mkdir -p "$out/stores"
+  local bad=0
   for f in test-nodes/root*/root-utb-entries.db test-nodes/evm*/shard-utb-entries.db; do
     [ -f "$f" ] || continue
     n=$(basename "$(dirname "$f")"); cp "$f" "$out/stores/$n.db"
-    build/ubft trust-base utb-export --utb-genesis test-nodes/utb-genesis.cbor --utb-genesis-id "$(utb_pin)" --utb-entries-db "$out/stores/$n.db" --out "$out/stores/$n.cbor" >/dev/null 2>&1 || { vru_fail "$n's entry store does not export from the pinned genesis"; return 1; }
-    vru_ev verify --bundle "$out/stores/$n.cbor" --pin "$(utb_pin)" | tee "$out/stores/$n.verify.txt" | grep -q '^ok: epochs 1\.\.2,' || { vru_fail "$n's own store holds no verified epochs 1..2"; return 1; }
+    if ! build/ubft trust-base utb-export --utb-genesis test-nodes/utb-genesis.cbor --utb-genesis-id "$(utb_pin)" --utb-entries-db "$out/stores/$n.db" --out "$out/stores/$n.cbor" >"$out/stores/$n.export.log" 2>&1; then
+      vrb_log "FAIL: $n's entry store does not export from the pinned genesis ($(tail -n 1 "$out/stores/$n.export.log"))"; bad=$((bad + 1))
+    elif ! vru_ev verify --bundle "$out/stores/$n.cbor" --pin "$(utb_pin)" >"$out/stores/$n.verify.txt" 2>&1 || ! grep -q '^ok: epochs 1\.\.2,' "$out/stores/$n.verify.txt"; then
+      vrb_log "FAIL: $n's own store holds no verified epochs 1..2 ($(tail -n 1 "$out/stores/$n.verify.txt"))"; bad=$((bad + 1))
+    elif ! vru_ev extract --bundle "$out/stores/$n.cbor" --epoch 2 --out "$out/stores/$n-epoch2.cbor" >/dev/null || ! cmp -s "$out/stores/$n-epoch2.cbor" "$out/entries/epoch2.cbor"; then
+      vrb_log "FAIL: $n's epoch-2 entry is not the aggregator's, byte for byte"; bad=$((bad + 1))
+    else
+      vrb_log "PASS: $n's own entry store verifies epochs 1..2 from the pin, epoch 2 byte for byte the aggregator's"
+    fi
     rm -f "$out/stores/$n.db"
   done
   # the SDK 4.0 client: genesis alone, the epoch-1 certificate verifies, the epoch-2 one names an unknown epoch and is repaired by the SDK's own fetch, and a forged entry is refused
@@ -114,5 +110,6 @@ PY
   else
     vru_fail "UTB_SDK_JS is not set (the SDK 4.0 client check is part of the acceptance)"; return 1
   fi
+  [ "$bad" = 0 ] || { vru_fail "$bad node stores did not verify (see above)"; return 1; }
   vrb_log "PASS: UTB across the VR handoff: epochs 1 and 2 served from the pin, epoch 2 signed by epoch 1's quorum and the installed committee, the epoch-1 certificate verifies after the switch, the SDK client verifies both and refuses a forged entry"
 }
