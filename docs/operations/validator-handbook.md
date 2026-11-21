@@ -347,6 +347,31 @@ Stage a verified, compatible release before the scheduled root epoch, and coordi
 
 `validator status` reports previous and current base fee floor, change denominator and collector, and the effective EVM block. Fee changes come from certified registry state at the parent. Leave the startup collector at the release value. Watch the live fee and committee limit changes in `ubft governance list --rpc "$RPC_URL"` and verify the effective values through status.
 
+### Upgrade to a hotfix release
+
+Use the Foundation's authenticated announcement for your generation. It gives the affected component, hotfix URL, manifest SHA-256 and rollout window. Stage the binary under a distinct filename so the supervisor can still select the previous release. This example stages a root-only `ubft` hotfix.
+
+```bash
+read -rp 'Hotfix release URL: ' HOTFIX_URL
+read -rp 'Hotfix SHA256SUMS digest: ' HOTFIX_MANIFEST_SHA
+HOTFIX_BINARY="$UBFT_HOME/release/ubft-hotfix-$HOTFIX_MANIFEST_SHA"
+stage_hotfix() (
+  set -eo pipefail
+  [[ "$HOTFIX_MANIFEST_SHA" =~ ^[0-9a-f]{64}$ ]]
+  work=$(mktemp -d "$UBFT_HOME/release/.hotfix.XXXXXXXX")
+  trap 'rm -r -- "$work"' EXIT
+  curl -fsS "${HOTFIX_URL%/}/SHA256SUMS" -o "$work/SHA256SUMS"
+  printf '%s  %s\n' "$HOTFIX_MANIFEST_SHA" "$work/SHA256SUMS" | sha256sum -c -
+  curl -fsS "${HOTFIX_URL%/}/ubft" -o "$work/ubft"
+  (cd "$work" && sha256sum -c SHA256SUMS)
+  install -m 755 "$work/ubft" "$HOTFIX_BINARY"
+  "$HOTFIX_BINARY" root-node run --help >/dev/null
+)
+stage_hotfix
+```
+
+After staging succeeds, use the service supervisor to stop the affected root and start it with `"$HOTFIX_BINARY" root-node run`, the existing `ROOT_ARGS` and the same home. Keep the shard, execution client and signing authority running, and keep the proof profile for this generation. Check that the root has caught up and is voting if it remains a committee member. If startup fails, return the affected service to the previous verified executable with its original arguments and contact the Foundation. An operator already excluded can complete the PoS exit using the public RPC and wallet after the incumbent roots produce the retirement record.
+
 ## 6. Exit and retire
 
 ```bash
@@ -429,6 +454,8 @@ If PoS registration already committed, keep the authority running and contact th
 - The signing authority is unavailable or faulted. Stop the signing client and follow the [authority runbook](monitoring/runbooks.md#unicityauthorityfaulted). Preserve all signing and node state. Never duplicate an active signing identity.
 
 ### Rehearsal recovery for an interrupted journal observation
+
+A journal left with an incomplete local-proposal certificate association by a pre-#1240 build is refused by the loader. Use the documented incident recovery for your release or [re-sync from a verified seed](sync-seed.md).
 
 For the pre-VT-07 rehearsal, the maintainer may publish a compatible shard recovery build for [the interrupted observation incident](https://github.com/ristik/bft-core/issues/1239). Keep the root and authority running. Use the existing shard journal, archive and ureth datadir. Make sure ureth uses the pre-VT-07 proof settings and passes its readiness check. In your rehearsal shell recreate `SHARD_ARGS` from Section 3 if you reconnected, and confirm the failed shard has exited. Obtain the recovery binary's SHA-256 from the maintainer in the operator log.
 

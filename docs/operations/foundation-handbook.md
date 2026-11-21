@@ -40,6 +40,14 @@ ubft governance propose schedule-activation --rpc "$RPC_URL" --rule "$RULE" \
 
 Review the rule, release identifier, earliest certified time and target root epoch against the current schedule and cutoff. Publish the matching signed release and its component checksums before the epoch. Verify the queue, the latched schedule and operator readiness with `validator upgrade` on that release. Coordinate a supported activation before the cutoff. Follow [upgrade alert runbooks](monitoring/runbooks.md#unicityupgraderequired) for a missing or unsupported rule.
 
+## Roll out a compatible hotfix
+
+Build from the generation's deployed source pin with only the approved fix. Verify that the patch applies cleanly, run the affected tests, and publish a separate versioned artifact with a SHA-256 manifest. Announce the source pin, hotfix commit, manifest digest, affected services and rollback binary through the authenticated release channel. Use the activation procedure above for changes to consensus rules.
+
+Before restarting a root, check the current committee, quorum weight, recent committed rounds and shard certification. Pick a quiet window between handoffs. Confirm that the roots staying online have enough voting weight to make quorum. Stage the verified binary first. Restart one affected root with its existing arguments, home and keys. Keep its paired shard, execution client and authority running.
+
+Check that the restarted root rejoins the current epoch, submits votes and appears in a new quorum certificate. Confirm that certification has advanced on a peer and that the public execution head is healthy before moving to the next root. Record the before and after process IDs, binary digest, epochs and quorum certificates. If any check fails, pause the rollout and recover that root with the previously verified binary and the same state. Announce completion and the affected operator steps. [Stage an operator hotfix](validator-handbook.md#upgrade-to-a-hotfix-release)
+
 ## Release and publish seeds
 
 Publish independently authenticated release checksums and the UTB genesis EntryID. Publish the genesis trust base, execution genesis, shard configuration, VR and B1 pins, activation bundles and peer addresses alongside each release. Export a seed from a synced validator's archive and its isolated UTB bundle listener. Serve the verified seed directory through a read-only endpoint, and check it by fetching from an operator network with the published pin. Keep enough archive data and handoff history available for a new node to catch up. See [Sync from a seed](sync-seed.md) and [root RPC exposure](root-rpc-exposure.md).
