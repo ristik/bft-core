@@ -1,5 +1,5 @@
 """Public relay regressions against controllable JSON-RPC validators."""
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import ExitStack
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -343,6 +343,51 @@ class PublicRelayTest(unittest.TestCase):
         self.relay.close()
         with self.relay.large_send_slots, self.relay.large_send_slots:
             self.assertFalse(self.relay.large_send_slots.acquire(blocking=False))
+
+    def test_positive_ack_received_before_cutoff_can_publish_afterward(self):
+        self.check_reply_crossing_cutoff({'result': TX})
+
+    def test_duplicate_reply_received_before_cutoff_can_publish_afterward(self):
+        self.check_reply_crossing_cutoff({'error': KNOWN})
+
+    def check_reply_crossing_cutoff(self, reply):
+        received = threading.Event()
+        crossed_cutoff = threading.Event()
+        release = threading.Event()
+        self.gateway(Node(answers={
+            'eth_sendRawTransaction': reply,
+            'web3_sha3': {'result': TX},
+            'eth_getTransactionByHash': {'result': {'hash': TX}},
+        }))
+        health = self.relay.health
+
+        def pause_after_reply(url, available):
+            if available:
+                received.set()
+                release.wait(4)
+            health(url, available)
+
+        def observe_cutoff(tasks, timeout=None):
+            done, pending = wait(tasks, timeout=timeout)
+            if timeout is not None and pending:
+                crossed_cutoff.set()
+            return done, pending
+
+        with patch.object(self.relay, 'health', side_effect=pause_after_reply), \
+                patch('public_relay.wait', side_effect=observe_cutoff), \
+                patch('public_relay.REQUEST_TIMEOUT', 2), patch('public_relay.DUPLICATE_RESERVE', 1.5), \
+                ThreadPoolExecutor(max_workers=1) as caller:
+            send = caller.submit(self.rpc, 'eth_sendRawTransaction', [RAW])
+            try:
+                self.assertTrue(received.wait(1))
+                self.assertTrue(crossed_cutoff.wait(1))
+                # Leave the worker paused while the coordinator decides what
+                # to do at the cutoff. The request must stay open for its reply.
+                with self.assertRaises(TimeoutError):
+                    send.result(timeout=.2)
+            finally:
+                release.set()
+            self.assertEqual(send.result(timeout=1), (200, dict(jsonrpc='2.0', id='caller', result=TX)))
 
     def test_a_slow_peer_does_not_delay_a_confirmed_send(self):
         started = threading.Event()

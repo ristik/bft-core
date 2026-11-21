@@ -296,7 +296,7 @@ class Relay:
         self.health(url, True)
         return reply
 
-    def fanout(self, urls, body, deadline, answer, duplicates):
+    def fanout(self, urls, body, deadline, answer, outcomes):
         for index, url in enumerate(urls):
             if time.monotonic() >= deadline:
                 break
@@ -308,7 +308,7 @@ class Relay:
                 continue
             message = reply.get('error', {}).get('message', '').lower()
             if message in ('already known', 'nonce too low') or message.startswith('nonce too low:'):
-                duplicates.put(url)
+                outcomes.put(url)
 
     def duplicate_hash(self, params, preferred, deadline):
         # A duplicate responder is a good hash source. Check all configured
@@ -343,31 +343,48 @@ class Relay:
         # Each admitted group has its own four worker slots, so competing
         # requests cannot queue behind a slow 16-validator fan-out.
         tasks = []
-        duplicates = SimpleQueue()
+        outcomes = SimpleQueue()
         try:
             urls = self.read_order()
             broadcast_deadline = deadline - DUPLICATE_RESERVE
             for index in range(min(SEND_WIDTH, len(urls))):
-                tasks.append(self.peer_pool.submit(
-                    self.fanout, urls[index::SEND_WIDTH], body, broadcast_deadline, answer, duplicates))
+                task = self.peer_pool.submit(
+                    self.fanout, urls[index::SEND_WIDTH], body, broadcast_deadline, answer, outcomes)
+                tasks.append(task)
+                task.add_done_callback(lambda _: outcomes.put(None))
             wait(tasks, timeout=max(0, broadcast_deadline - time.monotonic()))
-            if answer.done():
+            if len(params) != 1 or not isinstance(params[0], str):
                 return
-            preferred = []
-            while True:
+
+            # The cutoff starts duplicate confirmation. Workers can still
+            # publish replies they received before it, including while a
+            # different worker is still running.
+            pending = len(tasks)
+            while pending and not answer.done():
                 try:
-                    preferred.append(duplicates.get_nowait())
-                except Empty:
+                    outcome = outcomes.get(timeout=remaining(deadline))
+                except (Empty, Unavailable):
                     break
-            if preferred and len(params) == 1 and isinstance(params[0], str):
-                tx_hash = self.duplicate_hash(params, preferred, deadline)
-                if tx_hash is not None:
-                    publish(answer, dict(jsonrpc='2.0', id=1, result=tx_hash))
+                preferred = []
+                while True:
+                    if outcome is None:
+                        pending -= 1
+                    else:
+                        preferred.append(outcome)
+                    try:
+                        outcome = outcomes.get_nowait()
+                    except Empty:
+                        break
+                if preferred and not answer.done():
+                    tx_hash = self.duplicate_hash(params, preferred, deadline)
+                    if tx_hash is not None:
+                        publish(answer, dict(jsonrpc='2.0', id=1, result=tx_hash))
         finally:
-            publish(answer, None)
-            # Confirmation can overlap a straggler. The group owns its
-            # broadcast permits until those workers relinquish the payload.
+            # Keep a positive acknowledgement eligible to win until workers
+            # finish publishing. The caller enforces its own request deadline.
+            # The group retains admission until its workers release the body.
             wait(tasks)
+            publish(answer, None)
 
     def send(self, params, deadline):
         body = payload('eth_sendRawTransaction', params)
