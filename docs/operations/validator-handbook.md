@@ -352,3 +352,22 @@ Use the replacement authority's sockets and credentials in the node commands, an
 - A shard restart reports that `eth_getProof` exceeded the proof window. Check which [release proof profile](#choose-the-releases-execution-proof-profile) is active. Restart only ureth with the same datadir, peer key and the correct release flags. VT-07 also needs the requested historical state to exist on the private proof source. Wait for both listeners, then check restart admission's exact-parent witness request.
 - The journal reports a certified candidate missing its resulting observation. Preserve the journal and logs and use the recovery release designated for the incident. Keep the signing authority, its enrolled key and its session state. While the shard stays unready, report root participation and shard certification separately. A PoS exit request uses the operator wallet and public RPC. Keep the root serving until the acknowledged exclusion.
 - The signing authority is unavailable or faulted. Stop the signing client and follow the [authority runbook](monitoring/runbooks.md#unicityauthorityfaulted). Preserve all signing and node state. Never duplicate an active signing identity.
+
+### Rehearsal recovery for an interrupted journal observation
+
+For the pre-VT-07 rehearsal, the maintainer may publish a compatible shard recovery build for [the interrupted observation incident](https://github.com/ristik/bft-core/issues/1239). Keep the root and authority running. Use the existing shard journal, archive and ureth datadir. Make sure ureth uses the pre-VT-07 proof settings and passes its readiness check. In your rehearsal shell recreate `SHARD_ARGS` from Section 3 if you reconnected, and confirm the failed shard has exited. Obtain the recovery binary's SHA-256 from the maintainer in the operator log.
+
+```bash
+read -rp 'Journal recovery binary SHA-256: ' RECOVERY_SHA256
+install_journal_recovery() (
+  set -eo pipefail
+  curl -fsS "${RELEASE_URL%/}/ubft-journal-recovery" -o release/ubft-journal-recovery.download
+  printf '%s  %s\n' "$RECOVERY_SHA256" release/ubft-journal-recovery.download | sha256sum -c -
+  install -m 755 release/ubft-journal-recovery.download release/ubft-journal-recovery
+)
+install_journal_recovery &&
+  "$UBFT_HOME/release/ubft-journal-recovery" shard-node run "${SHARD_ARGS[@]}" >>logs/shard.log 2>&1 &
+SHARD_PID=$!
+```
+
+Use local shard health, ureth catch-up and the authority's signing metrics to check that the recovered shard actually validates. Preserve the same data and report the first new error if startup or replay stops again.
