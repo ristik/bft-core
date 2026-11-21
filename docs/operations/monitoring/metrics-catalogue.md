@@ -72,7 +72,7 @@ as well (`network="shard"` for the peers: the validators of the installed assign
 | `unicity_authority_enrolled` | gauge | | 1 once the enrollment is complete |
 | `unicity_authority_faulted` | gauge | | 1 when the authority latched faulted: it signs nothing further until restarted |
 | `unicity_authority_key_lost` | gauge | | 1 when it holds no key |
-| `unicity_authority_retired` | gauge | | 1 when the validator was removed: it signs nothing further |
+| `unicity_authority_retired` | gauge | | 1 when the authority is fenced from signing and issuing sessions because the installed assignment excludes its key |
 | `unicity_authority_session_issued` | gauge | | 1 when a client session exists (the shard node can sign through it) |
 | `unicity_authority_has_reservation` | gauge | | 1 while a round is reserved |
 | `unicity_authority_response_retained` | gauge | | 1 while a signed response is retained |

@@ -110,7 +110,7 @@ var ErrNoHashSigner = errors.New("signing-key-cannot-sign-a-digest")
 
 // Errors of the proof-verified advance (#1085).
 var (
-	// ErrRetired is an authority whose validator an authenticated activation removed: it signs nothing further in this lifetime.
+	// ErrRetired is an authority excluded from the installed assignment and fenced from signing and issuing sessions.
 	ErrRetired = errors.New("signing-retired")
 	// ErrRecoveryOnly is the operator-trusted advance asked of an authority that verifies its own lineage, without the recovery policy.
 	ErrRecoveryOnly = errors.New("signing-advance-recovery-only")

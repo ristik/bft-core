@@ -6,11 +6,11 @@ import (
 	gocrypto "crypto"
 	"errors"
 	"fmt"
-	"github.com/unicitynetwork/bft-core/vradmit"
 	"math"
 
 	"github.com/unicitynetwork/bft-core/activationproof"
 	"github.com/unicitynetwork/bft-core/internal/weightvalidation"
+	"github.com/unicitynetwork/bft-core/vradmit"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -32,7 +32,8 @@ verifies everything itself, inside its own trust boundary, from that pin:
     threshold): the tip it advances from is authenticated, not assumed. When the lineage reaches that epoch, the authority holds the
     lineage's trust of it from then on, boundary included, and every later step compares that trust in full;
   - the activated configuration is valid under the bounded weights, is this network's, partition's and shard's, and names this node
-    with THIS authority's key. One that does not retires the authority: it installs the history and signs nothing further.
+    with THIS authority's key. One that does not fences the authority. Only the exact recovery of an unacknowledged primary
+    exclusion can restore the original node and key to a signing scope.
 
 Nothing a requester supplies is taken as a result: the bundle is evidence, and the only inputs are its bytes. A bundle for an epoch the
 lineage already holds is an exact replay (a no-op) or a conflict; a bundle that skips an epoch is refused (send them in order). The first
@@ -103,7 +104,7 @@ func (a *Authority) AdvanceWithProof(ctx context.Context, bundle []byte) (Advanc
 		a.mu.Unlock()
 		return AdvanceResult{}, fmt.Errorf("%w: this authority was enrolled without a lineage pin", ErrLineageUnverified)
 	}
-	enroll, lineage, trust, scope, retired := a.enroll.clone(), a.lineage, a.trust, a.scopeVersion, a.retired
+	enroll, lineage, trust, scope, retired, recovery := a.enroll.clone(), a.lineage, a.trust, a.scopeVersion, a.retired, a.recovery
 	pub, err := publicKeyOf(a.signer)
 	a.mu.Unlock()
 	if err != nil {
@@ -151,7 +152,12 @@ func (a *Authority) AdvanceWithProof(ctx context.Context, bundle []byte) (Advanc
 			return AdvanceResult{}, err
 		}
 	case retired:
-		// a retired authority follows the lineage and nothing else
+		if recovery != nil {
+			successor, err = recovery.verify(lineage, next, step, enroll, pub)
+			if err != nil {
+				return AdvanceResult{}, err
+			}
+		}
 	case step.Epoch == current+1:
 		if err := sameTrust(ctx, trust, lineage, current); err != nil {
 			return AdvanceResult{}, err
@@ -187,6 +193,9 @@ func (a *Authority) AdvanceWithProof(ctx context.Context, bundle []byte) (Advanc
 		}
 	}
 	a.lineage = next
+	if !step.Replay {
+		a.recovery = nil // eligibility lasts for the immediate successor of the exclusion
+	}
 	switch {
 	case successor == nil:
 		if adopted != nil {
@@ -194,14 +203,15 @@ func (a *Authority) AdvanceWithProof(ctx context.Context, bundle []byte) (Advanc
 			a.trust = currentTrust{base: adopted}
 		}
 	case successor.retire:
-		// installed and fenced: the history is the lineage's, and nothing is signed or issued again within this lifetime
 		a.retired = true
+		a.recovery = successor.recovery
 		a.scopeVersion++
 		a.generation++
 		a.sessionIssued = false
 		result.Retired = true
 	default:
 		a.publishScopeLocked(a.enroll, successor.shardEpoch, successor.confHash, successor.trust)
+		a.retired, result.Retired = false, false
 		result.Advanced = true
 	}
 	result.RootEpoch, result.ShardEpoch, result.LineageEpoch = pinnedRootEpoch(a.enroll.RootEpoch), a.enroll.ShardEpoch, a.lineage.Tip()
@@ -220,6 +230,7 @@ func (a *Authority) lineageEpochLocked() uint64 {
 // scopeChange is the verified successor scope of one proof advance.
 type scopeChange struct {
 	retire     bool
+	recovery   *recoveryExclusion
 	shardEpoch uint64
 	confHash   []byte
 	trust      *types.RootTrustBaseV1
@@ -244,6 +255,10 @@ func verifySuccessor(prev, next *activationproof.Lineage, step activationproof.S
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrLineageUnverified, err)
 	}
+	return scopeForTransition(next, step, enroll, pub, t)
+}
+
+func scopeForTransition(next *activationproof.Lineage, step activationproof.Step, enroll Enrollment, pub []byte, t activationproof.Transition) (*scopeChange, error) {
 	trust, err := next.Trust(step.Epoch)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrLineageUnverified, err)
@@ -267,17 +282,15 @@ func verifySuccessor(prev, next *activationproof.Lineage, step activationproof.S
 	if err != nil || !bytes.Equal(hash, t.NextConfHash) {
 		return nil, fmt.Errorf("%w: the activated configuration's hash", ErrLineageUnverified)
 	}
-	named := false
 	for _, v := range conf.Validators {
 		if v.NodeID == enroll.NodeID {
-			named = bytes.Equal(v.SigKey, pub)
-			break
+			if !bytes.Equal(v.SigKey, pub) {
+				return &scopeChange{retire: true}, nil
+			}
+			return &scopeChange{shardEpoch: conf.Epoch, confHash: hash, trust: trust}, nil
 		}
 	}
-	if !named {
-		return &scopeChange{retire: true}, nil
-	}
-	return &scopeChange{shardEpoch: conf.Epoch, confHash: hash, trust: trust}, nil
+	return &scopeChange{retire: true, recovery: excludedByPrimary(step, enroll, pub, conf.Epoch, hash)}, nil
 }
 
 // sameTrust authenticates the authority's held root trust of an epoch against its lineage's: the same network, epoch, boundary,
