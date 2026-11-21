@@ -270,6 +270,18 @@ vrp_recovery_evidence() { # <old root epoch> <handoff = the handoff committed | 
   fi
 }
 
+vrp_k_shard_serving() {
+  local i=$1 node status
+  node=$(evm_validator_id "$i") || return 1
+  status=$(curl -fsS -m 2 "http://$(evm_validator_rpc_addr "$i")/api/v1/health") || return 1
+  jq -e --arg node "$node" --argjson partition "$partitionID" '
+    .executorOk == true and .voting == true and .binding.member == true and
+    .binding.nodeId == $node and .binding.partitionId == $partition and
+    .binding.shardEpoch == 3 and .binding.history[-1].epoch == 4
+  ' <<<"$status" >/dev/null || return 1
+  printf '%s\n' "$status" >"$VR_EVIDENCE/evm$i-k-health.json"
+}
+
 vrp_recovery() {
   vrp_source_q3 || { vrb_log "FAIL: the q3 helpers"; return 1; }
   local first=$vrb_result i rid2 rec
@@ -329,6 +341,12 @@ vrp_recovery() {
   rec=$(cast call --rpc-url "$vrb_rpc" "$(vrp_custody)" 'lastAckedAssignment()(bytes32)')
   vrb_log "custody's last acknowledged assignment is the recovery assignment $rec"
   vrp_facts_ok || { vrb_log "FAIL: the holder facts differ from custody's state"; return 1; }
+  for i in $(seq 1 "$n"); do
+    vrb_wait 180 "K's shard node $i serves as a voting member (root epoch 4, shard epoch 3)" vrp_k_shard_serving "$i" || {
+      tail -n 30 "test-nodes/evm$i/debug.log" >&2
+      return 1
+    }
+  done
   vrb_log "PASS: the recovery (install K) completed through VR: Recovered, Healthy, cursors and holder facts match"
   if [ "${UTB_LANE:-0}" = 1 ]; then vrp_utb 4 || return 1; fi
 }
