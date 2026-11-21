@@ -2,8 +2,10 @@ package nb2ref
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -67,11 +69,26 @@ func TestFlatSupplement(t *testing.T) {
 			if !entry.IsDir() {
 				rel, err := filepath.Rel(dir, path)
 				require.NoError(t, err)
-				require.True(t, bytes.Equal(supplementRead(t, input, rel), supplementRead(t, dir, rel)), "%s differs", rel)
+				published, regenerated := supplementRead(t, input, rel), supplementRead(t, dir, rel)
+				// Go releases can encode the same trace with different DEFLATE blocks.
+				if filepath.Ext(rel) == ".gz" {
+					published, regenerated = supplementGunzip(t, published), supplementGunzip(t, regenerated)
+				}
+				require.True(t, bytes.Equal(published, regenerated), "%s differs", rel)
 			}
 			return nil
 		}))
 	}
+}
+
+func supplementGunzip(t *testing.T, raw []byte) []byte {
+	t.Helper()
+	reader, err := gzip.NewReader(bytes.NewReader(raw))
+	require.NoError(t, err)
+	trace, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	require.NoError(t, reader.Close())
+	return trace
 }
 
 func flatSupplementRollover(t *testing.T, out string, w *World, v *FlatVerifier, registry b1ref.Words) {
