@@ -1,15 +1,26 @@
 """Availability policy for the public RPC gateway."""
-from concurrent.futures import ThreadPoolExecutor
-from http.client import HTTPException
+from concurrent.futures import Future, InvalidStateError, ThreadPoolExecutor, wait
+from http.client import HTTPConnection, HTTPException, HTTPSConnection
 import json
 import re
+import socket
 import threading
 import time
-import urllib.error
+from urllib.parse import urlsplit
 
-from faucet.gateway import ResponseTooLarge, request
+from faucet.gateway import ResponseTooLarge
 
+# Upstream work starts after the HTTP handler validates the client body. Leave
+# time for the gateway to answer its ten-second Docker health probe.
+REQUEST_TIMEOUT = 9
+DUPLICATE_RESERVE = 3
 PROBE_TIMEOUT = 1
+METHOD_TIMEOUT = 8
+READ_SLOTS = 8
+SEND_GROUPS = 4
+SEND_WIDTH = 4
+LARGE_SEND_GROUPS = 2
+SMALL_BODY = 16 << 10
 RETRY_AFTER = 5
 CONTROL_BYTES = 16 << 10
 HASH = re.compile(r'0x[0-9a-fA-F]{64}')
@@ -37,14 +48,58 @@ def payload(method, params):
     return json.dumps(dict(jsonrpc='2.0', id=1, method=method, params=params)).encode()
 
 
-def rpc(url, body, max_bytes=CONTROL_BYTES, timeout=PROBE_TIMEOUT):
+def remaining(deadline):
+    seconds = deadline - time.monotonic()
+    if seconds <= 0:
+        raise Unavailable('validator deadline elapsed')
+    return seconds
+
+
+def fair_slice(deadline, peers_left):
+    """Reserve a share of the remaining budget for every untried peer."""
+    now = time.monotonic()
+    return now + (deadline - now) / peers_left
+
+
+def interrupt(sock):
     try:
-        reply = request(url, body, {'Content-Type': 'application/json'}, max_bytes=max_bytes, timeout=timeout)
-    except ResponseTooLarge:
+        sock.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass  # The connection already closed.
+
+
+def rpc(url, body, deadline, max_bytes=CONTROL_BYTES, timeout=PROBE_TIMEOUT):
+    deadline = min(deadline, time.monotonic() + timeout)
+    target = urlsplit(url)
+    connect = HTTPSConnection if target.scheme == 'https' else HTTPConnection
+    try:
+        connection = connect(target.hostname, target.port, timeout=remaining(deadline))
+        try:
+            connection.connect()
+            # Socket timeouts are per operation. A watchdog also bounds a peer
+            # that trickles headers or body bytes without going idle.
+            watchdog = threading.Timer(remaining(deadline), interrupt, args=(connection.sock,))
+            watchdog.daemon = True
+            watchdog.start()
+            try:
+                path = target.path or '/'
+                if target.query:
+                    path += '?' + target.query
+                connection.request('POST', path, body, {'Content-Type': 'application/json'})
+                with connection.getresponse() as response:
+                    if response.status != 200:
+                        raise Unavailable('validator HTTP failure')
+                    raw = response.read() if max_bytes is None else response.read(max_bytes + 1)
+            finally:
+                watchdog.cancel()
+        finally:
+            connection.close()
+        remaining(deadline)
+        if max_bytes is not None and len(raw) > max_bytes:
+            raise ResponseTooLarge(f'upstream answer above {max_bytes} bytes')
+        reply = json.loads(raw)
+    except (Unavailable, ResponseTooLarge):
         raise
-    except urllib.error.HTTPError as exc:
-        exc.close()
-        raise Unavailable('validator HTTP failure') from exc
     except (OSError, HTTPException, ValueError) as exc:
         raise Unavailable('validator transport or JSON failure') from exc
     if isinstance(reply, dict) and reply.get('jsonrpc') == '2.0' and reply.get('id') == 1:
@@ -63,15 +118,22 @@ class Relay:
         self.genesis_hash = cfg['genesis_hash']
         self.retry_at = {}
         self.lock = threading.Lock()
-        self.pool = ThreadPoolExecutor(max_workers=16)
+        self.read_slots = threading.BoundedSemaphore(READ_SLOTS)
+        self.send_slots = threading.BoundedSemaphore(SEND_GROUPS)
+        self.large_send_slots = threading.BoundedSemaphore(LARGE_SEND_GROUPS)
+        self.read_pool = ThreadPoolExecutor(max_workers=READ_SLOTS)
+        self.send_pool = ThreadPoolExecutor(max_workers=SEND_GROUPS)
+        self.peer_pool = ThreadPoolExecutor(max_workers=SEND_GROUPS * SEND_WIDTH)
 
     def close(self):
-        self.pool.shutdown()
+        self.read_pool.shutdown()
+        self.send_pool.shutdown()
+        self.peer_pool.shutdown()
 
-    def identity(self, url):
+    def identity(self, url, deadline):
         try:
-            chain = rpc(url, payload('eth_chainId', [])).get('result')
-            genesis = rpc(url, payload('eth_getBlockByNumber', ['0x0', False])).get('result')
+            chain = rpc(url, payload('eth_chainId', []), deadline).get('result')
+            genesis = rpc(url, payload('eth_getBlockByNumber', ['0x0', False]), deadline).get('result')
         except ResponseTooLarge as exc:
             raise Unavailable('oversized validator identity response') from exc
         if quantity(chain) != self.chain_id:
@@ -92,13 +154,13 @@ class Relay:
             return sorted(self.urls, key=lambda url: self.retry_at.get(url, 0) > now)
 
     @staticmethod
-    def head(url):
-        head = quantity(rpc(url, payload('eth_blockNumber', [])).get('result'))
+    def head(url, deadline):
+        head = quantity(rpc(url, payload('eth_blockNumber', []), deadline).get('result'))
         if head is None:
             raise Unavailable('validator head unavailable')
         return head
 
-    def covers(self, url, method, params):
+    def covers(self, url, method, params, deadline):
         """Check coverage for reads where a lagging node could give a misleading answer."""
         block = params[0] if params else None
         if method == 'eth_getLogs':
@@ -106,29 +168,35 @@ class Relay:
         elif method not in {'eth_getBlockByNumber', 'eth_getBlockReceipts', 'unicity_getSealCompanionV1'}:
             return True
         number = quantity(block)
-        if number is None and is_hash(block) and method in {'eth_getLogs', 'unicity_getSealCompanionV1'}:
+        if number is None and is_hash(block) and method != 'eth_getBlockByNumber':
             # false requests transaction hashes, so the coverage probe stays bounded
             # even when the block contains large transactions.
-            header = rpc(url, payload('eth_getBlockByHash', [block, False]), max_bytes=8 << 20).get('result')
+            header = rpc(url, payload('eth_getBlockByHash', [block, False]), deadline, max_bytes=8 << 20).get('result')
             if not isinstance(header, dict) or not same_hash(header.get('hash'), block):
                 return False
             number = quantity(header.get('number'))
             if number is None:
                 return False
-        return number is None or self.head(url) >= number
+        return number is None or self.head(url, deadline) >= number
 
-    def read(self, method, params, max_bytes):
+    def read(self, method, params, max_bytes, deadline):
         body = payload(method, params)
         miss = None
         error = None
-        for url in self.read_order():
+        urls = self.read_order()
+        for index, url in enumerate(urls):
+            if time.monotonic() >= deadline:
+                break
+            attempt = fair_slice(deadline, len(urls) - index)
             try:
-                self.identity(url)
-                covered = self.covers(url, method, params)
-                if not covered and method == 'eth_getLogs':
+                self.identity(url, attempt)
+                covered = self.covers(url, method, params, attempt)
+                if not covered and method in {'eth_getLogs', 'eth_getBlockReceipts'}:
                     self.health(url, True)
+                    if method == 'eth_getBlockReceipts' and miss is None:
+                        miss = dict(jsonrpc='2.0', id=1, result=None)
                     continue
-                reply = rpc(url, body, max_bytes=max_bytes, timeout=8)
+                reply = rpc(url, body, attempt, max_bytes=max_bytes, timeout=METHOD_TIMEOUT)
                 self.health(url, True)
                 if 'error' in reply:
                     if covered and error is None:
@@ -162,7 +230,7 @@ class Relay:
                             miss = reply
                         continue
                     number = quantity(block)
-                    if number is None or self.head(url) < number:
+                    if number is None or self.head(url, attempt) < number:
                         continue
                 return reply
             except Unavailable:
@@ -173,28 +241,46 @@ class Relay:
             return error
         raise Unavailable('no validator could serve the read')
 
-    def send_to(self, url, body):
+    def send_to(self, url, body, deadline):
         try:
-            self.identity(url)
+            self.identity(url, deadline)
+            reply = rpc(url, body, deadline, timeout=METHOD_TIMEOUT)
         except (Unavailable, ResponseTooLarge):
             self.health(url, False)
-            return False, None
-        try:
-            reply = rpc(url, body, timeout=8)
-        except (Unavailable, ResponseTooLarge):
-            self.health(url, False)
-            return True, None
+            return None
         self.health(url, True)
-        return True, reply
+        return reply
 
-    def duplicate_hash(self, params, urls):
-        # The pinned execution clients implement Keccak in web3_sha3. Hashing
-        # here also handles large bridge calldata without a Python hot loop.
+    def fanout(self, urls, body, deadline, answer):
+        duplicates = []
+        for index, url in enumerate(urls):
+            if time.monotonic() >= deadline:
+                break
+            reply = self.send_to(url, body, fair_slice(deadline, len(urls) - index))
+            if reply is None:
+                continue
+            if is_hash(reply.get('result')):
+                try:
+                    answer.set_result(reply)
+                except InvalidStateError:
+                    pass  # Another validator has already acknowledged.
+                continue
+            message = reply.get('error', {}).get('message', '').lower()
+            if message in ('already known', 'nonce too low') or message.startswith('nonce too low:'):
+                duplicates.append(url)
+        return duplicates
+
+    def duplicate_hash(self, params, preferred, deadline):
+        # A duplicate responder is a good hash source. Check all configured
+        # validators, including ones that could not be reached during broadcast.
+        urls = preferred + [url for url in self.read_order() if url not in preferred]
         body = payload('web3_sha3', params)
-        for url in urls:
+        hash_deadline = fair_slice(deadline, 2)
+        for index, url in enumerate(urls):
+            attempt = fair_slice(hash_deadline, len(urls) - index)
             try:
-                self.identity(url)
-                tx_hash = rpc(url, body).get('result')
+                self.identity(url, attempt)
+                tx_hash = rpc(url, body, attempt).get('result')
                 if is_hash(tx_hash):
                     break
             except (Unavailable, ResponseTooLarge):
@@ -202,38 +288,72 @@ class Relay:
         else:
             return None
         body = payload('eth_getTransactionByHash', [tx_hash])
-        for url in urls:
+        for index, url in enumerate(urls):
+            attempt = fair_slice(deadline, len(urls) - index)
             try:
-                self.identity(url)
-                found = rpc(url, body, max_bytes=8 << 20).get('result')
+                self.identity(url, attempt)
+                found = rpc(url, body, attempt, max_bytes=8 << 20).get('result')
                 if isinstance(found, dict) and same_hash(found.get('hash'), tx_hash):
                     return tx_hash
             except (Unavailable, ResponseTooLarge):
                 continue
         return None
 
-    def send(self, params):
+    def deliver(self, body, params, deadline, answer):
+        # Each admitted group has its own four worker slots, so competing
+        # requests cannot queue behind a slow 16-validator fan-out.
+        try:
+            urls = self.read_order()
+            broadcast_deadline = deadline - DUPLICATE_RESERVE
+            tasks = [self.peer_pool.submit(self.fanout, urls[i::SEND_WIDTH], body, broadcast_deadline, answer)
+                     for i in range(min(SEND_WIDTH, len(urls)))]
+            wait(tasks)
+            if answer.done():
+                return
+            preferred = [url for task in tasks for url in task.result()]
+            if preferred and len(params) == 1 and isinstance(params[0], str):
+                tx_hash = self.duplicate_hash(params, preferred, deadline)
+                if tx_hash is not None:
+                    answer.set_result(dict(jsonrpc='2.0', id=1, result=tx_hash))
+        finally:
+            if not answer.done():
+                answer.set_exception(Unavailable('no validator acknowledged this transaction'))
+
+    def send(self, params, deadline):
         body = payload('eth_sendRawTransaction', params)
-        urls = self.read_order()
-        tasks = [self.pool.submit(self.send_to, url, body) for url in urls]
-        replies = [task.result() for task in tasks]
-        duplicate = False
-        for _, reply in replies:
-            if reply is None:
-                continue
-            if is_hash(reply.get('result')):
-                return reply
-            message = reply.get('error', {}).get('message', '').lower()
-            if message in ('already known', 'nonce too low') or message.startswith('nonce too low:'):
-                duplicate = True
-        if duplicate and len(params) == 1 and isinstance(params[0], str):
-            urls = [url for url, (attempted, _) in zip(urls, replies) if attempted]
-            tx_hash = self.duplicate_hash(params, urls)
-            if tx_hash is not None:
-                return dict(jsonrpc='2.0', id=1, result=tx_hash)
-        raise Unavailable('no validator acknowledged this transaction')
+        if not self.send_slots.acquire(blocking=False):
+            raise Unavailable('all broadcast slots occupied')
+        large = len(body) > SMALL_BODY
+        if large and not self.large_send_slots.acquire(blocking=False):
+            self.send_slots.release()
+            raise Unavailable('all large broadcast slots occupied')
+
+        def release(_):
+            if large:
+                self.large_send_slots.release()
+            self.send_slots.release()
+
+        # Keep admission until all delivery work finishes, even if the HTTP
+        # handler has returned an acknowledgement and released its body slot.
+        answer = Future()
+        try:
+            job = self.send_pool.submit(self.deliver, body, params, deadline, answer)
+        except RuntimeError:
+            release(None)
+            raise
+        job.add_done_callback(release)
+        return answer.result(timeout=remaining(deadline))
 
     def call(self, method, params, max_bytes=8 << 20):
+        deadline = time.monotonic() + REQUEST_TIMEOUT
         if method == 'eth_sendRawTransaction':
-            return self.send(params)
-        return self.read(method, params, max_bytes)
+            return self.send(params, deadline)
+        if not self.read_slots.acquire(blocking=False):
+            raise Unavailable('all read slots occupied')
+        try:
+            job = self.read_pool.submit(self.read, method, params, max_bytes, deadline)
+        except RuntimeError:
+            self.read_slots.release()
+            raise
+        job.add_done_callback(lambda _: self.read_slots.release())
+        return job.result(timeout=remaining(deadline))
