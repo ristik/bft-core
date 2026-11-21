@@ -102,6 +102,55 @@ func TestARestartAfterAnInstallInterruptedForTheRecordPrefixCompletesWithTheFetc
 	require.Equal(t, anchor, r.manager.epochAnchor)
 }
 
+// State recovery can replace a follower's block store before it installs a later handoff. The replacement
+// must still fetch records that the next checkpoint commits but the follower has not retained.
+func TestFollowerSwitchFetchesMissingRecordAfterAnchorRecovery(t *testing.T) {
+	recs, nextState := prefixChain(4)
+	prior := recs[:3]
+	priorState := nextState
+	priorState.Count, priorState.Tip = uint64(len(prior)), prior[len(prior)-1].ID
+	first := q3fixture.New(t, q3fixture.Options{SourceState: priorState.Bytes()})
+	second := q3fixture.New(t, q3fixture.Options{After: first, SourceState: nextState.Bytes()})
+	node := second.NewNodes[3]
+	require.NotContains(t, first.NewNodes, node)
+
+	ctx := context.Background()
+	r := newQ3Replica(t, first, node)
+	r.noCheckpoint = true
+	r.mustOpen(true)
+	t.Cleanup(r.close)
+	require.NoError(t, r.rt.Recover(ctx))
+	require.NoError(t, r.db.AppendRecords(prior))
+	fetcher := &peerRecords{recs: recs}
+	m := r.manager
+	m.SetRecordFetcher(fetcher)
+	require.NoError(t, r.rt.Activate(ctx, r.bundle()))
+	require.ErrorIs(t, m.safety.member(2), ErrNotAMember)
+
+	old := m.blockStore()
+	state, err := old.GetState()
+	require.NoError(t, err)
+	replacement, err := old.NewFromAnchorState(state.CommittedHead)
+	require.NoError(t, err)
+	m.storeRef.Store(replacement)
+	require.Zero(t, fetcher.calls)
+
+	raw, err := q3active.EncodeBundle(secondBundle(second))
+	require.NoError(t, err)
+	sw := &Q3EpochSwitch{Runtime: r.rt}
+	captured, err := sw.AdoptActivation(ctx, raw, 3)
+	require.NoError(t, err)
+	transition, ok := m.enterSwitching(2, 3, nil, captured).(*errEpochSwitch)
+	require.True(t, ok)
+	require.NoError(t, m.switchEpoch(ctx, transition))
+	require.Equal(t, SwitchRunning, m.SwitchState().Phase)
+	require.EqualValues(t, 3, m.InstalledRootEpoch())
+	require.Equal(t, 1, fetcher.calls, "only the missing record is needed")
+	retained, err := r.db.Records(0, len(recs))
+	require.NoError(t, err)
+	require.Equal(t, recs, retained)
+}
+
 // pipeFeed is a recordsfeed transport to in-process servers: what a libp2p stream to another root is, for the record prefix fetch.
 type pipeStream struct{ net.Conn }
 

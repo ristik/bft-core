@@ -53,6 +53,13 @@ func (x *BlockStore) SetRecordFetcher(f RecordFetcher) {
 	x.prefixSource = f
 }
 
+// recordFetcher carries the configured source into a replacement store after state recovery.
+func (x *BlockStore) recordFetcher() RecordFetcher {
+	x.lock.RLock()
+	defer x.lock.RUnlock()
+	return x.prefixSource
+}
+
 // ensureRetainedPrefix checks the installed checkpoint's source state (the length and tip of the log it commits) against the retained
 // log before the successor consensus starts. A longer or equal retained log must carry the committed tip at the committed length; a
 // shorter one is completed from the fetcher, each record verified link by link from the last retained one and the closed epochs
