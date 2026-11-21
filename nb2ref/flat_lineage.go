@@ -22,6 +22,7 @@ func DecodeFlatConfig(gamma []byte) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	c.wireVersion = 2
 	ty, aid := FlatAssetIDs(c)
 	if c.Ty != ty || c.Aid != aid || c.Asset != AssetUCT {
 		return nil, ErrConfigShape
@@ -392,7 +393,7 @@ func (v *FlatVerifier) RunFlat(data []byte) (*FlatRunResult, error) {
 		if err != nil {
 			return nil, err
 		}
-		if s.Phase < FlatChildMint || s.Phase > FlatTransfer || s.Seq != e.Seq || s.Digest(session) != e.StateDigest {
+		if !s.validResume(packet.Header.Length) || s.Seq != e.Seq || s.Digest(session) != e.StateDigest {
 			return nil, ErrFlatPredecessor
 		}
 	}
@@ -436,6 +437,21 @@ func (v *FlatVerifier) RunFlat(data []byte) (*FlatRunResult, error) {
 	}
 	s.Pos, s.ClaimRoot = r.pos, claims.root
 	return &FlatRunResult{&s, FlatEvent{Kind: FlatProgressEvent, Session: session, Seq: s.Seq, StateDigest: s.Digest(session)}}, nil
+}
+
+func (s FlatState) validResume(length uint64) bool {
+	if s.Pos < flatPreludeBytes || s.Pos > length || s.LevelsLeft == 0 || s.Amount == ([32]byte{}) {
+		return false
+	}
+	switch s.Phase {
+	case FlatChildMint:
+		return s.TransfersLeft == 0 && s.Owner == ([33]byte{}) && s.State == ([32]byte{})
+	case FlatTransfer:
+		_, err := ParseKey(s.Owner[:])
+		return err == nil && s.TransfersLeft != 0 && s.ParentLink == ([32]byte{}) && s.ParentManifest == ([32]byte{})
+	default:
+		return false
+	}
 }
 
 func flatStepError(err error) error {

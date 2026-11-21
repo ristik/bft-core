@@ -117,6 +117,12 @@ func TestFlatPacketRefusalOrderAndRetry(t *testing.T) {
 		{"wrong-seq", func(e *FlatEvent, o *ReceiptOpts) { e.Seq++ }},
 		{"wrong-state", func(e *FlatEvent, o *ReceiptOpts) { e.StateDigest[0] ^= 1 }},
 		{"wrong-session", func(e *FlatEvent, o *ReceiptOpts) { e.Session[0] ^= 1 }},
+		{"wrong-event-kind", func(e *FlatEvent, o *ReceiptOpts) {
+			o.MutLog = func(log *RawLog) { log.Topics[0] = FlatCompleteEvent.Topic() }
+		}},
+		{"closed-epoch-upper-bound", func(e *FlatEvent, o *ReceiptOpts) {
+			o.Seal = &SealOpts{Network: DevNetwork, Epoch: 1, RootRound: RotationRound}
+		}},
 		{"wrong-emitter", func(e *FlatEvent, o *ReceiptOpts) { o.MutLog = func(log *RawLog) { log.Address[0] ^= 1 } }},
 		{"wrong-log-index", func(e *FlatEvent, o *ReceiptOpts) { o.MutProof = func(p *DepositProof) { p.LogIndex++ } }},
 		{"bad-header", func(e *FlatEvent, o *ReceiptOpts) {
@@ -134,6 +140,12 @@ func TestFlatPacketRefusalOrderAndRetry(t *testing.T) {
 		require.NoError(t, err)
 		refuse(bad.name, wire, ErrFlatPredecessor, "BadPredecessor")
 	}
+
+	foreign := *v
+	foreign.deployment.Salt[0] ^= 1
+	out, err := foreign.RunFlat(data)
+	require.Nil(t, out)
+	require.ErrorIs(t, err, ErrFlatPredecessor)
 
 	fresh := resume
 	fresh.Receipt = flatCertifiedEvent(t, w, v, progress.Event, ReceiptOpts{Type: 2, Rotated: true, TxIndex: 2})
@@ -170,6 +182,7 @@ func TestFlatPageProofAndTransportBoundaries(t *testing.T) {
 	_, err = FlatRun.DecodeCalldata(wire)
 	require.ErrorIs(t, err, ErrFlatPacket)
 	require.Equal(t, 52, flatPageDepth(math.MaxUint64))
+	require.Equal(t, FlatPageBytes-1, flatPageLen(math.MaxUint64, flatPageCount(math.MaxUint64)-1))
 	_, err = flatGapEnd(MaxSegment, 1)
 	require.ErrorIs(t, err, ErrFlatStep)
 	_, err = flatNextSeq(math.MaxUint64)
@@ -192,4 +205,17 @@ func TestFlatSparseConflictsAcrossCuts(t *testing.T) {
 	require.NoError(t, err)
 	_, err = flatSIDTree.update(root, key, [32]byte{}, flatSIDLeaf(key), FlatSparseOpening{})
 	require.True(t, errors.Is(err, ErrFlatStep))
+
+	full := FlatSparseOpening{Bitmap: [32]byte(bytes.Repeat([]byte{0xff}, 32))}
+	root = [32]byte{}
+	for i := range 256 {
+		sibling := HU([]byte("full-sparse-fixture"), flatU16(uint16(i)))
+		full.Siblings = append(full.Siblings, sibling)
+		root = flatSIDTree.fold(i, key, root, sibling)
+	}
+	_, err = flatSIDTree.update(root, key, [32]byte{}, flatSIDLeaf(key), full)
+	require.NoError(t, err)
+	full.Siblings[0] = flatSparseDefaults[flatSIDTree][0]
+	_, err = flatSIDTree.update(root, key, [32]byte{}, flatSIDLeaf(key), full)
+	require.ErrorIs(t, err, ErrFlatStep)
 }

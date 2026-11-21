@@ -76,7 +76,11 @@ func flatExportCold(t *testing.T, name string, wire []byte, meta any) {
 func TestFlatGapAndSettlementMatrix(t *testing.T) {
 	w, v, _ := flatFixtureVerifier(t)
 	key := Key("flat-root")
-	evidence, records := flatFixtureEncode(t, v, flatFixtureLineage(t, w, v, 0, 0, false))
+	levels := flatFixtureLineage(t, w, v, 0, 0, false)
+	rootReason, err := DecodeReceiptBacking(levels[0].token.Mint.Justification)
+	require.NoError(t, err)
+	rho := Rho(v.domain, rootReason.R)
+	evidence, records := flatFixtureEncode(t, v, levels)
 	_, completion := flatFixtureRun(t, w, v, evidence, records, 2)
 	header := mustFlatEvidence(t, evidence).Header()
 	vd := completion.Verdict
@@ -104,7 +108,7 @@ func TestFlatGapAndSettlementMatrix(t *testing.T) {
 				t.Run(fmt.Sprintf("gap=%t/suffix=%t/previous=%t", startGap, suffix, previous), func(t *testing.T) {
 					vault, err := NewFlatVault(v, w.Env())
 					require.NoError(t, err)
-					require.NoError(t, vault.Deposit(big.NewInt(100), FirstOwner(key), HE([]byte("model rho"))))
+					require.NoError(t, vault.Deposit(big.NewInt(100), FirstOwner(key), rho))
 					e := start
 					packet := FlatGapPacket{Header: header, Kind: FlatCompleteEvent, Receipt: receipt}
 					if startGap {
@@ -193,7 +197,7 @@ func TestFlatGapAndSettlementMatrix(t *testing.T) {
 	t.Run("zero-gap-wrong-head-and-skipped-signed-start", func(t *testing.T) {
 		vault, err := NewFlatVault(v, w.Env())
 		require.NoError(t, err)
-		require.NoError(t, vault.Deposit(big.NewInt(100), FirstOwner(key), [32]byte{1}))
+		require.NoError(t, vault.Deposit(big.NewInt(100), FirstOwner(key), rho))
 		vault.model.SetState(1, start+2, 0, big.NewInt(100), h2, h1, nil, ids)
 		forged := gap
 		forged.Head[0] ^= 1
@@ -211,7 +215,7 @@ func TestFlatGapAndSettlementMatrix(t *testing.T) {
 		t.Run(fmt.Sprintf("race/ordinary-first=%t", ordinaryFirst), func(t *testing.T) {
 			vault, err := NewFlatVault(v, w.Env())
 			require.NoError(t, err)
-			require.NoError(t, vault.Deposit(big.NewInt(100), FirstOwner(key), [32]byte{1}))
+			require.NoError(t, vault.Deposit(big.NewInt(100), FirstOwner(key), rho))
 			vault.model.SetState(1, start, 0, big.NewInt(100), h0, [32]byte{}, nil, ids)
 			wire, err := (FlatGapPacket{Header: header, Kind: FlatCompleteEvent, Receipt: receipt}).Calldata(FlatRedeemRecovered, v.cfg.K)
 			require.NoError(t, err)
@@ -226,4 +230,89 @@ func TestFlatGapAndSettlementMatrix(t *testing.T) {
 			require.Equal(t, int64(100), vault.Balance(vd.Recipient).Int64())
 		})
 	}
+}
+
+func TestFlatSettlementBoundsAndSealRollback(t *testing.T) {
+	w, v, _ := flatFixtureVerifier(t)
+	key := Key("flat-root")
+	levels := flatFixtureLineage(t, w, v, 0, 0, false)
+	j, err := DecodeReceiptBacking(levels[0].token.Mint.Justification)
+	require.NoError(t, err)
+	raw, records := flatFixtureEncode(t, v, levels)
+	_, complete := flatFixtureRun(t, w, v, raw, records, 2)
+	h := mustFlatEvidence(t, raw).Header()
+	head := GenesisHead(v.domain, v.cfg.K)
+	eta, a := complete.Verdict.Eta, complete.Verdict.MinSegment
+	segRoot, proof, ids := flatGaps(t, v.cfg.K, eta)
+	receipt := flatCertifiedEvent(t, w, v, complete, ReceiptOpts{})
+	newVault := func() *FlatVault {
+		s, err := NewFlatVault(v, w.Env())
+		require.NoError(t, err)
+		require.NoError(t, s.Deposit(big.NewInt(100), FirstOwner(key), Rho(v.domain, j.R)))
+		return s
+	}
+	t.Run("settlement-1024-and-1025", func(t *testing.T) {
+		p := FlatGapPacket{Header: h, Kind: FlatCompleteEvent, Receipt: receipt, StartHead: &head}
+		want := head
+		for i := range uint64(1024) {
+			want = NextHead(v.domain, a+i, want, segRoot)
+			p.Proofs = append(p.Proofs, proof)
+		}
+		s := newVault()
+		s.model.SetState(1, a+1024, 0, big.NewInt(100), want, [32]byte{}, nil, ids)
+		wire, err := p.Calldata(FlatRedeemRecovered, v.cfg.K)
+		require.NoError(t, err)
+		before := flatCustodyState(s, complete.Verdict.Recipient)
+		_, err = s.RedeemRecovered(wire, RecipientAccepts)
+		require.NoError(t, err)
+		flatExportCold(t, "settle-count1024", wire, struct{ Before, After flatCustodyFixture }{
+			before, flatCustodyState(s, complete.Verdict.Recipient)})
+		p.Proofs = append(p.Proofs, proof)
+		_, err = p.Calldata(FlatRedeemRecovered, v.cfg.K)
+		require.ErrorIs(t, err, ErrFlatPacket)
+	})
+	t.Run("failed-payout-rolls-back-seal", func(t *testing.T) {
+		s := newVault()
+		s.model.SetState(1, a, v.cfg.K-1, big.NewInt(100), head, [32]byte{}, ids[:len(ids)-1], nil)
+		p := FlatGapPacket{Header: h, Kind: FlatCompleteEvent, Receipt: receipt}
+		wire, err := p.Calldata(FlatRedeemRecovered, v.cfg.K)
+		require.NoError(t, err)
+		before := flatCustodyState(s, complete.Verdict.Recipient)
+		_, err = s.RedeemRecovered(wire, RecipientReverts)
+		require.ErrorIs(t, err, ErrPayoutFailed)
+		require.Equal(t, before, flatCustodyState(s, complete.Verdict.Recipient))
+		_, err = s.RedeemRecovered(wire, RecipientAccepts)
+		require.NoError(t, err)
+		after := flatCustodyState(s, complete.Verdict.Recipient)
+		require.Equal(t, a+1, after.Segment)
+		require.Zero(t, after.Population)
+		require.Len(t, after.Previous, int(v.cfg.K))
+		require.Len(t, s.Logs(), len(before.Events)+2)
+		_, err = s.RedeemRecovered(wire, RecipientAccepts)
+		require.ErrorIs(t, err, ErrAlreadyPaid)
+		flatExportCold(t, "settle-seal-rollback-and-retry", wire, struct {
+			Before, After        flatCustodyFixture
+			FirstFailure, Replay string
+		}{before, after, "PayoutFailed", "AlreadyPaid"})
+	})
+	t.Run("insufficient-backing-and-failed-seal", func(t *testing.T) {
+		s := newVault()
+		max := *complete.Verdict
+		max.MinSegment = MaxSegment
+		e := complete
+		e.Verdict = &max
+		p := FlatGapPacket{Header: h, Kind: FlatCompleteEvent, Receipt: flatCertifiedEvent(t, w, v, e, ReceiptOpts{})}
+		wire, err := p.Calldata(FlatRedeemRecovered, v.cfg.K)
+		require.NoError(t, err)
+		for _, tc := range []struct {
+			q    int64
+			want error
+		}{{99, ErrLiabilityUnderflow}, {100, ErrSegmentCounterExhausted}} {
+			s.model.SetState(1, MaxSegment, v.cfg.K-1, big.NewInt(tc.q), head, [32]byte{}, ids[:len(ids)-1], nil)
+			before := flatCustodyState(s, complete.Verdict.Recipient)
+			_, err = s.RedeemRecovered(wire, RecipientAccepts)
+			require.ErrorIs(t, err, tc.want)
+			require.Equal(t, before, flatCustodyState(s, complete.Verdict.Recipient))
+		}
+	})
 }

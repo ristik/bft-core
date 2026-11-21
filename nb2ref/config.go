@@ -120,13 +120,20 @@ type Config struct {
 	VerifierCodeHash    [32]byte
 	K, B                uint64
 	Qmax                *big.Int
+	wireVersion         uint64 // zero means legacy encoding for constructed configurations
 }
 
 // ConfigArity is the arity of Γ.
 const ConfigArity = 19
 
 // Bytes is the exact encoding of Γ.
-func (c *Config) Bytes() []byte { return c.bytesWithVersion(V2Version) }
+func (c *Config) Bytes() []byte {
+	version := c.wireVersion
+	if version == 0 {
+		version = V2Version
+	}
+	return c.bytesWithVersion(version)
+}
 
 func (c *Config) bytesWithVersion(version uint64) []byte {
 	return CArr(

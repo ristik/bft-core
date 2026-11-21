@@ -71,6 +71,7 @@ func TestFlatIndependentlyEncodedGoldens(t *testing.T) {
 	expect := func(name string, got []byte) { t.Helper(); require.Equal(t, flatGolden(t, name), got, name) }
 	expect("domain", v.domain[:])
 	expect("gamma", FlatConfigBytes(v.cfg))
+	require.Equal(t, v.domain, v.cfg.Domain())
 	g := FlatHash("GEN", v.deployment.Salt[:], v.domain[:])
 	expect("generation", g[:])
 	var descriptors [6][]byte
@@ -465,4 +466,52 @@ func TestFlatHeldAndSiblingWitnesses(t *testing.T) {
 		_, err = v.VerifyFlatHeld(bad)
 		require.ErrorIs(t, err, ErrSplitProof)
 	}
+}
+
+// The replacement receipt is independently certified from the already
+// authenticated event. The only replay inputs are E, the published cuts
+// and the last durable checkpoint.
+func TestFlatRestartFromRebuiltScratchAndAlternateReceipt(t *testing.T) {
+	w, v, _ := flatFixtureVerifier(t)
+	raw, records := flatFixtureEncode(t, v, flatFixtureLineage(t, w, v, 330, 1, false))
+	trace, complete := flatFixtureRun(t, w, v, raw, records, 16)
+	base := trace[18]
+	state, err := DecodeFlatState(base.NewState)
+	require.NoError(t, err)
+	e := mustFlatEvidence(t, raw)
+	ev, err := v.event(e.Header(), FlatProgressEvent, base.ResultReceipt)
+	require.NoError(t, err)
+	replacement := flatCertifiedEvent(t, w, v, ev, ReceiptOpts{Rotated: true, Type: 2, TxIndex: 4})
+	require.NotEqual(t, base.ResultReceipt, replacement)
+	wallet := newFlatFixtureWallet(e)
+	i := 0
+	for _, old := range trace[:19] {
+		p, err := DecodeFlatRun(old.Payload)
+		require.NoError(t, err)
+		n := len(p.Operations)
+		wallet.packet(t, nil, nil, records[i:i+n])
+		i += n
+	}
+	require.Equal(t, state.Pos, records[i].start)
+	require.Equal(t, state.SeenRoot, wallet.seen.lookup(256, [32]byte{}))
+	require.Equal(t, state.ClaimRoot, wallet.claims.lookup(256, [32]byte{}))
+	prior := &state
+	for _, next := range trace[19:] {
+		old, err := DecodeFlatRun(next.Payload)
+		require.NoError(t, err)
+		n := len(old.Operations)
+		raw, err := wallet.packet(t, prior, replacement, records[i:i+n]).Calldata()
+		require.NoError(t, err)
+		result, err := v.RunFlat(raw)
+		require.NoError(t, err)
+		log := result.Event.Log(v.deployment.Recovery)
+		require.Equal(t, next.Data, log.Data)
+		prior, replacement = result.State, next.ResultReceipt
+		i += n
+		if result.Event.Kind == FlatCompleteEvent {
+			require.Equal(t, complete.Verdict.ABI(), result.Event.Verdict.ABI())
+		}
+	}
+	require.Equal(t, len(records), i)
+	require.Nil(t, prior)
 }
