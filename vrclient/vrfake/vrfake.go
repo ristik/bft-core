@@ -43,6 +43,8 @@ type Chain struct {
 	Registry ethcommon.Address
 	Module   ethcommon.Address
 	Seal     ethcommon.Address
+	Custody  ethcommon.Address
+	Election ethcommon.Address
 	Tag      [32]byte
 	// Governor is the FoundationMultisig, Signers its five signers (ascending) and MsigNonce its approval nonce.
 	Governor     ethcommon.Address
@@ -361,6 +363,16 @@ func (c *Chain) exec(from, to ethcommon.Address, data []byte, write bool) ([]byt
 			return u64word(c.RecordCount), nil
 		}
 		return nil, &rpcError{Code: 3, Message: "execution reverted"}
+	case c.Custody:
+		if c.Custody != (ethcommon.Address{}) && bytes.Equal(data[:4], vrclient.CustodyABI.Methods["election"].ID) {
+			return pack(vrclient.CustodyABI, "election", c.Election), nil
+		}
+		return nil, nil
+	case c.Election:
+		if c.Election != (ethcommon.Address{}) && bytes.Equal(data[:4], vrclient.PosPublishABI.Methods["openResult"].ID) {
+			return pack(vrclient.PosPublishABI, "openResult", [32]byte{}), nil
+		}
+		return nil, nil
 	default:
 		return nil, nil // no code: an empty return
 	}
@@ -489,7 +501,7 @@ func (c *Chain) vr(from ethcommon.Address, method string, in []any, write bool) 
 	case "config":
 		return pack(a, method, c.Config), nil
 	case "activeModule":
-		return pack(a, method, vrclient.ModuleView{Module: c.Module, Health: c.Health, Meta: vrclient.ModuleMeta{ModuleTag: c.Tag}}), nil
+		return pack(a, method, vrclient.ModuleView{Module: c.Module, Health: c.Health, Meta: vrclient.ModuleMeta{ModuleTag: c.Tag, LiabilityHolder: c.Custody}}), nil
 	case "committee":
 		return pack(a, method, c.members()), nil
 	case "openOutput":
