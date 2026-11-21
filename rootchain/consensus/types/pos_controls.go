@@ -342,9 +342,9 @@ func (c *PosControl) UnmarshalCBOR(data []byte) error {
 	return nil
 }
 
-// closureEpoch, retirementKey are the identities the ordering rule sorts and de-duplicates by.
+// RetirementKey is the identity by which valid retirement controls are sorted and deduplicated.
 // A P85 Retirement is keyed (0, id, generation), a VR HolderRetirement (holder, id, generation).
-func (c PosControl) retirementKey() [3]uint64 {
+func (c PosControl) RetirementKey() [3]uint64 {
 	if c.Registry {
 		return [3]uint64{beUint64(c.Data[24:32]), beUint64(c.Data[56:64]), beUint64(c.Data[88:96])}
 	}
@@ -406,7 +406,7 @@ func validatePosControls(cs []PosControl) error {
 			return fmt.Errorf("%w: control %d is out of group order", ErrPosControl, i)
 		case gc == gp && c.Op == OpCloseLiability && c.Close.ClosedEpoch <= p.Close.ClosedEpoch:
 			return fmt.Errorf("%w: closures must ascend by closed epoch without duplicates", ErrPosControl)
-		case gc == gp && c.Op == OpRetirement && !lessKey(p.retirementKey(), c.retirementKey()):
+		case gc == gp && c.Op == OpRetirement && !lessKey(p.RetirementKey(), c.RetirementKey()):
 			return fmt.Errorf("%w: retirements must ascend by (id, generation) without duplicates", ErrPosControl)
 		}
 	}

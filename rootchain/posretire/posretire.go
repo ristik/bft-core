@@ -27,6 +27,8 @@ import (
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-core/rootchain/evmstate"
+	"github.com/unicitynetwork/bft-core/rootchain/vrstate"
+	"github.com/unicitynetwork/bft-core/vrschema"
 )
 
 // Bounds. Every one of them is a cap on work or memory, never a correctness rule.
@@ -71,6 +73,7 @@ type Proofs func(blockHash [32]byte) evmstate.ProofSource
 type Config struct {
 	Deployment storage.PosDeployment
 	Pins       evmstate.Pins
+	VR         *vrstate.Pins // emits HolderRetirement for the prototype's P85 holder 0
 	Chain      Chain
 	Proofs     Proofs
 	// Build collects a witness (default evmstate.BuildRetirementWitness); a seam for tests.
@@ -411,7 +414,7 @@ func (s *Service) collect(ck cacheKey, fetchAt [32]byte) {
 	started := s.cfg.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), ProofBudget)
 	defer cancel()
-	witness, facts, err := s.cfg.Build(ctx, s.cfg.Proofs(fetchAt), s.cfg.Pins, ck.key.ID, ck.key.Generation)
+	witness, facts, err := s.buildWitness(ctx, ck, s.cfg.Proofs(fetchAt))
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -453,6 +456,10 @@ func (s *Service) collect(ck cacheKey, fetchAt [32]byte) {
 		Op: rctypes.OpRetirement, Data: data[:], WitnessHash: sha256.Sum256(witness),
 		Retire: &rctypes.RetireContext{EVMBlockHash: ck.parent.BlockHash, EVMStateRoot: ck.parent.StateRoot},
 	}
+	if s.cfg.VR != nil {
+		c.Registry = true
+		c.Data = (vrschema.HolderRetirement{ID: ck.key.ID, Generation: ck.key.Generation, RefDigest: facts.RefDigest}).Encode()
+	}
 	if err := c.Validate(); err != nil {
 		s.log.Error("a prepared retirement is not a valid control", "id", ck.key.ID, "generation", ck.key.Generation, "error", err)
 		return
@@ -465,6 +472,29 @@ func (s *Service) collect(ck cacheKey, fetchAt [32]byte) {
 	}
 	s.log.Info("retirement proof ready", "id", ck.key.ID, "generation", ck.key.Generation, "latencyMs", s.cfg.Now().Sub(started).Milliseconds(),
 		"parentRoot", fmt.Sprintf("%x", ck.parent.StateRoot), "parentBlock", fmt.Sprintf("%x", ck.parent.BlockHash), "witnessBytes", len(witness), monitoring.Event(monitoring.EvExitRetirementProof))
+}
+
+func (s *Service) buildWitness(ctx context.Context, ck cacheKey, src evmstate.ProofSource) ([]byte, storage.RetirementFacts, error) {
+	if s.cfg.VR == nil {
+		return s.cfg.Build(ctx, src, s.cfg.Pins, ck.key.ID, ck.key.Generation)
+	}
+	h := vrschema.HolderRetirement{ID: ck.key.ID, Generation: ck.key.Generation}
+	raw, _, err := vrstate.BuildRetirementWitness(ctx, src, *s.cfg.VR, h)
+	if err != nil {
+		return nil, storage.RetirementFacts{}, err
+	}
+	w, err := vrstate.VerifyRetirement(raw, ck.parent.StateRoot, *s.cfg.VR, h, 0, false)
+	if err != nil {
+		return nil, storage.RetirementFacts{}, err
+	}
+	return raw, storage.RetirementFacts{
+		ID: h.ID, Generation: h.Generation, RefDigest: w.Facts.RefDigest,
+		Requested:       w.HolderKnown && w.Facts.Requested,
+		NotImported:     !w.Retired && !w.DedupPresent,
+		NoLiveExposures: w.Facts.LiveExposures == 0,
+		NoLotReferences: w.Facts.LotReferences == 0,
+		RecordsCaughtUp: w.HolderCursor == w.RecordCount && w.RecordCount == w.TargetCount,
+	}, nil
 }
 
 // Ready implements storage.RetirementProposer.

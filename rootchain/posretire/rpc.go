@@ -1,9 +1,12 @@
 package posretire
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"math/big"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/rpc"
 
@@ -14,6 +17,9 @@ import (
 type RPCChain struct {
 	Client  *rpc.Client
 	Custody [20]byte
+	// Registry discovers the prototype P85 custody registered as VR holder 0.
+	// Its address is only used to find candidate request logs.
+	Registry [20]byte
 }
 
 // Head implements Chain.
@@ -35,9 +41,28 @@ type rpcLog struct {
 // Requests implements Chain. A log that is not exactly custody's event shape (an id or generation beyond uint64, a wrong topic count or data
 // width) is ignored: logs are scheduling hints and a malformed one authorizes nothing.
 func (c RPCChain) Requests(ctx context.Context, from, to uint64) ([]Request, error) {
+	custody := c.Custody
+	if c.Registry != ([20]byte{}) {
+		data := make(hexutil.Bytes, 36)
+		copy(data, []byte{0xaa, 0x28, 0x05, 0x83}) // holderAt(uint8)
+		var holder hexutil.Bytes
+		err := c.Client.CallContext(ctx, &holder, "eth_call", map[string]any{
+			"to": common.Address(c.Registry), "data": data,
+		}, "latest")
+		if err != nil {
+			return nil, err
+		}
+		if len(holder) != 128 {
+			return nil, fmt.Errorf("posretire: holderAt(0) returned %d bytes", len(holder))
+		}
+		copy(custody[:], holder[12:32])
+		if custody == ([20]byte{}) {
+			return nil, nil // no prototype P85 holder registered
+		}
+	}
 	var logs []rpcLog
 	filter := map[string]any{
-		"address":   hexutil.Encode(c.Custody[:]),
+		"address":   hexutil.Encode(custody[:]),
 		"fromBlock": hexutil.EncodeUint64(from),
 		"toBlock":   hexutil.EncodeUint64(to),
 		"topics":    []any{hexutil.Encode(RequestedTopic[:])},
@@ -47,11 +72,20 @@ func (c RPCChain) Requests(ctx context.Context, from, to uint64) ([]Request, err
 	}
 	var out []Request
 	for _, l := range logs {
-		if l.Removed || len(l.Topics) != 2 || len(l.Data) != 32 || len(l.Topics[1]) != 32 {
+		if l.Removed || len(l.Topics) < 2 || !bytes.Equal(l.Topics[0], RequestedTopic[:]) || len(l.Topics[1]) != 32 {
+			continue
+		}
+		var generationWord []byte
+		switch {
+		case len(l.Topics) == 3 && len(l.Topics[2]) == 32 && len(l.Data) == 0:
+			generationWord = l.Topics[2] // current P85 and VR holder event
+		case len(l.Topics) == 2 && len(l.Data) == 32:
+			generationWord = l.Data // legacy custody event
+		default:
 			continue
 		}
 		id, ok1 := word64(l.Topics[1])
-		generation, ok2 := word64(l.Data)
+		generation, ok2 := word64(generationWord)
 		if ok1 && ok2 {
 			out = append(out, Request{Key: Key{ID: id, Generation: generation}, Block: uint64(l.BlockNumber)})
 		}
