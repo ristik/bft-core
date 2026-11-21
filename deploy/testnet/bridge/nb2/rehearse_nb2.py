@@ -461,14 +461,14 @@ class NB2Rehearsal(SdkClients, Rehearsal):
                 [f'replay-{p}' for p in (p60, p15, p25)] + [f'replay-{p}-evicted' for p in (p60, p15, p25)] + [f'verdicts-{p}' for p in (p60, p15, p25)]
         self.keep(*names)
         (self.evidence / 'nb2' / f'paid{self.prefix}.json').write_text(json.dumps({'paid': paid, 'mainBalanceDelta': self.balance(main) - bal0, 'segments': [s0['segment'], s1['segment']], 'indices': idx}, indent=2) + '\n')
-        # an ambiguous broadcast (#1121): the redeem reaches validator 1 first, so the gateway's relay sees "already known" beside the others' hash and
-        # answers 503 "broadcast may be partial"; the wallet must not resend blindly but poll the receipt of the hash it computed
+        # The redeem reaches validator 1 first, so the public broadcast must acknowledge it despite a duplicate reply (#1121).
         d('burn', 'main', 'legacy')
         d('verdicts', 'main', 'legacy')
-        d('redeem', 'main', 'legacy', '--ambiguous')
+        d('redeem', 'main', 'legacy', '--pre-send')
         r = self.outfile('redeem-legacy')
-        self.expect(r['result'] == 'paid' and r['broadcasts']['ambiguous'] >= 1 and len(r['sends']) == 1,
-                    'the gateway answered 503 (partial broadcast) and the wallet found the payment by receipt polling, with one send', json.dumps(r['broadcasts']))
+        b = r['broadcasts']
+        self.expect(r['result'] == 'paid' and b['preSent'] == 1 and b['acknowledged'] == 1 and b['ambiguous'] == 0 and len(r['sends']) == 1,
+                    'the public gateway acknowledged the pre-submitted transaction and the wallet settled with one send', json.dumps(b))
         self.keep('burn-legacy', 'redeem-legacy', 'verdicts-legacy')
 
     # --- evidence (#1102) --------------------------------------------------------------------------------------------------------

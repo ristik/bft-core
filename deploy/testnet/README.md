@@ -77,9 +77,20 @@ serves the aggregator's JSON-RPC on `POST /aggregator` (the SDK's methods only,
 bodies <=64 KiB) and its trust-base pages on `GET /api/v1/trustbases`, with their
 own limit of ten requests/IP/second and 50/second overall; no authentication. Expensive log scans,
 trace/debug and signing methods are excluded. `eth_call`/estimate run under these
-limits and upstream deadlines; transaction fanout reuses faucet/relay.py and checks
-every validator's chain ID/genesis before sending. A partial broadcast is ambiguous:
-inspect its hash on every node; do not automatically retry.
+limits and a shared nine-second upstream budget. The public gateway checks chain
+ID and genesis on each backend it uses. Bridge preflight calls start on the
+healthiest backend with the remaining budget, up to eight seconds for the
+method itself. Reads can use any healthy backend. The gateway
+checks block coverage for logs, receipts by number or hash, and seal companions.
+`/healthz` is ready when a pinned backend serves a valid head. The gateway
+broadcasts transactions to reachable, pinned validators within the budget. One
+acceptance returns the transaction hash immediately while bounded delivery to
+the remaining validators continues. The gateway allows four active broadcasts,
+at most two from large requests, including those finishing in the background.
+Resubmitting the same signed bytes also returns that hash when a backend can
+find that exact transaction in its pool or chain. If the gateway cannot confirm
+acceptance, it returns HTTP 503. Check the transaction hash before retrying the
+same signed bytes.
 
 ## Build artifacts on Linux
 
