@@ -8,8 +8,36 @@ source scripts/lib/h3-lib.sh
 source scripts/vr-pos-steps.sh
 
 work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
+work=$(cd "$work" && pwd -P)
+trap 'rm -rf -- "$work"' EXIT
 cd "$work"
+
+# The real restore helper clears these destinations before its stubbed node starts.
+unset EVM_EXECUTION_JOURNAL_ROOT H3_RESTORE_SEED_DIR H3_RESTORE_SEED_BUNDLES
+H3_ARCHIVES=$work/archives
+EVM_ARCHIVE_ROOT=$H3_ARCHIVES
+H3_RESTORE_TRUST_BASE=$work/test-nodes/trust-base.json
+REGISTRY_LAYOUT_FILE=$work/test-nodes/registry-layout
+EVM_B1_PROFILE=$work/test-nodes/b1-profile.json
+EVM_GENESIS_FILE=$work/test-nodes/genesis.json
+EVM_FULL_SHARD_CONF=$work/test-nodes/shard.json
+VR_EVIDENCE=$work
+UTB_LANE=0
+
+journal=test-nodes/evm5/execution-journal.db
+python3 - "$work" build/ubft test-nodes/evm5 test-nodes/reth5/dd \
+  "$H3_ARCHIVES/evm5" "$EVM_ARCHIVE_ROOT/evm5" "$journal" "$journal"-* \
+  "$H3_RESTORE_TRUST_BASE" "$REGISTRY_LAYOUT_FILE" "$EVM_B1_PROFILE" "$EVM_GENESIS_FILE" "$EVM_FULL_SHARD_CONF" <<'PY'
+from pathlib import Path
+import sys
+
+work = Path(sys.argv[1])
+for name in [*sys.argv[2:], *work.rglob("*")]:
+    resolved = Path(name).resolve()
+    if work not in resolved.parents:
+        raise SystemExit(f"Refusing fixture path outside {work}: {name} resolves to {resolved}")
+PY
+
 mkdir -p build test-nodes/evm5
 cat >build/ubft <<'SH'
 #!/usr/bin/env bash
@@ -30,14 +58,9 @@ registry_layout() { echo 3; }
 
 SIGNING=authority
 H3_RESTORE_NO_SESSION=1
-H3_RESTORE_TRUST_BASE=test-nodes/trust-base.json
 H3_ROOTS='1 2 3 4'
 H3_ONLINE='1 2 3 4'
-EVM_ARCHIVE_ROOT=$H3_ARCHIVES
 EVM_ARCHIVE_DERIVED=1
-EVM_B1_PROFILE=test-nodes/b1-profile.json
-EVM_GENESIS_FILE=test-nodes/genesis.json
-EVM_FULL_SHARD_CONF=test-nodes/shard.json
 EVM_ENGINE_FEE_COLLECTOR=test-collector
 EVM_JOURNAL_CANDIDATES=4096
 EVM_EXTRA_ARGS='--journal-observations 8192 --journal-bytes=134217728 --journal-candidates=2048 --log-level debug'
@@ -63,7 +86,6 @@ fi
 echo 'PASS: restore and restart use the same durable journal limits'
 
 partitionID=8
-VR_EVIDENCE=$work
 health='{"executorOk":true,"voting":true,"binding":{"member":true,"nodeId":"peer-5","partitionId":8,"shardEpoch":3,"history":[{"epoch":4}]}}'
 curl() { [ -n "$health" ] && printf '%s\n' "$health"; }
 vrp_k_shard_serving 5
