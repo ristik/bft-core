@@ -57,8 +57,19 @@ def create(gen, initcode, label):
     try:
         out = tools(gen, 'cast', 'send', '--rpc-url', ETH, '--keystore', '/gen/faucet-secrets/keystore.json', '--password-file', '/gen/faucet-secrets/password',
                     '--json', '--create', initcode, capture=True)
-    except subprocess.CalledProcessError as error:   # cast's own reason (its stderr), not the initcode the command line carries
-        raise SystemExit(f'the {label} creation failed: cast exited {error.returncode}: {(error.stderr or "").strip()[-2000:]}')
+    except subprocess.CalledProcessError as error:
+        # cast --json reports its errors on stdout. Older tools use stderr.
+        reasons = []
+        try:
+            result = json.loads(error.stdout or '')
+        except json.JSONDecodeError:
+            result = None
+        if isinstance(result, dict) and isinstance(result.get('errors'), list):
+            reasons = [e['message'] for e in result['errors']
+                       if isinstance(e, dict) and isinstance(e.get('message'), str)]
+        detail = '; '.join(dict.fromkeys(reasons)) or (error.stderr or '').strip() or 'no diagnostic from cast'
+        detail = detail.replace(initcode, '[creation bytecode redacted]')
+        raise SystemExit(f'the {label} creation failed: cast exited {error.returncode}: {detail[-2000:]}') from None
     receipt = json.loads(out)
     if receipt.get('status') not in ('0x1', 1, '1'):
         raise SystemExit(f'the {label} creation failed: {out[:400]}')

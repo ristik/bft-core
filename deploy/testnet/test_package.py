@@ -2485,8 +2485,10 @@ class NB2DriverKeys(unittest.TestCase):
     def test_a_failed_creation_reports_casts_own_reason(self):
         # the intermittent production-vault creation on testnet-bridge-pos (run 43994509917) left only the initcode in the log
         import importlib.util
-        spec=importlib.util.spec_from_file_location('deploy_nb2',Path(__file__).parent/'bridge/nb2/deploy_nb2.py')
-        sys.path.insert(0,str(Path(__file__).parent/'bridge'));self.addCleanup(sys.path.remove,str(Path(__file__).parent/'bridge'))
+        nb2_dir = Path(__file__).parent / 'bridge/nb2'
+        spec = importlib.util.spec_from_file_location('deploy_nb2', nb2_dir / 'deploy_nb2.py')
+        sys.path.insert(0, str(nb2_dir))
+        self.addCleanup(sys.path.remove, str(nb2_dir))
         m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
         def tools(gen,*args,capture=False):
             raise subprocess.CalledProcessError(1,['docker','run','cast','send','--create','0x'+'60'*4000],output='',stderr='Error: server returned an error response: error code -32000: nonce too low\n')
@@ -2494,6 +2496,22 @@ class NB2DriverKeys(unittest.TestCase):
             with self.assertRaises(SystemExit) as e: m.create(Path('/srv/g'),'0x6060','production vault')
         self.assertIn('the production vault creation failed: cast exited 1: Error: server returned an error response: error code -32000: nonce too low',str(e.exception))
         self.assertNotIn('6060606060',str(e.exception),'not the initcode')
+        initcode = '0x' + '60' * 4000
+        error = 'server returned an error response: error code -32000: nonce too low'
+        structured = json.dumps({'schema_version': 1, 'success': False, 'data': None, 'errors': [
+            {'code': 'cast.error', 'message': error},
+            {'code': 'cast.error.context', 'message': error},
+            {'code': 'cast.error.context', 'message': f'transaction input {initcode}'},
+        ]})
+        with patch.object(m, 'tools', side_effect=subprocess.CalledProcessError(
+            1, ['docker', 'run', 'cast', 'send', '--create', initcode], output=structured, stderr='',
+        )):
+            with self.assertRaises(SystemExit) as e:
+                m.create(Path('/srv/g'), initcode, 'production verifier')
+        self.assertEqual(
+            str(e.exception), f'the production verifier creation failed: cast exited 1: {error}; '
+                              'transaction input [creation bytecode redacted]',
+        )
     def test_no_key_is_given_to_a_command_line(self):
         src=(Path(__file__).parent/'bridge/nb2/rehearse_nb2.py').read_text()
         self.assertNotIn('--private-key',src);self.assertNotIn('self.key(',src)
