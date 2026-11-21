@@ -375,7 +375,7 @@ class Rehearsal:
         running = set(self.compose('ps', '--services', '--status', 'running').split())
         self.expect(True, 'every non-authority service except the signer is running', f'{len(start)} services')
         self.expect('signer' not in running, 'the faucet signer is not running (no third-party call in the rehearsal)')
-        head = self.wait('the public gateway reports a head (every validator identity checked by the relay)',
+        head = self.wait('a pinned validator serves a public gateway head',
                          lambda: self.http(PUBLIC_RPC, 'GET', '/healthz')[0] == 200, 600)
         self.expect(head, 'the public gateway is healthy')
 
@@ -1676,8 +1676,7 @@ class Rehearsal:
         self.expect(blocks[-1] > blocks[0], 'the execution chain\'s block moved between the first and the last sample (an idle chain still produces blocks)', str(blocks))
 
     def send_to_survivors(self, survivors, raw, tx):
-        """The gateway's fan-out with a validator down, each reply checked. The validators have no peers, so a pool that is not sent a transaction never holds it: sent to one
-        survivor it waits for that survivor's turn to lead."""
+        """Send the latency samples directly so each survivor's acceptance can be checked."""
         for j in survivors:
             reply = self.inner_reply(f'http://ureth{j}:8545', 'eth_sendRawTransaction', [raw])
             error = str(reply.get('error', '')).lower()
@@ -1774,8 +1773,7 @@ class Rehearsal:
 
     def pod_restart(self, rotated=False, capture_logs=None):
         """One validator entity at a time: stop its execution client, root and shard node (its signing authority stays live, as the README requires), check what the
-        package promises, start them again and check they rejoin. The PUBLIC gateway fails closed while a validator is down (it checks every validator's identity
-        before it serves or broadcasts): that is asserted, not worked around; the survivors are driven directly, as the gateway would fan out."""
+        public gateway availability and survivor agreement, then start them again and check they rejoin."""
         capture_logs = (not rotated) if capture_logs is None else capture_logs   # the PoA stage keeps the logs of each stop window (bft-core #886), the rotated epochs do not
         sender, to = self.manifest['faucet_address'], '0x' + '22' * 20
         for i in self.pods:
@@ -1786,15 +1784,13 @@ class Rehearsal:
             stopped = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z')
             stopped_at = time.monotonic()
             self.compose('stop', *names)
-            self.wait('the public gateway refuses while a validator is down (fail closed)', lambda: self.http(PUBLIC_RPC, 'GET', '/healthz')[0] == 503, 120)
-            self.expect(True, f'validator {i} down: the public gateway fails closed (503), no partial broadcast')
-            nonce = int(self.ureth(survivors[0], 'eth_getTransactionCount', [sender, 'latest']), 16)
-            price = int(self.ureth(survivors[0], 'eth_gasPrice'), 16)
+            self.wait('the public gateway is healthy with one validator down', lambda: self.http(PUBLIC_RPC, 'GET', '/healthz')[0] == 200, 120)
+            self.expect(int(self.call('eth_chainId'), 16) == self.chain_id, f'validator {i} down: public chain ID is readable')
+            nonce = int(self.call('eth_getTransactionCount', [sender, 'latest']), 16)
+            price = int(self.call('eth_gasPrice'), 16)
             raw = self.raw_tx(to, nonce, price)
-            # the hash is the transaction's own (keccak of the raw bytes), not what a node answers: send_to_survivors says which answers are acceptance
             tx = self.cast_run('keccak', raw)
-            self.send_to_survivors(survivors, raw, tx)
-            self.say(f'  the {len(survivors)} survivors accept transaction {tx}')
+            self.expect(self.call('eth_sendRawTransaction', [raw]) == tx, f'validator {i} down: the gateway acknowledges the signed transaction', tx)
             blocks = set()
             accepted = time.monotonic()
             for j in survivors:
@@ -1806,6 +1802,9 @@ class Rehearsal:
             if capture_logs:
                 self.capture_restart_window(i, window_start, stall)
             self.expect(len(blocks) == 1, 'the survivors agree on the including block')
+            receipt = self.call('eth_getTransactionReceipt', [tx])
+            self.expect(receipt is not None and receipt['blockHash'] in blocks, 'the gateway serves the receipt during the outage')
+            self.expect(self.call('eth_sendRawTransaction', [raw]) == tx, 'resubmitting the included transaction returns the same hash', tx)
             last = tx
             if rotated:
                 last = self.after_transition_latency(i, survivors, MINE_SECONDS_ROTATED, stopped_at) or tx
