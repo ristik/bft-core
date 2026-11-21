@@ -78,7 +78,9 @@ bodies <=64 KiB) and its trust-base pages on `GET /api/v1/trustbases`, with thei
 own limit of ten requests/IP/second and 50/second overall; no authentication. Expensive log scans,
 trace/debug and signing methods are excluded. `eth_call`/estimate run under these
 limits and a shared nine-second upstream budget. The public gateway checks chain
-ID and genesis on each backend it uses. Reads can use any healthy backend. It
+ID and genesis on each backend it uses. Bridge preflight calls start on the
+healthiest backend with the remaining budget, up to eight seconds for the
+method itself. Reads can use any healthy backend. The gateway
 checks block coverage for logs, receipts by number or hash, and seal companions.
 `/healthz` is ready when a pinned backend serves a valid head. The gateway
 broadcasts transactions to reachable, pinned validators within the budget. One

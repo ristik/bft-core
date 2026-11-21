@@ -3,10 +3,11 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import socket
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 import urllib.error
 import urllib.request
 
@@ -77,7 +78,7 @@ class PublicRelayTest(unittest.TestCase):
         self.stack.callback(server.shutdown)
         return 'http://127.0.0.1:' + str(server.server_port)
 
-    def gateway(self, *nodes):
+    def gateway(self, *nodes, hostname=None):
         urls = []
         for node in nodes:
             if node is None:
@@ -88,6 +89,8 @@ class PublicRelayTest(unittest.TestCase):
                 urls.append('http://127.0.0.1:' + str(server.server_address[1]))
             else:
                 urls.append(self.serve(ThreadingHTTPServer(('127.0.0.1', 0), node.handler())))
+        if hostname is not None:
+            urls[0] = urls[0].replace('127.0.0.1', hostname)
         cfg = dict(validator_rpc_urls=urls, chain_id=70, genesis_hash=GENESIS)
         self.relay = Relay(cfg, small_body_limit=MAX_BODY)
         server = Server(('127.0.0.1', 0), Handler, self.relay)
@@ -223,6 +226,123 @@ class PublicRelayTest(unittest.TestCase):
         self.assertNotIn(('eth_getBlockReceipts', [BLOCK]), lagging.calls)
         self.assertIn(('eth_blockNumber', []), covering.calls)
         self.assertIn(('eth_getBlockReceipts', [BLOCK]), covering.calls)
+
+    def test_healthy_bridge_preflight_can_exceed_an_even_peer_slice(self):
+        def preflight(_):
+            time.sleep(.5)
+            return {'result': '0x1234'}
+
+        peers = [Node(answers={'eth_call': preflight, 'eth_estimateGas': preflight}) for _ in range(4)]
+        self.gateway(*peers)
+        with patch('public_relay.REQUEST_TIMEOUT', 1.4), patch('public_relay.METHOD_TIMEOUT', 1.1):
+            for method in ('eth_call', 'eth_estimateGas'):
+                with self.subTest(method=method):
+                    params = [{'data': '0x' + 'a' * 20000}, 'latest']
+                    self.assert_result(method, params, '0x1234')
+
+    def test_stalled_resolution_leaves_time_to_confirm_a_duplicate_and_release_admission(self):
+        resolver_started = threading.Event()
+        release_resolver = threading.Event()
+        resolve = socket.getaddrinfo
+        blocked_host = 'validator-dns-stall.test'
+        raw = '0x' + 'a' * 20000
+        stalled_lookups = []
+
+        def lookup(host, *args, **kwargs):
+            if host == blocked_host:
+                stalled_lookups.append(host)
+                resolver_started.set()
+                release_resolver.wait(4)
+                host = '127.0.0.1'
+            return resolve(host, *args, **kwargs)
+
+        def duplicate(_):
+            self.assertTrue(resolver_started.wait(1))
+            return {'error': KNOWN}
+
+        slow = Node()
+        confirming = Node(answers={
+            'eth_sendRawTransaction': duplicate,
+            'web3_sha3': {'result': TX},
+            'eth_getTransactionByHash': {'result': {'hash': TX}},
+        })
+        self.gateway(slow, confirming, hostname=blocked_host)
+        with patch('socket.getaddrinfo', side_effect=lookup), \
+                patch('public_relay.REQUEST_TIMEOUT', 1.8), patch('public_relay.DUPLICATE_RESERVE', .8):
+            try:
+                self.assert_result('eth_sendRawTransaction', [raw], TX)
+                self.assertFalse(release_resolver.is_set())
+                # Once the group finishes there is room for two more large writes,
+                # even though the bounded resolver task still has not returned.
+                confirming.answers['eth_sendRawTransaction'] = {'result': TX}
+                with ThreadPoolExecutor(max_workers=2) as callers:
+                    sends = [callers.submit(self.assert_result, 'eth_sendRawTransaction', [raw], TX)
+                             for _ in range(2)]
+                    for send in sends:
+                        send.result(timeout=1.5)
+            finally:
+                release_resolver.set()
+        self.relay.close()
+        self.assertNotIn(('eth_sendRawTransaction', [raw]), slow.calls)
+        self.assertEqual(stalled_lookups, [blocked_host])
+
+    def test_connect_candidates_reuse_the_deadline_after_resolution(self):
+        relay = Relay(dict(validator_rpc_urls=[], chain_id=70, genesis_hash=GENESIS), small_body_limit=MAX_BODY)
+        self.addCleanup(relay.close)
+        now = 10.0
+        candidates = [(socket.AF_INET, socket.SOCK_STREAM, 0, '', (f'127.0.0.{i}', 8545))
+                      for i in range(1, 3)]
+
+        def resolve(address, deadline):
+            nonlocal now
+            now += .25
+            return candidates
+
+        def fail_connect(address):
+            nonlocal now
+            now += .25
+            raise ConnectionRefusedError
+
+        first, second = Mock(), Mock()
+        first.connect.side_effect = fail_connect
+        with patch.object(relay, 'resolve', side_effect=resolve), \
+                patch('public_relay.time.monotonic', side_effect=lambda: now), \
+                patch('public_relay.socket.socket', side_effect=[first, second]):
+            self.assertIs(relay.connect_peer(('validator', 8545), 11), second)
+        first.settimeout.assert_called_once_with(.75)
+        first.close.assert_called_once()
+        self.assertEqual(second.settimeout.call_args_list[0].args, (.5,))
+
+    def test_duplicate_reply_survives_a_straggler_on_the_same_worker(self):
+        duplicate = Node(answers={
+            'eth_sendRawTransaction': {'error': KNOWN},
+            'web3_sha3': {'result': TX},
+            'eth_getTransactionByHash': {'result': {'hash': TX}},
+        })
+        self.gateway(duplicate, *(Node() for _ in range(4)))
+        stalled = threading.Event()
+        release = threading.Event()
+        send_to = self.relay.send_to
+
+        def fail_late(url, body, deadline):
+            if url == self.relay.urls[-1]:
+                stalled.set()
+                release.wait(5)
+                return None
+            return send_to(url, body, deadline)
+
+        with patch.object(self.relay, 'send_to', side_effect=fail_late), \
+                patch('public_relay.REQUEST_TIMEOUT', 2.5), patch('public_relay.DUPLICATE_RESERVE', 1.5):
+            try:
+                self.assert_result('eth_sendRawTransaction', ['0x' + 'a' * 20000], TX)
+                self.assertTrue(stalled.is_set())
+                with self.relay.large_send_slots:
+                    self.assertFalse(self.relay.large_send_slots.acquire(blocking=False))
+            finally:
+                release.set()
+        self.relay.close()
+        with self.relay.large_send_slots, self.relay.large_send_slots:
+            self.assertFalse(self.relay.large_send_slots.acquire(blocking=False))
 
     def test_a_slow_peer_does_not_delay_a_confirmed_send(self):
         started = threading.Event()
