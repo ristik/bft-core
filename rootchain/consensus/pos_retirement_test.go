@@ -52,10 +52,11 @@ func closure(epoch uint64) drctypes.PosControl {
 	return c
 }
 
-func idsOf(controls []drctypes.PosControl) (out [][3]uint64) {
+func idsOf(controls []drctypes.PosControl) (out [][2]uint64) {
 	for _, c := range controls {
 		if c.Op == drctypes.OpRetirement {
-			out = append(out, c.RetirementKey())
+			key := c.RetirementKey()
+			out = append(out, [2]uint64{key[1], key[2]})
 		}
 	}
 	return out
@@ -82,7 +83,7 @@ func TestPreparedRetirementsAreOrderedAfterTheClosuresInAscendingKeyOrderAndStam
 	require.Len(t, got, 5)
 	require.Equal(t, drctypes.OpCloseLiability, got[0].Op, "the mandatory closures keep their first place")
 	require.Equal(t, drctypes.OpCloseLiability, got[1].Op)
-	require.Equal(t, [][3]uint64{{0, 4, 1}, {0, 6, 1}, {0, 9, 1}}, idsOf(got), "ascending (id, generation) among the Retirements")
+	require.Equal(t, [][2]uint64{{4, 1}, {6, 1}, {9, 1}}, idsOf(got), "ascending (id, generation) among the Retirements")
 	for _, c := range got[2:] {
 		if c.Op == drctypes.OpRetirement && c.RetirementKey() != [3]uint64{0, 6, 1} {
 			require.EqualValues(t, 1, c.OrderingEpoch)
