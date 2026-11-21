@@ -17,6 +17,7 @@ import (
 	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/internal/weightvalidation"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
+	"github.com/unicitynetwork/bft-core/vrrules"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
@@ -100,6 +101,52 @@ type Authority struct {
 	requirePos bool
 	// latePos allows the operator channel to pin the election at run time (WithLatePosPolicy): development only.
 	latePos bool
+	// fence refuses to sign for, or advance to, a root epoch >= E of an effective activation-schedule rule this binary lacks (WithFence).
+	fence *vrrules.Gate
+	// fencePending is the pre-genesis enrollment mode (WithFencePending): the authority serves key and enrollment operations only and signs
+	// nothing, and advances nothing, until ProvisionFence gives it its fence. Guarded by mu.
+	fencePending bool
+}
+
+// WithFence makes the authority refuse, with vrrules.ErrUpgradeRequired, to authenticate (and so reserve or sign) a request for a root
+// epoch >= E of an effective rule of the committed activation schedule that this binary lacks, and to advance into such an epoch (design
+// 7.4). A source failure with nothing known for the epoch refuses too. A nil gate fences nothing.
+func WithFence(g *vrrules.Gate) Option {
+	return func(a *Authority) error { a.fence = g; return nil }
+}
+
+// ErrFencePending is a signing or advance request to an authority that is still waiting for its activation fence (WithFencePending).
+var ErrFencePending = errors.New("signing-fence-pending")
+
+// WithFencePending starts the authority in the pre-genesis enrollment mode of a VR generation: its key and enrollment are available (the
+// shard configuration is generated from the key), but the generation's profile, execution genesis and activation source are not known
+// yet, so it signs nothing until ProvisionFence supplies the gate. The CLI starts it so only when the fence inputs are to be provisioned.
+func WithFencePending() Option {
+	return func(a *Authority) error { a.fencePending = true; return nil }
+}
+
+// ProvisionFence ends the pre-genesis mode: it gives the authority its fence, once, and enables signing and advance.
+func (a *Authority) ProvisionFence(g *vrrules.Gate) error {
+	if g == nil {
+		return errors.New("signingauthority: no fence to provision")
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !a.fencePending {
+		return errors.New("signingauthority: this authority is not waiting for its fence")
+	}
+	a.fence, a.fencePending = g, false
+	return nil
+}
+
+// fenceGate is the fence every signing and advance operation consults, or ErrFencePending while it is not provisioned.
+func (a *Authority) fenceGate() (*vrrules.Gate, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.fencePending {
+		return nil, fmt.Errorf("%w: this authority waits for its activation fence (profile, execution genesis, activation source) and signs nothing until then", ErrFencePending)
+	}
+	return a.fence, nil
 }
 
 // WithAdvanceHook calls hook at the start of every proof verification, outside the authority's locks. It changes no decision; it exists
@@ -694,6 +741,10 @@ replayed but genuine authorization passes here every time, and the signing recor
 refuses it. Keeping the two apart is the point of the split, because authenticity is not freshness.
 */
 func (a *Authority) Authenticate(ctx context.Context, req Request) (*Authorization, error) {
+	fence, err := a.fenceGate()
+	if err != nil {
+		return nil, err
+	}
 	a.mu.Lock()
 	enroll, trust, hasKey, scopeVersion := a.enroll.clone(), a.trust, a.signer != nil, a.scopeVersion
 	irBase, irBaseKnown, irAckSeen := a.irBase, a.irBaseKnown, a.irAckSeen
@@ -771,6 +822,10 @@ func (a *Authority) Authenticate(ctx context.Context, req Request) (*Authorizati
 
 	// Authentication against the authority's own trust, for the root epoch the certificate names.
 	// An unknown epoch is a refusal rather than a reason to trust the certificate's own claim.
+	// the activation schedule's fence: nothing is authenticated, reserved or signed for an epoch >= E of a rule this binary lacks
+	if err := fence.Check(ctx, own.UC.GetRootEpoch()); err != nil {
+		return nil, fmt.Errorf("signing for root epoch %d: %w", own.UC.GetRootEpoch(), err)
+	}
 	tb, err := trust.GetByEpoch(ctx, own.UC.GetRootEpoch())
 	if err != nil {
 		return nil, fmt.Errorf("%w: root epoch %d: %w", ErrUnauthenticated, own.UC.GetRootEpoch(), err)

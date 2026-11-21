@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/unicitynetwork/bft-core/vrrules"
 	"net"
 	"os"
 	"path/filepath"
@@ -79,9 +80,16 @@ type signingAuthorityRunFlags struct {
 	*baseFlags
 	trustBaseFlags
 
-	ClientSocket       string
-	OperatorSocket     string
-	OperatorCredential string
+	ActivationSourceURL  string
+	VRGeneration         bool
+	FenceProvisionFile   string
+	B1Profile            string
+	ExecutionGenesisHash string
+	VRNetworkWord        string
+	VRRegistryCodeHash   string
+	ClientSocket         string
+	OperatorSocket       string
+	OperatorCredential   string
 	// the automated root member's narrow channel: the handoff possession proof only (VT-09); both or neither
 	PoPSocket     string
 	PoPCredential string
@@ -134,6 +142,13 @@ key exists: the authority starts pending and admits no client until complete-enr
 	cmd.Flags().StringArrayVar(&flags.PosPolicies, "pos-policy", nil, "JSON file pinning the P85 election (network word, chain id, ElectionPolicy address) and the identity ids this authority's EVM key may sign possession proofs for (#1216): without a pin the authority signs no P85 assignment possession. Fixed for the authority's lifetime; `signing-authority pos-policy` pins it once on a running authority")
 	cmd.Flags().BoolVar(&flags.RequirePosPolicy, "require-pos-policy", false, "refuse every P85 possession signature (election, delegation, assignment) until the P85 pin is set; with --pos-policy the pin is fixed from startup")
 	cmd.Flags().BoolVar(&flags.LatePosPolicy, "dev-allow-late-pos-policy", false, "DEVELOPMENT ONLY: let `signing-authority pos-policy` pin the P85 election on this running authority. The pin then comes from the operator credential that also asks for signatures, so it restricts nothing against a compromised credential; production gives --pos-policy at startup")
+	cmd.Flags().StringVar(&flags.ActivationSourceURL, "activation-source-url", "", activationSourceUsage)
+	cmd.Flags().BoolVar(&flags.VRGeneration, "vr-generation", false, "force the VR-generation requirements (it cannot disable them): a b1 profile with the VR measurement, or a VR registration/P85 policy, already requires --activation-source-url and the generation pins, and the authority refuses to start without them")
+	cmd.Flags().StringVar(&flags.FenceProvisionFile, "fence-provision-file", "", "on a VR generation whose fence inputs are not known at start (the authority is started first to provide its key): start in the pre-genesis enrollment mode, signing and advancing nothing, and enable signing when this JSON file {b1Profile, activationSourceUrl, executionGenesisHash} appears. Provision the genesis hash from the generation's own genesis artifacts, not from the endpoint it checks")
+	cmd.Flags().StringVar(&flags.B1Profile, "b1-profile", "", "the deployment's b1 profile (as the shard node's): on a VR generation it supplies the registry code hash pin and makes the activation fence mandatory")
+	cmd.Flags().StringVar(&flags.ExecutionGenesisHash, "execution-genesis-hash", "", "0x-prefixed hash of the deployment's execution genesis block: the generation the activation source must be (mandatory on a VR generation)")
+	cmd.Flags().StringVar(&flags.VRNetworkWord, "vr-network-word", "", "optional 0x-prefixed VR network word the activation source's registry must report")
+	cmd.Flags().StringVar(&flags.VRRegistryCodeHash, "vr-registry-code-hash", "", "0x-prefixed runtime code hash of the pinned VR core (the b1 profile's VR measurement) that the activation source's registry must have")
 	cmd.Flags().StringVar(&flags.AuthorityID, "authority-id", "", "operator-assigned name for this authority lifetime, for diagnostics")
 	cmd.Flags().StringVar(&flags.NodeID, "node-id", "", "the shard validator this authority signs for (`ubft node-id` on the shard node's key configuration)")
 	cmd.Flags().Uint16Var(&flags.NetworkID, "network-id", 0, "network identifier")
@@ -198,12 +213,15 @@ func signingAuthorityRun(ctx context.Context, flags *signingAuthorityRunFlags) e
 	if err != nil {
 		return err
 	}
+	var policyNetwork *[32]byte // the VR network word the registration policy pins: the generation this authority belongs to
 	if flags.RegistrationPolicy != "" {
 		policy, err := readRegistrationPolicy(flags.RegistrationPolicy)
 		if err != nil {
 			return err
 		}
 		opts = append(opts, signingauthority.WithRegistrationPolicy(policy))
+		nw := [32]byte(policy.Deployment.Network)
+		policyNetwork = &nw
 	}
 	if len(flags.PosPolicies) > 1 {
 		return fmt.Errorf("--pos-policy is given once: %d policies named", len(flags.PosPolicies))
@@ -221,6 +239,68 @@ func signingAuthorityRun(ctx context.Context, flags *signingAuthorityRunFlags) e
 	if flags.RequirePosPolicy {
 		opts = append(opts, signingauthority.WithRequirePosPolicy())
 	}
+	// Whether this deployment is a VR generation comes from trusted enrollment data, never from an opt-in: the enrolled b1 profile carries
+	// the VR hook measurement (as the shard node's does), or the authority is given a VR registration policy (not a P85 --pos-policy). On a VR generation the
+	// fence is mandatory and the authority refuses to start without its activation source and generation pins. --vr-generation can only add
+	// to that (it cannot disable it).
+	fenceGen := vrFence{VR: flags.VRGeneration || flags.RegistrationPolicy != ""} // never from --pos-policy: that also pins the standalone P85 election of a pre-VR generation
+	if flags.B1Profile != "" {
+		_, pf, perr := readB1ProfileFile(flags.B1Profile)
+		if perr != nil {
+			return fmt.Errorf("loading the b1 profile: %w", perr)
+		}
+		if pf.VRHookMeasurement != nil {
+			fenceGen.VR = true
+			fenceGen.CodeHash = &pf.VRHookMeasurement.RegistryCodeHash
+		}
+	}
+	if flags.VRRegistryCodeHash != "" {
+		if fenceGen.CodeHash, err = parseCodeHash(flags.VRRegistryCodeHash); err != nil {
+			return err
+		}
+	}
+	if flags.ExecutionGenesisHash != "" {
+		if fenceGen.GenesisHash, err = parseCodeHash(flags.ExecutionGenesisHash); err != nil {
+			return err
+		}
+	}
+	if flags.VRNetworkWord != "" {
+		if fenceGen.NetworkWord, err = parseCodeHash(flags.VRNetworkWord); err != nil {
+			return err
+		}
+	}
+	if fenceGen.NetworkWord == nil {
+		fenceGen.NetworkWord = policyNetwork
+	}
+	if fenceGen.VR && flags.LineageGenesis == "" {
+		// the schedule for an epoch is decided from the checkpoint of the activation proof the authority verifies itself: an authority that
+		// advances on the operator's word alone has no authenticated evidence for the epochs it installs
+		return fmt.Errorf("%w: a VR generation advances by advance-with-proof, so --lineage-genesis-trust-base is mandatory", errVRFenceRequired)
+	}
+	// On a VR generation whose fence inputs are not known yet (the authority is started to provide its key, from which the shard
+	// configuration and the genesis are generated), --fence-provision-file starts it in the pre-genesis enrollment mode: it signs and
+	// advances nothing until that file supplies the b1 profile, the execution genesis hash and the activation source.
+	pending := fenceGen.VR && flags.FenceProvisionFile != "" && (flags.ActivationSourceURL == "" || fenceGen.CodeHash == nil || fenceGen.GenesisHash == nil)
+	var activationGate *vrrules.Gate
+	closeGate := func() {}
+	if pending {
+		opts = append(opts, signingauthority.WithFencePending())
+		log.Warn("signing authority in pre-genesis enrollment mode: it signs nothing until its activation fence is provisioned", "file", flags.FenceProvisionFile)
+	} else {
+		var gerr error
+		activationGate, closeGate, gerr = newActivationGate(ctx, log, flags.ActivationSourceURL, fenceGen)
+		if gerr != nil {
+			return gerr
+		}
+		defer closeGate()
+		if activationGate != nil {
+			opts = append(opts, signingauthority.WithFence(activationGate))
+			if err := activationGate.RegisterMetric(flags.observe.Meter("signingauthority")); err != nil {
+				return fmt.Errorf("creating the upgrade metric: %w", err)
+			}
+			go activationGate.Watch(ctx, activationWatchInterval, func() uint64 { return flags.RootEpoch })
+		}
+	}
 	// The key is generated here. The enrollment has no configuration hash yet, on purpose.
 	authority, err := signingauthority.New(signingauthority.Enrollment{
 		AuthorityID: flags.AuthorityID, NodeID: flags.NodeID, NetworkID: types.NetworkID(flags.NetworkID),
@@ -231,6 +311,9 @@ func signingAuthorityRun(ctx context.Context, flags *signingAuthorityRunFlags) e
 		return err
 	}
 	defer authority.Close()
+	if pending {
+		go provisionFenceWhenReady(ctx, log, flags.FenceProvisionFile, fenceGen, flags.ActivationSourceURL, authority, flags.observe.Meter("signingauthority"), func() uint64 { return flags.RootEpoch })
+	}
 
 	server, err := service.NewServer(authority, service.Config{OperatorCredential: operatorCredential, PoPCredential: popCredential, Log: log})
 	if err != nil {

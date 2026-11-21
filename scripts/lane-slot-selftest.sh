@@ -36,10 +36,11 @@ if [ -z "$bare" ]; then pass "no bare name-pattern process lookup in the lane li
 mkdir -p "$tmp/a" "$tmp/b"
 for t in a b; do
   ( cd "$tmp/$t" && python3 -c "$fake" ubft root-node run --home test-nodes/root1 >/dev/null 2>&1 & )
-  ( cd "$tmp/$t" && python3 -c "$fake" reth node --datadir test-nodes/reth5/dd --home test-nodes/evm5 >/dev/null 2>&1 & )
+  ( cd "$tmp/$t" && python3 -c "$fake" unicity-reth-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-linux-x86_64 node --datadir test-nodes/reth5/dd --home test-nodes/evm5 >/dev/null 2>&1 & )
 done
 sleep 1
-for pat in 'ubft root-node run --home test-nodes/root1' '--home test-nodes/evm5( |$)|test-nodes/reth5/dd'; do
+rethPat=$(source "$repo/helper.sh" && reth_node_pattern)
+for pat in 'ubft root-node run --home test-nodes/root1' '--home test-nodes/evm5( |$)|test-nodes/reth5/dd' "$rethPat"; do
   for t in a b; do
     mine=$(cd "$tmp/$t" && source "$repo/helper.sh" && owned_pids "$pat" | wc -l | tr -d ' ')
     own=$(pids_under "$tmp/$t" | wc -l | tr -d ' ')

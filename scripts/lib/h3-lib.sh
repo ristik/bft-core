@@ -86,8 +86,8 @@ h3_advance_authorities() { # root epoch, shard epoch, ids...
   # is bound from the verified handoff history), under its advanced authority.
   for i in ${joiners[@]+"${joiners[@]}"}; do
     stop_one_evm_validator "$i" 2>/dev/null || true
-    build/ubft signing-authority advance-epoch --operator-socket "test-nodes/auth$i/operator.sock" \
-      --operator-credential "test-nodes/auth$i/operator.cred" --trust-base "test-nodes/trust-base-epoch${rootEpoch}.json" --shard-conf "$pdr" || return 1
+    source helper.sh
+    authority_advance_scope "$i" "$rootEpoch" "test-nodes/trust-base-epoch${rootEpoch}.json" "$pdr" || return 1
     h3_restore_validator "$i" 2 || return 1
     echo "joiner $i advanced to root epoch $rootEpoch and restored"
   done
@@ -286,7 +286,7 @@ h3_start_reth() { # spare execution client i, peered with the running ones
   "$URETH_BIN" node --chain "$chainSpec" --datadir "test-nodes/reth$i/dd" \
     --authrpc.jwtsecret "test-nodes/evm$i/jwt.hex" --authrpc.addr 127.0.0.1 --authrpc.port $((rethEngineBase + i - 1)) \
     --http --http.addr 127.0.0.1 --http.port $((rethEthBase + i - 1)) --http.api eth,net,web3,admin,debug \
-    --rpc.eth-proof-window 64 --port $((rethP2PBase + i - 1)) --disable-discovery --ipcdisable \
+    $(urethPinStateProofFlags) --port $((rethP2PBase + i - 1)) --disable-discovery --ipcdisable \
     --engine.persistence-threshold "$d2cPersistenceThreshold" --builder.gaslimit "${URETH_BUILDER_GASLIMIT:-30000000}" \
     $(urethPinUnicityFlags) >"test-nodes/reth$i/reth.log" 2>&1 &
   echo $! >"test-nodes/reth$i/pid"

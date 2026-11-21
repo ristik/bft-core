@@ -49,6 +49,9 @@ lane_preflight_ports() { local label=$1 p; shift; for p in "$@"; do lane_port_pr
 # lane_port DEFAULT: the default port shifted into this lane's slot
 lane_port() { echo $(($1 + LANE_PORT_OFFSET)); }
 
+# lane_reth_eth_port INDEX: validator INDEX's reth eth port: rethEthBase (the lane's own, when it set one) or this slot's 18545 (never slot 0's by accident)
+lane_reth_eth_port() { echo $(( ${rethEthBase:-$(lane_port 18545)} + $1 - 1 )); }
+
 # The table: name, default port (slot 0), count, class. Classes: core (every paired lane), neg (the section-3 negative clients the default paired invocation
 # starts), f8, f6c, seed (one lane's each). A lane profile (below) is a set of classes. Everything a lane listens on; the lane scripts take their ports from here by value.
 lane_port_table() {

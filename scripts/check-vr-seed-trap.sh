@@ -33,7 +33,7 @@ traps=$(grep -c "^trap 'exit 1[34][03]' \(INT\|TERM\)" scripts/reth-paired-devne
 [ "$traps" = 2 ] && echo "ok   INT and TERM exit through the EXIT trap (cleanup)" || { echo "FAIL INT/TERM traps changed"; fail=1; }
 
 # one offset for the root listener and the export URL
-off=$(LANE_SLOT=2 bash -c 'source scripts/lib/utb-lib.sh; echo $(seed_port_offset)')
+off=$(LANE_SLOT=2 bash -c 'source scripts/lib/utb-lib.sh; printf "%s\n" "$LANE_PORT_OFFSET"')
 flags=$(LANE_SLOT=2 VR_SEED=1 bash -c 'source "$ROOT/scripts/lib/utb-lib.sh"; cd "$(mktemp -d)"; mkdir -p test-nodes; echo 0x00 >test-nodes/utb-genesis.id; echo x >test-nodes/utb-genesis.cbor; utb_root_flags 1')
 url=$(LANE_SLOT=2 VR_EVIDENCE=/tmp bash -c 'vrb_log(){ :; }; source scripts/vr-seed-steps.sh; echo $vrs_bundle_url')
 case "$flags" in *"127.0.0.1:40600"*) ;; *) echo "FAIL root listener not at slot 2's port: $flags"; fail=1 ;; esac

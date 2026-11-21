@@ -314,7 +314,8 @@ vrp_recovery() {
     # the joiner (identity 5) is a running member of K already (J named it): its authority advances and its shard node restarts under the new session
     local op5=(--operator-socket "test-nodes/auth5/operator.sock" --operator-credential "test-nodes/auth5/operator.cred")
     stop_one_evm_validator 5 2>/dev/null || true
-    build/ubft signing-authority advance-epoch "${op5[@]}" --trust-base test-nodes/trust-base-epoch4.json --shard-conf "$(h3_pdr_file 3)" || { vrb_log "FAIL: identity 5's authority advance"; return 1; }
+    source helper.sh
+    authority_advance_scope 5 4 test-nodes/trust-base-epoch4.json "$(h3_pdr_file 3)" || { vrb_log "FAIL: identity 5's authority advance"; return 1; }
     build/ubft signing-authority replace-session "${op5[@]}" --out test-nodes/auth5/client.cred || { vrb_log "FAIL: identity 5's session"; return 1; }
     start_one_evm_validator 5 "${validators:-4}" "$partitionID" "$(m2_root_addr 1)" engine-api rpc "$(evm_bootnodes_for_peers "$(m2_root_addr 1)" 5 1 2 3 4 5)" >/dev/null 2>&1 || { vrb_log "FAIL: identity 5's shard node did not start"; return 1; }
     vrb_log "PASS: K's authorities advanced into root epoch 4 / shard epoch 3"
