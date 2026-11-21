@@ -21,7 +21,7 @@ ssh -o IdentitiesOnly=yes -o HostKeyAlgorithms=ecdsa-sha2-nistp256 \
 
 ## 1. Install the release
 
-Use a dedicated Linux service account, a synchronized clock and persistent SSD storage. Allow inbound root and shard libp2p TCP and the release's ureth devp2p ports. Use outbound access to the public RPC, seed and peers. Keep operator RPC, metrics, Engine API and signing sockets on loopback or a private admin network. Archive replay needs the local ureth debug API for header witnesses. The reference host has 6 CPU cores / 12 threads, 64 GB RAM and two 1 TB NVMe drives. Size for your release and retention policy, and check `validator doctor`.
+Use a synchronized clock and persistent SSD storage. Allow inbound root and shard libp2p TCP and the release's ureth devp2p ports. Use outbound access to the public RPC, seed and peers. Keep operator RPC, metrics, Engine API and signing sockets on loopback or a private admin network. Archive replay needs the local ureth debug API for header witnesses. The reference host has 6 CPU cores / 12 threads, 64 GB RAM and two 1 TB NVMe drives. Size for your release and retention policy, and check `validator doctor`.
 
 Install the matching Linux `ubft` and `unicity-reth` from the release's checksum manifest. The rehearsal release is built for Linux x86-64. These examples use Bash, curl, jq, GnuPG and the GNU core utilities. Run them from a fresh login shell. Keep the same values when supervising services or starting another shell.
 
@@ -55,6 +55,10 @@ install_release
 Continue after all manifest entries verify. The commands below use free local ports 26652 (root), 28152 (shard), 30303 (ureth devp2p), 8545 (Ethereum RPC), 8551 (Engine), 25852 (root status) and 28352 (shard status). Adapt the ports together if these are in use.
 
 ## 2. Create the operator identity and start the authority
+
+The single-account commands in Sections 2–4 are for the isolated rehearsal. For an external deployment, put the authority and its operator socket, administrative credential and wallet in an administrative security boundary. Run root, shard and ureth as separate unprivileged services. Keep their homes, credentials and backups separate from the administrative files. Restrict the root to the PoP socket and `pop.cred`, and the shard to the certification socket and current `client.cred`. Ureth needs neither endpoint.
+
+For separate Linux accounts, place the authority's operator, PoP and certification sockets in three distinct directories. The authority creates each socket owner-only and restricts its directory on startup. After the listeners are ready, have the supervisor grant the paired root UID traversal and connect access to the PoP directory and socket, and the paired shard UID those rights to the certification directory and socket, for example with per-user filesystem ACLs. Reapply the grants after each authority startup. Keep the operator socket and credential in an admin-only location. Deliver each service's own credential to its private directory and update the shard's copy when a session is replaced. Before starting services, verify from each service account that it can reach its own endpoint and read its own credential, and that access to the administrative credential and the other service's credential is denied. [Authority credential model](../design/f6c-signing-state-contract.md#the-authority-process-boundary-before-step-4)
 
 Before creating the authority, have the Foundation confirm the next election is still open to applications and give you its successor shard epoch and application cutoff. For the rehearsal, use the maintainer's admission-window entry in the operator log. The current root epoch alone cannot establish this scope.
 
@@ -110,12 +114,24 @@ Fund the printed operator address with the bond plus transaction gas using the r
 export GPG_TTY=$(tty)
 install -d -m 700 "$HOME/validator-backups"
 BACKUP="$HOME/validator-backups/validator-$(date -u +%Y%m%dT%H%M%SZ).tar.gz.gpg"
-tar -czf - root/keys.json evm/keys.json ureth-key/p2p-secret operator/key validator.json | \
-  gpg --symmetric --cipher-algo AES256 --output "$BACKUP"
-gpg --decrypt "$BACKUP" | tar -tzf -
+backup_validator() (
+  set -eo pipefail
+  files=(root/keys.json evm/keys.json ureth-key/p2p-secret operator/key validator.json)
+  work=$(mktemp -d "$HOME/validator-backups/.verify.XXXXXXXX")
+  trap 'rm -r -- "$work"' EXIT
+  tar -czf - "${files[@]}" |
+    gpg --symmetric --cipher-algo AES256 --output "$work/backup.gpg"
+  gpg --decrypt "$work/backup.gpg" | tar -tzf - > "$work/entries"
+  printf '%s\n' "${files[@]}" | LC_ALL=C sort > "$work/expected"
+  LC_ALL=C sort "$work/entries" -o "$work/entries"
+  diff -u "$work/expected" "$work/entries"
+  mv -- "$work/backup.gpg" "$BACKUP"
+  printf 'Verified encrypted backup: %s\n' "$BACKUP"
+)
+backup_validator
 ```
 
-The second command lists the encrypted archive's entries without writing a decrypted archive. Keep the JWT and authority credentials private. Start only one instance per identity. Always pass the same `--p2p-secret-key` to ureth so its enode survives a datadir rebuild.
+The check decrypts into a pipe and compares the archive's entry list before publishing the encrypted backup. Keep the JWT and authority credentials private. Start only one instance per identity. Always pass the same `--p2p-secret-key` to ureth so its enode survives a datadir rebuild.
 
 Before applying, check that `validator status --sample 0 --json` still reports the recorded `ROOT_EPOCH` and that your confirmed election cutoff has passed neither in certified time nor progress. Confirm a new window if the cutoff elapsed or an intervening handoff closed it. See [Missed admission](#missed-admission) for the binding recovery.
 
@@ -273,14 +289,28 @@ Once the result is published, the roots derive the intent and the nodes collect 
 ```bash
 read -rp 'Activated root epoch: ' ACTIVATED_ROOT_EPOCH
 read -rp 'Activated shard epoch: ' ACTIVATED_SHARD_EPOCH
-ubft q3 shard-conf --root-rpc http://127.0.0.1:25852 --epoch "$ACTIVATED_SHARD_EPOCH" --out activated-shard-conf.json
-ubft q3 trust-base --root-rpc http://127.0.0.1:25852 --epoch "$ACTIVATED_ROOT_EPOCH" --out activated-trust-base.json
-ubft signing-authority complete-enrollment "${AUTH[@]}" --shard-conf activated-shard-conf.json
-ubft signing-authority advance-epoch "${AUTH[@]}" --shard-conf activated-shard-conf.json --trust-base activated-trust-base.json
-ubft signing-authority replace-session "${AUTH[@]}" --out "$UBFT_HOME/authority/client.cred"
+read -rp 'First enrollment or later handoff (enroll/advance): ' HANDOFF_MODE
+install_authority_scope() (
+  set -eo pipefail
+  [[ "$ACTIVATED_ROOT_EPOCH" =~ ^[1-9][0-9]*$ && "$ACTIVATED_SHARD_EPOCH" =~ ^[0-9]+$ ]]
+  [[ "$HANDOFF_MODE" == enroll || "$HANDOFF_MODE" == advance ]]
+  activation=$(mktemp -d "$UBFT_HOME/activation-root-${ACTIVATED_ROOT_EPOCH}-shard-${ACTIVATED_SHARD_EPOCH}.XXXXXXXX")
+  shard_conf="$activation/shard-conf.json"
+  trust_base="$activation/trust-base.json"
+  ubft q3 shard-conf --root-rpc http://127.0.0.1:25852 --epoch "$ACTIVATED_SHARD_EPOCH" --out "$shard_conf"
+  ubft q3 trust-base --root-rpc http://127.0.0.1:25852 --epoch "$ACTIVATED_ROOT_EPOCH" --out "$trust_base"
+  jq -e --arg epoch "$ACTIVATED_SHARD_EPOCH" '(.epoch | tostring) == $epoch' "$shard_conf" > /dev/null
+  jq -e --arg epoch "$ACTIVATED_ROOT_EPOCH" '(.epoch | tostring) == $epoch' "$trust_base" > /dev/null
+  if [[ "$HANDOFF_MODE" == enroll ]]; then
+    ubft signing-authority complete-enrollment "${AUTH[@]}" --shard-conf "$shard_conf"
+  fi
+  ubft signing-authority advance-epoch "${AUTH[@]}" --shard-conf "$shard_conf" --trust-base "$trust_base"
+  ubft signing-authority replace-session "${AUTH[@]}" --out "$UBFT_HOME/authority/client.cred"
+)
+install_authority_scope
 ```
 
-This initial enrollment uses the configuration verified by your paired root. At each later handoff, repeat the advance and session steps with the new verified files. Complete enrollment only once. If you advanced to the new root using a stale shard epoch, fetch the activated shard configuration and advance again with the same verified root trust and the higher shard epoch. Replace the session and restart only the shard if it still holds the old credential. For an authority already equipped with a lineage pin and an installed configuration, use `signing-authority advance-with-proof` and the verified activation bundles in epoch order. Keep its certification session private.
+Use `enroll` only for the first enrollment. For each later handoff, use `advance` with the confirmed pair. If a lookup fails or the epochs disagree, wait for the paired root to serve the confirmed configuration and rerun the block. Each attempt fetches into a fresh directory. If you previously advanced using a stale shard epoch, use `advance` with the same verified root epoch and the confirmed higher shard epoch. For an authority already equipped with a lineage pin and an installed configuration, use `signing-authority advance-with-proof` and the verified activation bundles in epoch order. Keep its certification session private.
 
 Wait for the local shard to activate the same root epoch. If the shard needs to reload its session, stop that shard process through its supervisor and restart it with the same `run` arguments. A registered identity or reserved result is still waiting to validate. Check that the successor handoff is acknowledged, the registry lists your membership, your root votes, your shard certifies with the authority, and local ureth tracks the public head.
 
@@ -319,7 +349,7 @@ ubft validator status --custody "$CUSTODY" --json --exit-code
 On PoS, exit requests custody retirement. Keep serving until the committee has excluded your identity through an acknowledged handoff. Wait for closure, the HolderRetirement record and custody's maturity gates. With the default withdrawal address, the operator account can then mature and claim. A different withdrawal address must claim its own credit through custody.
 
 ```bash
-ubft validator claim
+ubft validator claim --dry-run && ubft validator claim
 ```
 
 On PoA, exit withdraws an unadmitted application or requests the exit of an active member. The Foundation confirms an active member's exit. Keep serving until the acknowledged boundary and `Exited` status. For Admitted, Joining or Parked PoA states, ask the Foundation for the appropriate removal.
@@ -370,25 +400,15 @@ ubft validator status --custody "$CUSTODY" --sample 0
 3. **HolderRetirement.** Wait for `holder retirement imported: 1`. This confirms custody processed the retirement record for that generation.
 4. **Maturity.** Run `ubft validator claim --dry-run` to simulate the remaining record, time, progress and evidence gates. The preview describes the next transaction. Successful maturation creates the withdrawal credit.
 
+The election floors above describe exclusion timing. HolderRetirement is ordered by an eligible root after closure, after the holder and SealRegistry catch up, and outside a handoff. A subsequent election gives no guarantee that the record has been ordered.
+
+If custody still reports `0` after closure, compare the incumbent root target, SealRegistry count and the VR and custody cursors from the same point. A node still catching up can report an older root target. If the four counts have converged across several eligible EVM blocks, report the request transaction, identity, generation, acknowledged root epoch, zero-exposure reading and cursor values to the network maintainers. They can check for `exit.retirement.requested` and `exit.retirement.proof_ready` on incumbents and kind 8 in the SealRegistry. The pinned VT-13 rehearsal has [an open root-side proposer defect](https://github.com/ristik/bft-core/issues/1242). Preserve the confirmed request and wait for recovery. After import, continue at the maturity dry-run. [Record catch-up runbook](vr-record-catch-up.md#what-to-monitor) · [Retirement events](monitoring/events.md)
+
 ## Missed admission
 
 If the application has sent no registration, confirm a new window, stop only the pending authority using its saved `AUTHORITY_PID`, and start an authority for the confirmed successor using the existing registration policy and credentials. Write its node info to a fresh filename and select it with `validator init --force`. Keep the wallet, root key, shard peer identity and payee.
 
-If registration already committed, changing a pending authority loses the key the registry knows. Ask the Foundation to confirm that your identity is outside the active committee and that no open result can install the previous binding. Keep the current authority running until that is confirmed. Keep the same owner, identity, bond, root key and peer identity. Provision the replacement authority for the new confirmed epoch in a separate directory. Its registration policy must authorize the same owner, root key and payee with `action: "binding"` and the existing VR identity as `id`. Set `REPLACEMENT_AUTH` to that authority's directory with its own operator socket, credential and node info. Stage its binding and then resume the PoS application for the same identity.
-
-```bash
-ID=$(jq -er '.id' validator.json)
-ubft validator rotate --id "$ID" --new-evm-authority-socket "$REPLACEMENT_AUTH/operator.sock" \
-  --new-evm-authority-credential "$REPLACEMENT_AUTH/operator.cred" \
-  --new-evm-node-info "$REPLACEMENT_AUTH/node-info.json"
-ubft validator init --force --id "$ID" --rpc "$RPC_URL" --chain-id "$CHAIN_ID" --ports 26652,28152,30303 \
-  --evm-authority-socket "$REPLACEMENT_AUTH/operator.sock" \
-  --evm-authority-credential "$REPLACEMENT_AUTH/operator.cred" \
-  --evm-authority-node-info "$REPLACEMENT_AUTH/node-info.json"
-ubft validator apply
-```
-
-Use the replacement authority's sockets and credentials in the node commands, and pin its updated P85 policy to the same identity. Stop and coordinate with the Foundation if either the staged binding or delegation is refused.
+If PoS registration already committed, keep the authority running and contact the Foundation before staging a replacement binding or delegation. Share the identity, committed receipts, confirmed target epoch and whether the bond committed. Ask the Foundation to check custody's generation, the current and staged VR bindings, and whether an open or published result can still select the existing key. For a bonded identity, `validator rotate` stages a binding at generation `g+1` while `validator apply` writes the delegation at the open custody generation `g`. Both transactions can succeed and still leave the identity ineligible at the P85 snapshot. This release has no verified self-service recovery for that state. Preserve the authority and bond while the Foundation confirms a supported path.
 
 ## Troubleshooting
 
