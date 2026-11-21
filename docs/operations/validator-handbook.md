@@ -121,6 +121,26 @@ Before applying, check that `validator status --sample 0 --json` still reports t
 
 ## 3. Verify the seed and start as a follower
 
+### Choose the release's execution proof profile
+
+**VT-07 release.** Set ureth to serve archive state proofs and point the root's `--pos-evm-rpc` at that private execution endpoint. The VT-07 root retains observations in a durable queue and can request an exact block hash long after it was certified. A bounded proof window can leave that entry at the front of the queue and delay later publications.
+
+```bash
+URETH_PROOF_ARGS=(--unicity.archive-state-proofs)
+ROOT_EXEC_RPC=http://127.0.0.1:8545
+```
+
+Keep ureth's HTTP, WebSocket if enabled, and authenticated RPC bound to loopback. Retain unpruned **account history and storage history** for all certified blocks the root might replay. Disable any account- or storage-history pruning in both CLI flags and `reth.toml`. Allocate persistent SSD space for full execution history and its growth, and monitor that volume. Turning on archive proofs cannot recover state already pruned. Build the proof source with full retained history from genesis or from the release's verified archival recovery procedure before pointing the root at it. This history is separate from the shard's certified archive and from a seed. [ureth archive state proofs](https://github.com/ristik/ureth/pull/106) · [VT-07 root schedule](https://github.com/ristik/bft-core/pull/1228)
+
+**Pre-VT-07 release, including the pinned VT-13 rehearsal.** Use these assignments instead. This bounded window covers the paired shard's recent parent witnesses and restart admission on this release.
+
+```bash
+URETH_PROOF_ARGS=(--rpc.eth-proof-window 64)
+ROOT_EXEC_RPC=$RPC_URL
+```
+
+For other pre-VT-07 deployments, set `ROOT_EXEC_RPC` to the deployment's designated execution endpoint.
+
 The following preflight is for an epoch-1 checkpoint. For a later checkpoint, fetch the published activation bundles in epoch order and pass each to `seed restore-pin` with `--bundle`. See [Sync from a seed](sync-seed.md) for mirror agreement, history verification and retention.
 
 ```bash
@@ -163,7 +183,7 @@ UTB=(--utb-genesis "$UBFT_HOME/release/utb-genesis.cbor" --utb-genesis-id "$GENE
 unicity-reth node --chain "$UBFT_HOME/release/genesis.json" --datadir "$UBFT_HOME/ureth" \
   --p2p-secret-key "$UBFT_HOME/ureth-key/p2p-secret" --disable-discovery \
   --port 30303 --ipcdisable --http --http.addr 127.0.0.1 --http.port 8545 --http.api eth,net,debug \
-  --rpc.eth-proof-window 64 \
+  "${URETH_PROOF_ARGS[@]}" \
   --authrpc.addr 127.0.0.1 --authrpc.port 8551 --authrpc.jwtsecret "$UBFT_HOME/jwt/jwt.hex" \
   "${URETH_FLAGS[@]}" >logs/ureth.log 2>&1 &
 URETH_PID=$!
@@ -187,7 +207,7 @@ ROOT_ARGS=(--home "$UBFT_HOME/root" "${ROOT_P2P[@]}"
   --bootnodes "$ROOT_PEERS" --metrics prometheus --rpc-server-address 127.0.0.1:25852
   --trust-base release/trust-base.json --shard-conf release/full-shard-conf.json --profile-3 --q3-lane --b1-registry
   --genesis-identities release/genesis-identities.json --vr-deployment release/vr-deployment.json
-  --pos-evm-rpc "$RPC_URL" --vr-shard-rpc http://127.0.0.1:28352
+  --pos-evm-rpc "$ROOT_EXEC_RPC" --vr-shard-rpc http://127.0.0.1:28352
   --vr-evm-authority-socket "$UBFT_HOME/authority/pop.sock"
   --vr-evm-authority-credential "$UBFT_HOME/authority/pop.cred" "${UTB[@]}")
 ubft root-node run "${ROOT_ARGS[@]}" "${ROOT_INSTALL[@]}" >>logs/root.log 2>&1 &
@@ -329,6 +349,6 @@ Use the replacement authority's sockets and credentials in the node commands, an
 - Seed verification or replay fails. Check the independent genesis pin, shard config, checkpoint epoch and archive reachability. See [Sync from a seed](sync-seed.md) and [restore trust pins](bootstrap-trust-pin.md).
 - Local head stalls or the four record counts diverge. Start with [catch-up](vr-record-catch-up.md) and the [monitoring runbooks](monitoring/runbooks.md#unicityshardexecutioncatchup).
 - An output expires, a module faults or a handoff stalls. Record the result ID, root epoch, timings and status JSON. See the [output expiry runbook](monitoring/runbooks.md#unicityoutputexpired), [module runbook](monitoring/runbooks.md#unicityvrmoduleunhealthy), and [handoff recovery](root-handoff-abort.md).
-- A shard restart reports that `eth_getProof` exceeded the proof window. Restart only ureth with the same datadir, peer key and release flags, including `--rpc.eth-proof-window 64`. Wait for both listeners as above. Restart admission needs the exact parent witness, so check the local head and the shard's next error after that correction.
+- A shard restart reports that `eth_getProof` exceeded the proof window. Check which [release proof profile](#choose-the-releases-execution-proof-profile) is active. Restart only ureth with the same datadir, peer key and the correct release flags. VT-07 also needs the requested historical state to exist on the private proof source. Wait for both listeners, then check restart admission's exact-parent witness request.
 - The journal reports a certified candidate missing its resulting observation. Preserve the journal and logs and use the recovery release designated for the incident. Keep the signing authority, its enrolled key and its session state. While the shard stays unready, report root participation and shard certification separately. A PoS exit request uses the operator wallet and public RPC. Keep the root serving until the acknowledged exclusion.
 - The signing authority is unavailable or faulted. Stop the signing client and follow the [authority runbook](monitoring/runbooks.md#unicityauthorityfaulted). Preserve all signing and node state. Never duplicate an active signing identity.
