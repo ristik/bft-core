@@ -21,7 +21,7 @@
  *   preflight W LABEL      plan the return only (the capacity preflight), never burn
  *   ledger W LABEL T       the aggregator's verified non-inclusion of LABEL's head state at a snapshot sealed at T or later: unspent, never burned
  *   verdicts W LABEL...    the plug-in's verdict and the deployed verifier's (eth_call verifyReturn), byte for byte
- *   redeem W LABEL [--low-gas|--hold|--stale|--expect-ambiguous]
+ *   redeem W LABEL [--low-gas|--hold|--stale|--pre-send]
  *   replay W LABEL         the paid redemption again: the exact calldata re-sent, and the wallet's own refusal
  *   rotate W N [--prepare|--pay]   N small returns by wallet W (prepared ahead: deposit, mint, burn; then paid in a burst)
  *   mutations W LABEL      isolated mutations of one burned part, judged by the plug-in and by the deployed verifier
@@ -105,7 +105,7 @@ function laneKey(name: string): Uint8Array {
 
 /**
  * A lane wallet: the reference wallet's directory, journal, keys and steps in WORK/wallets/NAME, with the lane's connection (lane.json) and the
- * gateway RPC counted for the ambiguous-broadcast check. Opened as LANE_OPEN says: without the installation check unless asked (gamma-check
+ * gateway RPC counted for the duplicate-broadcast check. Opened as LANE_OPEN says: without the installation check unless asked (gamma-check
  * runs it), and without the wallet lock (a killed container's lock would block every later command on the wallet).
  */
 class Wallet extends ReferenceWallet {
@@ -119,12 +119,8 @@ class Wallet extends ReferenceWallet {
   }
 }
 
-/** The gateway as the wallet sees it, counting the ambiguous broadcasts (HTTP 503 "broadcast may be partial", #1121) it answered. */
-const broadcasts = { sent: 0, ambiguous: 0, preSent: 0, messages: [] as string[] };
-/**
- * --ambiguous: each signed transaction reaches validator 1 directly first, so the gateway's broadcast then gets "already known" from it and a hash
- * from the others; the relay calls that a partial broadcast (HTTP 503) although every pool holds the transaction: the #1121 ambiguity, on demand.
- */
+/** --pre-send puts the signed transaction in validator 1's pool before testing the public broadcast (#1121). */
+const broadcasts = { sent: 0, acknowledged: 0, ambiguous: 0, preSent: 0, messages: [] as string[] };
 let preSendDirect = false;
 class CountingRpc {
   public constructor(private readonly inner: HttpJsonRpc) {}
@@ -138,7 +134,9 @@ class CountingRpc {
       } catch { /* already known is fine */ }
     }
     try {
-      return await this.inner.call<T>(method, params);
+      const result = await this.inner.call<T>(method, params);
+      broadcasts.acknowledged++;
+      return result;
     } catch (e) {
       if (e instanceof RpcError && e.status === 503) {
         broadcasts.ambiguous++;
@@ -1114,7 +1112,7 @@ async function main(): Promise<void> {
     case 'burn': return burn(await wallet(), pos[1], opt('--recipient'));
     case 'verdicts': return verdicts(await wallet(), pos.slice(1));
     case 'redeem':
-      preSendDirect = flag('--ambiguous');
+      preSendDirect = flag('--pre-send');
       return redeem(await wallet(), pos[1], args.find((a) => ['--low-gas', '--hold', '--stale'].includes(a)));
     case 'replay': return replay(await wallet(), pos[1]);
     case 'rotate': return rotate(await wallet(), Number(pos[1]), args.find((a) => a === '--prepare' || a === '--pay'));

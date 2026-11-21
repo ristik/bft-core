@@ -14,6 +14,8 @@ import re
 import tempfile
 import threading
 import unittest
+from unittest import mock
+import urllib.error
 
 HERE = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location('prepare_handoff', HERE / 'prepare-handoff.py')
@@ -224,6 +226,106 @@ class AgainstFakeRoots(Files):
         self.assertIn('PASS: authenticated target is too_late', out)
         self.assertEqual(c.endorsed, 4)
         self.assertTrue(all(r['accepted'] for r in json.loads((self.dir / 'evidence/endorsements.json').read_text())))
+
+    def test_handoff_timeout_reports_the_exact_rpc_and_requests_dumps(self):
+        c = self.cluster()
+        endpoint = c.roots[1].url + '/api/v1/handoff/intent'
+        open_url = ph.urllib.request.urlopen
+
+        def open_with_timeout(request, **kwargs):
+            if request.full_url == endpoint:
+                raise urllib.error.URLError(TimeoutError('timed out'))
+            return open_url(request, **kwargs)
+
+        stderr = io.StringIO()
+        with mock.patch.object(ph.urllib.request, 'urlopen', side_effect=open_with_timeout):
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
+                self.assertEqual(ph.run(self.argv(c.urls())), 4)
+        self.assertIn(f'STOP: POST {endpoint} timed out after ', stderr.getvalue())
+        self.assertEqual(c.endorsed, 0)
+        self.assertTrue((self.dir / 'evidence/target.json').is_file())
+
+    def test_endorsement_error_body_timeout_requests_dumps(self):
+        c = self.cluster()
+        open_url = ph.urllib.request.urlopen
+        for index, extra in ((0, []), (1, ['--endorse-all'])):
+            with self.subTest(root=index):
+                endpoint = c.roots[index].url + '/api/v1/handoff/endorse'
+                body = mock.Mock(spec=io.BytesIO)
+                body.closed = False
+                body.read.side_effect = TimeoutError('timed out reading error body')
+
+                def open_with_error(request, **kwargs):
+                    if request.full_url == endpoint:
+                        raise urllib.error.HTTPError(endpoint, 422, 'rejected', {}, body)
+                    return open_url(request, **kwargs)
+
+                stderr = io.StringIO()
+                with mock.patch.object(ph.urllib.request, 'urlopen', side_effect=open_with_error):
+                    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
+                        self.assertEqual(ph.run(self.argv(c.urls(), out=f'evidence-{index}', extra=extra)), 4)
+                self.assertIn(f'STOP: POST {endpoint} timed out after ', stderr.getvalue())
+                body.close.assert_called_once()
+
+    def test_endorse_all_records_the_error_text_for_a_refusal(self):
+        c = self.cluster(committed_after_endorsements=3)
+        original_handle = c.handle
+
+        def handle(root, route, body):
+            if root is c.roots[1] and route == 'endorse':
+                return 422, 'endorsement refused by this root'
+            return original_handle(root, route, body)
+
+        with mock.patch.object(c, 'handle', side_effect=handle):
+            code, _ = self.helper(self.argv(c.urls(), extra=['--endorse-all']))
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads((self.dir / 'evidence/endorsements.json').read_text()), [
+            {'accepted': False, 'error': 'endorsement refused by this root'},
+            {'accepted': True},
+            {'accepted': True},
+        ])
+
+    def test_parallel_endorsement_reports_every_timeout_after_a_transport_failure(self):
+        c = self.cluster()
+        unreachable, slow_body, slow_connect = [
+            root.url + '/api/v1/handoff/endorse' for root in c.roots[1:]
+        ]
+        body = mock.Mock(spec=io.BytesIO)
+        body.closed = False
+        body.read.side_effect = TimeoutError('timed out reading error body')
+        open_url = ph.urllib.request.urlopen
+
+        def open_with_failures(request, **kwargs):
+            if request.full_url == unreachable:
+                raise urllib.error.URLError(ConnectionRefusedError('connection refused'))
+            if request.full_url == slow_body:
+                raise urllib.error.HTTPError(slow_body, 422, 'rejected', {}, body)
+            if request.full_url == slow_connect:
+                raise urllib.error.URLError(TimeoutError('timed out connecting'))
+            return open_url(request, **kwargs)
+
+        stderr = io.StringIO()
+        with mock.patch.object(ph.urllib.request, 'urlopen', side_effect=open_with_failures):
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
+                status = ph.run(self.argv(c.urls(), extra=['--endorse-all']))
+        body.close.assert_called_once()
+        self.assertEqual(status, 4, stderr.getvalue())
+        for endpoint in (slow_body, slow_connect):
+            self.assertIn(f'POST {endpoint} timed out after ', stderr.getvalue())
+
+    def test_an_expired_prepare_wait_also_requests_dumps(self):
+        c = self.cluster()
+        # Expire the Prepare deadline on the first retryable error, without waiting 60s.
+        def monotonic():
+            return 61 if any(route == 'endorse' for route, _ in c.roots[0].calls) else 0
+
+        stderr = io.StringIO()
+        with mock.patch.object(ph, 'time', wraps=ph.time) as clock:
+            clock.monotonic.side_effect = monotonic
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
+                self.assertEqual(ph.run(self.argv(c.urls())), 4)
+        self.assertIn(f'Prepare wait expired at {c.roots[0].url} (endorse)', stderr.getvalue())
+        self.assertEqual(c.endorsed, 0)
 
     def test_a_plan_without_receipts_is_not_taken_for_a_v3_plan(self):
         c = self.cluster(receipts_in_plan=False)

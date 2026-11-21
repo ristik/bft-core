@@ -49,6 +49,7 @@ selftest() {
   rm -rf "$tmp"
   pass "selftest: the steps file starts only with H6_LANE_LOCKED=1 and H6_ABORT_LANE=1 (five other flag combinations start nothing and define nothing)"
   grep -q 'H6_ABORT_LANE' scripts/reth-paired-devnet.sh && grep -q 'abort-rehearsal-steps.sh' scripts/reth-paired-devnet.sh || fail "selftest: the paired devnet does not select the rehearsal steps"
+  bash scripts/h6/test-h6-plan.sh || fail "selftest: H6 plan status and logging checks fail"
   python3 -m unittest discover -s scripts/h6 -p test_prepare_handoff.py >/dev/null 2>&1 || fail "selftest: the helper's checks fail (scripts/h6/test_prepare_handoff.py)"
   rm -rf scripts/h6/__pycache__
   pass "selftest: the helper's in-process checks pass"
