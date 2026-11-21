@@ -163,6 +163,7 @@ UTB=(--utb-genesis "$UBFT_HOME/release/utb-genesis.cbor" --utb-genesis-id "$GENE
 unicity-reth node --chain "$UBFT_HOME/release/genesis.json" --datadir "$UBFT_HOME/ureth" \
   --p2p-secret-key "$UBFT_HOME/ureth-key/p2p-secret" --disable-discovery \
   --port 30303 --ipcdisable --http --http.addr 127.0.0.1 --http.port 8545 --http.api eth,net,debug \
+  --rpc.eth-proof-window 64 \
   --authrpc.addr 127.0.0.1 --authrpc.port 8551 --authrpc.jwtsecret "$UBFT_HOME/jwt/jwt.hex" \
   "${URETH_FLAGS[@]}" >logs/ureth.log 2>&1 &
 URETH_PID=$!
@@ -328,4 +329,6 @@ Use the replacement authority's sockets and credentials in the node commands, an
 - Seed verification or replay fails. Check the independent genesis pin, shard config, checkpoint epoch and archive reachability. See [Sync from a seed](sync-seed.md) and [restore trust pins](bootstrap-trust-pin.md).
 - Local head stalls or the four record counts diverge. Start with [catch-up](vr-record-catch-up.md) and the [monitoring runbooks](monitoring/runbooks.md#unicityshardexecutioncatchup).
 - An output expires, a module faults or a handoff stalls. Record the result ID, root epoch, timings and status JSON. See the [output expiry runbook](monitoring/runbooks.md#unicityoutputexpired), [module runbook](monitoring/runbooks.md#unicityvrmoduleunhealthy), and [handoff recovery](root-handoff-abort.md).
+- A shard restart reports that `eth_getProof` exceeded the proof window. Restart only ureth with the same datadir, peer key and release flags, including `--rpc.eth-proof-window 64`. Wait for both listeners as above. Restart admission needs the exact parent witness, so check the local head and the shard's next error after that correction.
+- The journal reports a certified candidate missing its resulting observation. Preserve the journal and logs and use the recovery release designated for the incident. Keep the signing authority, its enrolled key and its session state. While the shard stays unready, report root participation and shard certification separately. A PoS exit request uses the operator wallet and public RPC. Keep the root serving until the acknowledged exclusion.
 - The signing authority is unavailable or faulted. Stop the signing client and follow the [authority runbook](monitoring/runbooks.md#unicityauthorityfaulted). Preserve all signing and node state. Never duplicate an active signing identity.
