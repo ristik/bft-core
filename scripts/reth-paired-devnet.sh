@@ -182,22 +182,26 @@ negativeReths="reth-wrong reth-wrongchain reth-othergenesis reth-laterfork"
 # nodes only, and a reth is stopped by its pid file only if that pid is still a `reth node` running
 # from this checkout. This runs nested inside scripts/reth-smoke.sh, whose own teardown cannot undo
 # anything a machine-wide sweep here had already killed.
-# dump_stalled_roots makes a wedged root diagnosable (#1063): at teardown, a root of this checkout whose debug.log has not moved for
-# LANE_STALL_DUMP_SECS seconds (default 5; 0 disables) gets SIGQUIT first. A Go process then writes the stack of every goroutine to its stderr,
-# which is that debug.log (m2_start_root), and exits; the lanes copy the log into their evidence. A healthy root logs several lines a second at
-# debug level, so only a root that stopped progressing (or the whole committee, waiting on one) is dumped. The roots are stopped next anyway.
+# At teardown, dump roots whose logs have been quiet for LANE_STALL_DUMP_SECS (default 5; 0 disables dumps). After an H6
+# timeout, dump the whole owned committee: a wedged consensus goroutine can coexist with active RPC or network logs (#1063).
+# SIGQUIT writes the Go stacks to debug.log (m2_start_root) and exits. The lane copies the logs into its evidence.
 dump_stalled_roots() {
-  local secs=${LANE_STALL_DUMP_SECS:-5} now p home log age dumped=()
+  local secs=${LANE_STALL_DUMP_SECS:-5} now p home log age reason dumped=()
   [ "$secs" -gt 0 ] 2>/dev/null || return 0
   now=$(date +%s)
   for p in $(owned_pids 'ubft root-node run'); do
     home=$(ps -o args= -p "$p" 2>/dev/null | sed -n 's/.*--home \([^ ]*\).*/\1/p')
     log=$home/debug.log
     [ -n "$home" ] && [ -f "$log" ] || continue
-    age=$(( now - $(p_mtime "$log") ))
-    [ "$age" -ge "$secs" ] || continue
-    echo "STALL: root $home (pid $p) wrote no log for ${age}s at teardown: SIGQUIT, goroutine dump in $log"
-    printf '\n=== #1063 stall dump: no log output for %ss at teardown, SIGQUIT at %s ===\n' "$age" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$log"
+    reason=${H6_ROOT_DUMP_REASON:-}
+    if [ -z "$reason" ]; then
+      age=$(( now - $(p_mtime "$log") ))
+      [ "$age" -ge "$secs" ] || continue
+      reason="no log output for ${age}s at teardown"
+    fi
+    owned_pid "$p" 'ubft root-node run' || continue
+    echo "STALL: root $home (pid $p), $reason: SIGQUIT, goroutine dump in $log"
+    printf '\n=== #1063 stall dump: %s, SIGQUIT at %s ===\n' "$reason" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$log"
     kill -QUIT "$p" 2>/dev/null && dumped+=("$p")
   done
   local i
@@ -206,6 +210,7 @@ dump_stalled_roots() {
   done
 }
 
+H6_ROOT_DUMP_REASON=
 cleanup() {
   dump_stalled_roots
   if [ "${F8_MIXED_LANE:-0}" = 1 ]; then f8_stop; fi

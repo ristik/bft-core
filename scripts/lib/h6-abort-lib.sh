@@ -50,13 +50,17 @@ h6_stage_candidate() { # epoch suffix
 
 # The rehearsal helper against the live roots: one endorsement (the default) or all of them (endorse-all). Leaves h6-<name>/plan/target.json and status.json.
 h6_plan() { # epoch suffix name [--endorse-all]
-  local epoch=$1 suffix=$2 name=$3 dir; shift 3
+  local epoch=$1 suffix=$2 name=$3 dir status; shift 3
   dir=$(h6_dir "$name")/plan; rm -rf "$dir"
   "$H6_PY" scripts/h6/prepare-handoff.py \
     --old-trust-base "test-nodes/trust-base-epoch$((epoch - 1)).json" --next-trust-base "test-nodes/trust-base-epoch$epoch.json" \
     --receipts "$(h6_receipt_files "$suffix")" --v3-body-id "$Q3_DIR/v3-body-id$suffix.txt" \
-    --root-rpc "$(h3_root_rpcs)" --out "$dir" "$@" | tee "$Q3_DIR/h6-$name.log"
-  [ "${PIPESTATUS[0]}" = 0 ]
+    --root-rpc "$(h3_root_rpcs)" --out "$dir" "$@" 2>&1 | tee "$Q3_DIR/h6-$name.log"
+  status=${PIPESTATUS[0]}
+  if [ "$status" = 4 ]; then
+    H6_ROOT_DUMP_REASON="H6 $name handoff timed out"
+  fi
+  return "$status"
 }
 
 # The documented Abort (docs/operations/root-handoff-abort.md) for the exact target the helper saved. Its output and exit status are the evidence.

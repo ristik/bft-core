@@ -14,6 +14,8 @@ import re
 import tempfile
 import threading
 import unittest
+from unittest import mock
+import urllib.error
 
 HERE = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location('prepare_handoff', HERE / 'prepare-handoff.py')
@@ -224,6 +226,38 @@ class AgainstFakeRoots(Files):
         self.assertIn('PASS: authenticated target is too_late', out)
         self.assertEqual(c.endorsed, 4)
         self.assertTrue(all(r['accepted'] for r in json.loads((self.dir / 'evidence/endorsements.json').read_text())))
+
+    def test_handoff_timeout_reports_the_exact_rpc_and_requests_dumps(self):
+        c = self.cluster()
+        endpoint = c.roots[1].url + '/api/v1/handoff/intent'
+        open_url = ph.urllib.request.urlopen
+
+        def open_with_timeout(request, **kwargs):
+            if request.full_url == endpoint:
+                raise urllib.error.URLError(TimeoutError('timed out'))
+            return open_url(request, **kwargs)
+
+        stderr = io.StringIO()
+        with mock.patch.object(ph.urllib.request, 'urlopen', side_effect=open_with_timeout):
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
+                self.assertEqual(ph.run(self.argv(c.urls())), 4)
+        self.assertIn(f'STOP: POST {endpoint} timed out after ', stderr.getvalue())
+        self.assertEqual(c.endorsed, 0)
+        self.assertTrue((self.dir / 'evidence/target.json').is_file())
+
+    def test_an_expired_prepare_wait_also_requests_dumps(self):
+        c = self.cluster()
+        # Expire the Prepare deadline on the first retryable error, without waiting 60s.
+        def monotonic():
+            return 61 if any(route == 'endorse' for route, _ in c.roots[0].calls) else 0
+
+        stderr = io.StringIO()
+        with mock.patch.object(ph, 'time', wraps=ph.time) as clock:
+            clock.monotonic.side_effect = monotonic
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
+                self.assertEqual(ph.run(self.argv(c.urls())), 4)
+        self.assertIn(f'Prepare wait expired at {c.roots[0].url} (endorse)', stderr.getvalue())
+        self.assertEqual(c.endorsed, 0)
 
     def test_a_plan_without_receipts_is_not_taken_for_a_v3_plan(self):
         c = self.cluster(receipts_in_plan=False)
