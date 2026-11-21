@@ -126,7 +126,8 @@ func (r *ArchiveRestore) Restore(ctx context.Context) error {
 		r.TipUC == nil || r.TipTR == nil || r.TipUC.InputRecord == nil || len(r.Genesis.Hash) != 32 || !r.Limits.valid() {
 		return fmt.Errorf("%w: incomplete restore configuration", ErrRestore)
 	}
-	if _, err := rootinput.AuthenticateObservationV2(ctx, r.Context.Observation, r.TipUC, r.TipTR); err != nil {
+	tipObservation, err := rootinput.AuthenticateObservationV2(ctx, r.Context.Observation, r.TipUC, r.TipTR)
+	if err != nil {
 		return fmt.Errorf("%w: tip pin: %v", ErrRestore, err)
 	}
 	image, err := r.Journal.LoadJournal(ctx, r.Context, r.JournalLimits)
@@ -165,21 +166,19 @@ func (r *ArchiveRestore) Restore(ctx context.Context) error {
 			if err != nil {
 				return err
 			}
-			observed, ok := state.Observed()
-			observedPin, err := RestorePinID(observed.Certificate(), observed.TechnicalRecord(), r.ResumeScope)
-			if !ok || err != nil || observedPin != pin || image.RestoreBase.Hash != checkpoint.Target ||
+			matches, err := state.MatchesObservation(tipObservation)
+			if err != nil || !matches || image.RestoreBase.Hash != checkpoint.Target ||
 				checkpoint.VerifiedHeight != image.RestoreBase.Height || !checkpoint.Finalizing || expected.Number != image.RestoreBase.Height {
 				return fmt.Errorf("%w: journal no longer holds the pinned restore tip", ErrRestore)
 			}
-		}
-		if sameBlockRef(head, expected) && sameBlockRef(finalized, expected) {
-			return r.backfillRestoredObservations(ctx)
-		}
-		if !resuming {
+		} else {
+			if sameBlockRef(head, expected) && sameBlockRef(finalized, expected) {
+				return r.backfillRestoredObservations(ctx)
+			}
 			return fmt.Errorf("%w: retry requires the EL head and finality at the verified restore base", ErrRestore)
 		}
-		// The EL may have acknowledged the target before flushing it. Recover
-		// its persisted prefix from the same verified restore before startup.
+		// Check the archive even when EL still holds the pinned tip. If EL
+		// reopened behind the anchor, replay from the verified prefix.
 	} else if len(image.Observations) != 0 || len(image.Candidates) != 0 || image.Restored != nil || image.Frontier != nil {
 		return fmt.Errorf("%w: BFT journal is not empty", ErrRestore)
 	}
@@ -294,6 +293,9 @@ func (r *ArchiveRestore) Restore(ctx context.Context) error {
 		if verifiedPrefix != checkpoint.VerifiedPrefix {
 			return fmt.Errorf("%w: retained archive differs from the verified restore prefix", ErrRestore)
 		}
+	}
+	if image.RestoreBase != nil && alreadyFinalized {
+		return r.backfillRestoredObservations(ctx)
 	}
 	if r.Log != nil {
 		r.Log.Info("archive records fetched and retained; replaying", "blocks", len(reverse), "elapsed", time.Since(progress.started).Round(time.Millisecond).String(),

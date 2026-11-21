@@ -81,7 +81,8 @@ block hash and state root. After the restore records intent to finalize its
 target, the EL can reopen at an earlier verified height, with finality at or
 below that head. The restore preserves that finality during replay and
 re-establishes the pinned head and finality, even if the BFT anchor already
-committed. Ordinary `shard-node run` refuses a checkpoint whose restore
+committed. A completed restore rechecks the local archive when retried and
+fetches missing records before returning success. Ordinary `shard-node run` refuses a checkpoint whose restore
 anchor is still missing.
 
 Interruptions before the checkpoint, restores started by binaries without a

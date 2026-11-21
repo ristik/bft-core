@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"testing"
 	"time"
 
@@ -12,15 +13,24 @@ import (
 	"github.com/unicitynetwork/bft-core/archive"
 	"github.com/unicitynetwork/bft-core/configuredprogress"
 	"github.com/unicitynetwork/bft-core/engineapi"
+	"github.com/unicitynetwork/bft-core/network"
+	"github.com/unicitynetwork/bft-core/rootinput"
 	"github.com/unicitynetwork/bft-core/shardnode"
+	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
+	"github.com/unicitynetwork/bft-go-base/types"
 )
 
 var errRestoreInterrupted = errors.New("interrupted restore")
 
 type interruptedRestoreExecutor struct {
 	*restoreExecutorFixture
-	stage                    string
-	forkchoiceCalls, commits int
+	stage                              string
+	verifies, forkchoiceCalls, commits int
+}
+
+func (e *interruptedRestoreExecutor) Verify(ctx context.Context, block shardnode.Block, params shardnode.RoundParams) (shardnode.Status, error) {
+	e.verifies++
+	return e.restoreExecutorFixture.Verify(ctx, block, params)
 }
 
 func (e *interruptedRestoreExecutor) RecoveryForkchoice(ctx context.Context, head, finalized shardnode.Hash) (shardnode.Status, error) {
@@ -63,7 +73,7 @@ func (f *retryRestoreFixture) reopenRestoreStores(t *testing.T) {
 	journal, err := configuredprogress.OpenConfiguredV2(f.journalPath, configuredprogress.Settings{Retain: 16})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = journal.Close() })
-	require.NoError(t, journal.EnableJournal(context.Background(), f.wf.context, f.limits))
+	require.NoError(t, journal.EnableJournal(context.Background(), f.restore.Context, f.limits))
 	local, err := archive.Open(f.archivePath)
 	require.NoError(t, err)
 	f.restore.Journal, f.restore.Archive, f.journal = journal, local, journal
@@ -258,6 +268,99 @@ func TestSingleEpochArchiveRestoreRefusesChangedVerifiedArchive(t *testing.T) {
 	}
 	f.restore.Archive = replacement
 	require.ErrorContains(t, f.restore.Restore(ctx), "retained archive differs from the verified restore prefix")
+	require.Zero(t, e.forkchoiceCalls)
+	require.Zero(t, e.commits)
+}
+
+func TestSingleEpochArchiveRestoreEquivalentBlockTipPin(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newRetryRestoreFixture(t, 0, fastRetry(time.Second))
+	archived := f.restore.TipUC
+	original := f.wf.chain.TrustBase.RootNodes[0]
+	extra, err := abcrypto.NewInMemorySecp256K1Signer()
+	require.NoError(t, err)
+	verifier, err := extra.Verifier()
+	require.NoError(t, err)
+	publicKey, err := verifier.MarshalPublicKey()
+	require.NoError(t, err)
+	id, err := network.NodeIDFromPublicKeyBytes(publicKey)
+	require.NoError(t, err)
+	tb, err := types.NewTrustBase(f.wf.chain.TrustBase.NetworkID, []*types.NodeInfo{
+		{NodeID: original.NodeID, SigKey: original.SigKey, Stake: 3},
+		{NodeID: id.String(), SigKey: publicKey, Stake: 1},
+	})
+	require.NoError(t, err)
+	f.restore.Context.Observation.TrustBases = fixtureTrust{tb}
+	f.restore.Context.Record.TrustBases = fixtureTrust{tb}
+
+	archivedRaw, err := types.Cbor.Marshal(archived)
+	require.NoError(t, err)
+	var pin types.UnicityCertificate
+	require.NoError(t, types.Cbor.Unmarshal(archivedRaw, &pin))
+	require.NoError(t, pin.UnicitySeal.Sign(id.String(), extra))
+	for _, uc := range []*types.UnicityCertificate{archived, &pin} {
+		_, err := rootinput.AuthenticateObservationV2(ctx, f.restore.Context.Observation, uc, f.restore.TipTR)
+		require.NoError(t, err)
+	}
+	f.restore.TipUC = &pin
+	wantPin, err := RestorePinID(&pin, f.restore.TipTR, f.restore.ResumeScope)
+	require.NoError(t, err)
+	archivedPin, err := RestorePinID(archived, f.restore.TipTR, f.restore.ResumeScope)
+	require.NoError(t, err)
+	require.NotEqual(t, archivedPin, wantPin)
+
+	require.NoError(t, f.restore.Restore(ctx))
+	require.EqualValues(t, 5, f.executor.finalized.Number)
+	f.reopenRestoreStores(t)
+	checkpoint, err := f.journal.RestoreCheckpoint()
+	require.NoError(t, err)
+	require.Equal(t, wantPin, checkpoint.Pin)
+	require.NoError(t, f.restore.Restore(ctx))
+
+	image, err := f.journal.LoadJournal(ctx, f.restore.Context, f.limits)
+	require.NoError(t, err)
+	require.NotNil(t, image.RestoreBase)
+	require.Len(t, image.Candidates, 1)
+	require.Len(t, image.Observations, 2)
+	state, _, err := f.journal.Load(ctx, f.restore.Context)
+	require.NoError(t, err)
+	observed, ok := state.Observed()
+	require.True(t, ok)
+	first, ok := state.FirstOrdinary()
+	require.True(t, ok)
+	for _, uc := range []*types.UnicityCertificate{image.Candidates[0].ResultingUC, image.Observations[1].UC, first.Certificate(), observed.Certificate()} {
+		raw, err := types.Cbor.Marshal(uc)
+		require.NoError(t, err)
+		require.Equal(t, archivedRaw, raw)
+	}
+	f.restore.TipUC = archived
+	require.ErrorContains(t, f.restore.Restore(ctx), "another restore pin")
+}
+
+func TestSingleEpochArchiveRestoreReopensCompletedRestoreWithEmptyArchive(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	f := newRetryRestoreFixture(t, 0, fastRetry(time.Second))
+	require.NoError(t, f.restore.Restore(ctx))
+	f.reopenRestoreStores(t)
+	require.NoError(t, os.Rename(f.archivePath, f.archivePath+"-original"))
+	empty, err := archive.Open(f.archivePath)
+	require.NoError(t, err)
+	f.restore.Archive = empty
+	e := &interruptedRestoreExecutor{restoreExecutorFixture: f.executor}
+	f.restore.Adapter = e
+
+	f.host.failures = -1
+	require.ErrorIs(t, f.restore.Restore(ctx), archive.ErrUnavailable)
+	f.host.failures = 0
+	require.NoError(t, f.restore.Restore(ctx))
+	for _, entry := range f.wf.entries {
+		q := archive.Request{Context: f.restore.Subject, BlockHash: [32]byte(entry.Candidate.Hash)}
+		_, err := empty.Get(q)
+		require.NoError(t, err, "successful retry must restore every archived ancestor")
+	}
+	require.Zero(t, e.verifies)
 	require.Zero(t, e.forkchoiceCalls)
 	require.Zero(t, e.commits)
 }

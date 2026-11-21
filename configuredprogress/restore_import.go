@@ -122,15 +122,22 @@ func (s *Store) installReplayedTip(ctx context.Context, c Context, limits Journa
 		if rel, err := compareObservations(first, result); err != nil || rel != relationAdvance {
 			return fmt.Errorf("%w: bootstrap to restored result: %v", ErrConflict, err)
 		}
-		if rel, err := compareObservations(result, tip); err != nil || rel == relationStale {
+		rel, err := compareObservations(result, tip)
+		if err != nil || rel == relationStale {
 			return fmt.Errorf("%w: restored result to tip: %v", ErrConflict, err)
+		}
+		cw.First = &pairWire{UC: ru, TR: rt}
+		if rel == relationDuplicate {
+			// Keep the archived pair for the candidate and its observation
+			// and progress. The checkpoint still binds the exact operator pin.
+			pairs = pairs[:1]
+			cw.Observed = cw.First
 		}
 		fu, ft, err := pairBytes(firstUC, firstTR)
 		if err != nil {
 			return err
 		}
 		pairs = append(pairs, observationPair{firstUC, fu, ft})
-		cw.First = &pairWire{UC: ru, TR: rt}
 	}
 	for _, pair := range pairs {
 		w := journalObservationWire{Version: journalVersion, Descriptor: state.i.descriptorDigest[:], Round: pair.uc.GetRoundNumber(), RootRound: pair.uc.GetRootRoundNumber(),
