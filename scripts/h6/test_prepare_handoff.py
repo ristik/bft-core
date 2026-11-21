@@ -245,6 +245,46 @@ class AgainstFakeRoots(Files):
         self.assertEqual(c.endorsed, 0)
         self.assertTrue((self.dir / 'evidence/target.json').is_file())
 
+    def test_endorsement_error_body_timeout_requests_dumps(self):
+        c = self.cluster()
+        open_url = ph.urllib.request.urlopen
+        for index, extra in ((0, []), (1, ['--endorse-all'])):
+            with self.subTest(root=index):
+                endpoint = c.roots[index].url + '/api/v1/handoff/endorse'
+                body = mock.Mock(spec=io.BytesIO)
+                body.closed = False
+                body.read.side_effect = TimeoutError('timed out reading error body')
+
+                def open_with_error(request, **kwargs):
+                    if request.full_url == endpoint:
+                        raise urllib.error.HTTPError(endpoint, 422, 'rejected', {}, body)
+                    return open_url(request, **kwargs)
+
+                stderr = io.StringIO()
+                with mock.patch.object(ph.urllib.request, 'urlopen', side_effect=open_with_error):
+                    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
+                        self.assertEqual(ph.run(self.argv(c.urls(), out=f'evidence-{index}', extra=extra)), 4)
+                self.assertIn(f'STOP: POST {endpoint} timed out after ', stderr.getvalue())
+                body.close.assert_called_once()
+
+    def test_endorse_all_records_the_error_text_for_a_refusal(self):
+        c = self.cluster(committed_after_endorsements=3)
+        original_handle = c.handle
+
+        def handle(root, route, body):
+            if root is c.roots[1] and route == 'endorse':
+                return 422, 'endorsement refused by this root'
+            return original_handle(root, route, body)
+
+        with mock.patch.object(c, 'handle', side_effect=handle):
+            code, _ = self.helper(self.argv(c.urls(), extra=['--endorse-all']))
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads((self.dir / 'evidence/endorsements.json').read_text()), [
+            {'accepted': False, 'error': 'endorsement refused by this root'},
+            {'accepted': True},
+            {'accepted': True},
+        ])
+
     def test_an_expired_prepare_wait_also_requests_dumps(self):
         c = self.cluster()
         # Expire the Prepare deadline on the first retryable error, without waiting 60s.

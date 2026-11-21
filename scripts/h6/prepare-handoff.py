@@ -29,6 +29,10 @@ class HandoffTimeout(Stop):
     pass
 
 
+class EndorsementRefused(Stop):
+    pass
+
+
 def head(major, n):
     """CBOR initial byte(s) in the shortest (canonical) form."""
     if n < 24:
@@ -80,9 +84,15 @@ def post(url, route, body):
     request = urllib.request.Request(endpoint, json.dumps(body).encode(), {'Content-Type': 'application/json'})
     started = time.monotonic()
     try:
-        with urllib.request.urlopen(request, timeout=5) as response:
-            raw = response.read(1 << 20)
-            return json.loads(raw) if raw else None
+        try:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                raw = response.read(1 << 20)
+                return json.loads(raw) if raw else None
+        except urllib.error.HTTPError as error:
+            if route != 'endorse':
+                raise
+            with error:
+                raise EndorsementRefused(error.read(1 << 20).decode(errors='replace')) from error
     except (TimeoutError, urllib.error.URLError) as error:
         if isinstance(error, TimeoutError) or isinstance(getattr(error, 'reason', None), TimeoutError):
             raise HandoffTimeout(f'POST {endpoint} timed out after {time.monotonic() - started:.2f}s') from error
@@ -178,8 +188,8 @@ def main(argv=None):
         try:
             post(urls[0], 'endorse', plan)
             break
-        except urllib.error.HTTPError as error:
-            diagnostic = error.read().decode(errors='replace')
+        except EndorsementRefused as error:
+            diagnostic = str(error)
             if 'before the handoff is prepared' not in diagnostic:
                 raise Stop(diagnostic)
             if time.monotonic() >= deadline:
@@ -195,8 +205,8 @@ def main(argv=None):
                 try:
                     future.result()
                     results.append({'accepted': True})
-                except urllib.error.HTTPError as error:
-                    results.append({'accepted': False, 'error': error.read().decode(errors='replace')})
+                except EndorsementRefused as error:
+                    results.append({'accepted': False, 'error': str(error)})
         write(args.out, 'endorsements.json', results)
         if len(urls) * 2 // 3 + 1 > 1 + sum(result['accepted'] for result in results):
             raise Stop('too few roots endorsed; inspect the exact saved target')
