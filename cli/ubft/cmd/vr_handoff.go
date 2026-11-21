@@ -23,6 +23,7 @@ import (
 	"github.com/unicitynetwork/bft-core/q3format"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
+	"github.com/unicitynetwork/bft-core/rootchain/posretire"
 	"github.com/unicitynetwork/bft-core/rootchain/vrschedule"
 	"github.com/unicitynetwork/bft-core/rootchain/vrstate"
 	"github.com/unicitynetwork/bft-core/signingauthority/service"
@@ -98,6 +99,19 @@ func enableVRHandoff(ctx context.Context, cm *consensus.ConsensusManager, dep vr
 	}); err != nil {
 		return err
 	}
+	retirements, err := posretire.New(posretire.Config{
+		Deployment: storage.PosDeployment{RootNetwork: dep.RootNetwork,
+			Deployment: evmassign.Deployment{NetworkWord: dep.NetworkWord, ChainID: dep.ChainID, Custody: dep.Registry}},
+		VR:        &pins,
+		Chain:     posretire.RPCChain{Client: client, Registry: dep.Registry},
+		Proofs:    posretire.RPCProofs(client),
+		StatePath: filepath.Join(home, posRetirementStateFileName),
+	})
+	if err != nil {
+		return err
+	}
+	cm.SetRetirementProposer(retirements)
+	go retirements.Run(ctx)
 	if host != nil {
 		// the peer protocol: the installed root committee always, besides the current intent's members the service names
 		svc, queue := cm.VRService()

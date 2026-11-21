@@ -397,6 +397,10 @@ func retirementIn(b *ExecutedBlock, id, generation uint64) bool {
 	if err != nil || !pos.on {
 		return false
 	}
+	if len(b.ShardState.Control.VR) != 0 {
+		_, ok := pos.state.IsHolderRetired(0, id, generation)
+		return ok
+	}
 	_, ok := pos.state.IsRetired(id, generation)
 	return ok
 }
