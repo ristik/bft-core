@@ -40,11 +40,13 @@ func TestPairedUTBVerifierPreflight(t *testing.T) {
 	// Every invocation that gets past the verifier check stops at the missing
 	// ureth binary, before any build, cleanup, slot use or devnet startup.
 	env := []string{
-		"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH"), "HOME=" + fixture,
+		"PATH=" + strings.Join([]string{bin, filepath.Join(checkout, "scripts"), os.Getenv("PATH")}, string(os.PathListSeparator)),
+		"HOME=" + fixture,
 		"VR_LANE=1", "Q3_B1=1", "M2_PROFILE2=1", "VR_STEPS=scripts/vr-boundary-steps.sh",
 		"VR_CONTRACTS=" + contracts, "VR_FRESH_MEASUREMENT=" + measured,
 		"URETH_BIN=" + missing, "AGG_BIN=" + verifier,
 	}
+	const missingDefault = "UTB_VERIFIER must be the verifier executable (expected an executable file): build/utb-evidence"
 	for _, tc := range []struct {
 		name, primary, alias, diagnostic string
 		enabled, deprecated, hasDefault  bool
@@ -57,12 +59,15 @@ func TestPairedUTBVerifierPreflight(t *testing.T) {
 		{"legacy executable", "", verifier, "", true, true, false, nil},
 		{"preferred symlink overrides legacy directory", link, fixture, "", true, false, false, nil},
 		{"UTB disabled", fixture, "", "", false, false, false, nil},
-		{"aggregator boundary requires default", "", "", "UTB_VERIFIER must be the verifier executable (expected an executable file): build/utb-evidence", true, false, false, []string{"VR_AGG=1"}},
+		{"aggregator boundary requires default", "", "", missingDefault, true, false, false, []string{"VR_AGG=1"}},
 		{"aggregator boundary accepts default executable", "", "", "", true, false, true, []string{"VR_AGG=1"}},
-		{"PoS boundary requires default", "", "", "UTB_VERIFIER must be the verifier executable (expected an executable file): build/utb-evidence", true, false, false, []string{"VR_POS=1"}},
-		{"bring-up without boundary steps", "", "", "", true, false, false, []string{"VR_AGG=1", "VR_STEPS="}},
-		{"seed-only steps", "", "", "", true, false, false, []string{"VR_AGG=1", "VR_JOINER=1", "VR_SEED=1"}},
-		{"joiner-only steps", "", "", "", true, false, false, []string{"VR_AGG=1", "VR_JOINER=1", "VR_JOINER_ONLY=1"}},
+		{"aggregator boundary found on PATH", "", "", missingDefault, true, false, false, []string{"VR_AGG=1", "VR_STEPS=vr-boundary-steps.sh"}},
+		{"PoS boundary requires default", "", "", missingDefault, true, false, false, []string{"VR_POS=1"}},
+		{"PoS boundary with prep-only flag", "", "", missingDefault, true, false, false, []string{"VR_POS=1", "VR_AGG=0", "ANYAGE_PREP_ONLY=1"}},
+		{"aggregator genesis prep requires default", "", "", missingDefault, true, false, false, []string{"VR_AGG=1", "ANYAGE_PREP_ONLY=1"}},
+		{"bring-up without boundary steps", "", "", missingDefault, true, false, false, []string{"VR_STEPS="}},
+		{"seed-only steps", "", "", missingDefault, true, false, false, []string{"VR_JOINER=1", "VR_SEED=1"}},
+		{"joiner-only steps", "", "", missingDefault, true, false, false, []string{"VR_JOINER=1", "VR_JOINER_ONLY=1"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cmd := exec.Command("bash", "scripts/reth-paired-devnet.sh")
@@ -72,9 +77,9 @@ func TestPairedUTBVerifierPreflight(t *testing.T) {
 				require.NoError(t, os.WriteFile(path, executable, 0o755))
 				t.Cleanup(func() { require.NoError(t, os.Remove(path)) })
 			}
-			cmd.Env = append(append([]string{}, env...), "UTB_VERIFIER="+tc.primary, "UTB_EVIDENCE="+tc.alias, "VR_UTB=0")
-			if tc.enabled {
-				cmd.Env = append(cmd.Env, "VR_UTB=1")
+			cmd.Env = append(append([]string{}, env...), "UTB_VERIFIER="+tc.primary, "UTB_EVIDENCE="+tc.alias)
+			if !tc.enabled {
+				cmd.Env = append(cmd.Env, "VR_UTB=0")
 			}
 			cmd.Env = append(cmd.Env, tc.extra...)
 			out, err := cmd.CombinedOutput()
@@ -141,23 +146,36 @@ func TestCombinedUTBPreflightChecksBuildOutput(t *testing.T) {
 }
 
 func TestCombinedUTBPrepValidatesBeforeQueueing(t *testing.T) {
+	root, err := filepath.Abs("../..")
+	require.NoError(t, err)
 	fixture := t.TempDir()
+	checkout := filepath.Join(fixture, "checkout")
+	require.NoError(t, os.MkdirAll(filepath.Join(checkout, "scripts"), 0o755))
+	for _, name := range []string{"utb-lane.sh", "lib"} {
+		require.NoError(t, os.Symlink(filepath.Join(root, "scripts", name), filepath.Join(checkout, "scripts", name)))
+	}
 	briefs := filepath.Join(fixture, "briefs")
 	require.NoError(t, os.Mkdir(briefs, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(briefs, "devnet-lock.sh"), []byte("#!/bin/sh\necho lock reached\nexit 47\n"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(briefs, "devnet-lock.sh"), []byte("#!/bin/sh\nprintf 'lock reached with %s\\n' \"$UTB_VERIFIER\"\nexit 47\n"), 0o755))
 	planned := filepath.Join(fixture, "planned")
+	defaultPath := filepath.Join(fixture, "builds", "utb-evidence-pr7")
+	require.NoError(t, os.Mkdir(filepath.Dir(defaultPath), 0o755))
 	for _, tc := range []struct {
-		name, primary, alias, diagnostic string
+		name, primary, alias, diagnostic, wantVerifier string
 	}{
-		{"preferred directory", fixture, "", "UTB_VERIFIER must be the verifier executable"},
-		{"legacy directory", "", fixture, "UTB_EVIDENCE must be the verifier executable"},
-		{"directory-form planned path", planned + "/", "", "UTB_VERIFIER must be the verifier executable"},
-		{"planned build path", planned, "", ""},
-		{"unset", "", "", ""},
+		{"preferred directory", fixture, "", "UTB_VERIFIER must be the verifier executable", ""},
+		{"legacy directory", "", fixture, "UTB_EVIDENCE must be the verifier executable", ""},
+		{"directory-form planned path", planned + "/", "", "UTB_VERIFIER must be the verifier executable", ""},
+		{"planned build path", planned, "", "UTB_VERIFIER must be the verifier executable", ""},
+		{"missing default", "", "", "UTB_VERIFIER must be the verifier executable", ""},
+		{"executable default", "", "", "", defaultPath},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.wantVerifier != "" {
+				require.NoError(t, os.WriteFile(tc.wantVerifier, []byte("#!/bin/sh\nexit 0\n"), 0o755))
+			}
 			cmd := exec.Command("bash", "scripts/utb-lane.sh", "--prep")
-			cmd.Dir = "../.."
+			cmd.Dir = checkout
 			cmd.Env = []string{
 				"PATH=" + os.Getenv("PATH"), "HOME=" + fixture, "AGRE_ROOT=" + fixture,
 				"P85_CONTRACTS=" + fixture, "UTB_VERIFIER=" + tc.primary, "UTB_EVIDENCE=" + tc.alias,
@@ -170,7 +188,7 @@ func TestCombinedUTBPrepValidatesBeforeQueueing(t *testing.T) {
 				require.NotContains(t, string(out), "lock reached")
 				require.Equal(t, 2, exit.ExitCode())
 			} else {
-				require.Contains(t, string(out), "lock reached")
+				require.Contains(t, string(out), "lock reached with "+tc.wantVerifier)
 				require.Equal(t, 47, exit.ExitCode())
 			}
 		})

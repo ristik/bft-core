@@ -8,7 +8,7 @@
 #   scripts/utb-lane.sh --selftest     chain-free tests of the lane's own logic (genesis/manifest generation, flags, the evidence-pack checker)
 #   scripts/utb-lane.sh --build-aggregator   AGG_COMMIT=<40 hex>: clone, build and record the aggregator (builds/aggregator-<sha8>/); pushes nothing
 #   scripts/utb-lane.sh --prep         dry run of the genesis side (ANYAGE_PREP_ONLY with UTB_LANE=1): P85 genesis, the UTB genesis entry, pin and manifest,
-#                                      and the aggregator shard configurations; starts no reth, root, validator or aggregator
+#                                      and the aggregator shard configurations; requires the verifier and starts no reth, root, validator or aggregator
 #   scripts/utb-lane.sh --check-evidence DIR   checks an evidence directory against the required list (design §11.4)
 #   scripts/utb-lane.sh                the run: refuses unless the preflight is entirely ok
 #
@@ -193,7 +193,7 @@ case "${1:-}" in
   --check-evidence) utb_check_evidence "${2:?usage: $0 --check-evidence DIR}" "$utb_verifier_default" && echo "evidence complete" ;;
   --preflight) plan; echo; preflight ;;
   --prep)
-    [ -z "${UTB_VERIFIER:-}${UTB_EVIDENCE:-}" ] || utb_resolve_verifier "$utb_verifier_default" allow-missing || exit 2
+    utb_resolve_verifier "$utb_verifier_default" || exit 2
     lane_env
     [ -n "${P85_CONTRACTS:-}" ] || { echo "--prep needs P85_CONTRACTS, M2_URETH_BIN, M2_URETH_COMMIT (and P85_DEV_RUN=1 unless the provenance is attested)" >&2; exit 2; }
     export ANYAGE_PREP_ONLY=1
