@@ -40,6 +40,7 @@ var (
 	// ErrNoSigningHistory is returned by a module with an activation gate but no signing resolver: without the authenticated
 	// history an epoch's scheme is unknown, and unknown is never scheme 1.
 	ErrNoSigningHistory = errors.New("no authenticated signing history for the epoch")
+	ErrNoProposalStore  = errors.New("no durable proposal signing store")
 )
 
 type (
@@ -96,6 +97,11 @@ type (
 	DecisionStorage interface {
 		SignedDecision(kind storage.DecisionKind, epoch, round uint64) (statement, message []byte, err error)
 		RecordSignedDecision(kind storage.DecisionKind, epoch, round uint64, statement, message []byte) error
+	}
+
+	ProposalStorage interface {
+		ReadProposalRecord() (storage.ProposalRecord, error)
+		ReserveProposal(storage.ProposalRecord) error
 	}
 
 	// UTBSource resolves the committed round of a committing vote to the unsigned successor trust-base entry (types.RootTrustBaseV2.SigBytes) the
@@ -426,9 +432,8 @@ func (s *SafetyModule) SignTimeout(tmoVote *abdrc.TimeoutMsg, lastRoundTC *drcty
 	return tmoVote.Sign(s.signer)
 }
 
-// Sign signs a message that carries no voting rule (a proposal, an IR change request) as a member of the given epoch. With an
-// activation gate the epoch must be admitted, exactly as for a vote or timeout: a leader whose installed epoch is not completely
-// activated signs and broadcasts nothing.
+// Sign signs a proposal or an IR change request as a member of the admitted
+// epoch. A proposal must reserve its signing slot before using the key.
 func (s *SafetyModule) Sign(epoch uint64, msg Signable) error {
 	if err := s.fenced(epoch); err != nil {
 		return err
@@ -438,7 +443,44 @@ func (s *SafetyModule) Sign(epoch uint64, msg Signable) error {
 			return fmt.Errorf("epoch %d is not admitted for signing: %w", epoch, err)
 		}
 	}
+	if proposal, ok := msg.(*abdrc.ProposalMsg); ok {
+		if proposal == nil || proposal.Block == nil || proposal.Block.Epoch != epoch {
+			return fmt.Errorf("proposal does not name signing epoch %d", epoch)
+		}
+		store, ok := s.storage.(ProposalStorage)
+		if !ok {
+			return ErrNoProposalStore
+		}
+		return proposal.Sign(reservedProposalSigner{s.signer, store, epoch, proposal.Block.Round})
+	}
 	return msg.Sign(s.signer)
+}
+
+func (s *SafetyModule) proposalRecord() (storage.ProposalRecord, error) {
+	store, ok := s.storage.(ProposalStorage)
+	if !ok {
+		return storage.ProposalRecord{}, ErrNoProposalStore
+	}
+	return store.ReadProposalRecord()
+}
+
+// reservedProposalSigner keeps the wire validation and hash in ProposalMsg.Sign.
+// It acquires the one durable reservation before calling the key.
+type reservedProposalSigner struct {
+	crypto.Signer
+	store        ProposalStorage
+	epoch, round uint64
+}
+
+func (s reservedProposalSigner) SignHash(hash []byte) ([]byte, error) {
+	if len(hash) != gocrypto.SHA256.Size() {
+		return nil, errors.New("proposal signing hash has the wrong length")
+	}
+	record := storage.ProposalRecord{Epoch: s.epoch, Round: s.round, Hash: [32]byte(hash)}
+	if err := s.store.ReserveProposal(record); err != nil {
+		return nil, fmt.Errorf("reserving proposal: %w", err)
+	}
+	return s.Signer.SignHash(hash)
 }
 
 func (s *SafetyModule) isSafeToTimeout(round, tmoHighQCRound uint64, lastRoundTC *drctypes.TimeoutCert) error {

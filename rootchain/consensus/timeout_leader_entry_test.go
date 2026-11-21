@@ -238,12 +238,15 @@ func TestGuardIsScopedToTheEpoch(t *testing.T) {
 		require.NoError(t, s.leader.manager.onProposalMsg(ctx, p))
 	}
 	m := s.leader.manager
-	m.lastProposedEpoch.Store(m.trustBase.Load().Epoch - 1)
-	m.lastProposedRound.Store(s.round + 10) // an old-epoch round above the successor's first rounds
+	require.NoError(t, m.safety.storage.(ProposalStorage).ReserveProposal(storage.ProposalRecord{
+		Epoch: m.trustBase.Load().Epoch - 1, Round: s.round + 10,
+	}))
 	require.NoError(t, m.onTimeoutMsg(ctx, s.next))
 	require.NotEmpty(t, s.leader.net.SentMessages(network.ProtocolRootProposal), "the successor's leader proposes")
-	require.Equal(t, m.trustBase.Load().Epoch, m.lastProposedEpoch.Load())
-	require.Equal(t, s.round+1, m.lastProposedRound.Load())
+	record, err := m.safety.proposalRecord()
+	require.NoError(t, err)
+	require.Equal(t, m.trustBase.Load().Epoch, record.Epoch)
+	require.Equal(t, s.round+1, record.Round)
 }
 
 // Timeouts at the start of an epoch carry no high QC at all, nor does the certificate: the carried certificate takes the leader into its

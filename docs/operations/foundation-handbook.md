@@ -46,7 +46,13 @@ Build from the generation's deployed source pin with only the approved fix. Veri
 
 Before restarting a root, check the current committee, quorum weight, recent committed rounds and shard certification. Pick a quiet window between handoffs. Confirm that the roots staying online have enough voting weight to make quorum. Stage the verified binary first. Restart one affected root with its existing arguments, home and keys. Keep its paired shard, execution client and authority running.
 
-Check that the restarted root rejoins the current epoch, submits votes and appears in a new quorum certificate. Confirm that certification has advanced on a peer and that the public execution head is healthy before moving to the next root. Record the before and after process IDs, binary digest, epochs and quorum certificates. If any check fails, pause the rollout and recover that root with the previously verified binary and the same state. Announce completion and the affected operator steps. [Stage an operator hotfix](validator-handbook.md#upgrade-to-a-hotfix-release)
+Check that the restarted root rejoins the current epoch, submits votes and appears in a new quorum certificate. Confirm that certification has advanced on a peer and that the public execution head is healthy before moving to the next root. Record the before and after process IDs, binary digest, epochs and quorum certificates. If any check fails, pause the rollout. For rollback, use only a release that enforces the current signing state and keep the same database. Announce completion and the affected operator steps. [Stage an operator hotfix](validator-handbook.md#upgrade-to-a-hotfix-release)
+
+### First adoption of durable root proposal signing
+
+Preserve the root database and trust history for each existing key. When the new executable opens a database from the previous release, it durably fences proposals through the last epoch the previous executable could have used. The root can still vote and time out. Advancing the network's round within that epoch does not clear the proposal fence.
+
+Upgrade one legacy root at a time. Keep enough weight online for quorum and leave roots that can still propose. Before proceeding, check that the upgraded root has installed a verified successor epoch above its fence, appears in a fresh QC and can propose in that epoch. A deployment without a supported successor epoch needs a coordinated migration to a fresh signing identity. If a key's root database or trust history is missing or stale, keep that key offline and use the authorized identity recovery process. Once a root has made a durable proposal reservation, keep its current database and a release that enforces the record with that key.
 
 ## Release and publish seeds
 
