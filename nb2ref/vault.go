@@ -71,7 +71,11 @@ func NewVault(gamma []byte, env Environment, p Params) (*Vault, error) {
 	if err != nil {
 		return nil, err
 	}
-	v := &Vault{Cfg: c, D: c.Domain(), A: new(big.Int)}
+	return newVault(c, c.Domain()), nil
+}
+
+func newVault(c *Config, domain [32]byte) *Vault {
+	v := &Vault{Cfg: c, D: domain, A: new(big.Int)}
 	w := tagWords(c.K, c.B)
 	for p := 0; p < 2; p++ {
 		v.S[p] = make([][32]byte, c.K)
@@ -80,7 +84,7 @@ func NewVault(gamma []byte, env Environment, p Params) (*Vault, error) {
 		}
 	}
 	v.Head = GenesisHead(v.D, c.K)
-	return v, nil
+	return v
 }
 
 func log2(x uint64) uint {
@@ -173,10 +177,11 @@ func (v *Vault) Deposit(value *big.Int, firstOwner []byte, rho [32]byte) error {
 type Recipient int
 
 const (
-	RecipientAccepts         Recipient = iota // an EOA or a contract that accepts value
-	RecipientReverts                          // reverts on receipt: PayoutFailed
-	RecipientReentersRedeem                   // calls redeem from its receive hook, swallows the revert, accepts
-	RecipientReentersDeposit                  // calls deposit from its receive hook, swallows the revert, accepts
+	RecipientAccepts           Recipient = iota // an EOA or a contract that accepts value
+	RecipientReverts                            // reverts on receipt: PayoutFailed
+	RecipientReentersRedeem                     // calls redeem from its receive hook, swallows the revert, accepts
+	RecipientReentersDeposit                    // calls deposit from its receive hook, swallows the revert, accepts
+	RecipientPropagatesReentry                  // propagates the inner Reentrancy failure and rejects payout
 )
 
 // VerifierCall is the mock verifier's answer: Revert non-nil means it reverted with that data, otherwise Return is its
@@ -199,7 +204,7 @@ func (v *Vault) Redeem(claimedEta [32]byte, claimedStart uint64, history []byte,
 		return nil, fail(ErrReentrancy)
 	}
 	snap := v.snapshot()
-	res, err := v.redeem(claimedEta, claimedStart, history, ver, rcp)
+	res, err := v.redeem(claimedEta, claimedStart, history, func() (VerifierCall, error) { return ver, nil }, rcp)
 	if err != nil {
 		v.restore(snap)
 		return nil, err
@@ -236,7 +241,7 @@ func argsErr(r *Rule, args ...any) error {
 	return out
 }
 
-func (v *Vault) redeem(eta [32]byte, a uint64, history []byte, ver VerifierCall, rcp Recipient) (*RedeemResult, error) {
+func (v *Vault) redeem(eta [32]byte, a uint64, history []byte, verify func() (VerifierCall, error), rcp Recipient) (*RedeemResult, error) {
 	k := v.Cfg.K
 	pl := uint64(GapProofLen(k))
 	// 1. History length.
@@ -285,26 +290,12 @@ func (v *Vault) redeem(eta [32]byte, a uint64, history []byte, ver VerifierCall,
 		}
 	}
 	// 4. Recent buffers.
-	p := int(c % 2)
-	b := Bucket(eta, v.Cfg.B)
-	scan := []struct {
-		buf int
-		pop uint64
-	}{{p, v.M()}}
-	if c > 0 && e == c-1 {
-		scan = append(scan, struct {
-			buf int
-			pop uint64
-		}{1 - p, k})
+	if err := v.scanRecent(eta, c, e); err != nil {
+		return nil, err
 	}
-	for _, s := range scan {
-		for i := uint64(0); i < s.pop; i++ {
-			if v.tag(s.buf, i) == b && v.S[s.buf][i] == eta {
-				if err := argsErr(ErrAlreadyPaid, eta); err != nil {
-					return nil, err
-				}
-			}
-		}
+	ver, err := verify()
+	if err != nil {
+		return nil, err
 	}
 	// 5. The verifier. A revert of at most MaxVerifierRevert bytes is VerifierRefused(revertData); a longer revert, like return data
 	// that is not exactly 192 canonical bytes, is VerifierBadReturn (the vault never copies unbounded revert data).
@@ -324,7 +315,36 @@ func (v *Vault) redeem(eta [32]byte, a uint64, history []byte, ver VerifierCall,
 	if !ok {
 		return nil, ErrVerifierBadReturn
 	}
-	// 6. Verdict.
+	return v.pay(vd, eta, a, rcp)
+}
+
+func (v *Vault) scanRecent(eta [32]byte, c, e uint64) error {
+	p := int(c % 2)
+	b := Bucket(eta, v.Cfg.B)
+	scan := []struct {
+		buf int
+		pop uint64
+	}{{p, v.M()}}
+	if c > 0 && e == c-1 {
+		scan = append(scan, struct {
+			buf int
+			pop uint64
+		}{1 - p, v.Cfg.K})
+	}
+	for _, s := range scan {
+		for i := uint64(0); i < s.pop; i++ {
+			if v.tag(s.buf, i) == b && v.S[s.buf][i] == eta {
+				if err := argsErr(ErrAlreadyPaid, eta); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func (v *Vault) pay(vd *Verdict, eta [32]byte, a uint64, rcp Recipient) (*RedeemResult, error) {
+	p, k := int(v.C()%2), v.Cfg.K
 	q := v.Q()
 	switch {
 	case vd.Domain != v.D:
@@ -380,8 +400,12 @@ func (v *Vault) redeem(eta [32]byte, a uint64, history []byte, ver VerifierCall,
 	case RecipientReverts:
 		v.entered = false
 		return nil, fail(ErrPayoutFailed)
-	case RecipientReentersRedeem:
-		_, res.Inner = v.Redeem(eta, a, history, ver, RecipientAccepts)
+	case RecipientReentersRedeem, RecipientPropagatesReentry:
+		_, res.Inner = v.Redeem(eta, a, nil, VerifierCall{}, RecipientAccepts)
+		if rcp == RecipientPropagatesReentry {
+			v.entered = false
+			return nil, fail(ErrPayoutFailed)
+		}
 	case RecipientReentersDeposit:
 		res.Inner = v.Deposit(big.NewInt(1), nil, [32]byte{})
 	}

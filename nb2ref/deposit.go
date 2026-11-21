@@ -202,6 +202,11 @@ func VerifyReceiptLog(c *Config, t *TrustInput, p *DepositProof) (*ReceiptLog, e
 	if err != nil {
 		return nil, err
 	}
+	return verifyReceiptLog(c.Vault, p, uc)
+}
+
+// verifyReceiptLog authenticates the execution part of a receipt after its UC was checked.
+func verifyReceiptLog(emitter [20]byte, p *DepositProof, uc *types.UnicityCertificate) (*ReceiptLog, error) {
 	header, err := bindHeader(p.Header, uc)
 	if err != nil {
 		return nil, err
@@ -225,7 +230,7 @@ func VerifyReceiptLog(c *Config, t *TrustInput, p *DepositProof) (*ReceiptLog, e
 		return nil, ErrLogIndex
 	}
 	out := &ReceiptLog{Address: [20]byte(l.kids[0].str), Data: l.kids[2].str}
-	if out.Address != c.Vault { // the emitter before the topics (section 6.2 step 5)
+	if out.Address != emitter { // the emitter before the topics (section 6.2 step 5)
 		if err := fail(ErrLogEmitter); err != nil {
 			return nil, err
 		}
@@ -320,57 +325,67 @@ func verifyRootMint(c *Config, t *TrustInput, m *MintTx) (*ReceiptBacking, *big.
 	if err != nil {
 		return nil, nil, err
 	}
-	d := c.Domain()
-	if j.D != d {
-		if err := fail(ErrMintDomain); err != nil {
-			return nil, nil, err
-		}
-	}
-	log, err := VerifyReceiptLog(c, t, &j.Proof)
+	value, err := verifyFundedMint(c, c.Domain(), m, j, func(p *DepositProof) (*ReceiptLog, error) {
+		return VerifyReceiptLog(c, t, p)
+	})
 	if err != nil {
 		return nil, nil, err
 	}
+	return j, value, nil
+}
+
+// verifyFundedMint checks the same signed deposit opening in both bridge generations.
+func verifyFundedMint(c *Config, d [32]byte, m *MintTx, j *ReceiptBacking, receipt func(*DepositProof) (*ReceiptLog, error)) (*big.Int, error) {
+	if j.D != d {
+		if err := fail(ErrMintDomain); err != nil {
+			return nil, err
+		}
+	}
+	log, err := receipt(&j.Proof)
+	if err != nil {
+		return nil, err
+	}
 	if len(log.Topics) != 2 || log.Topics[0] != TopicDeposited || log.Topics[1] != u256u(j.N) {
 		if err := fail(ErrLogTopics); err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 	}
 	data := log.Data
 	if len(data) != 224 {
-		return nil, nil, ErrLogData
+		return nil, ErrLogData
 	}
 	v := new(big.Int).SetBytes(data[32:64])
 	owner := data[160 : 160+FirstOwnerBytes]
 	if !bytes.Equal(data[96:128], cat(make([]byte, 31), []byte{0x80})) || !bytes.Equal(data[128:160], cat(make([]byte, 31), []byte{FirstOwnerBytes})) ||
 		!bytes.Equal(data[160+FirstOwnerBytes:], make([]byte, 224-160-FirstOwnerBytes)) || [32]byte(data[0:32]) != j.D || v.Sign() == 0 {
 		if err := fail(ErrLogData); err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 	}
 	if Rho(j.D, j.R) != [32]byte(data[64:96]) {
 		if err := fail(ErrSecretOpening); err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 	}
 	if m.Salt != DepositSalt(d, j.N, j.R) {
 		if err := fail(ErrMintSalt); err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 	}
 	if m.Type != c.Ty {
 		if err := fail(ErrMintType); err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 	}
 	if !bytes.Equal(m.Recipient.Bytes(), owner) {
 		if err := fail(ErrMintOwner); err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 	}
 	if v.BitLen() > 256 || !bytes.Equal(m.Data, ValueData(c.Aid, v)) {
 		if err := fail(ErrMintData); err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 	}
-	return j, v, nil
+	return v, nil
 }
