@@ -6,15 +6,22 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/stretchr/testify/require"
 
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	"github.com/unicitynetwork/bft-core/rootchain/evmstate"
+	"github.com/unicitynetwork/bft-core/rootchain/evmstate/evmstatetest"
+	"github.com/unicitynetwork/bft-core/rootchain/vrstate"
+	"github.com/unicitynetwork/bft-core/vrschema"
 )
 
 type fakeChain struct {
@@ -74,7 +81,7 @@ func (h *harness) service() *Service {
 			h.fetchM.Unlock()
 			return nil
 		},
-		Build: func(ctx context.Context, _ evmstate.ProofSource, _ evmstate.Pins, id, generation uint64) ([]byte, storage.RetirementFacts, error) {
+		buildLegacy: func(ctx context.Context, _ evmstate.ProofSource, _ evmstate.Pins, _ [32]byte, id, generation uint64) ([]byte, storage.RetirementFacts, error) {
 			h.built.Add(1)
 			if h.block != nil {
 				select {
@@ -101,6 +108,213 @@ func waitReady(t *testing.T, svc *Service, p storage.EVMParent, n int) []storage
 	var got []storage.PreparedRetirement
 	require.Eventually(t, func() bool { got = svc.Ready(p, 100); return len(got) >= n }, 2*time.Second, 5*time.Millisecond)
 	return got
+}
+
+type retirementRPC struct {
+	holder                   [20]byte
+	finalizedHash, stateRoot common.Hash
+}
+
+func (r retirementRPC) BlockNumber() hexutil.Uint64 { return 20 }
+
+func (r retirementRPC) GetBlockByNumber(tag string, full bool) (map[string]common.Hash, error) {
+	if tag != "finalized" || full {
+		return nil, errors.New("expected the finalized header")
+	}
+	return map[string]common.Hash{"hash": r.finalizedHash, "stateRoot": r.stateRoot}, nil
+}
+
+func (r retirementRPC) Call(input map[string]string, block string) (hexutil.Bytes, error) {
+	if common.HexToAddress(input["to"]) != common.Address(vrschema.ValidatorRegistry) {
+		return nil, errors.New("expected a VR holder lookup")
+	}
+	if input["data"] != "0xaa280583"+strings.Repeat("0", 64) || block != "latest" {
+		return nil, errors.New("expected holderAt(0) at the latest block")
+	}
+	out := make(hexutil.Bytes, 128)
+	copy(out[12:32], r.holder[:])
+	return out, nil
+}
+
+func (r retirementRPC) GetLogs(filter map[string]any) ([]rpcLog, error) {
+	if filter["address"] != hexutil.Encode(r.holder[:]) {
+		return nil, errors.New("expected the registered holder's logs")
+	}
+	id, generation := vrschema.U64(5), vrschema.U64(1)
+	return []rpcLog{{Topics: []hexutil.Bytes{RequestedTopic[:], id[:], generation[:]}, BlockNumber: 10}}, nil
+}
+
+func TestVRRequestBuildsAnAuthenticatedHolderRetirement(t *testing.T) {
+	ctx := context.Background()
+	pins := vrstate.Pins{
+		Registry: vrschema.ValidatorRegistry, RegistryCode: vrschema.Keccak([]byte("VR")),
+		SealRegistry: vrschema.SealRegistry, SealRegistryCode: vrschema.Keccak([]byte("seal")),
+	}
+	holder := vrschema.Holder{
+		Holder: [20]byte{9}, CodeHash: vrschema.Keccak([]byte("custody")),
+		Module: [20]byte{8}, RegisteredEpoch: 1,
+	}
+	words, err := holder.Words()
+	require.NoError(t, err)
+	status, err := (vrschema.Status{HolderCount: 1}).Word()
+	require.NoError(t, err)
+	h := vrschema.HolderRetirement{ID: 5, Generation: 1, RefDigest: vrschema.Keccak([]byte("closed exposures"))}
+	facts, err := (vrschema.LiabilityFacts{Requested: true, RefDigest: h.RefDigest, MaxLiabilityAnchor: 50}).Words()
+	require.NoError(t, err)
+	world := evmstatetest.NewWorld(t,
+		evmstatetest.Contract{Addr: pins.Registry, CodeHash: pins.RegistryCode, Storage: map[[32]byte][32]byte{
+			vrschema.VRSlot(vrschema.SlotStatus): status,
+			vrschema.HolderSlot(0, 0):            words[0],
+			vrschema.HolderSlot(0, 1):            words[1],
+			vrschema.HolderSlot(0, 2):            words[2],
+		}},
+		evmstatetest.Contract{Addr: pins.SealRegistry, CodeHash: pins.SealRegistryCode, Storage: map[[32]byte][32]byte{
+			vrstate.SealRecordCount: vrschema.U64(21), vrstate.SealTargetCount: vrschema.U64(21),
+		}},
+		evmstatetest.Contract{Addr: holder.Holder, CodeHash: holder.CodeHash, Storage: map[[32]byte][32]byte{
+			vrschema.LiabilityCursorSlot():                     vrschema.U64(21),
+			vrschema.LiabilityFactsSlot(h.ID, h.Generation, 0): facts[0],
+			vrschema.LiabilityFactsSlot(h.ID, h.Generation, 1): facts[1],
+		}},
+	)
+	key := Key{ID: h.ID, Generation: h.Generation}
+	server := rpc.NewServer()
+	t.Cleanup(server.Stop)
+	hash := [32]byte{1}
+	require.NoError(t, server.RegisterName("eth", retirementRPC{holder: holder.Holder, finalizedHash: hash, stateRoot: world.Root()}))
+	client := rpc.DialInProc(server)
+	t.Cleanup(client.Close)
+	fetched := make(chan [32]byte, 4)
+	cfg := Config{
+		Deployment: storage.PosDeployment{RootNetwork: 3},
+		VR:         &pins, StatePath: filepath.Join(t.TempDir(), "retirements.json"),
+		Chain: RPCChain{Client: client, Registry: pins.Registry},
+		Proofs: func(block [32]byte) evmstate.ProofSource {
+			fetched <- block
+			return world
+		},
+	}
+	open := func() *Service {
+		svc, err := New(cfg)
+		require.NoError(t, err)
+		t.Cleanup(func() { svc.wg.Wait(); svc.Flush() })
+		return svc
+	}
+	// First enablement during a quiet period discovers the historical request.
+	svc := open()
+	require.NoError(t, svc.Poll(ctx))
+	require.Equal(t, []Key{key}, svc.Pending())
+	quiet := storage.EVMParent{StateRoot: world.Root()}
+	unmatched := quiet
+	unmatched.StateRoot[0] ^= 1
+	svc.Prepare(unmatched)
+	svc.wg.Wait()
+	require.Empty(t, fetched, "a different finalized state must not be used to fetch a proof")
+	require.Empty(t, svc.Ready(unmatched, 1))
+	require.Equal(t, []Key{key}, svc.Pending())
+
+	assertReady := func(svc *Service) {
+		svc.Prepare(quiet)
+		ready := waitReady(t, svc, quiet, 1)[0]
+		require.Equal(t, hash, <-fetched, "proof lookup uses the matching finalized block")
+		require.True(t, ready.Control.Registry)
+		require.Equal(t, h.Encode(), ready.Control.Data)
+		require.Equal(t, sha256.Sum256(ready.Witness), ready.Control.WitnessHash)
+		require.Equal(t, quiet.StateRoot, ready.Control.Retire.EVMStateRoot)
+		require.Zero(t, ready.Control.Retire.EVMBlockHash, "the control still names the quiet parent")
+		witness, err := vrstate.VerifyRetirement(ready.Witness, quiet.StateRoot, pins, h, 50, false)
+		require.NoError(t, err)
+		require.NoError(t, vrschema.VerifyHolderRetirement(witness, h))
+	}
+	assertReady(svc)
+	svc.wg.Wait()
+	svc.Flush()
+
+	restarted := open()
+	require.Equal(t, []Key{key}, restarted.Pending())
+	assertReady(restarted)
+	restarted.Ordered(h.ID, h.Generation)
+	require.Empty(t, restarted.Pending())
+	require.Empty(t, restarted.Ready(quiet, 1))
+}
+
+type finalizedChain struct {
+	fakeChain
+	parent  storage.EVMParent
+	lookups int
+}
+
+func (c *finalizedChain) finalizedBlockHash(_ context.Context, root [32]byte) ([32]byte, error) {
+	c.lookups++
+	if root != c.parent.StateRoot {
+		return [32]byte{}, nil
+	}
+	return c.parent.BlockHash, nil
+}
+
+func TestLegacyQuietParentVerifiesEachRequestAtCachedBlock(t *testing.T) {
+	ctx := context.Background()
+	first, second := Key{ID: 5, Generation: 1}, Key{ID: 6, Generation: 1}
+	pins := evmstate.Pins{
+		Custody: [20]byte{1}, CustodyCode: vrschema.Keccak([]byte("legacy custody")),
+		Registry: [20]byte{2}, RegistryCode: vrschema.Keccak([]byte("legacy registry")),
+		NetworkWord: vrschema.Keccak([]byte("legacy network")),
+	}
+	var registryAddress [32]byte
+	copy(registryAddress[12:], pins.Registry[:])
+	custody := evmstatetest.Contract{Addr: pins.Custody, CodeHash: pins.CustodyCode, Storage: map[[32]byte][32]byte{
+		vrschema.U64(4): pins.NetworkWord, vrschema.U64(8): registryAddress,
+	}}
+	registry := evmstatetest.Contract{Addr: pins.Registry, CodeHash: pins.RegistryCode}
+	certified := evmstatetest.NewWorld(t, custody, registry)
+
+	// Substitute a trie that logs the second retirement. Its witness is
+	// well formed, but it authenticates to a different root.
+	domain := vrschema.Keccak([]byte("unicity.seal-registry/records.retirement"))
+	id, generation := vrschema.U64(second.ID), vrschema.U64(second.Generation)
+	slot := vrschema.Keccak(domain[:], id[:], generation[:])
+	registry.Storage = map[[32]byte][32]byte{slot: vrschema.U64(1)}
+	forged := evmstatetest.NewWorld(t, custody, registry)
+	raw, facts, err := evmstate.BuildRetirementWitness(ctx, forged, pins, second.ID, second.Generation)
+	require.NoError(t, err)
+	require.False(t, facts.NotImported)
+	_, err = (evmstate.Authority{Pins: pins}).VerifyRetirement(raw, certified.Root(), second.ID, second.Generation)
+	require.Error(t, err)
+
+	finalized := storage.EVMParent{BlockHash: [32]byte{3}, StateRoot: certified.Root()}
+	quiet := storage.EVMParent{StateRoot: certified.Root()}
+	chain := &finalizedChain{parent: finalized}
+	source := certified
+	var fetched [][32]byte
+	cfg := Config{
+		Pins: pins, Chain: chain, StatePath: filepath.Join(t.TempDir(), "retirements.json"),
+		Proofs: func(hash [32]byte) evmstate.ProofSource {
+			fetched = append(fetched, hash)
+			return source
+		},
+	}
+	svc, err := New(cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { svc.wg.Wait(); svc.Flush() })
+
+	require.True(t, svc.Add(first))
+	svc.Prepare(quiet)
+	svc.wg.Wait()
+	require.Equal(t, finalized.BlockHash, svc.roots[quiet.StateRoot])
+	require.Len(t, svc.negative, 1, "the authentic first witness keeps that request pending at this parent")
+
+	source = forged
+	require.True(t, svc.Add(second))
+	svc.Prepare(quiet)
+	svc.wg.Wait()
+	require.Equal(t, 1, chain.lookups, "the second request used the cached block hash")
+	require.Equal(t, [][32]byte{finalized.BlockHash, finalized.BlockHash}, fetched)
+	require.Empty(t, svc.Ready(quiet, 2))
+	require.Equal(t, []Key{first, second}, svc.Pending())
+	svc.Flush()
+	reopened, err := New(cfg)
+	require.NoError(t, err)
+	require.Equal(t, []Key{first, second}, reopened.Pending())
 }
 
 func TestDiscoveryFindsConfirmedRequestsAndKeepsAKeyedSetAcrossRestarts(t *testing.T) {
@@ -366,7 +580,7 @@ func TestARootsFailingNodeLeavesTheRequestPendingForALaterParent(t *testing.T) {
 	var fail atomic.Bool
 	fail.Store(true)
 	svc, err := New(Config{Chain: h.chain, StatePath: h.path, Proofs: func([32]byte) evmstate.ProofSource { return nil },
-		Build: func(context.Context, evmstate.ProofSource, evmstate.Pins, uint64, uint64) ([]byte, storage.RetirementFacts, error) {
+		buildLegacy: func(context.Context, evmstate.ProofSource, evmstate.Pins, [32]byte, uint64, uint64) ([]byte, storage.RetirementFacts, error) {
 			if fail.Load() {
 				return nil, storage.RetirementFacts{}, errors.New("node unavailable")
 			}

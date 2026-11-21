@@ -47,6 +47,8 @@ type Client struct {
 	Seal     ethcommon.Address
 	// Block is the block tag every read is made at ("latest" when empty).
 	Block string
+	// BlockHash, when set, pins every eth_call to that one block (EIP-1898): it wins over Block.
+	BlockHash string
 }
 
 // New returns a client of VR at registry (DefaultRegistry when zero).
@@ -68,9 +70,12 @@ func (c *Client) Pin(ctx context.Context) (*Client, uint64, error) {
 	return &p, uint64(head), nil
 }
 
-// blockParam is the eth_call block argument: a 32-byte hash (0x + 64 hex) is sent as the EIP-1898 {"blockHash": ...} object, so the read
-// is of that exact block and never of whatever block carries its number; anything else is a number or tag.
+// blockParam is the eth_call block argument: a pinned BlockHash, or a 32-byte hash Block (0x + 64 hex), is sent as the EIP-1898 {"blockHash": ...}
+// object, so the read is of that exact block and never of whatever block carries its number; anything else is a number or tag.
 func (c *Client) blockParam() any {
+	if c.BlockHash != "" {
+		return map[string]string{"blockHash": c.BlockHash}
+	}
 	if len(c.Block) == 66 {
 		return map[string]string{"blockHash": c.Block}
 	}

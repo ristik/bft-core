@@ -26,5 +26,5 @@ func TestFenceAndPending(t *testing.T) {
 	require.Equal(t, vrschema.Word{2}, u.ReleaseDigest, "the superseded entry never counts")
 	require.EqualValues(t, 9, u.RootEpoch)
 	require.NoError(t, Fence(nil, s, 100))
-	require.True(t, Known().Has(vrschema.RuleID(TestRuleName)) || len(Known()) == 0)
+	require.Equal(t, testRuleKnown, Known().Has(vrschema.RuleID(TestRuleName)), "the build profile decides whether the test rule is known")
 }

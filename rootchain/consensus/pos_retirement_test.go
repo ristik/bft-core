@@ -10,6 +10,7 @@ import (
 
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	drctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
+	"github.com/unicitynetwork/bft-core/vrschema"
 )
 
 type fakeRetirements struct {
@@ -54,7 +55,8 @@ func closure(epoch uint64) drctypes.PosControl {
 func idsOf(controls []drctypes.PosControl) (out [][2]uint64) {
 	for _, c := range controls {
 		if c.Op == drctypes.OpRetirement {
-			out = append(out, retirementKeyOf(c))
+			key := c.RetirementKey()
+			out = append(out, [2]uint64{key[1], key[2]})
 		}
 	}
 	return out
@@ -83,7 +85,7 @@ func TestPreparedRetirementsAreOrderedAfterTheClosuresInAscendingKeyOrderAndStam
 	require.Equal(t, drctypes.OpCloseLiability, got[1].Op)
 	require.Equal(t, [][2]uint64{{4, 1}, {6, 1}, {9, 1}}, idsOf(got), "ascending (id, generation) among the Retirements")
 	for _, c := range got[2:] {
-		if c.Op == drctypes.OpRetirement && (retirementKeyOf(c) != [2]uint64{6, 1}) {
+		if c.Op == drctypes.OpRetirement && c.RetirementKey() != [3]uint64{0, 6, 1} {
 			require.EqualValues(t, 1, c.OrderingEpoch)
 			require.EqualValues(t, 12, c.OrderingRound, "stamped with the position of the block that orders it")
 		}
@@ -93,6 +95,19 @@ func TestPreparedRetirementsAreOrderedAfterTheClosuresInAscendingKeyOrderAndStam
 	for _, p := range rp.ready {
 		require.True(t, cm.blockStore().HasWitness(p.Control.WitnessHash), "the witness is retained before the block is proposed")
 	}
+}
+
+func TestHolderRetirementSortsBeforeLaterControlGroups(t *testing.T) {
+	control := func(holder uint8, id uint64) drctypes.PosControl {
+		return drctypes.PosControl{Registry: true, Op: drctypes.OpRetirement,
+			Data: (vrschema.HolderRetirement{Holder: holder, ID: id, Generation: 1}).Encode()}
+	}
+	close := drctypes.PosControl{Registry: true, Op: drctypes.OpCloseLiability}
+	view := drctypes.PosControl{Registry: true, Op: drctypes.OpHandoffView}
+	base := []drctypes.PosControl{close, control(0, 3), control(1, 5), view}
+	got := insertRetirement(base, control(0, 5))
+	require.Equal(t, []drctypes.PosControl{close, control(0, 3), control(0, 5), control(1, 5), view}, got)
+	require.Equal(t, []drctypes.PosControl{close, control(0, 5), view}, insertRetirement([]drctypes.PosControl{close, view}, control(0, 5)))
 }
 
 func TestNothingIsAddedForAnotherParentOrWhenNothingIsReady(t *testing.T) {

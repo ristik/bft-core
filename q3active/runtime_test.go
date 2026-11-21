@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto"
 	"errors"
+	"github.com/unicitynetwork/bft-core/vrschema"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -636,4 +637,24 @@ func TestAHandoffAboveTheMemberCeilingIsRefusedAtAdmission(t *testing.T) {
 		rt, p := start(0)
 		require.NoError(t, rt.Activate(ctx, p.bundle()))
 	})
+}
+
+func TestActivateAndRecoverAreFenced(t *testing.T) {
+	f := q3fixture.New(t, q3fixture.Options{})
+	p := newProcess(t, f)
+	rt := p.start()
+	require.NoError(t, rt.Recover(ctx))
+	refuse := errors.New("UpgradeRequired")
+	var seen []uint64
+	rt.SetFence(func(epoch uint64, sched []vrschema.Activation) error {
+		seen = append(seen, epoch)
+		require.Empty(t, sched)
+		return refuse
+	})
+	require.ErrorIs(t, rt.Activate(ctx, p.bundle()), refuse)
+	require.Equal(t, []uint64{2}, seen, "decided from the authenticated checkpoint of the bundle, with no endpoint")
+	require.Nil(t, rt.Snapshot(), "nothing of the refused epoch is staged or published")
+	require.Equal(t, 0, p.root.Installs)
+	rt.SetFence(func(uint64, []vrschema.Activation) error { return nil })
+	require.NoError(t, rt.Activate(ctx, p.bundle()), "the same bundle installs once the fence passes")
 }

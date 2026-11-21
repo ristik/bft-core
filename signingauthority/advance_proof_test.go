@@ -6,6 +6,7 @@ import (
 	gocrypto "crypto"
 	"crypto/sha256"
 	"errors"
+	"slices"
 	"sync"
 	"testing"
 
@@ -589,4 +590,49 @@ func TestAUTBChainAdvancesOnlyAUTBPinnedAuthority(t *testing.T) {
 	require.ErrorIs(t, err, ErrLineageUnverified)
 	require.ErrorContains(t, err, "UTB envelope")
 	require.EqualValues(t, 1, b.Status().RootEpoch)
+}
+
+// The handoff that admits a member is its first: it is enrolled at the successor configuration (which the predecessor's checkpoint does not
+// carry), and its first proof advance verifies the predecessor from the checkpoint's own certified configuration and binds its key and
+// configuration to the certified successor.
+func TestANewlyAdmittedMemberAdvancesOnTheHandoffThatAdmitsIt(t *testing.T) {
+	f := coupledFixture(t)
+	_, activated, err := activatedOf(f)
+	require.NoError(t, err)
+	var joiner *types.NodeInfo
+	for _, v := range activated.Validators {
+		if !slices.ContainsFunc(f.ShardConf.Validators, func(o *types.NodeInfo) bool { return o.NodeID == v.NodeID }) {
+			joiner = v
+		}
+	}
+	require.NotNil(t, joiner, "the coupled successor admits a new member")
+	hash, err := activated.Hash(gocrypto.SHA256)
+	require.NoError(t, err)
+
+	enrolled := func(t *testing.T, conf *types.PartitionDescriptionRecord) *Authority {
+		t.Helper()
+		enroll := Enrollment{AuthorityID: "j", NodeID: joiner.NodeID, NetworkID: conf.NetworkID, PartitionID: conf.PartitionID, ShardID: conf.ShardID,
+			ShardEpoch: conf.Epoch, RootEpoch: PinRootEpoch(1), Profile: ProfileLegacyBCRv1}
+		a, err := New(enroll, currentTrust{base: f.Old}, WithLineage(f.Old, f.UTB))
+		require.NoError(t, err)
+		giveKey(t, a, f.EVMSigners[joiner.NodeID])
+		require.NoError(t, a.CompleteEnrollment(conf))
+		return a
+	}
+
+	a := enrolled(t, activated)
+	require.Equal(t, hash, a.Enrollment().ShardConfHash)
+	res, err := a.AdvanceWithProof(context.Background(), bundleOf(t, f))
+	require.NoError(t, err, "the joiner's first valid handoff is accepted")
+	require.EqualValues(t, 2, res.RootEpoch)
+	require.True(t, a.Status().LineagePinned)
+	require.Equal(t, hash, a.Enrollment().ShardConfHash, "bound to the certified successor")
+
+	// enrolled at a configuration the certified successor is not: refused, nothing changes
+	wrong := *activated
+	wrong.T2Timeout = activated.T2Timeout + 1
+	b := enrolled(t, &wrong)
+	_, err = b.AdvanceWithProof(context.Background(), bundleOf(t, f))
+	require.Error(t, err)
+	require.Equal(t, uint64(1), b.Status().RootEpoch, "a wrong-successor enrollment does not advance")
 }

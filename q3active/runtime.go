@@ -12,6 +12,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/unicitynetwork/bft-core/vradmit"
+	"github.com/unicitynetwork/bft-core/vrschema"
 	"sync"
 	"sync/atomic"
 
@@ -93,12 +95,14 @@ type Runtime struct {
 	// memberCeiling is Config.MemberCeiling.
 	memberCeiling int
 	mu            sync.Mutex // serialises activation and recovery
-	journal       *q3install.Journal
-	hist          atomic.Pointer[q3format.History]
-	snap          atomic.Pointer[Snapshot] // the installer's provisional snapshot: private until its epoch is journaled complete
-	active        atomic.Pointer[Snapshot] // the published active context: the provisional one once its epoch is complete
-	parts         atomic.Pointer[Participants]
-	completed     sync.Map // epoch -> struct{}: journaled complete in this process
+	// fence, when set (SetFence), refuses installing an epoch of a rule this binary lacks (design 7.4); guarded by mu.
+	fence     func(epoch uint64, schedule []vrschema.Activation) error
+	journal   *q3install.Journal
+	hist      atomic.Pointer[q3format.History]
+	snap      atomic.Pointer[Snapshot] // the installer's provisional snapshot: private until its epoch is journaled complete
+	active    atomic.Pointer[Snapshot] // the published active context: the provisional one once its epoch is complete
+	parts     atomic.Pointer[Participants]
+	completed sync.Map // epoch -> struct{}: journaled complete in this process
 }
 
 // ErrNotAttached is returned when an activation or recovery is asked before the participants were attached.
@@ -387,10 +391,64 @@ func (r *Runtime) Activate(ctx context.Context, b Bundle) error {
 			return err
 		}
 	}
+	// the activation schedule's fence (design 7.4) for a runtime without a root sink: the schedule of the checkpoint this bundle carries,
+	// authenticated against the verified history entry's control digest, decides before anything is staged
+	if err := r.fenceBundle(b, claim.Epoch); err != nil {
+		return err
+	}
 	if err := r.journal.Install(ctx, claim, raw); err != nil {
 		return err
 	}
 	r.complete(claim.Epoch)
+	return nil
+}
+
+// SetFence installs the activation-schedule fence (vrrules.Gate.CheckCheckpoint): Activate and Recover refuse an epoch it refuses, deciding
+// from the authenticated schedule of the checkpoint each bundle carries. It needs no endpoint and no coverage, so a recovery that skips an
+// intermediate Boundary decides like any other. Set it once, before Recover or Activate; nil (the default, and every root, whose sink
+// fences) fences nothing here.
+func (r *Runtime) SetFence(f func(epoch uint64, schedule []vrschema.Activation) error) {
+	r.mu.Lock()
+	r.fence = f
+	r.mu.Unlock()
+}
+
+// fenceBundle applies the fence to one bundle: the checkpoint's control state must be the one the verified history entry of the epoch
+// commits to, and then its schedule decides.
+func (r *Runtime) fenceBundle(b Bundle, epoch uint64) error {
+	if r.fence == nil {
+		return nil
+	}
+	if _, isRoot := r.parts.Load().Root.(RootFencer); isRoot {
+		return nil // a root's own fence ran
+	}
+	raw, err := EncodeBundle(b)
+	if err != nil {
+		return err
+	}
+	_, env, err := DecodeBundle(raw)
+	if err != nil {
+		return err
+	}
+	next, err := r.History().VerifyEnvelope(env)
+	if err != nil {
+		return errors.Join(ErrBundle, err)
+	}
+	e, err := next.ForEpoch(epoch)
+	if err != nil {
+		return errors.Join(ErrBundle, err)
+	}
+	v, _, ok := e.Handoff()
+	if !ok || b.Snapshot == nil {
+		return fmt.Errorf("%w: epoch %d has no verified checkpoint", ErrBundle, epoch)
+	}
+	sched, err := vradmit.AuthenticatedSchedule(b.Snapshot.Control, v.ControlDigest)
+	if err != nil {
+		return errors.Join(ErrBundle, err)
+	}
+	if err := r.fence(epoch, sched); err != nil {
+		return fmt.Errorf("epoch %d: %w", epoch, err)
+	}
 	return nil
 }
 
@@ -416,6 +474,21 @@ func (r *Runtime) Recover(ctx context.Context) error {
 			}
 			if err := f.FenceEpoch(a.Claim.Epoch, b.Snapshot); err != nil {
 				return err
+			}
+		}
+	}
+	if r.fence != nil { // a staged installation is finished only for an epoch this binary may run: each by its own checkpoint
+		pending, err := r.journal.Staged()
+		if err != nil {
+			return err
+		}
+		for _, a := range pending {
+			b, _, err := DecodeBundle(a.Bundle)
+			if err != nil {
+				return err
+			}
+			if err := r.fenceBundle(b, a.Claim.Epoch); err != nil {
+				return fmt.Errorf("staged epoch %d: %w", a.Claim.Epoch, err)
 			}
 		}
 	}

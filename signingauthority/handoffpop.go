@@ -45,6 +45,9 @@ operator channel and on the possession-proof endpoint of the automated root memb
 a shard node's client channel never reaches it.
 */
 func (a *Authority) SignHandoffPoP(req HandoffPoPRequest) (evmassign.PoP, error) {
+	if _, err := a.fenceGate(); err != nil {
+		return evmassign.PoP{}, err
+	}
 	if req.Domain != evmassign.PoPDomain {
 		return evmassign.PoP{}, fmt.Errorf("%w: %q", ErrPoPDomain, req.Domain)
 	}
