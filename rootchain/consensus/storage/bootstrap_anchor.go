@@ -294,7 +294,7 @@ func (x *BlockStore) NewFromAnchorState(head *abdrc.CommittedBlock) (*BlockStore
 		return nil, err
 	}
 	return withTree(&BlockStore{hash: x.hash, storage: x.storage,
-		orchestration: x.orchestration, profile: x.profile, log: x.log}, tree), nil
+		orchestration: x.orchestration, profile: x.profile, log: x.log, prefixSource: x.recordFetcher()}, tree), nil
 }
 
 // RetainHandoffArtifacts stores the successor body and, for an EVM assignment,
