@@ -365,9 +365,10 @@ install_journal_recovery() (
   printf '%s  %s\n' "$RECOVERY_SHA256" release/ubft-journal-recovery.download | sha256sum -c -
   install -m 755 release/ubft-journal-recovery.download release/ubft-journal-recovery
 )
-install_journal_recovery &&
+if install_journal_recovery; then
   "$UBFT_HOME/release/ubft-journal-recovery" shard-node run "${SHARD_ARGS[@]}" >>logs/shard.log 2>&1 &
-SHARD_PID=$!
+  SHARD_PID=$!
+fi
 ```
 
 Use local shard health, ureth catch-up and the authority's signing metrics to check that the recovered shard actually validates. Preserve the same data and report the first new error if startup or replay stops again.
