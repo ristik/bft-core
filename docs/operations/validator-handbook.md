@@ -12,12 +12,21 @@ ssh-keygen -t ed25519 -f "$HOME/.ssh/vt13-operator" -C vt13-operator
 cat "$HOME/.ssh/vt13-operator.pub"
 ```
 
-After the maintainer confirms the key is installed, check the server's SSH host fingerprint at the connection prompt. The rehearsal host's ECDSA fingerprint is `SHA256:Q9TuHHqEgdBwZrhgFitNfo1RaOhpOtg9uuIxtCo0X2A`. Connect using the new key and do the remaining steps in that shell.
+After the maintainer confirms the key is installed, check the server's SSH host fingerprint at the connection prompt. The rehearsal host's ECDSA fingerprint is `SHA256:Q9TuHHqEgdBwZrhgFitNfo1RaOhpOtg9uuIxtCo0X2A`. Connect using the new key.
 
 ```bash
 ssh -o IdentitiesOnly=yes -o HostKeyAlgorithms=ecdsa-sha2-nistp256 \
+  -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
   -i "$HOME/.ssh/vt13-operator" vt13operator@212.23.222.159
 ```
+
+Start or attach the rehearsal's persistent terminal before starting any services. Do the remaining steps inside it. To leave it running, detach with `Ctrl-b` then `d`. After an SSH interruption, reconnect and repeat this command to attach to the same session and retain its shell variables and jobs.
+
+```bash
+tmux new-session -A -s vt13-validator
+```
+
+The authority's enrolled key lives in the authority process. Keep its tmux window and the host running through the acknowledged exclusion. If the authority process exits before exclusion, record the failure and coordinate binding recovery with the Foundation before starting a replacement. After exclusion and closure, the incumbents can finish processing your confirmed retirement request independently of your authority. Keep your wallet available for the maturity and claim steps.
 
 ## 1. Install the release
 
