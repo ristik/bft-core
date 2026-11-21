@@ -29,7 +29,6 @@ type recoveryWallet struct {
 	e     *RecoveryEvidence
 	stack map[[32]byte]recoveryOpening
 	seen  RecoverySeen
-	ids   [][32]byte
 }
 
 func (w *recoveryWallet) input(s RecoveryState) (RecoveryInput, [32]byte, error) {
@@ -209,7 +208,7 @@ func TestRecoveryQuorumTrimming(t *testing.T) {
 			w, raw, _ := recoveryScenario(t, 64, 4, true, signers)
 			want, err := VerifyReturn(w.Gamma, raw, w.Trust, w.Params)
 			require.NoError(t, err)
-			calls, got, err := walkRecovery(t, w, raw, true)
+			calls, got, err := walkRecovery(t, w, raw, 35)
 			require.NoError(t, err)
 			require.Equal(t, want.ABI(), got.ABI())
 			if signers == 4 {
@@ -236,7 +235,7 @@ type recoveryCall struct {
 
 // walkRecovery carries only the immediately preceding certified receipt. At
 // restart it rebuilds wallets' openings and reopens the JSON-serialized state.
-func walkRecovery(t *testing.T, w *World, raw []byte, restart bool) ([]recoveryCall, *Verdict, error) {
+func walkRecovery(t *testing.T, w *World, raw []byte, restartAt int) ([]recoveryCall, *Verdict, error) {
 	t.Helper()
 	e, err := NewRecoveryEvidence(raw)
 	require.NoError(t, err)
@@ -247,6 +246,7 @@ func walkRecovery(t *testing.T, w *World, raw []byte, restart bool) ([]recoveryC
 	var transcript []recoveryCall
 	var receipt *DepositProof
 	var restarted bool
+	var consumedIDs int
 	for len(transcript) < 10000 {
 		in, sid, err := wallet.input(s)
 		if err != nil {
@@ -261,38 +261,45 @@ func walkRecovery(t *testing.T, w *World, raw []byte, restart bool) ([]recoveryC
 		}
 		transcript = append(transcript, recoveryCall{s, in, receipt, next, verdict, err})
 		if err != nil || verdict != nil {
+			if verdict != nil && restartAt > 0 {
+				require.True(t, restarted, "requested restart was not executed")
+			}
 			return transcript, verdict, err
 		}
 		if s.Phase == RecoveryMint || s.Phase == RecoveryTransfer {
 			wallet.seen.Insert(sid)
-			wallet.ids = append(wallet.ids, sid)
+			consumedIDs++
 		}
 		s = next
 		receipt, err = w.ReceiptProof(v.ProgressLog(s), ReceiptOpts{Type: 2, TxIndex: 3, FillerLogs: 2, Rotated: len(transcript)%3 == 0})
 		require.NoError(t, err)
-		if restart && !restarted && len(wallet.ids) == 4 {
+		if restartAt > 0 && !restarted && consumedIDs == restartAt {
 			start := time.Now()
 			journal, err := json.Marshal(s)
 			require.NoError(t, err)
-			s = RecoveryState{}
+			receiptWire := receipt.Bytes()
+			s, wallet, v, receipt = RecoveryState{}, recoveryWallet{}, nil, nil
 			require.NoError(t, json.Unmarshal(journal, &s))
-			wallet.seen = RecoverySeen{}
-			for _, key := range wallet.ids {
-				wallet.seen.Insert(key)
-			}
-			wallet.stack = make(map[[32]byte]recoveryOpening)
-			for _, old := range transcript {
-				if old.prior.Phase == RecoveryDiscover {
-					_, _, err = wallet.input(old.prior)
-					require.NoError(t, err)
-				}
-			}
+			receipt, err = DecodeDepositProof(receiptWire)
+			require.NoError(t, err)
 			wallet.e, err = NewRecoveryEvidence(raw)
 			require.NoError(t, err)
-			v, err = NewRecovery(w.Gamma, w.Trust, w.Params, recoveryFixtureEmitter, e.Root(), e.Length())
+			wallet.stack = make(map[[32]byte]recoveryOpening)
+			for _, old := range transcript {
+				switch old.prior.Phase {
+				case RecoveryDiscover:
+					_, _, err = wallet.input(old.prior)
+					require.NoError(t, err)
+				case RecoveryMint, RecoveryTransfer:
+					_, key, err := wallet.input(old.prior)
+					require.NoError(t, err)
+					wallet.seen.Insert(key)
+				}
+			}
+			v, err = NewRecovery(w.Gamma, w.Trust, w.Params, recoveryFixtureEmitter, wallet.e.Root(), wallet.e.Length())
 			require.NoError(t, err)
 			restarted = true
-			t.Logf("restart: %d-byte state, %d consumed source IDs, %s", len(journal), len(wallet.ids), time.Since(start))
+			t.Logf("restart: %d-byte state, %d-byte receipt, %d consumed source IDs, %s", len(journal), len(receiptWire), consumedIDs, time.Since(start))
 		}
 	}
 	t.Fatal("recovery did not finish")
@@ -315,7 +322,13 @@ func TestRecoveryDifferential(t *testing.T) {
 			w, evidence, mintSize := recoveryScenario(t, tc.transfers, tc.depth, tc.rotated)
 			expected, err := VerifyReturn(w.Gamma, evidence, w.Trust, w.Params)
 			require.NoError(t, err)
-			steps, actual, err := walkRecovery(t, w, evidence, true)
+			restartAt := 3
+			if tc.transfers == 600 {
+				restartAt = 300
+			} else if tc.depth == 20 {
+				restartAt = 20
+			}
+			steps, actual, err := walkRecovery(t, w, evidence, restartAt)
 			require.NoError(t, err)
 			require.Equal(t, expected.ABI(), actual.ABI())
 			if tc.transfers == 600 {
@@ -338,7 +351,7 @@ func TestRecoveryRejectsInvalidLineage(t *testing.T) {
 		require.NoError(t, err)
 		_, err = VerifyReturn(w.Gamma, ev[1], w.Trust, w.Params)
 		require.ErrorIs(t, err, ErrRepeatedSID)
-		steps, actual, err := walkRecovery(t, w, ev[1], false)
+		steps, actual, err := walkRecovery(t, w, ev[1], 0)
 		require.ErrorIs(t, err, ErrRepeatedSID)
 		require.Nil(t, actual)
 		exportRecovery(t, "repeated-source", w, ev[1], steps, nil)
@@ -354,7 +367,7 @@ func TestRecoveryRejectsInvalidLineage(t *testing.T) {
 		copy(evidence[i:], broken)
 		_, err = VerifyReturn(w.Gamma, evidence, w.Trust, w.Params)
 		require.ErrorIs(t, err, ErrSplitJustif)
-		steps, actual, err := walkRecovery(t, w, evidence, false)
+		steps, actual, err := walkRecovery(t, w, evidence, 0)
 		require.ErrorIs(t, err, ErrSplitJustif)
 		require.Nil(t, actual)
 		exportRecovery(t, "malformed-nested-length", w, evidence, steps, nil)
@@ -364,7 +377,7 @@ func TestRecoveryRejectsInvalidLineage(t *testing.T) {
 		evidence = evidence[:len(evidence)-1]
 		_, err := VerifyReturn(w.Gamma, evidence, w.Trust, w.Params)
 		require.Error(t, err)
-		steps, actual, err := walkRecovery(t, w, evidence, false)
+		steps, actual, err := walkRecovery(t, w, evidence, 0)
 		require.Error(t, err)
 		require.Nil(t, actual)
 		require.NotEmpty(t, steps)
