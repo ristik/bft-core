@@ -512,6 +512,44 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 	return cmd
 }
 
+// A fresh invocation may create stores only in fresh paths. Only a journal
+// bearing this exact request's checkpoint can reopen existing restore paths.
+func checkRestorePaths(flags *shardNodeRunFlags) (configuredprogress.RestoreCheckpoint, error) {
+	checkpoint, err := configuredprogress.ReadRestoreCheckpoint(flags.ExecutionJournal)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+	case err != nil:
+		return checkpoint, fmt.Errorf("restore requires a fresh BFT data directory or a matching checkpoint at %s: %w", flags.ExecutionJournal, err)
+	case checkpoint == (configuredprogress.RestoreCheckpoint{}):
+		return checkpoint, fmt.Errorf("restore requires a fresh BFT data directory or a matching checkpoint: %s already exists", flags.ExecutionJournal)
+	}
+	paths := []string{flags.PathWithDefault(flags.LUCStoreFile, lucStoreFileName)}
+	if checkpoint == (configuredprogress.RestoreCheckpoint{}) {
+		paths = append(paths, flags.ExecutionJournal+".trust")
+	}
+	if checkpoint == (configuredprogress.RestoreCheckpoint{}) || !flags.TrustHistoryProfile2 {
+		paths = append(paths, flags.ExecutionJournal+".handoffs")
+	}
+	for _, path := range paths {
+		if _, err := os.Lstat(path); err == nil {
+			return checkpoint, fmt.Errorf("restore requires a fresh BFT data directory: %s already exists", path)
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return checkpoint, fmt.Errorf("checking fresh BFT path %s: %w", path, err)
+		}
+	}
+	if checkpoint != (configuredprogress.RestoreCheckpoint{}) {
+		return checkpoint, nil
+	}
+	entries, err := os.ReadDir(flags.ArchiveStore)
+	if err == nil && len(entries) != 0 {
+		return checkpoint, fmt.Errorf("restore archive directory %s is not empty; supply a fresh directory", flags.ArchiveStore)
+	}
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return checkpoint, fmt.Errorf("checking restore archive directory: %w", err)
+	}
+	return checkpoint, nil
+}
+
 func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(string) bool) error {
 	operatorLog := slog.Default() // (a unit test drives this function with no base flags)
 	if flags.baseFlags != nil {
@@ -529,17 +567,33 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			return err
 		}
 	}
+	var restoreCheckpoint configuredprogress.RestoreCheckpoint
+	var restoreScope [32]byte
+	var restoreUC *types.UnicityCertificate
+	var restoreTR *certification.TechnicalRecord
 	var readOperatorStatus func(context.Context) (archivewiring.OperatorStatus, error)
 	if flags.Restore {
 		if flags.Executor != "engine-api" || flags.ExecutionJournal == "" || flags.ArchiveStore == "" || !flags.ArchivePrune ||
 			flags.SigningAuthoritySocket == "" || flags.RestoreTipUC == "" || flags.RestoreTipTR == "" || flags.RestoreTrustBodyID == "" {
 			return errors.New("restore requires --executor engine-api, --execution-journal, --archive-store, --archive-prune, a surviving --signing-authority-socket, --tip-uc, --tip-tr and --trust-body-id; local-key restore is refused")
 		}
-		for _, path := range []string{flags.ExecutionJournal, flags.ExecutionJournal + ".trust", flags.ExecutionJournal + ".handoffs", flags.PathWithDefault(flags.LUCStoreFile, lucStoreFileName)} {
-			if _, err := os.Lstat(path); err == nil {
-				return fmt.Errorf("restore requires a fresh BFT data directory: %s already exists", path)
-			} else if !errors.Is(err, fs.ErrNotExist) {
-				return fmt.Errorf("checking fresh BFT path %s: %w", path, err)
+		var err error
+		restoreCheckpoint, err = checkRestorePaths(flags)
+		if err != nil {
+			return err
+		}
+		if restoreCheckpoint != (configuredprogress.RestoreCheckpoint{}) {
+			restoreUC, restoreTR, err = loadRestorePin(flags.RestoreTipUC, flags.RestoreTipTR)
+			if err != nil {
+				return err
+			}
+			restoreScope, err = restoreResumeScope(flags)
+			if err != nil {
+				return err
+			}
+			pin, err := archivewiring.RestorePinID(restoreUC, restoreTR, restoreScope)
+			if err != nil || pin != restoreCheckpoint.Pin {
+				return fmt.Errorf("existing BFT restore checkpoint belongs to another pin or restore path")
 			}
 		}
 	}
@@ -1047,6 +1101,17 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			return fmt.Errorf("opening execution journal: %w", openErr)
 		}
 		defer journalStore.Close()
+		if flags.Restore {
+			checkpoint, err := journalStore.RestoreCheckpoint()
+			if err != nil {
+				return err
+			}
+			if checkpoint != restoreCheckpoint {
+				return errors.New("BFT restore checkpoint changed during startup")
+			}
+		} else if err := journalStore.CheckArchiveRestoreComplete(); err != nil {
+			return err
+		}
 		recordCtx := certifiedstore.Context{NetworkID: shardConf.NetworkID, PartitionID: shardConf.PartitionID, ShardID: shardConf.ShardID, FullShardConfHash: confHash, Registry: origin.ProofContext(), TrustBases: trustBaseStore}
 		journalCtx := configuredprogress.Context{Origin: origin, ExecutionConfigV2: executionID, Observation: rootinput.ObservationContextV2{NetworkID: shardConf.NetworkID, PartitionID: shardConf.PartitionID, ShardID: shardConf.ShardID, ShardConfHash: confHash, ConfForEpoch: node.ShardConfForEpoch, RootEpoch: trustBases[0].GetEpoch(), TrustBases: trustBaseStore}, Record: recordCtx}
 		if flags.TrustHistoryProfile2 {
@@ -1067,15 +1132,6 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		var publisher *archivewiring.Publisher
 		archiveTransportLimits := archivewiring.DefaultLimits()
 		if flags.ArchiveStore != "" {
-			if flags.Restore {
-				entries, readErr := os.ReadDir(flags.ArchiveStore)
-				if readErr == nil && len(entries) != 0 {
-					return fmt.Errorf("restore archive directory %s is not empty; supply a fresh directory", flags.ArchiveStore)
-				}
-				if readErr != nil && !errors.Is(readErr, fs.ErrNotExist) {
-					return fmt.Errorf("checking restore archive directory: %w", readErr)
-				}
-			}
 			adapter, ok := executor.(*engineapi.Adapter)
 			if !ok || !origin.Valid() {
 				return archivewiring.ErrConfig
@@ -1505,10 +1561,18 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			}
 		}
 		if flags.Restore {
-			uc, tr, pinErr := loadRestorePin(flags.RestoreTipUC, flags.RestoreTipTR)
-			if pinErr != nil {
-				return pinErr
+			if restoreUC == nil {
+				var pinErr error
+				restoreUC, restoreTR, pinErr = loadRestorePin(flags.RestoreTipUC, flags.RestoreTipTR)
+				if pinErr != nil {
+					return pinErr
+				}
+				restoreScope, pinErr = restoreResumeScope(flags)
+				if pinErr != nil {
+					return pinErr
+				}
 			}
+			uc, tr := restoreUC, restoreTR
 			catchUpHistory := func(ctx context.Context) error {
 				if !flags.TrustHistoryProfile2 {
 					// No handoff history to install: the installed set is the genesis one, and the replicas are validated against it
@@ -1549,7 +1613,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				restorer := &archivewiring.ArchiveRestore{Journal: journalStore, Context: journalCtx, JournalLimits: limits,
 					Archive: archiveLocal, Subject: archiveSubject, Replicas: readableArchiveReplicas(replicaPolicy, archiveReplicas), Host: archiveHost,
 					Limits: archiveTransportLimits, Adapter: executor.(*engineapi.Adapter), Genesis: genesis, TipUC: uc, TipTR: tr,
-					Log: flags.observe.Logger()}
+					Log: flags.observe.Logger(), ResumeScope: restoreScope}
 				return restorer.Restore(ctx)
 			}
 			var repairRestoredHandoffs func(context.Context) error

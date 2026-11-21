@@ -3,6 +3,7 @@ package archivewiring
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -25,8 +26,9 @@ import (
 var ErrRestore = errors.New("archive restore: certified replay refused")
 
 // ArchiveRestore replays authenticated archive records from the checked
-// execution genesis. Its archive and journal directories must be fresh. The
-// paired Engine remains at genesis finality until the whole target is checked.
+// execution genesis. An initial restore requires fresh stores. A same-epoch
+// retry uses the durable checkpoint and checks the actual EL head and finality
+// against the authenticated chain before resuming.
 type ArchiveRestore struct {
 	Journal       *configuredprogress.Store
 	Context       configuredprogress.Context
@@ -45,6 +47,9 @@ type ArchiveRestore struct {
 	Genesis shardnode.BlockRef
 	TipUC   *types.UnicityCertificate
 	TipTR   *certification.TechnicalRecord
+	// ResumeScope binds a command's checkpoint to its independently supplied
+	// local paths and trust pin. Library callers can leave it zero.
+	ResumeScope [32]byte
 }
 
 // restorePutBatch is how many authenticated records the restore retains with one shared set of device flushes.
@@ -83,16 +88,36 @@ type SingleEpochRestore = ArchiveRestore
 type RestoreExecutor interface {
 	Head(context.Context) (shardnode.BlockRef, error)
 	Finalized(context.Context) (shardnode.BlockRef, error)
-	Header(context.Context, shardnode.Hash) (shardnode.BlockRef, shardnode.Hash, error)
 	Verify(context.Context, shardnode.Block, shardnode.RoundParams) (shardnode.Status, error)
 	RecoveryForkchoice(context.Context, shardnode.Hash, shardnode.Hash) (shardnode.Status, error)
 	Commit(context.Context, shardnode.Hash) (shardnode.Status, error)
 }
 
 type restoredBlock struct {
-	q      archive.Request
-	height uint64
-	state  [32]byte
+	q        archive.Request
+	height   uint64
+	state    [32]byte
+	manifest [32]byte
+}
+
+// RestorePinID identifies the exact UC/TR pair and the caller's restore scope.
+func RestorePinID(uc *types.UnicityCertificate, tr *certification.TechnicalRecord, scope [32]byte) ([32]byte, error) {
+	raw, err := types.Cbor.Marshal([]any{"archive-restore-pin/v1", uc, tr, scope})
+	if err != nil {
+		return [32]byte{}, err
+	}
+	return sha256.Sum256(raw), nil
+}
+
+func appendRestorePrefix(prefix, manifest [32]byte) [32]byte {
+	var pair [64]byte
+	copy(pair[:32], prefix[:])
+	copy(pair[32:], manifest[:])
+	return sha256.Sum256(pair[:])
+}
+
+func (b restoredBlock) ref() shardnode.BlockRef {
+	return shardnode.BlockRef{Number: b.height, Hash: b.q.BlockHash[:], StateRoot: b.state[:]}
 }
 
 func (r *ArchiveRestore) Restore(ctx context.Context) error {
@@ -108,32 +133,58 @@ func (r *ArchiveRestore) Restore(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("%w: loading BFT journal: %v", ErrRestore, err)
 	}
+	checkpoint, err := r.Journal.RestoreCheckpoint()
+	if err != nil {
+		return restoreCause(err, "reading restore checkpoint: %v", err)
+	}
+	sameEpoch := r.TipUC.GetRootEpoch() == r.Context.Observation.RootEpoch
+	pin, err := RestorePinID(r.TipUC, r.TipTR, r.ResumeScope)
+	if err != nil {
+		return err
+	}
+	resuming := checkpoint != (configuredprogress.RestoreCheckpoint{})
+	if resuming && (!sameEpoch || checkpoint.Pin != pin) {
+		return fmt.Errorf("%w: existing checkpoint belongs to another restore pin", ErrRestore)
+	}
+	head, err := r.Adapter.Head(ctx)
+	if err != nil {
+		return restoreCause(err, "reading EL head: %v", err)
+	}
+	finalized, err := r.Adapter.Finalized(ctx)
+	if err != nil {
+		return restoreCause(err, "reading EL finalized head: %v", err)
+	}
 	if image.RestoreBase != nil {
-		// A prior replay may have committed its verified pin and EL finality,
-		// then failed while repairing a missing observation body. Resume that
-		// repair from the durable pin instead of requiring another disk wipe.
 		expected := shardnode.BlockRef{Number: image.RestoreBase.Height, Hash: image.RestoreBase.Hash[:], StateRoot: image.RestoreBase.StateRoot[:]}
 		if image.Frontier != nil && image.Frontier.Anchor != nil && image.Frontier.Anchor.Height > expected.Number {
 			expected = shardnode.BlockRef{Number: image.Frontier.Anchor.Height,
 				Hash: image.Frontier.Anchor.Subject.BlockHash[:], StateRoot: image.Frontier.Anchor.StateRoot[:]}
 		}
-		head, headErr := r.Adapter.Head(ctx)
-		finalized, finalErr := r.Adapter.Finalized(ctx)
-		if headErr != nil || finalErr != nil || !sameBlockRef(head, expected) || !sameBlockRef(finalized, expected) {
-			return restoreCause(errors.Join(headErr, finalErr), "retry requires the EL head and finality at the verified restore base: head=%v finalized=%v", headErr, finalErr)
+		if resuming {
+			state, _, err := r.Journal.Load(ctx, r.Context)
+			if err != nil {
+				return err
+			}
+			observed, ok := state.Observed()
+			observedPin, err := RestorePinID(observed.Certificate(), observed.TechnicalRecord(), r.ResumeScope)
+			if !ok || err != nil || observedPin != pin || image.RestoreBase.Hash != checkpoint.Target ||
+				checkpoint.VerifiedHeight != image.RestoreBase.Height || !checkpoint.Finalizing || expected.Number != image.RestoreBase.Height {
+				return fmt.Errorf("%w: journal no longer holds the pinned restore tip", ErrRestore)
+			}
 		}
-		return r.backfillRestoredObservations(ctx)
+		if sameBlockRef(head, expected) && sameBlockRef(finalized, expected) {
+			return r.backfillRestoredObservations(ctx)
+		}
+		if !resuming {
+			return fmt.Errorf("%w: retry requires the EL head and finality at the verified restore base", ErrRestore)
+		}
+		// The EL may have acknowledged the target before flushing it. Recover
+		// its persisted prefix from the same verified restore before startup.
+	} else if len(image.Observations) != 0 || len(image.Candidates) != 0 || image.Restored != nil || image.Frontier != nil {
+		return fmt.Errorf("%w: BFT journal is not empty", ErrRestore)
 	}
-	if len(image.Observations) != 0 || len(image.Candidates) != 0 || image.Restored != nil || image.Frontier != nil {
-		return fmt.Errorf("%w: BFT journal is not empty: %v", ErrRestore, err)
-	}
-	head, err := r.Adapter.Head(ctx)
-	if err != nil || !sameBlockRef(head, r.Genesis) {
-		return restoreCause(err, "EL head must be the checked genesis on an empty disk: %v", err)
-	}
-	finalized, err := r.Adapter.Finalized(ctx)
-	if err != nil || !sameBlockRef(finalized, r.Genesis) {
-		return restoreCause(err, "EL finalized head must be the checked genesis: %v", err)
+	if !resuming && (!sameBlockRef(head, r.Genesis) || !sameBlockRef(finalized, r.Genesis)) {
+		return fmt.Errorf("%w: EL head and finality must be at the checked genesis for a fresh restore", ErrRestore)
 	}
 	replayCtx := ctx
 	if adapter, ok := r.Adapter.(interface {
@@ -141,9 +192,18 @@ func (r *ArchiveRestore) Restore(ctx context.Context) error {
 	}); ok {
 		replayCtx = adapter.HistoricalContext(ctx)
 	}
-	target, err := r.findTarget(ctx)
-	if err != nil {
-		return err
+	target := checkpoint.Target
+	if !resuming {
+		target, err = r.findTarget(ctx)
+		if err != nil {
+			return err
+		}
+		if sameEpoch {
+			checkpoint = configuredprogress.RestoreCheckpoint{Pin: pin, Target: target}
+			if err := r.Journal.BeginArchiveRestore(ctx, r.Context, r.JournalLimits, checkpoint); err != nil {
+				return restoreCause(err, "writing restore checkpoint: %v", err)
+			}
+		}
 	}
 	var reverse []restoredBlock
 	var pendingQ []archive.Request
@@ -156,7 +216,7 @@ func (r *ArchiveRestore) Restore(ctx context.Context) error {
 			return err
 		}
 		fetchStarted := time.Now()
-		q, rec, result, _, header, err := r.fetchChecked(ctx, current)
+		q, rec, result, _, header, err := r.fetchChecked(ctx, current, resuming)
 		fetching += time.Since(fetchStarted)
 		if err != nil {
 			return fmt.Errorf("%w: block %x: %w", ErrRestore, current, err)
@@ -171,7 +231,14 @@ func (r *ArchiveRestore) Restore(ctx context.Context) error {
 		// the fetch or the verification, are what a long restore spends its time on). Nothing below reads a record back before the
 		// last batch is durable.
 		pendingQ, pendingRec = append(pendingQ, q), append(pendingRec, rec)
-		reverse = append(reverse, restoredBlock{q: q, height: header.Number.Uint64(), state: [32]byte(header.Root)})
+		item := restoredBlock{q: q, height: header.Number.Uint64(), state: [32]byte(header.Root)}
+		if sameEpoch {
+			item.manifest, err = archive.ManifestDigest(q, rec)
+			if err != nil {
+				return restoreCause(err, "hashing archived block %d: %v", item.height, err)
+			}
+		}
+		reverse = append(reverse, item)
 		if len(reverse) == 1 && r.Log != nil {
 			// the fetch walks the chain from the pinned tip to genesis: the tip's height is the number of records to fetch
 			r.Log.Info("fetching archive records from the pinned tip to genesis", "blocks", header.Number.Uint64(), "tipBlock", fmt.Sprintf("%x", current),
@@ -198,6 +265,36 @@ func (r *ArchiveRestore) Restore(ctx context.Context) error {
 		}
 		current = [32]byte(header.ParentHash)
 	}
+	tip := reverse[0].ref()
+	onChain := func(ref shardnode.BlockRef) bool {
+		if ref.Number == 0 {
+			return sameBlockRef(ref, r.Genesis)
+		}
+		return ref.Number <= tip.Number && sameBlockRef(ref, reverse[tip.Number-ref.Number].ref())
+	}
+	if !onChain(head) {
+		return fmt.Errorf("%w: EL head is outside the authenticated restore chain", ErrRestore)
+	}
+	if finalized.Number > head.Number || !onChain(finalized) || finalized.Number != 0 && !checkpoint.Finalizing {
+		return fmt.Errorf("%w: EL finality is outside the authorized restore prefix", ErrRestore)
+	}
+	alreadyFinalized := sameBlockRef(finalized, tip)
+	if image.RestoreBase != nil && (tip.Number != image.RestoreBase.Height || !bytes.Equal(tip.StateRoot, image.RestoreBase.StateRoot[:])) {
+		return fmt.Errorf("%w: authenticated archive differs from the installed anchor", ErrRestore)
+	}
+	if sameEpoch {
+		if head.Number > checkpoint.VerifiedHeight || checkpoint.VerifiedHeight > tip.Number ||
+			checkpoint.Finalizing && checkpoint.VerifiedHeight != tip.Number {
+			return fmt.Errorf("%w: EL head or checkpoint is beyond the verified restore prefix", ErrRestore)
+		}
+		var verifiedPrefix [32]byte
+		for height := uint64(1); height <= checkpoint.VerifiedHeight; height++ {
+			verifiedPrefix = appendRestorePrefix(verifiedPrefix, reverse[tip.Number-height].manifest)
+		}
+		if verifiedPrefix != checkpoint.VerifiedPrefix {
+			return fmt.Errorf("%w: retained archive differs from the verified restore prefix", ErrRestore)
+		}
+	}
 	if r.Log != nil {
 		r.Log.Info("archive records fetched and retained; replaying", "blocks", len(reverse), "elapsed", time.Since(progress.started).Round(time.Millisecond).String(),
 			"fetchAndVerify", fetching.Round(time.Millisecond).String(), "retain", retaining.Round(time.Millisecond).String())
@@ -208,13 +305,21 @@ func (r *ArchiveRestore) Restore(ctx context.Context) error {
 	var firstTR *certification.TechnicalRecord
 	var targetUC *types.UnicityCertificate
 	var targetTR *certification.TechnicalRecord
-	var targetBlock shardnode.Block
+	var candidate configuredprogress.JournalCandidate
+	var prefix [32]byte
 	for i := len(reverse) - 1; i >= 0; i-- {
 		item := reverse[i]
 		// The base representation is read here on purpose (bft-core#876): the record is authenticated below and nothing compares it with a journal-derived manifest; a selected variant certifies the same input record.
 		rec, err := r.Archive.Get(item.q)
 		if err != nil {
 			return err
+		}
+		if sameEpoch {
+			manifest, err := archive.ManifestDigest(item.q, rec)
+			if err != nil || manifest != item.manifest {
+				return restoreCause(err, "archive representation changed during replay at height %d: %v", item.height, err)
+			}
+			prefix = appendRestorePrefix(prefix, manifest)
 		}
 		original, originalTR, resulting, resultingTR, err := decodeRestorePairs(rec)
 		if err != nil {
@@ -227,31 +332,57 @@ func (r *ArchiveRestore) Restore(ctx context.Context) error {
 		if err != nil || block.Number != parent.Number+1 || !bytes.Equal(block.ParentHash, parent.Hash) {
 			return fmt.Errorf("%w: reconstructed payload breaks parent chain: %v", ErrRestore, err)
 		}
-		seal, err := shardnode.SealHash(original)
-		if err != nil {
-			return err
+		if block.Number > head.Number {
+			seal, err := shardnode.SealHash(original)
+			if err != nil {
+				return err
+			}
+			params := shardnode.RoundParams{Round: resulting.InputRecord.RoundNumber, Epoch: originalTR.Epoch,
+				Timestamp: original.UnicitySeal.Timestamp, SealHash: seal, Leader: originalTR.Leader, Parent: parent,
+				AuthorizingCertificate: original, AuthorizingTechnicalRecord: originalTR}
+			status, err := r.Adapter.Verify(replayCtx, block, params)
+			if err != nil || status != shardnode.StatusValid {
+				return restoreCause(err, "paired seal import %d returned %s: %v", block.Number, status, err)
+			}
+			if sameEpoch && block.Number > checkpoint.VerifiedHeight {
+				checkpoint, err = r.Journal.AdvanceArchiveRestore(checkpoint, prefix)
+				if err != nil {
+					return restoreCause(err, "checkpointing verified block %d: %v", block.Number, err)
+				}
+			}
+			status, err = r.Adapter.RecoveryForkchoice(ctx, block.Hash, finalized.Hash)
+			if err != nil || status != shardnode.StatusValid {
+				return restoreCause(err, "advancing replay head %d returned %s: %v", block.Number, status, err)
+			}
 		}
-		params := shardnode.RoundParams{Round: resulting.InputRecord.RoundNumber, Epoch: originalTR.Epoch,
-			Timestamp: original.UnicitySeal.Timestamp, SealHash: seal, Leader: originalTR.Leader, Parent: parent,
-			AuthorizingCertificate: original, AuthorizingTechnicalRecord: originalTR}
-		status, err := r.Adapter.Verify(replayCtx, block, params)
-		if err != nil || status != shardnode.StatusValid {
-			return restoreCause(err, "paired seal import %d returned %s: %v", block.Number, status, err)
-		}
-		status, err = r.Adapter.RecoveryForkchoice(ctx, block.Hash, r.Genesis.Hash)
-		if err != nil || status != shardnode.StatusValid {
-			return restoreCause(err, "advancing replay head %d returned %s: %v", block.Number, status, err)
+		if i == 0 {
+			targetUC, targetTR = resulting, resultingTR
+			candidate = configuredprogress.JournalCandidate{Round: resulting.GetRoundNumber(), Number: block.Number,
+				ParentNumber: parent.Number, Hash: block.Hash, StateRoot: block.StateRoot, ParentHash: block.ParentHash,
+				ParentState: parent.StateRoot, Raw: block.Raw, BlockSize: block.BlockSize, StateSize: block.StateSize,
+				AuthorizingUC: original, AuthorizingTR: originalTR}
 		}
 		parent = shardnode.BlockRef{Number: block.Number, Hash: block.Hash, StateRoot: block.StateRoot}
-		targetUC, targetTR, targetBlock = resulting, resultingTR, block
 		progress.note(r.Log, "replaying archive records", len(reverse)-i, len(reverse), block.Number)
 	}
 	if !bytes.Equal(parent.StateRoot, r.TipUC.InputRecord.Hash) {
 		return fmt.Errorf("%w: replayed state differs from pinned tip", ErrRestore)
 	}
-	status, err := r.Adapter.Commit(ctx, parent.Hash)
-	if err != nil || status != shardnode.StatusValid {
-		return restoreCause(err, "finalizing replay target: %s: %v", status, err)
+	if !alreadyFinalized {
+		if sameEpoch && !checkpoint.Finalizing {
+			head, err = r.Adapter.Head(ctx)
+			if err != nil || !sameBlockRef(head, parent) {
+				return restoreCause(err, "EL head differs from replay target: %v", err)
+			}
+			checkpoint, err = r.Journal.AuthorizeRestoreFinality(checkpoint)
+			if err != nil {
+				return restoreCause(err, "checkpointing restore finality intent: %v", err)
+			}
+		}
+		status, err := r.Adapter.Commit(ctx, parent.Hash)
+		if err != nil || status != shardnode.StatusValid {
+			return restoreCause(err, "finalizing replay target: %s: %v", status, err)
+		}
 	}
 	head, err = r.Adapter.Head(ctx)
 	if err != nil || !sameBlockRef(head, parent) {
@@ -261,8 +392,10 @@ func (r *ArchiveRestore) Restore(ctx context.Context) error {
 	if err != nil || !sameBlockRef(finalized, parent) {
 		return restoreCause(err, "EL finalized head differs from replay target: %v", err)
 	}
-	if err := r.recordTip(ctx, firstUC, firstTR, targetUC, targetTR, targetBlock, reverse[0]); err != nil {
-		return err
+	if image.RestoreBase == nil {
+		if err := r.recordTip(ctx, firstUC, firstTR, targetUC, targetTR, candidate, reverse[0], checkpoint); err != nil {
+			return err
+		}
 	}
 	return r.backfillRestoredObservations(ctx)
 }
@@ -339,12 +472,9 @@ func (r *ArchiveRestore) verifiedRestoreRecord(ctx context.Context, q archive.Re
 		if err != nil {
 			return nil, nil, nil, nil, nil, err
 		}
-		if _, _, err := r.checkRecord(q, rec); err != nil {
+		_, _, header, err := r.checkRecord(q, rec)
+		if err != nil {
 			return nil, nil, nil, nil, nil, err
-		}
-		var header gethtypes.Header
-		if err := rlp.DecodeBytes(rec.Header, &header); err != nil || header.Number == nil || header.Hash() != common.Hash(q.BlockHash) {
-			return nil, nil, nil, nil, nil, archive.ErrInvalid
 		}
 		if result.InputRecord == nil || expected == nil || expected.InputRecord == nil ||
 			!bytes.Equal(result.InputRecord.BlockHash, expected.InputRecord.BlockHash) ||
@@ -357,7 +487,7 @@ func (r *ArchiveRestore) verifiedRestoreRecord(ctx context.Context, q archive.Re
 		if err != nil || block.Number != header.Number.Uint64() || !bytes.Equal(block.Hash, q.BlockHash[:]) || !bytes.Equal(block.StateRoot, header.Root[:]) {
 			return nil, nil, nil, nil, nil, archive.ErrInvalid
 		}
-		return original, originalTR, result, resultTR, &header, nil
+		return original, originalTR, result, resultTR, header, nil
 	}
 	// The base representation is read here on purpose (bft-core#876): the record is authenticated below and nothing compares it with a journal-derived manifest; a selected variant certifies the same input record.
 	if rec, err := r.Archive.Get(q); err == nil {
@@ -539,7 +669,7 @@ func (r *ArchiveRestore) findTarget(ctx context.Context) ([32]byte, error) {
 				lastFetch = err
 				continue
 			}
-			result, _, err := r.checkRecord(q, rec)
+			result, _, _, err := r.checkRecord(q, rec)
 			if err == nil && r.matchesTip(result) {
 				found = q.BlockHash
 				return false, nil
@@ -556,7 +686,18 @@ func (r *ArchiveRestore) findTarget(ctx context.Context) ([32]byte, error) {
 	return found, nil
 }
 
-func (r *ArchiveRestore) fetchChecked(ctx context.Context, hash [32]byte) (q archive.Request, rec *archive.Record, uc *types.UnicityCertificate, tr *certification.TechnicalRecord, header *gethtypes.Header, err error) {
+func (r *ArchiveRestore) fetchChecked(ctx context.Context, hash [32]byte, resuming bool) (q archive.Request, rec *archive.Record, uc *types.UnicityCertificate, tr *certification.TechnicalRecord, header *gethtypes.Header, err error) {
+	if resuming {
+		q := archive.Request{Context: r.Subject, BlockHash: hash}
+		rec, err := r.Archive.Get(q)
+		if err == nil {
+			uc, tr, header, err := r.checkRecord(q, rec)
+			return q, rec, uc, tr, header, err
+		}
+		if !errors.Is(err, archive.ErrUnavailable) {
+			return archive.Request{}, nil, nil, nil, nil, err
+		}
+	}
 	err = r.retryFetch(ctx, fmt.Sprintf("archive record %x", hash), func() (bool, error) {
 		var transient bool
 		q, rec, uc, tr, header, transient, err = r.fetchCheckedOnce(ctx, hash)
@@ -607,101 +748,39 @@ func (r *ArchiveRestore) fetchCheckedOnce(ctx context.Context, hash [32]byte) (a
 				continue
 			}
 		}
-		uc, tr, err := r.checkRecord(q, rec)
+		uc, tr, header, err := r.checkRecord(q, rec)
 		if err == nil {
-			var header gethtypes.Header
-			if err = rlp.DecodeBytes(rec.Header, &header); err == nil {
-				return q, rec, uc, tr, &header, false, nil
-			}
+			return q, rec, uc, tr, header, false, nil
 		}
 	}
 	return archive.Request{}, nil, nil, nil, nil, transient, unavailableBecause(lastFetch)
 }
 
-func (r *ArchiveRestore) checkRecord(q archive.Request, rec *archive.Record) (*types.UnicityCertificate, *certification.TechnicalRecord, error) {
+func (r *ArchiveRestore) checkRecord(q archive.Request, rec *archive.Record) (*types.UnicityCertificate, *certification.TechnicalRecord, *gethtypes.Header, error) {
 	_, _, result, tr, err := decodeRestorePairs(rec)
 	if err != nil || result.GetRootEpoch() > r.TipUC.GetRootEpoch() {
-		return nil, nil, ErrRestore
+		return nil, nil, nil, ErrRestore
 	}
 	var header gethtypes.Header
 	if rlp.DecodeBytes(rec.Header, &header) != nil || header.Number == nil {
-		return nil, nil, archive.ErrInvalid
+		return nil, nil, nil, archive.ErrInvalid
 	}
 	fr := frontier.Record{Height: header.Number.Uint64(), Epoch: result.GetRootEpoch(), Round: result.GetRootRoundNumber(), StateRoot: [32]byte(header.Root), Subject: q}
 	if err := (CertifiedBinding{Context: r.Context, Subject: r.Subject}).VerifyCertified(fr, rec); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return result, tr, nil
+	return result, tr, &header, nil
 }
 
-func (r *ArchiveRestore) recordTip(ctx context.Context, firstUC *types.UnicityCertificate, firstTR *certification.TechnicalRecord, resultUC *types.UnicityCertificate, resultTR *certification.TechnicalRecord, block shardnode.Block, item restoredBlock) error {
+func (r *ArchiveRestore) recordTip(ctx context.Context, firstUC *types.UnicityCertificate, firstTR *certification.TechnicalRecord, resultUC *types.UnicityCertificate, resultTR *certification.TechnicalRecord, candidate configuredprogress.JournalCandidate, item restoredBlock, checkpoint configuredprogress.RestoreCheckpoint) error {
 	if firstUC == nil || firstTR == nil || resultUC == nil || resultTR == nil {
 		return ErrRestore
 	}
-	if firstUC.GetRootEpoch() != r.TipUC.GetRootEpoch() {
-		candidate, err := r.restoreCandidate(ctx, resultUC, block, item)
-		if err != nil {
-			return err
-		}
-		return r.Journal.InstallReplayedTip(ctx, r.Context, r.JournalLimits, candidate, resultUC, resultTR, r.TipUC, r.TipTR,
-			configuredprogress.RestoreAnchor{Height: block.Number, Hash: item.q.BlockHash, StateRoot: item.state, RootRound: resultUC.GetRootRoundNumber()})
+	anchor := configuredprogress.RestoreAnchor{Height: item.height, Hash: item.q.BlockHash, StateRoot: item.state, RootRound: resultUC.GetRootRoundNumber()}
+	if checkpoint == (configuredprogress.RestoreCheckpoint{}) {
+		return r.Journal.InstallReplayedTip(ctx, r.Context, r.JournalLimits, candidate, resultUC, resultTR, r.TipUC, r.TipTR, anchor)
 	}
-	for _, pair := range []struct {
-		uc *types.UnicityCertificate
-		tr *certification.TechnicalRecord
-	}{{firstUC, firstTR}, {resultUC, resultTR}, {r.TipUC, r.TipTR}} {
-		observed, err := rootinput.AuthenticateObservationV2(ctx, r.Context.Observation, pair.uc, pair.tr)
-		if err != nil {
-			return err
-		}
-		// The last record's candidate is inserted before its resulting UC so
-		// the journal never records an unresolved certified body.
-		if pair.uc == resultUC {
-			candidate, err := r.restoreCandidate(ctx, resultUC, block, item)
-			if err != nil {
-				return err
-			}
-			if err := r.Journal.PutJournalCandidate(ctx, r.Context, r.JournalLimits, candidate); err != nil {
-				return err
-			}
-		}
-		prepared, _, err := r.Journal.PrepareObservation(ctx, r.Context, observed)
-		if err != nil {
-			return err
-		}
-		if _, _, err := r.Journal.CommitObservation(prepared); err != nil {
-			return err
-		}
-	}
-	return r.Journal.InstallRestoreAnchor(ctx, r.Context, r.JournalLimits, configuredprogress.RestoreAnchor{
-		Height: block.Number, Hash: item.q.BlockHash, StateRoot: item.state, RootRound: resultUC.GetRootRoundNumber(),
-	})
-}
-
-func (r *ArchiveRestore) restoreCandidate(ctx context.Context, resultUC *types.UnicityCertificate, block shardnode.Block, item restoredBlock) (configuredprogress.JournalCandidate, error) {
-	// The base representation is read here on purpose (bft-core#876): the record is authenticated below and nothing compares it with a journal-derived manifest; a selected variant certifies the same input record.
-	rec, err := r.Archive.Get(item.q)
-	if err != nil {
-		return configuredprogress.JournalCandidate{}, err
-	}
-	original, originalTR, _, _, err := decodeRestorePairs(rec)
-	if err != nil {
-		return configuredprogress.JournalCandidate{}, err
-	}
-	var parentState []byte
-	if block.Number == 1 {
-		parentState = r.Genesis.StateRoot
-	} else {
-		parent, _, err := r.Adapter.Header(ctx, block.ParentHash)
-		if err != nil {
-			return configuredprogress.JournalCandidate{}, err
-		}
-		parentState = parent.StateRoot
-	}
-	return configuredprogress.JournalCandidate{Round: resultUC.InputRecord.RoundNumber, Number: block.Number,
-		ParentNumber: block.Number - 1, Hash: block.Hash, StateRoot: block.StateRoot, ParentHash: block.ParentHash,
-		ParentState: parentState, Raw: block.Raw, BlockSize: block.BlockSize, StateSize: block.StateSize,
-		AuthorizingUC: original, AuthorizingTR: originalTR}, nil
+	return r.Journal.InstallSameEpochReplayedTip(ctx, r.Context, r.JournalLimits, candidate, resultUC, resultTR, r.TipUC, r.TipTR, anchor, checkpoint, firstUC, firstTR)
 }
 
 // restoreError is an ErrRestore refusal that also carries the executor's cause, so a caller can tell a stopped context

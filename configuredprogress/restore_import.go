@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-core/rootinput"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -18,6 +19,25 @@ import (
 func (s *Store) InstallReplayedTip(ctx context.Context, c Context, limits JournalLimits, candidate JournalCandidate,
 	resultUC *types.UnicityCertificate, resultTR *certification.TechnicalRecord,
 	tipUC *types.UnicityCertificate, tipTR *certification.TechnicalRecord, anchor RestoreAnchor) error {
+	return s.installReplayedTip(ctx, c, limits, candidate, resultUC, resultTR, tipUC, tipTR, anchor, RestoreCheckpoint{}, nil, nil)
+}
+
+// InstallSameEpochReplayedTip retains the original bootstrap observation and
+// installs the certified tip, progress and recovery anchor in one transaction.
+func (s *Store) InstallSameEpochReplayedTip(ctx context.Context, c Context, limits JournalLimits, candidate JournalCandidate,
+	resultUC *types.UnicityCertificate, resultTR *certification.TechnicalRecord,
+	tipUC *types.UnicityCertificate, tipTR *certification.TechnicalRecord, anchor RestoreAnchor,
+	checkpoint RestoreCheckpoint, firstUC *types.UnicityCertificate, firstTR *certification.TechnicalRecord) error {
+	if checkpoint.Pin == ([32]byte{}) || checkpoint.Target != anchor.Hash || checkpoint.VerifiedHeight != anchor.Height || !checkpoint.Finalizing || firstUC == nil || firstTR == nil {
+		return ErrConflict
+	}
+	return s.installReplayedTip(ctx, c, limits, candidate, resultUC, resultTR, tipUC, tipTR, anchor, checkpoint, firstUC, firstTR)
+}
+
+func (s *Store) installReplayedTip(ctx context.Context, c Context, limits JournalLimits, candidate JournalCandidate,
+	resultUC *types.UnicityCertificate, resultTR *certification.TechnicalRecord,
+	tipUC *types.UnicityCertificate, tipTR *certification.TechnicalRecord, anchor RestoreAnchor,
+	checkpoint RestoreCheckpoint, firstUC *types.UnicityCertificate, firstTR *certification.TechnicalRecord) error {
 	s.vm.reset() // an install: whatever the memo holds was verified under the previous state (bft-core#728)
 	if !s.journal || limits.check() != nil || candidate.LocallyBuilt || candidate.AuthorizingUC == nil || candidate.AuthorizingTR == nil ||
 		resultUC == nil || resultTR == nil || tipUC == nil || tipTR == nil || resultUC.InputRecord == nil || tipUC.InputRecord == nil ||
@@ -59,16 +79,6 @@ func (s *Store) InstallReplayedTip(ctx context.Context, c Context, limits Journa
 	if err != nil {
 		return err
 	}
-	cw := state.i.control
-	cw.Revision, cw.First, cw.Observed = 1, &tipPair, &tipPair
-	controlPayload, err := marshal(cw)
-	if err != nil {
-		return err
-	}
-	controlRaw, err := encodeEnvelope(kindControl, controlPayload, MaxControlBytes)
-	if err != nil {
-		return err
-	}
 	au, at, err := pairBytes(candidate.AuthorizingUC, candidate.AuthorizingTR)
 	if err != nil {
 		return err
@@ -86,10 +96,43 @@ func (s *Store) InstallReplayedTip(ctx context.Context, c Context, limits Journa
 		return err
 	}
 	observations := make(map[string][]byte)
-	for _, pair := range []struct {
+	type observationPair struct {
 		uc    *types.UnicityCertificate
 		u, tr []byte
-	}{{resultUC, ru, rt}, {tipUC, tipPair.UC, tipPair.TR}} {
+	}
+	pairs := []observationPair{{resultUC, ru, rt}, {tipUC, tipPair.UC, tipPair.TR}}
+	cw := state.i.control
+	cw.Revision, cw.First, cw.Observed = 1, &tipPair, &tipPair
+	if firstUC != nil {
+		if firstUC.GetRootEpoch() != c.Observation.RootEpoch ||
+			resultUC.GetRootEpoch() != firstUC.GetRootEpoch() || tipUC.GetRootEpoch() != firstUC.GetRootEpoch() {
+			return ErrConflict
+		}
+		first, err := rootinput.AuthenticateObservationV2(ctx, c.Observation, firstUC, firstTR)
+		if err != nil {
+			return err
+		}
+		result, err := rootinput.AuthenticateObservationV2(ctx, c.Observation, resultUC, resultTR)
+		if err != nil {
+			return err
+		}
+		if first.Class() != evmroot.OriginBootstrapV2 || result.Class() == evmroot.OriginBootstrapV2 {
+			return ErrConflict
+		}
+		if rel, err := compareObservations(first, result); err != nil || rel != relationAdvance {
+			return fmt.Errorf("%w: bootstrap to restored result: %v", ErrConflict, err)
+		}
+		if rel, err := compareObservations(result, tip); err != nil || rel == relationStale {
+			return fmt.Errorf("%w: restored result to tip: %v", ErrConflict, err)
+		}
+		fu, ft, err := pairBytes(firstUC, firstTR)
+		if err != nil {
+			return err
+		}
+		pairs = append(pairs, observationPair{firstUC, fu, ft})
+		cw.First = &pairWire{UC: ru, TR: rt}
+	}
+	for _, pair := range pairs {
 		w := journalObservationWire{Version: journalVersion, Descriptor: state.i.descriptorDigest[:], Round: pair.uc.GetRoundNumber(), RootRound: pair.uc.GetRootRoundNumber(),
 			TargetHash: bytes.Clone(pair.uc.InputRecord.BlockHash), UC: pair.u, TR: pair.tr}
 		if len(w.TargetHash) != 0 && !bytes.Equal(w.TargetHash, candidate.Hash) {
@@ -108,6 +151,17 @@ func (s *Store) InstallReplayedTip(ctx context.Context, c Context, limits Journa
 	if len(observations) > limits.Observations || len(candidateRaw) > int(limits.Bytes) {
 		return ErrBounds
 	}
+	if firstUC != nil {
+		cw.Revision = uint64(len(observations))
+	}
+	controlPayload, err := marshal(cw)
+	if err != nil {
+		return err
+	}
+	controlRaw, err := encodeEnvelope(kindControl, controlPayload, MaxControlBytes)
+	if err != nil {
+		return err
+	}
 	aw := restoreAnchorWire{Version: journalVersion, Descriptor: state.i.descriptorDigest[:], Height: anchor.Height, Hash: anchor.Hash[:], StateRoot: anchor.StateRoot[:], RootRound: anchor.RootRound}
 	anchorPayload, err := marshal(aw)
 	if err != nil {
@@ -125,6 +179,13 @@ func (s *Store) InstallReplayedTip(ctx context.Context, c Context, limits Journa
 		b := tx.Bucket(bucketName)
 		if !imageMatches(b, state.i) || b.Get(restoreAnchorKey) != nil || b.Get(journalCoverageBaseKey) != nil {
 			return ErrStale
+		}
+		storedCheckpoint, err := readRestoreCheckpoint(b)
+		if err != nil {
+			return err
+		}
+		if storedCheckpoint != checkpoint {
+			return ErrConflict
 		}
 		if err := readJournalMeta(b, state.i.descriptorDigest, limits); err != nil {
 			return err
@@ -157,6 +218,9 @@ func (s *Store) InstallReplayedTip(ctx context.Context, c Context, limits Journa
 		if err := b.Put(restoreAnchorKey, anchorRaw); err != nil {
 			return err
 		}
-		return b.Put(journalCoverageBaseKey, coverageRaw)
+		if err := b.Put(journalCoverageBaseKey, coverageRaw); err != nil {
+			return err
+		}
+		return s.at("before-replayed-tip-commit")
 	})
 }
