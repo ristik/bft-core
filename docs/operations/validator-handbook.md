@@ -319,7 +319,34 @@ install_authority_scope() (
 install_authority_scope
 ```
 
-Use `enroll` only for the first enrollment. For each later handoff, use `advance` with the confirmed pair. If a lookup fails or the epochs disagree, wait for the paired root to serve the confirmed configuration and rerun the block. Each attempt fetches into a fresh directory. If you previously advanced using a stale shard epoch, use `advance` with the same verified root epoch and the confirmed higher shard epoch. For an authority already equipped with a lineage pin and an installed configuration, use `signing-authority advance-with-proof` and the verified activation bundles in epoch order. Keep its certification session private.
+Use `enroll` only for the first enrollment. For each later handoff, use `advance` with the confirmed pair. If a lookup fails or the epochs disagree, wait for the paired root to serve the confirmed configuration, then check the authority before retrying. Each attempt fetches into a fresh directory. If you previously advanced using a stale shard epoch, use `advance` with the same verified root epoch and the confirmed higher shard epoch. For an authority already equipped with a lineage pin and an installed configuration, use `signing-authority advance-with-proof` and the verified activation bundles in epoch order. Keep its certification session private.
+
+#### Resume an interrupted authority handoff
+
+Keep the authority running. Keep the intended epoch pair from the verified lookups and read the authority's current status before retrying a command.
+
+```bash
+ubft signing-authority status "${AUTH[@]}" |
+  jq '{enrollmentComplete, rootEpoch, shardEpoch, sessionIssued, generation, retired, faulted, keyLost}'
+```
+
+- If `enrollmentComplete` is false, resume with `enroll`. If it is true and the scope still needs to move to the verified pair, resume the main block with `advance`. Check with the Foundation if the reported scope is ahead of, or inconsistent with, the intended pair, or if the authority reports a fault, retirement or lost key.
+- If both epochs match the verified pair and `sessionIssued` is false, run only the block below. A scope advance fences the old client credential.
+- If both epochs match and `sessionIssued` is true, the authority already issued a session for that scope. If the replacement wrote `client.cred`, continue with the shard reload and confirm that the shard accepts the credential and resumes signing. An issued session does not prove the file was written. If the command reported a write failure, the credential is missing, or the shard reports that the credential is fenced, run only `ubft signing-authority replace-session "${AUTH[@]}" --out "$UBFT_HOME/authority/client.cred"` to recover the credential. A timeout or an unavailable shard alone does not establish that the file is stale.
+
+```bash
+resume_authority_session() (
+  set -eo pipefail
+  ubft signing-authority status "${AUTH[@]}" |
+    jq -e --arg root "$ACTIVATED_ROOT_EPOCH" --arg shard "$ACTIVATED_SHARD_EPOCH" '
+      .enrollmentComplete and (.rootEpoch | tostring) == $root and
+      (.shardEpoch | tostring) == $shard and (.sessionIssued == false) and
+      (.retired == false) and (.faulted == false) and (.keyLost == false)
+    ' >/dev/null
+  ubft signing-authority replace-session "${AUTH[@]}" --out "$UBFT_HOME/authority/client.cred"
+)
+resume_authority_session
+```
 
 Wait for the local shard to activate the same root epoch. If the shard needs to reload its session, stop that shard process through its supervisor and restart it with the same `run` arguments. A registered identity or reserved result is still waiting to validate. Check that the successor handoff is acknowledged, the registry lists your membership, your root votes, your shard certifies with the authority, and local ureth tracks the public head.
 
