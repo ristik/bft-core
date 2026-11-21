@@ -15,12 +15,13 @@ import { depositSalt, depositedData, encodeReceiptBacking, firstOwnerOf, rhoOf, 
 import { Nb2Error } from './sdk/nb2/errors.js';
 import { LocalKeySigner, signTx } from './sdk/nb2/evm.js';
 import { RecoveryAuthority, RecoverySession } from './sdk/nb2/recovery.js';
-import { EvmReader, HttpJsonRpc, RpcError, WalletError } from './sdk/nb2/rpc.js';
+import { EvmReader, HttpJsonRpc } from './sdk/nb2/rpc.js';
 import { genesisHead } from './sdk/nb2/segment.js';
 import { burnPredicate, decodeToken, lineageOf, signaturePredicate, valueData } from './sdk/nb2/token.js';
 import { appendTransfer, certifyChecked, childMint, localOwner, mintRequest, splitPlan, tokenOfChild, tokenOfMint, transferRequest } from './sdk/nb2/tokenops.js';
 import { decodeUc, TrustInput } from './sdk/nb2/trust.js';
 import { encodeReturnData, verifyReturn, verifySplit } from './sdk/nb2/verify.js';
+import { firstAvailableReceipt, receiptArchive } from './receipt.js';
 
 const [out, rpc, aggregator, chain, artifacts, createTool, keys] = process.argv.slice(2);
 const registry = '0xff00000000000000000000000000000000000002';
@@ -48,7 +49,7 @@ const depth = route === 'both' ? option('NB2_SPLIT_DEPTH', 1, 1, 20) : option('N
 const packetMax = option('NB2_PACKET_OPERATIONS', 2, 1, 16);
 const receiptReaders = [process.env.NB2_RECEIPT_PRIMARY_RPC ?? rpc, ...(process.env.NB2_RECEIPT_ALT_RPC?.split(',') ?? [])].map((url) => {
   assert.equal(new URL(url).hostname, '127.0.0.1', 'disposable loopback archive required');
-  return new EvmReader(new HttpJsonRpc(url, { timeoutMs: 3000, retries: 0 }));
+  return receiptArchive(new HttpJsonRpc(url, { timeoutMs: 3000, retries: 0 }));
 });
 
 function command(name: string, args: string[], input?: string) {
@@ -198,34 +199,26 @@ async function certifyReceipt(name: string, receipt: Receipt, emitter: Uint8Arra
   const tx = bytes(receipt.transactionHash);
   const started = Date.now();
   for (let attempt = 0; attempt < 60; ++attempt) {
-    for (const [source, archive] of receiptReaders.entries()) {
-      try {
-        if (!authenticatedArchives.has(archive)) {
-          const remote = await archive.headerByNumber(0n);
-          assert(remote && hex(remote.hash) === hex(executionGenesis), 'archive belongs to another generation');
-          authenticatedArchives.add(archive);
-        }
-        const proof = await archive.receiptProof(tx, emitter, expected.topics[0], true);
-        const trust = await trustFor([proof.proof.uc]);
-        const log = await verifyReceiptLog(c, trust, proof.proof, emitter);
-        assert.deepEqual({ address: hex(log.address), topics: log.topics.map(hex), data: hex(log.data) }, wanted);
-        assert.equal(hex(proof.blockHash), receipt.blockHash.toLowerCase());
-        assert.equal(proof.proof.txIndex, BigInt(receipt.transactionIndex));
-        assert.equal(proof.receiptLogIndex, 0);
-        writeFileSync(join(out, name + '.cbor'), proof.encoded);
-        json(name + '.locator.json', { transactionHash: receipt.transactionHash, blockHash: hex(proof.blockHash),
-          blockNumber: proof.blockNumber, transactionIndex: proof.proof.txIndex, receiptLogIndex: proof.receiptLogIndex,
-          source, acquisitionMs: Date.now() - started, ...wanted });
-        return { proof: proof.proof, encoded: proof.encoded, trust };
-      } catch (e) {
-        const unavailable = (e instanceof WalletError && ['CompanionUnknown', 'EvidenceMissing'].includes(e.reason))
-          || (e instanceof Nb2Error && e.rule === 'EvidencePruned')
-          || (e instanceof RpcError && (e.status === 429 || e.status >= 500))
-          || (e instanceof TypeError && e.message === 'fetch failed')
-          || (e instanceof Error && e.name === 'AbortError');
-        if (!unavailable) throw e;
+    const result = await firstAvailableReceipt(receiptReaders, async (archive, source) => {
+      if (!authenticatedArchives.has(archive)) {
+        const remote = await archive.headerByNumber(0n);
+        assert(remote && hex(remote.hash) === hex(executionGenesis), 'archive belongs to another generation');
+        authenticatedArchives.add(archive);
       }
-    }
+      const proof = await archive.receiptProof(tx, emitter, expected.topics[0], true);
+      const trust = await trustFor([proof.proof.uc]);
+      const log = await verifyReceiptLog(c, trust, proof.proof, emitter);
+      assert.deepEqual({ address: hex(log.address), topics: log.topics.map(hex), data: hex(log.data) }, wanted);
+      assert.equal(hex(proof.blockHash), receipt.blockHash.toLowerCase());
+      assert.equal(proof.proof.txIndex, BigInt(receipt.transactionIndex));
+      assert.equal(proof.receiptLogIndex, 0);
+      writeFileSync(join(out, name + '.cbor'), proof.encoded);
+      json(name + '.locator.json', { transactionHash: receipt.transactionHash, blockHash: hex(proof.blockHash),
+        blockNumber: proof.blockNumber, transactionIndex: proof.proof.txIndex, receiptLogIndex: proof.receiptLogIndex,
+        source, acquisitionMs: Date.now() - started, ...wanted });
+      return { proof: proof.proof, encoded: proof.encoded, trust };
+    });
+    if (result) return result;
     await delay(1000);
   }
   throw new Error(`no certified receipt for ${name}`);

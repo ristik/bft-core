@@ -5,6 +5,7 @@ here=$PWD/scripts/nb2-t7
 scratch=$(mktemp -d "$NB2_OUT/.driver.XXXXXX")
 driver_pid=
 cleanup() {
+  trap '' TERM HUP INT
   if [[ -n "$driver_pid" ]]; then kill -TERM "$driver_pid" 2>/dev/null || true; wait "$driver_pid" || true; fi
   rm -rf -- "$scratch"
 }
@@ -24,7 +25,7 @@ printf '%s\n' 'test test test test test test test test test test test junk' >"$s
 openssl rand -hex 24 >"$scratch/password"
 CAST_UNSAFE_PASSWORD=$(<"$scratch/password") cast wallet import sender --keystore-dir "$scratch" --mnemonic "$scratch/mnemonic" >/dev/null
 printf '%s\n' '{"type":"module"}' >"$scratch/package.json"
-cp "$here/driver.ts" "$scratch/"
+cp "$here/driver.ts" "$here/receipt.ts" "$scratch/"
 sed -n 's/^const testKeyHex = "\([0-9a-f]*\)"$/\1/p' scripts/evmtx/main.go >"$scratch/send-key"
 test -s "$scratch/send-key"
 ln -s "$NB2_PLUGIN/packages/native-bridge-plugin/lib" "$scratch/sdk"
@@ -38,7 +39,7 @@ jq -n --arg commit "$(jq -r .ureth "$NB2_OUT/pins.json")" --arg digest "$(sha256
   '{ureth:$commit,binaries:{"unicity-reth":$digest}}' >"$NB2_OUT/descriptors/build-index.json"
 {
   git rev-parse HEAD
-  sha256sum build/ubft "$UTB_VERIFIER" "$AGG_BIN" "$URETH_BIN" "$NB2_PLUGIN/package-lock.json"
+  sha256sum build/ubft "$UTB_VERIFIER" "$AGG_BIN" "$URETH_BIN" "$NB2_PLUGIN/package-lock.json" "$NB2_OUT/plugin-lib.sha256"
   go version -m "$AGG_BIN"
 } >"$NB2_OUT/builds.txt"
 run_driver "$NB2_PLUGIN/node_modules/.bin/tsx" "$scratch/driver.ts" "$NB2_OUT" "$rpc" "$agg" "$chain" \

@@ -18,10 +18,6 @@ forge build --force --use /path/to/solc-0.8.37 -j 4
 # In the pinned aggregator-go checkout.
 CGO_ENABLED=1 go build -p 4 -trimpath -o /path/to/bin/aggregator ./cmd/aggregator
 
-# In the pinned native-bridge-plugins checkout.
-npm ci
-npm run build
-
 # In the pinned Ureth checkout, or use its attested executable.
 cargo build --locked --release -j 4 -p unicity-reth
 
@@ -32,6 +28,11 @@ NB2_CONTRACTS=/path/to/contracts NB2_PLUGIN=/path/to/plug-ins \
 AGG_BIN=/path/to/bin/aggregator URETH_BIN=/path/to/ureth \
 NB2_OUT=/path/to/new/smoke-evidence scripts/nb2-t7/run.sh
 ```
+
+The launcher builds the plug-in from a Git archive of the pinned commit in a
+fresh directory before acquiring a slot. It installs from the tracked lockfile,
+records the generated files in `plugin-lib.sha256`, and removes the build tree
+after the lane stops.
 
 The smoke lane deploys the full production graph at K=64/B=16. It checks the T3/T4
 artifact hashes and the registry runtime, then binds the deployed runtime hashes in
@@ -59,7 +60,7 @@ The driver takes these workload parameters.
 | `NB2_SPLIT_DEPTH` | `1` for both, `0` for recovered | Total ancestors split along the recovered branch up to 20. Extra splits leave one-wei sibling balances outstanding. |
 | `NB2_PACKET_OPERATIONS` | `2` | Maximum cut size, 1 through 16. A cut shrinks to fit the hard transport caps. Use 1 for the one-source control. |
 | `NB2_RECEIPT_PRIMARY_RPC` | local validator | Loopback receipt source, checked against the paired genesis. |
-| `NB2_RECEIPT_ALT_RPC` | unset | Comma-separated loopback alternatives tried on missing, pruned or not-yet-certified receipts. |
+| `NB2_RECEIPT_ALT_RPC` | unset | Comma-separated loopback alternatives tried when receipts are missing, pruned, not yet certified or over a provider's response limit. |
 
 For a post-T6 scenario, set `NB2_SCENARIO_DRIVER` to an absolute executable path.
 It receives the evidence directory, the lane RPC URL and the aggregator URL as
@@ -71,3 +72,21 @@ The current driver uses the local paired validator as its origin authority. The
 T6 journal and load scenarios will exercise offline handoff, paid-ID eviction,
 sustained sealing and the measured release envelope. The default smoke keeps the
 segment at zero and does not claim those qualification results.
+
+
+## Focused regressions
+
+Run these from bft-core on the dev server. They do not acquire a slot or start
+MongoDB. The TypeScript test uses the pinned SDK build and exercises its
+receipt-trie check after a primary HTTP 413.
+
+```sh
+python3 scripts/nb2-t7/lane_test.py -v
+review=$(mktemp -d)
+trap 'rm -rf -- "$review"' EXIT
+bash scripts/nb2-t7/build-plugin.sh "$NB2_PLUGIN" "$(jq -r .plugin scripts/nb2-t7/pins.json)" "$review/plugin"
+printf '%s\n' '{"type":"module"}' >"$review/package.json"
+ln -s "$review/plugin/packages/native-bridge-plugin/lib" "$review/sdk"
+cp scripts/nb2-t7/{receipt,receipt.test}.ts "$review/"
+"$review/plugin/node_modules/.bin/tsx" --test "$review/receipt.test.ts"
+```

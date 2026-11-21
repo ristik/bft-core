@@ -221,6 +221,7 @@ dump_stalled_roots() {
 H6_ROOT_DUMP_REASON=
 nb2DriverPid=
 cleanup() {
+  if [ "${NB2_T7_LANE:-0}" = 1 ]; then trap '' TERM HUP INT; fi
   if [ -n "$nb2DriverPid" ]; then kill -TERM "$nb2DriverPid" 2>/dev/null || true; wait "$nb2DriverPid" || true; fi
   dump_stalled_roots
   if [ "${F8_MIXED_LANE:-0}" = 1 ]; then f8_stop; fi
