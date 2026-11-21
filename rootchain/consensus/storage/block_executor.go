@@ -410,6 +410,15 @@ func (x *ExecutedBlock) extendWithAuthority(newBlock *rctypes.BlockData, verifie
 					if err := pos.commit(committed, want != nil); err != nil {
 						return nil, err
 					}
+					if vr.on {
+						// the activation schedule's root history: this handoff's Accepted schedule changes enter the committed schedule, and
+						// every rule with E <= the epoch it installs is latched here, at the commit into that epoch (design section 7.1)
+						next, err := vr.state.CommitSchedule(committed.Epoch + 1)
+						if err != nil {
+							return nil, errors.Join(ErrVRMode, err)
+						}
+						vr.set(next)
+					}
 					if want == nil {
 						control.UnackedParent = bytes.Clone(control.FrozenParent) // root-only: pending until the EVM certifies after this parent
 					}

@@ -106,9 +106,9 @@ func vrRootFacts(state ShardStates, confs map[types.PartitionShardID]*types.Part
 		if f.Lifecycle, err = LifecycleFor(orchestration, si.PartitionID, si.ShardID, si.IR.Epoch, f.Installed); err != nil {
 			return f, errors.Join(ErrVRUnavailable, err)
 		}
-		schedule, err := svc.schedule(epoch)
+		schedule, err := controlSchedule(state.Control)
 		if err != nil {
-			return f, err
+			return f, errors.Join(ErrVRUnavailable, err)
 		}
 		f.Fold = vradmit.FoldContext{Network: network, SuccessorRootEpoch: epoch + 1, Installed: confs, EVMPartition: key.PartitionID,
 			ControlPartition: evmroot.D4ControlPartition, Schedule: schedule}.Input()
@@ -143,19 +143,12 @@ type VRIntents interface {
 	Intent(q VRIntentQuery) (VRIntent, bool, error)
 }
 
-// VRSchedule is the root's committed activation schedule (VT-07a), root-latched entries included.
-type VRSchedule interface {
-	Committed(epoch uint64) ([]vrschema.Activation, error)
-}
-
 // VRServices are the collaborators of the VR-mode executor. Deployment names the VR generation (root network, VR's network and chain id
-// words, its address and code hash). State verifies the witnesses; Intents and Schedule read committed history. A nil Schedule is the empty
-// schedule; a nil Intents refuses every HandoffView and Freeze v5 (fail closed).
+// words, its address and code hash). State verifies the witnesses; Intents reads committed history (the committed schedule is the root state's own, RootState.Schedule). A nil Intents refuses every HandoffView and Freeze v5 (fail closed).
 type VRServices struct {
 	Deployment vradmit.Deployment
 	State      VRStateAuthority
 	Intents    VRIntents
-	Schedule   VRSchedule
 }
 
 // domain is the deployment the VR-domain digests use: VR's network and chain id words, with VR's address as the deployment address
@@ -164,15 +157,16 @@ func (s *VRServices) domain() evmassign.Deployment {
 	return evmassign.Deployment{NetworkWord: s.Deployment.NetworkWord, ChainID: s.Deployment.ChainID, Custody: s.Deployment.Registry}
 }
 
-func (s *VRServices) schedule(epoch uint64) ([]vrschema.Activation, error) {
-	if s.Schedule == nil {
+// controlSchedule is the committed activation schedule of a control state (empty off a VR chain): root-latched entries included.
+func controlSchedule(c *evmroot.ControlState) ([]vrschema.Activation, error) {
+	if c == nil || len(c.VR) == 0 {
 		return nil, nil
 	}
-	a, err := s.Schedule.Committed(epoch)
+	s, err := vradmit.DecodeRootState(c.VR)
 	if err != nil {
-		return nil, errors.Join(ErrVRUnavailable, err)
+		return nil, err
 	}
-	return a, nil
+	return s.Schedule, nil
 }
 
 // vrStep is the VR root state of the block being executed, loaded from the parent's control state and written back at the end of the block.
@@ -386,10 +380,7 @@ func (x *ExecutedBlock) admitV5(v *vrStep, pos *posStep, svc *VRServices, r evmr
 	if err != nil {
 		return errors.Join(ErrHandoffRecord, err)
 	}
-	schedule, err := svc.schedule(block.Epoch)
-	if err != nil {
-		return err
-	}
+	schedule := v.state.Schedule
 	acked := map[vrschema.ShardKey]bool{}
 	for _, si := range states {
 		if si != nil && si.IR != nil {
@@ -443,6 +434,17 @@ func (x *ExecutedBlock) admitV5(v *vrStep, pos *posStep, svc *VRServices, r evmr
 	var body [32]byte
 	copy(body[:], r.NextBodyID)
 	next.StagedBody, next.StagedResult, next.StagedBitmap, next.StagedSupport = body, result, vrschema.RejectedBitmap(cand.RegistryChanges), staged
+	// K's own support this Freeze verified is retained with the primary and promoted if J's recovery is acknowledged instead (section 7.3)
+	next.StagedKSupport = verified.KSupport
+	// the Accepted schedule changes of this candidate enter the committed schedule when its H commits (section 7.1); the verdicts are the
+	// ones the Freeze just verified against the fold
+	verdicts := make([]uint8, len(cand.RegistryChanges))
+	for i, rc := range cand.RegistryChanges {
+		verdicts[i] = uint8(rc.Verdict)
+	}
+	if next, err = next.StageSchedule(cand.RegistryChanges, verdicts); err != nil {
+		return errors.Join(ErrHandoffRecord, ErrVRFreeze, err)
+	}
 	v.set(next)
 	// what the store retains: the body, the merged receipts, the v5 view the install paths read, and the canonical v6 bytes
 	receipts := make([]q3format.Receipt, 0, len(fv.Certificate.Readiness))
@@ -487,7 +489,7 @@ func (p *posStep) abortVR(v *vrStep, r evmroot.OrderedHandoffRecord, round, time
 		p.set(next)
 		p.records = append(p.records, rec)
 	}
-	s.StagedBody, s.StagedResult, s.StagedBitmap, s.StagedSupport = [32]byte{}, vrschema.Word{}, 0, vradmit.SupportTable{}
+	s.StagedBody, s.StagedResult, s.StagedBitmap, s.StagedSupport, s.StagedKSupport, s.StagedSchedule = [32]byte{}, vrschema.Word{}, 0, vradmit.SupportTable{}, vradmit.SupportTable{}, nil
 	v.set(s)
 	return nil
 }
@@ -543,9 +545,12 @@ func (p *posStep) ackVR(v *vrStep, candidates candidateSource, round, timestamp,
 		if s.Support, err = s.Support.Add(s.StagedSupport.Entries...); err != nil {
 			return errors.Join(ErrPosSource, err)
 		}
+	} else if s.Support, err = s.Support.Add(s.StagedKSupport.Entries...); err != nil {
+		// K's evidence that passed gate (b) at the Freeze: promoted, no new signature (design section 7.3)
+		return errors.Join(ErrPosSource, err)
 	}
 	s.Acknowledged = result
-	s.StagedBody, s.StagedResult, s.StagedBitmap, s.StagedSupport = [32]byte{}, vrschema.Word{}, 0, vradmit.SupportTable{}
+	s.StagedBody, s.StagedResult, s.StagedBitmap, s.StagedSupport, s.StagedKSupport, s.StagedSchedule = [32]byte{}, vrschema.Word{}, 0, vradmit.SupportTable{}, vradmit.SupportTable{}, nil
 	v.set(s)
 	return nil
 }
@@ -707,4 +712,21 @@ func HandoffViewOf(b *rctypes.BlockData) (*rctypes.ViewContext, bool) {
 		}
 	}
 	return nil, false
+}
+
+// CommittedSchedule is the activation schedule of the committed root block's control state (VT-07a), root-latched entries included. ok is
+// false on a chain that is not in VR mode.
+func (x *BlockStore) CommittedSchedule() (schedule []vrschema.Activation, epoch uint64, ok bool, err error) {
+	if x.profile != ProfileHandoff {
+		return nil, 0, false, nil
+	}
+	root := x.tree().Root()
+	if root == nil || root.ShardState.Control == nil || len(root.ShardState.Control.VR) == 0 {
+		return nil, 0, false, nil
+	}
+	s, err := vradmit.DecodeRootState(root.ShardState.Control.VR)
+	if err != nil {
+		return nil, 0, true, err
+	}
+	return s.Schedule, root.BlockData.Epoch, true, nil
 }

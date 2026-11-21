@@ -83,7 +83,7 @@ func TestAJoinerFetchesTheSourceFromAQuorumOfPeers(t *testing.T) {
 	r := [32]byte{0x52}
 	good := SourceEntry{Source: vrhandoff.Source{ResultID: r[:], EVMBlockHash: bytes.Repeat([]byte{7}, 32), EVMBlockNumber: 77, CertRootRound: 400, OutputCommit: bytes.Repeat([]byte{9}, 32)}, CertUCTime: 4000}
 	bad := good
-	bad.EVMBlockNumber = 78
+	bad.CertRootRound = 401 // a signed-off field the peers attest
 	joiner := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
 	var servers []*p2p.Peer
 	var ids []peer.ID
@@ -168,7 +168,7 @@ func TestSourceAgreementIsByVotingWeight(t *testing.T) {
 	r := [32]byte{0x53}
 	lie := SourceEntry{Source: vrhandoff.Source{ResultID: r[:], EVMBlockHash: bytes.Repeat([]byte{1}, 32), EVMBlockNumber: 5, CertRootRound: 9, OutputCommit: bytes.Repeat([]byte{2}, 32)}, CertUCTime: 1}
 	truth := lie
-	truth.EVMBlockNumber = 6
+	truth.CertRootRound = 10
 	joiner := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
 	serve := func(entry SourceEntry) peer.ID {
 		p := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
@@ -193,4 +193,39 @@ func TestSourceAgreementIsByVotingWeight(t *testing.T) {
 	// only the two light roots answer the same lie: weight 2 is not above 3
 	_, err = FetchSource(ctx, FromLibp2p(joiner), []WeightedPeer{{light1, 1}, {light2, 1}}, r, 10)
 	require.ErrorIs(t, err, ErrUnavailable)
+}
+
+// Mixed-version replies agree (astra r8): one peer of an earlier build replies shard round 4 and one replies EVM height 3 for the same
+// certified block; they reach the threshold together (the height is not attested), and the root records the height it derives itself.
+func TestMixedVersionPeersAgreeOnTheSourceAndTheHeightIsDerivedLocally(t *testing.T) {
+	w := newWorld(t)
+	r := [32]byte{0x54}
+	old := SourceEntry{Source: vrhandoff.Source{ResultID: r[:], EVMBlockHash: bytes.Repeat([]byte{7}, 32), EVMBlockNumber: 4, CertRootRound: 400, OutputCommit: bytes.Repeat([]byte{9}, 32)}, CertUCTime: 4000}
+	fixed := old
+	fixed.EVMBlockNumber = 3
+	joiner := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
+	var ids []peer.ID
+	for _, e := range []SourceEntry{old, fixed, {}, {}} {
+		p := testpeer.CreatePeer(t, testpeer.CreatePeerConfiguration(t))
+		joiner.Network().Peerstore().AddAddrs(p.ID(), p.MultiAddresses(), peerstore.PermanentAddrTTL)
+		src, err := NewSources("")
+		require.NoError(t, err)
+		if e.ResultID != nil {
+			_, err = src.Record(e)
+			require.NoError(t, err)
+		}
+		svc := w.service("x")
+		p.RegisterProtocolHandler(ProtocolID, NewServer(svc, NewQueue(svc, 0), func(peer.ID) bool { return true }).WithSources(src).Handler)
+		t.Cleanup(func() { p.RemoveProtocolHandler(ProtocolID) })
+		ids = append(ids, p.ID())
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	got, err := FetchSource(ctx, FromLibp2p(joiner), weighted(ids, 1), r, 4)
+	require.NoError(t, err, "the two replies agree on everything but the unattested height")
+	var h [32]byte
+	copy(h[:], got.EVMBlockHash)
+	resolved, err := ResolveFetched(ctx, &headerReader{fakeReader: &fakeReader{}, number: map[[32]byte]uint64{h: 3}}, got)
+	require.NoError(t, err)
+	require.EqualValues(t, 3, resolved.EVMBlockNumber, "the locally verified EVM height is the one recorded")
 }

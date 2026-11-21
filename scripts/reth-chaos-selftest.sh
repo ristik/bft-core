@@ -627,5 +627,32 @@ else
 fi
 
 echo
+# Use two inert processes with the same resolved executable. Only the one in this checkout can
+# be stopped, even if a stale PID file points at the one in the other tree.
+pinned_restart() (
+  local helper=$PWD/helper.sh pid other pat i
+  mkdir -p "$work/chaos-pid/test-nodes/reth1" "$work/other-pid" "$work/pin [fixture]" || return 1
+  URETH_BIN="$work/pin [fixture]/unicity-reth-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-linux-x86_64"
+  printf '#!/usr/bin/perl\nsleep 120;\n' >"$URETH_BIN"
+  chmod +x "$URETH_BIN" || return 1
+  source "$helper"
+  source "$harness"
+  cd "$work/chaos-pid" || return 1
+  "$URETH_BIN" node & pid=$!
+  ( cd "$work/other-pid" && exec "$URETH_BIN" node ) & other=$!
+  trap 'kill "$pid" "$other" 2>/dev/null; wait "$pid" "$other" 2>/dev/null' EXIT
+  pat=$(reth_node_pattern "$URETH_BIN")
+  for i in $(seq 1 20); do
+    owned_pid "$pid" "$pat" && (cd "$work/other-pid" && owned_pid "$other" "$pat") && break
+    sleep 0.1
+  done
+  owned_pid "$pid" "$pat" && (cd "$work/other-pid" && owned_pid "$other" "$pat") || return 1
+  echo "$other" >test-nodes/reth1/pid
+  stopReth 1 && kill -0 "$other" 2>/dev/null || return 1
+  echo "$pid" >test-nodes/reth1/pid
+  stopReth 1 && ! kill -0 "$pid" 2>/dev/null && [ ! -e test-nodes/reth1/pid ] && kill -0 "$other" 2>/dev/null
+)
+if pinned_restart; then ok "reth-only restart stops the pinned client and preserves the other checkout"; else bad "reth-only restart lost checkout or executable ownership"; fi
+
 echo "selftest: $selfPass ok, $selfFail bad"
 [ "$selfFail" -eq 0 ]

@@ -230,3 +230,9 @@ func (pinOrchestration) ShardConfigByHash(types.PartitionID, types.ShardID, []by
 }
 
 func emptyOrchestrationForPin() pinOrchestration { return pinOrchestration{} }
+
+func TestFrontierCommitRefusesObservationWithoutAtomicBackend(t *testing.T) {
+	// Any fallback write would dereference the missing underlying store.
+	proxy := &frontierPersistentStore{sampler: &frontierSampler{}}
+	require.ErrorIs(t, proxy.CommitBlock(nil, nil, nil, []storage.ObservationInput{{RootRound: 5}}), storage.ErrNoAtomicObservationCommit)
+}

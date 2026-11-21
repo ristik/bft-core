@@ -10,13 +10,12 @@
 
 vrs_dir=test-nodes/seed
 # the seed servers' ports: 38480..38483 shifted by the lane's port offset (#1218: LANE_SLOT * 1000, or LANE_PORT_BASE); scripts/lib/lane-slot.sh lists them
-declare -F seed_port_offset >/dev/null || source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/utb-lib.sh"
-vrs_off=$(seed_port_offset)
-vrs_port_a=$((38480 + vrs_off)); vrs_port_b=$((38481 + vrs_off)); vrs_port_c=$((38482 + vrs_off))
+declare -F utb_pin >/dev/null || source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/utb-lib.sh"
+vrs_port_a=$(lane_port 38480); vrs_port_b=$(lane_port 38481); vrs_port_c=$(lane_port 38482)
 vrs_log() { vrb_log "$@"; }
 vrs_pin() { tr -d '[:space:]' <test-nodes/utb-genesis.id; }
 vrs_pids=()
-vrs_bundle_url=http://127.0.0.1:$((38600 + vrs_off))   # root 1's isolated bundle listener (utb_root_flags)
+vrs_bundle_url=http://127.0.0.1:$(lane_port 38600)   # root 1's isolated bundle listener (utb_root_flags)
 vrs_cleanup() { local p; for p in "${vrs_pids[@]}"; do kill "$p" 2>/dev/null; done; vrs_pids=(); }
 # NO trap here: this file is sourced into the harness shell, whose EXIT trap stops the devnet. Cleanup is vrs_cleanup, called by the steps that end
 # the seed work and by the harness failure path (vr-boundary-steps.sh); every server is also recorded in the lane's extra-pids (vrs_serve).

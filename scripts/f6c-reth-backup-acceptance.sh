@@ -187,13 +187,14 @@ validator_health() { # <index> <name>
 }
 
 teardown_arm() {
-  local dir=$1
+  local dir=$1 rethPattern
+  rethPattern=$(reth_node_pattern "${URETH_BIN:-}")
   stop_proc "$dir" v1 'ubft shard-node run'
   stop_proc "$dir" v2 'ubft shard-node run'
   stop_proc "$dir" authority 'ubft signing-authority run'
   stop_proc "$dir" root 'ubft root-node run'
-  stop_proc "$dir" reth1 'reth node'
-  stop_proc "$dir" reth2 'reth node'
+  stop_proc "$dir" reth1 "$rethPattern"
+  stop_proc "$dir" reth2 "$rethPattern"
 }
 
 # --- evidence and verdict (this lane's own: reth datadirs are excluded from the seal) ---------------

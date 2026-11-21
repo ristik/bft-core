@@ -14,7 +14,12 @@ const (
 	maxRetirementTrials    = 4
 )
 
-// retirementProposer is the Retirement builder of this chain's P85 services, nil when it has none.
+// SetRetirementProposer attaches the Retirement builder before consensus starts.
+func (x *ConsensusManager) SetRetirementProposer(rp storage.RetirementProposer) {
+	x.blockStore().PosServices().Retirements = rp
+}
+
+// retirementProposer is the automated Retirement builder, nil when disabled.
 func (x *ConsensusManager) retirementProposer() storage.RetirementProposer {
 	if svc := x.blockStore().PosServices(); svc != nil {
 		return svc.Retirements
@@ -89,7 +94,7 @@ func (x *ConsensusManager) addRetirements(ctx context.Context, block *drctypes.B
 			continue // this branch already ordered it: committing is a few rounds away
 		}
 		if slices.ContainsFunc(block.Payload.PosControls, func(c drctypes.PosControl) bool {
-			return c.Op == drctypes.OpRetirement && c.Data != nil && retirementKeyOf(c) == [2]uint64{p.ID, p.Generation}
+			return c.Op == drctypes.OpRetirement && c.RetirementKey() == p.Control.RetirementKey()
 		}) {
 			continue // an operator submitted the same one
 		}
@@ -113,34 +118,20 @@ func (x *ConsensusManager) addRetirements(ctx context.Context, block *drctypes.B
 	}
 }
 
-func retirementKeyOf(c drctypes.PosControl) [2]uint64 {
-	if len(c.Data) < 64 {
-		return [2]uint64{}
-	}
-	return [2]uint64{beUint64(c.Data[24:32]), beUint64(c.Data[56:64])}
-}
-
-func beUint64(b []byte) (v uint64) {
-	for _, x := range b {
-		v = v<<8 | uint64(x)
-	}
-	return v
-}
-
-// insertRetirement returns the controls with the Retirement placed after every closure and RejectResult and in ascending (id, generation)
-// among the Retirements, the only order the payload accepts.
+// insertRetirement places the control after closures and rejections and before rule support and handoff views.
 func insertRetirement(controls []drctypes.PosControl, c drctypes.PosControl) []drctypes.PosControl {
 	out := append([]drctypes.PosControl(nil), controls...)
-	key := retirementKeyOf(c)
-	at := len(out)
+	key := c.RetirementKey()
 	for i, o := range out {
-		if o.Op != drctypes.OpRetirement {
-			continue
-		}
-		if k := retirementKeyOf(o); k[0] > key[0] || k[0] == key[0] && k[1] > key[1] {
-			at = i
-			break
+		switch o.Op {
+		case drctypes.OpRetirement:
+			k := o.RetirementKey()
+			if slices.Compare(k[:], key[:]) > 0 {
+				return slices.Insert(out, i, c)
+			}
+		case drctypes.OpRuleSupport, drctypes.OpHandoffView:
+			return slices.Insert(out, i, c)
 		}
 	}
-	return slices.Insert(out, at, c)
+	return append(out, c)
 }

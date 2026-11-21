@@ -3,14 +3,17 @@ package vrschedule
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/unicitynetwork/bft-core/vrclient"
 	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	gethtypes "github.com/ethereum/go-ethereum/core/types"
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/unicitynetwork/bft-core/evmassign"
@@ -215,4 +218,68 @@ func (r RPC) call(ctx context.Context, blockHash [32]byte, method string, args .
 		return nil, errors.Join(ErrRead, fmt.Errorf("decoding %s: %w", method, err))
 	}
 	return out, nil
+}
+
+// QueuedSchedules are the ScheduleActivation changes VR still holds (Queued, Scheduled or Bound) at the certified block (by hash), from its
+// pendingChanges and change views by an eth_call at that block: the root's early warning before a change is bound into any output
+// (design section 7.4). It is telemetry: nothing here is verified or enforced, and a failed read is simply no warning this time.
+func (r RPC) QueuedSchedules(ctx context.Context, blockHash [32]byte) ([]vrschema.Activation, error) {
+	ctx, cancel := context.WithTimeout(ctx, r.timeout())
+	defer cancel()
+	c := vrclient.New(r.Client, common.Address(r.Pins.Registry))
+	c.Block = hexutil.Encode(blockHash[:]) // the certified block by hash (EIP-1898), never by a number
+	ids, err := c.PendingChanges(ctx)
+	if err != nil {
+		return nil, errors.Join(ErrRead, err)
+	}
+	var out []vrschema.Activation
+	for _, id := range ids {
+		ch, err := c.Change(ctx, id)
+		if err != nil {
+			return nil, errors.Join(ErrRead, err)
+		}
+		if ch.Kind != vrclient.KindScheduleActivation {
+			continue
+		}
+		sc, err := vrschema.DecodeSchedule(ch.Payload)
+		if err != nil {
+			continue
+		}
+		out = append(out, vrschema.Activation{RuleID: sc.RuleID, ReleaseDigest: sc.ReleaseDigest, RootEpoch: sc.RootEpoch, NotBeforeUcTime: sc.NotBeforeUcTime,
+			State: vrschema.ActActive, ChangeID: id})
+	}
+	return out, nil
+}
+
+// HeaderNumber is the EVM block number of the certified block: the execution header resolved by the certified block hash (eth_getBlockByHash),
+// its hash recomputed from the header fields and required to equal the certified hash, and its number returned. It is the true height the
+// freshness proof is compared with (design section 5.3: P at or after source.evmBlockNumber), never the shard round, which differs after a
+// skipped round.
+func (r RPC) HeaderNumber(ctx context.Context, blockHash [32]byte) (uint64, error) {
+	ctx, cancel := context.WithTimeout(ctx, r.timeout())
+	defer cancel()
+	var raw json.RawMessage
+	if err := r.Client.CallContext(ctx, &raw, "eth_getBlockByHash", hexutil.Encode(blockHash[:]), false); err != nil {
+		return 0, errors.Join(ErrRead, fmt.Errorf("eth_getBlockByHash: %w", err))
+	}
+	return VerifiedHeaderNumber(raw, blockHash)
+}
+
+// VerifiedHeaderNumber decodes an execution header (as eth_getBlockByHash serves it), recomputes its hash and returns its number only if the
+// hash is the expected one: a client that serves another block, or altered fields, is refused.
+func VerifiedHeaderNumber(raw json.RawMessage, want [32]byte) (uint64, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return 0, errors.Join(ErrRead, errors.New("the execution client does not hold the certified block"))
+	}
+	var h gethtypes.Header
+	if err := json.Unmarshal(raw, &h); err != nil {
+		return 0, errors.Join(ErrRead, fmt.Errorf("decoding the header: %w", err))
+	}
+	if h.Number == nil || !h.Number.IsUint64() {
+		return 0, errors.Join(ErrRead, errors.New("the header carries no block number"))
+	}
+	if h.Hash() != common.Hash(want) {
+		return 0, errors.Join(ErrRead, fmt.Errorf("the header's hash %x is not the certified block %x", h.Hash(), want))
+	}
+	return h.Number.Uint64(), nil
 }

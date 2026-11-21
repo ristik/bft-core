@@ -83,7 +83,9 @@ type vrHandoff struct {
 	observer *vrschedule.Observer
 	svc      *vrschedule.Service
 	queue    *vrschedule.Queue
-	commits  chan []vrschedule.CertifiedEVM
+	obsWake  chan struct{} // a commit happened: the durable observation queue has new entries (a wakeup only; nothing is carried)
+	// obsq is the durable observation queue of the CURRENT block store (the manager replaces its block store on recovery and on an epoch switch)
+	obsq     func() storage.ObservationQueue
 	peers    func() []peer.ID
 	update   func() (vrschedule.Committed, error)
 	prefetch chan vrschedule.CertifiedEVM
@@ -179,8 +181,9 @@ func (x *ConsensusManager) EnableVRHandoff(ctx context.Context, cfg VRHandoffCon
 	}
 	cfg.Intents.Config = x.q3.ProtocolConfig
 	svc.Registry.Intents = cfg.Intents
-	v := &vrHandoff{cfg: cfg, commits: make(chan []vrschedule.CertifiedEVM, 1024), prefetch: make(chan vrschedule.CertifiedEVM, 64),
-		observer: &vrschedule.Observer{Reader: cfg.Reader, Sources: cfg.Intents.Sources, Outputs: cfg.Intents.Outputs, Log: cfg.Log}}
+	v := &vrHandoff{cfg: cfg, obsWake: make(chan struct{}, 1), obsq: func() storage.ObservationQueue { return x.blockStore() }, prefetch: make(chan vrschedule.CertifiedEVM, 64),
+		observer: &vrschedule.Observer{Reader: cfg.Reader, Sources: cfg.Intents.Sources, Outputs: cfg.Intents.Outputs, Log: cfg.Log,
+			OnPending: func(a []vrschema.Activation) { x.notePending(a, x.InstalledRootEpoch()) }}}
 	v.svc = vrschedule.NewService(vrschedule.ServiceConfig{Self: x.id.String(), Signer: cfg.Signer, Log: cfg.Log, Send: func(m vrschedule.Message) { v.send(ctx, m) }})
 	v.queue = vrschedule.NewQueue(v.svc, cfg.PiMax)
 	v.kick = make(chan struct{}, 1)
@@ -249,8 +252,7 @@ func (x *ConsensusManager) EnableVRHandoff(ctx context.Context, cfg VRHandoffCon
 		return reader.OpenOutput(c, blockHash, stateRoot)
 	}
 	x.vr = v
-	x.blockStore().SetCommitObserver(v.onCommit)
-	x.blockStore().SetExecutionObserver(v.onExecuted)
+	v.attach(x.blockStore())
 	go v.run(ctx)
 	go v.prefetchRun(ctx)
 	go v.queue.Run(ctx)
@@ -385,65 +387,99 @@ func (v *vrHandoff) send(ctx context.Context, m vrschedule.Message) {
 	}()
 }
 
-// onCommit hands the certified EVM blocks of the committed blocks, oldest first, to the worker (never blocking consensus).
-func (v *vrHandoff) onCommit(blocks []*storage.ExecutedBlock) {
-	var out []vrschedule.CertifiedEVM
-	for _, b := range blocks {
-		if b == nil || b.BlockData == nil {
-			continue
-		}
-		si := b.ShardState.States[v.cfg.EVM]
-		if si == nil || si.IR == nil || len(si.IR.BlockHash) != 32 || len(si.IR.Hash) != 32 {
-			continue
-		}
-		out = append(out, vrschedule.CertifiedEVM{RootRound: b.GetRound(), ParentRound: b.BlockData.GetParentRound(), RootUCTime: b.BlockData.Timestamp, BlockHash: [32]byte(si.IR.BlockHash),
-			StateRoot: [32]byte(si.IR.Hash), BlockNumber: si.IR.RoundNumber})
-	}
+// attach connects a block store to the handoff: it queues the designated EVM shard's certified blocks at every commit, in the commit
+// transaction, and wakes the worker; the execution observer prefetches.
+func (v *vrHandoff) attach(bs *storage.BlockStore) {
+	bs.SetObservedShard(v.cfg.EVM)
+	bs.SetCommitObserver(v.onCommit)
+	bs.SetExecutionObserver(v.onExecuted)
+}
+
+// onCommit wakes the worker (never blocking consensus). It carries nothing: the committed blocks' observations are already durable in the
+// queue, so a dropped wakeup loses nothing (the worker also polls).
+func (v *vrHandoff) onCommit(_ []*storage.ExecutedBlock) { v.obsWakeup() }
+
+func (v *vrHandoff) obsWakeup() {
 	select {
-	case v.commits <- out:
+	case v.obsWake <- struct{}{}:
 	default:
-		v.cfg.Log.Warn("VR handoff: the observer is behind; a commit was not observed")
 	}
 }
 
-// run observes each commit's certified EVM blocks (stage 0), then updates the protocol over the committed state; after its first update a
-// (re)started root rebuilds its view state from its peers (GetStage).
+// ObservePoll is how often the worker looks at the queue without a wakeup, and the bounds of its backoff after a failed read.
+const (
+	ObservePoll       = 3 * time.Second
+	observeBackoffMin = 500 * time.Millisecond
+	observeBackoffMax = 10 * time.Second
+	observationBatch  = 64
+)
+
+// run consumes the durable observation queue in order (stage 0), then updates the protocol over the committed state; after its first update
+// a (re)started root rebuilds its view state from its peers (GetStage).
 func (v *vrHandoff) run(ctx context.Context) {
+	backoff := observeBackoffMin
+	timer := time.NewTimer(0)
+	defer timer.Stop()
+	wake := v.obsWake
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case cs := <-v.commits:
-			for _, c := range cs {
-				v.observe(ctx, c)
-			}
-			v.refresh(ctx)
+		case <-wake:
+		case <-timer.C:
 		}
+		more, err := v.drain(ctx)
+		v.refresh(ctx)
+		wait := ObservePoll
+		wake = v.obsWake
+		switch {
+		case err != nil:
+			wait = backoff
+			backoff = min(2*backoff, observeBackoffMax)
+			wake = nil // a commit notification cannot shorten retry backoff
+		case more:
+			wait = 0 // service the next batch after refreshing the protocol
+			backoff = observeBackoffMin
+		default:
+			backoff = observeBackoffMin
+		}
+		timer.Reset(wait)
 	}
 }
 
-func (v *vrHandoff) observe(ctx context.Context, c vrschedule.CertifiedEVM) {
-	for try := 0; ; try++ {
-		err := v.observer.Observe(ctx, c)
-		if err == nil {
-			v.statMu.Lock()
-			v.observeErr = 0
-			v.statMu.Unlock()
-			return
+// drain observes one bounded batch in commit order. A failed read or acknowledgement leaves the input queued.
+func (v *vrHandoff) drain(ctx context.Context) (more bool, err error) {
+	q := v.obsq()
+	if q == nil {
+		return false, nil
+	}
+	entries, cursor, err := q.PendingObservations(observationBatch)
+	if err != nil {
+		v.cfg.Log.Debug("VR handoff: the observation queue is not readable", "error", err)
+		return false, err
+	}
+	v.observer.Resume(cursor.Set, cursor.ID.Epoch, cursor.ID.Round, vrschema.Word(cursor.Prev))
+	for _, e := range entries {
+		if err := ctx.Err(); err != nil {
+			return false, err
 		}
-		if try >= 20 || ctx.Err() != nil {
+		c := vrschedule.CertifiedEVM{RootEpoch: e.RootEpoch, RootRound: e.RootRound, ParentRound: e.ParentRound, RootUCTime: e.RootUCTime, BlockHash: e.BlockHash, StateRoot: e.StateRoot, ShardRound: e.ShardRound}
+		if err := v.observer.Observe(ctx, c); err != nil {
 			v.statMu.Lock()
 			v.observeErr++
 			v.statMu.Unlock()
-			v.cfg.Log.Warn("VR handoff: observing a certified EVM block failed", "evmBlock", c.BlockNumber, "rootRound", c.RootRound, "error", err)
-			return
+			v.cfg.Log.Warn("VR handoff: observing a certified EVM block failed; it stays queued and is retried", "shardRound", c.ShardRound, "rootRound", c.RootRound, "error", err)
+			return false, err
 		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(500 * time.Millisecond):
+		if err := q.AckObservation(e.ID(), [32]byte(v.observer.PreviousResult())); err != nil {
+			v.cfg.Log.Warn("VR handoff: acknowledging an observation failed", "rootRound", c.RootRound, "error", err)
+			return false, err
 		}
 	}
+	v.statMu.Lock()
+	v.observeErr = 0
+	v.statMu.Unlock()
+	return len(entries) == observationBatch, nil
 }
 
 func (v *vrHandoff) refresh(ctx context.Context) {
@@ -568,6 +604,7 @@ func (x *ConsensusManager) vrCommitted() (vrschedule.Committed, error) {
 		return c, err
 	}
 	c.K, c.Schedule = facts.Lifecycle.Incumbent, facts.Fold.Schedule
+	x.noteSchedule(c.Schedule, q.Epoch) // the warning and the gauge, from the moment the committed schedule holds an entry this binary lacks
 	c.Table = s.Support
 	c.Derived, c.Derivable = d, ok
 	if !ok {
@@ -1052,11 +1089,18 @@ func (v *vrHandoff) fetchSource(ctx context.Context, r [32]byte) {
 			v.cfg.Log.Debug("VR handoff: the source of a result is not available from the incumbents yet", "result", fmt.Sprintf("%x", r[:8]), "error", err)
 			return
 		}
+		// a fetched height is never trusted (incumbents of an earlier build report the shard round): it is re-derived from the certified
+		// block's header, and a source whose header cannot be resolved yet stays unrecorded and is fetched again
+		hr, _ := v.cfg.Reader.(vrschedule.HeaderReader)
+		if e, err = vrschedule.ResolveFetched(ctx, hr, e); err != nil {
+			v.cfg.Log.Debug("VR handoff: a fetched source is not recorded: its height is not verified yet", "result", fmt.Sprintf("%x", r[:8]), "error", err)
+			return
+		}
 		if _, err := v.cfg.Intents.Sources.Record(e); err != nil {
 			v.cfg.Log.Warn("VR handoff: recording a fetched source failed", "error", err)
 			return
 		}
-		v.cfg.Log.Info("VR handoff: the committed source of a result was fetched from the incumbents", "result", fmt.Sprintf("%x", r[:8]), "evmBlock", e.EVMBlockNumber, "certRootRound", e.CertRootRound)
+		v.cfg.Log.Info("VR handoff: the committed source of a result was fetched from the incumbents", "result", fmt.Sprintf("%x", r[:8]), "evmBlockNumber", e.EVMBlockNumber, "certRootRound", e.CertRootRound)
 		v.wake()
 	}()
 }

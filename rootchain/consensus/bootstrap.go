@@ -54,6 +54,10 @@ func (x *ConsensusManager) InstallEpochBundle(incoming handoffdelivery.Bundle) (
 	if err != nil {
 		return nil, err
 	}
+	// the activation schedule's fence over the bundle's verified checkpoint, before the first durable write (bundle retention)
+	if err := x.FenceEpoch(c.g.Epoch, head); err != nil {
+		return nil, err
+	}
 	old, oldSigning, v, g, projected, bodyID, interval, bundle := c.old, c.oldSigning, c.v, c.g, c.projected, c.bodyID, c.interval, c.bundle
 	if archive, ok := x.blockStore().GetDB().(handoffBundleArchive); ok {
 		if err := retainEquivalentHandoffBundle(x.trustBaseStore, archive, g.Epoch, bundle, old, g.ID()); err != nil {

@@ -398,6 +398,10 @@ func (x *ConsensusManager) switchEpoch(ctx context.Context, sw *errEpochSwitch) 
 			x.faultSwitch(sw, err)
 		}
 	}()
+	// the fence of the activation schedule, before the successor is installed: an epoch >= E of a rule this binary lacks is never entered
+	if err := x.upgradeFence(sw.to); err != nil {
+		return fmt.Errorf("epoch %d: %w", sw.to, err)
+	}
 	x.resetVolatile()
 	if err := sw.captured.Install(ctx); err != nil {
 		return fmt.Errorf("in-process install of epoch %d: %w", sw.to, err)

@@ -141,7 +141,9 @@ preflight() {
   note "the aggregator history range is served at $(utb_agg_history_url 1) (GET /api/v1/trustbases)"
   echo "-- substrate and the generated genesis"
   check "reth-paired-devnet.sh supports UTB_LANE" grep -q 'UTB_LANE' "$REPO_ROOT/scripts/reth-paired-devnet.sh"
-  check "helper.sh hands the profile to roots and validators" bash -c "grep -c 'UTB_LANE' '$REPO_ROOT/helper.sh' | grep -qx 2"
+  check "helper.sh hands the profile to roots and validators" bash -c '
+    grep -Fq "\$(utb_root_flags " "$1" && grep -Fq "\$(utb_shard_flags " "$1"
+  ' _ "$REPO_ROOT/helper.sh"
   check "m2_start_root keeps the profile on a restarted root" grep -q 'UTB_ROOT_FLAGS_FN' "$REPO_ROOT/scripts/lib/m2-handoff-lib.sh"
   if [ -s test-nodes/utb/utb-manifest.json ]; then
     check "the generated manifest checks out against its trust base" "$UBFT" trust-base utb-manifest --check test-nodes/utb/utb-manifest.json

@@ -171,8 +171,8 @@ func (s *q4bStore) WriteBlock(b *storage.ExecutedBlock, root bool) error {
 	return s.observed(b, root, func() error { return s.BoltDB.WriteBlock(b, root) })
 }
 
-func (s *q4bStore) CommitBlock(b *storage.ExecutedBlock, recs []rootrecords.Record, cut *storage.CutEntry) error {
-	return s.observed(b, true, func() error { return s.BoltDB.CommitBlock(b, recs, cut) })
+func (s *q4bStore) CommitBlock(b *storage.ExecutedBlock, recs []rootrecords.Record, cut *storage.CutEntry, obs []storage.ObservationInput) error {
+	return s.observed(b, true, func() error { return s.BoltDB.CommitBlock(b, recs, cut, obs) })
 }
 
 func (s *q4bStore) observed(b *storage.ExecutedBlock, root bool, write func() error) error {

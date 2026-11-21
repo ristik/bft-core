@@ -74,6 +74,9 @@ func ethSign(hs hashSigner, digest [32]byte) ([]byte, error) {
 // network whose successor binding names this node with this key (the same binding checks as SignHandoffPoP, which also bound the epoch),
 // and the member that carries the key must name this node as its EVM validator.
 func (a *Authority) SignElectionPoP(req ElectionPoPRequest) (evmassign.EVMPoP, error) {
+	if _, err := a.fenceGate(); err != nil {
+		return evmassign.EVMPoP{}, err
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	hs, pub, err := a.ethSigner()
@@ -110,6 +113,9 @@ func (a *Authority) SignElectionPoP(req ElectionPoPRequest) (evmassign.EVMPoP, e
 // SignDelegationPossession signs ElectionPolicy.delegationDigest for this authority's own key: the payload must nominate this key as the
 // identity's EVM key and this node as its EVM validator, and nothing else is signed.
 func (a *Authority) SignDelegationPossession(req DelegationPossessionRequest) ([]byte, error) {
+	if _, err := a.fenceGate(); err != nil {
+		return nil, err
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	hs, pub, err := a.ethSigner()

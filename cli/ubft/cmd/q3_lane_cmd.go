@@ -501,6 +501,7 @@ func newQ3ActivationCmd() *cobra.Command {
 }
 
 func newQ3Cmd() *cobra.Command {
+	var registryChangesOut string
 	q3 := &cobra.Command{Use: "q3", Short: "Evidence of the Q3 acceptance lane, read from the processes that hold it"}
 	var rootRPCs, out string
 	var epoch uint64
@@ -532,11 +533,31 @@ func newQ3Cmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if _, _, err := q3active.DecodeBundle(raw); err != nil {
+			bundle, env, err := q3active.DecodeBundle(raw)
+			if err != nil {
 				return fmt.Errorf("the root returned a bundle that does not decode: %w", err)
+			}
+			if registryChangesOut != "" {
+				link := env.Links[len(env.Links)-1]
+				digest := sha256.Sum256(bundle.Candidate)
+				if link.Body.Epoch != epoch || !bytes.Equal(digest[:], link.Evidence.CandidateDigest) {
+					return errors.New("the bundle does not bind the candidate for the requested epoch")
+				}
+				_, _, changes, err := evmassign.DecodeCandidateV6View(bundle.Candidate)
+				if err != nil {
+					return err
+				}
+				report := struct {
+					Epoch           uint64                         `json:"epoch"`
+					RegistryChanges []evmassign.RegistryChangeView `json:"registryChanges"`
+				}{epoch, changes}
+				if err := writeJSONFile(registryChangesOut, report); err != nil {
+					return err
+				}
 			}
 			return os.WriteFile(out, raw, 0o600)
 		}}
+	envelope.Flags().StringVar(&registryChangesOut, "registry-changes-out", "", "also export the committed VR candidate’s change verdicts as JSON")
 	envelope.Flags().Uint64Var(&epoch, "epoch", 0, "the activated root epoch")
 	_ = envelope.MarkFlagRequired("epoch")
 	signers := &cobra.Command{Use: "signers", Short: "The signers and weights of the committed root quorum certificate",
