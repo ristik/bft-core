@@ -308,6 +308,22 @@ h3_restore_validator() {
   # No default: an empty trust base would restore against the wrong anchor. The caller sets it before any path that can restore
   # (h3_advance_authorities restores the H3_RESTORE_RESTART validators too).
   [ -n "${H3_RESTORE_TRUST_BASE:-}" ] || { echo "h3_restore_validator $i: H3_RESTORE_TRUST_BASE is not set" >&2; return 1; }
+  # Journal metadata pins these limits. Forward the same overrides as the ordinary start, without its other extra flags.
+  local -a journalOverrides=()
+  # Use the same word splitting as start_one_evm_validator.
+  set -- ${EVM_EXTRA_ARGS:-}
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --) break ;;
+      --journal-candidates|--journal-observations|--journal-bytes)
+        [ "$#" -ge 2 ] || { echo "h3_restore_validator $i: $1 needs a value" >&2; return 1; }
+        journalOverrides+=("$1" "$2")
+        shift ;;
+      --journal-candidates=*|--journal-observations=*|--journal-bytes=*)
+        journalOverrides+=("$1") ;;
+    esac
+    shift
+  done
   # The restored node lives in the validator's own home, with the paths a plain start uses (journal, archive store, debug.log), so the
   # lane's later authority-advance restarts (start_one_evm_validator) find it where they expect it. Its stale state is cleared first.
   local evidence="test-nodes/evm$i" bodyID rootBoot bootnodes peers=() p
@@ -387,6 +403,7 @@ h3_restore_validator() {
     --eth-url "http://127.0.0.1:$((rethEthBase+i-1))" --jwt-secret "$evidence/jwt.hex" \
     --engine-fee-collector "$EVM_ENGINE_FEE_COLLECTOR" --execution-journal "$journal" \
     --archive-store "$H3_ARCHIVES/evm$i" --archive-prune --trust-history-profile-2 --journal-candidates "${EVM_JOURNAL_CANDIDATES:-32}" \
+    ${journalOverrides[@]+"${journalOverrides[@]}"} \
     ${signingArgs[@]+"${signingArgs[@]}"} \
     "${peers[@]}" --tip-uc "$evidence/tip.uc.cbor" --tip-tr "$evidence/tip.tr.cbor" --trust-body-id "$bodyID" \
     $([ "${Q3_B1:-0}" != 1 ] || echo --q3-lane --rpc-server-address "$(evm_validator_rpc_addr "$i")") \

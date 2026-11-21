@@ -326,6 +326,9 @@ func initBuckets(tx *bbolt.Tx) error {
 	if err := writeUint64(b, keyHighestVoted, rctypes.GenesisRootRound); err != nil {
 		return fmt.Errorf("storing highest voted round: %w", err)
 	}
+	if err := b.Put(keyProposalRecord, []byte{freshProposalRecord}); err != nil {
+		return fmt.Errorf("initializing proposal signing record: %w", err)
+	}
 	if _, err := tx.CreateBucket(bucketMetadata); err != nil {
 		return fmt.Errorf("creating bucket for metadata: %w", err)
 	}
