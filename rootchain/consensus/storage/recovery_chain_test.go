@@ -17,6 +17,7 @@ import (
 	"github.com/unicitynetwork/bft-go-base/types"
 	"github.com/unicitynetwork/bft-go-base/types/hex"
 
+	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
@@ -236,6 +237,26 @@ func Test_Chain_NormalRecoveryRoundTrip(t *testing.T) {
 	bs, _, err := c.recoverInto(sm)
 	require.NoError(t, err)
 	require.Equal(t, c.store.tree().root.data.RootHash, bs.tree().root.data.RootHash)
+}
+
+func TestRecoverFromStateKeepsTheRecordFetcher(t *testing.T) {
+	c := newTestChain(t, chainShard{partition: 1, epochStarts: []uint64{1}})
+	c.next()
+	c.next()
+	head := received(t, c.state()).CommittedHead
+	recs := chainOf(4)
+	fetcher := &sliceFetcher{recs: recs}
+	c.store.SetRecordFetcher(fetcher)
+	db := c.store.GetDB().(RecordStore)
+	require.NoError(t, db.AppendRecords(recs[:3]))
+
+	replacement, err := c.store.RecoverFromState(head)
+	require.NoError(t, err)
+	require.NoError(t, replacement.ensureRetainedPrefix(&evmroot.ControlState{Pos: stateOver(recs).Bytes()}))
+	require.Equal(t, 1, fetcher.calls)
+	retained, err := db.Records(0, len(recs))
+	require.NoError(t, err)
+	require.Equal(t, recs, retained)
 }
 
 // consistentHeadQCs returns the QC of the block and the commit QC which commits it, with the relationships the

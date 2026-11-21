@@ -80,6 +80,8 @@ type (
 
 	PersistentStore interface {
 		SafetyStorage
+		ProposalStorage
+		FenceLegacyProposals(epoch uint64) error
 		storage.PersistentStore
 	}
 
@@ -116,8 +118,6 @@ type (
 		irReqBuffer        *IrReqBuffer
 		safety             *SafetyModule
 		storeRef           atomic.Pointer[storage.BlockStore] // the block store, read through blockStore() (#1191)
-		lastProposedEpoch  atomic.Uint64                      // the epoch of lastProposedRound
-		lastProposedRound  atomic.Uint64                      // the highest round this process signed a proposal for: no round at or below it is signed again (#1210)
 		orchestration      Orchestration
 		irReqVerifier      *IRChangeReqVerifier
 		t2Timeouts         *PartitionTimeoutGenerator
@@ -366,6 +366,25 @@ func NewConsensusManager(
 		if err := configureHandoffAuthorities(bStore, trustBase, installedAnchor, optional.Q3, optional.RecoveryHistory); err != nil {
 			return nil, err
 		}
+	}
+	if _, err := store.ReadProposalRecord(); errors.Is(err, storage.ErrLegacyProposalStore) {
+		// Handoff roots sign only in the durably installed epoch. Roots
+		// driven by configured trust bases could have signed in any epoch
+		// in their local history, even if the recovered round is earlier.
+		legacyEpoch := trustBase.Epoch
+		if cParams.NetworkProfileVersion != storage.ProfileHandoff {
+			lastTrustBase, err := trustBaseStore.LoadLast()
+			if err != nil {
+				return nil, fmt.Errorf("finding last configured proposal epoch: %w", err)
+			}
+			legacyEpoch = lastTrustBase.Epoch
+		}
+		if err := store.FenceLegacyProposals(legacyEpoch); err != nil {
+			return nil, fmt.Errorf("fencing legacy proposal slots: %w", err)
+		}
+		log.Warn("legacy proposal signing fenced until a successor epoch", "epoch", legacyEpoch)
+	} else if err != nil {
+		return nil, fmt.Errorf("reading durable proposal record: %w", err)
 	}
 	// The lookup reads the manager's CURRENT block store: recovery replaces x.blockStore(), and a store captured here would go stale.
 	// The manager is assigned below, before anything can sign.
@@ -1948,12 +1967,15 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 		return
 	}
 
-	// a root signs at most one proposal for a round of an epoch, as long as the process lives: a recovery or a certificate lowering the round
-	// does not allow another one for a round already signed (#1210; across a restart: #1212). Checked before the payload is built: a
-	// suppressed duplicate takes no request out of the buffer. A successor epoch starts fresh: the suffix rounds of the old epoch overlap its
-	// first rounds.
-	if epoch, last := x.trustBase.Load().Epoch, x.lastProposedRound.Load(); epoch == x.lastProposedEpoch.Load() && round <= last {
-		x.log.WarnContext(ctx, "not proposing, a proposal of this round was already signed", "round", round, "last", last)
+	// Check before taking requests out of the buffer. The signing path reserves
+	// the proposal atomically after constructing and validating its final payload.
+	prior, err := x.safety.proposalRecord()
+	if err != nil {
+		x.log.WarnContext(ctx, "cannot read durable proposal record", "round", round, logger.Error(err))
+		return
+	}
+	if prior.Covers(x.trustBase.Load().Epoch, round) {
+		x.log.WarnContext(ctx, "not proposing, proposal slot already reserved", "round", round, "reservedEpoch", prior.Epoch, "reservedRound", prior.Round)
 		return
 	}
 
@@ -2132,13 +2154,11 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 		x.log.WarnContext(ctx, "cannot propose within the proposal frame limit: the ordered controls do not fit", "size", size, logger.Error(err))
 		return
 	}
-	// safety makes simple sanity checks and signs if everything is ok
+	// Safety validates and reserves the exact proposal before signing.
 	if err = x.safety.Sign(proposalMsg.Block.Epoch, proposalMsg); err != nil {
 		x.log.WarnContext(ctx, "failed to send proposal message, signing failed", logger.Error(err))
 		return
 	}
-	x.lastProposedEpoch.Store(x.trustBase.Load().Epoch)
-	x.lastProposedRound.Store(round)
 	// broadcast proposal message (also to self)
 	span.AddEvent(proposalMsg.Block.String())
 	x.log.LogAttrs(ctx, slog.LevelDebug, "broadcast proposal", logger.Data(proposalMsg.Block.String()))

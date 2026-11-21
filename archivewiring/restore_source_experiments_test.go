@@ -171,7 +171,7 @@ func TestArchiveRestoreSurvivesLosingOneReplicaDuringTheFetchWalk(t *testing.T) 
 }
 
 // Both replicas are lost partway through the walk. The restore ends after its bounded wait, naming the restore refusal and the unavailable
-// record. The failure is in the fetch phase, so nothing reached the journal or the execution client: no pin, no observation, EL at genesis.
+// record. Only the retry checkpoint is in the journal: no restore anchor, no observation, EL at genesis.
 // Once the sources are back, the same restore runs to completion on the same disks.
 func TestArchiveRestoreLosingBothReplicasDuringTheFetchWalkEndsCleanlyAndResumes(t *testing.T) {
 	t.Parallel()
@@ -241,40 +241,6 @@ type replayProbe struct {
 func (p *replayProbe) Verify(ctx context.Context, b shardnode.Block, params shardnode.RoundParams) (shardnode.Status, error) {
 	p.once.Do(p.onFirstVerify)
 	return p.RestoreExecutor.Verify(ctx, b, params)
-}
-
-// A replay that fails partway (here the execution client refuses the third block) leaves the execution client past genesis. The failure
-// is not rolled back and a second restore on the same disks is refused before any fetch, as docs/single-epoch-archive-restore.md says:
-// restart from new empty disks.
-func TestArchiveRestoreFailedReplayIsNotResumedOnTheSameDisks(t *testing.T) {
-	t.Parallel()
-	fx := newRetryRestoreFixture(t, 0, fastRetry(time.Second))
-	fx.restore.Adapter = &failingVerify{RestoreExecutor: fx.executor, failAt: 3}
-	err := fx.restore.Restore(context.Background())
-	require.ErrorIs(t, err, ErrRestore)
-	require.EqualValues(t, 2, fx.executor.head.Number, "the first two blocks were imported")
-	image, loadErr := fx.journal.LoadJournal(context.Background(), fx.wf.context, fx.limits)
-	require.NoError(t, loadErr)
-	require.Nil(t, image.Restored, "no restore pin is recorded for a failed replay")
-
-	fx.restore.Adapter = fx.executor
-	before := fx.host.calls.Load()
-	err = fx.restore.Restore(context.Background())
-	require.ErrorIs(t, err, ErrRestore)
-	require.ErrorContains(t, err, "EL head must be the checked genesis")
-	require.Equal(t, before, fx.host.calls.Load(), "the refusal comes before any fetch")
-}
-
-type failingVerify struct {
-	RestoreExecutor
-	failAt uint64
-}
-
-func (f *failingVerify) Verify(ctx context.Context, b shardnode.Block, params shardnode.RoundParams) (shardnode.Status, error) {
-	if b.Number == f.failAt {
-		return shardnode.StatusInvalid, nil
-	}
-	return f.RestoreExecutor.Verify(ctx, b, params)
 }
 
 // A source that accepts every stream and never answers (it advertises itself as a replica and cannot serve) costs the restore one bounded

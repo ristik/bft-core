@@ -112,9 +112,14 @@ func NewFromState(hash crypto.Hash, block *abdrc.CommittedBlock, db PersistentSt
 	return newFromHead(hash, block, db, orchestration, log, true, nil, networkProfile...)
 }
 
-// RecoverFromState installs the certified head on the existing store's database, preserving observation across the recovery.
+// RecoverFromState installs the certified head on the existing database, preserving observation and record fetching.
 func (x *BlockStore) RecoverFromState(block *abdrc.CommittedBlock) (*BlockStore, error) {
-	return newFromHead(x.hash, block, x.storage, x.orchestration, x.log, true, x.observed.Load(), x.profile)
+	store, err := newFromHead(x.hash, block, x.storage, x.orchestration, x.log, true, x.observed.Load(), x.profile)
+	if err != nil {
+		return nil, err
+	}
+	store.prefixSource = x.recordFetcher()
+	return store, nil
 }
 
 // NewFromCheckpoint installs a head that is authenticated by its own verification (a handoff checkpoint: the old committee's commit proof and the

@@ -252,7 +252,7 @@ ubft shard-node restore "${SHARD_ARGS[@]}" --tip-uc seed-pin.uc.cbor --tip-tr se
   --trust-body-id "$TRUST_BODY_ID" >logs/shard.log 2>&1 &
 ```
 
-If the initial shard restore exited at the Engine dial with connection refused, leave the healthy root running. After ureth's readiness check succeeds, repeat just `shard-node restore` when the journal and archive are still fresh. If restore already wrote replay state, preserve it and inspect the error before choosing a recovery procedure.
+If the initial shard restore exited at the Engine dial with connection refused, leave the healthy root running. After ureth's readiness check succeeds, repeat just `shard-node restore` when the journal and archive are still fresh. If a same-epoch restore recorded a checkpoint and then stopped, repeat the restore with the same pin, journal, archive and execution datadir. See [archive restore](../single-epoch-archive-restore.md) for the retry checks.
 
 The root starts from genesis, and the shard and ureth replay certified data from archive peers to the seed checkpoint. Before the roots stage your identity, your shard may retry its handshake and the local head may trail the network. Keep the services running through application and check for catch-up once the election publishes and the roots stage the successor. After a successful restore, supervise subsequent shard starts with `ubft shard-node run "${SHARD_ARGS[@]}"`. Preserve the databases, sessions and high-water records across restarts.
 
@@ -397,7 +397,9 @@ stage_hotfix() (
 stage_hotfix
 ```
 
-After staging succeeds, use the service supervisor to stop the affected root and start it with `"$HOTFIX_BINARY" root-node run`, the existing `ROOT_ARGS` and the same home. Keep the shard, execution client and signing authority running, and keep the proof profile for this generation. Check that the root has caught up and is voting if it remains a committee member. If startup fails, return the affected service to the previous verified executable with its original arguments and contact the Foundation. An operator already excluded can complete the PoS exit using the public RPC and wallet after the incumbent roots produce the retirement record.
+After staging succeeds, use the service supervisor to stop the affected root and start it with `"$HOTFIX_BINARY" root-node run`, the existing `ROOT_ARGS` and the same home. Keep the shard, execution client and signing authority running, and keep the proof profile for this generation. Check that the root has caught up and is voting if it remains a committee member. If startup fails, contact the Foundation. Use a verified rollback release only if it enforces the current signing state, including any durable proposal fence and reservations. Keep the same root database and trust history. If a compatible executable is unavailable, keep the root signer stopped. [First adoption of durable root proposal signing](foundation-handbook.md#first-adoption-of-durable-root-proposal-signing)
+
+An operator already excluded can complete the PoS exit using the public RPC and wallet after the incumbent roots produce the retirement record.
 
 ## 6. Exit and retire
 
