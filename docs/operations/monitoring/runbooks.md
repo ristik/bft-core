@@ -231,11 +231,11 @@ Severity: critical.
 
 Severity: warning.
 
-**What it means.** The authority latched retired: this validator was removed from the committee; it signs nothing further.
+**What it means.** The installed assignment excluded the validator or changed its key. The authority is fenced from signing and issuing sessions.
 
 **Confirm.** `unicity_authority_retired == 1` after a committed exit or removal (`unicity_vr_identity_state` in 6 to 8).
 
-**Fix.** Expected after an exit: stop the validator's services. Unexpected: find the governance change that removed it (`ubft validator status` lists pending changes).
+**Fix.** After an acknowledged exit, follow the validator retirement procedure. If an unacknowledged primary excluded the validator and a verified recovery K restores its original key, advance the authority with both activation proofs in order. For unexpected removal, use `ubft validator status` to identify the governance change.
 
 **Escalate when.** Escalate if it was not an exit you requested.
 
