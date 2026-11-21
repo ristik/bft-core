@@ -258,7 +258,10 @@ fn cases(db: &Db, pins: Pins, dir: &Path, ordinary: Address, recovery: Address, 
             let _after = field(&mut frames);
             let topics = field(&mut frames);
             let data = field(&mut frames);
-            let _receipt = field(&mut frames);
+            let receipt = field(&mut frames);
+            if name == "cross-cut-conflict" && index == 0 {
+                assert_eq!(receipt, raw(case.join("last-usable-predecessor.cbor")));
+            }
             if name == "cross-cut-conflict" && index == 1 {
                 let (result, native) = call(
                     &state,
@@ -279,6 +282,9 @@ fn cases(db: &Db, pins: Pins, dir: &Path, ordinary: Address, recovery: Address, 
             }
             let (result, native) = call(&state, pins, recovery, packet);
             check_event(result, recovery, topics, data);
+            if name == "b1-rollover" && index == 1 {
+                assert_eq!(data[32..], raw(case.join("verdict.bin")));
+            }
             if name == "b1-rollover" && index == 0 {
                 assert_eq!(native.cert.len(), 2);
                 for (i, input) in native.cert.iter().enumerate() {
@@ -436,7 +442,10 @@ fn deployable_nb2_flat_supplement() {
         if seed {
             fs::write(dir.join(name), value).unwrap();
         } else {
-            assert_eq!(value, raw(dir.join(name)), "{name}");
+            assert!(
+                value == raw(dir.join(name)),
+                "{name} differs from the freshly deployed graph"
+            );
         }
     }
     if !seed {

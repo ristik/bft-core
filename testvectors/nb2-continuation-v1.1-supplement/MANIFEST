@@ -1,4 +1,4 @@
-13649162d55678c649e3de0cebd34ad3ac82d9431c881e3c963a51267c0df1a6  ./README.md
+a56a907706a50c5e949863201adfb546b21b7cb85cbe1eec612af23dedc05fa7  ./README.md
 ceb29e0c58f606b8ada95731d36430096bf751fb01cd0cf3ff2aa72e954430ba  ./b1-rollover-refusals/BadPage.calldata.bin
 19f624ee690d53e26f531d250da7a9aac9a77ec664fa18155855e5225f8a1146  ./b1-rollover-refusals/BadStep.calldata.bin
 b9d1b74c08302e76b2468763058f75e11a090bdb04154da7b98217ba5b329ced  ./b1-rollover-refusals/batch-1.bin
@@ -29,5 +29,5 @@ b5f36b99a1e1e6fefdccf88c8422da42ee0234878777bfe4a5621b72cec37cfc  ./descriptors/
 6d2e306de19150ff02207f5d5e06fd08053b6ba4641b9689b5fb1f66d5920a6a  ./descriptors/semantic-profile.json
 1ce177655403c094e978b6c488e22103547e05f8318d9c67f072b5860ec1f893  ./gamma.bin
 d5ed116ce037bfb064754c1573b3d0d37d59296aa2a68031b34ae5fac351fc29  ./generation-salt.bin
-d9a293c18f3bde7a8cf9a66e604cfc51a1353d4ca58f7459e2e7b61e5857a6f6  ./nb2_flat_supplement.rs
+0c08d7e5a97458e5ea44652f9a5510657820177bf9b76ac6d938da28d82efd91  ./nb2_flat_supplement.rs
 c7ec3cbdf5d359bb374ed31919873c96629abeb785ee4ef96dbfbb1a814296f2  ./pin-records.bin

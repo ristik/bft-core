@@ -27,8 +27,10 @@ export NB2_FLAT_SUPPLEMENT="$NB2_FLAT_BFT/testvectors/nb2-continuation-v1.1-supp
 # ristik/unicity-pos-contracts at 36dcbc1fed6505ffaff858678116bcefc8bb9fbf
 cd /path/to/unicity-pos-contracts
 git submodule update --init
-forge build --use /path/to/solc-0.8.37 -j 4 --skip script
-export NB2_FLAT_FORGE_OUT="$PWD/out"
+forge build src/nb2/verifier/flat/NativeBridgeVerifier11.sol \
+  src/nb2/verifier/flat/NativeBridgeRecovery11.sol \
+  --out out-replay --cache-path cache-replay --use /path/to/solc-0.8.37 -j 4 --skip test --skip script
+export NB2_FLAT_FORGE_OUT="$PWD/out-replay"
 
 # Ureth at 47cf38736c9f09def5c8fc4dee8a7798ae3988dd, in a disposable checkout
 cd /path/to/ureth
