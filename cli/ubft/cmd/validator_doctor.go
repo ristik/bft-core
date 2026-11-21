@@ -411,11 +411,14 @@ func rpcChecks(v *loadedValidator, h hostFacts) []doctorCheck {
 			mode := "PoA"
 			if ch.isPoS() {
 				mode = "PoS"
-				_, _, err = ch.posAddrs(ctx)
-			} else {
-				_, err = ch.poa()
-			}
-			if err != nil {
+				_, election, err := ch.posAddrs(ctx)
+				if err != nil {
+					return false, err.Error(), ""
+				}
+				if _, err := ch.vr.OpenResult(ctx, election); err != nil {
+					return false, fmt.Sprintf("P85 election %s does not serve openResult: %v", election.Hex(), err), ""
+				}
+			} else if _, err := ch.poa(); err != nil {
 				return false, err.Error(), ""
 			}
 			n, ts, err := blockInfo(ctx, ch.rpc, "latest")

@@ -243,8 +243,13 @@ func (c *Client) PosContracts(ctx context.Context, m ModuleView) (custody, elect
 	if custody == (ethcommon.Address{}) {
 		return custody, election, fmt.Errorf("%w: the active module names no liability holder", ErrVR)
 	}
-	err = c.call(ctx, custody, CustodyABI, "election", &election)
-	return custody, election, err
+	if err = c.call(ctx, custody, CustodyABI, "election", &election); err != nil {
+		return custody, election, err
+	}
+	if election == (ethcommon.Address{}) {
+		return custody, election, fmt.Errorf("%w: custody %s names no P85 election", ErrVR, custody.Hex())
+	}
+	return custody, election, nil
 }
 
 // CustodyRegisteredID reads the id from a custody register receipt's Registered log.

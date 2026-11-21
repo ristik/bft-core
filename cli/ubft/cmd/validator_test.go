@@ -325,6 +325,25 @@ func TestValidatorDoctor(t *testing.T) {
 	}
 	chain.Fund(ethcrypto.PubkeyToAddress(keys.Operator.PublicKey), big.NewInt(1))
 
+	chain.With(func(c *vrfake.Chain) {
+		c.Tag = vrclient.ModuleTagPoS
+		c.Custody = ethcommon.HexToAddress("0x80")
+	})
+	out, err = run(host)
+	require.Error(t, err)
+	require.Contains(t, out, "names no P85 election")
+
+	chain.With(func(c *vrfake.Chain) { c.Election = c.Seal })
+	out, err = run(host)
+	require.Error(t, err)
+	require.Contains(t, out, "does not serve openResult")
+
+	chain.With(func(c *vrfake.Chain) { c.Election = ethcommon.HexToAddress("0x81") })
+	out, err = run(host)
+	require.NoError(t, err)
+	require.Contains(t, out, "PoS module")
+	chain.With(func(c *vrfake.Chain) { c.Tag = vrclient.ModuleTagPoA })
+
 	weak := host
 	weak.Cores, weak.Threads, weak.MemBytes, weak.NVMe = 4, 8, 32e9, []uint64{512e9}
 	weak.NTPSynced = func() (bool, string) { return false, "NTPSynchronized=no" }
