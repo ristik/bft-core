@@ -1102,10 +1102,23 @@ func (s *Store) loadJournalOnce(ctx context.Context, c Context, limits JournalLi
 					}
 				}
 			}
-			// A returning follower may retain a later proposal before it has
-			// fetched the authorizing certificate's own body/observation. The
-			// pair above was independently authenticated; only locally built
-			// proposals require it to have been observed here already.
+			// Historical recovery persists a peer body and its authenticated
+			// result before committing or backfilling the observation. A crash
+			// or handoff can interrupt that interval. The candidate's own
+			// result still certifies its body, but must not advance progress
+			// or synthesize an observation on load.
+			if !foundResult && !candidate.Candidate.LocallyBuilt {
+				auth, result := candidate.Candidate.AuthorizingUC, candidate.ResultingUC
+				if rootinput.CheckEpochCertificates(auth, result) != nil ||
+					!rootPositionLater(result.GetRootEpoch(), result.GetRootRoundNumber(), auth.GetRootEpoch(), auth.GetRootRoundNumber()) {
+					return fmt.Errorf("%w: detached result does not follow its authorization: height=%d round=%d",
+						ErrConflict, candidate.Candidate.Number, candidate.Candidate.Round)
+				}
+				foundResult = true
+			}
+			// A peer candidate can also arrive before the observation for its
+			// authenticated authorization. Local proposals still need their
+			// authorizing observation and a result observation or coverage.
 			if candidate.Candidate.LocallyBuilt && !foundAuthorization || !foundResult {
 				anchorHeight, anchorRound := uint64(0), uint64(0)
 				if out.Frontier != nil {

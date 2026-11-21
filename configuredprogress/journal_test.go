@@ -243,3 +243,52 @@ func TestJournalFullIsCapacityNotBounds(t *testing.T) {
 	require.NotErrorIs(t, journalFull(limits, limits.Bytes+1), ErrCapacity)
 	require.ErrorIs(t, journalFull(JournalLimits{Observations: 1, Bytes: limits.Bytes}, 100), ErrBounds, "a journal with no room for any candidate can never admit one")
 }
+
+func TestJournalReopensInterruptedHistoricalCandidateAdmission(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		local bool
+	}{
+		{name: "peer candidate"},
+		{name: "local proposal", local: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			f := newFixture(t, 2)
+			s, path := openJournal(t, f, testJournalLimits)
+			bootstrap, result := f.bootstrap(1, 4), f.first(1, 2, 5)
+			admitJournal(t, s, f, bootstrap)
+			candidate := candidateB1(f, bootstrap)
+			candidate.LocallyBuilt = tc.local
+			require.NoError(t, s.PutHistoricalCertifiedJournalCandidate(ctx, f.ctx, testJournalLimits, candidate, result.Certificate(), result.TechnicalRecord()))
+			// Simulate an interruption after the archive candidate was committed and before its observation.
+			require.NoError(t, s.Close())
+
+			s, err := OpenConfiguredV2(path, Settings{Retain: 3})
+			require.NoError(t, err)
+			defer s.Close()
+			err = s.EnableJournal(ctx, f.ctx, testJournalLimits)
+			if tc.local {
+				require.ErrorIs(t, err, ErrUntrusted)
+				return
+			}
+			require.NoError(t, err)
+			image, err := s.LoadJournal(ctx, f.ctx, testJournalLimits)
+			require.NoError(t, err)
+			require.Len(t, image.Candidates, 1)
+			require.True(t, image.Candidates[0].Certified)
+			require.Equal(t, result.Certificate().GetRootRoundNumber(), image.Candidates[0].ResultingUC.GetRootRoundNumber())
+			require.Len(t, image.Observations, 1, "opening a detached pair must not synthesize an observation")
+			progress, _, err := s.Load(ctx, f.ctx)
+			require.NoError(t, err)
+			latest, ok := progress.Observed()
+			require.True(t, ok)
+			require.Equal(t, bootstrap.Certificate().GetRootRoundNumber(), latest.Certificate().GetRootRoundNumber())
+
+			require.NoError(t, s.BackfillJournalObservation(ctx, f.ctx, testJournalLimits, result.Certificate(), result.TechnicalRecord()))
+			image, err = s.LoadJournal(ctx, f.ctx, testJournalLimits)
+			require.NoError(t, err)
+			require.Len(t, image.Observations, 2)
+		})
+	}
+}
