@@ -31,6 +31,23 @@ func (c RPCChain) Head(ctx context.Context) (uint64, error) {
 	return uint64(out), nil
 }
 
+// finalizedBlockHash locates the retained execution block behind a quiet
+// certificate. The paired shard finalizes execution when it certifies a block.
+// Its finalized block is usable only if it has the quiet parent's state root.
+func (c RPCChain) finalizedBlockHash(ctx context.Context, stateRoot [32]byte) ([32]byte, error) {
+	var header *struct {
+		Hash      common.Hash `json:"hash"`
+		StateRoot common.Hash `json:"stateRoot"`
+	}
+	if err := c.Client.CallContext(ctx, &header, "eth_getBlockByNumber", "finalized", false); err != nil {
+		return [32]byte{}, err
+	}
+	if header == nil || header.StateRoot != stateRoot {
+		return [32]byte{}, nil
+	}
+	return header.Hash, nil
+}
+
 type rpcLog struct {
 	Topics      []hexutil.Bytes `json:"topics"`
 	Data        hexutil.Bytes   `json:"data"`

@@ -66,6 +66,10 @@ type Chain interface {
 	Requests(ctx context.Context, from, to uint64) ([]Request, error)
 }
 
+type finalizedBlockSource interface {
+	finalizedBlockHash(context.Context, [32]byte) ([32]byte, error)
+}
+
 // Proofs returns the eth_getProof source for one EVM block.
 type Proofs func(blockHash [32]byte) evmstate.ProofSource
 
@@ -356,31 +360,32 @@ func cmpU(a, b uint64) int {
 	return 0
 }
 
-// blockHashFor returns the EVM block hash proofs for the parent are fetched at: the certified block's, or for a quiet parent (no block hash
-// in the input record) the block that certified the same state root earlier. The control still names the parent's own (zero) hash.
-func (s *Service) blockHashFor(parent storage.EVMParent) ([32]byte, bool) {
-	if parent.BlockHash != ([32]byte{}) {
-		if _, known := s.roots[parent.StateRoot]; !known {
-			if len(s.rootsOrd) >= maxRootBlocks {
-				delete(s.roots, s.rootsOrd[0])
-				s.rootsOrd = s.rootsOrd[1:]
-			}
-			s.roots[parent.StateRoot] = parent.BlockHash
-			s.rootsOrd = append(s.rootsOrd, parent.StateRoot)
-		}
-		return parent.BlockHash, true
+// rememberBlockHash caches proof locations while holding s.mu.
+func (s *Service) rememberBlockHash(root, block [32]byte) {
+	if _, known := s.roots[root]; known {
+		return
 	}
-	h, ok := s.roots[parent.StateRoot]
-	return h, ok
+	if len(s.rootsOrd) >= maxRootBlocks {
+		delete(s.roots, s.rootsOrd[0])
+		s.rootsOrd = s.rootsOrd[1:]
+	}
+	s.roots[root] = block
+	s.rootsOrd = append(s.rootsOrd, root)
 }
 
 // Prepare implements storage.RetirementProposer.
 func (s *Service) Prepare(parent storage.EVMParent) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// always learn the root -> block mapping, even with nothing pending: a later quiet parent carries the same root
-	fetchAt, ok := s.blockHashFor(parent)
-	if len(s.pending) == 0 || !ok {
+	fetchAt := parent.BlockHash
+	if fetchAt != ([32]byte{}) {
+		// Learn the mapping even when nothing is pending.
+		s.rememberBlockHash(parent.StateRoot, fetchAt)
+	} else {
+		fetchAt = s.roots[parent.StateRoot]
+	}
+	finalized, _ := s.cfg.Chain.(finalizedBlockSource)
+	if len(s.pending) == 0 || (fetchAt == ([32]byte{}) && finalized == nil) {
 		return
 	}
 	started := 0
@@ -399,7 +404,7 @@ func (s *Service) Prepare(parent storage.EVMParent) {
 		s.inflight[ck] = struct{}{}
 		started++
 		s.wg.Add(1)
-		go s.collect(ck, fetchAt)
+		go s.collect(ck, fetchAt, finalized)
 	}
 	s.rotate = (s.rotate + started) % max(n, 1)
 }
@@ -409,12 +414,26 @@ func (s *Service) cachedLocked(ck cacheKey) bool {
 }
 
 // collect builds the witness of one request against one parent, off the consensus loop.
-func (s *Service) collect(ck cacheKey, fetchAt [32]byte) {
+func (s *Service) collect(ck cacheKey, fetchAt [32]byte, finalized finalizedBlockSource) {
 	defer s.wg.Done()
 	started := s.cfg.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), ProofBudget)
 	defer cancel()
-	witness, facts, err := s.buildWitness(ctx, ck, s.cfg.Proofs(fetchAt))
+	var witness []byte
+	var facts storage.RetirementFacts
+	var err error
+	lookup := fetchAt == ([32]byte{})
+	if lookup {
+		fetchAt, err = finalized.finalizedBlockHash(ctx, ck.parent.StateRoot)
+	}
+	if err == nil && fetchAt != ([32]byte{}) {
+		witness, facts, err = s.buildWitness(ctx, ck, s.cfg.Proofs(fetchAt))
+	}
+	if err == nil && lookup && fetchAt != ([32]byte{}) && s.cfg.VR == nil {
+		// Authenticate the legacy witness too before using facts from a
+		// block located by execution RPC to complete a pending request.
+		facts, err = (evmstate.Authority{Pins: s.cfg.Pins}).VerifyRetirement(witness, ck.parent.StateRoot, ck.key.ID, ck.key.Generation)
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -423,6 +442,14 @@ func (s *Service) collect(ck cacheKey, fetchAt [32]byte) {
 	if err != nil {
 		s.log.Warn("retirement proof not collected", "id", ck.key.ID, "generation", ck.key.Generation, "parentRoot", fmt.Sprintf("%x", ck.parent.StateRoot), "error", err)
 		return
+	}
+	if fetchAt == ([32]byte{}) {
+		return // finalized execution does not yet match this parent
+	}
+	if lookup {
+		// Only cache an available proof location. Keep the quiet parent's zero
+		// block hash in the control and cache key.
+		s.rememberBlockHash(ck.parent.StateRoot, fetchAt)
 	}
 	idx := slices.IndexFunc(s.pending, func(p pendingItem) bool { return p.Key == ck.key })
 	if idx < 0 {

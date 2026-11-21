@@ -111,10 +111,18 @@ func waitReady(t *testing.T, svc *Service, p storage.EVMParent, n int) []storage
 }
 
 type retirementRPC struct {
-	holder [20]byte
+	holder                   [20]byte
+	finalizedHash, stateRoot common.Hash
 }
 
 func (r retirementRPC) BlockNumber() hexutil.Uint64 { return 20 }
+
+func (r retirementRPC) GetBlockByNumber(tag string, full bool) (map[string]common.Hash, error) {
+	if tag != "finalized" || full {
+		return nil, errors.New("expected the finalized header")
+	}
+	return map[string]common.Hash{"hash": r.finalizedHash, "stateRoot": r.stateRoot}, nil
+}
 
 func (r retirementRPC) Call(input map[string]string, block string) (hexutil.Bytes, error) {
 	if common.HexToAddress(input["to"]) != common.Address(vrschema.ValidatorRegistry) {
@@ -172,32 +180,62 @@ func TestVRRequestBuildsAnAuthenticatedHolderRetirement(t *testing.T) {
 	key := Key{ID: h.ID, Generation: h.Generation}
 	server := rpc.NewServer()
 	t.Cleanup(server.Stop)
-	require.NoError(t, server.RegisterName("eth", retirementRPC{holder: holder.Holder}))
+	hash := [32]byte{1}
+	require.NoError(t, server.RegisterName("eth", retirementRPC{holder: holder.Holder, finalizedHash: hash, stateRoot: world.Root()}))
 	client := rpc.DialInProc(server)
 	t.Cleanup(client.Close)
-	svc, err := New(Config{
+	fetched := make(chan [32]byte, 4)
+	cfg := Config{
 		Deployment: storage.PosDeployment{RootNetwork: 3},
 		VR:         &pins, StatePath: filepath.Join(t.TempDir(), "retirements.json"),
-		Chain:  RPCChain{Client: client, Registry: pins.Registry},
-		Proofs: func([32]byte) evmstate.ProofSource { return world },
-	})
-	require.NoError(t, err)
-	t.Cleanup(func() { svc.wg.Wait(); svc.Flush() })
+		Chain: RPCChain{Client: client, Registry: pins.Registry},
+		Proofs: func(block [32]byte) evmstate.ProofSource {
+			fetched <- block
+			return world
+		},
+	}
+	open := func() *Service {
+		svc, err := New(cfg)
+		require.NoError(t, err)
+		t.Cleanup(func() { svc.wg.Wait(); svc.Flush() })
+		return svc
+	}
+	// First enablement during a quiet period discovers the historical request.
+	svc := open()
 	require.NoError(t, svc.Poll(ctx))
 	require.Equal(t, []Key{key}, svc.Pending())
-	parent := storage.EVMParent{BlockHash: [32]byte{1}, StateRoot: world.Root()}
-	svc.Prepare(parent)
-	ready := waitReady(t, svc, parent, 1)[0]
-	require.True(t, ready.Control.Registry)
-	require.Equal(t, h.Encode(), ready.Control.Data)
-	require.Equal(t, sha256.Sum256(ready.Witness), ready.Control.WitnessHash)
-	require.Equal(t, parent.StateRoot, ready.Control.Retire.EVMStateRoot)
-	witness, err := vrstate.VerifyRetirement(ready.Witness, parent.StateRoot, pins, h, 50, false)
-	require.NoError(t, err)
-	require.NoError(t, vrschema.VerifyHolderRetirement(witness, h))
-	svc.Ordered(h.ID, h.Generation)
-	require.Empty(t, svc.Pending())
-	require.Empty(t, svc.Ready(parent, 1))
+	quiet := storage.EVMParent{StateRoot: world.Root()}
+	unmatched := quiet
+	unmatched.StateRoot[0] ^= 1
+	svc.Prepare(unmatched)
+	svc.wg.Wait()
+	require.Empty(t, fetched, "a different finalized state must not be used to fetch a proof")
+	require.Empty(t, svc.Ready(unmatched, 1))
+	require.Equal(t, []Key{key}, svc.Pending())
+
+	assertReady := func(svc *Service) {
+		svc.Prepare(quiet)
+		ready := waitReady(t, svc, quiet, 1)[0]
+		require.Equal(t, hash, <-fetched, "proof lookup uses the matching finalized block")
+		require.True(t, ready.Control.Registry)
+		require.Equal(t, h.Encode(), ready.Control.Data)
+		require.Equal(t, sha256.Sum256(ready.Witness), ready.Control.WitnessHash)
+		require.Equal(t, quiet.StateRoot, ready.Control.Retire.EVMStateRoot)
+		require.Zero(t, ready.Control.Retire.EVMBlockHash, "the control still names the quiet parent")
+		witness, err := vrstate.VerifyRetirement(ready.Witness, quiet.StateRoot, pins, h, 50, false)
+		require.NoError(t, err)
+		require.NoError(t, vrschema.VerifyHolderRetirement(witness, h))
+	}
+	assertReady(svc)
+	svc.wg.Wait()
+	svc.Flush()
+
+	restarted := open()
+	require.Equal(t, []Key{key}, restarted.Pending())
+	assertReady(restarted)
+	restarted.Ordered(h.ID, h.Generation)
+	require.Empty(t, restarted.Pending())
+	require.Empty(t, restarted.Ready(quiet, 1))
 }
 
 func TestDiscoveryFindsConfirmedRequestsAndKeepsAKeyedSetAcrossRestarts(t *testing.T) {
