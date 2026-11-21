@@ -120,6 +120,18 @@ if [ "${M2A_FINAL_RESTORE:-0}" = 1 ] && { [ "${M2_PROFILE2:-0}" != 1 ] || [ "${S
   echo "M2a final restore requires M2_PROFILE2=1, SIGNING=authority and four validators" >&2
   exit 2
 fi
+if [ "${UTB_LANE:-0}" = 1 ]; then
+  [ "${ANYAGE_LANE:-0}" = 1 ] || [ "${VR_UTB:-0}" = 1 ] || { echo "UTB_LANE=1 requires ANYAGE_LANE=1 (the aggregator partition)" >&2; exit 2; }
+  source scripts/lib/utb-lib.sh || exit 2
+  if [ -n "${ANYAGE_PREP_ONLY:-}" ]; then
+    # Genesis preparation does not use the verifier. Allow a planned build path.
+    [ -z "${UTB_VERIFIER:-}${UTB_EVIDENCE:-}" ] || utb_resolve_verifier build/utb-evidence allow-missing || exit 2
+  elif [ -n "${UTB_VERIFIER:-}${UTB_EVIDENCE:-}" ] || [ "${VR_LANE:-0}" != 1 ]; then
+    # VR also supports seed and bring-up runs without independent verification.
+    # Always validate an explicitly supplied path, including in those runs.
+    utb_resolve_verifier || exit 2
+  fi
+fi
 partitionID=8
 if [ "${M1_FEE_ACCOUNTING:-0}" = 1 ] && { [ "$validators" -ne 4 ] || [ "$rounds" -lt 10 ]; }; then
   echo "M1 fee accounting requires four validators and at least 10 rounds" >&2
@@ -437,8 +449,6 @@ if [ "${UTB_LANE:-0}" = 1 ]; then
   # entry, its pin and the deployment manifest are generated once, here, from the epoch-1 trust base the roots will start with. A VR generation (VR_UTB) has
   # no aggregator partition of its own here: its genesis entry came from `vr-genesis plan` and was checked by `vr-genesis verify`; the manifest is generated
   # from the same trust base and must hold the same entry.
-  [ "${ANYAGE_LANE:-0}" = 1 ] || [ "${VR_UTB:-0}" = 1 ] || { echo "UTB_LANE=1 requires ANYAGE_LANE=1 (the aggregator partition)" >&2; exit 2; }
-  source scripts/lib/utb-lib.sh
   UTB_ROOT_FLAGS_FN=utb_root_flags UTB_AGG_ENV_FN=utb_agg_env
   export UTB_ROOT_FLAGS_FN UTB_AGG_ENV_FN
   if [ "${VR_UTB:-0}" = 1 ]; then

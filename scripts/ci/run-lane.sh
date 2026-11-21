@@ -59,7 +59,7 @@ export M2_URETH_BIN=$prov/unicity-reth M2_URETH_COMMIT=$ureth_commit M2_URETH_AT
 
 mkdir -p build "$AGRE_ROOT/builds/tools"
 cp "$art/tools/ubft" build/ubft; chmod +x build/ubft; cp -R "$art/tools/tools/." "$AGRE_ROOT/builds/tools/"; chmod +x "$AGRE_ROOT/builds/tools/"*
-export LANE_TOOLS_DIR=$AGRE_ROOT/builds/tools UTB_EVIDENCE=$AGRE_ROOT/builds/tools/utb-evidence
+export LANE_TOOLS_DIR=$AGRE_ROOT/builds/tools UTB_VERIFIER=$AGRE_ROOT/builds/tools/utb-evidence
 if [ "$kind" = combined ]; then
   agg_commit=$(jq -er '.components["aggregator-go"].commit' "$pins")
   cp -R "$art/tools/aggregator-${agg_commit:0:8}" "$AGRE_ROOT/builds/"

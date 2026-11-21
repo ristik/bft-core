@@ -47,6 +47,8 @@ of 2..3 from a genesis-committee root with root HTTP unavailable to it (rev3's s
 entries, because the handshake reply attaches both and they follow the genesis), the stale reference client meeting the unknown epoch 3 and fetching [2 3] in one request, a token certified after the
 recovery, the original token verified unchanged under its historical committee, the bridge receipt, and the exported history reloaded exactly.
 
+**Verifier.** Set `UTB_VERIFIER` to the path of a built `utb-evidence` executable. The paired lane validates a configured path before setup, and the combined lane requires the verifier for its evidence checks. `UTB_EVIDENCE` is a deprecated alias used when `UTB_VERIFIER` is unset or empty.
+
 **Evidence.** `utb_check_evidence` verifies the bytes with the tools (scripts/utb-evidence: fetch, verify, extract, client, ucresp, uc-verify): the manifest checks out inside the pack (relative paths), the
 final bundle verifies from the pinned genesis, each verifier output and entry file is exactly the history's record for its epoch, the initial bundle is a shorter prefix, the UCResp sample is a version 2
 response attaching the entry byte for byte, the token is the original one and its certificates verify under their own epochs (interval checked), the client reload recorded the final digest and tip.

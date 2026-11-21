@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The signed trust-base history (UTB) checks of a VR generation (VR_UTB=1, VR_AGG=1; briefs/impl-vr-utb.md). Sourced by scripts/vr-boundary-steps.sh,
 # which defines vrb_log and runs in the paired devnet's shell (so agg-lib.sh, utb-lib.sh and m2_rpc_port are loaded). The independent verifier is
-# utb-evidence (scripts/utb-evidence, UTB_EVIDENCE: a prebuilt binary); the SDK client is the JS SDK 4.0 (UTB_SDK_JS: a built package or checkout with
+# utb-evidence (scripts/utb-evidence, UTB_VERIFIER: a prebuilt binary); the SDK client is the JS SDK 4.0 (UTB_SDK_JS: a built package or checkout with
 # lib/api/bft/trustbase/TrustBaseHistory.js). Nothing here trusts a node's own claim: every number comes from the history bytes a client would fetch.
 #
 #   vru_before   before the handoff: the aggregator holds epoch 1 only; a certificate of epoch 1 is saved (its digest is recorded) and verifies under it
@@ -13,7 +13,7 @@
 
 vru_dir() { mkdir -p "$VR_EVIDENCE/utb" && echo "$VR_EVIDENCE/utb"; }
 vru_fail() { vrb_log "FAIL: $*"; return 1; }
-vru_ev() { "${UTB_EVIDENCE:?UTB_EVIDENCE (a built scripts/utb-evidence) is not set}" "$@"; }
+vru_ev() { utb_ev "$@"; }
 
 vru_agg_tip() { local t; t=$(mktemp); if vru_ev fetch --url "$(utb_agg_url)" --out "$t" >/dev/null 2>&1; then vru_ev verify --bundle "$t" --pin "$(utb_pin)" 2>/dev/null | sed -n 's/^ok: epochs [0-9]*\.\.\([0-9]*\), tip.*/\1/p'; else echo 0; fi; rm -f "$t"; }
 vru_wait_tip() { # want seconds
@@ -28,8 +28,8 @@ vru_confs() { # OUT: the shard configurations certificates are verified against 
 }
 
 vru_before() {
+  utb_resolve_verifier || return 1
   local out i; out=$(vru_dir); mkdir -p "$out"/{bundle,proofs,entries,sdk,stores}
-  [ -x "${UTB_EVIDENCE:-}" ] || { vru_fail "UTB_EVIDENCE ($UTB_EVIDENCE) is not built"; return 1; }
   vru_wait_tip 1 120 || return 1
   vru_ev fetch --url "$(utb_agg_url)" --out "$out/bundle/initial.cbor" || return 1
   vru_ev verify --bundle "$out/bundle/initial.cbor" --pin "$(utb_pin)" | tee "$out/bundle/initial.verify.txt"
