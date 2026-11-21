@@ -29,9 +29,15 @@ func flatGolden(t *testing.T, name string) []byte {
 
 func flatFixtureVerifier(t *testing.T) (*World, *FlatVerifier, b1ref.Words) {
 	t.Helper()
+	return flatFixtureVerifierFor(t, flatGolden(t, "gamma"), FlatDeployment{
+		[32]byte(flatGolden(t, "generation-salt")), [32]byte(flatGolden(t, "pins")), HE([]byte{0x60, 3, 0}), [20]byte{18: 0xf2, 19: 0x02},
+	})
+}
+
+func flatFixtureVerifierFor(t *testing.T, gamma []byte, deployment FlatDeployment) (*World, *FlatVerifier, b1ref.Words) {
+	t.Helper()
 	w, err := NewWorld(64, 16, 2)
 	require.NoError(t, err)
-	gamma := flatGolden(t, "gamma")
 	cfg, err := DecodeFlatConfig(gamma)
 	require.NoError(t, err)
 	require.Equal(t, w.Trust.ID(), cfg.RootGenesis)
@@ -59,9 +65,7 @@ func flatFixtureVerifier(t *testing.T) (*World, *FlatVerifier, b1ref.Words) {
 	registry := b1ref.Model{GenesisCommitment: pins.GenesisCommitment, ProfileHash: pins.ProfileHash,
 		Phase: 2, Network: cfg.Network, GenesisEpoch: 1, ImportedTip: 2, OriginReady: true,
 		Origin: 2, RootRound: 10_000, Epochs: epochs}.Words()
-	recovery := [20]byte{18: 0xf2, 19: 0x02}
-	d := FlatDeployment{[32]byte(flatGolden(t, "generation-salt")), [32]byte(flatGolden(t, "pins")), HE([]byte{0x60, 3, 0}), recovery}
-	v, err := NewFlatVerifier(gamma, d, FlatAuthority{registry, pins})
+	v, err := NewFlatVerifier(gamma, deployment, FlatAuthority{registry, pins})
 	require.NoError(t, err)
 	return w, v, registry
 }
@@ -317,7 +321,7 @@ func flatFixtureRun(t *testing.T, w *World, v *FlatVerifier, evidence []byte, re
 	e, err := NewFlatEvidence(evidence)
 	require.NoError(t, err)
 	wallet := newFlatFixtureWallet(e)
-	model := newExpectedLineage(t, v, evidence)
+	model := newExpectedLineage(v, evidence)
 	require.Equal(t, model.pageRoot, e.Header().Root)
 	var state *FlatState
 	var prior []byte
@@ -382,6 +386,11 @@ func flatFixtureExports(t *testing.T, name string, w *World, v *FlatVerifier, re
 		return
 	}
 	p := filepath.Join(dir, name)
+	writeFlatFixture(t, p, w, v, registry, evidence, verdict, trace)
+}
+
+func writeFlatFixture(t *testing.T, p string, w *World, v *FlatVerifier, registry b1ref.Words, evidence, verdict []byte, trace []flatFixtureTrace) {
+	t.Helper()
 	require.NoError(t, os.MkdirAll(p, 0755))
 	var expected []byte
 	if len(trace) > 0 {
@@ -394,11 +403,17 @@ func flatFixtureExports(t *testing.T, name string, w *World, v *FlatVerifier, re
 	for n, b := range map[string][]byte{"evidence.bin": evidence, "utb.cbor": w.Trust.Bundle, "verdict.bin": expected} {
 		require.NoError(t, os.WriteFile(filepath.Join(p, n), b, 0644))
 	}
+	writeFlatContext(t, p, v, registry, evidence)
+	writeFlatTrace(t, p, trace)
+}
+
+func writeFlatContext(t *testing.T, p string, v *FlatVerifier, registry b1ref.Words, evidence []byte) {
+	t.Helper()
 	slots := make(map[string]string, len(registry))
 	for k, value := range registry {
 		slots[hex.EncodeToString(k[:])] = hex.EncodeToString(value[:])
 	}
-	expectedContext := newExpectedLineage(t, v, evidence)
+	expectedContext := newExpectedLineage(v, evidence)
 	r, err := json.MarshalIndent(struct {
 		GenesisCommitment, RegistryProfile, RecoveryAddress, RecoveryRuntimeHash, Session, PageRoot string
 		EvidenceLength                                                                              uint64
@@ -409,6 +424,10 @@ func flatFixtureExports(t *testing.T, name string, w *World, v *FlatVerifier, re
 		uint64(len(evidence)), slots}, "", "  ")
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(p, "context.json"), append(r, '\n'), 0644))
+}
+
+func writeFlatTrace(t *testing.T, p string, trace []flatFixtureTrace) {
+	t.Helper()
 	var payload []byte
 	for _, f := range trace {
 		for _, b := range [][]byte{f.Payload, f.OldState, f.NewState, f.Topics, f.Data, f.ResultReceipt} {
@@ -417,7 +436,7 @@ func flatFixtureExports(t *testing.T, name string, w *World, v *FlatVerifier, re
 	}
 	var compressed bytes.Buffer
 	gz := gzip.NewWriter(&compressed)
-	_, err = gz.Write(payload)
+	_, err := gz.Write(payload)
 	require.NoError(t, err)
 	require.NoError(t, gz.Close())
 	require.NoError(t, os.WriteFile(filepath.Join(p, "trace.bin.gz"), compressed.Bytes(), 0644))
@@ -482,7 +501,7 @@ func TestFlatHeldAndSiblingWitnesses(t *testing.T) {
 		e, ops := flatFixtureEncode(t, []flatFixtureLevel{{nil, root}, {paths[i], child}})
 		holding, err := v.VerifyFlatHeld(e)
 		require.NoError(t, err)
-		expected, event := newExpectedLineage(t, v, e).packet(t, ops)
+		expected, event := newExpectedLineage(v, e).packet(t, ops)
 		require.Equal(t, FlatProgressEvent, event.Kind)
 		want := FlatHolding{Owner: expected.Owner, State: expected.State, TokenID: expected.TokenID, Amount: expected.Amount}
 		require.Equal(t, want, holding)

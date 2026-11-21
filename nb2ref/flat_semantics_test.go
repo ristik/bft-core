@@ -143,7 +143,7 @@ func TestFlatChildRequiresItsVerifiedParent(t *testing.T) {
 				return
 			}
 			wallet := newFlatFixtureWallet(mustFlatEvidence(t, raw))
-			model := newExpectedLineage(t, v, raw)
+			model := newExpectedLineage(v, raw)
 			startPacket := wallet.packet(t, nil, nil, records[:1])
 			start, err := startPacket.Calldata()
 			require.NoError(t, err)
