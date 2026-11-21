@@ -22,3 +22,14 @@ A decompressed `trace.bin.gz` contains records to EOF. Each record contains six 
 6. The canonical CBOR receipt proof for that result.
 
 A Complete record has no successor state or digest. The terminal operation remains in calldata. Raw signed mints, transfers and certificates are recoverable directly from the framed evidence. Cold-call fixtures contain canonical calldata and either the emitted event/proof or the custody state before and after the call. Each refusal contains its original calldata, stage and last usable predecessor. A nonempty predecessor has a linked `retry-calldata.bin` that must succeed using that exact receipt. A permanently invalid child can be retried with a cut before the child to certify only the valid prefix. Recovered settlement refusals also include `custody-before.json` for the rollback check. Precise test-registry words describe a deterministic chain-free authority fixture. They are evidence for replaying these vectors, independent of production trust configuration.
+
+
+Cold custody prestates are reached from genesis by a target deposit and a
+separate deposit funding one-unit background redemptions. The custody harness
+treats background ordinary verdicts as certified and executes
+the shared §6 payment and seal paths. Identifier derivation includes both
+segment and slot, so sealed segments and the live buffers have disjoint paid
+IDs. Setup checks the resulting heads against an independent fold. Published
+events retain the target deposit as context and include the logs from the
+test call. Historical background logs and background recipient balances are
+outside that observation.

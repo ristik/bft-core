@@ -93,6 +93,9 @@ func (g *gen) sealReceipts() error {
 			pdr, _ := types.Cbor.Marshal(w.EVM.PDRs[0])
 			return CArr(CUint(1), CBytes(pdr), CBytes(p.UC), CBytes(p.Header), CUint(p.TxIndex), CUint(p.LogIndex), nodesCBOR(p.Nodes))
 		}},
+		{id: "seal-proof-map", note: "the shared receipt decoder requires the array head", want: "SealReceipt", inner: "Shape", seg: 0, data: data0, raw: func([]byte) []byte {
+			return []byte{0xa0}
+		}},
 		{id: "seal-no-entry-for-epoch", note: "14.6, 14.7: an otherwise valid UC from an epoch absent from the bundle; retryable (extend the trust-base history and retry), DepositUC on chain", want: "SealReceipt", inner: "NoEntryForEpoch", seg: 0, data: data0, o: ReceiptOpts{Seal: &SealOpts{Network: DevNetwork, Epoch: 3, RootRound: 3 * RotationRound}}},
 		{id: "seal-root-before-epoch", note: "14.7 multi-fault: the IR changed after sealing and the seal names an epoch the bundle does not hold; the root fails first, so DepositUC, not the retryable NoEntryForEpoch", want: "SealReceipt", inner: "DepositUC", seg: 0, data: data0, o: ReceiptOpts{Seal: &SealOpts{Network: DevNetwork, Epoch: 3, RootRound: 3 * RotationRound}, TamperUC: func(uc *types.UnicityCertificate) { uc.InputRecord.Timestamp++ }}},
 		{id: "seal-failed-transaction", want: "SealReceipt", inner: "ReceiptStatus", seg: 0, data: data0, o: ReceiptOpts{MutReceipt: func(r *RawReceipt) { r.Status = []byte{} }}},

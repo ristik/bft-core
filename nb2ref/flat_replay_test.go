@@ -282,13 +282,14 @@ func restoreFlatCustody(t *testing.T, v *FlatVerifier, env Environment, recipien
 		return out
 	}
 	head, previous := [32]byte(mustHex(before.Head)), [32]byte(mustHex(before.PreviousHead))
-	previousIDs := ids(before.Previous)
+	currentIDs, previousIDs := ids(before.Current), ids(before.Previous)
+	assertDistinctLiveIDs(t, currentIDs, previousIDs)
 	if before.Segment > 0 {
 		require.Len(t, previousIDs, int(v.cfg.K))
 		require.Equal(t, head, expectedArchiveStep(v.domain, before.Segment-1, previous, expectedGapRoot(previousIDs)))
 	}
 	vault.model.SetState(before.Deposits, before.Segment, before.Population, amount(before.Liability),
-		head, previous, ids(before.Current), previousIDs)
+		head, previous, currentIDs, previousIDs)
 	vault.model.Events = before.Events
 	vault.credit(v.cfg.Vault, amount(before.VaultBalance))
 	vault.credit(recipient, amount(before.RecipientBalance))
