@@ -463,7 +463,29 @@ ubft validator status --custody "$CUSTODY" --sample 0
 
 The election floors above describe exclusion timing. HolderRetirement is ordered by an eligible root after closure, after the holder and SealRegistry catch up, and outside a handoff. A subsequent election gives no guarantee that the record has been ordered.
 
-If custody still reports `0` after closure, compare the incumbent root target, SealRegistry count and the VR and custody cursors from the same point. A node still catching up can report an older root target. If the four counts have converged across several eligible EVM blocks, report the request transaction, identity, generation, acknowledged root epoch, zero-exposure reading and cursor values to the network maintainers. They can check for `exit.retirement.requested` and `exit.retirement.proof_ready` on incumbents and kind 8 in the SealRegistry. The pinned VT-13 rehearsal has [an open root-side proposer defect](https://github.com/ristik/bft-core/issues/1242). Preserve the confirmed request and wait for recovery. After import, continue at the maturity dry-run. [Record catch-up runbook](vr-record-catch-up.md#what-to-monitor) · [Retirement events](monitoring/events.md)
+If custody still reports `0` after closure, compare the incumbent root target, SealRegistry count and the VR and custody cursors from the same point. A node still catching up can report an older root target. If the four counts have converged across several eligible EVM blocks, report the request transaction, identity, generation, acknowledged root epoch, zero-exposure reading and cursor values to the network maintainers. They can check for `exit.retirement.requested` and `exit.retirement.proof_ready` on incumbents and kind 8 in the SealRegistry. The original VT-13 rehearsal roots require the retirement hotfix. Preserve the confirmed request during recovery. After import, continue at the maturity dry-run. [Retirement issue](https://github.com/ristik/bft-core/issues/1242) · [Record catch-up runbook](vr-record-catch-up.md#what-to-monitor) · [Retirement events](monitoring/events.md)
+
+If the maturity dry-run gives a generic revert, read the captured terms for each lot listed in the preview. Use the retirement view and `pos_view` from above. The progress floor is strict and the certified-time floor is inclusive. Compare both with the `clock` line in `validator status`. Custody also requires zero lot references, zero pending evidence holds and a complete root-record prefix with no pending assignment.
+
+```bash
+read -rp 'Lot ID from the maturity preview: ' MATURITY_LOT
+if [[ "$MATURITY_LOT" =~ ^[0-9]+$ && ${#RETIREMENT} -eq 192 && ${RETIREMENT:63:1} == 1 ]]; then
+  LOT_WORD=$(printf '%064x' "$((10#$MATURITY_LOT))")
+  # lots(uint256) returns 13 fixed words, including the captured holds.
+  LOT=$(pos_view "$CUSTODY" "0xf1648e84$LOT_WORD")
+  if [[ ${#LOT} -eq 832 ]]; then
+    ROUND_FLOOR=$((0x${RETIREMENT:64:64} + 0x${LOT:512:64}))
+    TIME_FLOOR=$((0x${RETIREMENT:128:64} + 0x${LOT:576:64}))
+    for FLOOR in "0x${LOT:640:64}" "0x${LOT:704:64}"; do
+      if (( FLOOR > ROUND_FLOOR )); then ROUND_FLOOR=$((FLOOR)); fi
+    done
+    if (( 0x${LOT:768:64} > TIME_FLOOR )); then TIME_FLOOR=$((0x${LOT:768:64})); fi
+    printf 'progress must be greater than %d; UC time must be at least %d; lot references: %d\n' \
+      "$ROUND_FLOOR" "$TIME_FLOOR" "0x${LOT:448:64}"
+  fi
+fi
+ubft validator status --custody "$CUSTODY" --sample 0 | grep '^clock'
+```
 
 ## Missed admission
 
