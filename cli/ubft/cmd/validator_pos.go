@@ -392,20 +392,30 @@ goes to the address that received it (the withdrawal address); this command clai
 				return err
 			}
 			var steps []step
-			if generation.OpenLots != 0 && len(lots) > 0 {
+			maturing := generation.OpenLots != 0 && len(lots) > 0
+			if maturing {
 				data, err := vrclient.PosCalldata(vrclient.CustodyABI, "mature", lots)
 				if err != nil {
 					return err
 				}
 				steps = append(steps, step{what: fmt.Sprintf("mature identity %d's %d lot(s)", id, len(lots)), tx: vrclient.Tx{To: custody, Data: data}})
 			}
-			after := func(i int, r *vrclient.Receipt) ([]step, error) { return claimStep(ctx, ch, custody, s) }
-			if len(steps) == 0 {
-				cs, err := claimStep(ctx, ch, custody, s)
+			if !maturing {
+				steps, err = claimStep(ctx, ch, custody, s)
 				if err != nil {
 					return err
 				}
-				steps, after = cs, nil
+			}
+			after := func(i int, r *vrclient.Receipt) ([]step, error) {
+				if maturing && i == 0 {
+					return claimStep(ctx, ch, custody, s)
+				}
+				amount, ok := vrclient.CustodyClaimedAmount(r, custody, s.From(), s.From())
+				if !ok {
+					return nil, fmt.Errorf("%w: claim transaction confirmed, but its receipt has no unique valid CreditClaimed event", ErrValidator)
+				}
+				fmt.Fprintf(w, "claimed %s base units to %s\n", amount, s.From().Hex())
+				return nil, nil
 			}
 			return runSteps(ctx, w, s, f.DryRun, steps, after)
 		},

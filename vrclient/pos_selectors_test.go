@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
+	"github.com/ethereum/go-ethereum/common"
 )
 
 // The selectors of the PoS prototype's contracts as the compiled artifacts report them (forge inspect methodIdentifiers on unicity-pos-contracts
@@ -91,4 +92,31 @@ func TestResultViewDecodes(t *testing.T) {
 	require.Equal(t, uint64(3), r.Attempt)
 	require.Equal(t, [32]byte{7}, r.AssignmentID)
 	require.Equal(t, [32]byte{8}, r.SnapshotDigest)
+}
+
+func TestCustodyClaimedAmountChecksReceiptScope(t *testing.T) {
+	custody, creditor, recipient := common.Address{1}, common.Address{2}, common.Address{3}
+	event := CustodyABI.Events["CreditClaimed"]
+	data := make([]byte, 32)
+	data[31] = 100
+	withdrawal := Log{Address: custody, Topics: []common.Hash{
+		event.ID, common.BytesToHash(creditor[:]), common.BytesToHash(recipient[:]),
+	}, Data: data}
+	other := withdrawal
+	other.Address = common.Address{4}
+
+	amount, ok := CustodyClaimedAmount(&Receipt{Logs: []Log{other, withdrawal}}, custody, creditor, recipient)
+	require.True(t, ok)
+	require.EqualValues(t, 100, amount.Uint64())
+
+	badData := withdrawal
+	badData.Data = data[1:]
+	zero := withdrawal
+	zero.Data = make([]byte, 32)
+	for _, logs := range [][]Log{nil, {other}, {badData}, {zero}, {withdrawal, withdrawal}} {
+		_, ok := CustodyClaimedAmount(&Receipt{Logs: logs}, custody, creditor, recipient)
+		require.False(t, ok)
+	}
+	_, ok = CustodyClaimedAmount(&Receipt{Logs: []Log{withdrawal}}, custody, creditor, creditor)
+	require.False(t, ok)
 }

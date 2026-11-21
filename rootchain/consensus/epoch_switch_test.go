@@ -726,7 +726,7 @@ func TestInProcessSwitchAccountsForEveryManagerField(t *testing.T) {
 		"utbConfig", "recoveryHistory", "stageRecovery", "proposalRequestCheck", "posPrefetching", "witnesses", "q3", "primaryWitness",
 		"approvalSink", "judgeHook", "handoffMu", "handoffIntentGen", "switcher", "ctxMu", "ctxGen", "switchCtx", "workerRunning", "future", "switchDeclined", "origins", "acq",
 		"switchPublished", "rules", "upgrades", "log", "tracer", "deferredReady", "admitted", "vr",
-		"lastProposedEpoch", "lastProposedRound", "mon", "votesMissed", "proposals", "roundTimeout", "memberOverride", "leaderCnt", "execMsgCnt", "execMsgDur", "voteCnt", "proposedCR", "qcSize", "qcVoters", "susVotes", "recoveryReq", "frontierFault", "addBlockDur"}
+		"mon", "votesMissed", "proposals", "roundTimeout", "memberOverride", "leaderCnt", "execMsgCnt", "execMsgDur", "voteCnt", "proposedCR", "qcSize", "qcVoters", "susVotes", "recoveryReq", "frontierFault", "addBlockDur"}
 	reset := []string{"pacemaker", "voteBuffer", "recovery", "irReqBuffer", "retained", "leaderCheckedRound", "switchCheckedRound", "posQueue",
 		"missedRun", "lastTimeoutRound", "primaryCache", "v3Planned", "q3Staged", "q3StagedEVM", "residence", "deferred", "proposers"}
 	installed := []string{"leaderSelector", "trustBase", "irReqVerifier", "t2Timeouts", "epochAnchor", "handoffPlans", "handoffIntent", "handoffAborts"}
