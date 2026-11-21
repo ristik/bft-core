@@ -20,7 +20,7 @@ type coverage struct {
 	longLineageRefused, longGapRefused, chunkAndLineagePaid        bool
 }
 
-func (s state) moves(c claim, seen *coverage, visit func(edge)) {
+func (s state) moves(c claim, seen *coverage, visit func(edge), fail func(action, problem string)) {
 	if s.traffic < trafficLimit {
 		visit(edge{"settle unrelated burn", s.payTraffic(), false})
 	}
@@ -29,9 +29,12 @@ func (s state) moves(c claim, seen *coverage, visit func(edge)) {
 	visit(edge{"toggle recipient availability", next, false})
 
 	try := func(tx call) {
+		action := fmt.Sprintf("settle route=%d session=%d suffix=%d..%d",
+			tx.route, tx.identity.session, tx.suffix.from, tx.suffix.to)
 		next, result := s.settle(c, tx)
 		if result != settled && next != s {
-			panic(fmt.Sprintf("rejected transaction mutated state: %+v", tx))
+			fail(action, fmt.Sprintf("rejected transaction mutated state (outcome %d)", result))
+			return
 		}
 		switch result {
 		case settled:
@@ -41,8 +44,7 @@ func (s state) moves(c claim, seen *coverage, visit func(edge)) {
 			seen.chunkAndLineagePaid = seen.chunkAndLineagePaid ||
 				(tx.event.kind == absenceProgress && c.lineageSteps > lineageLimit &&
 					tx.suffix.to-c.burn.start > gapsPerCall)
-			visit(edge{fmt.Sprintf("settle route=%d session=%d suffix=%d..%d",
-				tx.route, tx.identity.session, tx.suffix.from, tx.suffix.to), next, true})
+			visit(edge{action, next, true})
 		case oversized:
 			seen.longLineageRefused = seen.longLineageRefused ||
 				(tx.route == ordinary && c.lineageSteps > lineageLimit && tx.suffix.to-tx.suffix.from <= gapsPerCall)
@@ -57,7 +59,10 @@ func (s state) moves(c claim, seen *coverage, visit func(edge)) {
 				seen.recoveredSawOrdinary = seen.recoveredSawOrdinary ||
 					(tx.route == recovered && s.paidBy == ordinary)
 				seen.recentDuplicate = seen.recentDuplicate || result == recentReplay
-				seen.archivedDuplicate = seen.archivedDuplicate || result == wrongHead
+				// A current-endpoint fold can reject while the ID is still in
+				// the previous buffer. Count archive-only replay after eviction.
+				seen.archivedDuplicate = seen.archivedDuplicate ||
+					(result == wrongHead && !s.recent && !s.previous)
 			}
 		case recipientReverted:
 			seen.reverted = true
@@ -67,7 +72,9 @@ func (s state) moves(c claim, seen *coverage, visit func(edge)) {
 			ready.accepts = true
 			paid, retry := ready.settle(c, tx)
 			if retry != settled || paid.targetPayments != ready.targetPayments+1 {
-				panic("recipient recovery did not permit the same transaction to settle")
+				fail(action+" (reverts) -> restore recipient -> retry "+action,
+					fmt.Sprintf("retry did not settle (outcome %d, payments %d)", retry, paid.targetPayments))
+				return
 			}
 			seen.retryPaid = true
 		}
@@ -91,13 +98,15 @@ func (s state) moves(c claim, seen *coverage, visit func(edge)) {
 			if cursor > 0 {
 				before = lineageReceipt(c, id, cursor)
 			}
+			action := fmt.Sprintf("verify lineage session=%d cursor=%d", session, cursor+1)
 			event, ok := lineageStep(c, id, before, cursor)
 			if !ok {
-				panic("reachable lineage did not advance")
+				fail(action, "reachable lineage did not advance")
+				return
 			}
 			next := s
 			next.lineage[session] = event.cursor
-			visit(edge{fmt.Sprintf("verify lineage session=%d cursor=%d", session, event.cursor), next, true})
+			visit(edge{action, next, true})
 			continue
 		}
 		complete := lineageReceipt(c, id, cursor)
@@ -108,16 +117,18 @@ func (s state) moves(c claim, seen *coverage, visit func(edge)) {
 			if prefix > start {
 				before = receipt{true, absenceProgress, id, prefix, from}
 			}
+			action := fmt.Sprintf("verify gap session=%d suffix=%d..%d", session, prefix, prefix+1)
 			event, ok := advanceAbsence(c, id, before, suffix{prefix, prefix + 1, from})
 			if !ok {
-				panic("reachable prefix did not advance")
+				fail(action, "reachable prefix did not advance")
+				return
 			}
 			// A prefix can advance along the authentic head only if its next
 			// segment has a valid gap. A false head can never rejoin this branch.
 			if event.folded == s.archiveAt(prefix+1) {
 				next := s
 				next.prefix[session] = event.cursor
-				visit(edge{fmt.Sprintf("verify gap session=%d end=%d", session, event.cursor), next, true})
+				visit(edge{action, next, true})
 			}
 		}
 		for from := start; from <= prefix; from++ {
@@ -143,16 +154,17 @@ type node struct {
 	action string
 }
 
-func trace(nodes []node, at int) string {
+func trace(nodes []node, at int, attempted ...string) string {
 	var steps []string
 	for nodes[at].parent >= 0 {
 		steps = append(steps, nodes[at].action)
 		at = nodes[at].parent
 	}
+	steps = append(steps, "initial state")
 	for i, j := 0, len(steps)-1; i < j; i, j = i+1, j-1 {
 		steps[i], steps[j] = steps[j], steps[i]
 	}
-	return strings.Join(steps, " -> ")
+	return strings.Join(append(steps, attempted...), " -> ")
 }
 
 func (s state) progress() int {
@@ -188,10 +200,12 @@ func explore(t *testing.T, c claim) coverage {
 			}
 			if e.stable {
 				if e.next.progress() <= s.progress() {
-					t.Fatalf("stable transition %q failed to advance after %s", e.description, trace(nodes, i))
+					t.Fatalf("stable transition failed to advance after %s: %+v", trace(nodes, i, e.description), s)
 				}
 				predecessors[j] = append(predecessors[j], i)
 			}
+		}, func(action, problem string) {
+			t.Fatalf("%s after %s: %+v", problem, trace(nodes, i, action), s)
 		})
 	}
 

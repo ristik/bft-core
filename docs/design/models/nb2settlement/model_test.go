@@ -20,7 +20,7 @@ func (h head) next(containsTarget bool) head {
 
 const (
 	segmentSize  = 2
-	trafficLimit = 8
+	trafficLimit = 9
 	sessions     = 2
 	gapsPerCall  = 1
 	lineageLimit = 1

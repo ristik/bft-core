@@ -75,6 +75,13 @@ func TestReceiptBoundaries(t *testing.T) {
 		{"recipient", func(r *receipt) { r.identity.burn.recipient++ }},
 		{"amount", func(r *receipt) { r.identity.burn.amount++ }},
 		{"cursor", func(r *receipt) { r.cursor++ }},
+		{"kind only", func(r *receipt) {
+			if r.kind == lineageProgress {
+				r.kind = lineageComplete
+			} else {
+				r.kind = lineageProgress
+			}
+		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			for _, boundary := range []struct {
@@ -98,13 +105,6 @@ func TestReceiptBoundaries(t *testing.T) {
 				}
 			}
 		})
-	}
-	for _, candidate := range []receipt{progress, complete, prefix} {
-		bad := tx
-		bad.event = candidate
-		if next, result := s.settle(c, bad); result != badReceipt || next != s {
-			t.Fatalf("used event kind %d or wrong cursor to skip to final settlement", candidate.kind)
-		}
 	}
 	invalidCaller := tx
 	invalidCaller.claimed.recipient++
