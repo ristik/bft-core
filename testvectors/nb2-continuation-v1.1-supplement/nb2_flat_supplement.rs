@@ -263,6 +263,8 @@ fn cases(db: &Db, pins: Pins, dir: &Path, ordinary: Address, recovery: Address, 
                 assert_eq!(receipt, raw(case.join("last-usable-predecessor.cbor")));
             }
             if name == "cross-cut-conflict" && index == 1 {
+                // The modified input record breaks the local certificate fold.
+                // Solidity rejects before membership and the sparse claim map.
                 let (result, native) = call(
                     &state,
                     pins,

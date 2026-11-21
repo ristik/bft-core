@@ -6,9 +6,16 @@ Use this manifest alongside the [original T1 corpus](../nb2-continuation-v1.1). 
 | --- | --- |
 | `b1-rollover` | The production ordinary verifier returns the published ABI verdict. The production recovery emits Progress, then Complete with the same verdict. The first packet contains 16 source operations and 17 distinct complete seals, including the root deposit seal. The two exact native requests are `batch-1.bin` (16) and `batch-2.bin` (1). |
 | `b1-rollover-refusals` | One seal in the first native request lacks quorum. `BadStep.calldata.bin` refuses at final batch checking. `BadPage.calldata.bin` uses the same evidence, operations and native first batch with one extra authenticated page. The unused page takes precedence. Neither call emits an event. |
-| `cross-cut-conflict` | The Start packet commits one claim. The next packet has a valid transfer followed by a synthetic claim with identical complete seal, partition and shard, but a different input record. Its first-use opening carries the old value. `BadStep.calldata.bin` refuses during the claim check. The first trace frame certifies the predecessor and the second retries only the valid transfer using the exact receipt published as `last-usable-predecessor.cbor`. The changed claim would also fail native certification if submitted on its own. The replay checks that it never reaches that stage. |
+| `cross-cut-conflict` | Start commits two claims, the deposit and the mint. The next packet has a valid transfer followed by a synthetic conflict with the **mint claim**. The candidate preserves the complete seal, partition and shard but changes the input record. Its first-use opening carries the committed mint value. The shorter retry executes only the valid transfer using `last-usable-predecessor.cbor`. |
 
 The `context.json`, evidence, ABI verdict and six-field compressed trace use the [original wire layout](../nb2-continuation-v1.1/README.md). The conflict directory also publishes both raw packed claims. Its trace ends at a valid Progress because the evidence suffix contains the conflict.
+
+The Go verifier exercises the cross-packet claim-map value check. Its map control accepts the
+committed mint value with the same opening and intermediate root. The end-to-end Solidity replay
+through Ureth refuses earlier, when the conflicting source's local certificate fold fails to
+reproduce the signed seal root. It then verifies that the shorter retry produces the expected
+Progress. The focused `FlatClaimConflict.t.sol` test in unicity-pos-contracts exercises the
+production `FlatSparse.claim` value check with these same published claim bytes and opening.
 
 ## Deployment and provenance
 
