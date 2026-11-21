@@ -68,13 +68,30 @@ certified journal candidate, and restore anchor must agree before the normal
 readiness gate can release signing. A failed or hostile replica is bypassed per
 record. The frontier resumes only after two replicas acknowledge later blocks. If a configured replica was replaced, follow the one-replica-at-a-time rule in `docs/operations/m2-runbook.md` §4 ("Replacing a configured archive replica"); replacing both or reordering the pair is refused with `frontier.ErrContext`.
 
-The command refuses a copied BFT journal, a non-genesis or non-finalized fresh
-EL head, a nonempty local archive, an incompatible archive/context/version,
-wrong genesis or execution identity, a missing handoff, wrong epoch or forged
-records, local-key signing, and an absent or unhealthy authority or pin. A failed restore may have imported blocks or
-written journal state: restart from **new empty disks**. Generic EL P2P, snap,
-and pipeline sync do not establish the paired seal history and cannot be used
-as a restore source; the pinned client and Engine API checks remain mandatory.
+For an initial restore, the command requires fresh BFT and archive paths and
+the checked genesis as both the execution head and finality. For a tip in the
+genesis root epoch, it records the operator pin and selected block in the
+journal before retaining records or starting execution replay. If the command
+is interrupted after that checkpoint, repeat `shard-node restore` with the
+same journal, archive, execution datadir, UC/TR and BodyID. A retry
+reauthenticates the retained archive. Each block's exact archive representation
+is checkpointed after paired verification and before forkchoice advances.
+A retry can skip a verified prefix if the execution head matches its height,
+block hash and state root. After the restore records intent to finalize its
+target, the EL can reopen at an earlier verified height, with finality at or
+below that head. The restore preserves that finality during replay and
+re-establishes the pinned head and finality, even if the BFT anchor already
+committed. A completed restore rechecks the local archive when retried and
+fetches missing records before returning success. Ordinary `shard-node run` refuses a checkpoint whose restore
+anchor is still missing.
+
+Interruptions before the checkpoint, restores started by binaries without a
+checkpoint, and cross-epoch restores still require fresh paths if an attempt
+has left state on disk. The command refuses unrelated journals and altered
+pins, wrong genesis or execution identity, missing handoffs, incompatible or
+forged records, and an absent or unhealthy signing authority. Restore history
+comes from the paired seal and certificate checks. Generic EL P2P, snap and
+pipeline sync cannot serve as restore sources.
 
 ## Sources lost or lying during a restore
 
@@ -87,16 +104,15 @@ afterwards, in the observation backfill. What the tests establish
 | Source behaviour | Result | Test |
 |---|---|---|
 | One replica gone partway through the walk | the other replica serves the rest; the restore completes | `TestArchiveRestoreSurvivesLosingOneReplicaDuringTheFetchWalk` |
-| Both replicas gone partway through the walk | after the bounded wait (`FetchRetry.Total`, 150 s by default) the restore ends with `ErrRestore` and `archive.ErrUnavailable`. Nothing reached the journal or the execution client: no restore pin, no observation, EL at genesis. With the sources back, the same restore completes | `TestArchiveRestoreLosingBothReplicasDuringTheFetchWalkEndsCleanlyAndResumes` |
+| Both replicas gone partway through the walk | after the bounded wait (`FetchRetry.Total`, 150 s by default) the restore ends with `ErrRestore` and `archive.ErrUnavailable`. The journal holds the retry checkpoint. It has no anchor or observation, and EL remains at genesis. With the sources back, the same restore completes | `TestArchiveRestoreLosingBothReplicasDuringTheFetchWalkEndsCleanlyAndResumes` |
 | Both replicas gone once the replay has begun | the replay needs no source; the restore completes and opens no further stream | `TestArchiveRestoreReplayDoesNotNeedTheSources` |
-| The replay itself fails partway (here the execution client refuses block 3) | not rolled back: the EL stays past genesis and no pin is recorded. A second restore on the same disks is refused before any fetch (`EL head must be the checked genesis`). Restart from new empty disks, as above | `TestArchiveRestoreFailedReplayIsNotResumedOnTheSameDisks` |
+| Execution replay or tip installation is interrupted | the retry checks the actual EL head and finality, continues from the verified prefix, and installs the anchor and tip in one journal transaction | `TestSingleEpochArchiveRestoreResumesInterruptedTip` |
 | A replica that accepts the stream and never answers | each exchange ends at `Limits.Deadline`; the other replica serves; with both silent the restore ends after the bounded wait | `TestArchiveRestoreBypassesAReplicaThatAcceptsAndNeverAnswers`, `TestArchiveRestoreEndsWhenBothReplicasAcceptAndNeverAnswer` |
 | A replica asked for one block that answers with another block's genuine, correctly certified record | the answer does not echo the request (`ErrReplica`) and is bypassed; with every replica doing it the restore ends with `ErrRestore`, `ErrReplica` and keeps nothing | `TestArchiveRestoreBypassesAReplicaThatAnswersWithAnotherBlocksRecord`, `TestArchiveRestoreRefusesWhenEveryReplicaAnswersWithAnotherBlocksRecord` |
 
 A record that is delivered and fails authentication is never retried (`TestArchiveRestoreVerificationFailureIsNotRetried`), and the pin
 checks of the next section apply to whatever a source serves. These tests do not show a source process killed or lying during a live
-restore on a devnet, and they use a fixture execution client, so the failed-replay row says nothing about what a real reth leaves on disk
-beyond the instruction to start from empty disks.
+restore on a devnet. The execution client in these tests is a fixture.
 
 ## Incompatible stores: the refusal boundary
 
@@ -105,7 +121,7 @@ stores written by this version for this deployment, and refuse everything else b
 
 | Store | Incompatible when | Refusal | Evidence |
 |---|---|---|---|
-| BFT journal (`--execution-journal`, `.trust`, `.handoffs`) and the LUC checkpoint | any of these paths already exists at restore | `restore requires a fresh BFT data directory: <path> already exists` (a copied journal, the profile-2 siblings) | `cli/ubft/cmd/shard_node_restore_test.go` `TestRestoreCommandAcceptsProfile2AndRequiresFreshState` |
+| BFT journal (`--execution-journal`, `.trust`, `.handoffs`) and the LUC checkpoint | paths already exist without a matching same-epoch restore checkpoint; a legacy LUC checkpoint always conflicts | `restore requires a fresh BFT data directory` or a checkpoint mismatch | `cli/ubft/cmd/shard_node_restore_test.go` `TestRestoreCommandAcceptsProfile2AndRequiresFreshState` |
 | Journal database, legacy or unknown bucket | the file was written by an older layout (legacy bucket) or holds an unknown bucket | `configuredprogress.ErrVersion`, at open | `configuredprogress/codec_test.go` `TestOpenIsolationAndMalformedState` |
 | Journal database, origin | the journal is for another configured origin, or its version, origin or limits changed | `configuredprogress.ErrContext` | `configuredprogress/journal_test.go` `TestJournalRejectsCorruptForeignAndVersionedRecords` |
 | Journal database, record | a record is damaged | `configuredprogress.ErrUntrusted` (envelope digest) | same test |
@@ -113,16 +129,13 @@ stores written by this version for this deployment, and refuse everything else b
 | Journal database, descriptor | a legacy or other-version identity descriptor | `configuredprogress.ErrVersion` | `configuredprogress/m2_identity_test.go` `TestM2IdentityRefusesLegacyDescriptor`, `TestM2DescriptorVersionRefused` |
 | Archive store, manifest | the manifest magic is not the one for the record's version | `archive.ErrCorrupt`; the file is not rewritten | `archive/archive_test.go` `TestManifestOfAnotherVersionIsRefusedNotMigrated` |
 | Archive store, record | a nonempty slot that version 1 requires empty; a missing slot | `archive.ErrInvalid` when written, `archive.ErrUnavailable` when read | `archive/archive_test.go` `TestVersionOneAccountingSlotIsEmptyAndRequired` |
-| Local archive directory | not empty at restore | `restore archive directory <dir> is not empty; supply a fresh directory` | code only (`cli/ubft/cmd/shard_node_run.go`, restore branch); no test reaches it |
+| Local archive directory | holds files on an initial restore | `restore archive directory <dir> is not empty; supply a fresh directory` | `TestRestoreCommandAcceptsProfile2AndRequiresFreshState` |
 | Legacy LUC checkpoint beside an execution journal (run) | the checkpoint file exists | `execution journal requires fresh D2 lane state: legacy LUC checkpoint exists at <path>; no automatic migration` | code only; no test reaches it |
-| Execution client | its head or finalized block is not the checked genesis | `EL head must be the checked genesis on an empty disk` | `archivewiring/restore_source_experiments_test.go` `TestArchiveRestoreFailedReplayIsNotResumedOnTheSameDisks` |
+| Execution client | head or finality differs from checked genesis on a fresh restore, or disagrees with the verified chain during a retry | `EL head and finality must be at the checked genesis` or an authenticated-chain mismatch | `TestSingleEpochArchiveRestoreRefusesMismatchedResume` |
 | Archive replica pair | a configured replica was replaced and both or the order changed | `frontier.ErrContext` (the one-replica-at-a-time rule above) | `configuredprogress/journal_frontier_rotation_test.go` `TestMalformedReplicaPairChangeIsRefusedAtStartup` |
 
-The boundary is therefore: **a store is either created by this version in this deployment or it is refused.** The supported way to meet a
-refusal is a fresh authenticated restore on new empty disks. Out of scope: an interrupted upgrade (a process stopped between writing the journal and the archive, then started on a different binary)
-and an old-format file store put through the command line. The owner's greenroom decision is fresh genesis and no migrations, so there is no
-upgrade path to interrupt and no old-format store to import; both are met by the refusal and a fresh restore, as above. The two "code only"
-rows are not exercised by a test; that is accepted for #21 (owner decision, relayed by the orchestrator, 2026-10-20).
+Use fresh paths for an incompatible store. A same-epoch retry requires a
+checkpoint recorded by the restore command for the current deployment.
 
 ## Freshness assumption
 

@@ -9,6 +9,11 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/archivewiring"
+	"github.com/unicitynetwork/bft-core/certifiedstore"
+	"github.com/unicitynetwork/bft-core/configuredprogress"
+	"github.com/unicitynetwork/bft-core/network/protocol/certification"
+	"github.com/unicitynetwork/bft-core/rootinput"
+	"github.com/unicitynetwork/bft-go-base/types"
 )
 
 func TestRestoreCommandAcceptsProfile2AndRequiresFreshState(t *testing.T) {
@@ -45,8 +50,77 @@ func TestRestoreCommandAcceptsProfile2AndRequiresFreshState(t *testing.T) {
 	err = shardNodeRun(context.Background(), flags, nil)
 	require.ErrorContains(t, err, "fresh BFT data directory")
 	require.NoError(t, os.Remove(journal+".handoffs"))
+	require.NoError(t, os.Mkdir(flags.ArchiveStore, 0700))
+	require.NoError(t, os.WriteFile(filepath.Join(flags.ArchiveStore, "unrelated"), nil, 0600))
+	err = shardNodeRun(context.Background(), flags, nil)
+	require.ErrorContains(t, err, "is not empty; supply a fresh directory")
+	require.NoFileExists(t, journal)
+	require.NoError(t, os.Remove(filepath.Join(flags.ArchiveStore, "unrelated")))
 	flags.TrustHistoryProfile2 = false
 	flags.Executor = "fake"
 	err = shardNodeRun(context.Background(), flags, nil)
 	require.ErrorContains(t, err, "--executor engine-api")
+}
+
+func TestRestoreCommandAllowsOnlyMatchingCheckpointToReopenPaths(t *testing.T) {
+	ctx := context.Background()
+	base := &baseFlags{HomeDir: t.TempDir()}
+	flags := &shardNodeRunFlags{
+		baseFlags: base, Restore: true, Executor: "engine-api", ArchivePrune: true,
+		ExecutionJournal: filepath.Join(base.HomeDir, "journal.db"), ArchiveStore: filepath.Join(base.HomeDir, "archive"),
+		RestoreTipUC: filepath.Join(base.HomeDir, "tip.uc"), RestoreTipTR: filepath.Join(base.HomeDir, "tip.tr"),
+		RestoreTrustBodyID: strings.Repeat("a", 64), shardNodeSigningFlags: shardNodeSigningFlags{SigningAuthoritySocket: "authority.sock"},
+		ArchiveReplicas: []string{"reject-in-replica-validation"},
+	}
+	uc := &types.UnicityCertificate{Version: 1, InputRecord: &types.InputRecord{Version: 1}, UnicitySeal: &types.UnicitySeal{Version: 1}}
+	tr := &certification.TechnicalRecord{Round: 1}
+	writePin := func() {
+		t.Helper()
+		u, err := types.Cbor.Marshal(uc)
+		require.NoError(t, err)
+		r, err := types.Cbor.Marshal(tr)
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(flags.RestoreTipUC, u, 0600))
+		require.NoError(t, os.WriteFile(flags.RestoreTipTR, r, 0600))
+	}
+	writePin()
+	scope, err := restoreResumeScope(flags)
+	require.NoError(t, err)
+	pin, err := archivewiring.RestorePinID(uc, tr, scope)
+	require.NoError(t, err)
+
+	full, path, _ := preparedGenesisFixture(t, 1337)
+	origin, _, err := loadGenesisOrigin(full, path, "", 1)
+	require.NoError(t, err)
+	trust := staticTrustBases{}
+	confHash := origin.FullShardConfHash().Bytes()
+	c := configuredprogress.Context{Origin: origin,
+		Observation: rootinput.ObservationContextV2{NetworkID: full.NetworkID, PartitionID: full.PartitionID, ShardID: full.ShardID,
+			ShardConfHash: confHash, RootEpoch: 1, TrustBases: trust},
+		Record: certifiedstore.Context{NetworkID: full.NetworkID, PartitionID: full.PartitionID, ShardID: full.ShardID,
+			FullShardConfHash: confHash, Registry: origin.ProofContext(), TrustBases: trust}}
+	journal, err := configuredprogress.OpenConfiguredV2(flags.ExecutionJournal, configuredprogress.Settings{Retain: 128})
+	require.NoError(t, err)
+	_, _, err = journal.Initialize(ctx, c)
+	require.NoError(t, err)
+	limits := configuredprogress.JournalLimits{Candidates: 3, Observations: 4, Bytes: 16 << 20}
+	require.NoError(t, journal.EnableJournal(ctx, c, limits))
+	require.NoError(t, journal.BeginArchiveRestore(ctx, c, limits, configuredprogress.RestoreCheckpoint{Pin: pin, Target: [32]byte{1}}))
+	require.NoError(t, journal.Close())
+
+	// Fixed-profile startup creates a trust sibling too. Stop at ordinary
+	// replica validation so this test needs neither a live EL nor a signer.
+	require.NoError(t, os.WriteFile(flags.ExecutionJournal+".trust", nil, 0600))
+	require.NoError(t, os.Mkdir(flags.ArchiveStore, 0700))
+	require.NoError(t, os.WriteFile(filepath.Join(flags.ArchiveStore, "retained"), nil, 0600))
+	require.ErrorIs(t, shardNodeRun(ctx, flags, nil), archivewiring.ErrConfig)
+	otherPath := *flags
+	otherPath.ArchiveStore = filepath.Join(base.HomeDir, "wrong-archive")
+	require.ErrorContains(t, shardNodeRun(ctx, &otherPath, nil), "another pin or restore path")
+	otherBody := *flags
+	otherBody.RestoreTrustBodyID = strings.Repeat("b", 64)
+	require.ErrorContains(t, shardNodeRun(ctx, &otherBody, nil), "another pin or restore path")
+	tr.Round++
+	writePin()
+	require.ErrorContains(t, shardNodeRun(ctx, flags, nil), "another pin or restore path")
 }

@@ -44,7 +44,7 @@ func TestRestoreFetchProfile(t *testing.T) {
 		require.NoError(t, err)
 	})
 	part("checkRecord (certificates)", func(i int) {
-		_, _, err := restore.checkRecord(qs[i], recs[i])
+		_, _, _, err := restore.checkRecord(qs[i], recs[i])
 		require.NoError(t, err)
 	})
 	scratch, err := archive.Open(t.TempDir())

@@ -139,6 +139,18 @@ func sameRootStatement(a, b *types.UnicityCertificate, at, bt *certification.Tec
 	return bytes.Equal(as, bs) && bytes.Equal(atr, btr), nil
 }
 
+// MatchesObservation reports whether the durable latest observation and the
+// authenticated input certify the same statement, including when the quorum
+// signatures differ.
+func (s State) MatchesObservation(other rootinput.VerifiedObservationV2) (bool, error) {
+	current, ok := s.Observed()
+	if !ok {
+		return false, nil
+	}
+	rel, err := compareObservations(current, other)
+	return rel == relationDuplicate, err
+}
+
 func compareObservations(current, next rootinput.VerifiedObservationV2) (relation, error) {
 	return compareObservationsWithEpochSpan(current, next, false)
 }

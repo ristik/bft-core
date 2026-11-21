@@ -2,8 +2,10 @@ package cmd
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -45,4 +47,24 @@ func loadRestorePin(ucPath, trPath string) (*types.UnicityCertificate, *certific
 		return nil, nil, fmt.Errorf("restore TR is not canonical CBOR: %v", err)
 	}
 	return &uc, &tr, nil
+}
+
+func restoreResumeScope(flags *shardNodeRunFlags) ([32]byte, error) {
+	journal, err := filepath.Abs(flags.ExecutionJournal)
+	if err != nil {
+		return [32]byte{}, err
+	}
+	archive, err := filepath.Abs(flags.ArchiveStore)
+	if err != nil {
+		return [32]byte{}, err
+	}
+	bodyID, err := hexToHash(flags.RestoreTrustBodyID)
+	if err != nil {
+		return [32]byte{}, err
+	}
+	raw, err := types.Cbor.Marshal([]any{"shard-node-restore-scope/v1", journal, archive, []byte(bodyID), flags.TrustHistoryProfile2})
+	if err != nil {
+		return [32]byte{}, err
+	}
+	return sha256.Sum256(raw), nil
 }

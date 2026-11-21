@@ -89,7 +89,7 @@ func TestRestoreRecordAuthenticationRefusesForgedEpochAndIdentity(t *testing.T) 
 	q, rec, err := FromJournal(context.Background(), f.context, f.subject, nil, f.entries[0])
 	require.NoError(t, err)
 	r := &SingleEpochRestore{Context: f.context, Subject: f.subject, TipUC: f.entries[0].ResultingUC}
-	_, _, err = r.checkRecord(q, rec)
+	_, _, _, err = r.checkRecord(q, rec)
 	require.NoError(t, err)
 	for _, change := range []struct {
 		name string
@@ -107,12 +107,12 @@ func TestRestoreRecordAuthenticationRefusesForgedEpochAndIdentity(t *testing.T) 
 			change.edit(&uc)
 			altered.ResultingUC, err = types.Cbor.Marshal(&uc)
 			require.NoError(t, err)
-			_, _, err = r.checkRecord(q, &altered)
+			_, _, _, err = r.checkRecord(q, &altered)
 			require.ErrorIs(t, err, change.want)
 		})
 	}
 	foreign := q
 	foreign.Context.ExecutionIdentity = []byte("another execution identity")
-	_, _, err = r.checkRecord(foreign, rec)
+	_, _, _, err = r.checkRecord(foreign, rec)
 	require.ErrorIs(t, err, frontier.ErrContext)
 }
