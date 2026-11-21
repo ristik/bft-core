@@ -6,7 +6,7 @@
 // a peer can withhold a witness (the node then does not vote and recovers later) but never substitute one.
 //
 // The protocol is one request per stream: the 32-byte hash, answered by a 4-byte big-endian length and that many bytes, or length zero
-// when the peer does not hold it. It is served only to the root nodes of the current trust base.
+// when the peer does not hold it. It is served only to authorized roots, including the staged successor committee.
 package poswitness
 
 import (

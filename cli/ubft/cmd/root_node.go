@@ -1073,9 +1073,17 @@ func serveRootFrontier(ctx context.Context, log *slog.Logger, host *network.Peer
 	}, nil
 }
 
-// serveWitnesses serves the retained control witnesses to the other root nodes of the current trust base.
-func serveWitnesses(host *network.Peer, cm *consensus.ConsensusManager) func() {
-	server := poswitness.NewServer(cm, func(id peer.ID) bool { return slices.Contains(cm.Validators(), id) })
+type witnessRoot interface {
+	poswitness.Source
+	Validators() peer.IDSlice
+	IsStagedRoot(string) bool
+}
+
+// serveWitnesses serves installed roots and staged successors that need to follow the current epoch before they can join.
+func serveWitnesses(host *network.Peer, cm witnessRoot) func() {
+	server := poswitness.NewServer(cm, func(id peer.ID) bool {
+		return slices.Contains(cm.Validators(), id) || cm.IsStagedRoot(id.String())
+	})
 	host.RegisterProtocolHandler(poswitness.ProtocolID, server.Handler)
 	return func() { host.RemoveProtocolHandler(poswitness.ProtocolID) }
 }
