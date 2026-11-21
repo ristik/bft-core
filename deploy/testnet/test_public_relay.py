@@ -10,7 +10,7 @@ from unittest.mock import patch
 import urllib.error
 import urllib.request
 
-from gateway import Handler, Relay, Server
+from gateway import Handler, MAX_BODY, Relay, Server
 
 GENESIS = '0x' + 'aa' * 32
 TX = '0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347'
@@ -88,7 +88,8 @@ class PublicRelayTest(unittest.TestCase):
                 urls.append('http://127.0.0.1:' + str(server.server_address[1]))
             else:
                 urls.append(self.serve(ThreadingHTTPServer(('127.0.0.1', 0), node.handler())))
-        self.relay = Relay(dict(validator_rpc_urls=urls, chain_id=70, genesis_hash=GENESIS))
+        cfg = dict(validator_rpc_urls=urls, chain_id=70, genesis_hash=GENESIS)
+        self.relay = Relay(cfg, small_body_limit=MAX_BODY)
         server = Server(('127.0.0.1', 0), Handler, self.relay)
         self.stack.callback(self.relay.close)
         self.stack.callback(server.pool.shutdown)

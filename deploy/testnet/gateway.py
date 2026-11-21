@@ -27,7 +27,7 @@ import time
 import urllib.error
 import urllib.request
 
-from public_relay import Relay, ResponseTooLarge, SMALL_BODY
+from public_relay import Relay, ResponseTooLarge
 
 # The reads a native bridge v2 wallet builds its evidence from (bft-core#1102): certified header evidence (the companion of the child block
 # carries the certificate of its parent), the block's receipts for the receipt-trie path, vault logs, and the companion retention horizon.
@@ -40,7 +40,7 @@ LOG_TOPIC_ALTERNATIVES = 64 # hashes one topic position may list (for example th
 # the reads whose upstream work and answer grow with the chain: their own, tighter per-client and total rate, on top of the general one
 HEAVY_METHODS = frozenset({'eth_getLogs', 'eth_getBlockReceipts'})
 MAX_RESULT_BYTES = 8 << 20  # the most bytes of one upstream answer the gateway reads and relays; above it the wallet pages (413)
-MAX_BODY = SMALL_BODY
+MAX_BODY = 16384
 MAX_RAW_TX_BODY = 4718592   # 4.5 MiB: the 2 MiB envelope as hex in a redeem transaction, with its ABI and JSON framing
 # the methods that may carry a redemption's calldata: its send, and the call and the estimate a wallet makes first (their execution is bounded by the
 # gas the call is given, their concurrency by LARGE_SLOTS)
@@ -314,7 +314,7 @@ class Metrics(http.server.BaseHTTPRequestHandler):
 
 if __name__ == '__main__':
     cfg = json.loads(Path(os.environ.get('FAUCET_CONFIG', '/network/network.json')).read_text())
-    server = Server(('0.0.0.0', 8545), Handler, Relay(cfg))
+    server = Server(('0.0.0.0', 8545), Handler, Relay(cfg, small_body_limit=MAX_BODY))
     metrics = http.server.HTTPServer(('0.0.0.0', 9090), Metrics)
     metrics.gateway = server
     threading.Thread(target=metrics.serve_forever, daemon=True).start()

@@ -20,7 +20,6 @@ READ_SLOTS = 8
 SEND_GROUPS = 4
 SEND_WIDTH = 4
 LARGE_SEND_GROUPS = 2
-SMALL_BODY = 16 << 10
 RETRY_AFTER = 5
 CONTROL_BYTES = 16 << 10
 HASH = re.compile(r'0x[0-9a-fA-F]{64}')
@@ -112,10 +111,11 @@ def rpc(url, body, deadline, max_bytes=CONTROL_BYTES, timeout=PROBE_TIMEOUT):
 
 
 class Relay:
-    def __init__(self, cfg):
+    def __init__(self, cfg, *, small_body_limit):
         self.urls = tuple(cfg['validator_rpc_urls'])
         self.chain_id = cfg['chain_id']
         self.genesis_hash = cfg['genesis_hash']
+        self.small_body_limit = small_body_limit
         self.retry_at = {}
         self.lock = threading.Lock()
         self.read_slots = threading.BoundedSemaphore(READ_SLOTS)
@@ -323,7 +323,7 @@ class Relay:
         body = payload('eth_sendRawTransaction', params)
         if not self.send_slots.acquire(blocking=False):
             raise Unavailable('all broadcast slots occupied')
-        large = len(body) > SMALL_BODY
+        large = len(body) > self.small_body_limit
         if large and not self.large_send_slots.acquire(blocking=False):
             self.send_slots.release()
             raise Unavailable('all large broadcast slots occupied')
