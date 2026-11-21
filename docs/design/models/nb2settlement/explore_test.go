@@ -155,6 +155,14 @@ func trace(nodes []node, at int) string {
 	return strings.Join(steps, " -> ")
 }
 
+func (s state) progress() int {
+	rank := int(s.targetPayments)
+	for session := range s.lineage {
+		rank += int(s.lineage[session]) + int(s.prefix[session])
+	}
+	return rank
+}
+
 func explore(t *testing.T, c claim) coverage {
 	t.Helper()
 	start := initial(c)
@@ -179,14 +187,19 @@ func explore(t *testing.T, c claim) coverage {
 				predecessors = append(predecessors, nil)
 			}
 			if e.stable {
+				if e.next.progress() <= s.progress() {
+					t.Fatalf("stable transition %q failed to advance after %s", e.description, trace(nodes, i))
+				}
 				predecessors[j] = append(predecessors[j], i)
 			}
 		})
 	}
 
 	// Distance to payment under a stable, payable execution with archive and
-	// receipt access. At each step a claimant can take an edge reducing this
-	// rank. Idle or reverting schedules do not promise payment.
+	// receipt access. The bounded progress rank above excludes cycles and
+	// distance excludes unpaid dead ends. Every maximal stable path pays if
+	// effective calls continue to be included. Distance also measures the
+	// shortest completion path available to a claimant from each state.
 	distance := make([]int, len(nodes))
 	var queue []int
 	for i, n := range nodes {
