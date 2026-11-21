@@ -20,10 +20,10 @@ class ResponseTooLarge(ValueError):
     """An upstream answer above the caller's byte bound; nothing of it is parsed or relayed."""
 
 
-def request(url, data=None, headers=None, max_bytes=None):
-    payload = None if data is None else json.dumps(data).encode()
+def request(url, data=None, headers=None, max_bytes=None, *, timeout=8):
+    payload = data if data is None or isinstance(data, bytes) else json.dumps(data).encode()
     req = urllib.request.Request(url, payload, headers or {})
-    with urllib.request.urlopen(req, timeout=8) as response:
+    with urllib.request.urlopen(req, timeout=timeout) as response:
         if max_bytes is None:
             return json.load(response)
         raw = response.read(max_bytes + 1)

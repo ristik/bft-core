@@ -72,7 +72,7 @@ Each row: the check, where to look, and what a pass is. Record `PASS`, `FAIL` (w
 
 | # | check | where / how | pass |
 |---|---|---|---|
-| 22 | One validator entity down and back | `rehearse.py --stages pod-restart` evidence (and the host run) | the public gateway fails closed while down; survivors certify; the entity rejoins on the same block |
+| 22 | One validator entity down and back | `rehearse.py --stages pod-restart` evidence (and the host run) | the gateway serves reads and accepts a transaction with one validator down, the survivors certify it, and the entity rejoins on the same block |
 | 23 | Quiesced backup and same-generation restore | `backup.py` run on the host; `rehearse.py --stages backup-restore` evidence | archive and sha256 exist; restored validators agree on blocks and the funded nonce |
 | 24 | Reset | `reset.py`; `rehearse.py --stages reset` evidence | block-zero hash changed; old wallet pin gets 409; new network pays a transfer |
 | 25 | Replay of its own history | the native lane evidence (T6) and the archive restore rows X-29 to X-31 of the failure matrix | cited rows MET at the revision under review, or the limit stated; the archive replicas became a derived two-of-three set in #751, so re-check these rows against that change |

@@ -1,7 +1,7 @@
 """Bounded public JSON-RPC reverse proxy. No batches, signing, admin or Engine API.
 
 Two public routes:
-  POST /                    the execution chain's allow-listed methods (PUBLIC), through the relay to every validator. Bodies up to MAX_BODY,
+  POST /                    the execution chain's allow-listed methods (PUBLIC), through the relay to healthy validators. Bodies up to MAX_BODY,
                             except LARGE_METHODS up to MAX_RAW_TX_BODY: a bridge redemption carries its whole return proof (the 2 MiB direct
                             envelope is about 4.2 MB as hex), and a wallet checks it with eth_call and eth_estimateGas on the same calldata before
                             it sends it; at most LARGE_SLOTS bodies above MAX_BODY are read at once. The wallet evidence methods
@@ -27,7 +27,7 @@ import time
 import urllib.error
 import urllib.request
 
-from faucet.relay import Relay, ResponseTooLarge
+from public_relay import Relay, ResponseTooLarge
 
 # The reads a native bridge v2 wallet builds its evidence from (bft-core#1102): certified header evidence (the companion of the child block
 # carries the certificate of its parent), the block's receipts for the receipt-trie path, vault logs, and the companion retention horizon.
@@ -247,7 +247,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self.reply(413, {'error': f'{method}: the answer is above {MAX_RESULT_BYTES} bytes; ask for less (a narrower eth_getLogs window)'})
             except Exception:
                 self.server.errors += 1
-                return self.reply(503, {'error': 'RPC unavailable; broadcast may be partial, inspect before retry'})
+                if method == 'eth_sendRawTransaction':
+                    return self.reply(503, {'error': 'No transaction acknowledgement; check the hash before retrying the same bytes'})
+                return self.reply(503, {'error': 'RPC unavailable'})
             self.reply(200, result)
         except (ValueError, TypeError, KeyError):
             return self.reply(400, {'error': 'invalid or forbidden JSON-RPC request'})

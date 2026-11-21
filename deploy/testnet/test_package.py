@@ -623,7 +623,12 @@ class ProofOfStake(unittest.TestCase):
             def say(self,*a): pass
             def expect(self,ok,what,detail=''): assert ok,what
             def compose(self,*a,**k): return ''
-            def http(self,*a,**k): return (503,'')
+            chain_id=1
+            def http(self,*a,**k): return (200,'')
+            def call(self,method,params=()):
+                if method=='eth_getTransactionReceipt': return {'blockHash':'0xb'}
+                if method=='eth_sendRawTransaction': return '0xtx'
+                return '0x1'
             def ureth(self,j,method,params=None): return '0x1'
             def raw_tx(self,*a): return '0xraw'
             def cast_run(self,*a): return '0xtx'
@@ -652,7 +657,12 @@ class ProofOfStake(unittest.TestCase):
             def say(self,m): said.append(m)
             def expect(self,ok,what,detail=''): assert ok,what
             def compose(self,*a,**k): return 'a stop window line'
-            def http(self,*a,**k): return (503,'')
+            chain_id=1
+            def http(self,*a,**k): return (200,'')
+            def call(self,method,params=()):
+                if method=='eth_getTransactionReceipt': return {'blockHash':'0xb'}
+                if method=='eth_sendRawTransaction': return '0xtx'
+                return '0x1'
             def ureth(self,j,method,params=None): return '0x1'
             def raw_tx(self,*a): return '0xraw'
             def cast_run(self,*a): return '0xtx'
@@ -682,7 +692,12 @@ class ProofOfStake(unittest.TestCase):
             def say(self,m): said.append(m)
             def expect(self,ok,what,detail=''): assert ok,what
             def compose(self,*a,**k): return 'a stop window line'
-            def http(self,*a,**k): return (503,'')
+            chain_id=1
+            def http(self,*a,**k): return (200,'')
+            def call(self,method,params=()):
+                if method=='eth_getTransactionReceipt': return {'blockHash':'0xb'}
+                if method=='eth_sendRawTransaction': return self.inner_reply()['result']
+                return '0x1'
             hashes=[]
             def ureth(self,j,method,params=None):
                 if method=='eth_getTransactionReceipt': self.asked=params[0]
@@ -718,26 +733,41 @@ class ProofOfStake(unittest.TestCase):
                 return replies(url)
             def wait(self,what,probe,seconds): return True
         return Fake()
-    def test_the_transition_transaction_goes_to_every_survivor(self):
+    def test_the_transition_transaction_uses_the_gateway_while_a_validator_is_down(self):
         import rehearse
-        sent=[]
+        calls = []
+
         class Fake(rehearse.Rehearsal):
-            def __init__(self): self.n,self.pods,self.manifest,self.evidence,self.target=4,[2],{'faucet_address':'0x'+'11'*20},Path(tempfile.mkdtemp()),2
-            def say(self,m): pass
-            def expect(self,ok,what,detail=''): assert ok,what
-            def compose(self,*a,**k): return ''
-            def http(self,*a,**k): return (503,'')
-            def ureth(self,j,method,params=None): return '0x1'
-            def raw_tx(self,*a): return '0xraw'
-            def cast_run(self,*a): return '0xtx'
-            def inner_reply(self,url,method,params=()):
-                sent.append(url)
-                return {'result':'0xtx'}
-            def wait(self,what,probe,seconds):
-                if 'mines it' in what: raise rehearse.Failure('stop at the mining wait')
-                return True
-        with self.assertRaises(rehearse.Failure): Fake().pod_restart(rotated=True)
-        self.assertEqual(sent,[f'http://ureth{j}:8545' for j in (1,3,4)],'the validators have no peers: a pool not sent it never holds it')
+            n, pods, chain_id = 4, [2], 1
+            manifest = {'faucet_address': '0x' + '11' * 20}
+
+            def __init__(self): pass
+            def say(self, message): pass
+            def expect(self, ok, what, detail=''): assert ok, what
+            def compose(self, *args): calls.append(args)
+            def http(self, host, method, path): return (200, '')
+            def raw_tx(self, *args): return '0xraw'
+            def cast_run(self, *args): return '0xtx'
+
+            def call(self, method, params=()):
+                calls.append((method, params))
+                return '0xtx' if method == 'eth_sendRawTransaction' else '0x1'
+
+            def wait(self, what, probe, seconds):
+                if 'mines it' in what:
+                    raise rehearse.Failure('stop at the mining wait')
+                return probe()
+
+        with self.assertRaisesRegex(rehearse.Failure, 'stop at the mining wait'):
+            Fake().pod_restart(rotated=True)
+        self.assertEqual(calls, [
+            ('stop', 'ureth2', 'root2', 'shard2'),
+            ('eth_chainId', ()),
+            ('eth_getTransactionCount', [Fake.manifest['faucet_address'], 'latest']),
+            ('eth_gasPrice', ()),
+            ('eth_sendRawTransaction', ['0xraw']),
+        ])
+
     def test_the_next_result_is_any_open_result_but_the_last_handoffs(self):
         import rehearse
         done,other,zero='0x'+'aa'*32,'0x'+'bb'*32,'0x'+'00'*32
@@ -956,7 +986,12 @@ class ProofOfStake(unittest.TestCase):
             def say(self,m): said.append(m)
             def expect(self,ok,what,detail=''): assert ok,what
             def compose(self,*a,**k): return 'a stop window line'
-            def http(self,*a,**k): return (503,'')
+            chain_id=1
+            def http(self,*a,**k): return (200,'')
+            def call(self,method,params=()):
+                if method=='eth_getTransactionReceipt': return {'blockHash':'0xb'}
+                if method=='eth_sendRawTransaction': return self.inner_reply()['result']
+                return '0x1'
             def ureth(self,j,method,params=None):
                 if method=='eth_getTransactionReceipt': self.asked=params[0]
                 return '0x1'
@@ -1064,7 +1099,12 @@ class ProofOfStake(unittest.TestCase):
             def say(self,*a): pass
             def expect(self,ok,what,detail=''): assert ok,what
             def compose(self,*a,**k): return ''
-            def http(self,*a,**k): return (503,'')
+            chain_id=1
+            def http(self,*a,**k): return (200,'')
+            def call(self,method,params=()):
+                if method=='eth_getTransactionReceipt': return {'blockHash':'0xb'}
+                if method=='eth_sendRawTransaction': return '0xtx'
+                return '0x1'
             def ureth(self,j,method,params=None): return '0x1'
             def raw_tx(self,*a): return '0xraw'
             def cast_run(self,*a): return '0xtx'
