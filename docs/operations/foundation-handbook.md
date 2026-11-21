@@ -8,7 +8,9 @@ In a private working directory, set `RPC_URL`, `CHAIN_ID` and the paths for your
 
 ```bash
 ubft governance propose committee-limits --rpc "$RPC_URL" --n-min 4 --n-target 5 --n-max 5 --out proposal.json
-ubft governance sign --proposal proposal.json --signer-key "$SIGNER_KEY" --chain-id "$CHAIN_ID" --out approval.json
+read -rp 'Signer slot assigned by the coordinator (1, 2 or 3): ' SIGNER_SLOT
+ubft governance sign --proposal proposal.json --signer-key "$SIGNER_KEY" --chain-id "$CHAIN_ID" \
+  --out "approval-$SIGNER_SLOT.json"
 ubft governance aggregate --rpc "$RPC_URL" --proposal proposal.json \
   --approval approval-1.json --approval approval-2.json --approval approval-3.json --out bundle.json
 ubft governance execute --rpc "$RPC_URL" --bundle bundle.json --sender-key "$SENDER_KEY"
@@ -18,9 +20,13 @@ ubft governance execute --rpc "$RPC_URL" --change "$CHANGE_ID" --sender-key "$SE
 ubft governance list --rpc "$RPC_URL" --change "$CHANGE_ID"
 ```
 
-The three signers provide separate approval files. Wait for both certified-time and progress delays before executing the queue item. Check for Scheduled, then Bound, then the applied state and its effect. Queued or Scheduled items can be cancelled through the same multisig proposal flow. A bound change is committed to its boundary. Approvals remain executable until the nonce is consumed. Coordinate a nonce burn through the multisig if approvals at that nonce must be withdrawn.
+The coordinator gives the three signers distinct slots and collects their approval files under the same filenames. Wait for both certified-time and progress delays before executing the queue item. Check for Scheduled, then Bound, then the applied state and its effect. Queued or Scheduled items can be cancelled through the same multisig proposal flow. A bound change is committed to its boundary. Approvals remain executable until the nonce is consumed. Coordinate a nonce burn through the multisig if approvals at that nonce must be withdrawn.
 
 For fees, propose `fee-params` with the floor in wei, the change denominator and the collector address. Confirm the effective EVM block and the old and new settings with validator status. For limits, check the measured module caps and a viable committee and quorum before proposing a change. In **PoA only**, use `propose admit` and `propose confirm-exit` for the ordinary operator lifecycle. PoS delegation admission and retirement use P85 custody and elections.
+
+## Confirm admission windows
+
+For a PoS application, confirm the successor shard epoch and the cutoff for the next election from the current certified state. Check that there is time to complete registration, bond and delegation before the election takes its snapshot. If an existing result excludes the applicant, let that result resolve and give the operator a new window. If the already registered authority missed the planned assignment, check active and frozen membership before coordinating its replacement binding.
 
 ## Schedule activations
 

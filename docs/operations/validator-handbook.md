@@ -56,6 +56,8 @@ Continue after all manifest entries verify. The commands below use free local po
 
 ## 2. Create the operator identity and start the authority
 
+Before creating the authority, have the Foundation confirm the next election is still open to applications and give you its successor shard epoch and application cutoff. For the rehearsal, use the maintainer's admission-window entry in the operator log. The current root epoch alone cannot establish this scope.
+
 `validator init` creates the root key, the shard's local key file for peer identity, the ureth devp2p secret, the Engine JWT and the operator transaction key. The authority generates its own shard signing key in memory. It starts pending, with signing sessions disabled until enrollment. Create and hold the authority outside the shard's backup and restart scope. If its process is lost, its signing identity is lost. Arrange a new binding and enrollment before returning to service.
 
 ```bash
@@ -67,7 +69,7 @@ REGISTRY=0xff00000000000000000000000000000000000003
 ubft validator init --rpc "$RPC_URL" --chain-id "$CHAIN_ID" --ports 26652,28152,30303
 OPERATOR=$(jq -er '.payee' validator.json)
 ROOT_EPOCH=$(ubft validator status --sample 0 --json | jq -er '.rootEpoch | select(. >= 1)')
-NEXT_SHARD_EPOCH=$ROOT_EPOCH
+read -rp 'Confirmed successor shard epoch: ' NEXT_SHARD_EPOCH
 SHARD_NODE=$(ubft node-id --home "$UBFT_HOME/evm" | tail -n1)
 install -d -m 700 authority
 ubft signing-authority credential --out authority/operator.cred
@@ -89,7 +91,7 @@ ubft signing-authority run --home "$UBFT_HOME/authority" --authority-id "$SHARD_
 AUTHORITY_PID=$!
 ```
 
-A pending authority is scoped to the shard epoch that will first name it. On the rehearsal lane the genesis shard epoch is 0 and every handoff is coupled, so the current root epoch is the next shard epoch. On another deployment, set `NEXT_SHARD_EPOCH` to the successor shard epoch published for your admission.
+A pending authority is scoped to the shard epoch that will first name it. Save the confirmed cutoff, successor shard epoch and current root epoch with your service configuration.
 
 The late P85 pin is for this prototype rehearsal when VR assigns the identity at application. For a deployment with a provisioned identity, use an approved startup `--pos-policy` and `--require-pos-policy`. Wait for `signing authority running` in `logs/authority.log`, then select the authority in the validator config.
 
@@ -115,7 +117,7 @@ gpg --decrypt "$BACKUP" | tar -tzf -
 
 The second command lists the encrypted archive's entries without writing a decrypted archive. Keep the JWT and authority credentials private. Start only one instance per identity. Always pass the same `--p2p-secret-key` to ureth so its enode survives a datadir rebuild.
 
-Before applying, check that `validator status --sample 0 --json` still reports the `ROOT_EPOCH` captured above. If an incumbent handoff completed before your first registration, the pending authority may be scoped to the previous successor. In that case, stop only your still-pending authority using its saved `AUTHORITY_PID`. Re-read the current `ROOT_EPOCH`, update `NEXT_SHARD_EPOCH`, and repeat the authority run command with the existing policy and credentials. Write the replacement node info to a fresh filename, then point `validator init --force` at that file. Keep the same wallet, payee, root keys and shard peer identity. Once registration has committed, consult the Foundation before changing the authority or its binding.
+Before applying, check that `validator status --sample 0 --json` still reports the recorded `ROOT_EPOCH` and that your confirmed election cutoff has passed neither in certified time nor progress. Confirm a new window if the cutoff elapsed or an intervening handoff closed it. See [Missed admission](#missed-admission) for the binding recovery.
 
 ## 3. Verify the seed and start as a follower
 
@@ -133,7 +135,13 @@ PIN_RESULT=$(ubft seed restore-pin --dir downloaded-seed --utb-genesis-id "$GENE
 TRUST_BODY_ID=${PIN_RESULT##*bodyID=}
 ```
 
-Continue after preflight succeeds. The release's peer files contain one multiaddress per line. Rehearsal peer addresses are reachable from a fresh service account on the dev host. For an external deployment use the public peer multiaddresses and the routable announce addresses provisioned for your node.
+Continue after preflight succeeds. The release's peer files contain one multiaddress per line. Rehearsal peers are reachable from the dev host. For an external host, use the release's routable peers and set the host's public IPv4 address before running the next block. Forward TCP 26652 and 28152 to this host if it is behind NAT. The nodes still serve their operator RPC on loopback.
+
+```bash
+read -rp 'Public IPv4 address for your external node: ' PUBLIC_P2P_IP
+```
+
+Leave `PUBLIC_P2P_IP` unset during the rehearsal.
 
 ```bash
 read -r -a URETH_FLAGS <<< "$(paste -sd' ' release/ureth-flags.txt)"
@@ -141,6 +149,12 @@ ROOT_PEERS=$(paste -sd, release/root-peers.txt)
 SHARD_PEERS=$(paste -sd, release/shard-peers.txt)
 mapfile -t ARCHIVE_PEERS < <(head -n 2 release/shard-peers.txt | sed 's|.*/p2p/||')
 FEE_COLLECTOR=$(cat release/fee-collector.txt)
+ROOT_P2P=(--address /ip4/127.0.0.1/tcp/26652)
+SHARD_P2P=(--address /ip4/127.0.0.1/tcp/28152)
+if [[ -n ${PUBLIC_P2P_IP:-} ]]; then
+  ROOT_P2P=(--address /ip4/0.0.0.0/tcp/26652 --announce-addresses "/ip4/$PUBLIC_P2P_IP/tcp/26652")
+  SHARD_P2P=(--address /ip4/0.0.0.0/tcp/28152 --announce-addresses "/ip4/$PUBLIC_P2P_IP/tcp/28152")
+fi
 ROOT_INSTALL=()
 if (( ROOT_EPOCH > 1 )); then
   ROOT_INSTALL=(--install-handoff-epoch "$ROOT_EPOCH")
@@ -148,17 +162,34 @@ fi
 UTB=(--utb-genesis "$UBFT_HOME/release/utb-genesis.cbor" --utb-genesis-id "$GENESIS_PIN")
 unicity-reth node --chain "$UBFT_HOME/release/genesis.json" --datadir "$UBFT_HOME/ureth" \
   --p2p-secret-key "$UBFT_HOME/ureth-key/p2p-secret" --disable-discovery \
-  --port 30303 --http --http.addr 127.0.0.1 --http.port 8545 --http.api eth,net,debug \
+  --port 30303 --ipcdisable --http --http.addr 127.0.0.1 --http.port 8545 --http.api eth,net,debug \
   --authrpc.addr 127.0.0.1 --authrpc.port 8551 --authrpc.jwtsecret "$UBFT_HOME/jwt/jwt.hex" \
   "${URETH_FLAGS[@]}" >logs/ureth.log 2>&1 &
-ubft root-node run --home "$UBFT_HOME/root" --address /ip4/127.0.0.1/tcp/26652 \
+URETH_PID=$!
+```
+
+Wait for both ureth listeners before starting the root and shard. Continue after this check succeeds.
+
+```bash
+timeout 45 bash -c '
+  until curl -fsS --max-time 2 -H "Content-Type: application/json" \
+    -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_chainId\",\"params\":[],\"id\":1}" http://127.0.0.1:8545 |
+      jq -e ".result != null" >/dev/null &&
+      ( : </dev/tcp/127.0.0.1/8551 ) 2>/dev/null; do
+    sleep 1
+  done
+'
+```
+
+```bash
+ubft root-node run --home "$UBFT_HOME/root" "${ROOT_P2P[@]}" \
   --bootnodes "$ROOT_PEERS" --metrics prometheus --rpc-server-address 127.0.0.1:25852 \
   --trust-base release/trust-base.json --shard-conf release/full-shard-conf.json --profile-3 --q3-lane --b1-registry \
   --genesis-identities release/genesis-identities.json --vr-deployment release/vr-deployment.json \
   --pos-evm-rpc "$RPC_URL" --vr-shard-rpc http://127.0.0.1:28352 \
   --vr-evm-authority-socket "$UBFT_HOME/authority/pop.sock" \
   --vr-evm-authority-credential "$UBFT_HOME/authority/pop.cred" "${ROOT_INSTALL[@]}" "${UTB[@]}" >logs/root.log 2>&1 &
-SHARD_ARGS=(--home "$UBFT_HOME/evm" --address /ip4/127.0.0.1/tcp/28152
+SHARD_ARGS=(--home "$UBFT_HOME/evm" "${SHARD_P2P[@]}"
   --bootnodes "$ROOT_PEERS,$SHARD_PEERS" --metrics prometheus --rpc-server-address 127.0.0.1:28352
   --trust-base release/trust-base.json --full-shard-conf release/full-shard-conf.json
   --executor engine-api --genesis release/genesis.json --b1-profile release/b1-profile.json
@@ -172,6 +203,8 @@ SHARD_ARGS=(--home "$UBFT_HOME/evm" --address /ip4/127.0.0.1/tcp/28152
 ubft shard-node restore "${SHARD_ARGS[@]}" --tip-uc seed-pin.uc.cbor --tip-tr seed-pin.tr.cbor \
   --trust-body-id "$TRUST_BODY_ID" >logs/shard.log 2>&1 &
 ```
+
+If the initial shard restore exited at the Engine dial with connection refused, leave the healthy root running. After ureth's readiness check succeeds, repeat just `shard-node restore` when the journal and archive are still fresh. If restore already wrote replay state, preserve it and inspect the error before choosing a recovery procedure.
 
 The root starts from genesis, and the shard and ureth replay certified data from archive peers to the seed checkpoint. Before the roots stage your identity, your shard may retry its handshake and the local head may trail the network. Keep the services running through application and check for catch-up once the election publishes and the roots stage the successor. After a successful restore, supervise subsequent shard starts with `ubft shard-node run "${SHARD_ARGS[@]}"`. Preserve the databases, sessions and high-water records across restarts.
 
@@ -249,6 +282,26 @@ ubft validator claim
 ```
 
 On PoA, exit withdraws an unadmitted application or requests the exit of an active member. The Foundation confirms an active member's exit. Keep serving until the acknowledged boundary and `Exited` status. For Admitted, Joining or Parked PoA states, ask the Foundation for the appropriate removal.
+
+## Missed admission
+
+If the application has sent no registration, confirm a new window, stop only the pending authority using its saved `AUTHORITY_PID`, and start an authority for the confirmed successor using the existing registration policy and credentials. Write its node info to a fresh filename and select it with `validator init --force`. Keep the wallet, root key, shard peer identity and payee.
+
+If registration already committed, changing a pending authority loses the key the registry knows. Ask the Foundation to confirm that your identity is outside the active committee and that no open result can install the previous binding. Keep the current authority running until that is confirmed. Keep the same owner, identity, bond, root key and peer identity. Provision the replacement authority for the new confirmed epoch in a separate directory. Its registration policy must authorize the same owner, root key and payee with `action: "binding"` and the existing VR identity as `id`. Set `REPLACEMENT_AUTH` to that authority's directory with its own operator socket, credential and node info. Stage its binding and then resume the PoS application for the same identity.
+
+```bash
+ID=$(jq -er '.id' validator.json)
+ubft validator rotate --id "$ID" --new-evm-authority-socket "$REPLACEMENT_AUTH/operator.sock" \
+  --new-evm-authority-credential "$REPLACEMENT_AUTH/operator.cred" \
+  --new-evm-node-info "$REPLACEMENT_AUTH/node-info.json"
+ubft validator init --force --id "$ID" --rpc "$RPC_URL" --chain-id "$CHAIN_ID" --ports 26652,28152,30303 \
+  --evm-authority-socket "$REPLACEMENT_AUTH/operator.sock" \
+  --evm-authority-credential "$REPLACEMENT_AUTH/operator.cred" \
+  --evm-authority-node-info "$REPLACEMENT_AUTH/node-info.json"
+ubft validator apply
+```
+
+Use the replacement authority's sockets and credentials in the node commands, and pin its updated P85 policy to the same identity. Stop and coordinate with the Foundation if either the staged binding or delegation is refused.
 
 ## Troubleshooting
 
