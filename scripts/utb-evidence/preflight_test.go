@@ -188,8 +188,14 @@ func TestCombinedUTBPrepValidatesBeforeQueueing(t *testing.T) {
 				require.NotContains(t, string(out), "lock reached")
 				require.Equal(t, 2, exit.ExitCode())
 			} else {
-				require.Contains(t, string(out), "lock reached with "+tc.wantVerifier)
 				require.Equal(t, 47, exit.ExitCode())
+				gotPath, ok := strings.CutPrefix(strings.TrimSuffix(string(out), "\n"), "lock reached with ")
+				require.True(t, ok, "%s", out)
+				got, err := filepath.EvalSymlinks(gotPath)
+				require.NoError(t, err)
+				want, err := filepath.EvalSymlinks(tc.wantVerifier)
+				require.NoError(t, err)
+				require.Equal(t, want, got)
 			}
 		})
 	}
