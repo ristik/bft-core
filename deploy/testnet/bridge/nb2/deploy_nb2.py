@@ -21,6 +21,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -37,6 +38,8 @@ EVM_PARTITION, EVM_SHARD, AGG_PARTITION = 8, '0x80', 7   # generate.py: the EVM 
 QMAX_DEFAULT = 10 ** 27   # the test deployment's liability cap: 10^9 UCT (owner question, briefs/owner-questions.md)
 UNIT_WEI = 10 ** 15   # one scenario unit: deposit 100 units = 0.1 UCT
 TEST_SET = {4, 8}, {2, 4}
+ESTIMATE_ATTEMPTS = 6
+BOUND_PARENT_REFUSAL = 'error code -32603: bound execution input rejected the block: bound parent hash mismatch'
 
 
 def artifact(gen, contract, source):
@@ -52,13 +55,44 @@ def cast(gen, *args):
     return tools(gen, 'cast', *args, capture=True).strip()
 
 
+def cast_failure_reasons(error):
+    """Cast --json reports failures on stdout. Older tools use stderr."""
+    try:
+        result = json.loads(error.stdout or '')
+    except json.JSONDecodeError:
+        result = None
+    if isinstance(result, dict) and isinstance(result.get('errors'), list):
+        reasons = [e['message'] for e in result['errors']
+                   if isinstance(e, dict) and isinstance(e.get('message'), str) and e['message']]
+        if reasons:
+            return list(dict.fromkeys(reasons))
+    return [(error.stderr or '').strip() or 'no diagnostic from cast']
+
+
+def moving_estimate_head(reason):
+    reason = reason.removeprefix('Error: ')
+    prefix = 'Failed to estimate gas: '
+    return (reason.startswith(prefix)
+            and reason[len(prefix):].removeprefix('server returned an error response: ') == BOUND_PARENT_REFUSAL)
+
+
 def create(gen, initcode, label):
     """One creation from the faucet keystore; its receipt."""
-    try:
-        out = tools(gen, 'cast', 'send', '--rpc-url', ETH, '--keystore', '/gen/faucet-secrets/keystore.json', '--password-file', '/gen/faucet-secrets/password',
-                    '--json', '--create', initcode, capture=True)
-    except subprocess.CalledProcessError as error:   # cast's own reason (its stderr), not the initcode the command line carries
-        raise SystemExit(f'the {label} creation failed: cast exited {error.returncode}: {(error.stderr or "").strip()[-2000:]}')
+    for attempt in range(1, ESTIMATE_ATTEMPTS + 1):
+        try:
+            out = tools(gen, 'cast', 'send', '--rpc-url', ETH, '--keystore', '/gen/faucet-secrets/keystore.json',
+                        '--password-file', '/gen/faucet-secrets/password', '--json', '--create', initcode, capture=True)
+            break
+        except subprocess.CalledProcessError as error:
+            reasons = cast_failure_reasons(error)
+            # The pending head can advance during estimation (bft-core#1130).
+            # This specific failure precedes signing and broadcast.
+            if attempt < ESTIMATE_ATTEMPTS and moving_estimate_head(reasons[0]):
+                print(f'{label}: gas estimate refused on a moving head (attempt {attempt}/{ESTIMATE_ATTEMPTS}); retrying', flush=True)
+                time.sleep(min(attempt * 2, 10))
+                continue
+            detail = '; '.join(reasons).replace(initcode, '[creation bytecode redacted]')
+            raise SystemExit(f'the {label} creation failed: cast exited {error.returncode}: {detail[-2000:]}') from None
     receipt = json.loads(out)
     if receipt.get('status') not in ('0x1', 1, '1'):
         raise SystemExit(f'the {label} creation failed: {out[:400]}')
