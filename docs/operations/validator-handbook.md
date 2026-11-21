@@ -413,6 +413,28 @@ On PoS, exit requests custody retirement. Keep serving until the committee has e
 ubft validator claim --dry-run && ubft validator claim
 ```
 
+The pinned pre-VT-07 CLI can print `the operator account has no credit to claim` and exit 1 after both transactions were included. It checks the now-empty credit again after the claim. Use the public receipts to confirm the outcome. Both should have status `0x1` and name the release custody contract. The claim receipt's `CreditClaimed` event identifies the withdrawal recipient and the returned principal in its data word. Once the receipts confirm the withdrawal, the exit is complete.
+
+```bash
+read -rp 'Maturity transaction hash: ' MATURE_TX
+read -rp 'Claim transaction hash: ' CLAIM_TX
+check_exit_receipts() (
+  set -eo pipefail
+  for TX in "$MATURE_TX" "$CLAIM_TX"; do
+    curl -fsS --max-time 10 -H 'Content-Type: application/json' \
+      --data "$(jq -cn --arg tx "$TX" '{jsonrpc:"2.0",id:1,method:"eth_getTransactionReceipt",params:[$tx]}')" \
+      "$RPC_URL" | jq -e --arg custody "$CUSTODY" '
+        .result | select(.status == "0x1" and (.to | ascii_downcase) == ($custody | ascii_downcase)) |
+        {transactionHash, blockNumber, status, from, to, creditClaimed: [
+          .logs[] | select(.topics[0] == "0xc4b5041307ee38be8c4f25df5d980a372ac8a9a73ea8f459891000a5386f5322") |
+          {creditor: .topics[1], recipient: .topics[2], amountWord: .data}
+        ]}
+      '
+  done
+)
+check_exit_receipts
+```
+
 On PoA, exit withdraws an unadmitted application or requests the exit of an active member. The Foundation confirms an active member's exit. Keep serving until the acknowledged boundary and `Exited` status. For Admitted, Joining or Parked PoA states, ask the Foundation for the appropriate removal.
 
 ### Check PoS retirement and maturity
