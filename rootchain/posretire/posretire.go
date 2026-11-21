@@ -80,12 +80,12 @@ type Config struct {
 	VR         *vrstate.Pins // emits HolderRetirement for the prototype's P85 holder 0
 	Chain      Chain
 	Proofs     Proofs
-	// Build collects a witness (default evmstate.BuildRetirementWitness); a seam for tests.
-	Build     func(ctx context.Context, src evmstate.ProofSource, pins evmstate.Pins, id, generation uint64) ([]byte, storage.RetirementFacts, error)
-	StatePath string // the persisted cursor and request set
-	Poll      time.Duration
-	Log       *slog.Logger
-	Now       func() time.Time
+	// buildLegacy returns an authenticated witness and facts. Tests can supply synthetic facts.
+	buildLegacy func(ctx context.Context, src evmstate.ProofSource, pins evmstate.Pins, stateRoot [32]byte, id, generation uint64) ([]byte, storage.RetirementFacts, error)
+	StatePath   string // the persisted cursor and request set
+	Poll        time.Duration
+	Log         *slog.Logger
+	Now         func() time.Time
 }
 
 type entry struct {
@@ -142,8 +142,8 @@ func New(cfg Config) (*Service, error) {
 	if cfg.Chain == nil || cfg.Proofs == nil || cfg.StatePath == "" {
 		return nil, errors.New("posretire: a chain, a proof source and a state path are required")
 	}
-	if cfg.Build == nil {
-		cfg.Build = evmstate.BuildRetirementWitness
+	if cfg.buildLegacy == nil {
+		cfg.buildLegacy = buildLegacyWitness
 	}
 	if cfg.Poll <= 0 {
 		cfg.Poll = 2 * time.Second
@@ -429,12 +429,6 @@ func (s *Service) collect(ck cacheKey, fetchAt [32]byte, finalized finalizedBloc
 	if err == nil && fetchAt != ([32]byte{}) {
 		witness, facts, err = s.buildWitness(ctx, ck, s.cfg.Proofs(fetchAt))
 	}
-	if err == nil && lookup && fetchAt != ([32]byte{}) && s.cfg.VR == nil {
-		// Authenticate the legacy witness too before using facts from a
-		// block located by execution RPC to complete a pending request.
-		facts, err = (evmstate.Authority{Pins: s.cfg.Pins}).VerifyRetirement(witness, ck.parent.StateRoot, ck.key.ID, ck.key.Generation)
-	}
-
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.inflight, ck)
@@ -503,7 +497,7 @@ func (s *Service) collect(ck cacheKey, fetchAt [32]byte, finalized finalizedBloc
 
 func (s *Service) buildWitness(ctx context.Context, ck cacheKey, src evmstate.ProofSource) ([]byte, storage.RetirementFacts, error) {
 	if s.cfg.VR == nil {
-		return s.cfg.Build(ctx, src, s.cfg.Pins, ck.key.ID, ck.key.Generation)
+		return s.cfg.buildLegacy(ctx, src, s.cfg.Pins, ck.parent.StateRoot, ck.key.ID, ck.key.Generation)
 	}
 	h := vrschema.HolderRetirement{ID: ck.key.ID, Generation: ck.key.Generation}
 	raw, _, err := vrstate.BuildRetirementWitness(ctx, src, *s.cfg.VR, h)
@@ -522,6 +516,15 @@ func (s *Service) buildWitness(ctx context.Context, ck cacheKey, src evmstate.Pr
 		NoLotReferences: w.Facts.LotReferences == 0,
 		RecordsCaughtUp: w.HolderCursor == w.RecordCount && w.RecordCount == w.TargetCount,
 	}, nil
+}
+
+func buildLegacyWitness(ctx context.Context, src evmstate.ProofSource, pins evmstate.Pins, stateRoot [32]byte, id, generation uint64) ([]byte, storage.RetirementFacts, error) {
+	raw, _, err := evmstate.BuildRetirementWitness(ctx, src, pins, id, generation)
+	if err != nil {
+		return nil, storage.RetirementFacts{}, err
+	}
+	facts, err := (evmstate.Authority{Pins: pins}).VerifyRetirement(raw, stateRoot, id, generation)
+	return raw, facts, err
 }
 
 // Ready implements storage.RetirementProposer.
