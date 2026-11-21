@@ -1,0 +1,6 @@
+{
+  "protocol": "NB2 flat continuation v1.1",
+  "specification": {
+    "docs/design/nb2-continuation-v1.1.md": "487e7c0d33ec763730fed2196b920d7a4459e351e0360ad0a1a1356eaefdfbf7"
+  }
+}

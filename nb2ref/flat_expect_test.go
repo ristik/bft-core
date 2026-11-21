@@ -139,9 +139,9 @@ type expectedLineage struct {
 	sids, claims              expectedSparse
 }
 
-func newExpectedLineage(t *testing.T, v *FlatVerifier, evidence []byte) *expectedLineage {
+func newExpectedLineage(v *FlatVerifier, evidence []byte) *expectedLineage {
 	p := expectedPageRoot(evidence)
-	d := sha256.Sum256(flatGolden(t, "gamma"))
+	d := sha256.Sum256(v.cfg.Bytes())
 	g := expectedCommit("GEN", v.deployment.Salt[:], d[:])
 	n := binary.BigEndian.AppendUint64(nil, uint64(len(evidence)))
 	s := expectedCommit("SESSION", []byte{1, 1}, g[:], d[:], v.cfg.Vault[:], v.deployment.Recovery[:],

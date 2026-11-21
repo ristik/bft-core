@@ -43,7 +43,7 @@ func TestFlatPacketRefusalOrderAndRetry(t *testing.T) {
 	start := wallet.packet(t, nil, nil, records[:1])
 	startBytes, err := start.Calldata()
 	require.NoError(t, err)
-	model := newExpectedLineage(t, v, evidence)
+	model := newExpectedLineage(v, evidence)
 	frame, progress, event := flatFixtureFrame(t, w, v, model, start, startBytes, records[:1], ReceiptOpts{Type: 2})
 	prior := frame.ResultReceipt
 	resume := wallet.packet(t, progress, prior, records[1:])

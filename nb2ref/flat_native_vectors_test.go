@@ -166,7 +166,7 @@ func TestFlatLargeCombinedWitnesses(t *testing.T) {
 	require.NoError(t, err)
 	e := mustFlatEvidence(t, raw)
 	scratch := newFlatFixtureWallet(e)
-	model := newExpectedLineage(t, v, raw)
+	model := newExpectedLineage(v, raw)
 	var trace []flatFixtureTrace
 	var prior *FlatState
 	var receipt []byte

@@ -1,0 +1,8 @@
+{
+  "binaries": {
+    "unicity-reth": "3187a8349ee7563f1c26b0080377921d7401340b6b596c0dd701d1179414c74e"
+  },
+  "platform": "Linux x86_64",
+  "profile": "release",
+  "ureth": "47cf38736c9f09def5c8fc4dee8a7798ae3988dd"
+}

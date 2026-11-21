@@ -1,0 +1,12 @@
+{
+  "address": "0x0100",
+  "semantics": "CERT_BATCH_V2 permanent registry",
+  "sources": {
+    "crates/unicity/b1/src/batch.rs": "c8d5f5ad100ec9aedb9326f84c2a5df8dac03ad093292ca82fdfff83fc27a24b",
+    "crates/unicity/b1/src/cbor.rs": "0da394371d20be4f25c559bdca5b914465ea4d03c02957f2b233a6ff60478cd4",
+    "crates/unicity/b1/src/certificate.rs": "373186fd63e0b5cca2be7f471e52559af7ab9a6fa010740de9414ded7498e294",
+    "crates/unicity/b1/src/lib.rs": "f16def6a5f84e9939a228d36c73aca19784760785d1eb0308eac2c9cf6cc70c3",
+    "crates/unicity/b1/src/registry.rs": "4f45172189008d7b259241938724e91abe4b4d3e0f61453fdfcd2ab7873cd852"
+  },
+  "ureth": "47cf38736c9f09def5c8fc4dee8a7798ae3988dd"
+}

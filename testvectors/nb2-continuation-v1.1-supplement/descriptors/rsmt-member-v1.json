@@ -1,0 +1,9 @@
+{
+  "address": "0x0102",
+  "semantics": "RSMT_MEMBER_V1",
+  "sources": {
+    "crates/unicity/b1/src/lib.rs": "f16def6a5f84e9939a228d36c73aca19784760785d1eb0308eac2c9cf6cc70c3",
+    "crates/unicity/b1/src/rsmt.rs": "b945a2219a838db6dfbe759a00973809e949de188ff157b1e447adaf01b03452"
+  },
+  "ureth": "47cf38736c9f09def5c8fc4dee8a7798ae3988dd"
+}
