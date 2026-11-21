@@ -34,6 +34,7 @@ export M2_RUN_LOG_DIR="$NB2_OUT/paired" UTB_VERIFIER="$NB2_OUT/utb-evidence"
 export CI_MONGO_NAME="nb2-t7-$$"
 lane_token=
 lane_pid=
+mongo_started=
 plugin_build=$(mktemp -d "$NB2_OUT/.plugin.XXXXXX")
 cleanup() {
   trap '' TERM HUP INT
@@ -41,9 +42,11 @@ cleanup() {
     kill -TERM "$lane_pid" 2>/dev/null || true
     wait "$lane_pid" || true
   fi
-  if [[ -n "$lane_token" ]]; then
+  if [[ -n "$mongo_started" ]]; then
     bash scripts/ci/mongo-up.sh down "$NB2_OUT/mongo" || true
-    scripts/lane-slot.sh release --owner nb2-t7 --token "$lane_token"
+  fi
+  if [[ -n "$lane_token" ]]; then
+    (unset LANE_SLOT; scripts/lane-slot.sh release --owner nb2-t7 --token "$lane_token") || true
   fi
   rm -rf -- "$plugin_build"
 }
@@ -55,9 +58,16 @@ export NB2_PLUGIN="$plugin_build/source"
   cd "$NB2_PLUGIN"
   find packages/native-bridge-plugin/lib -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum
 ) >"$NB2_OUT/plugin-lib.sha256"
-claim=$(scripts/lane-slot.sh acquire --owner nb2-t7 --profile paired-default)
-read -r LANE_SLOT lane_token <<<"$claim"
+lane_token=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen)
+# Bash defers the launcher's signal trap until this foreground acquisition finishes.
+# Let the helper finish even when the terminal signals the whole process group.
+claim=$(
+  trap '' TERM HUP INT
+  scripts/lane-slot.sh acquire --owner nb2-t7 --profile paired-default --token "$lane_token"
+)
+read -r LANE_SLOT _ <<<"$claim"
 export LANE_SLOT
+mongo_started=1
 bash scripts/ci/mongo-up.sh up "$NB2_OUT/mongo"
 bash scripts/reth-paired-devnet.sh 4 10 &
 lane_pid=$!

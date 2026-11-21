@@ -74,22 +74,62 @@ class LaneTests(unittest.TestCase):
                     child.wait()
         return (self.root / 'trace').read_text().splitlines()
 
-    def test_repeated_signals_keep_lane_cleanup_order_and_token(self):
-        self.executable('scripts/reth-paired-devnet.sh', CHILD)
+    def stub_launcher_services(self):
         self.executable('scripts/ci/mongo-up.sh', '#!/bin/sh\necho "mongo-$1" >>"$TRACE"\n')
-        self.executable('scripts/lane-slot.sh', '''#!/bin/sh
-case "$1" in
-  acquire) echo "1 our-token";;
-  release) test "$*" = "release --owner nb2-t7 --token our-token" || exit 1
-           echo release-our-token >>"$TRACE";;
-esac
-''')
         self.executable('scripts/nb2-t7/build-plugin.sh', '''#!/bin/sh
 mkdir -p "$3/packages/native-bridge-plugin/lib"
 touch "$3/packages/native-bridge-plugin/lib/index.js"
 ''')
+
+    def test_repeated_signals_keep_lane_cleanup_order_and_token(self):
+        self.stub_launcher_services()
+        self.executable('scripts/reth-paired-devnet.sh', CHILD)
+        self.executable('scripts/lane-slot.sh', '''#!/bin/sh
+case "$1" in
+  acquire) test "$6" = --token && test -n "$7" || exit 1
+           printf '%s\\n' "$7" > acquired-token
+           echo "1 $7";;
+  release) test "$*" = "release --owner nb2-t7 --token $(cat acquired-token)" || exit 1
+           echo release-our-token >>"$TRACE";;
+esac
+''')
         self.assertEqual(self.interrupt_twice('run.sh'), [
             'mongo-up', 'child-ready', 'child-term', 'child-exit', 'mongo-down', 'release-our-token'])
+        self.assertEqual(list((self.root / 'output').glob('.plugin.*')), [])
+
+    @unittest.skipUnless(shutil.which('flock'), 'real slot acquisition requires flock')
+    def test_interrupt_during_slot_acquisition_releases_claim_before_mongo(self):
+        self.stub_launcher_services()
+        self.executable('scripts/reth-paired-devnet.sh', '#!/bin/sh\necho lane-started >>"$TRACE"\n')
+        (self.root / 'scripts/lib').mkdir()
+        for path in ('lane-slot.sh', 'lib/lane-slot.sh'):
+            shutil.copy(SCRIPTS.parent / path, self.root / 'scripts' / path)
+        locks = self.root / 'locks'
+        self.env.update(LANE_LOCK_DIR=str(locks), LANE_SLOT_TEST_STALL='wait-for-test', LANE_SLOT='3')
+        self.executable('bin/sleep', '''#!/bin/sh
+if [ "$1" != wait-for-test ]; then exec /bin/sleep "$@"; fi
+echo acquire-stalled >>"$TRACE"
+while [ ! -e "$ALLOW_EXIT" ]; do /bin/sleep .05; done
+''')
+        with subprocess.Popen(['bash', 'scripts/nb2-t7/run.sh'], cwd=self.root, env=self.env,
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                              start_new_session=True) as child:
+            try:
+                self.wait_trace('acquire-stalled', child)
+                self.assertEqual(len(list(locks.glob('slot-0.txt.tmp.*'))), 1)
+                self.assertFalse((locks / 'slot-0.txt').exists())
+                self.assertEqual(len(list((self.root / 'output').glob('.plugin.*'))), 1)
+                child.send_signal(signal.SIGTERM)
+                (self.root / 'allow-exit').touch()
+                output, _ = child.communicate(timeout=5)
+                self.assertEqual(child.returncode, 143, output)
+                self.assertIn('released slot 0', output)
+            finally:
+                if child.poll() is None:
+                    os.killpg(child.pid, signal.SIGKILL)
+                    child.wait()
+        self.assertEqual((self.root / 'trace').read_text().splitlines(), ['acquire-stalled'])
+        self.assertEqual(list(locks.glob('slot-*.txt*')), [])
         self.assertEqual(list((self.root / 'output').glob('.plugin.*')), [])
 
     def test_repeated_signals_remove_driver_scratch(self):
