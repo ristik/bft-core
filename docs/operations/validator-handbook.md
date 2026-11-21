@@ -268,7 +268,7 @@ Wait for a P85 election to reserve a result naming your identity. With the relea
 ubft validator pos-publish --own-proof
 ```
 
-Once the result is published, the roots derive the intent and the nodes collect readiness. Watch for Prepare, Freeze, the committed handoff and activation. Wait for your own root to install the first activated epoch that names you. Read its certified configuration and trust base over its loopback operator RPC. Use the exact root and shard epochs from that activation.
+Once the result is published, the roots derive the intent and the nodes collect readiness. Watch for Prepare, Freeze, the committed handoff and activation. Wait for your own root to install the first activated epoch that names you. Read its certified configuration and trust base over its loopback operator RPC. Use the root epoch and successor shard epoch confirmed for that handoff. Immediately after a root switch, round-info can still show the shard epoch of the last certificate. That early sample cannot distinguish a root-only change from a coupled assignment. Check that the verified shard configuration for the confirmed epoch is available before changing the authority's scope.
 
 ```bash
 read -rp 'Activated root epoch: ' ACTIVATED_ROOT_EPOCH
@@ -280,7 +280,7 @@ ubft signing-authority advance-epoch "${AUTH[@]}" --shard-conf activated-shard-c
 ubft signing-authority replace-session "${AUTH[@]}" --out "$UBFT_HOME/authority/client.cred"
 ```
 
-This initial enrollment uses the configuration verified by your paired root. At each later handoff, repeat the advance and session steps with the new verified files. Complete enrollment only once. For an authority already equipped with a lineage pin and an installed configuration, use `signing-authority advance-with-proof` and the verified activation bundles in epoch order. Keep its certification session private.
+This initial enrollment uses the configuration verified by your paired root. At each later handoff, repeat the advance and session steps with the new verified files. Complete enrollment only once. If you advanced to the new root using a stale shard epoch, fetch the activated shard configuration and advance again with the same verified root trust and the higher shard epoch. Replace the session and restart only the shard if it still holds the old credential. For an authority already equipped with a lineage pin and an installed configuration, use `signing-authority advance-with-proof` and the verified activation bundles in epoch order. Keep its certification session private.
 
 Wait for the local shard to activate the same root epoch. If the shard needs to reload its session, stop that shard process through its supervisor and restart it with the same `run` arguments. A registered identity or reserved result is still waiting to validate. Check that the successor handoff is acknowledged, the registry lists your membership, your root votes, your shard certifies with the authority, and local ureth tracks the public head.
 
