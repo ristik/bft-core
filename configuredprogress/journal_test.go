@@ -259,7 +259,11 @@ func TestJournalReopensInterruptedHistoricalCandidateAdmission(t *testing.T) {
 			bootstrap, result := f.bootstrap(1, 4), f.first(1, 2, 5)
 			admitJournal(t, s, f, bootstrap)
 			candidate := candidateB1(f, bootstrap)
-			candidate.LocallyBuilt = tc.local
+			if tc.local {
+				local := candidate
+				local.LocallyBuilt = true
+				require.NoError(t, s.PutJournalCandidate(ctx, f.ctx, testJournalLimits, local))
+			}
 			require.NoError(t, s.PutHistoricalCertifiedJournalCandidate(ctx, f.ctx, testJournalLimits, candidate, result.Certificate(), result.TechnicalRecord()))
 			// Simulate an interruption after the archive candidate was committed and before its observation.
 			require.NoError(t, s.Close())
@@ -267,17 +271,15 @@ func TestJournalReopensInterruptedHistoricalCandidateAdmission(t *testing.T) {
 			s, err := OpenConfiguredV2(path, Settings{Retain: 3})
 			require.NoError(t, err)
 			defer s.Close()
-			err = s.EnableJournal(ctx, f.ctx, testJournalLimits)
-			if tc.local {
-				require.ErrorIs(t, err, ErrUntrusted)
-				return
-			}
-			require.NoError(t, err)
+			require.NoError(t, s.EnableJournal(ctx, f.ctx, testJournalLimits))
 			image, err := s.LoadJournal(ctx, f.ctx, testJournalLimits)
 			require.NoError(t, err)
 			require.Len(t, image.Candidates, 1)
-			require.True(t, image.Candidates[0].Certified)
-			require.Equal(t, result.Certificate().GetRootRoundNumber(), image.Candidates[0].ResultingUC.GetRootRoundNumber())
+			require.Equal(t, !tc.local, image.Candidates[0].Certified, "a local proposal waits for the observation transaction")
+			require.Equal(t, tc.local, image.Candidates[0].Candidate.LocallyBuilt)
+			if !tc.local {
+				require.Equal(t, result.Certificate().GetRootRoundNumber(), image.Candidates[0].ResultingUC.GetRootRoundNumber())
+			}
 			require.Len(t, image.Observations, 1, "opening a detached pair must not synthesize an observation")
 			progress, _, err := s.Load(ctx, f.ctx)
 			require.NoError(t, err)
@@ -289,6 +291,9 @@ func TestJournalReopensInterruptedHistoricalCandidateAdmission(t *testing.T) {
 			image, err = s.LoadJournal(ctx, f.ctx, testJournalLimits)
 			require.NoError(t, err)
 			require.Len(t, image.Observations, 2)
+			require.True(t, image.Candidates[0].Certified)
+			require.Equal(t, tc.local, image.Candidates[0].Candidate.LocallyBuilt)
+			require.Equal(t, result.Certificate().GetRootRoundNumber(), image.Candidates[0].ResultingUC.GetRootRoundNumber())
 		})
 	}
 }

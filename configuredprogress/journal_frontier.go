@@ -533,6 +533,19 @@ func (s *Store) AdvanceFrontier(ctx context.Context, c Context, limits JournalLi
 				return err
 			}
 		}
+		// A detached result can certify a candidate before its observation
+		// advances durable progress. The loader treats the frontier's pair as
+		// the latest observation when it is at or beyond the journal's latest.
+		if state.i.observed == nil {
+			return fmt.Errorf("%w: archive frontier requires a durable observation", frontier.ErrObligation)
+		}
+		observed := state.i.observed.observation.Certificate()
+		if !rootPositionLater(observed.GetRootEpoch(), observed.GetRootRoundNumber(), nextUC.GetRootEpoch(), nextUC.GetRootRoundNumber()) {
+			material := covered[len(covered)-1].Material
+			if !bytes.Equal(material.ResultingUC, state.i.observed.wire.UC) || !bytes.Equal(material.ResultingTR, state.i.observed.wire.TR) {
+				return fmt.Errorf("%w: archive frontier result is outside durable progress", frontier.ErrObligation)
+			}
+		}
 		if err := checkPruneObligations(ctx, c, b, nextUC.GetRootEpoch(), nextUC.GetRootRoundNumber()); err != nil {
 			return err
 		}

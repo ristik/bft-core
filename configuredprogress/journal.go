@@ -442,7 +442,9 @@ func (s *Store) putJournalCandidate(ctx context.Context, c Context, limits Journ
 				if len(prior.ResultingUC) != 0 || len(prior.ResultingTR) != 0 {
 					return ErrUntrusted
 				}
-				if resultUC == nil {
+				// Local proposals become certified in the observation transaction.
+				// Recovery may fetch their result before that transaction can commit.
+				if resultUC == nil || prior.LocallyBuilt {
 					w.Status, w.ResultingUC, w.ResultingTR = prior.Status, nil, nil
 				}
 			case 1:
