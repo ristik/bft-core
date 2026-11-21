@@ -481,6 +481,41 @@ func TestFrontierCommitAndPruneGuards(t *testing.T) {
 	require.NoError(t, s.PruneFrontier(context.Background(), c, limits))
 }
 
+func TestFrontierWaitsForDetachedResultObservation(t *testing.T) {
+	ctx := context.Background()
+	source, f, c, policy, item, limits := frontierTestSetupWithFixture(t, t.TempDir()+"/source.db")
+	image, err := source.LoadJournal(ctx, c, limits)
+	require.NoError(t, source.Close())
+	require.NoError(t, err)
+	require.Len(t, image.Candidates, 1)
+	retained := image.Candidates[0]
+
+	store, err := OpenConfiguredV2(t.TempDir()+"/detached.db", Settings{Retain: 3})
+	require.NoError(t, err)
+	defer store.Close()
+	_, _, err = store.Initialize(ctx, c)
+	require.NoError(t, err)
+	require.NoError(t, store.EnableJournal(ctx, c, limits))
+	require.NoError(t, store.EnableFrontier(ctx, c, limits, policy))
+	prepared, _, err := store.PrepareObservation(ctx, c, f.bootstrap(1, 4))
+	require.NoError(t, err)
+	_, _, err = store.CommitObservation(prepared)
+	require.NoError(t, err)
+	require.NoError(t, store.PutHistoricalCertifiedJournalCandidate(ctx, c, limits, retained.Candidate, retained.ResultingUC, retained.ResultingTR))
+
+	require.ErrorIs(t, store.AdvanceFrontier(ctx, c, limits, []frontier.Coverage{item}), frontier.ErrObligation)
+	image, err = store.LoadJournal(ctx, c, limits)
+	require.NoError(t, err)
+	require.Nil(t, image.Frontier)
+	require.Len(t, image.Observations, 1)
+
+	require.NoError(t, store.BackfillJournalObservation(ctx, c, limits, retained.ResultingUC, retained.ResultingTR))
+	require.NoError(t, store.AdvanceFrontier(ctx, c, limits, []frontier.Coverage{item}))
+	image, err = store.LoadJournal(ctx, c, limits)
+	require.NoError(t, err)
+	require.EqualValues(t, 1, image.Frontier.Anchor.Height)
+}
+
 func TestFrontierRestartAdmitsCertificatesWhileReplicasAreDown(t *testing.T) {
 	path := t.TempDir() + "/journal.db"
 	s, f, c, policy, item, limits := frontierTestSetupWithFixture(t, path)
