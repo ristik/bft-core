@@ -324,6 +324,52 @@ ubft validator claim
 
 On PoA, exit withdraws an unadmitted application or requests the exit of an active member. The Foundation confirms an active member's exit. Keep serving until the acknowledged boundary and `Exited` status. For Admitted, Joining or Parked PoA states, ask the Foundation for the appropriate removal.
 
+### Check PoS retirement and maturity
+
+The exit receipt confirms that custody recorded the request. The public `member` field stays true until the exclusion is acknowledged. The `--custody` flag adds the record cursor. To check retirement and election timing on this P85 release, read the public contract views below. They send no transactions.
+
+```bash
+pos_view() {
+  local contract=$1 data=$2
+  curl -fsS --max-time 10 -H 'Content-Type: application/json' \
+    --data "$(jq -cn --arg to "$contract" --arg data "$data" \
+      '{jsonrpc:"2.0",id:1,method:"eth_call",params:[{to:$to,data:$data},"latest"]}')" \
+    "$RPC_URL" | jq -er '.result | select(type=="string" and startswith("0x")) | ltrimstr("0x")'
+}
+ID=$(jq -er '.id' validator.json)
+ID_WORD=$(printf '%064x' "$ID")
+# positions(uint64) returns nine fixed words, including generation and retirementRequested.
+POSITION=$(pos_view "$CUSTODY" "0x60f3ce04$ID_WORD")
+if [[ ${#POSITION} -eq 576 ]]; then
+  GENERATION_WORD=${POSITION:256:64}
+  printf 'retirement requested: %d\n' "0x${POSITION:512:64}"
+  # liveExposures(uint64,uint64) counts remaining open liability exposures.
+  EXPOSURES=$(pos_view "$CUSTODY" "0xf0011d97$ID_WORD$GENERATION_WORD")
+  if [[ ${#EXPOSURES} -eq 64 ]]; then
+    printf 'live liability exposures: %d\n' "0x$EXPOSURES"
+  fi
+  # retirements(uint64,uint64) returns imported, retirement progress and UC time.
+  RETIREMENT=$(pos_view "$CUSTODY" "0xa09fe98c$ID_WORD$GENERATION_WORD")
+  if [[ ${#RETIREMENT} -eq 192 ]]; then
+    printf 'holder retirement imported: %d\n' "0x${RETIREMENT:0:64}"
+  fi
+fi
+# thresholds() returns the next election's certified progress and time floors.
+THRESHOLDS=$(pos_view "$ELECTION" 0xcda43b3a)
+if [[ ${#THRESHOLDS} -eq 128 ]]; then
+  printf 'election progress floor: %d, UC time floor: %d\n' \
+    "0x${THRESHOLDS:0:64}" "0x${THRESHOLDS:64:64}"
+fi
+ubft validator status --custody "$CUSTODY" --sample 0
+```
+
+`retirement requested: 1` with `member: true` means the validator is still serving while exclusion is pending. The next election requires both floors. If no result is open after both floors, check for the next successful attempt.
+
+1. **Exclusion.** After the acknowledged handoff, `validator status --json` shows `member: false` and your identity is absent from `committee`.
+2. **Closure.** Wait for `live liability exposures: 0` for the retiring generation. Keep checking as custody applies the root records.
+3. **HolderRetirement.** Wait for `holder retirement imported: 1`. This confirms custody processed the retirement record for that generation.
+4. **Maturity.** Run `ubft validator claim --dry-run` to simulate the remaining record, time, progress and evidence gates. The preview describes the next transaction. Successful maturation creates the withdrawal credit.
+
 ## Missed admission
 
 If the application has sent no registration, confirm a new window, stop only the pending authority using its saved `AUTHORITY_PID`, and start an authority for the confirmed successor using the existing registration policy and credentials. Write its node info to a fresh filename and select it with `validator init --force`. Keep the wallet, root key, shard peer identity and payee.
