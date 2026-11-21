@@ -113,6 +113,30 @@ func TestReceiptBoundaries(t *testing.T) {
 	}
 }
 
+func TestRecoveredSettlementRequiresSignedStart(t *testing.T) {
+	c := claim{verdict{1, 1, 1, 1, 1, targetAmount}, 3, 4}
+	s := initial(c)
+	id := c.identity(0)
+	tx := call{
+		route:    recovered,
+		claimed:  c.burn,
+		identity: id,
+		event:    lineageReceipt(c, id, c.lineageSteps),
+		suffix:   suffix{from: c.burn.start, to: s.segment, start: s.archiveAt(c.burn.start)},
+	}
+	if _, result := s.settle(c, tx); result != settled {
+		t.Fatalf("completed receipt and proof from the signed start must settle, got %d", result)
+	}
+
+	// Keep the same receipt and retained endpoint. The empty suffix is valid
+	// at that endpoint, but it skips the interval starting at the signed index.
+	tx.suffix = suffix{from: s.segment, to: s.segment}
+	if next, result := s.settle(c, tx); result != badReceipt || next != s {
+		t.Fatalf("suffix skipped signed start %d: outcome %d, state changed %t",
+			c.burn.start, result, next != s)
+	}
+}
+
 func TestCertifiedAbsenceStillNeedsRetainedHead(t *testing.T) {
 	c := claim{verdict{1, 1, 0, 1, 1, targetAmount}, 1, 0}
 	s := initial(c)
