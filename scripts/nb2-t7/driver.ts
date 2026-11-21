@@ -6,17 +6,17 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
 import { concat, fromHex, toHex } from './sdk/bytes.js';
-import { depositCalldata, redeemCalldata } from './sdk/nb2/abi.js';
+import { abiEncode, depositCalldata, redeemCalldata } from './sdk/nb2/abi.js';
 import { SdkAggregator } from './sdk/nb2/aggregator.js';
 import { ascii, raw, scanNative, u16, u256 } from './sdk/nb2/cbor.js';
 import { ASSET_UCT, deriveCoin, deriveType, domainOf, encodeConfig, PRODUCTION_PARAMS, type Config } from './sdk/nb2/config.js';
 import { HE, HU } from './sdk/nb2/crypto.js';
-import { depositSalt, depositedData, encodeReceiptBacking, firstOwnerOf, rhoOf, TOPIC, verifyReceiptLog } from './sdk/nb2/deposit.js';
+import { decodeDepositProof, depositSalt, depositedData, encodeReceiptBacking, firstOwnerOf, rhoOf, TOPIC, verifyReceiptLog } from './sdk/nb2/deposit.js';
 import { Nb2Error } from './sdk/nb2/errors.js';
 import { LocalKeySigner, signTx } from './sdk/nb2/evm.js';
 import { RecoveryAuthority, RecoverySession } from './sdk/nb2/recovery.js';
-import { EvmReader, HttpJsonRpc } from './sdk/nb2/rpc.js';
-import { genesisHead } from './sdk/nb2/segment.js';
+import { EvmReader, HttpJsonRpc, RpcError } from './sdk/nb2/rpc.js';
+import { checkSegmentLog, encodeHistory, GapTree, genesisHead, nextHead, type Segment } from './sdk/nb2/segment.js';
 import { burnPredicate, decodeToken, encodeProof, lineageOf, signaturePredicate, valueData } from './sdk/nb2/token.js';
 import { appendTransfer, certifyChecked, childMint, localOwner, mintRequest, splitPlan, tokenOfChild, tokenOfMint, transferRequest } from './sdk/nb2/tokenops.js';
 import { decodeUc, TrustInput } from './sdk/nb2/trust.js';
@@ -48,6 +48,7 @@ const route = process.env.NB2_ROUTE ?? 'both';
 assert(route === 'both' || route === 'recovered', 'NB2_ROUTE');
 const depth = route === 'both' ? option('NB2_SPLIT_DEPTH', 1, 1, 20) : option('NB2_SPLIT_DEPTH', 0, 0, 20);
 const qualify = process.env.NB2_QUALIFY_COSTS === '1';
+const qualifyCustody = process.env.NB2_QUALIFY_CUSTODY === '1';
 const packetMax = option('NB2_PACKET_OPERATIONS', qualify ? 16 : 2, 1, 16);
 const receiptReaders = [process.env.NB2_RECEIPT_PRIMARY_RPC ?? rpc, ...(process.env.NB2_RECEIPT_ALT_RPC?.split(',') ?? [])].map((url) => {
   assert.equal(new URL(url).hostname, '127.0.0.1', 'disposable loopback archive required');
@@ -66,8 +67,8 @@ interface Receipt {
   status: string; transactionHash: string; blockNumber: string; blockHash: string; transactionIndex: string;
   gasUsed: string; effectiveGasPrice: string; contractAddress: string; logs: { address: string; topics: string[]; data: string }[];
 }
-async function record(name: string, receipt: Receipt, started: number, signedBytes?: number) {
-  assert.equal(receipt.status, '0x1', name);
+async function record(name: string, receipt: Receipt, started: number, signedBytes?: number, expectedStatus = '0x1') {
+  assert.equal(receipt.status, expectedStatus, name);
   signedBytes ??= bytes(await reader.rpc.call<string>('eth_getRawTransactionByHash', [receipt.transactionHash])).length;
   json(name + '.receipt.json', receipt);
   json(name + '.cost.json', { tx: receipt.transactionHash, block: BigInt(receipt.blockNumber),
@@ -76,7 +77,7 @@ async function record(name: string, receipt: Receipt, started: number, signedByt
   return receipt;
 }
 
-async function send(name: string, target: string, calldata: Uint8Array, value = 0n) {
+async function send(name: string, target: string, calldata: Uint8Array, value = 0n, expectedStatus = '0x1') {
   writeFileSync(join(evidenceDir, name + '.calldata'), calldata);
   const started = Date.now();
   const { baseFee, priority } = await reader.fees();
@@ -89,7 +90,7 @@ async function send(name: string, target: string, calldata: Uint8Array, value = 
   assert.equal(hex(await reader.sendRaw(tx.raw)), hex(tx.hash));
   for (let i = 0; i < 120; ++i) {
     const receipt = await reader.receipt(tx.hash) as Receipt | null;
-    if (receipt) return record(name, receipt, started, tx.raw.length);
+    if (receipt) return record(name, receipt, started, tx.raw.length, expectedStatus);
     await delay(500);
   }
   throw new Error(`no receipt for ${name} ${hex(tx.hash)}`);
@@ -195,11 +196,12 @@ async function trustFor(ucs: Uint8Array[]) {
 
 const authenticatedArchives = new Set<EvmReader>();
 type ExpectedLog = { topics: Uint8Array[]; data: Uint8Array };
-async function certifyReceipt(name: string, receipt: Receipt, emitter: Uint8Array, expected: ExpectedLog) {
+async function certifyReceipt(name: string, receipt: Receipt, emitter: Uint8Array, expected: ExpectedLog, index = 0, count = 1) {
   const fields = (log: { address: string; topics: string[]; data: string }) =>
     ({ address: log.address.toLowerCase(), topics: log.topics.map((t) => t.toLowerCase()), data: log.data.toLowerCase() });
   const wanted = { address: hex(emitter), topics: expected.topics.map(hex), data: hex(expected.data) };
-  assert.deepEqual(receipt.logs.map(fields), [wanted], name);
+  assert.equal(receipt.logs.length, count, name);
+  assert.deepEqual(fields(receipt.logs[index]), wanted, name);
   const tx = bytes(receipt.transactionHash);
   const started = Date.now();
   for (let attempt = 0; attempt < 60; ++attempt) {
@@ -209,13 +211,13 @@ async function certifyReceipt(name: string, receipt: Receipt, emitter: Uint8Arra
         assert(remote && hex(remote.hash) === hex(executionGenesis), 'archive belongs to another generation');
         authenticatedArchives.add(archive);
       }
-      const proof = await archive.receiptProof(tx, emitter, expected.topics[0], true);
+      const proof = await archive.receiptProof(tx, emitter, expected.topics[0], true, expected);
       const trust = await trustFor([proof.proof.uc]);
       const log = await verifyReceiptLog(c, trust, proof.proof, emitter);
       assert.deepEqual({ address: hex(log.address), topics: log.topics.map(hex), data: hex(log.data) }, wanted);
       assert.equal(hex(proof.blockHash), receipt.blockHash.toLowerCase());
       assert.equal(proof.proof.txIndex, BigInt(receipt.transactionIndex));
-      assert.equal(proof.receiptLogIndex, 0);
+      assert.equal(proof.receiptLogIndex, index);
       writeFileSync(join(evidenceDir, name + '.cbor'), proof.encoded);
       json(name + '.locator.json', { transactionHash: receipt.transactionHash, blockHash: hex(proof.blockHash),
         blockNumber: proof.blockNumber, transactionIndex: proof.proof.txIndex, receiptLogIndex: proof.receiptLogIndex,
@@ -229,6 +231,7 @@ async function certifyReceipt(name: string, receipt: Receipt, emitter: Uint8Arra
 }
 
 if (qualify) await runQualificationCosts();
+else if (qualifyCustody) await runQualificationCustody();
 else await runSmoke();
 
 async function runSmoke() {
@@ -332,7 +335,7 @@ async function runSmoke() {
   console.log('PASS NB2 v1.1 deposit and certified payout');
 }
 type Burn = { evidence: Uint8Array; trust: TrustInput; paid: ExpectedLog };
-async function executeRecovery(b: Burn) {
+async function completeRecovery(b: Burn, name = 'run') {
   const authority = new RecoveryAuthority(b.trust, async (next) => json('authority.json', next.origin));
   const session = await RecoverySession.create(gamma, b.evidence, authority, PRODUCTION_PARAMS,
     { salt, recovery: bytes(recovery), runtimeHash: recoveryHash, pins, vaultRuntimeHash: vaultHash });
@@ -353,16 +356,21 @@ async function executeRecovery(b: Burn) {
       }
     }
     const seq = (prior?.seq ?? 0n) + 1n;
-    const name = 'run-' + seq;
-    const cert = await certifyReceipt(name, await send(name, recovery, packet.calldata), bytes(recovery), packet.event);
+    const label = name + '-' + seq;
+    const cert = await certifyReceipt(label, await send(label, recovery, packet.calldata), bytes(recovery), packet.event);
     await session.verifyEvent(cert.trust, cert.encoded, packet.event);
-    if (packet.state) writeFileSync(join(evidenceDir, name + '.state'), packet.state);
-    json(name + '.shape.json', packet.shape);
+    if (packet.state) writeFileSync(join(evidenceDir, label + '.state'), packet.state);
+    json(label + '.shape.json', packet.shape);
     prior = { seq, receipt: cert.encoded };
     trust = cert.trust;
     from = packet.end;
   }
   assert(prior);
+  return { session, prior, trust };
+}
+
+async function executeRecovery(b: Burn) {
+  const { session, prior, trust } = await completeRecovery(b);
   const payment = await session.gaps('redeemRecovered', trust, prior.receipt, { seq: prior.seq }, []);
   await certifyReceipt('recovered', await send('recovered', vault, payment.calldata), c.vault, b.paid);
   return { session: hex(session.id), packets: prior.seq, operations: session.operationCount };
@@ -527,4 +535,214 @@ async function runQualificationCosts() {
 
 function tokenUcs(token: Uint8Array) {
   return lineageOf(decodeToken(token)).flatMap(l => [l.mintProof.uc, ...l.proofs.map(p => p.uc)]);
+}
+
+async function runQualificationCustody() {
+  const { GatewayAggregator } = await import('./wallet/core.js');
+  const walletAgg = new GatewayAggregator(aggregator);
+  const startTime = Date.now();
+  const n = 128;
+  const amount = BigInt(n + 1);
+  const recipient = bytes('0000000000000000000000000000000000000013');
+  const initialRecipient = await reader.balance(recipient);
+  const owner = localOwner(randomBytes(32));
+  const secret = randomBytes(32);
+  const firstOwner = firstOwnerOf(owner.publicKey);
+  const rho = rhoOf(domain, secret);
+  const deposit = await send('deposit', vault, depositCalldata(firstOwner, rho), amount);
+  const dep = await certifyReceipt('deposit', deposit, c.vault, {
+    topics: [TOPIC.Deposited, u256(1)], data: depositedData(domain, amount, rho, firstOwner),
+  });
+  const root = mintRequest({ network: c.network, recipient: signaturePredicate(owner.publicKey),
+    salt: depositSalt(domain, 1n, secret), type: c.ty,
+    justification: encodeReceiptBacking({ d: domain, n: 1n, r: secret, proof: dep.proof }),
+    data: valueData(c.aid, amount), deadline: null });
+  const token = tokenOfMint(root.tx, await certifyChecked(agg, root.cd));
+  const plan = splitPlan(decodeToken(token), Array.from({ length: n + 1 }, () => ({
+    ownerKey: owner.publicKey, amount: 1n, salt: randomBytes(32),
+  })), c.ty, c.aid, randomBytes(32));
+  const split = await transferRequest(token, owner, plan.burn);
+  const parent = appendTransfer(token, split.tx, await certifyChecked(agg, split.cd));
+  const verified = await verifySplit(c, domain, await trustFor(tokenUcs(parent)), decodeToken(parent));
+
+  async function certifyBatch<T extends { cd: Uint8Array }>(requests: readonly T[]) {
+    for (let at = 0; at < requests.length; at += 16) {
+      await Promise.all(requests.slice(at, at + 16).map(({ cd }) => walletAgg.submit(cd)));
+    }
+    const proofs: Uint8Array[] = [];
+    for (const { cd } of requests) proofs.push(await walletAgg.proof(cd));
+    return proofs;
+  }
+  const children = plan.children.map(template => {
+    const child = childMint(verified.link, plan.tree, template);
+    return { ...mintRequest(child.mint), allocation: child.allocation };
+  });
+  const childProofs = await certifyBatch(children);
+  const tokens = children.map((m, i) => tokenOfChild(parent, m.allocation, m.tx, childProofs[i]));
+  const data = encodeReturnData({ d: domain, asset: c.asset, recipient, amount: 1n, minIndex: 0n });
+  const burns = await Promise.all(tokens.map(t => transferRequest(t, owner, {
+    recipient: burnPredicate(HU(data)), mask: randomBytes(32), data, deadline: null,
+  })));
+  const burnProofs = await certifyBatch(burns);
+  const evidence = tokens.map((t, i) => appendTransfer(t, burns[i].tx, burnProofs[i]));
+  const trust = await trustFor(evidence.flatMap(tokenUcs));
+  const claims = await Promise.all(evidence.map(async e => {
+    const verdict = await verifyReturn(gamma, e, trust, PRODUCTION_PARAMS);
+    assert.equal(verdict.amount, 1n);
+    assert.equal(hex(verdict.recipient), hex(recipient));
+    return { evidence: e, verdict, paid: { topics: [TOPIC.Paid, verdict.eta,
+      concat(new Uint8Array(12), recipient)], data: u256(1) } };
+  }));
+  assert.equal(new Set(claims.map(({ verdict }) => hex(verdict.eta))).size, n + 1);
+  const target = claims[0], late = claims[n];
+  const recovered = await completeRecovery({ ...target, trust }, 'eviction-run');
+  const recoveredPacket = await recovered.session.gaps('redeemRecovered', recovered.trust,
+    recovered.prior.receipt, { seq: recovered.prior.seq }, []);
+  const ordinaryCall = (claim: typeof target, history = new Uint8Array()) =>
+    redeemCalldata(claim.evidence, claim.verdict.eta, claim.verdict.minSegment, history);
+  const replayReceipt = await send('paid-target', vault, ordinaryCall(target));
+  await certifyReceipt('paid-target', replayReceipt, c.vault, target.paid);
+
+  async function evmRefusal(name: string, calldata: Uint8Array, signature: string, ...args: Uint8Array[]) {
+    const expected = hex(concat(HE(ascii(signature)).subarray(0, 4), ...args));
+    await assert.rejects(reader.rpc.call('eth_call', [{ from: funded, to: vault, data: hex(calldata),
+      gas: '0x16e3600' }, 'latest']), error => {
+      assert(error instanceof RpcError, String(error));
+      assert.equal(error.data, expected, name);
+      return true;
+    });
+    json(name + '.refusal.json', { expected, signature });
+  }
+  await evmRefusal('before-ordinary', ordinaryCall(target), 'AlreadyPaid(bytes32)', target.verdict.eta);
+  await evmRefusal('before-recovered', recoveredPacket.calldata, 'AlreadyPaid(bytes32)', target.verdict.eta);
+  const segments: Segment[] = [];
+  const sealEvidence: Uint8Array[] = [];
+  const h0 = genesisHead(domain, c.K);
+  let head = h0;
+  let ids = [target.verdict.eta];
+  const sealTopic = HE(ascii('SegmentSealed(uint64,bytes32,bytes32,bytes)'));
+  const windows = [];
+
+  // Offer batches to the pool without waiting for each transaction's receipt.
+  const size = 16;
+  for (let i = 1; i < n; i += size) {
+    const first = Date.now();
+    const nonce = await reader.nonce(signer.address);
+    const { baseFee, priority } = await reader.fees();
+    const batch = claims.slice(i, Math.min(n, i + size));
+    const submitted = [];
+    for (const [j, claim] of batch.entries()) {
+      const tx = await signTx(signer, { chainId, nonce: nonce + BigInt(j), gas: 5_000_000n,
+        maxFeePerGas: 2n * baseFee + priority, maxPriorityFeePerGas: priority, to: c.vault,
+        value: 0n, data: ordinaryCall(claim) });
+      assert.equal(hex(await reader.sendRaw(tx.raw)), hex(tx.hash));
+      submitted.push(tx);
+    }
+    for (const [j, tx] of submitted.entries()) {
+      const claim = batch[j];
+      const name = 'load-' + (i + j);
+      let receipt;
+      for (let attempt = 0; attempt < 120; attempt++) {
+        receipt = await reader.receipt(tx.hash);
+        if (receipt) break;
+        await delay(500);
+      }
+      assert(receipt, name);
+      const mined = await record(name, receipt as Receipt, first, tx.raw.length);
+      ids.push(claim.verdict.eta);
+      const sealing = ids.length === Number(c.K);
+      await certifyReceipt(name, mined, c.vault, claim.paid, 0, sealing ? 2 : 1);
+      if (sealing) {
+        ids.sort(Buffer.compare);
+        const tree = GapTree.build(ids)!;
+        const index = BigInt(segments.length);
+        const after = nextHead(domain, index, head, tree.root);
+        const seal = { topics: [sealTopic, u256(index)], data: abiEncode([
+          { word: head }, { word: after }, { bytes: concat(...ids) },
+        ]) };
+        sealEvidence.push((await certifyReceipt('seal-' + index, mined, c.vault, seal, 1, 2)).encoded);
+        segments.push(checkSegmentLog(domain, c.K, index, head, seal.data));
+        windows.push({ segment: index, block: mined.blockNumber, observedMs: Date.now(), batchStartMs: first });
+        head = after;
+        ids = [];
+      }
+    }
+  }
+  const evicted = await reader.vaultState(c.vault);
+  assert.equal(evicted.segment, 2n);
+  assert.equal(evicted.population, 0n);
+  assert.equal(evicted.outstanding, 1n);
+  assert.equal(await reader.balance(c.vault), 1n);
+  assert.equal(hex(evicted.head), hex(head));
+  assert.equal(await reader.balance(recipient), initialRecipient + BigInt(n));
+  assert.equal(GapTree.build(segments[0].z)!.prove(target.verdict.eta), null);
+  assert.equal(GapTree.build(segments[1].z)!.prove(target.verdict.eta) !== null, true);
+  await evmRefusal('evicted-ordinary-stale', ordinaryCall(target), 'StaleEndpoint(uint64,uint64)', u256(0), u256(2));
+  await evmRefusal('evicted-recovered-stale', recoveredPacket.calldata, 'StaleEndpoint(uint64,uint64)', u256(0), u256(2));
+  // Use a genuine opening for a distinct unpaid eta as the control. It proves
+  // a gap at the correct archive endpoint, but cannot exclude the paid eta.
+  const gap = GapTree.build(segments[0].z)!.prove(late.verdict.eta)!;
+  const history = encodeHistory(h0, [gap]);
+  const ordinaryReplay = ordinaryCall(target, history);
+  const recoveredReplay = recoveredPacket.calldata.slice(0, 68);
+  // Preserve the exact certified Complete and substitute only the gap suffix.
+  const proofEnd = 68 + 42 + 1 + 4 + recovered.prior.receipt.length;
+  const payload = concat(recoveredPacket.calldata.subarray(68, proofEnd), u16(1), h0, gap);
+  const replay = concat(recoveredReplay.subarray(0, 4), abiEncode([{ bytes: payload }]));
+  await evmRefusal('evicted-ordinary', ordinaryReplay, 'BadGapProof(uint256)', u256(0));
+  await evmRefusal('evicted-recovered', replay, 'BadGapProof(uint256)', u256(0));
+
+  const failed = await send('evicted-recovered-mined', vault, replay, 0n, '0x0');
+  assert.deepEqual(failed.logs, []);
+  const gatewayChecks = [];
+  for (const url of laneGateways()) {
+    const gateway = new EvmReader(new HttpJsonRpc(url, { retries: 0, timeoutMs: 3000 }));
+    const started = Date.now();
+    let authenticated = false;
+    for (let attempt = 0; attempt < 20; attempt++) {
+      try {
+        await gateway.verifyFailedReceipt(bytes(failed.transactionHash), c, await trustFor([]),
+          failed as Parameters<EvmReader['verifyFailedReceipt']>[3]);
+        authenticated = true;
+        break;
+      } catch (error) {
+        if (attempt === 19) throw error;
+        await delay(1000);
+      }
+    }
+    assert(authenticated);
+    gatewayChecks.push({ url, exactFailedTransactionReceipt: true, elapsedMs: Date.now() - started });
+  }
+  json('gateway-checks.json', gatewayChecks);
+  const lateRecovery = await completeRecovery({ ...late, trust }, 'late-run');
+  const before = Date.now();
+  const gapTrust = await trustFor(sealEvidence.map(e => decodeDepositProof(e).uc));
+  const gaps = await lateRecovery.session.certifiedGaps(gapTrust, 0n, h0, sealEvidence);
+  const advance = await lateRecovery.session.gaps('advanceGaps', gapTrust, lateRecovery.prior.receipt,
+    { seq: lateRecovery.prior.seq }, gaps, h0);
+  const advanced = await certifyReceipt('late-advance', await send('late-advance', recovery, advance.calldata),
+    bytes(recovery), advance.event!);
+  await lateRecovery.session.verifyEvent(advanced.trust, advanced.encoded, advance.event!);
+  const settlement = await lateRecovery.session.gaps('redeemRecovered', advanced.trust, advanced.encoded,
+    { seq: lateRecovery.prior.seq + 1n, cursor: { next: advance.next, head: advance.head! } }, []);
+  await certifyReceipt('late-paid', await send('late-paid', vault, settlement.calldata), c.vault, late.paid);
+  const final = await reader.vaultState(c.vault);
+  assert.equal(final.segment, 2n);
+  assert.equal(final.population, 1n);
+  assert.equal(final.outstanding, 0n);
+  assert.equal(await reader.balance(c.vault), 0n);
+  assert.equal(await reader.balance(recipient), initialRecipient + amount);
+  assert.equal(hex(final.head), hex(head));
+  json('custody-result.json', { payments: amount, evicted: hex(target.verdict.eta), liability: final.outstanding,
+    recipientBefore: initialRecipient, recipientAfter: initialRecipient + amount, head: hex(head), windows,
+    lateGaps: gaps.length, lateAdvanceMs: Date.now() - before, segment: final.segment, elapsedMs: Date.now() - startTime });
+}
+
+function laneGateways() {
+  const base = new URL(rpc);
+  return Array.from({ length: 4 }, (_, n) => {
+    const url = new URL(base);
+    url.port = String(Number(base.port) + n);
+    return url.href;
+  });
 }
