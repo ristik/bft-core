@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -396,13 +397,21 @@ func (r *ExecutionRecovery) recoverChain(ctx context.Context, c recoveryChain, c
 	if common == len(c.blocks) && head.Number > c.anchor.Number {
 		return r.move(ctx, c.anchor, f, false)
 	}
-	// Try retained payloads first. Commit is legal only when it cannot rewind
-	// finality, as established above. A lost reply is settled by exact reread.
-	if err = r.commit(ctx, c.anchor); err == nil {
-		return c.anchor, nil
-	}
-	if !errors.Is(err, ErrRecoveryUnavailable) {
-		return head, err
+	// A locally built payload can be present in the engine with an unwitnessed
+	// companion. Forkchoice alone would make that companion canonical, even
+	// when the local build is an ancestor of the target. Replay the certified
+	// suffix in that case so Verify imports each witnessed companion first.
+	if !slices.ContainsFunc(c.blocks[common:], func(e configuredprogress.JournalEntry) bool {
+		return e.Candidate.LocallyBuilt
+	}) {
+		// Try retained payloads first when a local build cannot be promoted.
+		// Commit cannot rewind finality, and an exact reread resolves a lost reply.
+		if err = r.commit(ctx, c.anchor); err == nil {
+			return c.anchor, nil
+		}
+		if !errors.Is(err, ErrRecoveryUnavailable) {
+			return head, err
+		}
 	}
 	if err = r.admitHead(ctx, head); err != nil {
 		return head, err
