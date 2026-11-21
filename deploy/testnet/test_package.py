@@ -2482,14 +2482,18 @@ class NB2DriverKeys(unittest.TestCase):
             self.assertEqual(len(json.loads((Path(tmp)/'ev/nb2/boundary-g.json').read_text())['tries']),4)
             self.assertTrue((Path(tmp)/'ev/nb2/boundary-estimate-ge.json').is_file())
             self.assertIn(('redeem','big','g2c'),[a[:3] for a in asked],'soundness is judged on every probe even when the search failed')
-    def test_a_failed_creation_reports_casts_own_reason(self):
-        # the intermittent production-vault creation on testnet-bridge-pos (run 43994509917) left only the initcode in the log
+    def deploy_module(self):
         import importlib.util
         nb2_dir = Path(__file__).parent / 'bridge/nb2'
         spec = importlib.util.spec_from_file_location('deploy_nb2', nb2_dir / 'deploy_nb2.py')
         sys.path.insert(0, str(nb2_dir))
         self.addCleanup(sys.path.remove, str(nb2_dir))
-        m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_a_failed_creation_reports_casts_own_reason(self):
+        m = self.deploy_module()
         def tools(gen,*args,capture=False):
             raise subprocess.CalledProcessError(1,['docker','run','cast','send','--create','0x'+'60'*4000],output='',stderr='Error: server returned an error response: error code -32000: nonce too low\n')
         with patch.object(m,'tools',tools):
@@ -2512,6 +2516,35 @@ class NB2DriverKeys(unittest.TestCase):
             str(e.exception), f'the production verifier creation failed: cast exited 1: {error}; '
                               'transaction input [creation bytecode redacted]',
         )
+    def test_creation_retries_only_the_moving_estimate_head(self):
+        m = self.deploy_module()
+        def cast_error(message):
+            return subprocess.CalledProcessError(1, ['cast'], output=json.dumps({
+                'schema_version': 1, 'success': False, 'errors': [{'code': 'cast.error', 'message': message}],
+            }), stderr='')
+
+        refusal = 'error code -32603: bound execution input rejected the block: bound parent hash mismatch'
+        transient = cast_error('Failed to estimate gas: server returned an error response: ' + refusal)
+        receipt = {'status': '0x1', 'contractAddress': '0x1234', 'transactionHash': '0x5678', 'blockNumber': '0x8'}
+        with patch.object(m, 'tools', side_effect=[transient, json.dumps(receipt)]) as send, patch.object(m.time, 'sleep') as sleep:
+            self.assertEqual(m.create(Path('/srv/g'), '0x6060', 'production verifier'), receipt)
+            self.assertEqual(send.call_count, 2)
+            self.assertEqual(send.call_args_list[0], send.call_args_list[1])
+            sleep.assert_called_once_with(2)
+
+        with patch.object(m, 'tools', side_effect=transient) as send, patch.object(m.time, 'sleep') as sleep:
+            with self.assertRaisesRegex(SystemExit, 'bound parent hash mismatch'):
+                m.create(Path('/srv/g'), '0x6060', 'production vault')
+            self.assertEqual(send.call_count, m.ESTIMATE_ATTEMPTS)
+            self.assertEqual(sleep.call_count, m.ESTIMATE_ATTEMPTS - 1)
+
+        for permanent in ('Failed to estimate gas: execution reverted', 'Failed to send transaction: ' + refusal):
+            with self.subTest(permanent=permanent), patch.object(m, 'tools', side_effect=cast_error(permanent)) as send, patch.object(m.time, 'sleep') as sleep:
+                with self.assertRaises(SystemExit):
+                    m.create(Path('/srv/g'), '0x6060', 'production verifier')
+                send.assert_called_once()
+                sleep.assert_not_called()
+
     def test_no_key_is_given_to_a_command_line(self):
         src=(Path(__file__).parent/'bridge/nb2/rehearse_nb2.py').read_text()
         self.assertNotIn('--private-key',src);self.assertNotIn('self.key(',src)
