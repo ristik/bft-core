@@ -122,6 +122,48 @@ func TestValidatorInitCreatesKeysOnceAndSeparately(t *testing.T) {
 	require.ErrorContains(t, err, "--rpc")
 }
 
+func TestValidatorClaimAfterMaturingLots(t *testing.T) {
+	chain, url := fakeNetwork(t)
+	home := initHome(t, url)
+	_, keys := loadHome(t, home)
+	operator := ethcrypto.PubkeyToAddress(keys.Operator.PublicKey)
+	chain.Fund(operator, big.NewInt(1e18))
+	id := chain.AddMember(operator, vrclient.Registration{RootNodeID: "claim-root", EvmNodeID: "claim-evm"})
+	chain.Mu.Lock()
+	chain.Tag = vrclient.ModuleTagPoS
+	chain.Custody = ethcommon.Address{0xc1}
+	chain.Election = ethcommon.Address{0xe1}
+	chain.ClaimLots = []*big.Int{big.NewInt(42)}
+	chain.Mu.Unlock()
+
+	args := []string{"claim", "--id", fmt.Sprint(id)}
+	out, err := runValidator(t, home, append(args, "--dry-run")...)
+	require.NoError(t, err, out)
+	require.Zero(t, chain.Sends())
+	require.NotContains(t, out, "claimed 100 base units")
+
+	out, err = runValidator(t, home, args...)
+	require.Equal(t, 2, chain.Sends(), "mature and claim were mined: %s", out)
+	chain.Mu.Lock()
+	remaining := chain.ClaimCredit.Sign()
+	chain.Mu.Unlock()
+	require.Zero(t, remaining, "the claim spent the credit")
+	require.NoError(t, err, out)
+	require.Contains(t, out, "claimed 100 base units to "+operator.Hex())
+
+	_, err = runValidator(t, home, args...)
+	require.ErrorContains(t, err, "no credit to claim")
+	require.Equal(t, 2, chain.Sends(), "an empty balance before any transaction still refuses the claim")
+
+	chain.Mu.Lock()
+	chain.ClaimCredit = big.NewInt(60)
+	chain.Mu.Unlock()
+	out, err = runValidator(t, home, args...)
+	require.NoError(t, err, out)
+	require.Equal(t, 3, chain.Sends(), "a resumed withdrawal sends only the claim")
+	require.Contains(t, out, "claimed 60 base units to "+operator.Hex())
+}
+
 func TestValidatorApplyAdmitExit(t *testing.T) {
 	chain, url := fakeNetwork(t)
 	home := initHome(t, url)
