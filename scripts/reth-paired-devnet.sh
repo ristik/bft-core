@@ -127,9 +127,12 @@ if [ "${UTB_LANE:-0}" = 1 ]; then
     # Genesis preparation does not use the verifier. Allow a planned build path.
     [ -z "${UTB_VERIFIER:-}${UTB_EVIDENCE:-}" ] || utb_resolve_verifier build/utb-evidence allow-missing || exit 2
   elif [ -n "${UTB_VERIFIER:-}${UTB_EVIDENCE:-}" ] || [ "${VR_LANE:-0}" != 1 ]; then
-    # VR also supports seed and bring-up runs without independent verification.
-    # Always validate an explicitly supplied path, including in those runs.
     utb_resolve_verifier || exit 2
+  elif [ "${VR_STEPS:-}" -ef scripts/vr-boundary-steps.sh ] && { [ "${VR_AGG:-0}" = 1 ] || [ "${VR_POS:-0}" = 1 ]; }; then
+    # Seed-only and joiner-only runs return from the boundary steps before the verifier sections.
+    if [ "${VR_JOINER:-0}" != 1 ] || { [ "${VR_SEED:-0}" != 1 ] && [ "${VR_JOINER_ONLY:-0}" != 1 ]; }; then
+      utb_resolve_verifier || exit 2
+    fi
   fi
 fi
 partitionID=8

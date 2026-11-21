@@ -135,7 +135,7 @@ utb_resolve_verifier() {
     path=$UTB_EVIDENCE
   fi
   path=${path:-${1:-build/utb-evidence}}
-  if [ -d "$path" ]; then
+  if [ -d "$path" ] || [[ "$path" == */ ]]; then
     printf '%s must be the verifier executable (got a directory): %s\n' "$name" "$path" >&2
     return 1
   fi

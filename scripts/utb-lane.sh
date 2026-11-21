@@ -53,6 +53,10 @@ Entries: epoch 2 is the K->J handoff (activated; the P85 J is never acknowledged
 PLAN
 }
 
+build_verifier() {
+  go build -o "$UTB_VERIFIER" ./scripts/utb-evidence && utb_resolve_verifier
+}
+
 preflight() {
   echo "== UTB lane preflight (no devnet is started) =="
   if [ "${LANE_PINNED:-0}" = 1 ]; then
@@ -100,7 +104,7 @@ preflight() {
       lane_buildinfo "$2" | grep -q "vcs.revision=$3" && ! lane_buildinfo "$2" | grep -q "vcs.modified=true"
     ' bash "$SCRIPT_DIR" "$UTB_VERIFIER" "${LANE_PRODUCT_COMMIT:-$head}"
   else
-    check "utb-evidence builds (scripts/utb-evidence) into $UTB_VERIFIER" go build -o "$UTB_VERIFIER" ./scripts/utb-evidence
+    check "utb-evidence builds (scripts/utb-evidence) into $UTB_VERIFIER" build_verifier
   fi
   echo "-- machine"
   free=$(df -k "$AGRE_ROOT" | awk 'NR==2{print int($4/1048576)}')
@@ -189,6 +193,7 @@ case "${1:-}" in
   --check-evidence) utb_check_evidence "${2:?usage: $0 --check-evidence DIR}" "$utb_verifier_default" && echo "evidence complete" ;;
   --preflight) plan; echo; preflight ;;
   --prep)
+    [ -z "${UTB_VERIFIER:-}${UTB_EVIDENCE:-}" ] || utb_resolve_verifier "$utb_verifier_default" allow-missing || exit 2
     lane_env
     [ -n "${P85_CONTRACTS:-}" ] || { echo "--prep needs P85_CONTRACTS, M2_URETH_BIN, M2_URETH_COMMIT (and P85_DEV_RUN=1 unless the provenance is attested)" >&2; exit 2; }
     export ANYAGE_PREP_ONLY=1
