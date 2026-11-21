@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -189,6 +190,38 @@ func TestTheServerConcurrencyGates(t *testing.T) {
 	require.False(t, srv.admit("overflow"))
 	srv.release(held[0])
 	require.True(t, srv.admit("overflow"))
+}
+
+func TestTheServerKeepsOnlyPeersWithActiveStreams(t *testing.T) {
+	t.Run("capacity refusal", func(t *testing.T) {
+		srv := NewServer(memSource{}, allowAll)
+		for i := range MaxPendingStreams {
+			require.True(t, srv.admit(peer.ID("held-"+strconv.Itoa(i))))
+		}
+		require.Len(t, srv.peers, MaxPendingStreams)
+		for i := range 1024 {
+			require.False(t, srv.admit(peer.ID("refused-"+strconv.Itoa(i))))
+		}
+		require.Equal(t, MaxPendingStreams, len(srv.peers), "capacity refusals record no peers")
+		for i := range MaxPendingStreams {
+			srv.release(peer.ID("held-" + strconv.Itoa(i)))
+		}
+		require.Empty(t, srv.peers)
+		require.Zero(t, srv.pending)
+	})
+	t.Run("authorized peer churn", func(t *testing.T) {
+		srv := NewServer(memSource{}, allowAll)
+		for i := range 1024 {
+			id := peer.ID("authorized-" + strconv.Itoa(i))
+			require.True(t, srv.admit(id))
+			require.True(t, srv.admit(id))
+			srv.release(id)
+			require.Contains(t, srv.peers, id, "one stream for this peer is still active")
+			srv.release(id)
+			require.Empty(t, srv.peers, "the last release removes the peer")
+			require.Zero(t, srv.pending)
+		}
+	})
 }
 
 // a fake that resets the first streams (a server at its limit) and serves afterwards
