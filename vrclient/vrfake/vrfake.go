@@ -46,6 +46,9 @@ type Chain struct {
 	Custody  ethcommon.Address
 	Election ethcommon.Address
 	Tag      [32]byte
+	// ClaimLots and ClaimCredit model a single withdrawal in the custody test fixture.
+	ClaimLots   []*big.Int
+	ClaimCredit *big.Int
 	// Governor is the FoundationMultisig, Signers its five signers (ascending) and MsigNonce its approval nonce.
 	Governor     ethcommon.Address
 	Signers      [5]ethcommon.Address
@@ -364,10 +367,10 @@ func (c *Chain) exec(from, to ethcommon.Address, data []byte, write bool) ([]byt
 		}
 		return nil, &rpcError{Code: 3, Message: "execution reverted"}
 	case c.Custody:
-		if c.Custody != (ethcommon.Address{}) && bytes.Equal(data[:4], vrclient.CustodyABI.Methods["election"].ID) {
-			return pack(vrclient.CustodyABI, "election", c.Election), nil
+		if c.Custody == (ethcommon.Address{}) {
+			return nil, nil
 		}
-		return nil, nil
+		return c.custody(from, data, write)
 	case c.Election:
 		if c.Election != (ethcommon.Address{}) && bytes.Equal(data[:4], vrclient.PosPublishABI.Methods["openResult"].ID) {
 			return pack(vrclient.PosPublishABI, "openResult", [32]byte{}), nil
@@ -388,6 +391,55 @@ func (c *Chain) exec(from, to ethcommon.Address, data []byte, write bool) ([]byt
 		return c.poa(from, m.Name, in, write)
 	}
 	return c.vr(from, m.Name, in, write)
+}
+
+func (c *Chain) custody(from ethcommon.Address, data []byte, write bool) ([]byte, *rpcError) {
+	a := vrclient.CustodyABI
+	m, err := a.MethodById(data[:4])
+	if err != nil {
+		return nil, nil
+	}
+	in, err := m.Inputs.Unpack(data[4:])
+	if err != nil {
+		return nil, &rpcError{Code: 3, Message: "execution reverted"}
+	}
+	switch m.Name {
+	case "election":
+		return pack(a, "election", c.Election), nil
+	case "positions":
+		identity := c.Identities[in[0].(uint64)]
+		if identity == nil {
+			identity = &Identity{}
+		}
+		return pack(a, "positions", identity.Owner, identity.Owner, [32]byte{}, [32]byte{}, identity.Generation,
+			uint64(0), uint32(len(c.ClaimLots)), uint32(len(c.ClaimLots)), true), nil
+	case "generationLots":
+		return pack(a, "generationLots", c.ClaimLots), nil
+	case "credit":
+		credit := c.ClaimCredit
+		if credit == nil {
+			credit = new(big.Int)
+		}
+		return pack(a, "credit", credit), nil
+	case "mature":
+		if write {
+			c.ClaimLots = nil
+			c.ClaimCredit = big.NewInt(100)
+		}
+	case "claim":
+		amount, recipient := in[0].(*big.Int), in[1].(ethcommon.Address)
+		if c.ClaimCredit == nil || amount.Sign() <= 0 || amount.Cmp(c.ClaimCredit) > 0 {
+			return nil, &rpcError{Code: 3, Message: "execution reverted"}
+		}
+		if write {
+			c.ClaimCredit.Sub(c.ClaimCredit, amount)
+			topic := ethcrypto.Keccak256Hash([]byte("CreditClaimed(address,address,uint256)"))
+			c.Logs = append(c.Logs, map[string]any{"address": c.Custody, "topics": []ethcommon.Hash{
+				topic, ethcommon.BytesToHash(from[:]), ethcommon.BytesToHash(recipient[:]),
+			}, "data": hexutil.Bytes(amount.FillBytes(make([]byte, 32)))})
+		}
+	}
+	return nil, nil
 }
 
 func u64word(v uint64) []byte {

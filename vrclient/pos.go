@@ -38,6 +38,7 @@ var CustodyABI = mustABI(`[
  {"type":"function","name":"credit","stateMutability":"view","inputs":[{"name":"","type":"address"}],"outputs":[{"name":"","type":"uint256"}]},
  {"type":"function","name":"generationLots","stateMutability":"view","inputs":[{"name":"id","type":"uint64"},{"name":"generation","type":"uint64"}],"outputs":[{"name":"","type":"uint256[]"}]},
  {"type":"function","name":"positions","stateMutability":"view","inputs":[{"name":"","type":"uint64"}],"outputs":[{"name":"owner","type":"address"},{"name":"withdrawal","type":"address"},{"name":"rootKeyHash","type":"bytes32"},{"name":"stagedRootKeyHash","type":"bytes32"},{"name":"generation","type":"uint64"},{"name":"roleNonce","type":"uint64"},{"name":"openLots","type":"uint32"},{"name":"lotCount","type":"uint32"},{"name":"retirementRequested","type":"bool"}]},
+ {"type":"event","name":"CreditClaimed","anonymous":false,"inputs":[{"name":"creditor","type":"address","indexed":true},{"name":"to","type":"address","indexed":true},{"name":"amount","type":"uint256","indexed":false}]},
  {"type":"event","name":"Registered","anonymous":false,"inputs":[{"name":"id","type":"uint64","indexed":true},{"name":"owner","type":"address","indexed":true},{"name":"rootKeyHash","type":"bytes32","indexed":false},{"name":"withdrawal","type":"address","indexed":false}]}]`)
 
 // PosElectionABI is ElectionPolicy's admitDelegation and the views the CLI reads.
@@ -261,4 +262,22 @@ func CustodyRegisteredID(r *Receipt, custody ethcommon.Address) (uint64, bool) {
 		}
 	}
 	return 0, false
+}
+
+// CustodyClaimedAmount reads a single valid CreditClaimed event for this withdrawal.
+func CustodyClaimedAmount(r *Receipt, custody, creditor, recipient ethcommon.Address) (*big.Int, bool) {
+	event := CustodyABI.Events["CreditClaimed"]
+	creditorTopic, recipientTopic := ethcommon.BytesToHash(creditor[:]), ethcommon.BytesToHash(recipient[:])
+	var amount *big.Int
+	for _, l := range r.Logs {
+		if l.Address != custody || len(l.Topics) != 3 || l.Topics[0] != event.ID ||
+			l.Topics[1] != creditorTopic || l.Topics[2] != recipientTopic {
+			continue
+		}
+		if amount != nil || len(l.Data) != 32 {
+			return nil, false
+		}
+		amount = new(big.Int).SetBytes(l.Data)
+	}
+	return amount, amount != nil && amount.Sign() > 0
 }
