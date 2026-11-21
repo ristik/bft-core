@@ -14,6 +14,7 @@ import concurrent.futures
 import hashlib
 import json
 from pathlib import Path
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -21,6 +22,14 @@ import urllib.request
 
 
 class Stop(Exception):
+    pass
+
+
+class HandoffTimeout(Stop):
+    pass
+
+
+class EndorsementRefused(Stop):
     pass
 
 
@@ -71,10 +80,23 @@ def check_loopback(url):
 
 
 def post(url, route, body):
-    request = urllib.request.Request(url + '/api/v1/handoff/' + route, json.dumps(body).encode(), {'Content-Type': 'application/json'})
-    with urllib.request.urlopen(request, timeout=5) as response:
-        raw = response.read(1 << 20)
-        return json.loads(raw) if raw else None
+    endpoint = url + '/api/v1/handoff/' + route
+    request = urllib.request.Request(endpoint, json.dumps(body).encode(), {'Content-Type': 'application/json'})
+    started = time.monotonic()
+    try:
+        try:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                raw = response.read(1 << 20)
+                return json.loads(raw) if raw else None
+        except urllib.error.HTTPError as error:
+            if route != 'endorse':
+                raise
+            with error:
+                raise EndorsementRefused(error.read(1 << 20).decode(errors='replace')) from error
+    except (TimeoutError, urllib.error.URLError) as error:
+        if isinstance(error, TimeoutError) or isinstance(getattr(error, 'reason', None), TimeoutError):
+            raise HandoffTimeout(f'POST {endpoint} timed out after {time.monotonic() - started:.2f}s') from error
+        raise
 
 
 def write(directory, name, data):
@@ -166,23 +188,34 @@ def main(argv=None):
         try:
             post(urls[0], 'endorse', plan)
             break
-        except urllib.error.HTTPError as error:
-            diagnostic = error.read().decode(errors='replace')
-            if 'before the handoff is prepared' not in diagnostic or time.monotonic() >= deadline:
+        except EndorsementRefused as error:
+            diagnostic = str(error)
+            if 'before the handoff is prepared' not in diagnostic:
                 raise Stop(diagnostic)
+            if time.monotonic() >= deadline:
+                raise HandoffTimeout(f'Prepare wait expired at {urls[0]} (endorse): {diagnostic}')
             time.sleep(0.2)
     if args.endorse_all:
         print('STEP: endorse the remaining roots; H may now commit', flush=True)
         others = urls[1:]
         results = []
+        failures = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(others)) as pool:
             futures = [pool.submit(post, url, 'endorse', plan) for url in others]
             for future in futures:
                 try:
                     future.result()
                     results.append({'accepted': True})
-                except urllib.error.HTTPError as error:
-                    results.append({'accepted': False, 'error': error.read().decode(errors='replace')})
+                except EndorsementRefused as error:
+                    results.append({'accepted': False, 'error': str(error)})
+                except Exception as error:
+                    failures.append(error)
+        # A connection failure must not hide a timeout from another root.
+        timeouts = [error for error in failures if isinstance(error, HandoffTimeout)]
+        if timeouts:
+            raise HandoffTimeout('\n'.join(map(str, timeouts))) from timeouts[0]
+        if failures:
+            raise failures[0]
         write(args.out, 'endorsements.json', results)
         if len(urls) * 2 // 3 + 1 > 1 + sum(result['accepted'] for result in results):
             raise Stop('too few roots endorsed; inspect the exact saved target')
@@ -196,8 +229,10 @@ def main(argv=None):
         write(args.out, 'status.json', status)
         if status['state'] == expected:
             break
-        if time.monotonic() >= deadline or status['state'] not in ('pending', expected):
-            raise Stop('unexpected or timed-out control state: ' + status['state'])
+        if status['state'] != 'pending':
+            raise Stop('unexpected control state: ' + status['state'])
+        if time.monotonic() >= deadline:
+            raise HandoffTimeout(f'Control status wait expired at {urls[0]} (abort/status): expected {expected}, saw {status["state"]}')
         time.sleep(0.2)
     print('PASS: authenticated target is ' + expected + '; evidence: ' + str(args.out), flush=True)
     if not args.endorse_all:
@@ -205,8 +240,16 @@ def main(argv=None):
     return 0
 
 
-if __name__ == '__main__':
+def run(argv=None):
     try:
-        raise SystemExit(main())
+        return main(argv)
+    except HandoffTimeout as error:
+        print('STOP: ' + str(error), file=sys.stderr)
+        return 4  # h6_plan asks the paired devnet to dump root stacks at teardown
     except (OSError, ValueError, KeyError, Stop) as error:
-        raise SystemExit('STOP: ' + str(error))
+        print('STOP: ' + str(error), file=sys.stderr)
+        return 1
+
+
+if __name__ == '__main__':
+    raise SystemExit(run())
