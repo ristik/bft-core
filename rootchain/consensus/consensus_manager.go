@@ -81,6 +81,7 @@ type (
 	PersistentStore interface {
 		SafetyStorage
 		ProposalStorage
+		FenceLegacyProposals(epoch uint64) error
 		storage.PersistentStore
 	}
 
@@ -365,6 +366,25 @@ func NewConsensusManager(
 		if err := configureHandoffAuthorities(bStore, trustBase, installedAnchor, optional.Q3, optional.RecoveryHistory); err != nil {
 			return nil, err
 		}
+	}
+	if _, err := store.ReadProposalRecord(); errors.Is(err, storage.ErrLegacyProposalStore) {
+		// Handoff roots sign only in the durably installed epoch. Roots
+		// driven by configured trust bases could have signed in any epoch
+		// in their local history, even if the recovered round is earlier.
+		legacyEpoch := trustBase.Epoch
+		if cParams.NetworkProfileVersion != storage.ProfileHandoff {
+			lastTrustBase, err := trustBaseStore.LoadLast()
+			if err != nil {
+				return nil, fmt.Errorf("finding last configured proposal epoch: %w", err)
+			}
+			legacyEpoch = lastTrustBase.Epoch
+		}
+		if err := store.FenceLegacyProposals(legacyEpoch); err != nil {
+			return nil, fmt.Errorf("fencing legacy proposal slots: %w", err)
+		}
+		log.Warn("legacy proposal signing fenced until a successor epoch", "epoch", legacyEpoch)
+	} else if err != nil {
+		return nil, fmt.Errorf("reading durable proposal record: %w", err)
 	}
 	// The lookup reads the manager's CURRENT block store: recovery replaces x.blockStore(), and a store captured here would go stale.
 	// The manager is assigned below, before anything can sign.
