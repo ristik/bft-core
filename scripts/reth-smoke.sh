@@ -83,14 +83,16 @@ binDir=$(dirname "$runDir")/.bin-$(basename "$runDir")
 # directory: a stale pid file can name anything since reused — another checkout's node, or an
 # unrelated process started from this very checkout.
 ownedPids() {
-  local p f
+  local p f pattern
+  pattern="ubft (root-node|shard-node)|$(reth_node_pattern)"
+  if [ -n "${URETH_BIN:-}" ]; then pattern="$pattern|$(reth_node_pattern "$URETH_BIN")"; fi
   [ -n "${childPid:-}" ] && pgrep -g "$childPid" 2>/dev/null
   for f in "$nodesDir"/*/pid; do
     [ -f "$f" ] || continue
     p=$(cat "$f" 2>/dev/null)
-    owned_pid "$p" 'ubft (root-node|shard-node)|reth node' && echo "$p"
+    owned_pid "$p" "$pattern" && echo "$p"
   done
-  owned_pids 'ubft (root-node|shard-node)|reth node'
+  owned_pids "$pattern"
 }
 
 # ======================================================================= supervisor ============

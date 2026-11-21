@@ -298,8 +298,10 @@ type shardNodeRunFlags struct {
 	Executor string // "fake" or "engine-api"
 
 	// engine-api executor only — see engineapi.Config.
-	EngineURL           string
-	EthURL              string
+	EngineURL string
+	EthURL    string
+	// ActivationSourceURL is the optional VR endpoint of the activation schedule's fence (newActivationGate).
+	ActivationSourceURL string
 	JWTSecret           string
 	EngineFeeCollector  string
 	ExpectedGenesisHash string
@@ -413,6 +415,7 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 
 	cmd.Flags().StringVar(&flags.Executor, "executor", "fake",
 		"which Executor to run: \"fake\" (deterministic in-memory, no external process) or \"engine-api\" (drives an Ethereum execution client)")
+	cmd.Flags().StringVar(&flags.ActivationSourceURL, "activation-source-url", "", activationSourceUsage)
 	cmd.Flags().StringVar(&flags.EngineURL, "engine-url", "http://127.0.0.1:8551",
 		"engine-api executor only: URL of the execution client's authenticated Engine API endpoint")
 	cmd.Flags().StringVar(&flags.EthURL, "eth-url", "http://127.0.0.1:8545",
@@ -770,6 +773,43 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	if closer, ok := executor.(interface{ Close() }); ok {
 		defer closer.Close()
 	}
+	// On a VR generation (the b1 profile carries the VR hook measurement) the fence is mandatory and reads the shard's own execution
+	// client, checked against the profile's pinned registry code hash; --activation-source-url may name another endpoint.
+	fenceGen := vrFence{}
+	sourceURL := flags.ActivationSourceURL
+	if flags.B1Profile != "" {
+		_, pf, perr := readB1ProfileFile(flags.B1Profile)
+		if perr != nil {
+			return perr
+		}
+		if pf.VRHookMeasurement != nil {
+			fenceGen = vrFence{VR: true, CodeHash: &pf.VRHookMeasurement.RegistryCodeHash}
+			switch { // the generation: the verified genesis origin's block 0, or the operator's pinned genesis hash
+			case origin.Valid():
+				gh := [32]byte(origin.BlockHash())
+				fenceGen.GenesisHash = &gh
+			case flags.ExpectedGenesisHash != "":
+				h, herr := hexToHash(flags.ExpectedGenesisHash)
+				if herr != nil {
+					return herr
+				}
+				gh := [32]byte(h)
+				fenceGen.GenesisHash = &gh
+			}
+			// the read is made at this node's own certified, committed EVM block (the engine's finalized block, which Commit moves only for a
+			// block a UC certified), never the engine's `latest` and never whatever head the endpoint serves
+			fenceGen.Anchor = func(ctx context.Context) ([32]byte, uint64, error) { return committedAnchor(ctx, executor) }
+
+			if sourceURL == "" {
+				sourceURL = flags.EthURL
+			}
+		}
+	}
+	activationGate, closeGate, err := newActivationGate(ctx, operatorLog, sourceURL, fenceGen)
+	if err != nil {
+		return err
+	}
+	defer closeGate()
 	var executionID [32]byte
 	var handoffFollower *shardnode.HandoffFollower
 	var q3rt *q3active.Runtime
@@ -793,6 +833,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		}
 		defer historyDB.Close()
 		var historyOpts []shardnode.HistoryOption
+		historyOpts = append(historyOpts, shardnode.WithFence(gateCheckpoint(activationGate)))
 		if flags.UTBGenesisFile != "" { // the V2 handoffs this shard follows were committed by a UTB root: their certificates are version 3, also when the store reopens
 			historyOpts = append(historyOpts, shardnode.WithUTBProfile())
 		}
@@ -848,6 +889,9 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			}
 			if q3rt, jErr = q3active.New(q3active.Config{DB: journalDB, Genesis: trustBases[0], UTBGenesis: flags.UTBGenesisFile != "", MemberCeiling: q3Ceiling}); jErr != nil {
 				return fmt.Errorf("q3 runtime: %w", jErr)
+			}
+			if activationGate != nil {
+				q3rt.SetFence(gateCheckpoint(activationGate))
 			}
 			if q3Admit, jErr = wireQ3Pair(executor, q3rt, uint64(shardConf.NetworkID), origin.Valid(), [32]byte(origin.BlockHash())); jErr != nil {
 				return jErr
@@ -1731,6 +1775,19 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		return fmt.Errorf("creating metrics: %w", err)
 	}
 	node.SetMetrics(metrics)
+	if activationGate != nil {
+		if flags.baseFlags != nil {
+			if err := activationGate.RegisterMetric(flags.observe.Meter("shardnode")); err != nil {
+				return fmt.Errorf("creating the upgrade metric: %w", err)
+			}
+		}
+		go activationGate.Watch(ctx, activationWatchInterval, func() uint64 {
+			if q3rt != nil {
+				return q3rt.ActiveEpoch()
+			}
+			return trustBases[0].GetEpoch()
+		})
+	}
 	registerShardMonitoring(ctx, flags, flags.observe.Logger(), peer, node, executor, func() []libp2ppeer.ID { return activePeers.Peers() }, nil)
 
 	if err := peer.BootstrapConnect(ctx, flags.observe.Logger()); err != nil {
@@ -2433,4 +2490,23 @@ func attachShardRecordsFeed(cfg *b1paired.Config, host recordsfeed.Libp2p, roots
 	return attachRecordsFeed(cfg, host, roots, role, cuts, func(err error) {
 		log.Error("root-record retention failed: this node no longer mirrors its full record history", "error", err)
 	})
+}
+
+// committedAnchor is the shard's verified committed block: the executor's finalized block. An error or an identity that is not a block
+// hash is an error (never a conversion of an empty reference).
+func committedAnchor(ctx context.Context, executor shardnode.Executor) ([32]byte, uint64, error) {
+	f, ok := executor.(interface {
+		Finalized(context.Context) (shardnode.BlockRef, error)
+	})
+	if !ok {
+		return [32]byte{}, 0, errors.New("the executor reports no committed block")
+	}
+	ref, err := f.Finalized(ctx)
+	if err != nil {
+		return [32]byte{}, 0, err
+	}
+	if len(ref.Hash) != 32 {
+		return [32]byte{}, 0, fmt.Errorf("the executor's committed block has a %d-byte hash", len(ref.Hash))
+	}
+	return [32]byte(ref.Hash), ref.Number, nil
 }

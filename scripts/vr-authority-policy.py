@@ -2,7 +2,7 @@
 """The registration policy (`signing-authority run --registration-policy`) of one authority of the VR lane under SIGNING=authority.
 
   vr-authority-policy.py <out> binding <i> <validators>   authority i (the EVM key of identity rank(root i)) may sign ONE binding: its identity's owner
-                                                          stages the payee recorded in <vr dir>/rotate-payees.json (the lane's `validator rotate`)
+                                                          stages a payee recorded in <vr dir>/rotate-payees.json (the first; the lane's `validator rotate`) or rotate-payees-all.json (VR_ROTATIONS of them)
   vr-authority-policy.py <out> register <i>               the joiner's authority i may sign ONE registration: the first dev signer registers root i with
                                                           itself as payee (the lane's `validator apply`)
 
@@ -32,10 +32,19 @@ if mode == "binding":
     pf = f"{vr}/rotate-payees.json"
     if os.path.exists(pf):
         payees = json.load(open(pf))
-    payees[str(i)] = "0x" + secrets.token_hex(20)
+    # VR_ROTATIONS (default 1) payees: the authority may sign that many bindings of its identity, one per payee (a lane that rotates once per handoff
+    # needs one for each); rotate-payees.json keeps the first (what the Boundary step's `validator rotate` uses), rotate-payees-all.json all of them
+    n_rot = int(os.environ.get("VR_ROTATIONS", "1"))
+    all_payees = [ "0x" + secrets.token_hex(20) for _ in range(n_rot) ]
+    payees[str(i)] = all_payees[0]
     json.dump(payees, open(pf, "w"))
-    policy["authorized"].append({"action": "binding", "owner": keys["owners"][ident - 1]["address"], "id": ident,
-                                 "rootNodeId": root["nodeId"], "rootKey": root["sigKey"], "payee": payees[str(i)]})
+    allf = f"{vr}/rotate-payees-all.json"
+    every = json.load(open(allf)) if os.path.exists(allf) else {}
+    every[str(i)] = all_payees
+    json.dump(every, open(allf, "w"))
+    for pay in all_payees:
+        policy["authorized"].append({"action": "binding", "owner": keys["owners"][ident - 1]["address"], "id": ident,
+                                     "rootNodeId": root["nodeId"], "rootKey": root["sigKey"], "payee": pay})
 elif mode == "register":
     s = keys["signers"][0]["address"]
     policy["authorized"].append({"action": "register", "owner": s, "rootNodeId": root["nodeId"], "rootKey": root["sigKey"], "payee": s})

@@ -343,10 +343,8 @@ m2_advance_authorities() {
       mkdir -p test-nodes/post-m2a-evidence/restarting && : >"test-nodes/post-m2a-evidence/restarting/$i"
       stop_one_evm_validator "$i" || [ "${M2_ADVANCE_TOLERATE_STOPPED:-0}" = 1 ] || return 1
     fi
-    build/ubft signing-authority advance-epoch \
-      --operator-socket "test-nodes/auth$i/operator.sock" \
-      --operator-credential "test-nodes/auth$i/operator.cred" \
-      --trust-base "test-nodes/$trustFile" --shard-conf "$conf" || return 1
+    source helper.sh
+    authority_advance_scope "$i" "$epoch" "test-nodes/$trustFile" "$conf" || return 1
     build/ubft signing-authority replace-session \
       --operator-socket "test-nodes/auth$i/operator.sock" \
       --operator-credential "test-nodes/auth$i/operator.cred" \

@@ -41,9 +41,9 @@ elif [ -n "${POST_M2A_URETH_BIN:-}" ] || [ -n "${POST_M2A_URETH_COMMIT:-}" ]; th
   M2_RUN_LOG_DIR=${M2_RUN_LOG_DIR:-/Users/risto/uni/agre/briefs/devnet-runs/m2-p2${LANE_RUN_TAG}-$(date -u +%Y%m%dT%H%M%SZ)}
   echo "profile-2 logs: $M2_RUN_LOG_DIR"
 elif [ "${VR_LANE:-0}" = 1 ] && [ "${M2_PROFILE2:-0}" = 1 ]; then
-  # a VR generation runs the client of the combined lane (ureth main), the pin scripts/ci/lane-pins.json holds: an older client (the vt15 lane pin)
-  # fails engine-api's execution-profile check (bft-core#1200). POST_M2A_URETH_BIN and _COMMIT (above) still name another client explicitly.
-  URETH_PIN_COMMIT=$(python3 -I -c 'import json,sys;import re;c=json.load(open(sys.argv[1]))["components"]["ureth"]["commit"];assert isinstance(c,str) and re.fullmatch("[0-9a-f]{40}",c),"not a 40-hex commit: %r"%(c,);print(c)' scripts/ci/lane-pins.json) || { echo "the ureth pin of scripts/ci/lane-pins.json is unreadable" >&2; exit 2; }
+  # The VR roots replay historical observations from their paired client. Use the VR resolver and
+  # archive-proof support from ureth #106 until the shared lane pin includes those changes.
+  URETH_PIN_COMMIT=b8bd8ef4aefb050defd4322bdd0c64ca480a038f
   M2_RUN_LOG_DIR=${M2_RUN_LOG_DIR:-/Users/risto/uni/agre/briefs/devnet-runs/m2-p2${LANE_RUN_TAG}-$(date -u +%Y%m%dT%H%M%SZ)}
   echo "profile-2 logs: $M2_RUN_LOG_DIR"
 elif [ "${M2_PROFILE2:-0}" = 1 ]; then
@@ -151,8 +151,11 @@ echo "ureth engine.persistence-threshold=$d2cPersistenceThreshold blocks (D2C re
 # client and verifies it by revision. It used to run the stock `reth` on PATH; that client cannot
 # start a shard node, so every paired lane was pointed at a client it would refuse.
 urethPinResolve || exit 1
+urethPinRequireStateProofs "$URETH_BIN" || exit 2
+if [ "${VR_LANE:-0}" = 1 ]; then export VR_ARCHIVE_STATE_PROOFS=1; fi
 export URETH_PIN_FEE_COLLECTOR
-echo "bft source commit=$(git rev-parse HEAD)"
+bftSourceCommit=${BFT_SOURCE_COMMIT:-$(git rev-parse HEAD 2>/dev/null)}
+echo "bft source commit=$bftSourceCommit"
 echo "ureth source commit=$URETH_PIN_COMMIT binary sha256=$(shasum -a 256 "$URETH_BIN" | cut -d' ' -f1)"
 
 failures=0
@@ -395,7 +398,11 @@ fullShardConf=test-nodes/evm-full-shard-conf-v2.json
 if [ "${Q3_B1:-0}" = 1 ]; then
   build/ubft engine-api genesis --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" --trust-base test-nodes/trust-base.json \
     --b1-profile test-nodes/b1-profile.json --alloc-source test-nodes/evm-genesis-funded.json --out "$chainSpec" \
-    --full-shard-conf "$fullShardConf" --identities-out test-nodes/b1-identities.json || { echo "finalized funded B1 genesis failed" >&2; exit 1; }
+    --full-shard-conf "$fullShardConf" --identities-out test-nodes/b1-identities.json >test-nodes/genesis.out || { cat test-nodes/genesis.out >&2; echo "finalized funded B1 genesis failed" >&2; exit 1; }
+  cat test-nodes/genesis.out
+  # the execution genesis block hash, from the generation's own artifacts: the pin an authority's activation fence holds its source to
+  awk '/^block hash:/{print $3}' test-nodes/genesis.out >test-nodes/execution-genesis-hash
+  [ -s test-nodes/execution-genesis-hash ] || { echo "no block hash in the genesis output" >&2; exit 1; }
 else
 build/ubft engine-api genesis --shard-conf "test-nodes/shard-conf-${partitionID}_0.json" \
   --alloc-source test-nodes/evm-genesis-funded.json --out "$chainSpec" \
@@ -416,6 +423,10 @@ if [ "${SIGNING:-local}" = authority ]; then
   cp "$fullShardConf" "test-nodes/shard-conf-${partitionID}_0.json"
   enroll_evm_authorities "$validators" "$partitionID" || exit 1
   echo "enrolled $validators independent signing authorities against the full shard configuration"
+  if [ "${VR_LANE:-0}" = 1 ]; then
+    for i in $(seq 1 "$validators"); do provision_authority_fence "$i" || exit 1; done
+    echo "provisioned the activation fence of $validators signing authorities"
+  fi
   if [ "${VR_POS:-0}" = 1 ]; then
     for i in $(seq 1 "$validators"); do M2_CHAIN_ID="$postM2aChainID" vr_pos_pin_authority "$i" || exit 1; done
   fi
@@ -465,7 +476,7 @@ for i in $(seq 1 "$validators"); do
     --authrpc.jwtsecret "test-nodes/evm$i/jwt.hex" \
     --authrpc.addr 127.0.0.1 --authrpc.port $((rethEngineBase + i - 1)) \
     --http --http.addr 127.0.0.1 --http.port $((rethEthBase + i - 1)) \
-    --http.api eth,net,web3,admin,debug --rpc.eth-proof-window 64 \
+    --http.api eth,net,web3,admin,debug $(urethPinStateProofFlags) \
     --port $((rethP2PBase + i - 1)) --disable-discovery \
     --ipcdisable --engine.persistence-threshold "$d2cPersistenceThreshold" \
     --builder.gaslimit "${URETH_BUILDER_GASLIMIT:-30000000}" \
@@ -1098,7 +1109,7 @@ fi
 
 echo
 echo "=== 6. D1 continuous certified execution through block $rounds ==="
-echo "timing: witness attempt=400ms episode=500ms, T2=5000ms, proof window=64 blocks"
+echo "timing: witness attempt=400ms episode=500ms, T2=5000ms, state proofs: $(urethPinStateProofFlags)"
 probeArgs=()
 faultArgs=()
 traceArgs=()
@@ -1286,7 +1297,7 @@ if [ "${M1_FEE_ACCOUNTING:-0}" = 1 ]; then
         --authrpc.jwtsecret test-nodes/evm1/jwt.hex \
         --authrpc.addr 127.0.0.1 --authrpc.port "$rethEngineBase" \
         --http --http.addr 127.0.0.1 --http.port "$rethEthBase" \
-        --http.api eth,net,web3,admin,debug --rpc.eth-proof-window 64 \
+        --http.api eth,net,web3,admin,debug $(urethPinStateProofFlags) \
         --port "$rethP2PBase" --disable-discovery --ipcdisable \
         --engine.persistence-threshold "$d2cPersistenceThreshold" --builder.gaslimit "${URETH_BUILDER_GASLIMIT:-30000000}" \
         $(urethPinUnicityFlags) >test-nodes/reth1/reth-restart.log 2>&1 &

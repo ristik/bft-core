@@ -407,3 +407,21 @@ func ControlOf(c *evmroot.ControlState) vrschema.ControlState {
 func PlannedAttempt(c *evmroot.ControlState, round uint64) (uint64, bool, error) {
 	return vrschema.PlannableAttempt(ControlOf(c), round)
 }
+
+// AuthenticatedSchedule is the activation schedule a verified checkpoint's control state holds. wantDigest is the control digest a
+// verified commit proof (or a verified history entry) commits to: the control state's digest covers its VR bytes, so a control state
+// that matches it carries exactly the root's committed schedule at that handoff (design 7.4). A control state without VR bytes (a
+// pre-VR chain, or an empty one) has no schedule. It is pure.
+func AuthenticatedSchedule(ctl *evmroot.ControlState, wantDigest []byte) ([]vrschema.Activation, error) {
+	if ctl == nil || !bytes.Equal(ctl.Digest(), wantDigest) {
+		return nil, errors.New("vradmit: the checkpoint's control state is not the one the verified handoff commits to")
+	}
+	if len(ctl.VR) == 0 {
+		return nil, nil
+	}
+	s, err := DecodeRootState(ctl.VR)
+	if err != nil {
+		return nil, fmt.Errorf("decoding the checkpoint's activation schedule: %w", err)
+	}
+	return s.Schedule, nil
+}

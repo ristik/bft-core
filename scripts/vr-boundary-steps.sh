@@ -43,7 +43,14 @@ vrb_members_logged() { # every successor's root node (the four of this lane, and
 }
 vrb_logs_have() { grep -l -- "$1" test-nodes/root*/debug.log >/dev/null 2>&1; }
 vrb_acked() { [ "$(cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'lastAcked()(bytes32)')" = "$vrb_result" ]; }
-vrb_root_epoch2() { local r n=0; for r in $(vrb_root_rpcs); do curl -sf -X POST -H 'Content-Type: application/json' -d '{}' "$r/api/v1/q3/status" | grep -q '"activeEpoch": *2' && n=$((n+1)); done; [ "$n" -ge 3 ]; }
+vrb_root_epoch2() { # at least 3 of this lane's roots report activeEpoch as the JSON integer 2 (equality; no substring match)
+  local r n=0 f; f=$(mktemp)
+  for r in $(vrb_root_rpcs); do
+    curl -sf -X POST -H 'Content-Type: application/json' -d '{}' "$r/api/v1/q3/status" >"$f" 2>/dev/null \
+      && python3 -c 'import json,sys; v=json.load(open(sys.argv[1]))["activeEpoch"]; sys.exit(0 if type(v) is int and v == 2 else 1)' "$f" 2>/dev/null && n=$((n+1))
+  done
+  rm -f "$f"; [ "$n" -ge 3 ]
+}
 
 # The development hooks (the readiness hold, the joiner staging hook) exist only in a binary built with the vrdev build tag; the lane's `make build`
 # (setup-evm-nodes.sh) takes it from MAKEFLAGS=GO_BUILD_TAGS=-tags=vrdev. A production build has no such hook and no flag or variable enables one.
@@ -169,6 +176,8 @@ EOF
   cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'output(bytes32)' "$vrb_result" >"$VR_EVIDENCE/output.hex"
   vrb_log "R = $vrb_result"
   # 3. every root observed the source and derives the intent
+  # the schedule lane first requires exactly this lane's roots (scoped discovery; merge dependency: bft-core#1233): a cross-lane problem shows here
+  if [ "${VR_SCHEDULE:-0}" != 0 ]; then source scripts/vr-schedule-steps.sh; vrs_require_roots || return 1; fi
   vrb_wait "$([ "${VR_JOINER:-0}" = 1 ] && echo 900 || echo 300)" "every root derives the intent over its committed state (the joiner's included)" vrb_all_intents || return 1
   for i in $(vrb_root_rpcs); do vrb_intent "$i" | python3 -c "import json,sys;d=json.load(sys.stdin);print(sys.argv[1], d['digest'], d['view'], d['assembler'])" "$i"; done | tee "$VR_EVIDENCE/intents.txt"
   [ "$(awk '{print $2}' "$VR_EVIDENCE/intents.txt" | sort -u | wc -l)" = 1 ] || { vrb_log "FAIL: the roots derive different intents"; return 1; }
@@ -236,6 +245,7 @@ EOF
     grep -v 'IR change request\|CertificationResp' test-nodes/root5/debug.log | tail -n 3000 >"$VR_EVIDENCE/root5-tail.log"
     tail -n 1500 test-nodes/evm5/debug.log >"$VR_EVIDENCE/evm5-tail.log" 2>/dev/null; tail -n 200 test-nodes/reth5/reth.log >"$VR_EVIDENCE/reth5-tail.log" 2>/dev/null
   fi
+  if [ "${VR_SCHEDULE:-0}" != 0 ]; then source scripts/vr-schedule-steps.sh; if [ "$VR_SCHEDULE" = 2 ]; then vrs_long || return 1; else vrs_run || return 1; fi; fi
   return 0
 }
 
