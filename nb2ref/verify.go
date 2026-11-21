@@ -379,7 +379,10 @@ func checkSplitEdge(parent, child *level, tok *Token, sj *SplitJustification) er
 }
 
 func checkReturn(c *Config, part *Token, lv *level) (*ReturnData, error) {
-	last := &part.Transfers[len(part.Transfers)-1]
+	return checkReturnAt(c, c.Domain(), &part.Transfers[len(part.Transfers)-1], lv.amount)
+}
+
+func checkReturnAt(c *Config, d [32]byte, last *TransferTx, amount *big.Int) (*ReturnData, error) {
 	if last.Recipient.Type != PredBurn {
 		return nil, ErrNotBurn
 	}
@@ -387,7 +390,6 @@ func checkReturn(c *Config, part *Token, lv *level) (*ReturnData, error) {
 	if err != nil {
 		return nil, err
 	}
-	d := c.Domain()
 	if r.MinIndex > MaxSegment {
 		if err := fail(ErrReturnIndex); err != nil {
 			return nil, err
@@ -403,7 +405,7 @@ func checkReturn(c *Config, part *Token, lv *level) (*ReturnData, error) {
 			return nil, err
 		}
 	}
-	if r.Amount.Cmp(lv.amount) != 0 {
+	if r.Amount.Cmp(amount) != 0 {
 		if err := fail(ErrReturnAmount); err != nil {
 			return nil, err
 		}

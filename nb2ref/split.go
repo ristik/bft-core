@@ -67,6 +67,24 @@ func (p SumProof) Bytes() []byte {
 	return CArr(steps...)
 }
 
+// decodeFlatAllocation bounds the outer step array before the generic scanner
+// reserves child storage. Its steps remain ordinary NB2 sum-proof items.
+func decodeFlatAllocation(raw []byte) (SumProof, error) {
+	s := scanner{b: raw}
+	major, count, err := s.head()
+	if err != nil {
+		return nil, err
+	}
+	if major != majArray || count > maxSumProofSteps {
+		return nil, ErrSplitProofShape
+	}
+	it, err := scanOne(raw)
+	if err != nil {
+		return nil, err
+	}
+	return decodeSumProof(it)
+}
+
 // decodeSumProof: any step outside [depth < 256, strictly decreasing, b(32), Amount] is SplitProofShape.
 func decodeSumProof(it *item) (SumProof, error) {
 	if it.major != majArray || len(it.kids) > maxSumProofSteps {

@@ -120,6 +120,7 @@ type Config struct {
 	VerifierCodeHash    [32]byte
 	K, B                uint64
 	Qmax                *big.Int
+	wireVersion         uint64 // zero means legacy encoding for constructed configurations
 }
 
 // ConfigArity is the arity of Γ.
@@ -127,8 +128,16 @@ const ConfigArity = 19
 
 // Bytes is the exact encoding of Γ.
 func (c *Config) Bytes() []byte {
+	version := c.wireVersion
+	if version == 0 {
+		version = V2Version
+	}
+	return c.bytesWithVersion(version)
+}
+
+func (c *Config) bytesWithVersion(version uint64) []byte {
 	return CArr(
-		CBytes([]byte(domainConfig)), CUint(V2Version), CUint(uint64(c.Network)),
+		CBytes([]byte(domainConfig)), CUint(version), CUint(uint64(c.Network)),
 		CBytes(c.RootGenesis[:]), CBytes(c.ExecutionGenesis[:]), CUint(c.ChainID), CUint(uint64(c.EVMPartition)),
 		CBytes(c.EVMShard), CUint(uint64(c.AggregatorPartition)), CBytes(c.Vault[:]), CBytes(c.Asset[:]),
 		CBytes(c.Ty[:]), CBytes(c.Aid[:]), CBytes(c.SemanticProfileHash[:]), CBytes(c.Verifier[:]),
@@ -160,6 +169,10 @@ func cfgErr(field int, cause error) error { return &ConfigError{Field: field, Ca
 // check that asset, ty and aid are the section 4.2 derivations: the vault constructor does (Construct), and the stateless
 // verifier receives only the Γ the vault was constructed with. Every failure is ConfigShape (a *ConfigError naming the field).
 func DecodeConfig(b []byte, p Params) (*Config, error) {
+	return decodeConfig(b, p, V2Version)
+}
+
+func decodeConfig(b []byte, p Params, version uint64) (*Config, error) {
 	if len(b) > maxConfigBytes {
 		return nil, cfgErr(ConfigArity, ErrInputTooLarge)
 	}
@@ -175,7 +188,7 @@ func DecodeConfig(b []byte, p Params) (*Config, error) {
 	if err := k[0].literal(domainConfig); err != nil {
 		return nil, cfgErr(0, err)
 	}
-	if err := k[1].version(V2Version); err != nil {
+	if err := k[1].version(version); err != nil {
 		return nil, cfgErr(1, err)
 	}
 	nw, err := k[2].uintIn(1, 65535)

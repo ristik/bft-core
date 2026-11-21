@@ -1,0 +1,164 @@
+[
+  {
+    "Object": "cold calldata",
+    "Layer": "contract ABI framing",
+    "Inclusive": 393216,
+    "FirstOver": 393217
+  },
+  {
+    "Object": "signed transaction",
+    "Layer": "wallet and peer/pool admission",
+    "Inclusive": 524288,
+    "FirstOver": 524289
+  },
+  {
+    "Object": "ordinary gas capacity",
+    "Layer": "deployment block admission",
+    "Inclusive": 60000000,
+    "FirstOver": 60000001
+  },
+  {
+    "Object": "worst approved submitted gas",
+    "Layer": "wallet and release qualification",
+    "Inclusive": 24000000,
+    "FirstOver": 24000001
+  },
+  {
+    "Object": "separately framed receipt",
+    "Layer": "contract packet framing",
+    "Inclusive": 65536,
+    "FirstOver": 65537
+  },
+  {
+    "Object": "EVM UC",
+    "Layer": "receipt proof decoding",
+    "Inclusive": 16384,
+    "FirstOver": 16385
+  },
+  {
+    "Object": "header RLP",
+    "Layer": "receipt proof decoding",
+    "Inclusive": 2048,
+    "FirstOver": 2049
+  },
+  {
+    "Object": "receipt path nodes",
+    "Layer": "receipt proof decoding",
+    "Inclusive": 65,
+    "FirstOver": 66
+  },
+  {
+    "Object": "receipt branch",
+    "Layer": "receipt proof decoding",
+    "Inclusive": 1024,
+    "FirstOver": 1025
+  },
+  {
+    "Object": "receipt leaf",
+    "Layer": "receipt proof decoding",
+    "Inclusive": 49152,
+    "FirstOver": 49153
+  },
+  {
+    "Object": "root reason",
+    "Layer": "flat evidence object decoding",
+    "Inclusive": 65536,
+    "FirstOver": 65537
+  },
+  {
+    "Object": "root mint",
+    "Layer": "flat evidence object decoding",
+    "Inclusive": 66048,
+    "FirstOver": 66049
+  },
+  {
+    "Object": "child mint",
+    "Layer": "flat evidence object decoding",
+    "Inclusive": 512,
+    "FirstOver": 513
+  },
+  {
+    "Object": "allocation bytes",
+    "Layer": "flat evidence object decoding",
+    "Inclusive": 20480,
+    "FirstOver": 20481
+  },
+  {
+    "Object": "sum steps",
+    "Layer": "flat evidence object decoding",
+    "Inclusive": 256,
+    "FirstOver": 257
+  },
+  {
+    "Object": "mint proof and transfer count",
+    "Layer": "flat evidence object decoding",
+    "Inclusive": 40960,
+    "FirstOver": 40961
+  },
+  {
+    "Object": "transfer pair",
+    "Layer": "flat evidence object decoding",
+    "Inclusive": 40960,
+    "FirstOver": 40961
+  },
+  {
+    "Object": "aggregator UC",
+    "Layer": "flat evidence object decoding",
+    "Inclusive": 24576,
+    "FirstOver": 24577
+  },
+  {
+    "Object": "RSMT and sparse path bytes",
+    "Layer": "native/packet opening decoding",
+    "Inclusive": 8224,
+    "FirstOver": 8225
+  },
+  {
+    "Object": "page openings",
+    "Layer": "contract packet framing",
+    "Inclusive": 32,
+    "FirstOver": 33
+  },
+  {
+    "Object": "operations",
+    "Layer": "contract packet framing",
+    "Inclusive": 16,
+    "FirstOver": 17
+  },
+  {
+    "Object": "batch input",
+    "Layer": "B1 aggregate scanner",
+    "Inclusive": 262144,
+    "FirstOver": 262145
+  },
+  {
+    "Object": "B1 claims",
+    "Layer": "B1 aggregate scanner",
+    "Inclusive": 16,
+    "FirstOver": 17
+  },
+  {
+    "Object": "B1 seal signatures",
+    "Layer": "B1 native scanner",
+    "Inclusive": 16,
+    "FirstOver": 17
+  },
+  {
+    "Object": "B1 shard path steps",
+    "Layer": "B1 native scanner",
+    "Inclusive": 256,
+    "FirstOver": 257
+  },
+  {
+    "Object": "B1 unicity path steps",
+    "Layer": "B1 native scanner",
+    "Inclusive": 32,
+    "FirstOver": 33
+  },
+  {
+    "Object": "gap proofs",
+    "Layer": "cold packet framing",
+    "Inclusive": 1024,
+    "FirstOver": 1025
+  }
+]

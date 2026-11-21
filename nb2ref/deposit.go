@@ -87,34 +87,46 @@ func DecodeReceiptBacking(b []byte) (*ReceiptBacking, error) {
 	if len(b) > MaxJustificationBytes {
 		return nil, ErrInputTooLarge
 	}
-	root, err := scanOne(b)
+	s := scanner{b: b}
+	major, tag, err := s.head()
 	if err != nil {
 		return nil, err
 	}
-	c, err := root.tagContent(TagReceiptBacking)
-	if err != nil {
+	if major != majTag {
+		return nil, ErrShape
+	}
+	if tag != TagReceiptBacking {
+		return nil, ErrTag
+	}
+	if err := receiptArray(&s, 5); err != nil {
 		return nil, err
 	}
-	if err := c.array(5); err != nil {
-		return nil, err
-	}
-	k := c.kids
-	if err := k[0].version(V2Version); err != nil {
-		return nil, err
+	var fields [4]item
+	for i, major := range [...]byte{majUint, majBytes, majUint, majBytes} {
+		fields[i], err = receiptScalar(&s, major, 2)
+		if err != nil {
+			return nil, err
+		}
 	}
 	j := &ReceiptBacking{}
-	if err := k[1].fixed(j.D[:]); err != nil {
+	if err := fields[0].version(V2Version); err != nil {
 		return nil, err
 	}
-	if j.N, err = k[2].uintIn(1, MaxDeposit); err != nil {
+	if err := fields[1].fixed(j.D[:]); err != nil {
 		return nil, err
 	}
-	if err := k[3].fixed(j.R[:]); err != nil {
+	if j.N, err = fields[2].uintIn(1, MaxDeposit); err != nil {
 		return nil, err
 	}
-	p, err := decodeDepositProofItem(&k[4])
+	if err := fields[3].fixed(j.R[:]); err != nil {
+		return nil, err
+	}
+	p, err := readDepositProof(&s, 2)
 	if err != nil {
 		return nil, err
+	}
+	if s.pos != len(b) {
+		return nil, ErrTrailing
 	}
 	j.Proof = *p
 	return j, nil
@@ -125,62 +137,93 @@ func DecodeDepositProof(b []byte) (*DepositProof, error) {
 	if len(b) > MaxJustificationBytes {
 		return nil, ErrInputTooLarge
 	}
-	root, err := scanOne(b)
+	s := scanner{b: b}
+	p, err := readDepositProof(&s, 0)
 	if err != nil {
 		return nil, err
 	}
-	return decodeDepositProofItem(root)
+	if s.pos != len(b) {
+		return nil, ErrTrailing
+	}
+	return p, nil
 }
 
-func decodeDepositProofItem(it *item) (*DepositProof, error) {
-	if err := it.array(6); err != nil {
+func receiptArray(s *scanner, size uint64) error {
+	major, count, err := s.head()
+	if err != nil {
+		return err
+	}
+	if major != majArray || count != size {
+		return ErrShape
+	}
+	return nil
+}
+
+func receiptScalar(s *scanner, major byte, depth int) (item, error) {
+	if s.pos == len(s.b) {
+		return item{}, ErrTruncated
+	}
+	if s.b[s.pos]>>5 != major {
+		return item{}, ErrShape
+	}
+	return s.item(depth)
+}
+
+// Read the fixed receipt shape without allocating generic CBOR children.
+// In particular, the node-count limit applies to its declared head before
+// any node body is read or the node slice is allocated.
+func readDepositProof(s *scanner, depth int) (*DepositProof, error) {
+	if err := receiptArray(s, 6); err != nil {
 		return nil, err
 	}
-	k := it.kids
-	if err := k[0].version(V2Version); err != nil {
-		return nil, err
-	}
-	p := &DepositProof{}
-	blob := func(it *item, max int) ([]byte, error) {
-		b, err := it.bstr()
+	var fields [5]item
+	for i, major := range [...]byte{majUint, majBytes, majBytes, majUint, majUint} {
+		it, err := receiptScalar(s, major, depth+1)
 		if err != nil {
 			return nil, err
 		}
-		if len(b) > max {
-			return nil, ErrInputTooLarge
-		}
-		return b, nil
+		fields[i] = it
 	}
-	var err error
-	if p.UC, err = blob(&k[1], MaxEVMUCBytes); err != nil {
+	if err := fields[0].version(V2Version); err != nil {
 		return nil, err
 	}
-	if p.Header, err = blob(&k[2], MaxHeaderBytes); err != nil {
-		return nil, err
-	}
-	if p.TxIndex, err = k[3].uintIn(0, MaxIndex); err != nil {
-		return nil, err
-	}
-	if p.LogIndex, err = k[4].uintIn(0, MaxIndex); err != nil {
-		return nil, err
-	}
-	nodes := &k[5]
-	if nodes.major != majArray {
-		return nil, ErrShape
-	}
-	if len(nodes.kids) > MaxReceiptNodes {
+	p := &DepositProof{UC: fields[1].data, Header: fields[2].data}
+	if len(p.UC) > MaxEVMUCBytes || len(p.Header) > MaxHeaderBytes {
 		return nil, ErrInputTooLarge
 	}
-	for i := range nodes.kids {
-		max := MaxReceiptBranchNodeLen
-		if i == len(nodes.kids)-1 {
-			max = MaxReceiptLeafNodeLen
-		}
-		n, err := blob(&nodes.kids[i], max)
+	var err error
+	if p.TxIndex, err = fields[3].uintIn(0, MaxIndex); err != nil {
+		return nil, err
+	}
+	if p.LogIndex, err = fields[4].uintIn(0, MaxIndex); err != nil {
+		return nil, err
+	}
+	major, count, err := s.head()
+	if err != nil {
+		return nil, err
+	}
+	if major != majArray {
+		return nil, ErrShape
+	}
+	if count > MaxReceiptNodes {
+		return nil, ErrInputTooLarge
+	}
+	if count > uint64(len(s.b)-s.pos) {
+		return nil, ErrTruncated
+	}
+	for i := uint64(0); i < count; i++ {
+		n, err := receiptScalar(s, majBytes, depth+2)
 		if err != nil {
 			return nil, err
 		}
-		p.Nodes = append(p.Nodes, n)
+		max := MaxReceiptBranchNodeLen
+		if i+1 == count {
+			max = MaxReceiptLeafNodeLen
+		}
+		if len(n.data) > max {
+			return nil, ErrInputTooLarge
+		}
+		p.Nodes = append(p.Nodes, n.data)
 	}
 	return p, nil
 }
@@ -202,6 +245,11 @@ func VerifyReceiptLog(c *Config, t *TrustInput, p *DepositProof) (*ReceiptLog, e
 	if err != nil {
 		return nil, err
 	}
+	return verifyReceiptLog(c.Vault, p, uc)
+}
+
+// verifyReceiptLog authenticates the execution part of a receipt after its UC was checked.
+func verifyReceiptLog(emitter [20]byte, p *DepositProof, uc *types.UnicityCertificate) (*ReceiptLog, error) {
 	header, err := bindHeader(p.Header, uc)
 	if err != nil {
 		return nil, err
@@ -225,7 +273,7 @@ func VerifyReceiptLog(c *Config, t *TrustInput, p *DepositProof) (*ReceiptLog, e
 		return nil, ErrLogIndex
 	}
 	out := &ReceiptLog{Address: [20]byte(l.kids[0].str), Data: l.kids[2].str}
-	if out.Address != c.Vault { // the emitter before the topics (section 6.2 step 5)
+	if out.Address != emitter { // the emitter before the topics (section 6.2 step 5)
 		if err := fail(ErrLogEmitter); err != nil {
 			return nil, err
 		}
@@ -320,57 +368,67 @@ func verifyRootMint(c *Config, t *TrustInput, m *MintTx) (*ReceiptBacking, *big.
 	if err != nil {
 		return nil, nil, err
 	}
-	d := c.Domain()
-	if j.D != d {
-		if err := fail(ErrMintDomain); err != nil {
-			return nil, nil, err
-		}
-	}
-	log, err := VerifyReceiptLog(c, t, &j.Proof)
+	value, err := verifyFundedMint(c, c.Domain(), m, j, func(p *DepositProof) (*ReceiptLog, error) {
+		return VerifyReceiptLog(c, t, p)
+	})
 	if err != nil {
 		return nil, nil, err
 	}
+	return j, value, nil
+}
+
+// verifyFundedMint checks the same signed deposit opening in both bridge generations.
+func verifyFundedMint(c *Config, d [32]byte, m *MintTx, j *ReceiptBacking, receipt func(*DepositProof) (*ReceiptLog, error)) (*big.Int, error) {
+	if j.D != d {
+		if err := fail(ErrMintDomain); err != nil {
+			return nil, err
+		}
+	}
+	log, err := receipt(&j.Proof)
+	if err != nil {
+		return nil, err
+	}
 	if len(log.Topics) != 2 || log.Topics[0] != TopicDeposited || log.Topics[1] != u256u(j.N) {
 		if err := fail(ErrLogTopics); err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 	}
 	data := log.Data
 	if len(data) != 224 {
-		return nil, nil, ErrLogData
+		return nil, ErrLogData
 	}
 	v := new(big.Int).SetBytes(data[32:64])
 	owner := data[160 : 160+FirstOwnerBytes]
 	if !bytes.Equal(data[96:128], cat(make([]byte, 31), []byte{0x80})) || !bytes.Equal(data[128:160], cat(make([]byte, 31), []byte{FirstOwnerBytes})) ||
 		!bytes.Equal(data[160+FirstOwnerBytes:], make([]byte, 224-160-FirstOwnerBytes)) || [32]byte(data[0:32]) != j.D || v.Sign() == 0 {
 		if err := fail(ErrLogData); err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 	}
 	if Rho(j.D, j.R) != [32]byte(data[64:96]) {
 		if err := fail(ErrSecretOpening); err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 	}
 	if m.Salt != DepositSalt(d, j.N, j.R) {
 		if err := fail(ErrMintSalt); err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 	}
 	if m.Type != c.Ty {
 		if err := fail(ErrMintType); err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 	}
 	if !bytes.Equal(m.Recipient.Bytes(), owner) {
 		if err := fail(ErrMintOwner); err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 	}
 	if v.BitLen() > 256 || !bytes.Equal(m.Data, ValueData(c.Aid, v)) {
 		if err := fail(ErrMintData); err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 	}
-	return j, v, nil
+	return v, nil
 }

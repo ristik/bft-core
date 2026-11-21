@@ -253,9 +253,13 @@ func (g *gen) vault() error {
 			bad[9] = 0x04
 			burn := append([]byte(nil), fo...)
 			burn[6] = 0x02
-			return g.script("k4", "vault-BadFirstOwner", "41 bytes; then key prefix 0x04; then the burn predicate code").
+			offCurve := append([]byte(nil), fo...)
+			for i := 10; i < len(offCurve); i++ {
+				offCurve[i] = 0xff
+			}
+			return g.script("k4", "vault-BadFirstOwner", "41 bytes; key prefix 0x04; burn predicate code; compressed encoding without a curve point").
 				depositRaw(big.NewInt(1), fo[:41], "BadFirstOwner").depositRaw(big.NewInt(1), bad, "BadFirstOwner").
-				depositRaw(big.NewInt(1), burn, "BadFirstOwner").done()
+				depositRaw(big.NewInt(1), burn, "BadFirstOwner").depositRaw(big.NewInt(1), offCurve, "BadFirstOwner").done()
 		},
 		func() error {
 			q := new(big.Int).Sub(k4.Cfg.Qmax, big.NewInt(5))
