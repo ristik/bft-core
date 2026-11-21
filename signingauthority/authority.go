@@ -81,9 +81,10 @@ type Authority struct {
 	// route admitted only when uncheckedAdvance was configured. Guarded by mu; replaced, never mutated.
 	lineage          *activationproof.Lineage
 	uncheckedAdvance bool
-	// retired latches once an authenticated activation no longer names this node with this authority's key: the history is installed,
-	// nothing is signed and no session is issued again within this lifetime (re-entry is a new enrollment with a new key).
-	retired bool
+	// retired fences signing and sessions when an authenticated activation drops this node or changes its key.
+	// recovery remembers the primary exclusion only when its committed K still names this authority and key. Guarded by mu.
+	retired  bool
+	recovery *recoveryExclusion
 	// sessionIssued is whether a session was issued since the last scope change: an advance fences the client, and the operator's
 	// single advance operation issues the next session only when this is false (a crash between the two is then repaired by a rerun).
 	sessionIssued bool
