@@ -413,23 +413,37 @@ On PoS, exit requests custody retirement. Keep serving until the committee has e
 ubft validator claim --dry-run && ubft validator claim
 ```
 
-The pinned pre-VT-07 CLI can print `the operator account has no credit to claim` and exit 1 after both transactions were included. It checks the now-empty credit again after the claim. Use the public receipts to confirm the outcome. Both should have status `0x1` and name the release custody contract. The claim receipt's `CreditClaimed` event identifies the withdrawal recipient and the returned principal in its data word. Once the receipts confirm the withdrawal, the exit is complete.
+The pinned pre-VT-07 CLI can print `the operator account has no credit to claim` and exit 1 after both transactions were included. It checks the now-empty credit again after the claim. Use the public receipts to confirm the outcome when your operator account is both the configured payee and the withdrawal address. Both receipts must have status `0x1` and name the release custody contract. The claim receipt must contain exactly one custody `CreditClaimed` event with the configured payee as both creditor and recipient and a nonzero amount. Compare its hexadecimal amount in base units with the intended withdrawal before treating the exit as complete.
 
 ```bash
 read -rp 'Maturity transaction hash: ' MATURE_TX
 read -rp 'Claim transaction hash: ' CLAIM_TX
 check_exit_receipts() (
-  set -eo pipefail
+  set -o pipefail
+  [[ "$MATURE_TX" =~ ^0x[0-9a-fA-F]{64}$ && "$CLAIM_TX" =~ ^0x[0-9a-fA-F]{64}$ ]] || return 1
+  [[ "${MATURE_TX,,}" != "${CLAIM_TX,,}" ]] || return 1
+  PAYEE=$(jq -er '.payee | select(test("^0x[0-9a-fA-F]{40}$"))' validator.json) || return 1
   for TX in "$MATURE_TX" "$CLAIM_TX"; do
     curl -fsS --max-time 10 -H 'Content-Type: application/json' \
       --data "$(jq -cn --arg tx "$TX" '{jsonrpc:"2.0",id:1,method:"eth_getTransactionReceipt",params:[$tx]}')" \
-      "$RPC_URL" | jq -e --arg custody "$CUSTODY" '
-        .result | select(.status == "0x1" and (.to | ascii_downcase) == ($custody | ascii_downcase)) |
-        {transactionHash, blockNumber, status, from, to, creditClaimed: [
-          .logs[] | select(.topics[0] == "0xc4b5041307ee38be8c4f25df5d980a372ac8a9a73ea8f459891000a5386f5322") |
-          {creditor: .topics[1], recipient: .topics[2], amountWord: .data}
-        ]}
-      '
+      "$RPC_URL" | jq -e --arg custody "$CUSTODY" --arg payee "$PAYEE" --arg tx "$TX" --arg claim "$CLAIM_TX" '
+        ("0x" + ("0" * 24) + ($payee | ascii_downcase | ltrimstr("0x"))) as $payeeTopic |
+        .result | select(.status == "0x1" and (.to | ascii_downcase) == ($custody | ascii_downcase)
+          and (.transactionHash | ascii_downcase) == ($tx | ascii_downcase)) |
+        [.logs[] | select((.address | ascii_downcase) == ($custody | ascii_downcase)
+          and .topics[0] == "0xc4b5041307ee38be8c4f25df5d980a372ac8a9a73ea8f459891000a5386f5322")] as $events |
+        if $tx == $claim then
+          select(($events | length) == 1 and ($events[0].topics | length) == 3
+            and ($events[0].topics[1] | ascii_downcase) == $payeeTopic
+            and ($events[0].topics[2] | ascii_downcase) == $payeeTopic
+            and ($events[0].data | test("^0x[0-9a-fA-F]{64}$") and test("[1-9a-fA-F]"))) |
+          {transactionHash, blockNumber, status, from, to, creditClaimed: [
+            $events[0] | {creditor: .topics[1], recipient: .topics[2], amountWord: .data}
+          ]}
+        else
+          {transactionHash, blockNumber, status, from, to}
+        end
+      ' || return 1
   done
 )
 check_exit_receipts
@@ -533,14 +547,18 @@ For the pre-VT-07 rehearsal, the maintainer may publish a compatible shard recov
 ```bash
 read -rp 'Journal recovery binary SHA-256: ' RECOVERY_SHA256
 install_journal_recovery() (
-  set -eo pipefail
-  curl -fsS "${RELEASE_URL%/}/ubft-journal-recovery" -o release/ubft-journal-recovery.download
-  printf '%s  %s\n' "$RECOVERY_SHA256" release/ubft-journal-recovery.download | sha256sum -c -
-  install -m 755 release/ubft-journal-recovery.download release/ubft-journal-recovery
+  set -o pipefail
+  [[ "$RECOVERY_SHA256" =~ ^[0-9a-fA-F]{64}$ ]] || return 1
+  curl -fsS "${RELEASE_URL%/}/ubft-journal-recovery" -o release/ubft-journal-recovery.download || return 1
+  printf '%s  %s\n' "$RECOVERY_SHA256" release/ubft-journal-recovery.download | sha256sum -c - || return 1
+  install -m 755 release/ubft-journal-recovery.download release/ubft-journal-recovery || return 1
 )
 if install_journal_recovery; then
   "$UBFT_HOME/release/ubft-journal-recovery" shard-node run "${SHARD_ARGS[@]}" >>logs/shard.log 2>&1 &
   SHARD_PID=$!
+else
+  printf 'Journal recovery binary was not verified and installed.\n' >&2
+  false
 fi
 ```
 
