@@ -182,13 +182,15 @@ timeout 45 bash -c '
 ```
 
 ```bash
-ubft root-node run --home "$UBFT_HOME/root" "${ROOT_P2P[@]}" \
-  --bootnodes "$ROOT_PEERS" --metrics prometheus --rpc-server-address 127.0.0.1:25852 \
-  --trust-base release/trust-base.json --shard-conf release/full-shard-conf.json --profile-3 --q3-lane --b1-registry \
-  --genesis-identities release/genesis-identities.json --vr-deployment release/vr-deployment.json \
-  --pos-evm-rpc "$RPC_URL" --vr-shard-rpc http://127.0.0.1:28352 \
-  --vr-evm-authority-socket "$UBFT_HOME/authority/pop.sock" \
-  --vr-evm-authority-credential "$UBFT_HOME/authority/pop.cred" "${ROOT_INSTALL[@]}" "${UTB[@]}" >logs/root.log 2>&1 &
+ROOT_ARGS=(--home "$UBFT_HOME/root" "${ROOT_P2P[@]}"
+  --bootnodes "$ROOT_PEERS" --metrics prometheus --rpc-server-address 127.0.0.1:25852
+  --trust-base release/trust-base.json --shard-conf release/full-shard-conf.json --profile-3 --q3-lane --b1-registry
+  --genesis-identities release/genesis-identities.json --vr-deployment release/vr-deployment.json
+  --pos-evm-rpc "$RPC_URL" --vr-shard-rpc http://127.0.0.1:28352
+  --vr-evm-authority-socket "$UBFT_HOME/authority/pop.sock"
+  --vr-evm-authority-credential "$UBFT_HOME/authority/pop.cred" "${UTB[@]}")
+ubft root-node run "${ROOT_ARGS[@]}" "${ROOT_INSTALL[@]}" >>logs/root.log 2>&1 &
+ROOT_PID=$!
 SHARD_ARGS=(--home "$UBFT_HOME/evm" "${SHARD_P2P[@]}"
   --bootnodes "$ROOT_PEERS,$SHARD_PEERS" --metrics prometheus --rpc-server-address 127.0.0.1:28352
   --trust-base release/trust-base.json --full-shard-conf release/full-shard-conf.json
@@ -207,6 +209,24 @@ ubft shard-node restore "${SHARD_ARGS[@]}" --tip-uc seed-pin.uc.cbor --tip-tr se
 If the initial shard restore exited at the Engine dial with connection refused, leave the healthy root running. After ureth's readiness check succeeds, repeat just `shard-node restore` when the journal and archive are still fresh. If restore already wrote replay state, preserve it and inspect the error before choosing a recovery procedure.
 
 The root starts from genesis, and the shard and ureth replay certified data from archive peers to the seed checkpoint. Before the roots stage your identity, your shard may retry its handshake and the local head may trail the network. Keep the services running through application and check for catch-up once the election publishes and the roots stage the successor. After a successful restore, supervise subsequent shard starts with `ubft shard-node run "${SHARD_ARGS[@]}"`. Preserve the databases, sessions and high-water records across restarts.
+
+### Bring a lagging root to an activated epoch
+
+If the root stays on the same round and times out across an intervening public handoff, read its local epoch and the public VR epoch. For a confirmed gap, stop only your root and install the next missing root epoch from peers using the existing root home. Leave the authority and shard replay running. The root verifies the activation before it installs it.
+
+```bash
+LOCAL_ROOT_EPOCH=$(curl -fsS http://127.0.0.1:25852/api/v1/roundInfo | jq -er '.epochNumber | tonumber')
+PUBLIC_ROOT_EPOCH=$(ubft validator status --sample 0 --json | jq -er '.rootEpoch | select(. >= 1)')
+if [[ -n "$LOCAL_ROOT_EPOCH" && -n "$PUBLIC_ROOT_EPOCH" ]] &&
+   (( LOCAL_ROOT_EPOCH < PUBLIC_ROOT_EPOCH )); then
+  kill "$ROOT_PID"
+  wait "$ROOT_PID" || true
+  ubft root-node run "${ROOT_ARGS[@]}" --install-handoff-epoch "$((LOCAL_ROOT_EPOCH + 1))" >>logs/root.log 2>&1 &
+  ROOT_PID=$!
+fi
+```
+
+Check the new local epoch with the same round-info request. Repeat only after one activation has installed if more epochs are missing. Preserve the existing root database, UTB entry stores and member signing state.
 
 ## 4. Apply, stake and join
 
