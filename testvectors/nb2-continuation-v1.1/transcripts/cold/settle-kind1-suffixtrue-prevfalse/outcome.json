@@ -6,8 +6,8 @@
     "Liability": "100",
     "VaultBalance": "100",
     "RecipientBalance": "0",
-    "Head": "2347d5b36904e81968a1727eb239276ec13b3dd1533703115cf74aae7c4a263e",
-    "PreviousHead": "850cd979e259eaacf9f6a6c601ea45e74caf47fcc849a85dd83c8eb708893917",
+    "Head": "506fc1bfdc9671c6c466cc395c7811d87ee33b939164ce2f0a478be5a6e2a12e",
+    "PreviousHead": "dffe479b77c8ddc3c4099cc4510012ac934caf8343ddb55b47b20ac0154f98e1",
     "Current": [],
     "Previous": [
       "03a27e3018219bcbc4d14513e5ea960d397b5d85daec25ccb4fcc72fbbc334ad",
@@ -251,8 +251,8 @@
     "Liability": "0",
     "VaultBalance": "0",
     "RecipientBalance": "100",
-    "Head": "2347d5b36904e81968a1727eb239276ec13b3dd1533703115cf74aae7c4a263e",
-    "PreviousHead": "850cd979e259eaacf9f6a6c601ea45e74caf47fcc849a85dd83c8eb708893917",
+    "Head": "506fc1bfdc9671c6c466cc395c7811d87ee33b939164ce2f0a478be5a6e2a12e",
+    "PreviousHead": "dffe479b77c8ddc3c4099cc4510012ac934caf8343ddb55b47b20ac0154f98e1",
     "Current": [
       "f705f24c68a7b77536b2406ea51c1cce7805cc872a47d5b899532348e0241eea"
     ],

@@ -149,7 +149,12 @@ func (v *Vault) Deposit(value *big.Int, firstOwner []byte, rho [32]byte) error {
 			return err
 		}
 	}
-	if len(firstOwner) != FirstOwnerBytes || !bytes.Equal(firstOwner[:9], FirstOwnerPrefix) || (firstOwner[9] != 2 && firstOwner[9] != 3) {
+	validOwner := len(firstOwner) == FirstOwnerBytes && bytes.Equal(firstOwner[:9], FirstOwnerPrefix)
+	if validOwner {
+		_, err := ParseKey(firstOwner[9:])
+		validOwner = err == nil
+	}
+	if !validOwner {
 		if err := fail(ErrBadFirstOwner); err != nil {
 			return err
 		}

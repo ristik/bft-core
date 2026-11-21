@@ -3,6 +3,7 @@ package nb2ref
 import (
 	"bytes"
 	"encoding/json"
+	"math/big"
 	"os"
 	"path/filepath"
 	"testing"
@@ -71,7 +72,7 @@ func TestFlatResourceBoundaryFixtures(t *testing.T) {
 		raw[43] = 33
 		_, err = DecodeFlatRun(wire)
 		require.ErrorIs(t, err, ErrFlatPacket)
-		flatRecordRefusal(t, "page-count-33", wire, "BadPacket", nil)
+		flatRecordRefusal(t, "page-count-33", wire, "BadPacket", nil, nil, nil)
 	})
 
 	t.Run("depth-16-and-17", func(t *testing.T) {
@@ -92,4 +93,50 @@ func TestFlatResourceBoundaryFixtures(t *testing.T) {
 			require.Error(t, err)
 		}
 	})
+}
+
+func TestFlatDecodersBoundDeclaredArrays(t *testing.T) {
+	nodes := make([][]byte, MaxReceiptNodes)
+	for i := range nodes {
+		nodes[i] = []byte{byte(i)}
+	}
+	p := DepositProof{Nodes: nodes}
+	decoded, err := DecodeDepositProof(p.Bytes())
+	require.NoError(t, err)
+	require.Equal(t, nodes, decoded.Nodes)
+	j := ReceiptBacking{N: 1, Proof: p}
+	backed, err := DecodeReceiptBacking(j.Bytes())
+	require.NoError(t, err)
+	require.Equal(t, nodes, backed.Proof.Nodes)
+	p.Nodes = append(p.Nodes, []byte{1})
+	_, err = DecodeDepositProof(p.Bytes())
+	require.ErrorIs(t, err, ErrInputTooLarge)
+	j.Proof = p
+	_, err = DecodeReceiptBacking(j.Bytes())
+	require.ErrorIs(t, err, ErrInputTooLarge)
+
+	// A head with no children must give the same cap error at one over;
+	// at the cap, the normal truncation diagnostic must still apply.
+	for _, count := range []uint64{MaxReceiptNodes, MaxReceiptNodes + 1} {
+		raw := cat(head(majArray, 6), CUint(1), CBytes(nil), CBytes(nil), CUint(0), CUint(0), head(majArray, count))
+		want := ErrTruncated
+		if count > MaxReceiptNodes {
+			want = ErrInputTooLarge
+		}
+		_, err := DecodeDepositProof(raw)
+		require.ErrorIs(t, err, want)
+	}
+	steps := make(SumProof, maxSumProofSteps)
+	for i := range steps {
+		steps[i] = SumStep{Depth: uint8(len(steps) - 1 - i), Sum: big.NewInt(1)}
+	}
+	got, err := decodeFlatAllocation(steps.Bytes())
+	require.NoError(t, err)
+	require.Equal(t, steps, got)
+	_, err = decodeFlatAllocation(append(steps, steps[0]).Bytes())
+	require.ErrorIs(t, err, ErrSplitProofShape)
+	_, err = decodeFlatAllocation(head(majArray, maxSumProofSteps+1))
+	require.ErrorIs(t, err, ErrSplitProofShape)
+	_, err = decodeFlatAllocation(head(majArray, maxSumProofSteps))
+	require.ErrorIs(t, err, ErrTruncated)
 }

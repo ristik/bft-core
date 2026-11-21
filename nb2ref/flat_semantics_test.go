@@ -46,7 +46,7 @@ func TestFlatLineageSemanticRefusals(t *testing.T) {
 			d, _ := flatFixtureRoot(t, w, v, 100, Key("flat-root"))
 			bad.change(t, w, v, d)
 			tok := flatFixtureReturn(t, w, v, d, 7)
-			raw, records := flatFixtureEncode(t, v, []flatFixtureLevel{{nil, tok}})
+			raw, records := flatFixtureEncode(t, []flatFixtureLevel{{nil, tok}})
 			_, err := v.VerifyFlatReturn(raw)
 			require.ErrorIs(t, err, bad.want)
 			packet := newFlatFixtureWallet(mustFlatEvidence(t, raw)).packet(t, nil, nil, records)
@@ -56,7 +56,7 @@ func TestFlatLineageSemanticRefusals(t *testing.T) {
 			require.Nil(t, out)
 			require.ErrorIs(t, err, ErrFlatStep)
 			require.ErrorIs(t, err, bad.want)
-			flatRecordRefusal(t, bad.name, wire, "BadStep", nil)
+			flatRecordRefusal(t, bad.name, wire, "BadStep", nil, nil, nil)
 			flatExportRefusedEvidence(t, bad.name, raw)
 		})
 	}
@@ -127,7 +127,7 @@ func TestFlatChildRequiresItsVerifiedParent(t *testing.T) {
 				}
 			}
 			last := flatFixtureReturn(t, w, v, child, 7)
-			raw, records := flatFixtureEncode(t, v, []flatFixtureLevel{{nil, parent}, {alloc, last}})
+			raw, records := flatFixtureEncode(t, []flatFixtureLevel{{nil, parent}, {alloc, last}})
 			if change == "missing-parent" {
 				// Preserve the declared two-level prelude, but truncate after
 				// the first level so the completion cannot credit the prefix.
@@ -143,12 +143,22 @@ func TestFlatChildRequiresItsVerifiedParent(t *testing.T) {
 				return
 			}
 			wallet := newFlatFixtureWallet(mustFlatEvidence(t, raw))
-			start, err := wallet.packet(t, nil, nil, records[:2]).Calldata()
+			model := newExpectedLineage(t, v, raw)
+			startPacket := wallet.packet(t, nil, nil, records[:1])
+			start, err := startPacket.Calldata()
 			require.NoError(t, err)
-			progress, err := v.RunFlat(start)
+			frame, progress, _ := flatFixtureFrame(t, w, v, model, startPacket, start, records[:1], ReceiptOpts{})
+			prior := frame.ResultReceipt
+			packet := wallet.packet(t, progress, prior, records[1:])
+			data, err := packet.Calldata()
 			require.NoError(t, err)
-			prior := flatCertifiedEvent(t, w, v, progress.Event, ReceiptOpts{})
-			data, err := wallet.packet(t, progress.State, prior, records[2:]).Calldata()
+			// The invalid child cannot be repaired under this commitment. The
+			// preceding split can still be certified from the original input.
+			wallet = newFlatFixtureWallet(mustFlatEvidence(t, raw))
+			wallet.packet(t, nil, nil, records[:1])
+			retry, err := wallet.packet(t, progress, prior, records[1:2]).Calldata()
+			require.NoError(t, err)
+			_, err = v.RunFlat(retry)
 			require.NoError(t, err)
 			got, err := v.RunFlat(data)
 			require.Nil(t, got)
@@ -156,7 +166,7 @@ func TestFlatChildRequiresItsVerifiedParent(t *testing.T) {
 			if change != "repeated-mint-sid" {
 				require.ErrorIs(t, err, expected)
 			}
-			flatRecordRefusal(t, change, data, "BadStep", prior)
+			flatRecordRefusal(t, change, data, "BadStep", prior, retry, nil)
 			flatExportRefusedEvidence(t, change, raw)
 		})
 	}

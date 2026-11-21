@@ -18,7 +18,7 @@ func TestFlatCappedRootReceipt(t *testing.T) {
 		MutReceipt: func(receipt *RawReceipt) { receipt.Logs[0].Data = bytes.Repeat([]byte{0xaa}, 48_000) }}
 	d, _ := flatFixtureRootWithReceipt(t, w, v, 100, Key("flat-cap-root"), opts)
 	token := flatFixtureReturn(t, w, v, d, 7)
-	raw, records := flatFixtureEncode(t, v, []flatFixtureLevel{{nil, token}})
+	raw, records := flatFixtureEncode(t, []flatFixtureLevel{{nil, token}})
 	j, err := DecodeReceiptBacking(token.Mint.Justification)
 	require.NoError(t, err)
 	leaf := j.Proof.Nodes[len(j.Proof.Nodes)-1]
@@ -49,7 +49,7 @@ func TestFlatSharedClaimsAndAuthorityVariants(t *testing.T) {
 	for i, p := range proofs {
 		p.UC, p.Bitmap, p.Siblings = view[i].UC, view[i].Bitmap, view[i].Siblings
 	}
-	raw, records := flatFixtureEncode(t, v, levels)
+	raw, records := flatFixtureEncode(t, levels)
 	whole, err := v.VerifyFlatReturn(raw)
 	require.NoError(t, err)
 	mixed, complete := flatFixtureRun(t, w, v, raw, records, 3)
@@ -68,7 +68,7 @@ func TestFlatSharedClaimsAndAuthorityVariants(t *testing.T) {
 	older.UnicitySeal.Signatures["unsigned-fixture-extra"] = make([]byte, 65)
 	proofs[len(proofs)-1].UC, err = types.Cbor.Marshal(older)
 	require.NoError(t, err)
-	alt, records := flatFixtureEncode(t, v, levels)
+	alt, records := flatFixtureEncode(t, levels)
 	require.NotEqual(t, v.Session(mustFlatEvidence(t, raw).Header()), v.Session(mustFlatEvidence(t, alt).Header()))
 	target, err := v.VerifyFlatReturn(alt)
 	require.NoError(t, err)
@@ -87,14 +87,14 @@ func TestFlatSharedClaimsAndAuthorityVariants(t *testing.T) {
 	require.NoError(t, err)
 	tok.Mint.Justification = j.Bytes()
 	tok.mintRaw = tok.Mint.Bytes()
-	modified, _ := flatFixtureEncode(t, v, levels)
+	modified, _ := flatFixtureEncode(t, levels)
 	_, err = v.VerifyFlatReturn(modified)
 	require.ErrorIs(t, err, ErrCDMismatch)
 }
 
 func TestFlatAuthenticatedOriginAndMissingAuthority(t *testing.T) {
 	w, v, registry := flatFixtureVerifier(t)
-	raw, _ := flatFixtureEncode(t, v, flatFixtureLineage(t, w, v, 12, 0, false))
+	raw, _ := flatFixtureEncode(t, flatFixtureLineage(t, w, v, 12, 0, false))
 	for _, tc := range []struct {
 		name string
 		edit func(b1ref.Words)
@@ -161,33 +161,27 @@ func TestFlatLargeCombinedWitnesses(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, proofs[0].Siblings, 256)
 	p.UC, p.Bitmap, p.Siblings = proofs[0].UC, proofs[0].Bitmap, proofs[0].Siblings
-	raw, records := flatFixtureEncode(t, v, []flatFixtureLevel{{nil, root}, {sumProof.Bytes(), child}})
+	raw, records := flatFixtureEncode(t, []flatFixtureLevel{{nil, root}, {sumProof.Bytes(), child}})
 	want, err := v.VerifyFlatReturn(raw)
 	require.NoError(t, err)
 	e := mustFlatEvidence(t, raw)
 	scratch := newFlatFixtureWallet(e)
+	model := newExpectedLineage(t, v, raw)
 	var trace []flatFixtureTrace
 	var prior *FlatState
 	var receipt []byte
-	for _, cuts := range [][]flatSourceFixture{records[:2], records[2:]} {
-		packet, err := scratch.packet(t, prior, receipt, cuts).Calldata()
+	for _, cut := range [][]flatSourceFixture{records[:2], records[2:]} {
+		p := scratch.packet(t, prior, receipt, cut)
+		packet, err := p.Calldata()
 		require.NoError(t, err)
-		res, err := v.RunFlat(packet)
-		require.NoError(t, err)
-		log := res.Event.Log(v.deployment.Recovery)
-		receipt = flatCertifiedEvent(t, w, v, res.Event, largeReceipt)
+		f, next, event := flatFixtureFrame(t, w, v, model, p, packet, cut, largeReceipt)
+		receipt = f.ResultReceipt
 		require.Greater(t, len(receipt), 48_000)
-		f := flatFixtureTrace{Payload: packet, Topics: cat(log.Topics[0][:], log.Topics[1][:]), Data: log.Data, ResultReceipt: receipt}
-		if prior != nil {
-			f.OldState = prior.Bytes()
-		}
-		if res.State != nil {
-			f.NewState = res.State.Bytes()
-		} else {
-			require.Equal(t, want.ABI(), res.Event.Verdict.ABI())
+		if next == nil {
+			require.Equal(t, want.ABI(), expectedVerdictWire(event.Verdict))
 		}
 		trace = append(trace, f)
-		prior = res.State
+		prior = next
 	}
 	flatFixtureExports(t, "combined-large-receipt-and-paths", w, v, registry, raw, want.ABI(), trace)
 	t.Logf("complete packet %d bytes with 256 allocation steps, 256 RSMT siblings and a %d-byte predecessor", len(trace[1].Payload), len(trace[0].ResultReceipt))

@@ -3,6 +3,7 @@ package nb2ref
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"math"
 	"os"
@@ -12,7 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func flatRecordRefusal(t *testing.T, name string, data []byte, stage string, prior []byte) {
+func flatRecordRefusal(t *testing.T, name string, data []byte, stage string, prior, retry []byte, custody *flatCustodyFixture) {
 	t.Helper()
 	dir := os.Getenv("NB2_FLAT_VECTOR_OUT")
 	if dir == "" {
@@ -23,29 +24,39 @@ func flatRecordRefusal(t *testing.T, name string, data []byte, stage string, pri
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "calldata.bin"), data, 0644))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "stage.txt"), []byte(stage+"\n"), 0644))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "last-usable-predecessor.cbor"), prior, 0644))
+	require.Equal(t, len(prior) == 0, len(retry) == 0)
+	if len(retry) != 0 {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "retry-calldata.bin"), retry, 0644))
+	}
+	if custody != nil {
+		out, err := json.MarshalIndent(custody, "", "  ")
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "custody-before.json"), append(out, '\n'), 0644))
+	}
 }
 
 func TestFlatPacketRefusalOrderAndRetry(t *testing.T) {
 	w, v, _ := flatFixtureVerifier(t)
-	evidence, records := flatFixtureEncode(t, v, flatFixtureLineage(t, w, v, 6, 0, false))
+	evidence, records := flatFixtureEncode(t, flatFixtureLineage(t, w, v, 6, 0, false))
 	e := mustFlatEvidence(t, evidence)
 	wallet := newFlatFixtureWallet(e)
 	start := wallet.packet(t, nil, nil, records[:1])
 	startBytes, err := start.Calldata()
 	require.NoError(t, err)
-	progress, err := v.RunFlat(startBytes)
-	require.NoError(t, err)
-	prior := flatCertifiedEvent(t, w, v, progress.Event, ReceiptOpts{Type: 2})
-	resume := wallet.packet(t, progress.State, prior, records[1:])
+	model := newExpectedLineage(t, v, evidence)
+	frame, progress, event := flatFixtureFrame(t, w, v, model, start, startBytes, records[:1], ReceiptOpts{Type: 2})
+	prior := frame.ResultReceipt
+	resume := wallet.packet(t, progress, prior, records[1:])
 	data, err := resume.Calldata()
 	require.NoError(t, err)
 	require.Greater(t, len(resume.Pages), 1)
+	retry := data
 	refuse := func(name string, data []byte, want error, stage string) {
 		t.Helper()
 		r, err := v.RunFlat(data)
 		require.Nil(t, r, name)
 		require.ErrorIs(t, err, want, name)
-		flatRecordRefusal(t, name, data, stage, prior)
+		flatRecordRefusal(t, name, data, stage, prior, retry, nil)
 	}
 
 	raw, err := FlatRun.DecodeCalldata(data)
@@ -108,7 +119,9 @@ func TestFlatPacketRefusalOrderAndRetry(t *testing.T) {
 	h := FlatHeader{Length: 4097}
 	wire, err = FlatRun.Calldata(append(append(h.appendTo(nil), 0, 1), flatU64(2)...))
 	require.NoError(t, err)
-	refuse("4097-padding-is-not-a-page", wire, ErrFlatPacket, "BadPacket")
+	_, err = v.RunFlat(wire)
+	require.ErrorIs(t, err, ErrFlatPacket)
+	flatRecordRefusal(t, "4097-padding-is-not-a-page", wire, "BadPacket", nil, nil, nil)
 
 	badPredecessors := []struct {
 		name   string
@@ -132,7 +145,7 @@ func TestFlatPacketRefusalOrderAndRetry(t *testing.T) {
 		{"failed-receipt", func(e *FlatEvent, o *ReceiptOpts) { o.MutReceipt = func(r *RawReceipt) { r.Status = nil } }},
 	}
 	for _, bad := range badPredecessors {
-		out, opts := progress.Event, ReceiptOpts{Type: 2}
+		out, opts := event, ReceiptOpts{Type: 2}
 		bad.change(&out, &opts)
 		p := resume
 		p.Receipt = flatCertifiedEvent(t, w, v, out, opts)
@@ -148,7 +161,7 @@ func TestFlatPacketRefusalOrderAndRetry(t *testing.T) {
 	require.ErrorIs(t, err, ErrFlatPredecessor)
 
 	fresh := resume
-	fresh.Receipt = flatCertifiedEvent(t, w, v, progress.Event, ReceiptOpts{Type: 2, Rotated: true, TxIndex: 2})
+	fresh.Receipt = flatCertifiedEvent(t, w, v, event, ReceiptOpts{Type: 2, Rotated: true, TxIndex: 2})
 	wire, err = fresh.Calldata()
 	require.NoError(t, err)
 	a, err := v.RunFlat(wire)

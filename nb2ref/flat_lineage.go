@@ -137,11 +137,7 @@ func (r *flatRecordReader) mint(root bool) (flatMint, error) {
 		return m, err
 	}
 	if !root {
-		it, err := scanOne(alloc)
-		if err != nil {
-			return m, err
-		}
-		m.allocation, err = decodeSumProof(it)
+		m.allocation, err = decodeFlatAllocation(alloc)
 		if err != nil {
 			return m, err
 		}

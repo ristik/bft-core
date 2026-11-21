@@ -127,6 +127,8 @@ type flatSourceFixture struct {
 	start, end uint64
 	sid        [32]byte
 	claims     []flatClaim
+	token      *Token
+	transfer   int
 }
 
 func flatFixtureRoot(t *testing.T, w *World, v *FlatVerifier, value int64, key *secp256k1.PrivateKey) (*Draft, [32]byte) {
@@ -227,7 +229,7 @@ func flatFixtureLineage(t *testing.T, w *World, v *FlatVerifier, transfers, spli
 	return append(levels, flatFixtureLevel{allocation, flatFixtureReturn(t, w, v, d, 7)})
 }
 
-func flatFixtureEncode(t *testing.T, v *FlatVerifier, levels []flatFixtureLevel) ([]byte, []flatSourceFixture) {
+func flatFixtureEncode(t *testing.T, levels []flatFixtureLevel) ([]byte, []flatSourceFixture) {
 	t.Helper()
 	evidence := cat([]byte("NB2L"), flatU16(0x0101), flatU64(uint64(len(levels))))
 	var operations []flatSourceFixture
@@ -239,26 +241,20 @@ func flatFixtureEncode(t *testing.T, v *FlatVerifier, levels []flatFixtureLevel)
 		evidence = flatBlob(evidence, tok.MintProof.Bytes())
 		evidence = append(evidence, flatU64(uint64(len(tok.Transfers)))...)
 		op := flatSourceFixture{code: FlatChildMint, start: start, end: uint64(len(evidence)),
-			sid: StateID(tok.MintProof.CD.Source, tok.MintProof.CD.SourceHash)}
+			sid: expectedSID(t, tok.MintProof.CD), token: tok}
 		if i == 0 {
 			op.code, op.start = FlatRootMint, 0
 			j, err := DecodeReceiptBacking(tok.Mint.Justification)
 			require.NoError(t, err)
-			claim, _, err := v.claim(j.Proof.UC, v.cfg.EVMPartition, v.cfg.EVMShard)
-			require.NoError(t, err)
-			op.claims = append(op.claims, claim)
+			op.claims = append(op.claims, expectedClaim(t, j.Proof.UC))
 		}
-		c, _, err := v.claim(tok.MintProof.UC, v.cfg.AggregatorPartition, nil)
-		require.NoError(t, err)
-		op.claims = append(op.claims, c)
+		op.claims = append(op.claims, expectedClaim(t, tok.MintProof.UC))
 		operations = append(operations, op)
 		for j, proof := range tok.Proofs {
 			start := uint64(len(evidence))
 			evidence = flatBlob(evidence, CArr(tok.transfersRaw[j], proof.Bytes()))
-			c, _, err := v.claim(proof.UC, v.cfg.AggregatorPartition, nil)
-			require.NoError(t, err)
-			operations = append(operations, flatSourceFixture{FlatTransfer, start, uint64(len(evidence)),
-				StateID(proof.CD.Source, proof.CD.SourceHash), []flatClaim{c}})
+			operations = append(operations, flatSourceFixture{code: FlatTransfer, start: start, end: uint64(len(evidence)),
+				sid: expectedSID(t, proof.CD), claims: []flatClaim{expectedClaim(t, proof.UC)}, token: tok, transfer: j})
 		}
 	}
 	return evidence, operations
@@ -321,6 +317,8 @@ func flatFixtureRun(t *testing.T, w *World, v *FlatVerifier, evidence []byte, re
 	e, err := NewFlatEvidence(evidence)
 	require.NoError(t, err)
 	wallet := newFlatFixtureWallet(e)
+	model := newExpectedLineage(t, v, evidence)
+	require.Equal(t, model.pageRoot, e.Header().Root)
 	var state *FlatState
 	var prior []byte
 	var trace []flatFixtureTrace
@@ -340,24 +338,41 @@ func flatFixtureRun(t *testing.T, w *World, v *FlatVerifier, evidence []byte, re
 		packet := wallet.packet(t, state, prior, records[i:i+n])
 		data, err := packet.Calldata()
 		require.NoError(t, err)
-		result, err := v.RunFlat(data)
-		require.NoError(t, err, "records %d..%d", i, i+n)
-		log := result.Event.Log(v.deployment.Recovery)
-		receipt, err := w.ReceiptProof(log, ReceiptOpts{Type: 2, TxIndex: 3, FillerLogs: 2, Rotated: i%2 == 1})
-		require.NoError(t, err)
-		prior = receipt.Bytes()
-		frame := flatFixtureTrace{Payload: data, Topics: cat(log.Topics[0][:], log.Topics[1][:]), Data: log.Data, ResultReceipt: prior}
-		if state != nil {
-			frame.OldState = state.Bytes()
-		}
-		if result.State != nil {
-			frame.NewState = result.State.Bytes()
-		}
+		frame, next, expected := flatFixtureFrame(t, w, v, model, packet, data, records[i:i+n],
+			ReceiptOpts{Type: 2, TxIndex: 3, FillerLogs: 2, Rotated: i%2 == 1})
+		prior = frame.ResultReceipt
 		trace = append(trace, frame)
-		state, event = result.State, result.Event
+		state, event = next, expected
 		i += n
 	}
 	return trace, event
+}
+
+func flatFixtureFrame(t *testing.T, w *World, v *FlatVerifier, model *expectedLineage, packet FlatRunPacket,
+	data []byte, records []flatSourceFixture, opts ReceiptOpts,
+) (flatFixtureTrace, *FlatState, FlatEvent) {
+	t.Helper()
+	next, event := model.packet(t, records)
+	log := expectedLog(event, model.runtimeAddress)
+	receipt, err := w.ReceiptProof(log, opts)
+	require.NoError(t, err)
+	f := flatFixtureTrace{Payload: data, Topics: bytes.Join([][]byte{log.Topics[0][:], log.Topics[1][:]}, nil),
+		Data: log.Data, ResultReceipt: receipt.Bytes()}
+	if packet.Prior != nil {
+		f.OldState = expectedStateWire(*packet.Prior)
+	}
+	if next != nil {
+		f.NewState = expectedStateWire(*next)
+	}
+	actual, err := v.RunFlat(data)
+	require.NoError(t, err)
+	require.Equal(t, log, actual.Event.Log(model.runtimeAddress))
+	if next == nil {
+		require.Nil(t, actual.State)
+	} else {
+		require.Equal(t, f.NewState, actual.State.Bytes())
+	}
+	return f, next, event
 }
 
 func flatFixtureExports(t *testing.T, name string, w *World, v *FlatVerifier, registry b1ref.Words, evidence, verdict []byte, trace []flatFixtureTrace) {
@@ -368,20 +383,29 @@ func flatFixtureExports(t *testing.T, name string, w *World, v *FlatVerifier, re
 	}
 	p := filepath.Join(dir, name)
 	require.NoError(t, os.MkdirAll(p, 0755))
-	for n, b := range map[string][]byte{"evidence.bin": evidence, "utb.cbor": w.Trust.Bundle, "verdict.bin": verdict} {
+	var expected []byte
+	if len(trace) > 0 {
+		terminal := trace[len(trace)-1]
+		require.Empty(t, terminal.NewState)
+		require.Len(t, terminal.Data, 224)
+		expected = terminal.Data[32:]
+	}
+	require.Equal(t, expected, verdict)
+	for n, b := range map[string][]byte{"evidence.bin": evidence, "utb.cbor": w.Trust.Bundle, "verdict.bin": expected} {
 		require.NoError(t, os.WriteFile(filepath.Join(p, n), b, 0644))
 	}
 	slots := make(map[string]string, len(registry))
 	for k, value := range registry {
 		slots[hex.EncodeToString(k[:])] = hex.EncodeToString(value[:])
 	}
+	expectedContext := newExpectedLineage(t, v, evidence)
 	r, err := json.MarshalIndent(struct {
 		GenesisCommitment, RegistryProfile, RecoveryAddress, RecoveryRuntimeHash, Session, PageRoot string
 		EvidenceLength                                                                              uint64
 		Registry                                                                                    map[string]string
 	}{fmt.Sprintf("%x", v.authority.Pins.GenesisCommitment), fmt.Sprintf("%x", v.authority.Pins.ProfileHash),
 		fmt.Sprintf("%x", v.deployment.Recovery), fmt.Sprintf("%x", v.deployment.Runtime),
-		fmt.Sprintf("%x", v.Session(mustFlatEvidence(t, evidence).Header())), fmt.Sprintf("%x", mustFlatEvidence(t, evidence).Header().Root),
+		fmt.Sprintf("%x", expectedContext.session), fmt.Sprintf("%x", expectedContext.pageRoot),
 		uint64(len(evidence)), slots}, "", "  ")
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(p, "context.json"), append(r, '\n'), 0644))
@@ -417,7 +441,7 @@ func TestFlatSignedTranscripts(t *testing.T) {
 		t.Run(scenario.name, func(t *testing.T) {
 			w, v, registry := flatFixtureVerifier(t)
 			levels := flatFixtureLineage(t, w, v, scenario.n, scenario.split, false)
-			evidence, records := flatFixtureEncode(t, v, levels)
+			evidence, records := flatFixtureEncode(t, levels)
 			verdict, err := v.VerifyFlatReturn(evidence)
 			require.NoError(t, err)
 			trace, event := flatFixtureRun(t, w, v, evidence, records, 16)
@@ -455,14 +479,22 @@ func TestFlatHeldAndSiblingWitnesses(t *testing.T) {
 	for i := range kids {
 		child, err := w.Finalize(kids[i])
 		require.NoError(t, err)
-		e, _ := flatFixtureEncode(t, v, []flatFixtureLevel{{nil, root}, {paths[i], child}})
+		e, ops := flatFixtureEncode(t, []flatFixtureLevel{{nil, root}, {paths[i], child}})
 		holding, err := v.VerifyFlatHeld(e)
 		require.NoError(t, err)
-		require.Equal(t, child.Mint.Recipient.Params, holding.Owner[:])
+		expected, event := newExpectedLineage(t, v, e).packet(t, ops)
+		require.Equal(t, FlatProgressEvent, event.Kind)
+		want := FlatHolding{Owner: expected.Owner, State: expected.State, TokenID: expected.TokenID, Amount: expected.Amount}
+		require.Equal(t, want, holding)
 		_, err = v.VerifyFlatReturn(e)
 		require.ErrorIs(t, err, ErrNoTransfers)
-		flatFixtureExports(t, fmt.Sprintf("held-sibling-%d", i), w, v, registry, e, nil, nil)
-		bad, _ := flatFixtureEncode(t, v, []flatFixtureLevel{{nil, root}, {paths[(i+1)%len(paths)], child}})
+		name := fmt.Sprintf("held-sibling-%d", i)
+		flatFixtureExports(t, name, w, v, registry, e, nil, nil)
+		if dir := os.Getenv("NB2_FLAT_VECTOR_OUT"); dir != "" {
+			wire := bytes.Join([][]byte{want.Owner[:], want.State[:], want.TokenID[:], want.Amount[:]}, nil)
+			require.NoError(t, os.WriteFile(filepath.Join(dir, name, "holding.bin"), wire, 0644))
+		}
+		bad, _ := flatFixtureEncode(t, []flatFixtureLevel{{nil, root}, {paths[(i+1)%len(paths)], child}})
 		_, err = v.VerifyFlatHeld(bad)
 		require.ErrorIs(t, err, ErrSplitProof)
 	}
@@ -473,7 +505,7 @@ func TestFlatHeldAndSiblingWitnesses(t *testing.T) {
 // and the last durable checkpoint.
 func TestFlatRestartFromRebuiltScratchAndAlternateReceipt(t *testing.T) {
 	w, v, _ := flatFixtureVerifier(t)
-	raw, records := flatFixtureEncode(t, v, flatFixtureLineage(t, w, v, 330, 1, false))
+	raw, records := flatFixtureEncode(t, flatFixtureLineage(t, w, v, 330, 1, false))
 	trace, complete := flatFixtureRun(t, w, v, raw, records, 16)
 	base := trace[18]
 	state, err := DecodeFlatState(base.NewState)

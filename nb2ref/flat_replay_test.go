@@ -68,8 +68,11 @@ func TestFlatPublishedReplay(t *testing.T) {
 			require.NoError(t, err)
 			require.NoError(t, gz.Close())
 			if len(expected) == 0 {
-				_, err := oracle.VerifyFlatHeld(raw)
+				holding, err := oracle.VerifyFlatHeld(raw)
 				require.NoError(t, err)
+				want := mustFlatFile(t, dir, "holding.bin")
+				require.Len(t, want, 129)
+				require.Equal(t, want, bytes.Join([][]byte{holding.Owner[:], holding.State[:], holding.TokenID[:], holding.Amount[:]}, nil))
 				require.Empty(t, trace)
 				return
 			}
@@ -158,26 +161,8 @@ func TestFlatPublishedColdAndRefusalReplay(t *testing.T) {
 			event, err := v.event(packet.Header, packet.Kind, packet.Receipt)
 			require.NoError(t, err)
 			recipient := event.Verdict.Recipient
-			vault, err := NewFlatVault(v, w.Env())
-			require.NoError(t, err)
-			amount := func(s string) *big.Int {
-				n, ok := new(big.Int).SetString(s, 10)
-				require.True(t, ok)
-				return n
-			}
-			ids := func(raw []string) [][32]byte {
-				out := make([][32]byte, len(raw))
-				for i, s := range raw {
-					out[i] = [32]byte(mustHex(s))
-				}
-				return out
-			}
 			before := want.Before
-			vault.model.SetState(before.Deposits, before.Segment, before.Population, amount(before.Liability),
-				[32]byte(mustHex(before.Head)), [32]byte(mustHex(before.PreviousHead)), ids(before.Current), ids(before.Previous))
-			vault.model.Events = before.Events
-			vault.credit(v.cfg.Vault, amount(before.VaultBalance))
-			vault.credit(recipient, amount(before.RecipientBalance))
+			vault := restoreFlatCustody(t, v, w.Env(), recipient, before)
 			if want.FailedPayout != "" || want.FirstFailure != "" {
 				_, err := vault.RedeemRecovered(wire, RecipientReverts)
 				require.ErrorIs(t, err, ErrPayoutFailed)
@@ -201,16 +186,111 @@ func TestFlatPublishedColdAndRefusalReplay(t *testing.T) {
 	}
 	files, err := os.ReadDir(filepath.Join(root, "refusals"))
 	require.NoError(t, err)
-	stages := map[string]error{"BadPacket": ErrFlatPacket, "BadPredecessor": ErrFlatPredecessor, "BadPage": ErrFlatPage, "BadStep": ErrFlatStep}
+	stages := map[string]error{"BadPacket": ErrFlatPacket, "BadPredecessor": ErrFlatPredecessor,
+		"BadPage": ErrFlatPage, "BadStep": ErrFlatStep, "ChainMismatch": ErrChainMismatch}
 	for _, entry := range files {
 		t.Run(entry.Name(), func(t *testing.T) {
 			dir := filepath.Join(root, "refusals", entry.Name())
 			wire := mustFlatFile(t, dir, "calldata.bin")
 			stage := strings.TrimSpace(string(mustFlatFile(t, dir, "stage.txt")))
 			require.Contains(t, stages, stage)
-			out, err := v.RunFlat(wire)
-			require.Nil(t, out)
-			require.ErrorIs(t, err, stages[stage])
+			prior := mustFlatFile(t, dir, "last-usable-predecessor.cbor")
+			var retry []byte
+			if len(prior) != 0 {
+				retry = mustFlatFile(t, dir, "retry-calldata.bin")
+				require.Equal(t, wire[:4], retry[:4])
+				entry := FlatRun
+				switch [4]byte(wire[:4]) {
+				case FlatAdvanceGaps.Selector():
+					entry = FlatAdvanceGaps
+				case FlatRedeemRecovered.Selector():
+					entry = FlatRedeemRecovered
+				}
+				originalPacked, err := entry.DecodeCalldata(wire)
+				require.NoError(t, err)
+				retryPacked, err := entry.DecodeCalldata(retry)
+				require.NoError(t, err)
+				require.Equal(t, originalPacked[:42], retryPacked[:42], "retry binds the same evidence")
+			} else {
+				_, err := os.Stat(filepath.Join(dir, "retry-calldata.bin"))
+				require.ErrorIs(t, err, os.ErrNotExist)
+			}
+			switch [4]byte(wire[:4]) {
+			case FlatRun.Selector():
+				out, err := v.RunFlat(wire)
+				require.Nil(t, out)
+				require.ErrorIs(t, err, stages[stage])
+				if len(prior) != 0 {
+					packet, err := DecodeFlatRun(retry)
+					require.NoError(t, err)
+					require.NotNil(t, packet.Prior)
+					require.Equal(t, prior, packet.Receipt)
+					refused, err := DecodeFlatRun(wire)
+					if err == nil {
+						require.Equal(t, packet.Header, refused.Header)
+						require.Equal(t, packet.Prior, refused.Prior)
+					}
+					_, err = v.RunFlat(retry)
+					require.NoError(t, err, "retry using the published predecessor")
+				}
+			case FlatAdvanceGaps.Selector():
+				_, err := v.AdvanceFlatGaps(wire)
+				require.ErrorIs(t, err, stages[stage])
+				packet, err := DecodeFlatGap(retry, FlatAdvanceGaps, v.cfg.K)
+				require.NoError(t, err)
+				require.Equal(t, prior, packet.Receipt)
+				_, err = v.AdvanceFlatGaps(retry)
+				require.NoError(t, err)
+			case FlatRedeemRecovered.Selector():
+				packet, err := DecodeFlatGap(retry, FlatRedeemRecovered, v.cfg.K)
+				require.NoError(t, err)
+				require.Equal(t, prior, packet.Receipt)
+				event, err := v.event(packet.Header, packet.Kind, packet.Receipt)
+				require.NoError(t, err)
+				var before flatCustodyFixture
+				require.NoError(t, json.Unmarshal(mustFlatFile(t, dir, "custody-before.json"), &before))
+				recipient := event.Verdict.Recipient
+				vault := restoreFlatCustody(t, v, w.Env(), recipient, before)
+				out, err := vault.RedeemRecovered(wire, RecipientAccepts)
+				require.Nil(t, out)
+				require.ErrorIs(t, err, stages[stage])
+				require.Equal(t, before, flatCustodyState(vault, recipient))
+				_, err = vault.RedeemRecovered(retry, RecipientAccepts)
+				require.NoError(t, err)
+				require.Equal(t, expectedSettlement(before, event.Verdict, int(v.cfg.K)), flatCustodyState(vault, recipient))
+			default:
+				t.Fatalf("unknown refusal selector %x", wire[:4])
+			}
 		})
 	}
+}
+
+func restoreFlatCustody(t *testing.T, v *FlatVerifier, env Environment, recipient [20]byte, before flatCustodyFixture) *FlatVault {
+	t.Helper()
+	vault, err := NewFlatVault(v, env)
+	require.NoError(t, err)
+	amount := func(s string) *big.Int {
+		n, ok := new(big.Int).SetString(s, 10)
+		require.True(t, ok)
+		return n
+	}
+	ids := func(raw []string) [][32]byte {
+		out := make([][32]byte, len(raw))
+		for i, s := range raw {
+			out[i] = [32]byte(mustHex(s))
+		}
+		return out
+	}
+	head, previous := [32]byte(mustHex(before.Head)), [32]byte(mustHex(before.PreviousHead))
+	previousIDs := ids(before.Previous)
+	if before.Segment > 0 {
+		require.Len(t, previousIDs, int(v.cfg.K))
+		require.Equal(t, head, expectedArchiveStep(v.domain, before.Segment-1, previous, expectedGapRoot(previousIDs)))
+	}
+	vault.model.SetState(before.Deposits, before.Segment, before.Population, amount(before.Liability),
+		head, previous, ids(before.Current), previousIDs)
+	vault.model.Events = before.Events
+	vault.credit(v.cfg.Vault, amount(before.VaultBalance))
+	vault.credit(recipient, amount(before.RecipientBalance))
+	return vault
 }
