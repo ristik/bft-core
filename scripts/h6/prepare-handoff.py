@@ -199,6 +199,7 @@ def main(argv=None):
         print('STEP: endorse the remaining roots; H may now commit', flush=True)
         others = urls[1:]
         results = []
+        failures = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(others)) as pool:
             futures = [pool.submit(post, url, 'endorse', plan) for url in others]
             for future in futures:
@@ -207,6 +208,14 @@ def main(argv=None):
                     results.append({'accepted': True})
                 except EndorsementRefused as error:
                     results.append({'accepted': False, 'error': str(error)})
+                except Exception as error:
+                    failures.append(error)
+        # A connection failure must not hide a timeout from another root.
+        timeouts = [error for error in failures if isinstance(error, HandoffTimeout)]
+        if timeouts:
+            raise HandoffTimeout('\n'.join(map(str, timeouts))) from timeouts[0]
+        if failures:
+            raise failures[0]
         write(args.out, 'endorsements.json', results)
         if len(urls) * 2 // 3 + 1 > 1 + sum(result['accepted'] for result in results):
             raise Stop('too few roots endorsed; inspect the exact saved target')

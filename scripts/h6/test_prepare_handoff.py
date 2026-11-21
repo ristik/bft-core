@@ -285,6 +285,34 @@ class AgainstFakeRoots(Files):
             {'accepted': True},
         ])
 
+    def test_parallel_endorsement_reports_every_timeout_after_a_transport_failure(self):
+        c = self.cluster()
+        unreachable, slow_body, slow_connect = [
+            root.url + '/api/v1/handoff/endorse' for root in c.roots[1:]
+        ]
+        body = mock.Mock(spec=io.BytesIO)
+        body.closed = False
+        body.read.side_effect = TimeoutError('timed out reading error body')
+        open_url = ph.urllib.request.urlopen
+
+        def open_with_failures(request, **kwargs):
+            if request.full_url == unreachable:
+                raise urllib.error.URLError(ConnectionRefusedError('connection refused'))
+            if request.full_url == slow_body:
+                raise urllib.error.HTTPError(slow_body, 422, 'rejected', {}, body)
+            if request.full_url == slow_connect:
+                raise urllib.error.URLError(TimeoutError('timed out connecting'))
+            return open_url(request, **kwargs)
+
+        stderr = io.StringIO()
+        with mock.patch.object(ph.urllib.request, 'urlopen', side_effect=open_with_failures):
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(stderr):
+                status = ph.run(self.argv(c.urls(), extra=['--endorse-all']))
+        body.close.assert_called_once()
+        self.assertEqual(status, 4, stderr.getvalue())
+        for endpoint in (slow_body, slow_connect):
+            self.assertIn(f'POST {endpoint} timed out after ', stderr.getvalue())
+
     def test_an_expired_prepare_wait_also_requests_dumps(self):
         c = self.cluster()
         # Expire the Prepare deadline on the first retryable error, without waiting 60s.
