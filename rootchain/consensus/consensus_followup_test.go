@@ -159,7 +159,9 @@ func newFollowup(t *testing.T, votedRound uint64, change func(state *abdrc.State
 func (f *followup) signed(block *drctypes.BlockData, tc *drctypes.TimeoutCert) *abdrc.ProposalMsg {
 	f.t.Helper()
 	prop := &abdrc.ProposalMsg{Block: block, LastRoundTc: tc}
-	require.NoError(f.t, f.cm.safety.Sign(block.Epoch, prop))
+	// Build the peer's fixture proposal without reserving a slot for the
+	// manager under test. The fixture can reconstruct an older proposal.
+	require.NoError(f.t, prop.Sign(f.cm.safety.signer))
 	return prop
 }
 

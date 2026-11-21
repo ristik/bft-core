@@ -2,6 +2,8 @@ package consensus
 
 import (
 	"bytes"
+	"crypto"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"reflect"
@@ -323,7 +325,10 @@ func TestSafetyModule_MakeVote(t *testing.T) {
 }
 
 func TestSafetyModule_SignProposal(t *testing.T) {
-	s := initSafetyModule(t, "node1", nil)
+	db, err := storage.NewBoltStorage(filepath.Join(t.TempDir(), "root.db"))
+	require.NoError(t, err)
+	defer db.Close()
+	s := initSafetyModule(t, "node1", db)
 	// create a dummy proposal message
 	proposal := &abdrc.ProposalMsg{
 		Block: &drctypes.BlockData{
@@ -351,6 +356,93 @@ func TestSafetyModule_SignProposal(t *testing.T) {
 	proposal.Block.Qc = qc
 	require.NoError(t, s.Sign(proposal.Block.Epoch, proposal))
 	require.Greater(t, len(proposal.Signature), 1)
+}
+
+func TestSafetyModuleRefusesDifferentProposalAfterRestart(t *testing.T) {
+	for _, entry := range []string{"QC", "TC"} {
+		t.Run(entry, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "root.db")
+			db, err := storage.NewBoltStorage(path)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = db.Close() })
+			s := initSafetyModule(t, "node1", db)
+			qc, err := newQuorumCertificate(t, NewDummyVoteInfo(3, []byte{1, 2, 3, 4}), nil)
+			require.NoError(t, err)
+			proposal := &abdrc.ProposalMsg{
+				Block: &drctypes.BlockData{Author: s.peerID, Epoch: 1, Round: 4, Timestamp: 10000, Payload: &drctypes.Payload{}, Qc: qc},
+			}
+			if entry == "TC" {
+				proposal.Block.Round = 5
+				proposal.LastRoundTc = &drctypes.TimeoutCert{Timeout: drctypes.NewTimeout(4, proposal.Block.Epoch, qc)}
+			}
+			require.NoError(t, s.Sign(proposal.Block.Epoch, proposal))
+			require.NotEmpty(t, proposal.Signature)
+			require.NoError(t, db.Close())
+
+			reopened, err := storage.NewBoltStorage(path)
+			require.NoError(t, err)
+			defer reopened.Close()
+			restarted, err := NewSafetyModule(s.network, s.peerID, s.signer, reopened)
+			require.NoError(t, err)
+			replacement := &abdrc.ProposalMsg{Block: clone(t, proposal.Block), LastRoundTc: proposal.LastRoundTc}
+			replacement.Block.Timestamp++
+			require.ErrorIs(t, restarted.Sign(replacement.Block.Epoch, replacement), storage.ErrProposalAlreadyReserved)
+			require.Empty(t, replacement.Signature)
+			hash, err := proposal.Block.Hash(crypto.SHA256)
+			require.NoError(t, err)
+			record, err := restarted.proposalRecord()
+			require.NoError(t, err)
+			require.Equal(t, storage.ProposalRecord{Epoch: proposal.Block.Epoch, Round: proposal.Block.Round, Hash: [32]byte(hash)}, record)
+		})
+	}
+}
+
+type proposalWriteErrorStore struct {
+	storage.BoltDB
+	err error
+}
+
+func (s proposalWriteErrorStore) ReserveProposal(record storage.ProposalRecord) error {
+	if err := s.BoltDB.ReserveProposal(record); err != nil {
+		return err
+	}
+	return s.err
+}
+
+type proposalSigningSpy struct {
+	abcrypto.Signer
+	calls int
+}
+
+func (s *proposalSigningSpy) SignHash(hash []byte) ([]byte, error) {
+	s.calls++
+	return s.Signer.SignHash(hash)
+}
+
+func TestUncertainProposalReservationStopsBeforeSigning(t *testing.T) {
+	db, err := storage.NewBoltStorage(filepath.Join(t.TempDir(), "root.db"))
+	require.NoError(t, err)
+	defer db.Close()
+	key, err := abcrypto.NewInMemorySecp256K1Signer()
+	require.NoError(t, err)
+	signer := &proposalSigningSpy{Signer: key}
+	writeErr := errors.New("lost confirmation of proposal reservation")
+	s, err := NewSafetyModule(types.NetworkLocal, "node1", signer, proposalWriteErrorStore{db, writeErr})
+	require.NoError(t, err)
+	qc, err := newQuorumCertificate(t, NewDummyVoteInfo(3, []byte{1, 2, 3, 4}), nil)
+	require.NoError(t, err)
+	proposal := &abdrc.ProposalMsg{
+		Block: &drctypes.BlockData{Author: s.peerID, Epoch: 1, Round: 4, Timestamp: 10000, Payload: &drctypes.Payload{}, Qc: qc},
+	}
+	require.ErrorIs(t, s.Sign(1, proposal), writeErr)
+	require.Zero(t, signer.calls)
+	require.Empty(t, proposal.Signature)
+
+	restarted, err := NewSafetyModule(types.NetworkLocal, "node1", signer, db)
+	require.NoError(t, err)
+	require.ErrorIs(t, restarted.Sign(1, proposal), storage.ErrProposalAlreadyReserved)
+	require.Zero(t, signer.calls)
+	require.Empty(t, proposal.Signature)
 }
 
 func TestSafetyModule_SignTimeout(t *testing.T) {
