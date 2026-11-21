@@ -126,7 +126,38 @@ utb_lane_components() {
 # Each is a function the P85 step runner calls like its own (nonzero return = the lane fails and tears down). The evidence goes to $(utb_dir); the independent verifier is
 # utb-evidence (scripts/utb-evidence), which trusts no node. Entries: epoch 2 is the K->J handoff (activated, never acknowledged by J's EVM), epoch 3 the derived recovery.
 utb_dir() { mkdir -p "${H3_DIR:?}" && echo "$(cd "$H3_DIR" && pwd)/utb"; }
-utb_ev() { "${UTB_EVIDENCE:?}" "$@"; }
+# Resolve the verifier as a path so the file checked is the one executed,
+# including when later steps run from another working directory.
+utb_resolve_verifier() {
+  local name=UTB_VERIFIER path=${UTB_VERIFIER:-}
+  if [ -z "$path" ] && [ -n "${UTB_EVIDENCE:-}" ]; then
+    name=UTB_EVIDENCE
+    path=$UTB_EVIDENCE
+  fi
+  path=${path:-${1:-build/utb-evidence}}
+  if [ -d "$path" ] || [[ "$path" == */ ]]; then
+    printf '%s must be the verifier executable (got a directory): %s\n' "$name" "$path" >&2
+    return 1
+  fi
+  # A local preflight may build into an absent path. Existing files and
+  # symlinks must always resolve to an executable regular file.
+  if [ "${2:-}" != allow-missing ] || [ -e "$path" ] || [ -L "$path" ]; then
+    if [ ! -f "$path" ] || [ ! -x "$path" ]; then
+      printf '%s must be the verifier executable (expected an executable file): %s\n' "$name" "$path" >&2
+      return 1
+    fi
+  fi
+  case "$path" in /*) ;; *) path=$PWD/$path ;; esac
+  if [ "$name" = UTB_EVIDENCE ]; then
+    printf '%s\n' 'UTB_EVIDENCE is deprecated. Set UTB_VERIFIER to the utb-evidence executable.' >&2
+  fi
+  export UTB_VERIFIER="$path"
+}
+
+utb_ev() {
+  utb_resolve_verifier || return 1
+  "$UTB_VERIFIER" "$@"
+}
 utb_agg_log() { echo "$PWD/$(agg_dir 1)/logs/aggregator.log"; }
 utb_agg_url() { utb_agg_history_url 1; }
 # The shard configurations the pack verifies certificates against: the EVM shard's and every aggregator shard's (shard-conf-aggregator.json is shard 1, -2.json shard 2).
@@ -189,8 +220,8 @@ PY
 
 # Before rotation: the aggregator and the reference client hold only the genesis history; the saved original proof verifies under it.
 utb_step_u1() {
+  utb_resolve_verifier || return 1
   local out; out=$(utb_dir); mkdir -p "$out"/{bundle,entries,ucresp,verifier,catchup,handoff,proofs,history,manifest}
-  [ -x "${UTB_EVIDENCE:-}" ] || { echo "UTB_EVIDENCE ($UTB_EVIDENCE) is not built" >&2; return 1; }
   utb_ev fetch --url "$(utb_agg_url)" --out "$out/bundle/initial.cbor" || { echo "the aggregator serves no history at $(utb_agg_url)" >&2; return 1; }
   utb_ev verify --bundle "$out/bundle/initial.cbor" --pin "$(utb_pin)" | tee "$out/bundle/initial.verify.txt" || return 1
   grep -q '^ok: epochs 1\.\.1,' "$out/bundle/initial.verify.txt" || { echo "the aggregator held more than the genesis before any rotation" >&2; return 1; }
@@ -439,12 +470,13 @@ utb_step_u5() {
 
 # The pack: the evidence files the checker requires, the manifest rewritten with relative paths (self-contained), then the checker.
 utb_step_final() {
+  utb_resolve_verifier || return 1
   local out comp; out=$(utb_dir)
   cp test-nodes/trust-base.json "$out/manifest/trust-base.json"
   comp=$(python3 -c "import json;print(' '.join('--component %s=%s' % kv for kv in json.load(open('test-nodes/utb/utb-manifest.json')).get('components',{}).items()))")
   "$UBFT" trust-base utb-manifest --trust-base "$out/manifest/trust-base.json" --out-dir "$out/manifest" --relative-paths $comp >/dev/null || return 1
   [ "$(python3 -c "import json;print(json.load(open('$out/manifest/utb-manifest.json'))['derived']['utbGenesisEntryId'])")" = "$(utb_pin)" ] || { echo "the pack manifest's genesis is not the deployment's" >&2; return 1; }
-  { echo "bft-core ${LANE_PRODUCT_COMMIT:-$(git rev-parse HEAD)}${LANE_PRODUCT_COMMIT:+ harness=$(git rev-parse HEAD)} ubft sha256 $(shasum -a 256 "$UBFT" | cut -d' ' -f1)"; echo "utb-evidence sha256 $(shasum -a 256 "$UTB_EVIDENCE" | cut -d' ' -f1)"; echo "aggregator sha256 $(shasum -a 256 "$AGG_BIN" | cut -d' ' -f1)"
+  { echo "bft-core ${LANE_PRODUCT_COMMIT:-$(git rev-parse HEAD)}${LANE_PRODUCT_COMMIT:+ harness=$(git rev-parse HEAD)} ubft sha256 $(shasum -a 256 "$UBFT" | cut -d' ' -f1)"; echo "utb-evidence sha256 $(shasum -a 256 "$UTB_VERIFIER" | cut -d' ' -f1)"; echo "aggregator sha256 $(shasum -a 256 "$AGG_BIN" | cut -d' ' -f1)"
     echo "state-transition-sdk-js $(git -C "${UTB_SDK_JS:?}" rev-parse HEAD)"
     echo "aggregator shards: ${aggShards:-1} (${aggShardIDs[*]:-0x80})"; } >"$out/manifest/build.txt"
   mkdir -p "$out/manifest/aggregator"; cp "$(utb_agg_provenance "$AGG_BIN" "${AGRE_ROOT:-$PWD/..}/builds")"/{commit.txt,gomod-pins.txt,sha256.txt} "$out/manifest/aggregator/" || return 1
@@ -498,9 +530,7 @@ state-import/import-line.txt
 LIST
 }
 
-UTB_EVIDENCE=${UTB_EVIDENCE:-build/utb-evidence}
-
-# utb_check_evidence DIR: every required file exists and is non-empty, and the bytes are what they claim to be, checked by the tools and not by keyword:
+# utb_check_evidence DIR [DEFAULT_VERIFIER]: every required file exists and is non-empty, and the bytes are what they claim to be, checked by the tools and not by keyword:
 #  - the manifest checks out against the trust base and genesis entry inside the pack;
 #  - bundle/final.cbor is a tagged history from the manifest's pinned genesis, every record verified from its predecessor (utb-evidence verify);
 #  - each verifier output is exactly that tool's line for the record's epoch (2: the K->J handoff, 3: the recovery), and each entries/*.cbor is exactly that history's record for it;
@@ -510,9 +540,10 @@ UTB_EVIDENCE=${UTB_EVIDENCE:-build/utb-evidence}
 #    tool's output on these bytes);
 #  - the client reload recorded the final bundle's digest and tip; the two-entry gap was fetched in one sync.
 utb_check_evidence() {
-  local dir=$1 f missing=0 tool=$UTB_EVIDENCE pin out want got
+  local dir=$1 f missing=0 pin out want got
   [ -d "$dir" ] || { echo "utb_check_evidence: $dir is not a directory" >&2; return 1; }
-  [ -x "$tool" ] || { echo "utb_check_evidence: $tool is not built (go build -o build/utb-evidence ./scripts/utb-evidence)" >&2; return 1; }
+  utb_resolve_verifier "${2:-}" || return 1
+  local tool=$UTB_VERIFIER
   while read -r f; do
     [ -s "$dir/$f" ] || { echo "evidence missing or empty: $f" >&2; missing=1; }
   done < <(utb_evidence_required)
@@ -694,7 +725,7 @@ utb_selftest() {
   local ev="$t/ev"
   mkdir -p "$ev"
   while read -r f; do mkdir -p "$ev/$(dirname "$f")"; printf 'x\n' >"$ev/$f"; done < <(utb_evidence_required)
-  UBFT=$(realpath "$UBFT") utb_st_no "a pack of placeholders is refused" bash -c "source '$cwd/scripts/lib/utb-lib.sh'; UBFT='$UBFT' UTB_EVIDENCE='${UTB_EVIDENCE:-build/utb-evidence}' utb_check_evidence '$ev'"
+  UBFT=$(realpath "$UBFT") utb_st_no "a pack of placeholders is refused" bash -c "source '$cwd/scripts/lib/utb-lib.sh'; UBFT='$UBFT' UTB_VERIFIER='${UTB_VERIFIER:-build/utb-evidence}' utb_check_evidence '$ev'"
   utb_st "the evidence checker accepts a real pack and refuses each bad property (go test ./scripts/utb-evidence -run EvidencePack)" bash -c "cd '$cwd' && UBFT_BIN='$(realpath "$UBFT")' go test -count=1 ./scripts/utb-evidence -run EvidencePack"
   utb_st "the P85 genesis preparation passes the root identity and the caps to p85-genesis.sh (dry run with fakes: bash -c 'source scripts/lib/p85-lib.sh; p85_selftest')" bash -c "cd '$cwd' && source scripts/lib/p85-lib.sh && p85_selftest"
   echo "utb lane self-test: $UTB_ST_BAD failures"

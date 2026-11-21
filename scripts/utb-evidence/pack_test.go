@@ -173,7 +173,7 @@ type utbManifestJSON struct {
 func check(t *testing.T, ubft, tool, pack string) (string, error) {
 	cmd := exec.Command("bash", "-c", "source scripts/lib/utb-lib.sh; utb_check_evidence \"$1\"", "bash", pack)
 	cmd.Dir = repoRoot(t)
-	cmd.Env = append(os.Environ(), "UBFT="+ubft, "UTB_EVIDENCE="+tool)
+	cmd.Env = append(os.Environ(), "UBFT="+ubft, "UTB_VERIFIER="+tool)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }

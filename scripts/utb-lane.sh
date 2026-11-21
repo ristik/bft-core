@@ -8,7 +8,7 @@
 #   scripts/utb-lane.sh --selftest     chain-free tests of the lane's own logic (genesis/manifest generation, flags, the evidence-pack checker)
 #   scripts/utb-lane.sh --build-aggregator   AGG_COMMIT=<40 hex>: clone, build and record the aggregator (builds/aggregator-<sha8>/); pushes nothing
 #   scripts/utb-lane.sh --prep         dry run of the genesis side (ANYAGE_PREP_ONLY with UTB_LANE=1): P85 genesis, the UTB genesis entry, pin and manifest,
-#                                      and the aggregator shard configurations; starts no reth, root, validator or aggregator
+#                                      and the aggregator shard configurations; requires the verifier and starts no reth, root, validator or aggregator
 #   scripts/utb-lane.sh --check-evidence DIR   checks an evidence directory against the required list (design §11.4)
 #   scripts/utb-lane.sh                the run: refuses unless the preflight is entirely ok
 #
@@ -53,8 +53,17 @@ Entries: epoch 2 is the K->J handoff (activated; the P85 J is never acknowledged
 PLAN
 }
 
+build_verifier() {
+  go build -o "$UTB_VERIFIER" ./scripts/utb-evidence && utb_resolve_verifier
+}
+
 preflight() {
   echo "== UTB lane preflight (no devnet is started) =="
+  if [ "${LANE_PINNED:-0}" = 1 ]; then
+    utb_resolve_verifier "$utb_verifier_default" || return 1
+  else
+    utb_resolve_verifier "$utb_verifier_default" allow-missing || return 1
+  fi
   echo "-- tools"
   export PATH="$HOME/.foundry/bin:$PATH"
   # LANE_PINNED=1 (the CI run job, scripts/ci/run-lane.sh): no Go toolchain and no live gh queries; the components are the manifest's pins (scripts/ci/lane-pins.json)
@@ -90,9 +99,12 @@ preflight() {
   note "deploy/testnet/pins.json pins bft $(python3 -c "import json;print(json.load(open('$REPO_ROOT/deploy/testnet/pins.json'))['bft'][:10])" 2>/dev/null): the testnet package is NOT what this lane runs (devnet scripts + build/ubft)"
   echo "-- the independent verifier"
   if [ "${LANE_PINNED:-0}" = 1 ]; then
-    check "utb-evidence ($UTB_EVIDENCE) is built from $bdesc (a prebuilt binary, verified by its embedded build information)" bash -c "source '$SCRIPT_DIR/lib/portable.sh'; [ -x '$UTB_EVIDENCE' ] && lane_buildinfo '$UTB_EVIDENCE' | grep -q 'vcs.revision=${LANE_PRODUCT_COMMIT:-$head}' && ! lane_buildinfo '$UTB_EVIDENCE' | grep -q 'vcs.modified=true'"
+    check "utb-evidence ($UTB_VERIFIER) is built from $bdesc (a prebuilt binary, verified by its embedded build information)" bash -c '
+      source "$1/lib/portable.sh"
+      lane_buildinfo "$2" | grep -q "vcs.revision=$3" && ! lane_buildinfo "$2" | grep -q "vcs.modified=true"
+    ' bash "$SCRIPT_DIR" "$UTB_VERIFIER" "${LANE_PRODUCT_COMMIT:-$head}"
   else
-    check "utb-evidence builds (scripts/utb-evidence) into $UTB_EVIDENCE" bash -c "cd '$REPO_ROOT' && go build -o '$UTB_EVIDENCE' ./scripts/utb-evidence"
+    check "utb-evidence builds (scripts/utb-evidence) into $UTB_VERIFIER" build_verifier
   fi
   echo "-- machine"
   free=$(df -k "$AGRE_ROOT" | awk 'NR==2{print int($4/1048576)}')
@@ -165,8 +177,8 @@ preflight() {
 }
 
 # outside build/ (make build clears it) and absolute (the lane steps run in other directories)
-UTB_EVIDENCE=${UTB_EVIDENCE:-$(cd "$REPO_ROOT/.." && pwd)/builds/utb-evidence-pr7}
-lane_env() { export UTB_EVIDENCE ANYAGE_LANE=1 UTB_LANE=1 P85_LOCK_OWNER=utb P85_EVIDENCE_PREFIX=utb CONTRACTS=${P85_CONTRACTS:-} UTB_COMPONENTS="$(utb_lane_components)"; }
+utb_verifier_default=$(cd "$REPO_ROOT/.." && pwd)/builds/utb-evidence-pr7
+lane_env() { export UTB_VERIFIER ANYAGE_LANE=1 UTB_LANE=1 P85_LOCK_OWNER=utb P85_EVIDENCE_PREFIX=utb CONTRACTS=${P85_CONTRACTS:-} UTB_COMPONENTS="$(utb_lane_components)"; }
 
 case "${1:-}" in
   --plan) plan ;;
@@ -178,9 +190,10 @@ case "${1:-}" in
     bin=$(utb_agg_build "$AGG_COMMIT" "$AGRE_ROOT/builds") || exit 1
     prov=$(utb_agg_provenance "$bin" "$AGRE_ROOT/builds") || exit 1
     echo "built $bin"; echo "provenance $prov"; utb_agg_pins_ok "$prov" "${PRODUCT_DIR:-$REPO_ROOT}" || { [ -z "${PRODUCT_DIR:-}" ] || { echo "a pinned product run needs the aggregator built on a bft-core in the product history" >&2; exit 1; }; echo "WARNING: re-pin the aggregator to a bft-core in this checkout's history before the real run" >&2; } ;;
-  --check-evidence) utb_check_evidence "${2:?usage: $0 --check-evidence DIR}" && echo "evidence complete" ;;
+  --check-evidence) utb_check_evidence "${2:?usage: $0 --check-evidence DIR}" "$utb_verifier_default" && echo "evidence complete" ;;
   --preflight) plan; echo; preflight ;;
   --prep)
+    utb_resolve_verifier "$utb_verifier_default" || exit 2
     lane_env
     [ -n "${P85_CONTRACTS:-}" ] || { echo "--prep needs P85_CONTRACTS, M2_URETH_BIN, M2_URETH_COMMIT (and P85_DEV_RUN=1 unless the provenance is attested)" >&2; exit 2; }
     export ANYAGE_PREP_ONLY=1
