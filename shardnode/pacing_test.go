@@ -100,33 +100,61 @@ func TestPacing_ZeroIntervalDoesNotDelay(t *testing.T) {
 	require.Less(t, time.Since(start), 200*time.Millisecond)
 }
 
-// A follower extends its wait for the leader's block by what remains of its own interval, so a paced leader is not mistaken for a silent
-// one: with a 100 ms await budget and a 400 ms interval the follower takes a block that arrives 300 ms into the round and signs it.
+type pacingWaitObserver struct {
+	*broadcastDisseminator
+	roundTwoBudget chan time.Duration
+}
+
+func (d pacingWaitObserver) Await(ctx context.Context, round uint64) (shardnode.Block, error) {
+	if round == 2 {
+		deadline, _ := ctx.Deadline()
+		d.roundTwoBudget <- time.Until(deadline)
+	}
+	return d.broadcastDisseminator.Await(ctx, round)
+}
+
+// The follower gives a paced leader time to produce round 2. Observe the actual
+// await budget and release delivery after the follower starts waiting.
 func TestPacing_FollowerWaitCoversThePacedLeader(t *testing.T) {
-	const interval, budget = 400 * time.Millisecond, 100 * time.Millisecond
-	ctx := context.Background()
-	d := newBroadcastDisseminator()
+	const interval, budget = time.Hour, 100 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	watchdog := time.AfterFunc(5*time.Second, cancel)
+	defer watchdog.Stop()
+	d := pacingWaitObserver{
+		broadcastDisseminator: newBroadcastDisseminator(),
+		roundTwoBudget:        make(chan time.Duration, 1),
+	}
 	leader := newDeterminismValidator(t, d)
 	follower := newDeterminismValidator(t, d)
-	for _, v := range []*determinismValidator{leader, follower} {
-		v.round.SetBlockInterval(interval)
-		v.round.SetAwaitTimeout(budget)
-	}
+	follower.round.SetBlockInterval(interval)
+	follower.round.SetAwaitTimeout(budget)
 
-	// Round 1: both take part at once (no previous block); the follower marks the time it received the leader's block.
 	uc, rec := genesisUC(1000), tr(1, 0, leader.nodeID)
 	require.NoError(t, leader.round.HandleCertificate(ctx, uc, rec))
 	require.NoError(t, follower.round.HandleCertificate(ctx, uc, rec))
 	require.Len(t, follower.sub.got, 1)
 
-	// Round 2: the leader publishes 300 ms later, beyond the follower's budget but within its interval.
 	uc2, rec2 := certifyFrom(leader.sub.last(t), 2, 1000), tr(2, 0, leader.nodeID)
+	followerDone := make(chan error, 1)
 	go func() {
-		time.Sleep(300 * time.Millisecond)
-		_ = leader.round.HandleCertificate(ctx, uc2, rec2)
+		followerDone <- follower.round.HandleCertificate(ctx, uc2, rec2)
 	}()
-	require.NoError(t, follower.round.HandleCertificate(ctx, uc2, rec2))
-	require.Len(t, follower.sub.got, 2, "the follower signed the paced leader's block")
+	select {
+	case wait := <-d.roundTwoBudget:
+		require.Greater(t, wait, interval/2, "the follower adds the remaining block interval")
+	case err := <-followerDone:
+		t.Fatalf("follower returned before awaiting round 2: %v", err)
+	case <-ctx.Done():
+		t.Fatal("follower did not await round 2")
+	}
+
+	// The test releases the leader now that the follower is waiting. Awaiting
+	// its handler also ensures the leader has submitted before comparing records.
+	require.NoError(t, leader.round.HandleCertificate(ctx, uc2, rec2))
+	require.NoError(t, <-followerDone)
+	require.Len(t, follower.sub.got, 2, "the follower signed the leader's block")
+	require.Len(t, leader.sub.got, 2)
 	require.Equal(t, leader.sub.last(t).InputRecord, follower.sub.last(t).InputRecord)
 }
 
