@@ -15,12 +15,20 @@ Keep the faucet signer stopped while deploying. The deployer uses the generation
 keystore, validates the tool and node pins, and predicts the vault address before
 creating the recovery verifier. It deploys `FlatReceipts`, `FlatLineage`,
 `NativeBridgeVerifier11`, `NativeBridgeRecovery11` and `NativeBridgeVault11`.
-It verifies the registry, all five runtime code hashes and their immutable
-bindings on every paired validator before publishing. If deployment fails partway
+It verifies each creation block and reads the registry, all five runtime code
+hashes and their immutable bindings at a recorded canonical finalized block
+hash on every paired validator before publishing. If deployment fails partway
 through, keep the logs and use a fresh generation for the next deployment.
 
-Publish only `GENERATION/bridge/nb2/public/` through the operator's authenticated
-release channel. It contains `nb2-release.json`, the exact descriptors, and
+Distribute the wallet files from `GENERATION/bridge/nb2/public/` over the
+operator's authenticated HTTPS release channel. Pin the SHA-256 of
+`nb2-release.json` in the demo wallet build and the handbook, and compare it
+before opening the wallet. The channel and pinned digest select the intended
+testnet deployment. The UTB pin authenticates the trust history. Binding the
+release selection to an authority verifiable from that UTB pin remains a
+real-value gate. [#1282](https://github.com/ristik/bft-core/issues/1282)
+
+The public directory contains `nb2-release.json`, the exact descriptors, and
 `trust-base.bundle.cbor` with `trust-base.genesis.entryid`.
 
 | Release field | Contents |

@@ -169,8 +169,10 @@ def deploy_graph(gen, evidence_bin, manifest, work, bridge, pin, qmax):
         encoded = cast(gen, 'abi-encode', signature, *args)[2:] if signature else ''
         receipt = create(gen, code[name] + encoded, name)
         address = receipt['contractAddress'].lower()
+        block_hash = receipt['blockHash']
         nodes[role] = {'contract': name, 'address': address, 'block': int(receipt['blockNumber'], 16),
-                       'transaction': receipt['transactionHash'], 'runtimeCodeHash': code_hash(gen, ETH, address),
+                       'blockHash': block_hash, 'transaction': receipt['transactionHash'],
+                       'runtimeCodeHash': code_hash(gen, ETH, address, canonical_block(block_hash)),
                        'creationCodeHash': templates[name][0], 'runtimeTemplateHash': templates[name][1],
                        'constructorArgs': '0x' + encoded}
         return address, nodes[role]['runtimeCodeHash']
@@ -229,10 +231,21 @@ def code_hash(gen, target, address, at='latest'):
     return keccak(gen, bytes.fromhex(code[2:]))
 
 
-def verify_graph(gen, record, target=ETH):
+def canonical_block(block_hash):
+    return {'blockHash': block_hash, 'requireCanonical': True}
+
+
+def verify_graph(gen, record, head, target=ETH):
+    at = canonical_block(head['hash'])
+    finalized = int(head['number'], 16)
     nodes = record['contracts']
     for role, node in nodes.items():
-        same(f'{target} {role} runtime', code_hash(gen, target, node['address']), node['runtimeCodeHash'])
+        if 'transaction' in node:
+            if node['block'] > finalized:
+                raise SystemExit(f'{target} {role} creation is above finalized block {finalized}')
+            creation = rpc(gen, target, 'eth_getBlockByNumber', hex(node['block']), False)
+            same(f'{target} {role} canonical creation block', (creation or {}).get('hash'), node['blockHash'])
+        same(f'{target} {role} runtime', code_hash(gen, target, node['address'], at), node['runtimeCodeHash'])
     address = lambda role: nodes[role]['address']
     runtime = lambda role: nodes[role]['runtimeCodeHash']
     profile = record['descriptors']['semantic-profile']
@@ -251,15 +264,19 @@ def verify_graph(gen, record, target=ETH):
     }
     for role, getters in checks.items():
         for getter, value in getters.items():
-            same(f'{target} {role} {getter}', cast(gen, 'call', '--rpc-url', target, address(role), getter), value)
+            signature = getter[:getter.index(')') + 1]
+            data = cast(gen, 'sig', signature)
+            raw = rpc(gen, target, 'eth_call', {'to': address(role), 'data': data}, at)
+            same(f'{target} {role} {getter}', cast(gen, 'abi-decode', getter, raw), value)
 
 
-def origin_checkpoint(gen, target=ETH):
-    """Read the operator's finalized registry at one canonical block."""
-    head = rpc(gen, target, 'eth_getBlockByNumber', 'finalized', False)
+def origin_checkpoint(gen, target=ETH, *, head=None):
+    """Read both operator registry words at the supplied finalized checkpoint."""
+    if head is None:
+        head = rpc(gen, target, 'eth_getBlockByNumber', 'finalized', False)
     if not head:
         raise SystemExit('execution client has no finalized NB2 checkpoint')
-    at = {'blockHash': head['hash'], 'requireCanonical': True}
+    at = canonical_block(head['hash'])
     slots = {'usableEpoch': 'origin.rootEpoch', 'rootRound': 'clock.rootRound'}
     origin = {name: str(int(rpc(gen, target, 'eth_getStorageAt', REGISTRY,
                               keccak(gen, ('unicity.seal-registry/' + slot).encode()), at), 16))
@@ -293,7 +310,9 @@ def run_deployment(gen, evidence_bin, qmax, output):
     pin = '0x' + (output / 'public/trust-base.genesis.entryid').read_text().strip().removeprefix('0x')
     same('trust bundle genesis', pin, '0x' + manifest['utb']['genesis_id'].removeprefix('0x'))
     record = deploy_graph(gen, evidence_bin, manifest, output, bridge, pin, qmax)
-    write_json(output / 'deployment.json', record)
+    record_path = output / 'deployment.json'
+    write_json(record_path, record)
+    checkpoints = []
     for i in range(1, manifest['validators'] + 1):
         target = f'http://ureth{i}:8545'
         genesis = rpc(gen, target, 'eth_getBlockByNumber', '0x0', False)
@@ -307,9 +326,15 @@ def run_deployment(gen, evidence_bin, qmax, output):
             time.sleep(1)
         else:
             raise SystemExit(f'{target} did not finalize vault deployment block {block}')
-        verify_graph(gen, record, target)
-        print(f'{target}: verified five contracts and native registry at finalized block {int(head["number"], 16)}', flush=True)
-    origin = origin_checkpoint(gen)
+        verify_graph(gen, record, head, target)
+        checkpoint = {'validator': i, 'blockHash': head['hash'], 'blockNumber': int(head['number'], 16)}
+        checkpoints.append(checkpoint)
+        if i == 1:
+            origin = origin_checkpoint(gen, target, head=head)
+        print(f'{target}: verified five contracts and native registry at finalized block '
+              f'{checkpoint["blockNumber"]} ({checkpoint["blockHash"]})', flush=True)
+    record['readbackCheckpoints'] = checkpoints
+    write_json(record_path, record)
     doc = release_nb2.build(gen, record, bridge, services, origin, limits=limits)
     path = output / 'public/nb2-release.json'
     temp = path.with_suffix('.tmp')

@@ -2507,11 +2507,16 @@ class NB2DriverKeys(unittest.TestCase):
         spec.loader.exec_module(module)
         return module
 
-    def test_deploy_readback_rejects_a_different_vault_recovery_graph(self):
+    def test_graph_and_origin_readback_use_the_recorded_finalized_hash(self):
         m = self.deploy_module()
         roles = ['registry', 'receipts', 'lineage', 'ordinary', 'recovery', 'vault']
         graph = {role: {'address': f'0x{i+1:040x}', 'runtimeCodeHash': f'0x{i+1:064x}'}
                  for i, role in enumerate(roles)}
+        head = {'hash': '0x' + 'f1' * 32, 'number': '0x20'}
+        latest = {'hash': '0x' + 'f2' * 32, 'number': '0x21'}
+        expected_selector = {'blockHash': head['hash'], 'requireCanonical': True}
+        for i, role in enumerate(roles[1:], 1):
+            graph[role].update(block=i, blockHash=f'0x{i+8:064x}', transaction=f'0x{i+20:064x}')
         want = {
             'LINEAGE()': graph['lineage']['address'], 'LINEAGE_HASH()': graph['lineage']['runtimeCodeHash'],
             'RECEIPTS()': graph['receipts']['address'], 'RECEIPTS_HASH()': graph['receipts']['runtimeCodeHash'],
@@ -2524,15 +2529,51 @@ class NB2DriverKeys(unittest.TestCase):
         }
         record = {'contracts': graph, 'gamma': '0xab', 'domain': '0x12', 'pins': '0x34',
                   'recoveryGeneration': '0x78', 'descriptors': {'semantic-profile': '0x56'}}
-        by_addr = {role['address']: role['runtimeCodeHash'] for role in graph.values()}
-        with patch.object(m, 'code_hash', side_effect=lambda gen, target, address: by_addr[address]), \
-             patch.object(m, 'cast', side_effect=lambda *args: want[args[-1].split(')')[0]+')']):
-            m.verify_graph(Path('/srv/g'), record)
+        by_addr = {node['address']: node['runtimeCodeHash'] for node in graph.values()}
+        creation_hashes = {hex(node['block']): node['blockHash'] for node in graph.values() if 'block' in node}
+
+        def code_hash(gen, target, addr, at):
+            self.assertEqual(at, expected_selector)
+            return by_addr[addr]
+
+        def response(gen, target, method, *params):
+            if method == 'eth_getBlockByNumber':
+                if params[0] == 'latest':
+                    return latest
+                self.assertIn(params[0], creation_hashes)
+                return {'hash': creation_hashes[params[0]]}
+            self.assertEqual(params[-1], expected_selector)
+            if method == 'eth_call':
+                return want[params[0]['data']]
+            self.assertEqual(method, 'eth_getStorageAt')
+            self.assertEqual(params[0], m.REGISTRY)
+            return {'rootEpoch': '0x02', 'rootRound': '0x42'}[params[1]]
+
+        def cast(gen, operation, *args):
+            if operation == 'sig':
+                return args[0]
+            self.assertEqual(operation, 'abi-decode')
+            return args[-1]
+
+        with patch.object(m, 'code_hash', side_effect=code_hash), \
+             patch.object(m, 'rpc', side_effect=response) as call, \
+             patch.object(m, 'cast', side_effect=cast), \
+             patch.object(m, 'keccak', side_effect=lambda gen, data: data.decode().rsplit('.', 1)[-1]):
+            m.verify_graph(Path('/srv/g'), record, head)
+            self.assertEqual(m.origin_checkpoint(Path('/srv/g'), head=head), {
+                'usableEpoch': '2', 'rootRound': '66', 'blockHash': head['hash'],
+                'blockNumber': 32, 'registry': m.REGISTRY,
+            })
+            self.assertEqual(sum(c.args[2] == 'eth_getStorageAt' for c in call.call_args_list), 2)
+            self.assertFalse(any('latest' in c.args for c in call.call_args_list))
             want['RECOVERY_PINS()'] = '0x00'
             with self.assertRaisesRegex(SystemExit, 'vault RECOVERY_PINS'):
-                m.verify_graph(Path('/srv/g'), record)
+                m.verify_graph(Path('/srv/g'), record, head)
+            creation_hashes['0x1'] = latest['hash']
+            with self.assertRaisesRegex(SystemExit, 'receipts canonical creation block'):
+                m.verify_graph(Path('/srv/g'), record, head)
 
-    def test_origin_reads_both_words_at_one_finalized_block(self):
+    def test_origin_defaults_to_one_finalized_block(self):
         m = self.deploy_module()
         block = '0x' + 'f1' * 32
 
