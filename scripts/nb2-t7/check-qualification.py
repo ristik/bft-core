@@ -118,7 +118,9 @@ def workload(directory, tx_limit, gas_limit):
     result = directory / 'result.json'
     if not result.exists():
         error = directory / 'error.json'
+        costs = [read(path) for path in directory.glob('run-*.cost.json')]
         return {'status': 'incomplete', 'txTarget': tx_limit, 'gasTarget': gas_limit,
+                'includedBeforeFailure': len(costs), 'gasBeforeFailure': sum(int(row['gas']) for row in costs),
                 'failure': read(error) if error.exists() else None}
     names = [*(path.name.removesuffix('.cost.json') for path in directory.glob('run-*.cost.json')), 'recovered']
     cost = [read(directory / f'{n}.cost.json') for n in names]
@@ -127,6 +129,15 @@ def workload(directory, tx_limit, gas_limit):
     gas = sum(int(row['gas']) for row in cost)
     peak = max(int(row['gas']) for row in cost)
     shape = [read(directory / f'{n}.shape.json') for n in names if n != 'recovered']
+    observed_bids = []
+    for name, row in zip(names, cost):
+        data = (directory / f'{name}.calldata').read_bytes()
+        intrinsic = 21_000 + sum(4 if value == 0 else 16 for value in data)
+        execution = int(row['gas']) - intrinsic
+        # The floor plus observed execution and 20% margin is an observed
+        # lower bound on the release quote. It does not bound larger witnesses.
+        observed_bids.append(21_000 + 16 * len(data) + (6 * execution + 4) // 5 +
+                             (500_000 if name == 'recovered' else 0))
     return {'status': 'pass' if len(cost) <= tx_limit and gas <= gas_limit else 'fail',
             'transactions': len(cost), 'txTarget': tx_limit, 'txDelta': len(cost) - tx_limit,
             'gas': gas, 'gasTarget': gas_limit, 'gasDelta': gas - gas_limit, 'maxIncludedGas': peak,
@@ -135,6 +146,7 @@ def workload(directory, tx_limit, gas_limit):
             'maxObservedRunShape': {k: max(row[k] for row in shape)
                                     for k in ('operations', 'calldataBytes', 'pages', 'receiptBytes', 'openingBytes')},
             'actualFeeWei': str(sum(int(row['paidFee']) for row in cost)),
+            'largestObservedGasQuoteFloor': max(observed_bids),
             'receiptRetryPolls': sum(row.get('attempts', 1) - 1 for row in locators),
             'custody': read(result), 'lineage': read(directory / 'workload.json')}
 
@@ -144,7 +156,7 @@ def public_files(run):
     for path in run.rglob('*'):
         parts = path.relative_to(run).parts
         if (path.is_file() and path.suffix in allowed and
-                not any(part.startswith('.') or part in ('mongo', 'paired') for part in parts)):
+                not any(part.startswith('.') or '.private.' in part or part in ('mongo', 'paired') for part in parts)):
             yield str(Path(*parts)), digest(path)
 
 
@@ -159,13 +171,21 @@ def main():
     report = {'schema': 'nb2-t7-test-qualification-evidence', 'version': 1, 'realValueAuthorized': False,
               'feeEnvelope': None, 'peakWindowEnvelope': None, 'generations': {},
               'corporaSha256': {name: digest(args.repo / 'testvectors' / name / 'MANIFEST') for name in
-                                ('nb2-continuation-v1.1', 'nb2-continuation-v1.1-supplement')}}
+                                ('nb2-continuation-v1.1', 'nb2-continuation-v1.1/transcripts', 'nb2-continuation-v1.1-supplement')}}
     for run in args.runs:
         graph = inspect_graph(run, args.repo, args.ureth, args.artifacts)
         graph['costs'] = {name: workload(run / name, *limits) for name, limits in CASES.items()
-                          if (run / name).is_dir()}
+                          if (run / name).is_dir() and not (run / name / 'offline-checkpoint.json').exists()}
+        offline = list(run.glob('*/offline-result.json'))
+        if offline:
+            graph['offline'] = read(offline[0])
+        if (run / 'offline-load/custody-result.json').exists():
+            graph['offlineSettlementLoad'] = read(run / 'offline-load/custody-result.json')
         if (run / 'custody-result.json').exists():
             graph['custody'] = read(run / 'custody-result.json')
+        for file in ('validator-graph.json', 'public-relay-check.json', 'gateway-checks.json'):
+            if (run / file).exists():
+                graph[file.removesuffix('.json')] = read(run / file)
         graph['buildEvidence'] = (run / 'builds.txt').read_text().splitlines()[:7]
         graph['evidenceSha256'] = dict(public_files(run))
         report['generations'][run.name] = graph

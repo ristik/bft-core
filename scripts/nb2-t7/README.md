@@ -68,11 +68,36 @@ arguments after the pinned contracts deploy. It starts with a fresh vault and
 can drive the load generator and separate signer, relayer and archive processes.
 The built-in smoke is the default scenario.
 
-The current driver uses the local paired validator as its origin authority. The
-T6 journal and load scenarios will exercise offline handoff, paid-ID eviction,
-sustained sealing and the measured release envelope. The default smoke keeps the
-segment at zero and does not claim those qualification results.
+The driver uses the local paired validator as its origin authority. The T7
+launcher enables replicated shard archives so long runs can pass the default
+256-block live journal bound. It retains the full execution proof sources.
 
+## Qualification measurements
+
+Use the same setup and a new output directory per generation.
+
+| Variable | Workload |
+| --- | --- |
+| `NB2_QUALIFY_COSTS=1` | Exercise all three application-sized lineages through payout. Use `NB2_QUALIFY_CASE=transfer-600`, `transfer-600-split-1` or `split-20` to run one. |
+| `NB2_QUALIFY_CUSTODY=1` | Pay 129 one-wei returns across two rotations, refuse the first payment on both routes, authenticate the mined failed retry, and race independently funded ordinary and recovered bidders for the last payment. |
+| `NB2_QUALIFY_OFFLINE=1 NB2_QUALIFY_CASE=transfer-600-split-1 NB2_PACKET_OPERATIONS=16` | Stop the wallet after persisting its signed burn. Certify it in a relayer, checkpoint after 336 operations and stop the preferred archive. Seal two real segments, restore Progress from a second validator and settle the recovered burn after folding those seals. |
+
+These runs use disposable value and a wallet input marked for measurement. The
+driver records the wallet's admission result separately from the explicitly
+authorised test burn. Private wallet files and the signed handoff live in the
+driver's private scratch directory. The offline run covers two real seals.
+Qualification of the peak window and oversized archive history requires further
+measurements.
+
+During a run, `probe-qualification.py RUN LANE RECEIPT_PATH` checks the chain
+identity, graph and proof settings on all four validators, then reads that raw
+transaction by block hash and index through the public relay. Pass a mined
+failed receipt path to exercise the failed-retry read.
+
+`check-qualification.py --repo BFT_CORE --ureth URETH --artifacts FORGE_OUT
+--output MANIFEST RUN...` rederives artifact, domain and pin digests and indexes
+the public evidence. It records test measurements. Fundable fee and peak-window
+envelopes need measured bounds for the combined qualification workloads.
 
 ## Focused regressions
 

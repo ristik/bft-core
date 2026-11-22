@@ -17,10 +17,10 @@ import { LocalKeySigner, signTx } from './sdk/nb2/evm.js';
 import { RecoveryAuthority, RecoverySession } from './sdk/nb2/recovery.js';
 import { EvmReader, HttpJsonRpc, RpcError } from './sdk/nb2/rpc.js';
 import { checkSegmentLog, encodeHistory, GapTree, genesisHead, nextHead, type Segment } from './sdk/nb2/segment.js';
-import { burnPredicate, decodeToken, encodeProof, lineageOf, signaturePredicate, valueData } from './sdk/nb2/token.js';
-import { appendTransfer, certifyChecked, childMint, localOwner, mintRequest, splitPlan, tokenOfChild, tokenOfMint, transferRequest } from './sdk/nb2/tokenops.js';
+import { burnPredicate, decodeToken, encodeProof, lineageOf, stateId, signaturePredicate, valueData } from './sdk/nb2/token.js';
+import { appendTransfer, certifyChecked, childMint, headOf, localOwner, mintRequest, splitPlan, tokenOfChild, tokenOfMint, transferRequest } from './sdk/nb2/tokenops.js';
 import { decodeUc, TrustInput } from './sdk/nb2/trust.js';
-import { encodeReturnData, verifyReturn, verifySplit } from './sdk/nb2/verify.js';
+import { burnTransitionId, encodeReturnData, redemptionId, verifyReturn, verifySplit } from './sdk/nb2/verify.js';
 import { firstAvailableReceipt, receiptArchive } from './receipt.js';
 
 const [out, rpc, aggregator, chain, artifacts, createTool, keys] = process.argv.slice(2);
@@ -66,8 +66,9 @@ const abi = (signature: string, ...args: string[]) => command('cast', ['abi-enco
 const codeHash = async (address: string) => HE(await reader.code(bytes(address)));
 
 type Receipt = NonNullable<Awaited<ReturnType<EvmReader['receipt']>>> & { effectiveGasPrice: string; contractAddress?: string };
-async function record(name: string, receipt: Receipt, started: number, signedBytes?: number, expectedStatus = '0x1') {
-  assert.equal(receipt.status, expectedStatus, name);
+async function record(name: string, receipt: Receipt, started: number, signedBytes?: number, expectedStatus: string | null = '0x1') {
+  if (expectedStatus !== null) assert.equal(receipt.status, expectedStatus, name);
+  else assert(['0x0', '0x1'].includes(receipt.status), name);
   assert(receipt.gasUsed, name + ' gasUsed');
   signedBytes ??= bytes(await reader.rpc.call<string>('eth_getRawTransactionByHash', [receipt.transactionHash])).length;
   json(name + '.receipt.json', receipt);
@@ -77,15 +78,16 @@ async function record(name: string, receipt: Receipt, started: number, signedByt
   return receipt;
 }
 
-async function send(name: string, target: string, calldata: Uint8Array, value = 0n, expectedStatus = '0x1') {
+async function send(name: string, target: string, calldata: Uint8Array, value = 0n,
+  expectedStatus: string | null = '0x1', payer = signer, gas = 24_000_000n) {
   writeFileSync(join(evidenceDir, name + '.calldata'), calldata);
   const started = Date.now();
   const { baseFee, priority } = await reader.fees();
-  const nonce = await reader.nonce(signer.address);
-  const tx = await signTx(signer, { chainId: BigInt(chain), nonce, maxPriorityFeePerGas: priority,
-    maxFeePerGas: baseFee * 2n + priority, gas: 24_000_000n, to: bytes(target), data: calldata, value });
+  const nonce = await reader.nonce(payer.address);
+  const tx = await signTx(payer, { chainId: BigInt(chain), nonce, maxPriorityFeePerGas: priority,
+    maxFeePerGas: baseFee * 2n + priority, gas, to: bytes(target), data: calldata, value });
   assert(tx.raw.length <= 524_288, 'signed transaction cap');
-  json(name + '.submitted.json', { hash: hex(tx.hash), nonce, gasLimit: 24_000_000n,
+  json(name + '.submitted.json', { hash: hex(tx.hash), nonce, gasLimit: gas, payer: hex(payer.address),
     maxFeePerGas: baseFee * 2n + priority, maxPriorityFeePerGas: priority });
   assert.equal(hex(await reader.sendRaw(tx.raw)), hex(tx.hash));
   for (let i = 0; i < 120; ++i) {
@@ -593,7 +595,9 @@ async function runQualificationCustody() {
   const { GatewayAggregator } = await import('./wallet/core.js');
   const walletAgg = new GatewayAggregator(aggregator);
   const startTime = Date.now();
-  const n = 128;
+  const loadSegments = resumeStage === 'load' ? 2 : option('NB2_LOAD_SEGMENTS', 2, 1024);
+  const skew = process.env.NB2_LOAD_SKEW === '1';
+  const n = Number(c.K) * loadSegments;
   const amount = BigInt(n + 1);
   const recipient = bytes('0000000000000000000000000000000000000013');
   const initialRecipient = await reader.balance(recipient);
@@ -637,9 +641,21 @@ async function runQualificationCustody() {
   const childProofs = await certifyBatch(children);
   const tokens = children.map((m, i) => tokenOfChild(parent, m.allocation, m.tx, childProofs[i]));
   const data = encodeReturnData({ d: domain, asset: c.asset, recipient, amount: 1n, minIndex: 0n });
-  const burns = await Promise.all(tokens.map(t => transferRequest(t, owner, {
-    recipient: burnPredicate(HU(data)), mask: randomBytes(32), data, deadline: null,
-  })));
+  const burns = [];
+  for (const [i, token] of tokens.entries()) {
+    const source = headOf(decodeToken(token));
+    const sid = stateId(source.owner, source.state);
+    for (;;) {
+      const request = await transferRequest(token, owner, {
+        recipient: burnPredicate(HU(data)), mask: randomBytes(32), data, deadline: null,
+      });
+      const eta = redemptionId(domain, burnTransitionId(sid, HU(request.tx)));
+      if (!skew || i === n || (eta[0] >> 4) === 0) {
+        burns.push(request);
+        break;
+      }
+    }
+  }
   const burnProofs = await certifyBatch(burns);
   const evidence = tokens.map((t, i) => appendTransfer(t, burns[i].tx, burnProofs[i]));
   const trust = await trustFor(evidence.flatMap(tokenUcs));
@@ -679,6 +695,13 @@ async function runQualificationCustody() {
   let ids = [target.verdict.eta];
   const sealTopic = HE(ascii('SegmentSealed(uint64,bytes32,bytes32,bytes)'));
   const windows = [];
+  const batchOffers = [];
+  const eligibleHistory = (claim: typeof target, count: number) => count === 0 ? new Uint8Array() :
+    encodeHistory(h0, segments.slice(0, count).map(segment => {
+      const gap = GapTree.build(segment.z)!.prove(claim.verdict.eta);
+      assert(gap, 'load eta appears in an already sealed archive');
+      return gap;
+    }));
 
   // Offer batches to the pool without waiting for each transaction's receipt.
   const size = 16;
@@ -687,14 +710,17 @@ async function runQualificationCustody() {
     const nonce = await reader.nonce(signer.address);
     const { baseFee, priority } = await reader.fees();
     const batch = claims.slice(i, Math.min(n, i + size));
+    const endpoint = segments.length;
     const submitted = [];
     for (const [j, claim] of batch.entries()) {
-      const tx = await signTx(signer, { chainId, nonce: nonce + BigInt(j), gas: 5_000_000n,
+      const data = ordinaryCall(claim, eligibleHistory(claim, endpoint));
+      const tx = await signTx(signer, { chainId, nonce: nonce + BigInt(j), gas: 12_000_000n,
         maxFeePerGas: 2n * baseFee + priority, maxPriorityFeePerGas: priority, to: c.vault,
-        value: 0n, data: ordinaryCall(claim) });
+        value: 0n, data });
       assert.equal(hex(await reader.sendRaw(tx.raw)), hex(tx.hash));
       submitted.push(tx);
     }
+    batchOffers.push({ atMs: first, calls: batch.length, dispatchedMs: Date.now() - first, endpoint });
     for (const [j, tx] of submitted.entries()) {
       const claim = batch[j];
       const name = 'load-' + (i + j);
@@ -719,14 +745,15 @@ async function runQualificationCustody() {
         ]) };
         sealEvidence.push((await certifyReceipt('seal-' + index, mined, c.vault, seal, 1, 2)).encoded);
         segments.push(checkSegmentLog(domain, c.K, index, head, seal.data));
-        windows.push({ segment: index, block: mined.blockNumber, observedMs: Date.now(), batchStartMs: first });
+        const buckets = Array.from({ length: Number(c.B) }, (_, b) => ids.filter(id => (id[0] >> 4) === b).length);
+        windows.push({ segment: index, block: mined.blockNumber, buckets, observedMs: Date.now(), batchStartMs: first });
         head = after;
         ids = [];
       }
     }
   }
   const evicted = await reader.vaultState(c.vault);
-  assert.equal(evicted.segment, 2n);
+  assert.equal(evicted.segment, BigInt(loadSegments));
   assert.equal(evicted.population, 0n);
   assert.equal(evicted.outstanding, initial.outstanding + 1n);
   assert.equal(await reader.balance(c.vault), initialBalance + 1n);
@@ -734,16 +761,16 @@ async function runQualificationCustody() {
   assert.equal(await reader.balance(recipient), initialRecipient + BigInt(n));
   assert.equal(GapTree.build(segments[0].z)!.prove(target.verdict.eta), null);
   assert.equal(GapTree.build(segments[1].z)!.prove(target.verdict.eta) !== null, true);
-  await evmRefusal('evicted-ordinary-stale', ordinaryCall(target), 'StaleEndpoint(uint64,uint64)', u256(0), u256(2));
-  await evmRefusal('evicted-recovered-stale', recoveredPacket.calldata, 'StaleEndpoint(uint64,uint64)', u256(0), u256(2));
+  await evmRefusal('evicted-ordinary-stale', ordinaryCall(target), 'StaleEndpoint(uint64,uint64)', u256(0), u256(BigInt(loadSegments)));
+  await evmRefusal('evicted-recovered-stale', recoveredPacket.calldata, 'StaleEndpoint(uint64,uint64)', u256(0), u256(BigInt(loadSegments)));
   // Use a genuine opening for a distinct unpaid eta as the control. It proves
   // a gap at the correct archive endpoint, but cannot exclude the paid eta.
-  const gap = GapTree.build(segments[0].z)!.prove(late.verdict.eta)!;
-  const history = encodeHistory(h0, [gap]);
+  const replayGaps = segments.slice(0, loadSegments - 1).map(segment => GapTree.build(segment.z)!.prove(late.verdict.eta)!);
+  const history = encodeHistory(h0, replayGaps);
   const ordinaryReplay = ordinaryCall(target, history);
   // Preserve the exact certified Complete and substitute only the gap suffix.
   const proofEnd = 68 + 42 + 1 + 4 + recovered.prior.receipt.length;
-  const payload = concat(recoveredPacket.calldata.subarray(68, proofEnd), u16(1), h0, gap);
+  const payload = concat(recoveredPacket.calldata.subarray(68, proofEnd), u16(replayGaps.length), h0, ...replayGaps);
   const replay = concat(recoveredPacket.calldata.subarray(0, 4), abiEncode([{ bytes: payload }]));
   await evmRefusal('evicted-ordinary', ordinaryReplay, 'BadGapProof(uint256)', u256(0));
   await evmRefusal('evicted-recovered', replay, 'BadGapProof(uint256)', u256(0));
@@ -781,16 +808,40 @@ async function runQualificationCustody() {
   await lateRecovery.session.verifyEvent(advanced.trust, advanced.encoded, advance.event!);
   const settlement = await lateRecovery.session.gaps('redeemRecovered', advanced.trust, advanced.encoded,
     { seq: lateRecovery.prior.seq + 1n, cursor: { next: advance.next, head: advance.head! } }, []);
-  await certifyReceipt('late-paid', await send('late-paid', vault, settlement.calldata), c.vault, late.paid);
+  const bidder = new LocalKeySigner(randomBytes(32));
+  await send('race-bidder-funding', hex(bidder.address), new Uint8Array(), 10n ** 18n);
+  const race = [
+    { name: 'race-ordinary', payer: signer, data: ordinaryCall(late, encodeHistory(h0, gaps)) },
+    { name: 'race-recovered', payer: bidder, data: settlement.calldata },
+  ];
+  const quotes = await Promise.all(race.map(async leg => {
+    const estimate = BigInt(await reader.rpc.call<string>('eth_estimateGas', [
+      { from: hex(leg.payer.address), to: vault, data: hex(leg.data), gas: '0x16e3600' },
+    ]));
+    const gas = (estimate * 6n + 4n) / 5n + 500_000n;
+    assert(gas <= 24_000_000n, leg.name);
+    return { ...leg, estimate, gas };
+  }));
+  const attempts = await Promise.all(quotes.map(async ({ name, payer, data, gas }) =>
+    send(name, vault, data, 0n, null, payer, gas)));
+  const winner = attempts.findIndex(r => r.status === '0x1');
+  assert(winner >= 0 && attempts.filter(r => r.status === '0x1').length === 1, 'one race winner');
+  await certifyReceipt('late-paid', attempts[winner], c.vault, late.paid);
+  assert.deepEqual(attempts[1 - winner].logs, []);
+  await evmRefusal('race-refused', quotes[1 - winner].data, 'AlreadyPaid(bytes32)', late.verdict.eta);
+  json('race.json', { winner: quotes[winner].name, attempts: quotes.map(({ name, payer, estimate, gas }, i) => ({
+    name, payer: hex(payer.address), estimate, submittedGas: gas, status: attempts[i].status,
+    transactionHash: attempts[i].transactionHash,
+  })) });
   const final = await reader.vaultState(c.vault);
-  assert.equal(final.segment, 2n);
+  assert.equal(final.segment, BigInt(loadSegments));
   assert.equal(final.population, 1n);
   assert.equal(final.outstanding, initial.outstanding);
   assert.equal(await reader.balance(c.vault), initialBalance);
   assert.equal(await reader.balance(recipient), initialRecipient + amount);
   assert.equal(hex(final.head), hex(head));
   json('custody-result.json', { payments: amount, evicted: hex(target.verdict.eta), liability: final.outstanding,
-    recipientBefore: initialRecipient, recipientAfter: initialRecipient + amount, head: hex(head), windows,
+    recipientBefore: initialRecipient, recipientAfter: initialRecipient + amount, head: hex(head), windows, batchOffers, skew,
     lateGaps: gaps.length, lateAdvanceMs: Date.now() - before, segment: final.segment, elapsedMs: Date.now() - startTime });
 }
 
