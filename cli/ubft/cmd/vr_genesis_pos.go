@@ -25,8 +25,7 @@ var (
 	vrPosGasBounds = [8]uint64{5_000_000, 1_500_000, 2_500_000, 10_000, 10_000, 10_000, 10_000, 10_000}
 )
 
-// The prototype's measured deployment limit (contracts script/VRPosGenesis.s.sol, test/vr/pos/PosLimit.t.sol): a committee of at most 6 from an
-// index of at most 8 identities of one lot each.
+// Measured PoS deployment limits for one lifetime lot per identity generation.
 const (
 	vrPosMaxCommittee = 16
 	vrPosMaxPool      = 20

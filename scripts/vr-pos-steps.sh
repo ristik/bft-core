@@ -194,7 +194,7 @@ vrp_root_epoch_is() { curl -sf -X POST -H 'Content-Type: application/json' -d '{
 vrp_eth_block() { cast block-number --rpc-url "$vrb_rpc"; }
 
 # the holder facts (design 3.9.2) read from custody's storage at the frozen slots equal custody's own getters, for every identity at generation 1
-vrp_facts_ok() {
+vrp_legacy_facts_ok() {
   local cu; cu=$(vrp_custody)
   python3 - "$vrb_rpc" "$cu" <<'PY' || return 1
 import subprocess, sys
@@ -319,6 +319,10 @@ vrp_recovery() {
   [ "$after" -le "$((before + 1))" ] || { vrb_log "FAIL: J' certified blocks ($before -> $after) without its EVM quorum"; return 1; }
   [ "$(vrp_result_state "$rid2")" = 2 ] || { vrb_log "FAIL: J' is no longer Published in VR"; return 1; }
   vrb_log "PASS: J' stalls (EVM block $before -> $after in 45 s with $((nj - stop)) of its $nj validators)"
+  if [ "${VR_POS16:-0}" = 1 ]; then
+    python3 scripts/p85/check_recovery_facts.py snapshot "$vrb_rpc" "$(vrp_custody)" "$vrb_vr" "$rid2" \
+      "$VR_EVIDENCE/recovery-holder-before.json" || return 1
+  fi
   # 3. the recovery (#1221): the VR leader proposes the exact recovery to K (epoch 4) after J' committed and failed to acknowledge. The operator only
   # requests it (`root handoff propose --vr-recovery`: nothing named, the root derives K from the retained authorization); the leader orders the Prepare,
   # J''s four roots endorse it, the Freeze is a v3 companion (KindRecovery, exact K, no receipts) and then H. The endorsements are scoped to J''s roots
@@ -354,7 +358,12 @@ vrp_recovery() {
   vrb_wait 300 "custody and VR have applied the same records" vrp_cursors_match || return 1
   rec=$(cast call --rpc-url "$vrb_rpc" "$(vrp_custody)" 'lastAckedAssignment()(bytes32)')
   vrb_log "custody's last acknowledged assignment is the recovery assignment $rec"
-  vrp_facts_ok || { vrb_log "FAIL: the holder facts differ from custody's state"; return 1; }
+  if [ "${VR_POS16:-0}" = 1 ]; then
+    python3 scripts/p85/check_recovery_facts.py verify "$vrb_rpc" "$(vrp_custody)" "$vrb_vr" "$rec" \
+      "$VR_EVIDENCE/recovery-holder-before.json" >"$VR_EVIDENCE/recovery-holder-verified.json" || return 1
+  else
+    vrp_legacy_facts_ok || { vrb_log "FAIL: the holder facts differ from custody's state"; return 1; }
+  fi
   for i in $(seq 1 "$n"); do
     vrb_wait 180 "K's shard node $i serves as a voting member (root epoch 4, shard epoch 3)" vrp_k_shard_serving "$i" || {
       tail -n 30 "test-nodes/evm$i/debug.log" >&2
