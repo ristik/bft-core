@@ -75,6 +75,22 @@ func (s *Submitter) call(ctx context.Context, to [20]byte, a abi.ABI, method str
 	return a.Unpack(method, out)
 }
 
+// optionalLookup recognizes only the EVM's empty revert for an unknown selector.
+// The new getters are total for valid ABI arguments. Transport and decode errors are retryable.
+func (s *Submitter) optionalLookup(ctx context.Context, to [20]byte, a abi.ABI, method string, args ...any) ([]any, error) {
+	values, err := s.call(ctx, to, a, method, args...)
+	var rpcErr rpc.Error
+	var dataErr rpc.DataError
+	if errors.As(err, &rpcErr) && rpcErr.ErrorCode() == 3 && rpcErr.Error() == "execution reverted" &&
+		errors.As(err, &dataErr) {
+		switch dataErr.ErrorData() {
+		case nil, "0x":
+			return nil, nil
+		}
+	}
+	return values, err
+}
+
 func (s *Submitter) addr(ctx context.Context, method string) ([20]byte, error) {
 	o, err := s.call(ctx, s.Evidence, evidenceAbi, method)
 	if err != nil {
@@ -182,7 +198,11 @@ func (s *Submitter) Resolve(ctx context.Context, r *SlotRecord) (*Resolved, erro
 func (s *Submitter) findExposure(ctx context.Context, custody [20]byte, id, keyHash [32]byte) ([32]byte, *seatLocator, bool, error) {
 	zero := [32]byte{}
 	// Older P85 deployments have only the hash lookup.
-	if count, err := s.call(ctx, custody, custodyAbi, "assignmentSeatCount", id); err == nil && count[0].(*big.Int).Sign() != 0 {
+	count, err := s.optionalLookup(ctx, custody, custodyAbi, "assignmentSeatCount", id)
+	if err != nil {
+		return zero, nil, false, err
+	}
+	if count != nil && count[0].(*big.Int).Sign() != 0 {
 		n := count[0].(*big.Int)
 		if !n.IsUint64() || n.Uint64() > 16 {
 			return zero, nil, false, fmt.Errorf("rootevidence: invalid compact seat count %v", n)
@@ -389,8 +409,11 @@ func (s *Submitter) Settle(ctx context.Context, caseID [32]byte) (int, error) {
 		return 0, err
 	}
 	var all []*big.Int
-	location, locErr := s.call(ctx, s.Evidence, evidenceAbi, "caseLocation", caseID)
-	if locErr == nil && location[0].([32]byte) != ([32]byte{}) {
+	location, err := s.optionalLookup(ctx, s.Evidence, evidenceAbi, "caseLocation", caseID)
+	if err != nil {
+		return 0, err
+	}
+	if location != nil && location[0].([32]byte) != ([32]byte{}) {
 		m, err := s.assignmentSeat(ctx, custody, seatLocator{location[0].([32]byte), location[1].(*big.Int)})
 		if err != nil {
 			return 0, err
@@ -406,6 +429,9 @@ func (s *Submitter) Settle(ctx context.Context, caseID [32]byte) (int, error) {
 		}
 		all = lots[0].([]*big.Int)
 	}
+	if uint64(len(all)) != uint64(info.LotCount) || info.Cursor > info.LotCount {
+		return 0, fmt.Errorf("rootevidence: case expects %d lots at cursor %d, resolved %d", info.LotCount, info.Cursor, len(all))
+	}
 	mb, err := s.call(ctx, s.Evidence, evidenceAbi, "maxBatch")
 	if err != nil {
 		return 0, err
@@ -415,8 +441,8 @@ func (s *Submitter) Settle(ctx context.Context, caseID [32]byte) (int, error) {
 		return 0, errors.New("rootevidence: the contract's maxBatch is zero")
 	}
 	sent := 0
-	for cursor := int(info.Cursor); cursor < int(info.LotCount) && cursor < len(all); {
-		end := min(cursor+int(batch), int(info.LotCount), len(all))
+	for cursor := int(info.Cursor); cursor < len(all); {
+		end := min(cursor+int(batch), len(all))
 		data, err := evidenceAbi.Pack("settleEvidence", caseID, all[cursor:end])
 		if err != nil {
 			return sent, err

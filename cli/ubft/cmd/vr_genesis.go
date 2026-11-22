@@ -506,6 +506,7 @@ type vrDeploymentFile struct {
 	RewardPool                  string `json:"rewardPool,omitempty"`
 	RewardPoolCodeHash          string `json:"rewardPoolCodeHash,omitempty"`
 	GenesisImpl                 string `json:"genesisImpl,omitempty"`
+	GenesisImplCodeHash         string `json:"genesisImplCodeHash,omitempty"`
 	Factory                     string `json:"factory,omitempty"`
 	ManifestHash                string `json:"manifestHash,omitempty"`
 	PosAssignmentID             string `json:"posAssignmentId,omitempty"`

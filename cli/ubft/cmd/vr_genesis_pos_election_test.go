@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -8,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/stretchr/testify/require"
 
 	"github.com/unicitynetwork/bft-core/vrschema"
@@ -33,6 +35,24 @@ func posElectionFixture(t *testing.T) (vrGenesisInput, vrDeploymentFile, map[com
 		alloc[common.HexToAddress(k)] = v
 	}
 	return in, d, alloc
+}
+
+func TestPosCustodyImplementationMismatchIsRefused(t *testing.T) {
+	custody, impl := common.Address{19: 1}, common.Address{19: 2}
+	good, bad := []byte{0x60, 0x00, 0x00}, []byte{0x60, 0x01, 0x00}
+	hash := ethcrypto.Keccak256Hash(good)
+	addressWord := vrschema.AddrWord(impl)
+	custodyCode := append(addressWord[:], hash[:]...)
+	d := vrDeploymentFile{Custody: custody.Hex(), GenesisImpl: impl.Hex(), GenesisImplCodeHash: hash.Hex()}
+	alloc := map[common.Address]vrAllocAccount{
+		custody: {Code: "0x" + hex.EncodeToString(custodyCode)},
+		impl:    {Code: "0x" + hex.EncodeToString(good)},
+	}
+	require.NoError(t, vrCheckPosCustodyImplementation(d, alloc))
+	alloc[impl] = vrAllocAccount{Code: "0x" + hex.EncodeToString(bad)}
+	require.ErrorContains(t, vrCheckPosCustodyImplementation(d, alloc), "does not match its runtime hash")
+	d.GenesisImplCodeHash = ethcrypto.Keccak256Hash(bad).Hex()
+	require.ErrorContains(t, vrCheckPosCustodyImplementation(d, alloc), "does not pin its implementation")
 }
 
 func TestPosElectionInitializationIsBoundToThePlan(t *testing.T) {

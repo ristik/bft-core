@@ -276,7 +276,7 @@ Check the new local epoch with the same round-info request. Repeat only after on
 
 ## 4. Apply, stake and join
 
-Check the PoS committee profile in the authenticated release announcement. A sixteen-seat generation allows up to 16 primary and recovery seats, 20 live identities and four recoveries per primary committee. On that profile each identity generation has one lifetime lot. A recovery preserves the incumbent's ordered seats and historical lot references. Check the certified assignment and epoch before changing your authority scope. The existing PoS generation uses the limits in its own release announcement.
+Check the PoS committee profile in the authenticated release announcement. A sixteen-seat generation allows up to 16 seats in primary and recovered assignments and 20 live identities. Each identity generation has one lifetime lot with room for four simultaneous assignment references. Released obligations free capacity. A recovery preserves the incumbent's ordered seats and historical lot references. Check the certified assignment and epoch before changing your authority scope. The existing PoS generation uses the limits in its own release announcement.
 
 
 ```bash
