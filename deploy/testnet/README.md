@@ -212,10 +212,43 @@ public_routes.py G --hostname NAME [--web-root /var/www/pos-staging]
 ```
 
 `public_routes.py` writes `G/public/nginx/{zones,routes}.conf` (/rpc, /aggregator,
-/api/v1/trustbases, /faucet/ with /api/network and /api/claim, /demo/); its docstring has
+/api/v1/trustbases, /faucet/ with /api/network and /api/claim, /demo/, /release/); its docstring has
 the install steps. Publishing the native bridge v2 files (`G/bridge/nb2/public/`) is
 bft-core#1178; the protocol 6/7 bridge's /lockproof/ and /bridge/ routes were removed with
 it (#1139). Rehearse on loopback before installing the routes.
+
+### Public testnet regeneration
+
+Reserve slot 0 for the fixed host ports and a separate offset slot for the
+join rehearsal. Use the exact node and bridge source pins and record the image
+IDs, the execution genesis hash and the signed trust-base genesis EntryID. Run
+the fifth-validator rehearsal before handing over the public four-member
+generation. The public VR/P85 profile requires the verified VR deployment and
+genesis identities. Track the Compose integration and NB2 continuation deploy
+steps in [#1277](https://github.com/ristik/bft-core/issues/1277) and
+[#1278](https://github.com/ristik/bft-core/issues/1278).
+
+Use `public_routes.py --release-source RELEASE_DIR` to verify and stage the
+regular artifacts listed in the operator release's `SHA256SUMS`. Install the
+resulting `OUT/release/` under the web root. Include the files required by the
+[validator handbook](../../docs/operations/validator-handbook.md), the generation
+manifest, and the NB2 release and trust files. Check the digests before copying.
+Keep the faucet credential as a file mount readable by the container UID. Run
+the route tests on loopback before the owner opens ingress.
+
+Keep nginx stopped and disabled during regeneration. At handoff, the owner
+checks both HTTP/2 backports before opening the front. Use Ubuntu nginx
+`1.24.0-2ubuntu7.20` or later, or an upstream fixed release
+(`1.30.7` on the stable branch or `1.31.9` on the mainline branch). Verify the
+Ubuntu package changelog and confirm the expected loopback and public listeners.
+
+```sh
+dpkg-query -W nginx
+zcat /usr/share/doc/nginx/changelog.Debian.gz | grep -c CVE-2026-123007
+zcat /usr/share/doc/nginx/changelog.Debian.gz | grep -c CVE-2026-123633
+sudo nginx -t
+sudo ss -ltnp
+```
 
 ## Monitoring, logs and incidents
 
