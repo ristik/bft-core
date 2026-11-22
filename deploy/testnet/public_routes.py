@@ -13,11 +13,12 @@ It writes, and changes nothing else (no nginx reload, no copy into the web root)
                            /aggregator          the gateway's aggregator route (POST), and /api/v1/trustbases (GET)
                            /faucet/             the faucet page, with /api/network and /api/claim (its script calls them by absolute path)
                            /demo/               WEB_ROOT/demo: a static wallet build, deployed separately
+                           /release/            WEB_ROOT/release: public, checksummed operator and wallet files
 The protocol 6/7 bridge's /lockproof/ and /bridge/ routes were removed with that bridge (bft-core#1106, #1139); publishing the native bridge v2
 files (GENERATION/bridge/nb2/public) is bft-core#1178.
 
 Install (an operator act; nginx -t before every reload):
-    sudo install -d -m 0755 WEB_ROOT/demo
+    sudo install -d -m 0755 WEB_ROOT/demo WEB_ROOT/release
     include OUT/nginx/zones.conf in the http context (once per host) and OUT/nginx/routes.conf in the host's server block
     sudo nginx -t && sudo systemctl reload nginx
 
@@ -122,6 +123,15 @@ location /demo/ {{
     limit_except GET {{ deny all; }}
     alias {web_root}/demo/;
     index index.html;
+}}
+# Stage only the public files listed in the release's SHA256SUMS.
+location = /release {{ return 301 /release/; }}
+location /release/ {{
+    limit_except GET {{ deny all; }}
+    limit_conn tn_conn 4;
+    limit_req zone=tn_agg burst=20 nodelay;
+    alias {web_root}/release/;
+    autoindex off;
 }}
 """)
     return ''.join(out)

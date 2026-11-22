@@ -3209,10 +3209,11 @@ class StagingKnobs(unittest.TestCase):
             with patch('builtins.print'): public_routes.main([str(gen),'--hostname','pos.staging.unicity.network'])
             routes=(gen/'public/nginx/routes.conf').read_text(); zones=(gen/'public/nginx/zones.conf').read_text()
             for loc in ('location = /rpc ','location = /aggregator ','location = /api/v1/trustbases ','location /faucet/ ','location = /api/network ','location = /api/claim ',
-                        'location /demo/ '):
+                        'location /demo/ ', 'location /release/ '):
                 self.assertIn(loc,routes)
             self.assertIn('proxy_pass http://127.0.0.1:8545/;',routes); self.assertIn('proxy_pass http://127.0.0.1:8088/;',routes)
             self.assertIn('alias /var/www/pos-staging/demo/;',routes)
+            self.assertIn('alias /var/www/pos-staging/release/;\n    autoindex off;',routes)
             self.assertNotIn('lockproof',routes+zones); self.assertNotIn('/bridge/',routes); self.assertFalse((gen/'public/bridge').exists())
             self.assertEqual(routes.count('{'),routes.count('}'))
             for zone in set(re.findall(r'zone=(\w+)',routes))|set(re.findall(r'limit_conn (\w+)',routes)):
@@ -3225,6 +3226,7 @@ class StagingKnobs(unittest.TestCase):
             with patch('builtins.print'): public_routes.main([str(gen),'--hostname','pos.example.org','--web-root','/srv/www/'])
             routes=(gen/'public/nginx/routes.conf').read_text()
             self.assertIn('alias /srv/www/demo/;',routes)
+            self.assertIn('alias /srv/www/release/;',routes)
             for args in (['--hostname','Pos.Example.org'],['--hostname','x;y'],['--hostname','a.org','--web-root','rel/dir'],['--hostname','a.org','--web-root','/a b'],['--hostname','a.org','--web-root','/a/../b']):
                 with self.assertRaises(SystemExit,msg=args), patch('sys.stderr'): public_routes.main([str(gen),*args,'--out',str(Path(tmp)/'o')])
             bad=json.loads((gen/'compose.yaml').read_text()); bad['services']['rpc']['ports']=['0.0.0.0:8545:8545']
