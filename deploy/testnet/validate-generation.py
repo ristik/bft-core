@@ -19,10 +19,26 @@ p.add_argument('--b1genesis',required=True,type=Path)
 p.add_argument('--check-prometheus',action='store_true')
 p.add_argument('--pos-contracts',type=Path,help='a clean unicity-pos-contracts checkout at the pin (forge on PATH): also generate and probe the proof-of-stake profile')
 p.add_argument('--aggregator',type=Path,help='CI native nonempty-batch certification probe')
+p.add_argument('--generation',type=Path,help='check the shipped files and Compose of an existing VR generation')
 a=p.parse_args()
 def flags_ok(generation):
     errors=ubft_flags.check(a.ubft.resolve(),[json.loads((generation/'compose.yaml').read_text())])
     assert not errors,'; '.join(errors)
+if a.generation:
+    import importlib.util
+    g = a.generation.resolve()
+    spec = importlib.util.spec_from_file_location('pos_probe', HERE / 'validate-pos.py')
+    probe = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(probe)
+    manifest = json.loads((g / 'manifest.json').read_text())
+    network = json.loads((g / 'network/network.json').read_text())
+    assert network['chain_id'] == manifest['chain_id'] and network['genesis_hash'] == manifest['genesis_hash']
+    assert network['funding_address'] == manifest['faucet_address']
+    for name, digest in manifest['config_sha256'].items():
+        assert hashlib.sha256((g / 'network' / name).read_bytes()).hexdigest() == digest, name
+    flags_ok(g)
+    print(json.dumps(probe.validate_vr(g, a.ubft.resolve(), manifest), indent=2))
+    sys.exit()
 with tempfile.TemporaryDirectory(prefix='tnops-validation-',dir='/tmp') as tmp:
     base=Path(tmp)
     images=base/'images.json'

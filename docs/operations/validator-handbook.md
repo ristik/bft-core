@@ -51,6 +51,7 @@ install_release() (
   curl -fsS "${RELEASE_URL%/}/SHA256SUMS" -o release/SHA256SUMS
   printf '%s  %s\n' "$RELEASE_DIGEST" release/SHA256SUMS | sha256sum -c -
   while read -r digest name; do
+    mkdir -p "release/$(dirname "$name")"
     curl -fsS "${RELEASE_URL%/}/$name" -o "release/$name"
   done < release/SHA256SUMS
   (cd release && sha256sum -c SHA256SUMS)

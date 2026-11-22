@@ -3170,6 +3170,28 @@ class StagingKnobs(unittest.TestCase):
         entry=(Path(__file__).parent/'faucet/backend-entrypoint.sh').read_text()
         self.assertIn('-faucet.amount "$FAUCET_PAYOUT"',entry); self.assertNotIn('0.01',entry)
         self.assertNotIn("!= '0.01'",(Path(__file__).parent/'faucet/gateway.py').read_text(),'the guard checks the configured payout, not a constant')
+    def test_vr_authorities_and_archive_execution_stay_in_their_pod(self):
+        cfg = self.topo(vr_pos=True, utb='0x' + 'aa' * 32, port_offset=1000,
+                        captcha_secret_file='/srv/secrets/captcha')
+        self.assertEqual(cfg['secrets']['hcaptcha_secret'], {'file': '/srv/secrets/captcha'})
+        self.assertEqual(cfg['services']['rpc']['ports'], ['127.0.0.1:9545:8545'])
+        for i in range(1, 5):
+            services = cfg['services']
+            root, authority, ureth, shard, relay = (services[f'{role}{i}'] for role in ('root', 'authority', 'ureth', 'shard', 'evm-rpc'))
+            for service in (root, authority, ureth, shard, relay):
+                self.assertEqual(service['network_mode'], f'service:pod{i}')
+                self.assertNotIn('ports', service)
+            self.assertIn('--vr-deployment', root['entrypoint'])
+            self.assertIn(f'./validator{i}/auth/pop:/pop:ro', root['volumes'])
+            self.assertNotIn(f'./validator{i}/auth:/authority', root['volumes'])
+            self.assertIn('--fence-provision-file', authority['entrypoint'])
+            self.assertEqual(authority['restart'], 'no')
+            for flag in ('--http.addr', '--authrpc.addr'):
+                entry = ureth['entrypoint']
+                self.assertEqual(entry[entry.index(flag) + 1], '127.0.0.1')
+            self.assertIn('--unicity.archive-state-proofs', ureth['entrypoint'])
+            self.assertIn('http://127.0.0.1:8551', shard['entrypoint'])
+            self.assertEqual(relay['environment']['TN_LOCAL_EXECUTION_ALIAS'], f'ureth{i}')
     def test_subnets_are_options(self):
         cfg=self.topo()
         self.assertEqual(cfg['networks']['faucet']['ipam']['config'],[{'subnet':'172.30.88.0/24','gateway':'172.30.88.1'}])

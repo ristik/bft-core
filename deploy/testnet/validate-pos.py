@@ -21,6 +21,7 @@ import urllib.request
 
 import operator_rpc
 import pos
+import vr_genesis
 
 
 def code_of(genesis, address):
@@ -145,7 +146,53 @@ def roots_start(generation, ubft, base_port=24000):
 
 
 def validate(generation, ubft, keygen):
+    manifest = json.loads((generation / 'manifest.json').read_text())
+    if (manifest.get('pos') or {}).get('profile') == 'vr-pos16':
+        return validate_vr(generation, ubft, manifest)
     manifest = statics(generation, ubft, keygen)
     started = roots_start(generation, ubft)
     return {'pos_genesis_ids_agree': 'PASS', 'genesis_assignment': manifest['pos']['genesis_assignment'],
             'base_configuration_assignment_refused': manifest['pos']['first_pass_assignment'], **started}
+
+
+def validate_vr(generation, ubft, manifest):
+    net = generation / 'network'
+    with tempfile.TemporaryDirectory(prefix='tnops-vr-verify-') as tmp:
+        output = Path(tmp) / 'vr-deployment.json'
+        vr_genesis.verify_compose_pos(ubft, net, manifest['generation'], output=output)
+        assert output.read_bytes() == (net / 'vr-deployment.json').read_bytes(), 'the root deployment differs from verified genesis'
+    plan = json.loads((net / 'vr-input.json').read_text())
+    assert tuple(plan['limits'][k] for k in ('nMin', 'nTarget', 'nMax')) == (4, 5, 16)
+    assert len(plan['identities']) == manifest['validators'] == 4
+    assert plan['pos']['assignmentId'] == manifest['pos']['genesis_assignment']
+    assert (generation / 'vr-owner-keys/keys.json').stat().st_mode & 0o077 == 0
+    compose = json.loads((generation / 'compose.yaml').read_text())
+    for i in range(1, 5):
+        services = compose['services']
+        root, shard, authority = (services[f'{role}{i}'] for role in ('root', 'shard', 'authority'))
+        assert root['network_mode'] == shard['network_mode'] == f'service:pod{i}'
+        for service in (root, shard):
+            entry = service['entrypoint']
+            assert entry[entry.index('--rpc-server-address') + 1].startswith('127.')
+        assert '--vr-deployment' in root['entrypoint'] and '--pos-deployment' not in root['entrypoint']
+        assert f'./validator{i}/auth/pop:/pop:ro' in root['volumes']
+        assert not any(':/authority' in item for item in root['volumes'])
+        assert '--fence-provision-file' in authority['entrypoint'] and authority['restart'] == 'no'
+        ureth = services[f'ureth{i}']
+        assert ureth['network_mode'] == authority['network_mode'] == root['network_mode']
+        assert '--unicity.archive-state-proofs' in ureth['entrypoint']
+        for flag in ('--http.addr', '--authrpc.addr'):
+            assert ureth['entrypoint'][ureth['entrypoint'].index(flag) + 1] == '127.0.0.1'
+        assert not services[f'evm-rpc{i}'].get('ports')
+    assert not (generation / 'faucet-secrets/hcaptcha-secret').exists(), 'the mounted captcha secret was copied'
+    return {'vr_genesis_and_compose': 'PASS', 'genesis_assignment': manifest['pos']['genesis_assignment']}
+
+
+if __name__ == '__main__':
+    import argparse
+    cli = argparse.ArgumentParser(description=__doc__)
+    cli.add_argument('generation', type=Path)
+    cli.add_argument('--ubft', type=Path, required=True)
+    cli.add_argument('--keygen', type=Path)
+    args = cli.parse_args()
+    print(json.dumps(validate(args.generation.resolve(), args.ubft.resolve(), args.keygen), indent=2))
