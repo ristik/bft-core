@@ -804,6 +804,6 @@ Reads and transactions go to a public JSON-RPC endpoint only. Every transaction 
 --dry-run stops there.`,
 	}
 	cmd.AddCommand(validatorInitCmd(base), validatorDoctorCmd(base), validatorStatusCmd(base), validatorExporterCmd(base), validatorApplyCmd(base),
-		validatorUpgradeCmd(base), validatorExitCmd(base), validatorRejoinCmd(base), validatorRotateCmd(base), validatorClaimCmd(base), validatorPosPublishCmd(base))
+		validatorUpgradeCmd(base), validatorExitCmd(base), validatorRejoinCmd(base), validatorRotateCmd(base), validatorClaimCmd(base), validatorPosPublishCmd(base), validatorLastUCCmd())
 	return cmd
 }

@@ -33,7 +33,7 @@ def main():
             shutil.copyfile(a.peers/name, stage/name)
         tar = stage/'validator-image.tar.gz'
         with subprocess.Popen(['docker','save',a.image], stdout=subprocess.PIPE) as child:
-            with tar.open('wb') as file, gzip.GzipFile(filename='', fileobj=file, mtime=0) as zipped:
+            with tar.open('wb') as file, gzip.GzipFile(filename='', mode='wb', fileobj=file, mtime=0) as zipped:
                 shutil.copyfileobj(child.stdout, zipped)
             if child.wait() != 0:
                 raise RuntimeError('docker save failed')

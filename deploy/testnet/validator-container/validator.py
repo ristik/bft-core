@@ -221,7 +221,8 @@ def authority_process(a, pins):
     with lock('.authority.lock'):
         if (AUTH/'lifetime').exists():
             raise ValueError('the authority lifetime was already started. If its process is lost, rotate the validator key with ubft validator rotate')
-        n = read(HOME/'network.json')
+        n = wait_for('the node’s verified initial authority scope',
+                     lambda: read(HOME/'authority-scope.json'), limit=360)
         AUTH.mkdir(mode=0o700, exist_ok=True)
         for name in ('operator.cred', 'pop.cred'):
             if not (AUTH/name).exists():
@@ -276,6 +277,24 @@ def root_status():
     if r.get('switch') and r['switch']['phase'] not in ('running', 'following'):
         return None
     return r
+
+
+def active_member_epoch(status, previous):
+    if status and not status.get('follower', False) and status['activeEpoch'] > previous:
+        return status['activeEpoch']
+    return None
+
+
+def provision_scope(network, epoch):
+    view = root_status()
+    if not view or view['activeEpoch'] != epoch or not view.get('follower'):
+        return None
+    with urllib.request.urlopen(ROOT + '/api/v1/roundInfo', timeout=8) as response:
+        state = json.load(response)
+    if int(state['epochNumber']) != epoch:
+        return None
+    evm, = [part for part in state['partitionShards'] if part['partitionId'] == 8]
+    return {'rootEpoch': epoch, 'shardEpoch': network['shardEpoch'] or int(evm['epochNumber']) + 1}
 
 
 def link_authority():
@@ -338,8 +357,22 @@ def run(a, pins):
                   '--shard-conf', RELEASE/'full-shard-conf.json', '--shard-conf', RELEASE/'aggregator-conf.json',
                   '--profile-3', '--q3-lane', '--b1-registry', '--genesis-identities', RELEASE/'genesis-identities.json',
                   '--vr-deployment', RELEASE/'vr-deployment.json', '--pos-evm-rpc', EXECUTION, '--vr-shard-rpc', SHARD, *utb]
-            if n['rootEpoch'] > 1 and not (AUTH/'fingerprint').exists():
-                start('root', [*root_args, '--install-handoff-epoch', n['rootEpoch']])
+            if not (AUTH/'fingerprint').exists():
+                epoch = n['rootEpoch']
+                if epoch is None:
+                    # A chain observation selects what the local root must
+                    # verify from genesis. It cannot authorize the authority.
+                    def hint():
+                        result = ubft('validator', 'status', '--rpc', RPC, '--json', output=True, check=False)
+                        if result.stdout:
+                            return json.loads(result.stdout).get('rootEpoch')
+                        return None
+                    epoch = wait_for('the current registry epoch', hint, limit=60)
+                install = ['--install-handoff-epoch', epoch] if epoch > 1 else []
+                start('root', [*root_args, *install])
+                scope = wait_for('the locally verified initial root and shard scope',
+                                 lambda: provision_scope(n, epoch), limit=300)
+                write(HOME/'authority-scope.json', json.dumps(scope).encode())
                 link_authority()
                 stop('root')
             else:
@@ -419,6 +452,12 @@ def show_status(_a, _pins):
             report['certifiedTip'] = json.load(response).get('certifiedTip')
     except (OSError, ValueError):
         report['certifiedTip'] = None
+    report['lastSignedUC'] = None
+    if report.get('member') and report.get('rootNodeId'):
+        observed = command('handoff-ubft', 'validator', 'last-signed-uc', '--execution', EXECUTION,
+                           '--root-rpc', ROOT, '--signer', report['rootNodeId'], output=True, check=False)
+        if observed.returncode == 0:
+            report['lastSignedUC'] = json.loads(observed.stdout)
     print(json.dumps(report, indent=2))
     return result.returncode
 
@@ -491,7 +530,8 @@ def join(a, pins):
             raise ValueError('start the authority and node containers before joining')
         active = HOME/'shard-active.json'
         if active.exists():
-            return show_status(a, pins)
+            show_status(a, pins)
+            return 0
         progress = HOME/'join.json'
         if not progress.exists():
             journal(progress, 'waiting-funding')
@@ -517,13 +557,9 @@ def join(a, pins):
             journal(progress, 'electing', id=ident)
         ident = read(CONFIG)['id']
         status = authority_status()
-        base = read(HOME/'network.json')
-        def activated():
-            status = root_status()
-            if status and not status['follower'] and status['activeEpoch'] > base['rootEpoch']:
-                return status['activeEpoch']
-            return None
-        target = wait_for('activated root epoch', activated)
+        scope = HOME/'authority-scope.json'
+        base = read(scope if scope.exists() else HOME/'network.json')
+        target = wait_for('activated root epoch', lambda: active_member_epoch(root_status(), base['rootEpoch']))
         journal(progress, 'activation', id=ident, rootEpoch=target)
         shard = base['shardEpoch']
         conf = AUTH/'activated-shard.json'
@@ -533,7 +569,8 @@ def join(a, pins):
         advance(target)
         journal(progress, 'activated', id=ident, rootEpoch=target)
         wait_for('committee membership', lambda: json.loads(local_status().stdout).get('member'))
-        return show_status(a, pins)
+        show_status(a, pins)
+        return 0
 
 
 def leave(a, _pins):
@@ -550,8 +587,8 @@ def main():
     p.add_argument('action', choices=['init', 'authority', 'run', 'join', 'status', 'exit', 'incumbent'])
     p.add_argument('--ports', type=int, nargs=3, default=(27652, 29252, 31452))
     p.add_argument('--announce-addresses', help='a reachable IPv4 multiaddress prefix, e.g. /ip4/192.0.2.10')
-    p.add_argument('--root-epoch', type=int, default=1)
-    p.add_argument('--shard-epoch', type=int, default=1)
+    p.add_argument('--root-epoch', type=int, help='override the initial root epoch hint')
+    p.add_argument('--shard-epoch', type=int, help='override the successor shard epoch hint')
     p.add_argument('--yes', action='store_true')
     p.add_argument('--claim', action='store_true')
     p.add_argument('--member-id', type=int)

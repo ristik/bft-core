@@ -31,8 +31,8 @@ Keep the named volume private. Start the authority once. Both roles can share
 the host network, and only the two P2P ports need inbound forwarding. Supply
 your own IPv4 address in place of the example. The profile and UTB genesis
 are pinned by the image. If the operator's authenticated launch instructions
-name a later epoch, include their `--root-epoch` and `--shard-epoch` values
-at initialization.
+name a later epoch, the node verifies that epoch from genesis before it
+provisions the authority. The defaults select the current epoch automatically.
 
 ```bash
 docker volume create unicity-validator

@@ -20,6 +20,11 @@ p2p = module('p2p')
 
 
 class ValidatorContainer(unittest.TestCase):
+    def test_active_status_omits_the_follower_flag(self):
+        self.assertEqual(validator.active_member_epoch({'activeEpoch':2}, 1), 2)
+        self.assertIsNone(validator.active_member_epoch({'activeEpoch':2, 'follower':True}, 1))
+        self.assertIsNone(validator.active_member_epoch({'activeEpoch':1}, 1))
+
     def test_unpinned_release_checksum_stops_before_native_import(self):
         settings = SimpleNamespace(release_url='https://example.invalid/release')
         with patch.object(validator, 'download', return_value=b'changed'), patch.object(validator, 'ubft') as tool:

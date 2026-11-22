@@ -69,7 +69,7 @@ def main():
             shutil.copyfile(release/name, context/name)
             if sha(context/name) != entries[name]:
                 cli.error(f'{name} differs from the pinned release')
-        for path in (HERE/'Dockerfile', HERE/'validator.py', HERE.parent/'validator_rpc.py',
+        for path in (HERE/'Dockerfile', HERE/'debian-packages.txt', HERE/'validator.py', HERE.parent/'validator_rpc.py',
                      HERE.parent/'gateway.py', HERE.parent/'public_relay.py'):
             shutil.copyfile(path, context/path.name)
         shutil.copyfile(a.handoff_ubft, context/'handoff-ubft')
