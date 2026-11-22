@@ -3243,7 +3243,7 @@ class StagingKnobs(unittest.TestCase):
             for name in ('ureth-flags.txt', 'fee-collector.txt'):
                 with self.subTest(missing_digest=name), tempfile.TemporaryDirectory() as out:
                     expected = manifest['config_sha256'].pop(name)
-                    with self.assertRaisesRegex(ValueError, name):
+                    with self.assertRaisesRegex(ValueError, rf'{re.escape(name)}.*Re-export starts with the next generation'):
                         vr_release.stage_network_files(net, Path(out), manifest)
                     manifest['config_sha256'][name] = expected
             (net / 'genesis.json').unlink()

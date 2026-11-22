@@ -39,7 +39,14 @@ def copy_regular(source, name, destination):
 
 def stage_network_files(source, stage, manifest):
     utb = manifest['utb']
-    config_digests = manifest['config_sha256']
+    config_digests = manifest.get('config_sha256', {})
+    missing = [name for name in ('ureth-flags.txt', 'fee-collector.txt') if not config_digests.get(name)]
+    if missing:
+        raise ValueError(
+            f"generation manifest is missing startup-file digests for {', '.join(missing)}. "
+            "Keep the already-verified static release. Re-export starts with the next generation, "
+            "whose manifest must pin both files."
+        )
     for name in NETWORK_FILES:
         target = stage / name
         copy_regular(source, name, target)

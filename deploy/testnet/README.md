@@ -283,8 +283,15 @@ with the deployment's public NB2 files for the final export. The peer
 addresses are for operators on the dev host's private validator network.
 Export the bootstrap seed while the archive checkpoint is in root epoch one.
 Keep the verified `RELEASE/seed/` and pass it as `--bootstrap-seed` on later
-releases. A new successor-epoch seed needs the verified activation bundles
+releases for generations whose manifests pin both `ureth-flags.txt` and
+`fee-collector.txt`. A new successor-epoch seed needs the verified activation bundles
 described in [Sync from a seed](../../docs/operations/sync-seed.md).
+
+Keep the already-verified static release for `tn-public-20261122`. Its manifest
+predates the startup-file digests. Release re-export starts with the next
+generation, whose manifest must pin both files. The moving NB2 checkpoint at
+`/release/nb2-origin.json` is published independently of the static release
+and continues to refresh.
 
 For the on-host operator start `python3 deploy/testnet/validator_rpc.py` on
 loopback and use `http://127.0.0.1:18485` as the operator RPC. The wrapper
