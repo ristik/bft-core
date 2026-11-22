@@ -76,7 +76,8 @@ jobs:
       - name: Pinned reference wallet unit tests
         run: |
           img=$(python3 -c "import sys; sys.path[:0] = ['deploy/testnet/bridge', 'deploy/testnet']; import deploy_bridge; print(deploy_bridge.image())")
-          docker run --rm --read-only --network none --tmpfs /tmp -e HOME=/tmp/home "$img" npx --no-install tsx --test wallet/core.test.ts wallet/recovery.test.ts wallet/trust.test.ts
+          docker run --rm --read-only --network none --tmpfs /tmp -e HOME=/tmp/home "$img" npx --no-install tsx --test wallet/core.test.ts wallet/trust.test.ts
+          docker run --rm --read-only --network none --tmpfs /tmp -e HOME=/tmp/home "$img" npx --no-install tsx --test --test-name-pattern "qualified ordinary envelope|ordinary release gas bound" wallet/recovery.test.ts
       - run: go build -o /tmp/tn-keygen ./deploy/testnet/keygen
       - run: go build -C pinned-bft -o /tmp/tn-b1genesis ./scripts/b1genesis
       - name: The Go reference verifier and wallet-evidence tool (nb2ref), from this checkout

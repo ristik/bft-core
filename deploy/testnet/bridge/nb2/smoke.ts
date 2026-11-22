@@ -106,7 +106,7 @@ async function walk(stage: string) {
     const signed = await burn(wallet, label, recipient, undefined, policy, join(work, `${label}.private.json`));
     const route = label === 'back' ? 'recovery' : 'ordinary';
     const checkpoints = new Set<string>();
-    let paid;
+    let paid: Awaited<ReturnType<typeof redeem>> | Awaited<ReturnType<typeof resumePayout>> | undefined;
     if (route === 'ordinary') {
       paid = await redeem(wallet, label, 60, 3000, (why) => console.error('redeem waiting:', why), undefined, policy);
     } else {
