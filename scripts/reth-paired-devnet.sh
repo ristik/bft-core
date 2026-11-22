@@ -62,6 +62,10 @@ postM2aChainID=${POST_M2A_CHAIN_ID:-31337}
 if [ "${NB2_T7_LANE:-0}" = 1 ]; then
   [ "${M2_PROFILE2:-0}:${Q3_B1:-0}:${SIGNING:-local}:${UTB_LANE:-0}:${P85_LANE:-0}:${VR_LANE:-0}:$validators" = 1:1:authority:1:0:0:4 ] ||
     { echo "NB2 T7 needs four authority-signed validators, profile 2, B1 and UTB" >&2; exit 2; }
+  # Retain the complete certified history in replicated archives while the
+  # live journal prunes acknowledged entries. The default journal stops at 256 blocks.
+  export EVM_JOURNAL_CANDIDATES=${EVM_JOURNAL_CANDIDATES:-4096} EVM_ARCHIVE_DERIVED=${EVM_ARCHIVE_DERIVED-1}
+  export EVM_EXTRA_ARGS=${EVM_EXTRA_ARGS---journal-observations 8192 --journal-bytes 134217728}
   ANYAGE_LANE=1
 fi
 if [ "${ANYAGE_LANE:-0}" = 1 ]; then
@@ -922,6 +926,9 @@ if [ "${H3_ASSIGNMENT_LANE:-0}" = 1 ] || [ "${P85_LANE:-0}" = 1 ]; then   # the 
   mkdir -p "$EVM_ARCHIVE_ROOT"
 elif [ "${VR_LANE:-0}" = 1 ] && [ "${VR_ARCHIVE:-0}" = 1 ]; then   # a long VR run (the joiner's): the journal is pruned by the archive replicas, and a joiner restores from an archive
   export EVM_ARCHIVE_ROOT=test-nodes/vr-archives
+  mkdir -p "$EVM_ARCHIVE_ROOT"
+elif [ "${NB2_T7_LANE:-0}" = 1 ]; then
+  export EVM_ARCHIVE_ROOT=test-nodes/nb2-t7-archives
   mkdir -p "$EVM_ARCHIVE_ROOT"
 elif [ "${H4_RESTORE_PROBE:-0}" = 1 ] || [ "${M2A_FINAL_RESTORE:-0}" = 1 ]; then
   export EVM_ARCHIVE_ROOT=test-nodes/h4-archives

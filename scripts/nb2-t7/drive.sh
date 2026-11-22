@@ -4,10 +4,19 @@ rpc=$1 agg=$2 chain=$3 history=$4
 here=$PWD/scripts/nb2-t7
 scratch=$(mktemp -d "$NB2_OUT/.driver.XXXXXX")
 driver_pid=
+archive_pid=
 cleanup() {
   trap '' TERM HUP INT
   if [[ -n "$driver_pid" ]]; then kill -TERM "$driver_pid" 2>/dev/null || true; wait "$driver_pid" || true; fi
+  stop_archive
   rm -rf -- "$scratch"
+}
+stop_archive() {
+  if [[ -n "$archive_pid" ]]; then
+    kill -TERM "$archive_pid" 2>/dev/null || true
+    wait "$archive_pid" || true
+    archive_pid=
+  fi
 }
 trap cleanup EXIT
 trap 'exit 143' HUP INT TERM
@@ -29,6 +38,7 @@ cp "$here/driver.ts" "$here/receipt.ts" "$scratch/"
 sed -n 's/^const testKeyHex = "\([0-9a-f]*\)"$/\1/p' scripts/evmtx/main.go >"$scratch/send-key"
 test -s "$scratch/send-key"
 ln -s "$NB2_PLUGIN/packages/native-bridge-plugin/lib" "$scratch/sdk"
+ln -s "$NB2_PLUGIN/wallet" "$scratch/wallet"
 cp test-nodes/utb-genesis.id "$NB2_OUT/trust.pin"
 cp test-nodes/execution-genesis-hash "$NB2_OUT/execution.pin"
 cp test-nodes/utb/utb-manifest.json "$NB2_OUT/utb-manifest.json"
@@ -42,8 +52,25 @@ jq -n --arg commit "$(jq -r .ureth "$NB2_OUT/pins.json")" --arg digest "$(sha256
   sha256sum build/ubft "$UTB_VERIFIER" "$AGG_BIN" "$URETH_BIN" "$NB2_PLUGIN/package-lock.json" "$NB2_OUT/plugin-lib.sha256"
   go version -m "$AGG_BIN"
 } >"$NB2_OUT/builds.txt"
-run_driver "$NB2_PLUGIN/node_modules/.bin/tsx" "$scratch/driver.ts" "$NB2_OUT" "$rpc" "$agg" "$chain" \
-  "${NB2_ARTIFACTS:-$NB2_CONTRACTS/out}" "$here/create.py" "$scratch"
+driver=( "$NB2_PLUGIN/node_modules/.bin/tsx" "$scratch/driver.ts" "$NB2_OUT" "$rpc" "$agg" "$chain"
+  "${NB2_ARTIFACTS:-$NB2_CONTRACTS/out}" "$here/create.py" "$scratch" )
+if [[ "${NB2_QUALIFY_OFFLINE:-0}" = 1 ]]; then
+  openssl rand -hex 32 >"$scratch/relayer-key"
+  python3 "$here/probe-qualification.py" archive "$rpc" "$chain" "$(cat "$NB2_OUT/execution.pin")" \
+    "$scratch/archive-url" >"$NB2_OUT/preferred-archive.log" 2>&1 &
+  archive_pid=$!
+  for ((i = 0; i < 50; ++i)); do [[ -s "$scratch/archive-url" ]] && break; sleep .1; done
+  export NB2_RECEIPT_PRIMARY_RPC="$(<"$scratch/archive-url")"
+  export NB2_RECEIPT_ALT_RPC="http://127.0.0.1:$(("${rpc##*:}" + 1))"
+  NB2_QUALIFY_COSTS=1 run_driver "${driver[@]}"
+  [[ -s "$scratch/offline-burn.private.json" ]]
+  NB2_RESUME_STAGE=checkpoint run_driver "${driver[@]}"
+  stop_archive
+  NB2_RESUME_STAGE=load run_driver "${driver[@]}"
+  NB2_RESUME_STAGE=settle run_driver "${driver[@]}"
+else
+  run_driver "${driver[@]}"
+fi
 
 if [[ -n "${NB2_SCENARIO_DRIVER:-}" ]]; then
   rm -rf -- "$scratch"
