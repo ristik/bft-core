@@ -31,6 +31,7 @@ jobs:
       - run: python3 -m unittest discover -s deploy/testnet -p test_package.py -v
         env:
           TN_REQUIRE_COMPOSE: '1'
+      - run: python3 -m unittest discover -s deploy/testnet -p test_nb2_origin.py -v
       - run: python3 -m unittest discover -s deploy/testnet -p test_public_relay.py -v
       - run: python3 -m unittest discover -s deploy/testnet -p test_handoff_drive.py -v
       - run: python3 -m unittest discover -s deploy/testnet -p test_remote_joiner.py -v
