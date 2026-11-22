@@ -56,13 +56,16 @@ func TestCustodySlotsAreTheSlotsTheEVMReads(t *testing.T) {
 				require.Len(t, r.Slots, 1)
 			case "liveExposures":
 				must(nested(custodyLiveExposures, u(t, a[0]), u(t, a[1])), "liveExposures[id][gen]")
-				require.Len(t, r.Slots, 1)
+				must(baseSlot(custodyLimits), "custody layout selector")
+				require.Len(t, r.Slots, 2)
 			case "exposureChain":
 				must(nested(custodyExposureChain, u(t, a[0]), u(t, a[1])), "exposureChain[id][gen]")
-				require.Len(t, r.Slots, 1)
+				must(baseSlot(custodyLimits), "custody layout selector")
+				require.Len(t, r.Slots, 2)
 			case "maxLiabilityAnchor":
 				must(nested(custodyMaxLiabilityAnchor, u(t, a[0]), u(t, a[1])), "maxLiabilityAnchor[id][gen]")
-				require.Len(t, r.Slots, 1)
+				must(baseSlot(custodyLimits), "custody layout selector")
+				require.Len(t, r.Slots, 2)
 			case "generationLots":
 				length := nested(custodyGenerationLots, u(t, a[0]), u(t, a[1]))
 				must(length, "generationLots length")

@@ -291,7 +291,8 @@ func vrPlan(in vrPlanInput) (vrGenesisInput, []evmassign.Identity, error) {
 	if v, set := in.conf.PartitionParams[evmassign.CouplingParam]; set && v != "true" {
 		return out, nil, fmt.Errorf("%w: the EVM shard configuration refuses coupled changes (%s=%s)", ErrVRGenesis, evmassign.CouplingParam, v)
 	}
-	if _, _, ok, err := vrstate.PinsFromPDR(in.conf); err != nil || !ok {
+	_, registryHash, pinned, err := vrstate.PinsFromPDR(in.conf)
+	if err != nil || !pinned {
 		return out, nil, fmt.Errorf("%w: the EVM shard configuration does not pin VR (validator_registry, validator_registry_code_hash): %v", ErrVRGenesis, err)
 	}
 	chainID, ok := zkverifier.ParseChainIDFromParams(in.conf.PartitionParams)
@@ -328,6 +329,9 @@ func vrPlan(in vrPlanInput) (vrGenesisInput, []evmassign.Identity, error) {
 		l.MaxBatch = in.profile.HRecords // the PoS-capable VR admits exactly the profile's H (a PoA generation keeps custody's ceiling)
 		l.VMax = vrPosLegacyPool
 		if l.NMax > 5 {
+			if registryHash != b1state.VRBuildPos16.RegistryCodeHash {
+				return out, nil, fmt.Errorf("%w: a PoS committee above five needs the measured sixteen-seat VR build", ErrVRGenesis)
+			}
 			l.VMax = vrPosMaxPool
 		}
 		if l.NMax > vrPosMaxCommittee {
@@ -953,6 +957,12 @@ func vrVerify(v vrVerifyInput) (vrRootDeployment, error) {
 		hh := hashes[a.role]
 		if addr != vrGenesisAddress(a.low) || !strings.EqualFold(rec[1], lowerHex(hh[:])) {
 			return fail("the deployment report's %s is not the allocated account", a.role)
+		}
+	}
+	if in.Pos != nil && (in.Limits.NMax > 5 || in.Limits.VMax > vrPosLegacyPool) {
+		if hashes["registry"] != b1state.VRBuildPos16.RegistryCodeHash || in.Limits.NMax > vrPosMaxCommittee ||
+			in.Limits.VMax != vrPosMaxPool || in.Limits.LMax != 1 || in.Limits.RMax != 4 {
+			return fail("the wide PoS generation needs the measured sixteen-seat VR build, V=20, one lifetime lot and rMax=4")
 		}
 	}
 	if err := b1state.CheckVRHookGasFresh(v.profile, hashes["registry"], hashes["module"], *v.profileFile.VRHookMeasurement, v.fresh); err != nil {
