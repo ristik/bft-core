@@ -81,7 +81,8 @@ neg-shard-p2p 28001 4 neg
 root-rpc 25866 16
 root-p2p 26662 16
 mongo 27117 1
-shard-p2p 28111 16
+shard-p2p-wide 28030 16
+shard-p2p 28111 6
 shard-dissemination 28211 16
 shard-rpc 28311 16
 f8-http 28601 3 f8

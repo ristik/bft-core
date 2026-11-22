@@ -218,6 +218,7 @@ function start_root_nodes() {
 # ============================================================================
 
 evmValidatorPortStart=$((28111+LANE_PORT_OFFSET))
+if [ "${VR_POS16:-0}" = 1 ]; then evmValidatorPortStart=$(lane_port 28030); fi
 evmDisseminationPortStart=$((28211+LANE_PORT_OFFSET))
 evmRPCPortStart=$((28311+LANE_PORT_OFFSET))
 
