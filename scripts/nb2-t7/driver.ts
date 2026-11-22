@@ -655,7 +655,7 @@ async function runQualificationCustody() {
   const childProofs = await certifyBatch(children);
   const tokens = children.map((m, i) => tokenOfChild(parent, m.allocation, m.tx, childProofs[i]));
   const data = encodeReturnData({ d: domain, asset: c.asset, recipient, amount: 1n, minIndex: 0n });
-  const burns = [];
+  const burns: Awaited<ReturnType<typeof transferRequest>>[] = [];
   for (const [i, token] of tokens.entries()) {
     const source = headOf(decodeToken(token));
     const sid = stateId(source.owner, source.state);
@@ -710,7 +710,8 @@ async function runQualificationCustody() {
   const sealTopic = HE(ascii('SegmentSealed(uint64,bytes32,bytes32,bytes)'));
   const windows = [];
   const batchOffers = [];
-  const catchUpMeasurements = [];
+  const catchUpMeasurements: { calls: string; verifiedGaps: number; submittedAtMs: number; proofMs: number;
+    arrivedDuringCall: bigint; beforeBacklog: bigint; afterBacklog: bigint }[] = [];
   const loadPayer = new LocalKeySigner(randomBytes(32));
   await send('catch-up-funding', hex(loadPayer.address), new Uint8Array(), 10n ** 18n);
   const lateRecovery = await completeRecovery({ ...late, trust }, 'late-run');

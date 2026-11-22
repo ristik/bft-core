@@ -160,6 +160,26 @@ def public_files(run):
             yield str(Path(*parts)), digest(path)
 
 
+def sealing_sample(custody):
+    loaded = [row for row in custody.get('catchUpMeasurements', []) if row['calls'].startswith('loaded-')]
+    if not loaded:
+        return None
+    seals = [row['observedMs'] for row in custody['windows']]
+    window_ms = 30_000
+    peak_count = max(sum(start <= seal < start + window_ms for seal in seals) for start in seals)
+    q = min(row['verifiedGaps'] for row in loaded)
+    p99 = percentile([row['proofMs'] for row in loaded], 99)
+    return {
+        'scope': 'finite test load sample',
+        'peakWindowMs': window_ms, 'peakSeals': peak_count,
+        'firstToLastSealMs': seals[-1] - seals[0], 'sealedSegments': len(seals),
+        'observations': len(loaded), 'gapsPerCall': q,
+        'proofMs': {str(p): percentile([row['proofMs'] for row in loaded], p) for p in (50, 95, 99)},
+        'twiceObservedPeakMet': q * window_ms >= 2 * peak_count * p99,
+        'allObservedBacklogsShrank': all(int(row['afterBacklog']) < int(row['beforeBacklog']) for row in loaded),
+    }
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('--repo', type=Path, default=Path('.'))
@@ -168,7 +188,8 @@ def main():
     p.add_argument('--output', type=Path, required=True)
     p.add_argument('runs', type=Path, nargs='+')
     args = p.parse_args()
-    report = {'schema': 'nb2-t7-test-qualification-evidence', 'version': 1, 'realValueAuthorized': False,
+    report = {'schema': 'nb2-t7-test-qualification-evidence', 'version': 1, 'status': 'qualification-incomplete',
+              'realValueAuthorized': False,
               'feeEnvelope': None, 'peakWindowEnvelope': None, 'generations': {},
               'corporaSha256': {name: digest(args.repo / 'testvectors' / name / 'MANIFEST') for name in
                                 ('nb2-continuation-v1.1', 'nb2-continuation-v1.1/transcripts', 'nb2-continuation-v1.1-supplement')}}
@@ -183,6 +204,10 @@ def main():
             graph['offlineSettlementLoad'] = read(run / 'offline-load/custody-result.json')
         if (run / 'custody-result.json').exists():
             graph['custody'] = read(run / 'custody-result.json')
+            graph['sealingSample'] = sealing_sample(graph['custody'])
+        for name in ('race', 'same-evidence-comparison'):
+            if (run / (name + '.json')).exists():
+                graph[name] = read(run / (name + '.json'))
         for file in ('validator-graph.json', 'public-relay-check.json', 'gateway-checks.json'):
             if (run / file).exists():
                 graph[file.removesuffix('.json')] = read(run / file)
