@@ -214,14 +214,20 @@ def main(argv=None):
     if out.exists():
         p.error(f'{out} exists: choose a new directory')
     ports = upstreams(gen)
-    (out / 'nginx').mkdir(parents=True)
-    (out / 'nginx/zones.conf').write_text(ZONES)
-    (out / 'nginx/routes.conf').write_text(routes(ports, web_root, gen.name))
-    if a.release_source:
-        try:
-            stage_release(a.release_source, out / 'release')
-        except (ValueError, OSError) as error:
-            p.error(f'cannot stage release: {error}')
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=out.parent, prefix='.public-') as temp:
+        stage = Path(temp) / 'public'
+        stage.mkdir()
+        stage.chmod(0o755)
+        (stage / 'nginx').mkdir()
+        (stage / 'nginx/zones.conf').write_text(ZONES)
+        (stage / 'nginx/routes.conf').write_text(routes(ports, web_root, gen.name))
+        if a.release_source:
+            try:
+                stage_release(a.release_source, stage / 'release')
+            except (ValueError, OSError) as error:
+                p.error(f'cannot stage release: {error}')
+        stage.rename(out)
     print(json.dumps({'generation': gen.name, 'hostname': a.hostname, 'out': str(out), 'upstreams': ports,
                       'routes': ['/rpc', '/aggregator', '/api/v1/trustbases', '/faucet/', '/api/network', '/api/claim', '/demo/', '/release/']}, indent=2))
 

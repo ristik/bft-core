@@ -3319,6 +3319,37 @@ class StagingKnobs(unittest.TestCase):
                     with self.assertRaises((ValueError, OSError)):
                         public_routes.stage_release(source, base / 'rejected')
                     self.assertFalse((base / 'rejected').exists())
+    def test_public_routes_retries_after_failed_release_under_restrictive_umask(self):
+        import hashlib
+        import public_routes
+        with tempfile.TemporaryDirectory() as tmp:
+            gen = self.generation(tmp)
+            source = Path(tmp) / 'source'
+            (source / 'seed').mkdir(parents=True)
+            artifact = b'{}'
+            (source / 'seed/manifest.json').write_bytes(artifact)
+            sums = source / 'SHA256SUMS'
+            sums.write_text(f'{"0" * 64}  seed/manifest.json\n')
+            out = Path(tmp) / 'public'
+            args = [str(gen), '--hostname', 'pos.example.org', '--out', str(out),
+                    '--release-source', str(source)]
+            previous = os.umask(0o077)
+            try:
+                with self.assertRaises(SystemExit), patch('sys.stderr') as err:
+                    public_routes.main(args)
+                self.assertIn('checksum mismatch', ''.join(call.args[0] for call in err.write.call_args_list))
+                self.assertFalse(out.exists())
+                sums.write_text(f'{hashlib.sha256(artifact).hexdigest()}  seed/manifest.json\n')
+                with patch('builtins.print'):
+                    public_routes.main(args)
+            finally:
+                os.umask(previous)
+            for name in ('.', 'release', 'release/seed'):
+                self.assertEqual((out / name).stat().st_mode & 0o777, 0o755, name)
+            for name in ('release/SHA256SUMS', 'release/seed/manifest.json'):
+                self.assertEqual((out / name).stat().st_mode & 0o777, 0o644, name)
+            self.assertTrue((out / 'nginx/routes.conf').is_file())
+
     def test_public_routes_web_root_and_bad_input(self):
         import public_routes
         with tempfile.TemporaryDirectory() as tmp:
