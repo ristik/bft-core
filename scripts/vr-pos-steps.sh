@@ -126,6 +126,14 @@ vrp_rotated() {
   vrb_log "PASS: ordinary PoS rotation: R acknowledged, VR Healthy, the election's open result $(cast call --rpc-url "$vrb_rpc" "$el" 'openResult()(bytes32)')"
   cast call --rpc-url "$vrb_rpc" "$cu" 'lastAckedAssignment()(bytes32)' | tee "$VR_EVIDENCE/custody-last-acked.txt"
 }
+# m2_send_paid joins a successful receipt to the shard's certificate for the specified root epoch.
+vrp_paid_in_epoch() {
+  local epoch=$1 nonce=$2
+  vrj_source_libs || return 1
+  M2_PAID_REGISTRY_CHECK=0 LANE_TX_FANOUT=one M2_NEXT_NONCE="$nonce" \
+    m2_send_paid "$epoch" "$nonce" | tee "$VR_EVIDENCE/paid-epoch$epoch.txt"
+}
+
 vrp_cursors_match() {
   [ "$(cast call --rpc-url "$vrb_rpc" "$(vrp_custody)" 'recordCursor()(uint64)')" = "$(cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'recordCursor()(uint64)')" ]
 }
@@ -352,5 +360,6 @@ vrp_recovery() {
     }
   done
   vrb_log "PASS: the recovery (install K) completed through VR: Recovered, Healthy, cursors and holder facts match"
+  if [ "${VR_POS16:-0}" = 1 ]; then vrp_paid_in_epoch 4 4 || return 1; fi
   if [ "${UTB_LANE:-0}" = 1 ]; then vrp_utb 4 || return 1; fi
 }

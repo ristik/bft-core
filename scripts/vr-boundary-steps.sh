@@ -232,6 +232,7 @@ EOF
   if [ "${VR_JOINER:-0}" = 1 ]; then vrj_validates || return 1; fi
   if [ "${VR_POS:-0}" = 1 ]; then
     vrp_rotated || return 1
+    if [ "${VR_POS16:-0}" = 1 ]; then vrp_paid_in_epoch 2 3 || return 1; fi
     if [ "${UTB_LANE:-0}" = 1 ] || [ "${VR_UTB:-0}" = 1 ]; then vrp_utb || return 1; fi
     if [ "${VR_POS_RECOVERY:-0}" = 1 ]; then vrp_recovery || return 1; fi
   fi
