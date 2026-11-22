@@ -369,10 +369,10 @@ class UtbProfile(unittest.TestCase):
     def test_the_signed_history_is_on_by_default_and_no_utb_is_the_escape_hatch(self):
         source=(Path(generate.__file__)).read_text()
         self.assertRegex(source,r"add_argument\('--utb',action=argparse\.BooleanOptionalAction,default=True",'--utb defaults on; argparse adds --no-utb')
-        for wf in ('testnet-rehearsal.yml','testnet-bridge.yml'):   # the hosted rehearsals keep the package without the profile (what they exercised before the default flipped)
+        for wf, flag in (('testnet-rehearsal.yml','--no-utb'),('testnet-bridge.yml','--utb')):
             text=(Path(generate.__file__).resolve().parents[2]/'.github/workflows'/wf).read_text()
             for call in re.findall(r"deploy/testnet/generate\.py.*?(?=\n\s*- name:|\n\s*\n|\Z)",text,re.S):
-                self.assertIn('--no-utb',call,wf)
+                self.assertIn(flag,call,wf)
     def test_the_aggregator_gets_the_pin_and_a_writable_store_of_its_own(self):
         agg=self.topo(4,self.PIN)['services']['aggregator']
         env=agg['environment']
@@ -1150,9 +1150,9 @@ class ProofOfStake(unittest.TestCase):
         full=pos.profile_args(d,{'election':'/m.json','hook':'/h.jsonl'})
         self.assertEqual(sorted(set(full)-set(args)),sorted(['--election','--elect-measurement','0xe','/m.json']))
     def test_the_caps_are_covered_by_the_per_record_reservation(self):
-        # the cold RecoveryAck: 2,281,165 for 6 members of one lot (3,629,888 for 8 members of 2 lots); the guard's margin is 1.25
+        # Hosted CI reported 3,174,198 after margin for the cold RecoveryAck at the legacy caps.
         self.assertEqual(pos.CAPS,(16,1,6))
-        self.assertLessEqual(2_281_165*125//100,pos.HOOK_RECORD_GAS)
+        self.assertLessEqual(3_174_198,pos.HOOK_RECORD_GAS)
         self.assertGreater(3_629_888*125//100,pos.HOOK_RECORD_GAS)
     def test_pos_refuses_more_validators_than_the_caps_cover_before_any_key(self):
         done=subprocess.run([sys.executable,str(Path(__file__).parent/'generate.py'),'--out','/nonexistent/tn-x','--validators',str(pos.CAPS[2]+1),'--ubft','x','--keygen','x','--b1genesis','x',
@@ -2024,11 +2024,11 @@ class NB2Release(unittest.TestCase):
         (gen/'manifest.json').write_text(json.dumps({'generation':'tn-x','chain_id':31337,'genesis_hash':'0x'+'ab'*32,'validators':4,'artifacts':{'sources':{'ureth':'u'},'images':{'node':'n'}}}))
         (art/'bridge-images.json').write_text(json.dumps({'sources':{'contracts':'c'*40,'native-bridge-plugins':'p'*40},'images':{'bridge':self.IMAGE}}))
         (gen/'network/b1-profile.json').write_text(json.dumps({'maxGas':269547540+60000000,'ordinaryCapacity':60000000}))
-        pair=lambda build,k,b:{'build':build,'K':k,'B':b,'Qmax':'1','gamma':'0x93'+build[0]*2,'domain':'0x'+'dd'*32,
-                               'vault':{'address':'0x'+'aa'*20,'block':12,'transaction':'0x02','runtimeCodeHash':'0x'+'a1'*32},
-                               'verifier':{'address':'0x'+'bb'*20,'block':11,'transaction':'0x01','codeHash':'0x'+'b1'*32},'helper':{'address':'0x'+'cc'*20,'codeHash':'0x'+'c1'*32}}
-        record={'primary':'test','deployments':{'test':pair('test',4,2),'production':pair('production',64,16)},'deployer':'0x'+'ee'*20,'trustPin':'0x'+'99'*32,
-                'profileHash':'0x'+'a9'*32,'vectorsDigest':'9b'*32}
+        record={'build':'production','gamma':'0x9301','domain':'0x'+'dd'*32,'firstBlock':11,
+                'contracts':{'vault':{'address':'0x'+'aa'*20,'block':12,'runtimeCodeHash':'0x'+'a1'*32},
+                             'recovery':{'address':'0x'+'bb'*20,'runtimeCodeHash':'0x'+'b1'*32}},
+                'descriptors':{'semantic-profile':'0x'+'a9'*32},
+                'salt':'0x'+'a8'*32,'pins':'0x'+'a7'*32,'trustPin':'0x'+'99'*32}
         return gen,art,record
     URETH=['unicity-reth','node','--txpool.max-tx-gas=60000000','--txpool.max-tx-input-bytes=4194304']   # the B1 profile's ureth flags (ubft engine-api b1-profile)
     def svc(self,entrypoint=None,**extra):
@@ -2046,16 +2046,31 @@ class NB2Release(unittest.TestCase):
     def build(self,gen,art,record,services=None):
         m=self.module()
         with patch.object(m,'ARTIFACTS',art):
-            return m.build(gen,record,self.IMAGE,services or self.services())
+            return m.build(gen,record,self.IMAGE,services or self.services(),{'usableEpoch':'1','rootRound':'20'})
     def test_the_pins_are_the_wallets_deployment_pins(self):
         with tempfile.TemporaryDirectory() as tmp:
             r=self.build(*self.generation(tmp))
         self.assertEqual(r['limits']['poolMaxTxInputBytes']['value'],4194304);self.assertEqual(r['limits']['poolMaxTxGas']['value'],60000000)
         self.assertIn('ureth1, ureth2, ureth3, ureth4',r['limits']['poolMaxTxInputBytes']['source'])
-        self.assertEqual(r['pins'],{'gamma':'0x93tt','build':'test','vaultRuntimeCodeHash':'0x'+'a1'*32,'maxEncodedTxBytes':524288,'userGasLimit':'60000000',
-                                    'gasReserve':'500000','returnReserveSegments':64,'deploymentBlock':12,'stateReadOnly':False,
-                                    'nativeGasSchedule':self.module().NATIVE_GAS_SCHEDULE})
-        self.assertEqual(r['deployment']['production']['K'],64);self.assertEqual(r['deployment']['firstBlock'],11)
+        self.assertEqual(r['pins'],{'gamma':'0x9301','build':'production','vaultRuntimeCodeHash':'0x'+'a1'*32,
+                                    'maxEncodedTxBytes':524288,'userGasLimit':'24000000','gasReserve':'500000',
+                                    'returnReserveSegments':64,'deploymentBlock':12,'stateReadOnly':False})
+        self.assertEqual(r['deployment']['firstBlock'],11)
+        self.assertEqual(r['trust']['origin'],{'usableEpoch':'1','rootRound':'20'})
+        self.assertEqual(r['recovery']['address'],'0x'+'bb'*20)
+        self.assertEqual(r['recovery']['pins'],'0x'+'a7'*32)
+        self.assertEqual(r['recovery']['backlog'],r['peakWindowEnvelope']['backlog'])
+        self.assertEqual(r['status'],'testnet-provisional')
+        self.assertFalse(r['realValueAuthorized'])
+        self.assertEqual(r['feeEnvelope']['status'],'testnet-provisional')
+        self.assertEqual(r['peakWindowEnvelope']['status'],'testnet-provisional')
+        for name, transactions, gas in (('transfer-600',39,247746775),('split-20',4,24166979)):
+            measured=r['feeEnvelope']['workloads'][name]
+            self.assertEqual(measured['includedTransactions'],transactions)
+            self.assertEqual(int(measured['includedGas']),gas)
+            self.assertGreaterEqual(measured['budgetTransactions'] * 2,transactions * 3)
+            self.assertGreaterEqual(int(measured['budgetGas']) * 2,gas * 3)
+        self.assertTrue(any(x['max']['entry']=='redeemRecovered' for x in r['recovery']['ranges']))
         self.assertEqual(r['limits']['blockGasLimit']['value'],329547540)
         self.assertGreaterEqual(r['limits']['gatewayMaxRawTxBodyBytes']['value'],2*524288+(64<<10))   # section 12.7
         self.assertEqual(r['limits']['gatewayLogBlockRange']['value'],gateway.LOG_BLOCK_RANGE)
@@ -2180,7 +2195,7 @@ class NB2Release(unittest.TestCase):
             gen,art,record=self.generation(tmp)
             m=self.module()
             with patch.object(m,'ARTIFACTS',art):
-                with self.assertRaisesRegex(SystemExit,'records'): m.build(gen,record,'sha256:'+'22'*32,self.services())
+                with self.assertRaisesRegex(SystemExit,'records'): m.build(gen,record,'sha256:'+'22'*32,self.services(),{'usableEpoch':'1','rootRound':'20'})
     def test_the_driver_runs_read_only_with_the_lane_directory_mounted(self):
         m=self.module()
         with patch('deploy_bridge.image',return_value=self.IMAGE),patch('deploy_bridge.validators_network',return_value='tn_validators'):
@@ -2479,6 +2494,91 @@ class NB2DriverKeys(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         return module
+
+    def test_graph_and_origin_readback_use_the_recorded_finalized_hash(self):
+        m = self.deploy_module()
+        roles = ['registry', 'receipts', 'lineage', 'ordinary', 'recovery', 'vault']
+        graph = {role: {'address': f'0x{i+1:040x}', 'runtimeCodeHash': f'0x{i+1:064x}'}
+                 for i, role in enumerate(roles)}
+        head = {'hash': '0x' + 'f1' * 32, 'number': '0x20'}
+        latest = {'hash': '0x' + 'f2' * 32, 'number': '0x21'}
+        expected_selector = {'blockHash': head['hash'], 'requireCanonical': True}
+        for i, role in enumerate(roles[1:], 1):
+            graph[role].update(block=i, blockHash=f'0x{i+8:064x}', transaction=f'0x{i+20:064x}')
+        want = {
+            'LINEAGE()': graph['lineage']['address'], 'LINEAGE_HASH()': graph['lineage']['runtimeCodeHash'],
+            'RECEIPTS()': graph['receipts']['address'], 'RECEIPTS_HASH()': graph['receipts']['runtimeCodeHash'],
+            'REGISTRY_HASH()': graph['registry']['runtimeCodeHash'], 'PROFILE_HASH()': '0x56',
+            'ORDINARY()': graph['ordinary']['address'], 'ORDINARY_HASH()': graph['ordinary']['runtimeCodeHash'],
+            'VAULT()': graph['vault']['address'], 'DOMAIN()': '0x12', 'PINS()': '0x34', 'GENERATION()': '0x78',
+            'config()': '0xab', 'domain()': '0x12', 'RECOVERY()': graph['recovery']['address'],
+            'RECOVERY_RUNTIME()': graph['recovery']['runtimeCodeHash'], 'RECOVERY_PINS()': '0x34',
+            'RECOVERY_GENERATION()': '0x78',
+        }
+        record = {'contracts': graph, 'gamma': '0xab', 'domain': '0x12', 'pins': '0x34',
+                  'recoveryGeneration': '0x78', 'descriptors': {'semantic-profile': '0x56'}}
+        by_addr = {node['address']: node['runtimeCodeHash'] for node in graph.values()}
+        creation_hashes = {hex(node['block']): node['blockHash'] for node in graph.values() if 'block' in node}
+
+        def code_hash(gen, target, addr, at):
+            self.assertEqual(at, expected_selector)
+            return by_addr[addr]
+
+        def response(gen, target, method, *params):
+            if method == 'eth_getBlockByNumber':
+                if params[0] == 'latest':
+                    return latest
+                self.assertIn(params[0], creation_hashes)
+                return {'hash': creation_hashes[params[0]]}
+            self.assertEqual(params[-1], expected_selector)
+            if method == 'eth_call':
+                return want[params[0]['data']]
+            self.assertEqual(method, 'eth_getStorageAt')
+            self.assertEqual(params[0], m.REGISTRY)
+            return {'rootEpoch': '0x02', 'rootRound': '0x42'}[params[1]]
+
+        def cast(gen, operation, *args):
+            if operation == 'sig':
+                return args[0]
+            self.assertEqual(operation, 'abi-decode')
+            return args[-1]
+
+        with patch.object(m, 'code_hash', side_effect=code_hash), \
+             patch.object(m, 'rpc', side_effect=response) as call, \
+             patch.object(m, 'cast', side_effect=cast), \
+             patch.object(m, 'keccak', side_effect=lambda gen, data: data.decode().rsplit('.', 1)[-1]):
+            m.verify_graph(Path('/srv/g'), record, head)
+            self.assertEqual(m.origin_checkpoint(Path('/srv/g'), head=head), {
+                'usableEpoch': '2', 'rootRound': '66', 'blockHash': head['hash'],
+                'blockNumber': 32, 'registry': m.REGISTRY,
+            })
+            self.assertEqual(sum(c.args[2] == 'eth_getStorageAt' for c in call.call_args_list), 2)
+            self.assertFalse(any('latest' in c.args for c in call.call_args_list))
+            want['RECOVERY_PINS()'] = '0x00'
+            with self.assertRaisesRegex(SystemExit, 'vault RECOVERY_PINS'):
+                m.verify_graph(Path('/srv/g'), record, head)
+            creation_hashes['0x1'] = latest['hash']
+            with self.assertRaisesRegex(SystemExit, 'receipts canonical creation block'):
+                m.verify_graph(Path('/srv/g'), record, head)
+
+    def test_origin_defaults_to_one_finalized_block(self):
+        m = self.deploy_module()
+        block = '0x' + 'f1' * 32
+
+        def response(gen, endpoint, method, *params):
+            if method == 'eth_getBlockByNumber':
+                self.assertEqual(params, ('finalized', False))
+                return {'hash': block, 'number': '0x10'}
+            self.assertEqual(method, 'eth_getStorageAt')
+            self.assertEqual(params[0], m.REGISTRY)
+            self.assertEqual(params[2], {'blockHash': block, 'requireCanonical': True})
+            return {'rootEpoch': '0x02', 'rootRound': '0x42'}[params[1]]
+
+        with patch.object(m, 'rpc', side_effect=response), \
+             patch.object(m, 'keccak', side_effect=lambda gen, data: data.decode().rsplit('.',1)[-1]):
+            self.assertEqual(m.origin_checkpoint(Path('/srv/g')), {
+                'usableEpoch': '2', 'rootRound': '66', 'blockHash': block, 'blockNumber': 16, 'registry': m.REGISTRY,
+            })
 
     def test_a_failed_creation_reports_casts_own_reason(self):
         m = self.deploy_module()

@@ -111,6 +111,45 @@ class PublicRelayTest(unittest.TestCase):
     def assert_result(self, method, params, result):
         self.assertEqual(self.rpc(method, params), (200, dict(jsonrpc='2.0', id='caller', result=result)))
 
+    def test_wallet_graph_accepts_nine_concurrent_reads(self):
+        release = threading.Event()
+        workers_busy = threading.Event()
+        nine_accepted = threading.Event()
+        workers, accepted = 0, 0
+        lock = threading.Lock()
+
+        def reply(method, params, *, max_bytes):
+            nonlocal workers
+            with lock:
+                workers += 1
+                if workers == 8:
+                    workers_busy.set()
+            if not release.wait(5):
+                raise TimeoutError('gateway worker test barrier')
+            return {'jsonrpc': '2.0', 'result': '0x46'}
+
+        class ObservedServer(Server):
+            def process_request(self, sock, address):
+                nonlocal accepted
+                super().process_request(sock, address)
+                accepted += 1
+                if accepted == 9:
+                    nine_accepted.set()
+
+        server = ObservedServer(('127.0.0.1', 0), Handler, Mock(call=reply))
+        self.stack.callback(server.pool.shutdown)
+        self.url = self.serve(server)
+        with ThreadPoolExecutor(max_workers=9) as clients:
+            futures = [clients.submit(self.rpc, 'eth_chainId') for _ in range(8)]
+            try:
+                self.assertTrue(workers_busy.wait(4))
+                futures.append(clients.submit(self.rpc, 'eth_chainId'))
+                self.assertTrue(nine_accepted.wait(4))
+            finally:
+                release.set()
+            for future in futures:
+                self.assertEqual(future.result(), (200, {'jsonrpc': '2.0', 'id': 'caller', 'result': '0x46'}))
+
     def test_read_when_validator_is_down(self):
         self.gateway(None, Node())
         self.assert_result('eth_chainId', [], '0x46')

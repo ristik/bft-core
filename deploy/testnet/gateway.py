@@ -146,11 +146,15 @@ def upstream(url, payload=None, content_type='application/json'):
         return e.code, e.headers.get('Content-Type', 'application/json'), e.read()
 
 class Server(http.server.HTTPServer):
+    # The NB2 wallet checks nine graph fields concurrently. Keep the eight
+    # workers and admit one additional batch of sockets to their bounded queue.
+    request_queue_size = 16
+
     def __init__(self, address, handler, relay):
         super().__init__(address, handler)
         self.relay = relay
         self.pool = concurrent.futures.ThreadPoolExecutor(max_workers=8)
-        self.slots = threading.BoundedSemaphore(8)
+        self.slots = threading.BoundedSemaphore(16)
         self.large = threading.BoundedSemaphore(LARGE_SLOTS)
         self.rpc_limit = Limiter(10, 100)
         self.heavy_limit = Limiter(2, 20)   # HEAVY_METHODS, in addition to rpc_limit

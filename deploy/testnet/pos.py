@@ -18,15 +18,15 @@ import sys
 
 # The lane's values (scripts/lib/p85-lib.sh). The cadence is a rehearsal value: an election is due this many ordinary root rounds and UC seconds after the
 # last acknowledged rotation. #437 sets the testnet's own (--pos-cadence-rounds / --pos-cadence-seconds).
-# manifest limits.vMax, limits.lMax, election nMax: the election price AND the records hook's per-record reservation are measured at exactly these. (16, 1, 6) is what
-# the 3,000,000 per record covers with the 1.25 margin (the RecoveryAck of 8 members in 2 lots costs 3,629,888 cold, contracts docs/p85/HOOK_GAS.md); until the owner
-# decides between a higher limit and lower caps (Q12) the package declares caps the limit covers, and `b1-profile --hook-measurement` refuses any pair it does not.
+# Measure the election and records hook at the same limits (vMax, lMax, nMax). CI measured a minimum of
+# 3,174,198 gas per record after margin at these caps. Keep 3,500,000 for the legacy ceremony and let
+# b1-profile reject any future measurement that exceeds it. The VR profile uses its own measurements.
 CAPS = (16, 1, 6)
 BOND_UNIT = 100 * 10**18               # 100 UCT in base units: one weight unit
 GENESIS_UNITS = 1                      # bond units per genesis identity (unit weights)
 HOOK_RECORDS = ('ack', 'stage', 'closure', 'recovery')   # the records of script/measure-hook-gas.sh: the hook's worst record is the largest of them
 H_RECORDS = 2
-HOOK_RECORD_GAS = 3_000_000
+HOOK_RECORD_GAS = 3_500_000
 CADENCE_ROUNDS = 400
 CADENCE_SECONDS = 300
 REGISTRY = '0xff00000000000000000000000000000000000002'

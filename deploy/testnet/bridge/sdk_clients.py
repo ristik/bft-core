@@ -103,7 +103,7 @@ class SdkClients:
         # the shipped genesis bundle holds the epoch-1 entry alone; its EntryID is the pin (the clients check it themselves, from the SDK's decoded entry)
         _, genesis_entries = utbcbor.history((public / 'trust-base.bundle.cbor').read_bytes())
         self.expect(len(genesis_entries) == 1 and utbcbor.entry_id(genesis_entries[0]).hex() == self.sdk_pin, 'the shipped trust-base bundle is the genesis entry alone, of the pinned EntryID')
-        self.sdk_agg_url = json.loads((public.parent / 'lane.json').read_text())['agg']
+        self.sdk_agg_url = 'http://rpc:8545/aggregator'  # internal address of the public gateway
         out = self.evidence / 'pos-bridge' / 'sdk-clients'
         out.mkdir(parents=True, exist_ok=True)
         images = self.build_sdk_clients()

@@ -204,10 +204,10 @@ The faucet's settings are generator options: `--faucet-payout` (UCT per claim, d
 A public generation behind one name (e.g. pos.staging.unicity.network):
 
 ```
-generate.py --out /srv/testnet/tn-NAME ... --pos [--no-utb] [--faucet-subnet A --edge-subnet B]
+generate.py --out /srv/testnet/tn-NAME ... --pos --utb [--faucet-subnet A --edge-subnet B]
 rehearse.py --generation G --evidence E --stages up,identity,first-tx,pos-smoke
+bridge/nb2/deploy_nb2.py G --nb2-evidence BIN   # the NB2 v1.1 graph (bridge/README.md)
 docker compose -f G/compose.yaml --project-directory G up -d --no-deps signer
-bridge/nb2/deploy_nb2.py G --nb2-evidence BIN   # the native bridge v2 (bridge/README.md)
 public_routes.py G --hostname NAME [--web-root /var/www/pos-staging]
 ```
 

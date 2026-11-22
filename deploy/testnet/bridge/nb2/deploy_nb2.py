@@ -1,24 +1,16 @@
 #!/usr/bin/env python3
-"""Deploy the native bridge v2 (NB2-09, bft-core#1105): NativeBridgeVerifierV2 and NativeBridgeVaultV2 on a running generation, and its release manifest.
+"""Deploy and verify the NB2 v1.1 graph on a running testnet generation.
 
-    deploy_nb2.py GENERATION --nb2-evidence BIN [--k 4 --b 2] [--qmax WEI] [--no-production]
-
-An operator action on the generation's internal validators network, against validator 1's execution client, signed with the generation's faucet keystore
-(the key never leaves its file), in the bridge tools image (deploy_bridge.py's tools(): forge/cast and the contracts' build output at the pin):
-
-  1. the trust-base release bundle and its genesis EntryID (dnb-tool trust-bundle): Γ.rootGenesis32 and the wallets' trust input;
-  2. the verifier, as initcode from the image's build output (`cast send --create`, nothing recompiles), of the build that admits K: the test build
-     (admitsTestSet, K in {4, 8} x B in {2, 4}) for the lanes' K = 4, the production build for (64, 16). It creates its receipt helper;
-  3. Γ (section 4.1) by the Go reference (nb2-evidence gamma, built from this checkout), for the vault's address predicted from the deployer's nonce;
-  4. the vault of the same build with exactly those bytes; its constructor checks them (BadConfig otherwise), and config() and domain() are read back;
-  5. unless --no-production, the production pair (64, 16) as well: the lane's admission check needs both builds on one chain;
-  6. GENERATION/bridge/nb2/: deployment.json (what was deployed), lane.json (the driver's view), public/ (what wallets get: the trust bundle and
-     its pin, and the release manifest nb2-release.json with the pinned limits and the operating envelope, release_nb2.py).
+Use an idle faucet signer during deployment. The release is written only after
+readback of the five contracts and the native seal registry. Publish the release
+and its trust files together through the authenticated operator channel.
 """
 import argparse
+import fcntl
 import hashlib
 import json
 import os
+import secrets
 import subprocess
 import sys
 import time
@@ -33,26 +25,52 @@ import release_nb2   # noqa: E402
 ETH = 'http://ureth1:8545'
 CONTRACTS = '/opt/bridge/contracts'
 NBP = '/opt/bridge/native-bridge-plugins'
-NETWORK_ID = 3   # generate.py: the signing authorities' --network-id, the trust base's network (the plug-in's bindTrust checks it)
-EVM_PARTITION, EVM_SHARD, AGG_PARTITION = 8, '0x80', 7   # generate.py: the EVM shard; the package's one aggregator (owner decision 40)
-QMAX_DEFAULT = 10 ** 27   # the test deployment's liability cap: 10^9 UCT (owner question, briefs/owner-questions.md)
-UNIT_WEI = 10 ** 15   # one scenario unit: deposit 100 units = 0.1 UCT
-TEST_SET = {4, 8}, {2, 4}
+REPO = HERE.parents[3]
+# From the released ureth pin. The T7 certificate, membership and execution
+# rule sources are byte-identical at this commit. Only Cargo.lock changed.
+RELEASE_URETH = 'b61d3beebf9e08e900e3bb88f5e3b2d275bc1dec'
+RELEASE_URETH_LOCK = 'b6417ee486ed2ffe5fdbe579a83b5f123f9ae96037200ce7566c6374a73c94cc'
+REGISTRY = '0xff00000000000000000000000000000000000002'
+NETWORK_ID, EVM_PARTITION, EVM_SHARD, AGG_PARTITION = 3, 8, '0x80', 7
+QMAX_DEFAULT = 10 ** 27
+DESCRIPTORS = ('cert-batch-v2', 'rsmt-member-v1', 'registry-layout', 'execution', 'build-index', 'primitive-vectors')
+CONTRACT_NAMES = ('FlatReceipts', 'FlatLineage', 'NativeBridgeVerifier11', 'NativeBridgeRecovery11', 'NativeBridgeVault11')
 ESTIMATE_ATTEMPTS = 6
 BOUND_PARENT_REFUSAL = 'error code -32603: bound execution input rejected the block: bound parent hash mismatch'
 
 
-def artifact(gen, contract, source):
-    """The creation bytecode of CONTRACT from the image's forge build output (no link references: the verifier's libraries are internal)."""
-    art = json.loads(tools(gen, 'cat', f'{CONTRACTS}/out/{source}/{contract}.json', capture=True))
-    code = art['bytecode']['object']
-    if '__$' in code:
-        raise SystemExit(f'{contract} has unlinked library references')
-    return code if code.startswith('0x') else '0x' + code
-
-
 def cast(gen, *args):
     return tools(gen, 'cast', *args, capture=True).strip()
+
+
+def keccak(gen, data):
+    return cast(gen, 'keccak', '0x' + data.hex()).lower()
+
+
+def digest(data):
+    return '0x' + hashlib.sha256(data).hexdigest()
+
+
+def hash_fields(gen, label, *fields):
+    prefix = keccak(gen, ('UNICITY/NB2/CONT/1.1/' + label).encode())
+    return keccak(gen, bytes.fromhex(prefix[2:] + ''.join(field.removeprefix('0x') for field in fields)))
+
+
+def rpc(gen, target, method, *params):
+    return json.loads(cast(gen, 'rpc', '--rpc-url', target, '--raw', method, json.dumps(params)))
+
+
+def same(name, actual, expected):
+    if not isinstance(actual, str) or actual.lower() != expected.lower():
+        raise SystemExit(f'{name}: expected {expected}, got {actual}')
+
+
+def artifact(gen, name, hashes):
+    data = json.loads(tools(gen, 'cat', f'{CONTRACTS}/out/{name}.sol/{name}.json', capture=True))
+    codes = [('0x' + data[field]['object'].removeprefix('0x')).lower() for field in ('bytecode', 'deployedBytecode')]
+    for kind, code, expected in zip(('creation', 'runtime template'), codes, hashes, strict=True):
+        same(f'{name} {kind} hash', keccak(gen, bytes.fromhex(code[2:])), expected)
+    return codes[0]
 
 
 def cast_failure_reasons(error):
@@ -101,111 +119,260 @@ def create(gen, initcode, label, *, transport=None):
     return receipt
 
 
-def word(b):
-    return ('01' if b else '00').rjust(64, '0')
+def write_json(path, doc):
+    path.write_text(json.dumps(doc, indent=2) + '\n')
 
 
-def abi_bytes(data):
-    raw = bytes.fromhex(data[2:])
-    return (32).to_bytes(32, 'big').hex() + len(raw).to_bytes(32, 'big').hex() + raw.hex() + '00' * (-len(raw) % 32)
+def descriptors(gen, manifest, bridge, work):
+    """Bind the reviewed rules and the actual immutable node artifacts into P."""
+    corpus = REPO / 'testvectors/nb2-continuation-v1.1-supplement/descriptors'
+    dest = work / 'public/descriptors'
+    dest.mkdir(exist_ok=True)
+    native = manifest['artifacts']
+    hashes = {}
+    for name in (*DESCRIPTORS, 'semantic-profile'):
+        if name == 'build-index':
+            data = (json.dumps({'sources': native['sources'], 'binarySha256': native['binary_sha256'],
+                                'nodeImages': native['images'], 'bridgeImage': bridge}, sort_keys=True) + '\n').encode()
+        else:
+            data = (corpus / f'{name}.json').read_bytes()
+            if name in ('cert-batch-v2', 'rsmt-member-v1', 'execution'):
+                descriptor = json.loads(data)
+                descriptor['ureth'] = RELEASE_URETH
+                if name == 'execution':
+                    descriptor['rules']['Cargo.lock'] = RELEASE_URETH_LOCK
+                data = (json.dumps(descriptor, sort_keys=True) + '\n').encode()
+        (dest / f'{name}.json').write_bytes(data)
+        hashes[name] = digest(data)
+    return hashes
 
 
-def deploy_pair(gen, evidence_bin, k, b, qmax, fields, deployer, production):
-    """The verifier and the vault of one build, Γ in between. Returns the deployment record of the pair."""
-    verifier_code = artifact(gen, 'NativeBridgeVerifierV2', 'NativeBridgeVerifierV2.sol') + word(not production)
-    v = create(gen, verifier_code, f'{"production" if production else "test"} verifier')
-    verifier = v['contractAddress']
-    vhash = cast(gen, 'codehash', '--rpc-url', ETH, verifier)
-    helper = cast(gen, 'call', '--rpc-url', ETH, verifier, 'RECEIPTS()(address)')
-    helper_hash = cast(gen, 'codehash', '--rpc-url', ETH, helper)
-    pinned = cast(gen, 'call', '--rpc-url', ETH, verifier, 'RECEIPTS_CODEHASH()(bytes32)')
-    if pinned != helper_hash:
-        raise SystemExit(f'the verifier pins helper code {pinned}, the helper has {helper_hash}')
-    nonce = int(cast(gen, 'nonce', '--rpc-url', ETH, deployer))
-    predicted = cast(gen, 'compute-address', '--nonce', str(nonce), deployer).split()[-1]
-    g = json.loads(subprocess.check_output([str(evidence_bin), 'gamma', '-network', str(NETWORK_ID), '-root-genesis', fields['rootGenesis'],
-                                            '-execution-genesis', fields['executionGenesis'], '-chain-id', str(fields['chainId']), '-evm-partition', str(EVM_PARTITION),
-                                            '-evm-shard', EVM_SHARD, '-aggregator-partition', str(AGG_PARTITION), '-vault', predicted, '-verifier', verifier,
-                                            '-verifier-code-hash', vhash, '-profile-hash', fields['profileHash'], '-k', str(k), '-b', str(b), '-qmax', str(qmax)], text=True))
-    contract = 'NativeBridgeVaultV2' if production else 'NativeBridgeVaultV2Test'
-    vault_initcode = artifact(gen, contract, f'{contract}.sol')
-    vt = create(gen, vault_initcode + abi_bytes(g['gamma']), f'{"production" if production else "test"} vault')
-    vault = vt['contractAddress']
-    if vault.lower() != predicted.lower():
-        raise SystemExit(f'the vault landed at {vault}, Γ names {predicted}: another transaction used the deployer\'s nonce; deploy again')
-    config = cast(gen, 'call', '--rpc-url', ETH, vault, 'config()(bytes)')
-    domain = cast(gen, 'call', '--rpc-url', ETH, vault, 'domain()(bytes32)')
-    if config.lower() != g['gamma'].lower() or domain.lower() != g['domain'].lower() or domain[2:] != hashlib.sha256(bytes.fromhex(g['gamma'][2:])).hexdigest():
-        raise SystemExit(f'the vault reads back another Γ or domain: {config[:80]}.. {domain}')
-    vault_hash = cast(gen, 'codehash', '--rpc-url', ETH, vault)
-    return {
-        'build': 'production' if production else 'test', 'K': k, 'B': b, 'Qmax': str(qmax), 'gamma': g['gamma'], 'domain': g['domain'], 'fields': g,
-        'vault': {'contract': contract, 'address': vault, 'transaction': vt['transactionHash'], 'block': int(vt['blockNumber'], 16), 'runtimeCodeHash': vault_hash,
-                  'initcodeSha256': hashlib.sha256(bytes.fromhex(vault_initcode[2:])).hexdigest()},
-        'verifier': {'contract': 'NativeBridgeVerifierV2', 'admitsTestSet': not production, 'address': verifier, 'transaction': v['transactionHash'],
-                     'block': int(v['blockNumber'], 16), 'codeHash': vhash},
-        'helper': {'contract': 'Nb2ReceiptVerifier', 'address': helper, 'codeHash': helper_hash},
-        '_vaultInitcode': vault_initcode,
+def deploy_graph(gen, evidence_bin, manifest, work, bridge, pin, qmax):
+    reviewed = json.loads((REPO / 'scripts/nb2-t7/pins.json').read_text())
+    templates = reviewed['artifactKeccak']
+    code = {name: artifact(gen, name, templates[name]) for name in CONTRACT_NAMES}
+    registry_hash = code_hash(gen, ETH, REGISTRY)
+    same('native seal registry runtime', registry_hash, reviewed['registryRuntimeKeccak'])
+    if int(rpc(gen, ETH, 'eth_chainId'), 16) != manifest['chain_id']:
+        raise SystemExit('execution chain ID differs from generation manifest')
+    same('execution genesis', rpc(gen, ETH, 'eth_getBlockByNumber', '0x0', False)['hash'], manifest['genesis_hash'])
+
+    descriptor_hashes = descriptors(gen, manifest, bridge, work)
+    fields = [descriptor_hashes[name] for name in DESCRIPTORS]
+    profile = descriptor_hashes['semantic-profile']
+    nodes = {'registry': {'address': REGISTRY, 'runtimeCodeHash': registry_hash}}
+    deployer = manifest['faucet_address']
+    # On a partial failure there is no safe implicit retry of a creation.
+    (work / '.deployment-started').touch(exist_ok=False)
+
+    def deploy(role, name, signature=None, *args):
+        encoded = cast(gen, 'abi-encode', signature, *args)[2:] if signature else ''
+        receipt = create(gen, code[name] + encoded, name)
+        address = receipt['contractAddress'].lower()
+        block_hash = receipt['blockHash']
+        nodes[role] = {'contract': name, 'address': address, 'block': int(receipt['blockNumber'], 16),
+                       'blockHash': block_hash, 'transaction': receipt['transactionHash'],
+                       'runtimeCodeHash': code_hash(gen, ETH, address, canonical_block(block_hash)),
+                       'creationCodeHash': templates[name][0], 'runtimeTemplateHash': templates[name][1],
+                       'constructorArgs': '0x' + encoded}
+        return address, nodes[role]['runtimeCodeHash']
+
+    receipts, receipts_hash = deploy('receipts', 'FlatReceipts')
+    same('receipt helper runtime', receipts_hash, templates['FlatReceipts'][1])
+    lineage, lineage_hash = deploy('lineage', 'FlatLineage', 'f(address)', receipts)
+    ordinary, ordinary_hash = deploy('ordinary', 'NativeBridgeVerifier11',
+        'f(address,bytes32,bytes32,bytes32)', lineage, lineage_hash, profile, registry_hash)
+
+    # The recovery creation consumes nonce n and the vault consumes n+1.
+    latest = int(rpc(gen, ETH, 'eth_getTransactionCount', deployer, 'latest'), 16)
+    pending = int(rpc(gen, ETH, 'eth_getTransactionCount', deployer, 'pending'), 16)
+    if latest != pending:
+        raise SystemExit('the deployer has pending transactions')
+    predicted = cast(gen, 'compute-address', '--nonce', str(latest + 1), deployer).split()[-1].lower()
+    config = json.loads(subprocess.check_output([str(evidence_bin), 'gamma', '-flat', '-network', str(NETWORK_ID),
+        '-root-genesis', pin, '-execution-genesis', manifest['genesis_hash'], '-chain-id', str(manifest['chain_id']),
+        '-evm-partition', str(EVM_PARTITION), '-evm-shard', EVM_SHARD, '-aggregator-partition', str(AGG_PARTITION),
+        '-vault', predicted, '-verifier', ordinary, '-verifier-code-hash', ordinary_hash, '-profile-hash', profile,
+        '-k', '64', '-b', '16', '-qmax', str(qmax)], text=True))
+    gamma, domain = config['gamma'], config['domain']
+    same('Go Γ domain', digest(bytes.fromhex(gamma[2:])), domain)
+
+    def pin_record(role, address, identity):
+        return f'{role:04x}' + address.removeprefix('0x') + identity[2:]
+
+    records = [
+        pin_record(1, ordinary, ordinary_hash), pin_record(2, receipts, receipts_hash),
+        pin_record(3, '0000000000000000000000000000000000000100', fields[0]),
+        pin_record(4, '0000000000000000000000000000000000000102', fields[1]),
+        pin_record(5, REGISTRY, hash_fields(gen, 'REGISTRY', registry_hash, fields[2])),
+        pin_record(256, lineage, lineage_hash),
+    ]
+    release = hash_fields(gen, 'RELEASE', *fields)
+    pins = hash_fields(gen, 'PINS', release, f'{len(records):04x}', *records)
+    salt = '0x' + secrets.token_hex(32)
+    recovery, recovery_hash = deploy('recovery', 'NativeBridgeRecovery11',
+        'f(bytes,address,bytes32,(bytes32,bytes32,bytes32,bytes32,bytes32,bytes32),bytes32)',
+        gamma, ordinary, salt, '(' + ','.join(fields) + ')', pins)
+    vault, _ = deploy('vault', 'NativeBridgeVault11', 'f(bytes,address,bytes32,bytes32)', gamma, recovery, recovery_hash, profile)
+    same('vault predicted from the deployer nonce', vault, predicted)
+
+    return {'build': 'production', 'fields': config, 'gamma': gamma, 'domain': domain, 'deployer': deployer,
+            'contracts': nodes, 'release': release, 'pins': pins, 'pinRecords': ['0x' + r for r in records],
+            'salt': salt, 'recoveryGeneration': hash_fields(gen, 'GEN', salt, domain),
+            'descriptors': descriptor_hashes, 'trustPin': pin, 'firstBlock': nodes['receipts']['block'],
+            'compiler': {'solc': '0.8.37', 'evm': 'cancun', 'viaIR': True,
+                         'optimizerRuns': {'src/nb2/verifier/**': 1, 'default': 200}}}
+
+
+def code_hash(gen, target, address, at='latest'):
+    code = rpc(gen, target, 'eth_getCode', address, at)
+    if code == '0x':
+        raise SystemExit(f'{target} has no code at {address}')
+    return keccak(gen, bytes.fromhex(code[2:]))
+
+
+def canonical_block(block_hash):
+    return {'blockHash': block_hash, 'requireCanonical': True}
+
+
+def verify_graph(gen, record, head, target=ETH):
+    at = canonical_block(head['hash'])
+    finalized = int(head['number'], 16)
+    nodes = record['contracts']
+    for role, node in nodes.items():
+        if 'transaction' in node:
+            if node['block'] > finalized:
+                raise SystemExit(f'{target} {role} creation is above finalized block {finalized}')
+            creation = rpc(gen, target, 'eth_getBlockByNumber', hex(node['block']), False)
+            same(f'{target} {role} canonical creation block', (creation or {}).get('hash'), node['blockHash'])
+        same(f'{target} {role} runtime', code_hash(gen, target, node['address'], at), node['runtimeCodeHash'])
+    address = lambda role: nodes[role]['address']
+    runtime = lambda role: nodes[role]['runtimeCodeHash']
+    profile = record['descriptors']['semantic-profile']
+    hooks = {'LINEAGE()(address)': address('lineage'), 'LINEAGE_HASH()(bytes32)': runtime('lineage'),
+             'RECEIPTS()(address)': address('receipts'), 'RECEIPTS_HASH()(bytes32)': runtime('receipts'),
+             'REGISTRY_HASH()(bytes32)': runtime('registry')}
+    checks = {
+        'lineage': {'RECEIPTS()(address)': address('receipts'), 'RECEIPTS_HASH()(bytes32)': runtime('receipts')},
+        'ordinary': {**hooks, 'PROFILE_HASH()(bytes32)': profile},
+        'recovery': {**hooks, 'ORDINARY()(address)': address('ordinary'), 'ORDINARY_HASH()(bytes32)': runtime('ordinary'),
+                     'VAULT()(address)': address('vault'), 'DOMAIN()(bytes32)': record['domain'],
+                     'PINS()(bytes32)': record['pins'], 'GENERATION()(bytes32)': record['recoveryGeneration']},
+        'vault': {'config()(bytes)': record['gamma'], 'domain()(bytes32)': record['domain'],
+                  'RECOVERY()(address)': address('recovery'), 'RECOVERY_RUNTIME()(bytes32)': runtime('recovery'),
+                  'RECOVERY_PINS()(bytes32)': record['pins'], 'RECOVERY_GENERATION()(bytes32)': record['recoveryGeneration']},
     }
+    for role, getters in checks.items():
+        for getter, value in getters.items():
+            signature = getter[:getter.index(')') + 1]
+            data = cast(gen, 'sig', signature)
+            raw = rpc(gen, target, 'eth_call', {'to': address(role), 'data': data}, at)
+            same(f'{target} {role} {getter}', cast(gen, 'abi-decode', getter, raw), value)
+
+
+def origin_checkpoint(gen, target=ETH, *, head=None):
+    """Read both operator registry words at the supplied finalized checkpoint."""
+    if head is None:
+        head = rpc(gen, target, 'eth_getBlockByNumber', 'finalized', False)
+    if not head:
+        raise SystemExit('execution client has no finalized NB2 checkpoint')
+    at = canonical_block(head['hash'])
+    slots = {'usableEpoch': 'origin.rootEpoch', 'rootRound': 'clock.rootRound'}
+    origin = {name: str(int(rpc(gen, target, 'eth_getStorageAt', REGISTRY,
+                              keccak(gen, ('unicity.seal-registry/' + slot).encode()), at), 16))
+              for name, slot in slots.items()}
+    if int(origin['usableEpoch']) == 0 or int(origin['rootRound']) == 0:
+        raise SystemExit('finalized seal registry has no usable origin')
+    return {**origin, 'blockHash': head['hash'], 'blockNumber': int(head['number'], 16), 'registry': REGISTRY}
+
+
+def run_deployment(gen, evidence_bin, qmax, output):
+    manifest = json.loads((gen / 'manifest.json').read_text())
+    if not manifest.get('utb'):
+        raise SystemExit('NB2 v1.1 requires a UTB generation')
+    if manifest['artifacts']['sources']['ureth'] != RELEASE_URETH:
+        raise SystemExit('generation ureth is outside the reviewed NB2 native descriptors')
+    if not evidence_bin.is_file() or not os.access(evidence_bin, os.X_OK):
+        raise SystemExit('nb2-evidence must be an executable file')
+    if not 0 < qmax < 2 ** 144:
+        raise SystemExit('Qmax must be positive and below 2^144')
+    bridge = image(gen)
+    services = release_nb2.active_services(gen)
+    limits = release_nb2.admission(gen, manifest, bridge, services)
+    sources = limits[0]
+    pins = json.loads((HERE.parent / 'pins.json').read_text())
+    for name in ('contracts', 'native-bridge-plugins'):
+        same(f'bridge image {name} pin', sources.get(name), pins[name])
+    same('bridge dnb-tool bft pin', sources.get('bft'), manifest['artifacts']['sources']['bft'])
+    record_image(gen, bridge)
+    tools(gen, 'dnb-tool', 'trust-bundle', '--trust-base', '/gen/network/trust-base.json',
+          '--out', '/work/nb2/public/trust-base.bundle.cbor', '--out-pin', '/work/nb2/public/trust-base.genesis.entryid')
+    pin = '0x' + (output / 'public/trust-base.genesis.entryid').read_text().strip().removeprefix('0x')
+    same('trust bundle genesis', pin, '0x' + manifest['utb']['genesis_id'].removeprefix('0x'))
+    record = deploy_graph(gen, evidence_bin, manifest, output, bridge, pin, qmax)
+    record_path = output / 'deployment.json'
+    write_json(record_path, record)
+    checkpoints = []
+    for i in range(1, manifest['validators'] + 1):
+        target = f'http://ureth{i}:8545'
+        genesis = rpc(gen, target, 'eth_getBlockByNumber', '0x0', False)
+        same(f'{target} execution genesis', genesis['hash'], manifest['genesis_hash'])
+        # Wait for each paired validator to see the vault creation before comparing its graph.
+        block = record['contracts']['vault']['block']
+        for _ in range(120):
+            head = rpc(gen, target, 'eth_getBlockByNumber', 'finalized', False)
+            if head and int(head['number'], 16) >= block:
+                break
+            time.sleep(1)
+        else:
+            raise SystemExit(f'{target} did not finalize vault deployment block {block}')
+        verify_graph(gen, record, head, target)
+        checkpoint = {'validator': i, 'blockHash': head['hash'], 'blockNumber': int(head['number'], 16)}
+        checkpoints.append(checkpoint)
+        if i == 1:
+            origin = origin_checkpoint(gen, target, head=head)
+        print(f'{target}: verified five contracts and native registry at finalized block '
+              f'{checkpoint["blockNumber"]} ({checkpoint["blockHash"]})', flush=True)
+    record['readbackCheckpoints'] = checkpoints
+    write_json(record_path, record)
+    doc = release_nb2.build(gen, record, bridge, services, origin, limits=limits)
+    path = output / 'public/nb2-release.json'
+    temp = path.with_suffix('.tmp')
+    write_json(temp, doc)
+    temp.replace(path)
+    if os.getuid() == 0:
+        subprocess.run(['chown', '-R', '10001:10001', str(gen / 'bridge')], check=True)
+    print(json.dumps({'release': str(path), 'domain': record['domain'],
+                      'contracts': {role: node['address'] for role, node in record['contracts'].items()}}))
 
 
 def main():
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('generation', type=Path)
-    p.add_argument('--nb2-evidence', required=True, type=Path, help='the nb2-evidence binary built from this checkout (go build ./scripts/nb2-evidence)')
-    p.add_argument('--k', type=int, default=4)
-    p.add_argument('--b', type=int, default=2)
+    mode = p.add_mutually_exclusive_group(required=True)
+    mode.add_argument('--nb2-evidence', type=Path, help='build from this checkout with go build ./scripts/nb2-evidence')
+    mode.add_argument('--print-origin', action='store_true', help='print a new finalized checkpoint for the published release')
     p.add_argument('--qmax', type=int, default=QMAX_DEFAULT)
-    p.add_argument('--no-production', action='store_true', help='do not deploy the production (64, 16) pair beside the test one')
-    p.add_argument('--gateway', default='http://rpc:8545', help='the public gateway as the validators network names it (the driver\'s only RPC)')
     a = p.parse_args()
     gen = a.generation.resolve()
-    manifest = json.loads((gen / 'manifest.json').read_text())
-    work = gen / 'bridge' / 'nb2'
-    (work / 'public').mkdir(parents=True, exist_ok=True)
-    if (a.k, a.b) != (64, 16) and not (a.k in TEST_SET[0] and a.b in TEST_SET[1]):
-        raise SystemExit(f'(K, B) = ({a.k}, {a.b}) is admitted by neither build')
-
-    tools(gen, 'dnb-tool', 'trust-bundle', '--trust-base', '/gen/network/trust-base.json', '--out', '/work/nb2/public/trust-base.bundle.cbor',
-          '--out-pin', '/work/nb2/public/trust-base.genesis.entryid')
-    pin = (work / 'public/trust-base.genesis.entryid').read_text().strip()
-    pin = pin if pin.startswith('0x') else '0x' + pin
-    profile_hash = '0x' + tools(gen, 'sha256sum', f'{NBP}/protocol/profile.json', capture=True).split()[0]
-    vectors_digest = tools(gen, 'cat', f'{NBP}/protocol/vectors/nb2/nb2-vectors.json.sha256', capture=True).split()[0]
-    fields = {'rootGenesis': pin, 'executionGenesis': manifest['genesis_hash'], 'chainId': manifest['chain_id'], 'profileHash': profile_hash}
-    deployer = manifest['faucet_address']
-
-    deployed = {'test' if (a.k, a.b) != (64, 16) else 'production': deploy_pair(gen, a.nb2_evidence.resolve(), a.k, a.b, a.qmax, fields, deployer, (a.k, a.b) == (64, 16))}
-    if not a.no_production and (a.k, a.b) != (64, 16):
-        deployed['production'] = deploy_pair(gen, a.nb2_evidence.resolve(), 64, 16, a.qmax, fields, deployer, True)
-    primary = deployed['test'] if 'test' in deployed else deployed['production']
-    initcodes = {}
-    for name, d in deployed.items():
-        initcodes[name] = d.pop('_vaultInitcode')
-        (work / f'vault-initcode-{name}.hex').write_text(initcodes[name] + '\n')
-    record = {'primary': primary['build'], 'deployments': deployed, 'deployer': deployer, 'trustPin': pin, 'profileHash': profile_hash, 'vectorsDigest': vectors_digest}
-    (work / 'deployment.json').write_text(json.dumps(record, indent=2) + '\n')
-
-    bridge = image(gen)
-    record_image(gen, bridge)
-    services = release_nb2.active_services(gen)   # every execution client of every Compose file the package selects (base, joiner and restore overrides)
-    doc = release_nb2.build(gen, record, bridge, services)
-    lane = {'rpc': a.gateway, 'agg': a.gateway + '/aggregator', 'direct': ETH, 'release': '/work/nb2/public/nb2-release.json',
-            'trustBundle': '/work/nb2/public/trust-base.bundle.cbor', 'trustPin': '/work/nb2/public/trust-base.genesis.entryid', 'unit': str(UNIT_WEI),
-            'verifier': primary['verifier']['address'], 'helper': primary['helper']['address'],
-            'test': {'gamma': primary['gamma'], 'vaultInitcode': initcodes[primary['build']]}}
-    if 'production' in deployed and primary['build'] == 'test':
-        prod = deployed['production']
-        lane['production'] = {'vault': prod['vault']['address'], 'verifier': prod['verifier']['address'], 'gamma': prod['gamma'], 'vaultInitcode': initcodes['production']}
-    (work / 'lane.json').write_text(json.dumps(lane, indent=2) + '\n')
-    # the envelope comes from the plug-in's measured gas model, run in the image (driver.ts envelope) over the manifest's pins
-    (work / 'public/nb2-release.json').write_text(json.dumps(doc, indent=2) + '\n')
-    release_nb2.driver(gen, 'envelope', '/work/nb2/envelope.json')
-    doc['envelope'] = json.loads((work / 'envelope.json').read_text())
-    (work / 'public/nb2-release.json').write_text(json.dumps(doc, indent=2) + '\n')
-    if os.getuid() == 0:
-        subprocess.run(['chown', '-R', '10001:10001', str(gen / 'bridge')], check=True)
-    print(json.dumps({n: {'vault': d['vault']['address'], 'verifier': d['verifier']['address'], 'domain': d['domain']} for n, d in deployed.items()}))
+    output = gen / 'bridge/nb2'
+    if a.print_origin:
+        release = json.loads((output / 'public/nb2-release.json').read_text())
+        genesis = rpc(gen, ETH, 'eth_getBlockByNumber', '0x0', False)
+        same('checkpoint execution genesis', genesis['hash'], release['package']['genesisHash'])
+        same('checkpoint seal registry runtime', code_hash(gen, ETH, REGISTRY),
+             release['deployment']['contracts']['registry']['runtimeCodeHash'])
+        print(json.dumps(origin_checkpoint(gen)))
+        return
+    (output / 'public').mkdir(parents=True, exist_ok=True)
+    with (output / '.deploy.lock').open('a') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise SystemExit('another NB2 deployment is active for this generation') from None
+        if (output / '.deployment-started').exists() or (output / 'deployment.json').exists():
+            raise SystemExit('this generation already attempted an NB2 deployment; use a fresh generation')
+        run_deployment(gen, a.nb2_evidence.resolve(), a.qmax, output)
 
 
 if __name__ == '__main__':
