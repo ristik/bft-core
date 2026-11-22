@@ -2,6 +2,67 @@
 
 This guide operates one validator on a Validator Registry (VR) proof-of-stake generation with the P85 prototype contracts. One validator runs a root node, an EVM shard node, ureth for execution, and a signing authority for the shard's certification key. The Foundation publishes the network release and endpoints. Use its authenticated release announcement to obtain the release digest and the UTB genesis EntryID.
 
+## Quick start with the validator container
+
+Use an amd64 Linux Docker host with a reachable IPv4 address. Forward TCP 27652
+and 29252 to that host if a router owns the public address. A laptop without
+those inbound routes cannot join. The operator and Engine RPCs and ureth stay
+on loopback. The public peer lists are in the
+`/release/validator-container/` bundle.
+
+Obtain the container bundle's `SHA256SUMS` digest from the authenticated
+announcement. The tarball is a `docker save` archive for the one image used by
+both roles.
+
+```bash
+set -euo pipefail
+RELEASE=https://pos.staging.unicity.network/release/validator-container
+read -rp 'Published container SHA256SUMS digest: ' BUNDLE_DIGEST
+curl -fsS "$RELEASE/SHA256SUMS" -o SHA256SUMS
+printf '%s  SHA256SUMS\n' "$BUNDLE_DIGEST" | sha256sum -c -
+while read -r digest name; do curl -fsS "$RELEASE/$name" -o "$name"; done < SHA256SUMS
+sha256sum -c SHA256SUMS
+docker load -i validator-image.tar.gz
+IMAGE=$(jq -er .imageId manifest.json)
+test "$(docker image inspect --format '{{.Id}}' "$IMAGE")" = "$IMAGE"
+```
+
+Keep the named volume private. Start the authority once. Both roles can share
+the host network, and only the two P2P ports need inbound forwarding. Supply
+your own IPv4 address in place of the example. The profile and UTB genesis
+are pinned by the image. If the operator's authenticated launch instructions
+name a later epoch, include their `--root-epoch` and `--shard-epoch` values
+at initialization.
+
+```bash
+docker volume create unicity-validator
+docker run --rm --network host -v unicity-validator:/data "$IMAGE" \
+  init --announce-addresses /ip4/192.0.2.10
+docker run -d --name unicity-authority --restart=no --network host \
+  -v unicity-validator:/data "$IMAGE" authority
+docker run -d --name unicity-node --network host \
+  -v unicity-validator:/data "$IMAGE" run
+docker exec unicity-node ubft-validator join --yes
+docker exec unicity-node ubft-validator status
+```
+
+Use the faucet page to fund the printed payee. One 200 UCT claim covers the
+100 UCT bond and gas. The join command resumes from the private journal.
+Every validator submits its own frozen-member proof and can publish the
+result once all proofs are recorded. The joining node uses the activation
+proof from its own synced root and verifies it from its pinned lineage.
+
+Keep the authority container running during node updates. Replace only
+`unicity-node`, with the same data volume, then repeat `join --yes` if the
+join was interrupted. Authority process loss requires the handbook's
+`validator rotate` procedure. For retirement run
+`docker exec unicity-node ubft-validator exit --yes`. After the maturity
+conditions in section 6 hold, run
+`docker exec unicity-node ubft-validator exit --claim --yes`.
+
+The manual procedure below is the reference for incident recovery and
+for validating the resulting committee and certification evidence.
+
 ## Rehearsal shell
 
 For VT-13, use the dedicated `vt13operator` account on the rehearsal host. Generate a new SSH key on your workstation and submit **only the public key** in `briefs/vt13-operator-log.md` for the rehearsal maintainer to install. Use the host address from the public RPC URL in the rehearsal inputs.

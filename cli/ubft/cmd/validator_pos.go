@@ -447,7 +447,9 @@ var _ = ethcrypto.Keccak256
 func validatorPosPublishCmd(base *baseFlags) *cobra.Command {
 	f := &txFlags{validatorFlags: validatorFlags{baseFlags: base}}
 	var keyArgs, authArgs []string
-	var ownProof bool
+	var ownProof, participate bool
+	var expectedResult string
+	var memberID uint64
 	cmd := &cobra.Command{
 		Use:   "pos-publish",
 		Short: "Submit P85 possession proofs or finalize and publish an election result",
@@ -470,12 +472,36 @@ func validatorPosPublishCmd(base *baseFlags) *cobra.Command {
 			if rid == ([32]byte{}) {
 				return fmt.Errorf("%w: the election has no open result (no election has been reserved)", ErrValidator)
 			}
+			if participate && expectedResult == "" {
+				return fmt.Errorf("%w: --participate requires a certified --result", ErrValidator)
+			}
+			if expectedResult != "" && !strings.EqualFold(common.Hash(rid).Hex(), expectedResult) {
+				return fmt.Errorf("%w: the open result differs from expected %s", ErrValidator, expectedResult)
+			}
 			members, err := ch.vr.FrozenMembers(ctx, election, rid)
 			if err != nil {
 				return err
 			}
 			if ownProof {
 				return publishOwnPosProof(ctx, w, v, keys, ch, s, election, rid, members, f.DryRun)
+			}
+			if participate {
+				if memberID == 0 {
+					memberID, _, err = findID(ctx, v, ch, s.From())
+					if err != nil {
+						return err
+					}
+				}
+				for _, member := range members {
+					if member.Id == memberID {
+						if err := submitMemberProof(ctx, w, keys, ch, s, election, rid, member, f.DryRun); err != nil {
+							return err
+						}
+						break
+					}
+				}
+				return publishReadyResult(ctx, w, posPublishRun{Election: election, Registry: ch.vr.Registry,
+					Rid: rid, Members: members, Chain: posPublishReader{ch, election}, Sender: s, DryRun: f.DryRun})
 			}
 			return runPosPublish(ctx, w, posPublishRun{Election: election, Registry: ch.vr.Registry, Rid: rid, Members: members, Chain: posPublishReader{ch, election},
 				Sender: s, DryRun: f.DryRun, Pops: func(ctx context.Context) ([]vrclient.PoPInput, error) {
@@ -548,18 +574,21 @@ func validatorPosPublishCmd(base *baseFlags) *cobra.Command {
 	}
 	f.add(cmd)
 	cmd.Flags().BoolVar(&ownProof, "own-proof", false, "submit only the configured validator's authority-held proof; leave finalization to a relayer")
+	cmd.Flags().BoolVar(&participate, "participate", false, "submit only this node's own proof and permissionlessly publish when every proof is recorded")
+	cmd.Flags().Uint64Var(&memberID, "proof-member", 0, "the local authority's member ID for --participate, when the gas payer is separate")
+	cmd.Flags().StringVar(&expectedResult, "result", "", "restrict this call to the exact open result id")
 	cmd.Flags().StringArrayVar(&authArgs, "evm-authority", nil, "id=socket,credential,nodeInfo of the signing authority that holds a member's EVM key (repeat per member; instead of --evm-keys)")
 	cmd.Flags().StringArrayVar(&keyArgs, "evm-keys", nil, "id=path of a member's EVM shard node key file (repeat per member)")
 	cmd.MarkFlagsMutuallyExclusive("own-proof", "evm-authority")
 	cmd.MarkFlagsMutuallyExclusive("own-proof", "evm-keys")
+	cmd.MarkFlagsMutuallyExclusive("participate", "own-proof")
+	cmd.MarkFlagsMutuallyExclusive("participate", "evm-authority")
+	cmd.MarkFlagsMutuallyExclusive("participate", "evm-keys")
 	return cmd
 }
 
 func publishOwnPosProof(ctx context.Context, w io.Writer, v *loadedValidator, keys *validatorKeys, ch *validatorChain, sender vrclient.Sender,
 	election common.Address, result [32]byte, members []vrclient.FrozenMember, dryRun bool) error {
-	if keys.EVMAuth == nil {
-		return fmt.Errorf("%w: --own-proof requires the configured signing authority", ErrValidator)
-	}
 	id, found, err := findID(ctx, v, ch, sender.From())
 	if err != nil {
 		return err
@@ -571,22 +600,44 @@ func publishOwnPosProof(ctx context.Context, w io.Writer, v *loadedValidator, ke
 		if member.Id != id {
 			continue
 		}
-		record, err := ch.vr.Result(ctx, election, result)
-		if err != nil {
-			return err
-		}
-		proof, err := authorityPosProof(ctx, ch, election, result, record, member, keys.EVMAuth)
-		if err != nil {
-			return err
-		}
-		data, err := vrclient.PosCalldata(vrclient.PosPublishABI, "submitAssignmentPoPs", result, []vrclient.PoPInput{proof})
-		if err != nil {
-			return err
-		}
-		return runSteps(ctx, w, sender, dryRun, []step{{what: fmt.Sprintf("submit identity %d's possession proof for result %x", id, result),
-			tx: vrclient.Tx{To: election, Data: data}}}, nil)
+		return submitMemberProof(ctx, w, keys, ch, sender, election, result, member, dryRun)
 	}
 	return fmt.Errorf("%w: identity %d is not a frozen member of result %x", ErrValidator, id, result)
+}
+
+func submitMemberProof(ctx context.Context, w io.Writer, keys *validatorKeys, ch *validatorChain, sender vrclient.Sender,
+	election common.Address, result [32]byte, member vrclient.FrozenMember, dryRun bool) error {
+	recorded := func() (bool, error) {
+		var accepted [32]byte
+		err := ch.vr.CallPos(ctx, election, vrclient.PosPublishABI, "popHash", &accepted, result, member.Id)
+		return accepted != ([32]byte{}), err
+	}
+	if hasProof, err := recorded(); err != nil || hasProof {
+		return err
+	}
+	if keys.EVMAuth == nil {
+		return fmt.Errorf("%w: publishing a member proof requires its configured signing authority", ErrValidator)
+	}
+	record, err := ch.vr.Result(ctx, election, result)
+	if err != nil {
+		return err
+	}
+	proof, err := authorityPosProof(ctx, ch, election, result, record, member, keys.EVMAuth)
+	if err != nil {
+		return err
+	}
+	data, err := vrclient.PosCalldata(vrclient.PosPublishABI, "submitAssignmentPoPs", result, []vrclient.PoPInput{proof})
+	if err != nil {
+		return err
+	}
+	err = runSteps(ctx, w, sender, dryRun, []step{{what: fmt.Sprintf("submit identity %d's possession proof for result %x", member.Id, result),
+		tx: vrclient.Tx{To: election, Data: data}}}, nil)
+	if err != nil {
+		if accepted, checkErr := recorded(); checkErr == nil && accepted {
+			return nil
+		}
+	}
+	return err
 }
 
 func authorityPosProof(ctx context.Context, ch *validatorChain, election common.Address, result [32]byte,
@@ -723,6 +774,27 @@ type posPublishRun struct {
 	Pops               func(ctx context.Context) ([]vrclient.PoPInput, error)
 	Sender             vrclient.Sender
 	DryRun             bool
+}
+
+func publishReadyResult(ctx context.Context, w io.Writer, r posPublishRun) error {
+	view, err := r.Chain.Publication(ctx, r.Rid)
+	if err != nil {
+		return err
+	}
+	if len(r.Members) == 0 || int(view.PopCount) != len(r.Members) || view.Lost {
+		return nil
+	}
+	// No peer credentials are accepted. Publication is safe to repeat or race.
+	r.Pops = func(context.Context) ([]vrclient.PoPInput, error) {
+		return nil, fmt.Errorf("%w: the result no longer has all its frozen proofs", ErrValidator)
+	}
+	err = runPosPublish(ctx, w, r)
+	if err != nil {
+		if out, readErr := r.Chain.Output(ctx, r.Rid); readErr == nil && requireVRPublished(out) == nil {
+			return nil
+		}
+	}
+	return err
 }
 
 // runPosPublish plans from the chain's state, sends the unfinished steps and, after each mined transaction, reads the state again and requires
