@@ -11,3 +11,9 @@ VR_HOOK_BUILD=pos VR_HOOK_MODULE_CODE_HASH="$MODULE_CODE_HASH" \
 ```
 
 The hook fixture drives the real VR runtime with cap-bounded module paths. The matching contracts revision's `PosCompactSixteenTest` exercises the real adapter. For genesis and the live lane, use `vr-hook-pos16.json` as the recorded measurement and pass the independently generated file as `VR_FRESH_MEASUREMENT`. The run uses 15 genesis validators plus one joiner, `VR_POS16=1`, `VR_POS_RECOVERY=1`, `SIGNING=authority` and `VR_UTB=1`.
+
+The Compose ceremony in package CI uses `vr-hook-pos16-independent.json`,
+the independently recorded #1215 rerun from
+`~/evidence/1215/vr-hook-measurement-pos16-fresh.json` on the dev host. The two
+runs produced identical bytes. CI rechecks both against a newly generated
+four-member genesis and the pinned contracts build.

@@ -165,6 +165,9 @@ def validate_vr(generation, ubft, manifest):
     assert tuple(plan['limits'][k] for k in ('nMin', 'nTarget', 'nMax')) == (4, 5, 16)
     assert len(plan['identities']) == manifest['validators'] == 4
     assert plan['pos']['assignmentId'] == manifest['pos']['genesis_assignment']
+    conf = json.loads((net / 'full-shard-conf.json').read_text())
+    evm = manifest['evm_block']
+    assert conf['t2timeout'] == evm['t2_ms'] * 1_000_000
     assert (generation / 'vr-owner-keys/keys.json').stat().st_mode & 0o077 == 0
     compose = json.loads((generation / 'compose.yaml').read_text())
     for i in range(1, 5):
@@ -174,6 +177,9 @@ def validate_vr(generation, ubft, manifest):
         for service in (root, shard):
             entry = service['entrypoint']
             assert entry[entry.index('--rpc-server-address') + 1].startswith('127.')
+        if evm['interval_ms']:
+            entry = shard['entrypoint']
+            assert entry[entry.index('--target-block-interval') + 1] == f"{evm['interval_ms']}ms"
         assert '--vr-deployment' in root['entrypoint'] and '--pos-deployment' not in root['entrypoint']
         assert f'./validator{i}/auth/pop:/pop:ro' in root['volumes']
         assert not any(':/authority' in item for item in root['volumes'])

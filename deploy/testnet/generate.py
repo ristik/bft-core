@@ -682,8 +682,7 @@ def main():
         write(out/'network/network.json',network)
         if not vr_info: flags=[*flags,'--unicity.genesis-commitment='+genesis_commitment(json.loads((home/'genesis.json').read_text()))]
         final=immutable(topology(out,a.validators,{'root':roots,'evm':evms},records['images'],a.captcha_sitekey,flags,max_gas,bool(genesis),a.rpc_bind,**topology_options))
-        if not a.offline_validation:
-            check_authorities_unchanged(boot,final,a.validators)
+        check_authorities_unchanged(boot,final,a.validators)
         write(out/'compose.yaml',final)
         manifest={'offline_validation_only':a.offline_validation,'generation':out.name,'chain_id':a.chain_id,'genesis_hash':'0x'+block,'validators':a.validators,'operator_rpc':{'bind':a.rpc_bind,'root_port':operator_rpc.ROOT_PORT,'shard_port':operator_rpc.SHARD_PORT},
             'faucet_address':next(iter(alloc)), 'artifacts':records,

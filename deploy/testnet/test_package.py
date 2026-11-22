@@ -125,17 +125,6 @@ class BlockInterval(unittest.TestCase):
         got=joiner.joiner_services(four,5,'r4','e4')
         shard=got['shard5']['entrypoint']
         self.assertEqual(shard[shard.index('--target-block-interval')+1],'10000ms')
-    def test_the_generator_derives_the_shard_conf_t2_and_records_both(self):
-        source=(generate.HERE/'generate.py').read_text()
-        main=source.split('def main')[1]
-        self.assertIn("'--t2-timeout',str(t2_for_block_interval(a.block_interval_ms))",main)
-        self.assertIn('block_interval_ms=a.block_interval_ms,',main)
-        self.assertEqual(main.count('**topology_options))'),2,'the boot and the final compose use the same settings')
-        # a nonzero interval with a pinned ubft that lacks the flag is refused before anything is generated, never silently dropped
-        self.assertIn("if a.block_interval_ms and '--target-block-interval' not in subprocess.run([ubft,'shard-node','run','--help']",main)
-        self.assertIn("p.error('the pinned ubft has no shard-node run --target-block-interval",main)
-        self.assertIn("'evm_block':{'interval_ms':a.block_interval_ms,'t2_ms':t2_for_block_interval(a.block_interval_ms)}",main)
-
 class B1Layout(unittest.TestCase):
     def test_the_package_is_on_the_single_b1_layout(self):
         source=(generate.HERE/'generate.py').read_text()
@@ -339,10 +328,6 @@ class UtbProfile(unittest.TestCase):
             change(final['services']['authority3'])
             with self.assertRaisesRegex(RuntimeError,r"authority3 .*\b"+field+r"\b",msg=field):
                 generate.check_authorities_unchanged(self.boot(4,self.PIN),final,4)
-        source=(Path(generate.__file__)).read_text()
-        self.assertIn('topology_options=dict(utb=utb_pin', source)
-        self.assertRegex(source,r"boot=immutable\(topology\([^\n]*\*\*topology_options",'the boot Compose uses the pinned UTB settings')
-        self.assertIn('check_authorities_unchanged(boot,final,a.validators)',source)
     def test_the_rehearsal_reset_keeps_the_selected_utb_profile_and_variant(self):
         import rehearse
         class R: pass
@@ -3209,6 +3194,47 @@ class StagingKnobs(unittest.TestCase):
         selector[0]['toBlock'] = 'latest'
         with self.assertRaises(ValueError):
             handler.log_filter(selector)
+
+    def test_role_status_can_check_sync_through_the_gateway(self):
+        self.assertIn('eth_syncing', gateway.PUBLIC)
+
+    def test_operator_registration_lookup_pages_a_pinned_head(self):
+        import validator_rpc
+        logs = {'method': 'eth_getLogs', 'id': 42, 'params': [
+            {'address': '0x' + '12' * 20, 'fromBlock': '0x0', 'toBlock': 'latest'}]}
+        forward = unittest.mock.Mock(side_effect=[(200, {'result': '0x2710'}), (200, {'result': [1]}), (200, {'result': [2]})])
+        self.assertEqual(validator_rpc.operator_request(logs, forward), (200, {'jsonrpc': '2.0', 'id': 42, 'result': [1, 2]}))
+        filters = [entry.args[0]['params'][0] for entry in forward.call_args_list[1:]]
+        self.assertEqual([(f['fromBlock'], f['toBlock']) for f in filters], [('0x0', '0x270f'), ('0x2710', '0x2710')])
+
+    def test_vr_release_compares_the_copied_genesis_and_rejects_symlinks(self):
+        import hashlib
+        import vr_release
+        sha = lambda value: hashlib.sha256(value).hexdigest()
+        with tempfile.TemporaryDirectory() as tmp:
+            net = Path(tmp) / 'network'
+            net.mkdir()
+            pin = '0x' + '31' * 32
+            files = {name: b'{}' for name in vr_release.NETWORK_FILES}
+            files['utb-genesis.id'] = (pin + '\n').encode()
+            files['utb-genesis.cbor'] = b'genesis record'
+            for name, data in files.items():
+                (net / name).write_bytes(data)
+            manifest = {'utb': {'genesis_id': pin, 'genesis_sha256': sha(files['utb-genesis.cbor'])},
+                        'config_sha256': {name: sha(data) for name, data in files.items() if name.endswith('.json')}}
+            good = Path(tmp) / 'verified'
+            good.mkdir()
+            vr_release.stage_network_files(net, good, manifest)
+            for name in ('utb-genesis.id', 'utb-genesis.cbor', 'trust-base.json'):
+                with self.subTest(name=name), tempfile.TemporaryDirectory() as out:
+                    (net / name).write_bytes(b'stale')
+                    with self.assertRaisesRegex(ValueError, name):
+                        vr_release.stage_network_files(net, Path(out), manifest)
+                    (net / name).write_bytes(files[name])
+            (net / 'genesis.json').unlink()
+            (net / 'genesis.json').symlink_to(good / 'genesis.json')
+            with tempfile.TemporaryDirectory() as out, self.assertRaises(OSError):
+                vr_release.stage_network_files(net, Path(out), manifest)
     def test_subnets_are_options(self):
         cfg=self.topo()
         self.assertEqual(cfg['networks']['faucet']['ipam']['config'],[{'subnet':'172.30.88.0/24','gateway':'172.30.88.1'}])
@@ -3272,10 +3298,18 @@ class StagingKnobs(unittest.TestCase):
             digest = hashlib.sha256(b'{}').hexdigest()
             sums = source / 'SHA256SUMS'
             sums.write_text(f'{digest}  seed/manifest.json\n')
-            public_routes.stage_release(source, base / 'staged')
+            previous = os.umask(0o077)
+            try:
+                public_routes.stage_release(source, base / 'staged')
+            finally:
+                os.umask(previous)
             self.assertEqual((base / 'staged/seed/manifest.json').read_bytes(), b'{}')
             self.assertEqual((base / 'staged/SHA256SUMS').read_text(), sums.read_text())
             self.assertFalse((base / 'staged/private').exists())
+            for directory in ('staged', 'staged/seed'):
+                self.assertEqual((base / directory).stat().st_mode & 0o777, 0o755)
+            for file in ('staged/SHA256SUMS', 'staged/seed/manifest.json'):
+                self.assertEqual((base / file).stat().st_mode & 0o777, 0o644)
             (source / 'link').symlink_to('seed', target_is_directory=True)
             (source / 'file-link').symlink_to('seed/manifest.json')
             for path in ('../source/seed/manifest.json', 'link/manifest.json', 'file-link', 'seed', 'private'):

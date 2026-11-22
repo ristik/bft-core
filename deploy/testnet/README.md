@@ -281,6 +281,15 @@ the first certified blocks. It exports the release manifests, binaries, peer
 addresses and independently checked `RELEASE/seed/`. Supply `--wallet-dir`
 with the deployment's public NB2 files for the final export. The peer
 addresses are for operators on the dev host's private validator network.
+Export the bootstrap seed while the archive checkpoint is in root epoch one.
+Keep the verified `RELEASE/seed/` and pass it as `--bootstrap-seed` on later
+releases. A new successor-epoch seed needs the verified activation bundles
+described in [Sync from a seed](../../docs/operations/sync-seed.md).
+
+For the on-host operator start `python3 deploy/testnet/validator_rpc.py` on
+loopback and use `http://127.0.0.1:18485` as the operator RPC. The wrapper
+resolves and pages registration log requests and uses the normal gateway for
+transaction fanout. Use `--gateway-port 9545` on the slot-1 rehearsal.
 
 For the join rehearsal use a separate operator home and the
 [validator handbook](../../docs/operations/validator-handbook.md). When the

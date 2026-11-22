@@ -190,6 +190,9 @@ def stage_release(source, destination):
         if not names:
             raise ValueError('empty SHA256SUMS')
         (stage / 'SHA256SUMS').write_bytes(manifest)
+        (stage / 'SHA256SUMS').chmod(0o644)
+        for directory, _, _ in os.walk(stage):
+            Path(directory).chmod(0o755)
         stage.rename(destination)
 
 
