@@ -97,13 +97,14 @@ JSON
 }
 
 vrp_publish() {
+  local evidence_log=${1:-pos-publish.log}
   vrp_relay_cfg || return 1
   vrb_wait 1500 "the hook's election reserves a result from stake (cadence passed)" vrp_open_result || return 1
   local rid; rid=$(cast call --rpc-url "$vrb_rpc" "$(vrp_election)" 'openResult()(bytes32)')
   vrb_log "the election reserved $rid; VR's open output is $(vrb_open_output)"
   local -a holders=(); local line
   while IFS= read -r line; do [ -z "$line" ] || holders+=("$line"); done < <(vrp_evm_key_args)
-  build/ubft validator pos-publish --validator-config "$vrj_cfg/validator.json" ${holders[@]+"${holders[@]}"} 2>&1 | tee "$VR_EVIDENCE/pos-publish.log" || { vrb_log "FAIL: pos-publish"; return 1; }
+  build/ubft validator pos-publish --validator-config "$vrj_cfg/validator.json" ${holders[@]+"${holders[@]}"} 2>&1 | tee "$VR_EVIDENCE/$evidence_log" || { vrb_log "FAIL: pos-publish"; return 1; }
   vrb_log "PASS: every possession proof submitted, the candidate finalized and the result published in VR"
 }
 
@@ -302,17 +303,17 @@ vrp_recovery() {
   # (`validator exit`); the next election reserves J' = the other four, published and handed off by the roots
   [ "${VR_JOINER:-0}" = 1 ] || { vrb_log "FAIL: the PoS recovery needs the joiner (VR_JOINER=1): a retirement is its committee change"; return 1; }
   build/ubft validator exit --validator-config "$vrj_cfg/validator.json" 2>&1 | tee "$VR_EVIDENCE/exit.log" || { vrb_log "FAIL: validator exit"; return 1; }
-  vrb_wait 1500 "the election reserves J' (the four) after the retirement" vrp_new_open_result || { vrp_election_diag; return 1; }
+  vrb_wait 1500 "the election reserves the successor excluding the retiring joiner" vrp_new_open_result || { vrp_election_diag; return 1; }
   rid2=$(cast call --rpc-url "$vrb_rpc" "$(vrp_election)" 'openResult()(bytes32)')
   vrb_result=$rid2
-  vrp_publish || return 1
+  vrp_publish recovery-pos-publish.log || return 1
   vrb_wait 900 "the roots installed J' (root epoch 3)" vrp_root_epoch_is 3 || return 1
   vrb_log "J' = $rid2 is installed at the roots; its VR output state $(vrp_result_state "$rid2") (2 = Published)"
   # 2. J' stalls: two of its four lose their EVM services, so its EVM quorum (3 of 4) cannot form
   local before after n stop
   n=$(cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'committeeIds()(uint64[])' | tr -cd ',' | wc -c); n=$((n + 1))   # K, the five
   local nj=$((n - 1)); stop=$((nj - nj / 2))
-  vrb_log "K has $n members, J' has $nj: the EVM services of the last $stop of J' (identities $(seq -s ' ' $((nj - stop + 1)) "$nj")) stop (J' keeps $((nj - stop)), the EVM quorum is $((nj / 2 + 1)))"
+  vrb_log "K has $n members, J' has $nj: the EVM services of the last $stop of J' (identities $(seq -s ' ' $((nj - stop + 1)) "$nj")) stop (J' keeps $((nj - stop)), unit-weight quorum is $((2 * nj / 3 + 1)))"
   for i in $(seq $((nj - stop + 1)) "$nj"); do stop_one_evm_validator "$i" 2>/dev/null || true; done
   before=$(vrp_eth_block); sleep 45; after=$(vrp_eth_block)
   [ "$after" -le "$((before + 1))" ] || { vrb_log "FAIL: J' certified blocks ($before -> $after) without its EVM quorum"; return 1; }
