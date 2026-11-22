@@ -609,7 +609,7 @@ async function runQualificationCustody() {
   const { GatewayAggregator } = await import('./wallet/core.js');
   const walletAgg = new GatewayAggregator(aggregator);
   const startTime = Date.now();
-  const loadSegments = resumeStage === 'load' ? 2 : option('NB2_LOAD_SEGMENTS', 2, 1024);
+  const loadSegments = resumeStage === 'load' ? 2 : option('NB2_LOAD_SEGMENTS', 2, 2, 1024);
   const skew = process.env.NB2_LOAD_SKEW === '1';
   const n = Number(c.K) * loadSegments;
   const amount = BigInt(n + 1);
