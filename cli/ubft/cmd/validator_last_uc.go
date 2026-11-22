@@ -12,6 +12,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/spf13/cobra"
+	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -99,7 +100,7 @@ func findLastSignedUC(ctx context.Context, rpc ethExecution, root, signer string
 		if err != nil {
 			return nil, err
 		}
-		if err := uc.Verify(trust, crypto.SHA256, conf.PartitionID, conf.ShardID, h); err != nil {
+		if err := uc.Verify(quorumweight.Checked(trust), crypto.SHA256, conf.PartitionID, conf.ShardID, h); err != nil {
 			return nil, fmt.Errorf("verify UC for %s: %w", child.Parent, err)
 		}
 		if !sealSignedBy(uc.UnicitySeal, trust, signer) {
