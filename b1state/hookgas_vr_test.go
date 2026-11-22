@@ -240,7 +240,7 @@ func TestThePoSEnvelopeIsWhatTheSystemGasAdds(t *testing.T) {
 // The cap tuple is bound to the build whose code enforces it: the PoS-capable runtime carries the PoS caps and only them, any other runtime
 // keeps the PoA mapping (the PoA build and its pins are unchanged).
 func TestTheCapTupleIsBoundToTheVRBuild(t *testing.T) {
-	require.Len(t, VRBuilds, 2)
+	require.Len(t, VRBuilds, 3)
 	pos, ok := VRBuildFor(posRegistryCode)
 	require.True(t, ok)
 	require.Equal(t, VRCapsPos, pos.Caps)
@@ -277,6 +277,11 @@ func TestTheCapTupleIsBoundToTheVRBuild(t *testing.T) {
 	require.ErrorIs(t, CheckVRBuildRoles(poa.RegistryCodeHash, poa.GovernanceFacet, poa.RepairFacet, poa.RecordsFacet, true), ErrVRHookMeasurement, "a PoS plan on the PoA build")
 	require.ErrorIs(t, CheckVRBuildRoles([32]byte{0x51}, poa.GovernanceFacet, poa.RepairFacet, poa.RecordsFacet, false), ErrVRHookMeasurement)
 	require.ErrorIs(t, CheckVRBuildRoles(pos.RegistryCodeHash, poa.GovernanceFacet, pos.RepairFacet, pos.RecordsFacet, true), ErrVRHookMeasurement, "the PoA governance facet under the PoS core")
+	large, ok := VRBuildFor(VRBuildPos16.RegistryCodeHash)
+	require.True(t, ok)
+	require.Equal(t, VRCapsPos16, large.Caps)
+	require.NoError(t, CheckVRBuildRoles(large.RegistryCodeHash, large.GovernanceFacet, large.RepairFacet, large.RecordsFacet, true))
+	require.ErrorIs(t, CheckVRBuildRoles(large.RegistryCodeHash, pos.GovernanceFacet, large.RepairFacet, large.RecordsFacet, true), ErrVRHookMeasurement)
 }
 
 // The PoA pins stay what the reviewed derivation gave (byte for byte): the PoS build adds a mapping, it changes none.

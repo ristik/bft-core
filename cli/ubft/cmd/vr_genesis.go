@@ -291,7 +291,8 @@ func vrPlan(in vrPlanInput) (vrGenesisInput, []evmassign.Identity, error) {
 	if v, set := in.conf.PartitionParams[evmassign.CouplingParam]; set && v != "true" {
 		return out, nil, fmt.Errorf("%w: the EVM shard configuration refuses coupled changes (%s=%s)", ErrVRGenesis, evmassign.CouplingParam, v)
 	}
-	if _, _, ok, err := vrstate.PinsFromPDR(in.conf); err != nil || !ok {
+	_, registryHash, pinned, err := vrstate.PinsFromPDR(in.conf)
+	if err != nil || !pinned {
 		return out, nil, fmt.Errorf("%w: the EVM shard configuration does not pin VR (validator_registry, validator_registry_code_hash): %v", ErrVRGenesis, err)
 	}
 	chainID, ok := zkverifier.ParseChainIDFromParams(in.conf.PartitionParams)
@@ -326,7 +327,13 @@ func vrPlan(in vrPlanInput) (vrGenesisInput, []evmassign.Identity, error) {
 		MaxBatch: b1state.HookMaxRecords}
 	if in.pos != nil {
 		l.MaxBatch = in.profile.HRecords // the PoS-capable VR admits exactly the profile's H (a PoA generation keeps custody's ceiling)
-		l.VMax = vrPosMaxPool            // the PoS prototype's measured index ceiling (script/VRPosGenesis.s.sol MAX_POOL)
+		l.VMax = vrPosLegacyPool
+		if l.NMax > 5 {
+			if registryHash != b1state.VRBuildPos16.RegistryCodeHash {
+				return out, nil, fmt.Errorf("%w: a PoS committee above five needs the measured sixteen-seat VR build", ErrVRGenesis)
+			}
+			l.VMax = vrPosMaxPool
+		}
 		if l.NMax > vrPosMaxCommittee {
 			return out, nil, fmt.Errorf("%w: a PoS generation's nMax is at most %d (the contracts' measured limit), got %d", ErrVRGenesis, vrPosMaxCommittee, l.NMax)
 		}
@@ -484,22 +491,25 @@ type vrDeploymentFile struct {
 	IdentityCount           uint64 `json:"identityCount"`
 	Members                 uint64 `json:"members"`
 	// the PoS prototype's P85 stack (script/vr-pos-genesis.sh); Composer* are absent there
-	Pos                bool   `json:"pos,omitempty"`
-	Custody            string `json:"custody,omitempty"`
-	CustodyCodeHash    string `json:"custodyCodeHash,omitempty"`
-	Election           string `json:"election,omitempty"`
-	ElectionCodeHash   string `json:"electionCodeHash,omitempty"`
-	Evidence           string `json:"evidence,omitempty"`
-	Selection          string `json:"selection,omitempty"`
-	Reader             string `json:"reader,omitempty"`
-	Policy             string `json:"policy,omitempty"`
-	PolicyCodeHash     string `json:"policyCodeHash,omitempty"`
-	RewardPool         string `json:"rewardPool,omitempty"`
-	RewardPoolCodeHash string `json:"rewardPoolCodeHash,omitempty"`
-	GenesisImpl        string `json:"genesisImpl,omitempty"`
-	Factory            string `json:"factory,omitempty"`
-	ManifestHash       string `json:"manifestHash,omitempty"`
-	PosAssignmentID    string `json:"posAssignmentId,omitempty"`
+	Pos                         bool   `json:"pos,omitempty"`
+	Custody                     string `json:"custody,omitempty"`
+	CustodyCodeHash             string `json:"custodyCodeHash,omitempty"`
+	Election                    string `json:"election,omitempty"`
+	ElectionCodeHash            string `json:"electionCodeHash,omitempty"`
+	ElectionPublication         string `json:"electionPublication,omitempty"`
+	ElectionPublicationCodeHash string `json:"electionPublicationCodeHash,omitempty"`
+	Evidence                    string `json:"evidence,omitempty"`
+	Selection                   string `json:"selection,omitempty"`
+	Reader                      string `json:"reader,omitempty"`
+	Policy                      string `json:"policy,omitempty"`
+	PolicyCodeHash              string `json:"policyCodeHash,omitempty"`
+	RewardPool                  string `json:"rewardPool,omitempty"`
+	RewardPoolCodeHash          string `json:"rewardPoolCodeHash,omitempty"`
+	GenesisImpl                 string `json:"genesisImpl,omitempty"`
+	GenesisImplCodeHash         string `json:"genesisImplCodeHash,omitempty"`
+	Factory                     string `json:"factory,omitempty"`
+	ManifestHash                string `json:"manifestHash,omitempty"`
+	PosAssignmentID             string `json:"posAssignmentId,omitempty"`
 }
 
 func (d vrDeploymentFile) accounts() map[string][2]string {
@@ -948,6 +958,12 @@ func vrVerify(v vrVerifyInput) (vrRootDeployment, error) {
 		hh := hashes[a.role]
 		if addr != vrGenesisAddress(a.low) || !strings.EqualFold(rec[1], lowerHex(hh[:])) {
 			return fail("the deployment report's %s is not the allocated account", a.role)
+		}
+	}
+	if in.Pos != nil && (in.Limits.NMax > 5 || in.Limits.VMax > vrPosLegacyPool) {
+		if hashes["registry"] != b1state.VRBuildPos16.RegistryCodeHash || in.Limits.NMax > vrPosMaxCommittee ||
+			in.Limits.VMax != vrPosMaxPool || in.Limits.LMax != 1 || in.Limits.RMax != 4 {
+			return fail("the wide PoS generation needs the measured sixteen-seat VR build, V=20, one lifetime lot and rMax=4")
 		}
 	}
 	if err := b1state.CheckVRHookGasFresh(v.profile, hashes["registry"], hashes["module"], *v.profileFile.VRHookMeasurement, v.fresh); err != nil {

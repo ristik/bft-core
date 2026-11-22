@@ -5,6 +5,7 @@ package cmd
 // the plan: its accounts, code hashes, balances, and the custody slots that tie it to VR and to the roots' genesis identities.
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"math/big"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
+	"github.com/unicitynetwork/bft-core/b1state"
 	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/vrschema"
 )
@@ -23,11 +25,18 @@ var (
 	vrPosGasBounds = [8]uint64{5_000_000, 1_500_000, 2_500_000, 10_000, 10_000, 10_000, 10_000, 10_000}
 )
 
-// The prototype's measured deployment limit (contracts script/VRPosGenesis.s.sol, test/vr/pos/PosLimit.t.sol): a committee of at most 6 from an
-// index of at most 8 identities of one lot each.
+// Measured PoS deployment limits for one lifetime lot per identity generation.
 const (
-	vrPosMaxCommittee = 5
-	vrPosMaxPool      = 8
+	vrPosMaxCommittee = 16
+	vrPosMaxPool      = 20
+	vrPosLegacyPool   = 8
+)
+
+// Reviewed VRPosGenesis custody runtime and its GENESIS_IMPL and GENESIS_IMPL_CODE_HASH immutables.
+var (
+	vrPosCustodyRuntimeHash   = common.HexToHash("0x7ef8f1ca7090f9d51c58e956b424e331456ffeab1786eb64a5e03d199c2db255")
+	vrPosCustodyWriterAddress = common.HexToAddress("0xcD220EA34A9d650f58317411A2be2733e4F0c46f")
+	vrPosCustodyWriterHash    = common.HexToHash("0xc84515c10d8de1be6f86bffd2efc164b198cf9efbca3aff74b467b38bcc19432")
 )
 
 // custody storage appended by VT-04 (docs/p85/custody-storage-layout.txt): deploymentDomain and exposureMemberDigest.
@@ -55,8 +64,12 @@ func vrPosAccounts(in vrGenesisInput, d vrDeploymentFile) (map[common.Address]st
 	if !d.Pos || d.PosAssignmentID == "" {
 		return nil, fmt.Errorf("%w: the input is a PoS plan but the deployment report is not a PoS deployment", ErrVRGenesis)
 	}
-	for role, s := range map[string]string{"factory": d.Factory, "custody": d.Custody, "genesisImpl": d.GenesisImpl, "election": d.Election,
-		"evidence": d.Evidence, "selection": d.Selection, "reader": d.Reader, "policy": d.Policy, "rewardPool": d.RewardPool} {
+	roles := map[string]string{"factory": d.Factory, "custody": d.Custody, "genesisImpl": d.GenesisImpl, "election": d.Election,
+		"evidence": d.Evidence, "selection": d.Selection, "reader": d.Reader, "policy": d.Policy, "rewardPool": d.RewardPool}
+	if d.ElectionPublication != "" || in.Limits.VMax > vrPosLegacyPool {
+		roles["electionPublication"] = d.ElectionPublication
+	}
+	for role, s := range roles {
 		a, err := vrAddress("PoS "+role, s)
 		if err != nil {
 			return nil, err
@@ -96,9 +109,13 @@ func vrPosExpectedState(in vrGenesisInput, d vrDeploymentFile, identities []evma
 	}
 	set(V(16), vrPosTag)
 	set(V(17), packed([3]uint64{0, 4, 1}, [3]uint64{4, 8, in.Pos.CadenceRounds}))
+	gasBounds := vrPosGasBounds
+	if d.ElectionPublication != "" {
+		gasBounds[0] = 7_000_000
+	}
 	for half := 0; half < 2; half++ {
-		set(V(18+uint64(half)), packed([3]uint64{0, 8, vrPosGasBounds[4*half]}, [3]uint64{8, 8, vrPosGasBounds[4*half+1]},
-			[3]uint64{16, 8, vrPosGasBounds[4*half+2]}, [3]uint64{24, 8, vrPosGasBounds[4*half+3]}))
+		set(V(18+uint64(half)), packed([3]uint64{0, 8, gasBounds[4*half]}, [3]uint64{8, 8, gasBounds[4*half+1]},
+			[3]uint64{16, 8, gasBounds[4*half+2]}, [3]uint64{24, 8, gasBounds[4*half+3]}))
 	}
 	cw := vrschema.AddrWord(custody)
 	set(V(20), cw)
@@ -124,6 +141,25 @@ func vrPosExpectedState(in vrGenesisInput, d vrDeploymentFile, identities []evma
 func vrCheckPosStack(in vrGenesisInput, d vrDeploymentFile, identities []evmassign.Identity, alloc map[common.Address]vrAllocAccount, posAccts map[common.Address]string) error {
 	fail := func(f string, a ...any) error { return fmt.Errorf("%w: "+f, append([]any{ErrVRGenesis}, a...)...) }
 	hashes := map[string]string{"custody": d.CustodyCodeHash, "election": d.ElectionCodeHash, "policy": d.PolicyCodeHash, "rewardPool": d.RewardPoolCodeHash}
+	if d.ElectionPublication != "" {
+		hashes["electionPublication"] = d.ElectionPublicationCodeHash
+		election := common.HexToAddress(d.Election)
+		impl := vrschema.AddrWord(common.HexToAddress(d.ElectionPublication))
+		hash, err := vrHex("publication implementation code hash", d.ElectionPublicationCodeHash, 32)
+		if err != nil {
+			return err
+		}
+		code := common.FromHex(alloc[election].Code)
+		if !bytes.Contains(code, impl[:]) || !bytes.Contains(code, hash) {
+			return fail("the PoS election does not pin its publication implementation and code")
+		}
+	}
+	if strings.EqualFold(d.RegistryCodeHash, lowerHex(b1state.VRBuildPos16.RegistryCodeHash[:])) ||
+		d.ElectionPublication != "" || in.Limits.VMax > vrPosLegacyPool || d.GenesisImplCodeHash != "" {
+		if err := vrCheckPosCustodyImplementation(d, alloc); err != nil {
+			return err
+		}
+	}
 	var custody common.Address
 	for a, role := range posAccts {
 		acct, ok := alloc[a]
@@ -189,9 +225,36 @@ func vrCheckPosStack(in vrGenesisInput, d vrDeploymentFile, identities []evmassi
 	for i, id := range identities {
 		sid := uint64(i + 1)
 		eid := vrschema.PoaExposureDigest(vrschema.Word(network), chainWord, vrschema.ValidatorRegistry, vrschema.Word(assignment), sid)
-		if got := slots[vrschema.MapSlot(eid, vrschema.U64(vrCustodyMemberDigestSlot))]; !strings.EqualFold(lowerHex(got[:]), lowerHex(id.ExposureDigest)) {
+		got := slots[vrschema.MapSlot(eid, vrschema.U64(vrCustodyMemberDigestSlot))]
+		if in.Limits.VMax > vrPosLegacyPool {
+			// vrCheckPosCustody authenticated the ordered row and its binding. The compact getter derives the genesis digest.
+			got = vrschema.PoaExposureDigest(vrschema.Word(network), chainWord, vrschema.ValidatorRegistry, vrschema.GenesisResult, sid)
+		}
+		if !strings.EqualFold(lowerHex(got[:]), lowerHex(id.ExposureDigest)) {
 			return fail("custody's member digest of genesis identity %d is %x, the roots' genesis identity carries %x", sid, got, id.ExposureDigest)
 		}
+	}
+	return nil
+}
+
+// The custody runtime checks this immutable address and code hash before delegating.
+func vrCheckPosCustodyImplementation(d vrDeploymentFile, alloc map[common.Address]vrAllocAccount) error {
+	if ethcrypto.Keccak256Hash(common.FromHex(alloc[common.HexToAddress(d.Custody)].Code)) != vrPosCustodyRuntimeHash {
+		return fmt.Errorf("%w: the PoS custody runtime is not the reviewed build with an authenticated writer", ErrVRGenesis)
+	}
+	impl, err := vrAddress("PoS custody implementation", d.GenesisImpl)
+	if err != nil {
+		return err
+	}
+	digest, err := vrHex("PoS custody implementation code hash", d.GenesisImplCodeHash, 32)
+	if err != nil {
+		return err
+	}
+	if impl != vrPosCustodyWriterAddress || [32]byte(digest) != vrPosCustodyWriterHash {
+		return fmt.Errorf("%w: reported PoS custody implementation address and runtime hash do not match the reviewed pair", ErrVRGenesis)
+	}
+	if ethcrypto.Keccak256Hash(common.FromHex(alloc[impl].Code)) != vrPosCustodyWriterHash {
+		return fmt.Errorf("%w: allocated PoS custody implementation does not match its runtime hash", ErrVRGenesis)
 	}
 	return nil
 }
@@ -383,6 +446,11 @@ func vrPosCustodyExpected(in vrGenesisInput, d vrDeploymentFile, network []byte,
 	e.set(U(13), U(n))
 	e.set(U(14), asg)
 	total := new(big.Int)
+	compact := in.Limits.VMax > vrPosLegacyPool
+	if compact {
+		e.set(U(41), U(n))                        // _nextBinding
+		e.set(vrschema.MapSlot(asg, U(44)), U(n)) // _seats[genesis]
+	}
 	// positions, keys, lots, exposures
 	expoIDs := make([]vrschema.Word, 0, n)
 	expoDigest, keyDigest := vrCustodyExpoDigestDom, vrCustodyKeyDigestDom
@@ -428,27 +496,44 @@ func vrPosCustodyExpected(in vrGenesisInput, d vrDeploymentFile, network []byte,
 		// the exposure at the genesis assignment, in the VR domain
 		eid := vrschema.PoaExposureDigest(net, chain, vr, asg, sid)
 		expoIDs = append(expoIDs, eid)
-		ex := vrschema.MapSlot(eid, U(33))
-		e.set(ex, asg)
-		e.set(vrschema.SlotAdd(ex, 1), packed([3]uint64{0, 8, sid}, [3]uint64{8, 8, 1}, [3]uint64{16, 8, id.RawWeight}, [3]uint64{24, 8, id.RawWeight}))
-		e.set(vrschema.SlotAdd(ex, 2), rootHash)
-		e.set(vrschema.SlotAdd(ex, 3), evmHash)
-		w4 := vrschema.Word{}
-		addrAt(&w4, 0, payee)
-		e.set(vrschema.SlotAdd(ex, 4), w4)
-		e.set(vrschema.SlotAdd(ex, 5), U(1))
-		e.set(vrschema.BytesDataSlot(vrschema.SlotAdd(ex, 5)), U(sid))
-		e.set(vrschema.MapSlot(U(sid), vrschema.MapSlot(eid, U(34))), U(1)) // _exposureHasLot[eid][lot]
+		if compact {
+			binding := vrschema.MapSlot(U(sid), U(42))
+			e.set(binding, packed([3]uint64{0, 8, sid}, [3]uint64{8, 8, 1}))
+			e.set(vrschema.SlotAdd(binding, 1), vrschema.Keccak([]byte(id.RootNodeID)))
+			e.set(vrschema.SlotAdd(binding, 2), rootHash)
+			e.set(vrschema.SlotAdd(binding, 3), vrschema.Keccak([]byte(id.EVMNodeID)))
+			e.set(vrschema.SlotAdd(binding, 4), evmHash)
+			e.set(vrschema.SlotAdd(binding, 5), A(payee))
+			e.set(vrschema.MapSlot(U(1), vrschema.MapSlot(U(sid), U(43))), U(sid))
+			row := vrschema.SlotAdd(vrschema.BytesDataSlot(vrschema.MapSlot(asg, U(44))), uint64(i))
+			e.set(row, packed([3]uint64{0, 8, sid}, [3]uint64{8, 8, sid}, [3]uint64{16, 8, id.RawWeight}, [3]uint64{24, 8, id.RawWeight}))
+		} else {
+			ex := vrschema.MapSlot(eid, U(33))
+			e.set(ex, asg)
+			e.set(vrschema.SlotAdd(ex, 1), packed([3]uint64{0, 8, sid}, [3]uint64{8, 8, 1}, [3]uint64{16, 8, id.RawWeight}, [3]uint64{24, 8, id.RawWeight}))
+			e.set(vrschema.SlotAdd(ex, 2), rootHash)
+			e.set(vrschema.SlotAdd(ex, 3), evmHash)
+			w4 := vrschema.Word{}
+			addrAt(&w4, 0, payee)
+			e.set(vrschema.SlotAdd(ex, 4), w4)
+			e.set(vrschema.SlotAdd(ex, 5), U(1))
+			e.set(vrschema.BytesDataSlot(vrschema.SlotAdd(ex, 5)), U(sid))
+			e.set(vrschema.MapSlot(U(sid), vrschema.MapSlot(eid, U(34))), U(1)) // _exposureHasLot[eid][lot]
+		}
 		// the exposure chain of (id, 1) and the holder facts
 		chainWord := vrschema.Keccak(wb(vrCustodyChainDomain), zeroWordBytes(), wb(eid))
-		e.set(vrschema.MapSlot(U(1), vrschema.MapSlot(U(sid), U(29))), chainWord)
-		e.set(vrschema.MapSlot(U(1), vrschema.MapSlot(U(sid), U(31))), U(1))
+		if !compact {
+			e.set(vrschema.MapSlot(U(1), vrschema.MapSlot(U(sid), U(29))), chainWord)
+			e.set(vrschema.MapSlot(U(1), vrschema.MapSlot(U(sid), U(31))), U(1))
+		}
 		f := vrschema.MapSlot(U(1), vrschema.MapSlot(U(sid), vrschema.SlotAdd(nsB, 1)))
 		e.set(f, packed([3]uint64{1, 4, 1}, [3]uint64{5, 4, 1}))
 		e.set(vrschema.SlotAdd(f, 1), chainWord)
 		// the member digest of the VR domain: VR's seat digest over GENESIS_RESULT
 		member := vrschema.PoaExposureDigest(net, chain, vr, vrschema.GenesisResult, sid)
-		e.set(vrschema.MapSlot(eid, U(40)), member)
+		if !compact {
+			e.set(vrschema.MapSlot(eid, U(40)), member)
+		}
 		expoDigest = vrschema.Keccak(wb(expoDigest), wb(eid), wb(U(sid)), wb(U(id.RawWeight)), wb(U(id.RawWeight)), wb(A(payee)), wb(member))
 		keyDigest = vrschema.Keccak(wb(keyDigest), wb(U(sid)), wb(rootHash), wb(evmHash))
 		_ = owner
@@ -464,9 +549,11 @@ func vrPosCustodyExpected(in vrGenesisInput, d vrDeploymentFile, network []byte,
 	e.set(vrschema.SlotAdd(a, 5), expoDigest)
 	e.set(vrschema.SlotAdd(a, 6), keyDigest)
 	e.set(vrschema.SlotAdd(a, 7), U(vrCustodyPolicyID))
-	e.set(vrschema.SlotAdd(a, 8), U(uint64(len(expoIDs))))
-	for i, eid := range expoIDs {
-		e.set(vrschema.SlotAdd(vrschema.BytesDataSlot(vrschema.SlotAdd(a, 8)), uint64(i)), eid)
+	if !compact {
+		e.set(vrschema.SlotAdd(a, 8), U(uint64(len(expoIDs))))
+		for i, eid := range expoIDs {
+			e.set(vrschema.SlotAdd(vrschema.BytesDataSlot(vrschema.SlotAdd(a, 8)), uint64(i)), eid)
+		}
 	}
 	return e, nil
 }

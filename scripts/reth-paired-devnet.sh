@@ -85,7 +85,13 @@ if [ -n "$postM2aMode" ]; then
     exit 2
   fi
 fi
-if [ "${M2_PROFILE2:-0}" = 1 ] && [ "$validators" -ne 4 ]; then
+if [ "${VR_POS16:-0}" = 1 ]; then
+  [ "${VR_LANE:-0}" = 1 ] && [ "${VR_POS:-0}" = 1 ] && [ "${VR_JOINER:-0}" = 1 ] &&
+    [ "${SIGNING:-local}" = authority ] && [ "${VR_UTB:-1}" = 1 ] && [ "$validators" -eq 15 ] ||
+    { echo "VR_POS16=1 needs the PoS VR lane, 15 incumbents plus a joiner, authority signing and UTB" >&2; exit 2; }
+  export VR_POS_LIMITS=15,16,16 VR_INCUMBENTS="$validators"
+fi
+if [ "${M2_PROFILE2:-0}" = 1 ] && [ "$validators" -ne 4 ] && [ "${VR_POS16:-0}" != 1 ]; then
   echo "profile-2 handoff lane requires four validators" >&2
   exit 2
 fi
@@ -158,6 +164,11 @@ fi
 
 rethEngineBase=$((18551+LANE_PORT_OFFSET))
 rethEthBase=$((18545+LANE_PORT_OFFSET))
+if [ "${VR_POS16:-0}" = 1 ]; then
+  rethEthBase=$(lane_port 18200)
+  rethEngineBase=$(lane_port 18220)
+  export rethEthBase rethEngineBase
+fi
 rethP2PBase=$((30401+LANE_PORT_OFFSET))
 engineProxyPort=$((18651+LANE_PORT_OFFSET))
 d2cPersistenceThreshold=${D2C_PERSISTENCE_THRESHOLD:-64}
@@ -347,6 +358,7 @@ fi
 echo "=== 1. generate the shard topology and chain spec ==="
 rootValidators=3
 if [ "${M2_PROFILE2:-0}" = 1 ]; then rootValidators=4; fi
+if [ "${VR_POS16:-0}" = 1 ]; then rootValidators=$validators; fi
 ./setup-evm-nodes.sh -r "$rootValidators" -v "$validators" -c "$postM2aChainID" >/dev/null || { echo "setup failed" >&2; exit 1; }
 registry_layout_require || exit 1
 # VR_LANE=1 (VT-14, scripts/lib/vr-lib.sh): a validator-registry generation. The EVM shard configuration pins VR before the profile and the

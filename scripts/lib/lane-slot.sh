@@ -56,9 +56,11 @@ lane_reth_eth_port() { echo $(( ${rethEthBase:-$(lane_port 18545)} + $1 - 1 )); 
 # starts), f8, f6c, seed (one lane's each). A lane profile (below) is a set of classes. Everything a lane listens on; the lane scripts take their ports from here by value.
 lane_port_table() {
   cat <<'EOF'
+reth-eth-wide 18200 16
+reth-engine-wide 18220 16
 reth-eth 18545 6
 reth-engine 18551 6
-reth-p2p 30401 6
+reth-p2p 30401 16
 reth-eth-bystander 18565 4
 reth-engine-bystander 18581 4
 reth-p2p-bystander 30421 4
@@ -76,12 +78,13 @@ neg-reth-p2p-2 30599 1 neg
 neg-reth-p2p-3 30699 1 neg
 neg-reth-p2p-4 30759 1 neg
 neg-shard-p2p 28001 4 neg
-root-rpc 25866 8
-root-p2p 26662 8
+root-rpc 25866 16
+root-p2p 26662 16
 mongo 27117 1
+shard-p2p-wide 28030 16
 shard-p2p 28111 6
-shard-dissemination 28211 6
-shard-rpc 28311 6
+shard-dissemination 28211 16
+shard-rpc 28311 16
 f8-http 28601 3 f8
 aggregator-bft-p2p 29101 2
 aggregator-http 3001 2
