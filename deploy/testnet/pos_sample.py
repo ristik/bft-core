@@ -92,9 +92,14 @@ def state_kb(generation):
     return out
 
 
+def deployment_path(generation):
+    net = Path(generation) / 'network'
+    return net / ('deployment.json' if (net / 'vr-deployment.json').exists() else 'pos-deployment.json')
+
+
 def pos_collect(generation):
     """The PoS part of one sample. A view that cannot be read is recorded under `errors`, not raised: an unreadable chain is a finding."""
-    deployment = json.loads((Path(generation) / 'network' / 'pos-deployment.json').read_text())
+    deployment = json.loads(deployment_path(generation).read_text())
     custody, election, pool = deployment['custody'], deployment['election'], deployment['rewardPool']
     out, errors = {}, []
     def get(key, fn):
@@ -277,8 +282,8 @@ def main():
     p.add_argument('--disk-limit', type=float, default=80)
     p.add_argument('--no-faucet', action='store_true', help='do not sample the faucet guard (its /healthz needs the signer, which a rehearsal does not start)')
     a = p.parse_args()
-    if not (a.generation / 'network' / 'pos-deployment.json').exists():
-        p.error('the generation has no network/pos-deployment.json: it was not made with generate.py --pos (use observe.py)')
+    if not deployment_path(a.generation).exists():
+        p.error('the generation has no PoS deployment (use observe.py)')
     a.out.mkdir(parents=True, exist_ok=True)
     transport = handoff_ops.DockerTransport(a.generation)
     watch, pos_watch, alerts, start, n = observe.Watch(a.stall, a.disk_limit), PosWatch(a.stall, a.lag, a.open_limit), [], time.monotonic(), 0

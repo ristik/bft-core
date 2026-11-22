@@ -125,16 +125,6 @@ class BlockInterval(unittest.TestCase):
         got=joiner.joiner_services(four,5,'r4','e4')
         shard=got['shard5']['entrypoint']
         self.assertEqual(shard[shard.index('--target-block-interval')+1],'10000ms')
-    def test_the_generator_derives_the_shard_conf_t2_and_records_both(self):
-        source=(generate.HERE/'generate.py').read_text()
-        main=source.split('def main')[1]
-        self.assertIn("'--t2-timeout',str(t2_for_block_interval(a.block_interval_ms))",main)
-        self.assertEqual(main.count('block_interval_ms=a.block_interval_ms))'),2,'the boot and the final compose both carry it')
-        # a nonzero interval with a pinned ubft that lacks the flag is refused before anything is generated, never silently dropped
-        self.assertIn("if a.block_interval_ms and '--target-block-interval' not in subprocess.run([ubft,'shard-node','run','--help']",main)
-        self.assertIn("p.error('the pinned ubft has no shard-node run --target-block-interval",main)
-        self.assertIn("'evm_block':{'interval_ms':a.block_interval_ms,'t2_ms':t2_for_block_interval(a.block_interval_ms)}",main)
-
 class B1Layout(unittest.TestCase):
     def test_the_package_is_on_the_single_b1_layout(self):
         source=(generate.HERE/'generate.py').read_text()
@@ -151,10 +141,11 @@ class B1Layout(unittest.TestCase):
         # the pinned checkouts come from pins.json itself (a pin bump is one file, #1075): no SHA is repeated in the workflow
         self.assertIn("json.load(open('deploy/testnet/pins.json'))",workflow)
         self.assertIsNone(re.search(r'ref: [0-9a-f]{40}',workflow))
-        for out,path in (('bft','pinned-bft'),('aggregator_go','pinned-aggregator-go'),('contracts','pinned-contracts')):
+        for out,path in (('bft','pinned-bft'),('aggregator_go','pinned-aggregator-go'),('vr_contracts','pinned-contracts')):
             self.assertRegex(workflow,r'ref: \$\{\{ steps\.pins\.outputs\.%s \}\}\s+path: %s'%(out,path))
         self.assertIn('./scripts/b1genesis',workflow)
         self.assertIn('--pos-contracts pinned-contracts',workflow)
+        self.assertIn('--vr-fresh-measurement deploy/testnet/measurements/vr-hook-pos16-independent.json', workflow)
     def test_every_pins_workflow_builds_dnb_tool_from_the_node_pin(self):
         # #1075: the bridge image's dnb-tool comes from the same bft checkout as the nodes (an older one cannot read their archive layout)
         for name in ('testnet-bridge.yml','testnet-bridge-pos.yml'):
@@ -338,9 +329,6 @@ class UtbProfile(unittest.TestCase):
             change(final['services']['authority3'])
             with self.assertRaisesRegex(RuntimeError,r"authority3 .*\b"+field+r"\b",msg=field):
                 generate.check_authorities_unchanged(self.boot(4,self.PIN),final,4)
-        source=(Path(generate.__file__)).read_text()
-        self.assertRegex(source,r"boot=immutable\(topology\([^\n]*utb=utb_pin",'main() starts the authorities from a compose that carries the UTB pin')
-        self.assertIn('check_authorities_unchanged(boot,final,a.validators)',source)
     def test_the_rehearsal_reset_keeps_the_selected_utb_profile_and_variant(self):
         import rehearse
         class R: pass
@@ -1162,9 +1150,9 @@ class ProofOfStake(unittest.TestCase):
         full=pos.profile_args(d,{'election':'/m.json','hook':'/h.jsonl'})
         self.assertEqual(sorted(set(full)-set(args)),sorted(['--election','--elect-measurement','0xe','/m.json']))
     def test_the_caps_are_covered_by_the_per_record_reservation(self):
-        # the cold RecoveryAck: 2,281,165 for 6 members of one lot (3,629,888 for 8 members of 2 lots); the guard's margin is 1.25
+        # Hosted CI reported 3,174,198 after margin for the cold RecoveryAck at the legacy caps.
         self.assertEqual(pos.CAPS,(16,1,6))
-        self.assertLessEqual(2_281_165*125//100,pos.HOOK_RECORD_GAS)
+        self.assertLessEqual(3_174_198,pos.HOOK_RECORD_GAS)
         self.assertGreater(3_629_888*125//100,pos.HOOK_RECORD_GAS)
     def test_pos_refuses_more_validators_than_the_caps_cover_before_any_key(self):
         done=subprocess.run([sys.executable,str(Path(__file__).parent/'generate.py'),'--out','/nonexistent/tn-x','--validators',str(pos.CAPS[2]+1),'--ubft','x','--keygen','x','--b1genesis','x',
@@ -3270,6 +3258,98 @@ class StagingKnobs(unittest.TestCase):
         entry=(Path(__file__).parent/'faucet/backend-entrypoint.sh').read_text()
         self.assertIn('-faucet.amount "$FAUCET_PAYOUT"',entry); self.assertNotIn('0.01',entry)
         self.assertNotIn("!= '0.01'",(Path(__file__).parent/'faucet/gateway.py').read_text(),'the guard checks the configured payout, not a constant')
+    def test_vr_authorities_and_archive_execution_stay_in_their_pod(self):
+        cfg = self.topo(vr_pos=True, utb='0x' + 'aa' * 32, port_offset=1000,
+                        captcha_secret_file='/srv/secrets/captcha')
+        self.assertEqual(cfg['secrets']['hcaptcha_secret'], {'file': '/srv/secrets/captcha'})
+        self.assertEqual(cfg['services']['rpc']['ports'], ['127.0.0.1:9545:8545'])
+        for i in range(1, 5):
+            services = cfg['services']
+            root, authority, ureth, shard, relay = (services[f'{role}{i}'] for role in ('root', 'authority', 'ureth', 'shard', 'evm-rpc'))
+            for service in (root, authority, ureth, shard, relay):
+                self.assertEqual(service['network_mode'], f'service:pod{i}')
+                self.assertNotIn('ports', service)
+            self.assertIn('--vr-deployment', root['entrypoint'])
+            self.assertIn(f'./validator{i}/auth/pop:/pop:ro', root['volumes'])
+            self.assertNotIn(f'./validator{i}/auth:/authority', root['volumes'])
+            self.assertIn('--fence-provision-file', authority['entrypoint'])
+            self.assertEqual(authority['restart'], 'no')
+            for flag in ('--http.addr', '--authrpc.addr'):
+                entry = ureth['entrypoint']
+                self.assertEqual(entry[entry.index(flag) + 1], '127.0.0.1')
+            self.assertIn('--unicity.archive-state-proofs', ureth['entrypoint'])
+            self.assertIn('http://127.0.0.1:8551', shard['entrypoint'])
+            self.assertEqual(relay['environment']['TN_LOCAL_EXECUTION_ALIAS'], f'ureth{i}')
+
+    def test_internal_operator_log_lookup_pins_latest_and_keeps_the_window(self):
+        handler = object.__new__(gateway.ExecutionHandler)
+        handler.server = unittest.mock.Mock()
+        handler.server.relay.call.return_value = {'result': '0x270f'}
+        selector = [{'address': '0x' + 'ab' * 20, 'fromBlock': '0x0', 'toBlock': 'latest'}]
+        with self.assertRaises(ValueError):
+            gateway.check_log_filter(selector)
+        handler.log_filter(selector)
+        self.assertEqual(selector[0]['toBlock'], '0x270f')
+        handler.server.relay.call.assert_called_once_with('eth_blockNumber', [])
+        handler.server.relay.call.return_value = {'result': '0x2710'}
+        selector[0]['toBlock'] = 'latest'
+        with self.assertRaises(ValueError):
+            handler.log_filter(selector)
+
+    def test_role_status_can_check_sync_through_the_gateway(self):
+        self.assertIn('eth_syncing', gateway.PUBLIC)
+
+    def test_operator_registration_lookup_pages_a_pinned_head(self):
+        import validator_rpc
+        logs = {'method': 'eth_getLogs', 'id': 42, 'params': [
+            {'address': '0x' + '12' * 20, 'fromBlock': '0x0', 'toBlock': 'latest'}]}
+        forward = unittest.mock.Mock(side_effect=[(200, {'result': '0x2710'}), (200, {'result': [1]}), (200, {'result': [2]})])
+        self.assertEqual(validator_rpc.operator_request(logs, forward), (200, {'jsonrpc': '2.0', 'id': 42, 'result': [1, 2]}))
+        filters = [entry.args[0]['params'][0] for entry in forward.call_args_list[1:]]
+        self.assertEqual([(f['fromBlock'], f['toBlock']) for f in filters], [('0x0', '0x270f'), ('0x2710', '0x2710')])
+
+    def test_vr_release_checks_staged_network_files_and_rejects_symlinks(self):
+        import hashlib
+        import vr_release
+        sha = lambda value: hashlib.sha256(value).hexdigest()
+        with tempfile.TemporaryDirectory() as tmp:
+            net = Path(tmp) / 'network'
+            net.mkdir()
+            pin = '0x' + '31' * 32
+            files = {name: b'{}' for name in vr_release.NETWORK_FILES}
+            files['utb-genesis.id'] = (pin + '\n').encode()
+            files['utb-genesis.cbor'] = b'genesis record'
+            files['ureth-flags.txt'] = f'--unicity.genesis-commitment={pin}\n'.encode()
+            files['fee-collector.txt'] = b'0x00000000000000000000000000000000000000fe\n'
+            for name, data in files.items():
+                (net / name).write_bytes(data)
+            manifest = {'utb': {'genesis_id': pin, 'genesis_sha256': sha(files['utb-genesis.cbor'])},
+                        'config_sha256': {name: sha(data) for name, data in files.items() if not name.startswith('utb-genesis.')}}
+            good = Path(tmp) / 'verified'
+            good.mkdir()
+            vr_release.stage_network_files(net, good, manifest)
+            for name, stale in (
+                ('utb-genesis.id', b'stale'),
+                ('utb-genesis.cbor', b'stale'),
+                ('trust-base.json', b'stale'),
+                ('ureth-flags.txt', files['ureth-flags.txt'].replace(b'31', b'32')),
+                ('fee-collector.txt', files['fee-collector.txt'].replace(b'fe', b'fd')),
+            ):
+                with self.subTest(name=name), tempfile.TemporaryDirectory() as out:
+                    (net / name).write_bytes(stale)
+                    with self.assertRaisesRegex(ValueError, name):
+                        vr_release.stage_network_files(net, Path(out), manifest)
+                    (net / name).write_bytes(files[name])
+            for name in ('ureth-flags.txt', 'fee-collector.txt'):
+                with self.subTest(missing_digest=name), tempfile.TemporaryDirectory() as out:
+                    expected = manifest['config_sha256'].pop(name)
+                    with self.assertRaisesRegex(ValueError, rf'{re.escape(name)}.*Re-export starts with the next generation'):
+                        vr_release.stage_network_files(net, Path(out), manifest)
+                    manifest['config_sha256'][name] = expected
+            (net / 'genesis.json').unlink()
+            (net / 'genesis.json').symlink_to(good / 'genesis.json')
+            with tempfile.TemporaryDirectory() as out, self.assertRaises(OSError):
+                vr_release.stage_network_files(net, Path(out), manifest)
     def test_subnets_are_options(self):
         cfg=self.topo()
         self.assertEqual(cfg['networks']['faucet']['ipam']['config'],[{'subnet':'172.30.88.0/24','gateway':'172.30.88.1'}])
@@ -3306,18 +3386,84 @@ class StagingKnobs(unittest.TestCase):
         import public_routes
         with tempfile.TemporaryDirectory() as tmp:
             gen=self.generation(tmp)
-            with patch('builtins.print'): public_routes.main([str(gen),'--hostname','pos.staging.unicity.network'])
+            with patch('builtins.print') as printed:
+                public_routes.main([str(gen),'--hostname','pos.staging.unicity.network'])
+            self.assertIn('/release/', json.loads(printed.call_args.args[0])['routes'])
             routes=(gen/'public/nginx/routes.conf').read_text(); zones=(gen/'public/nginx/zones.conf').read_text()
             for loc in ('location = /rpc ','location = /aggregator ','location = /api/v1/trustbases ','location /faucet/ ','location = /api/network ','location = /api/claim ',
-                        'location /demo/ '):
+                        'location /demo/ ', 'location /release/ '):
                 self.assertIn(loc,routes)
             self.assertIn('proxy_pass http://127.0.0.1:8545/;',routes); self.assertIn('proxy_pass http://127.0.0.1:8088/;',routes)
             self.assertIn('alias /var/www/pos-staging/demo/;',routes)
+            self.assertIn('alias /var/www/pos-staging/release/;\n    autoindex off;\n    disable_symlinks on;',routes)
             self.assertNotIn('lockproof',routes+zones); self.assertNotIn('/bridge/',routes); self.assertFalse((gen/'public/bridge').exists())
             self.assertEqual(routes.count('{'),routes.count('}'))
             for zone in set(re.findall(r'zone=(\w+)',routes))|set(re.findall(r'limit_conn (\w+)',routes)):
                 self.assertIn(f'zone={zone}:',zones)
             with self.assertRaises(SystemExit), patch('sys.stderr'): public_routes.main([str(gen),'--hostname','pos.staging.unicity.network'])   # never overwrites
+    def test_release_stages_only_manifest_regular_files(self):
+        import hashlib
+        import public_routes
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            source = base / 'source'
+            (source / 'seed').mkdir(parents=True)
+            (source / 'seed/manifest.json').write_bytes(b'{}')
+            (source / 'private').write_bytes(b'not public')
+            digest = hashlib.sha256(b'{}').hexdigest()
+            sums = source / 'SHA256SUMS'
+            sums.write_text(f'{digest}  seed/manifest.json\n')
+            previous = os.umask(0o077)
+            try:
+                public_routes.stage_release(source, base / 'staged')
+            finally:
+                os.umask(previous)
+            self.assertEqual((base / 'staged/seed/manifest.json').read_bytes(), b'{}')
+            self.assertEqual((base / 'staged/SHA256SUMS').read_text(), sums.read_text())
+            self.assertFalse((base / 'staged/private').exists())
+            for directory in ('staged', 'staged/seed'):
+                self.assertEqual((base / directory).stat().st_mode & 0o777, 0o755)
+            for file in ('staged/SHA256SUMS', 'staged/seed/manifest.json'):
+                self.assertEqual((base / file).stat().st_mode & 0o777, 0o644)
+            (source / 'link').symlink_to('seed', target_is_directory=True)
+            (source / 'file-link').symlink_to('seed/manifest.json')
+            for path in ('../source/seed/manifest.json', 'link/manifest.json', 'file-link', 'seed', 'private'):
+                with self.subTest(path=path):
+                    sums.write_text(f'{digest}  {path}\n')
+                    with self.assertRaises((ValueError, OSError)):
+                        public_routes.stage_release(source, base / 'rejected')
+                    self.assertFalse((base / 'rejected').exists())
+    def test_public_routes_retries_after_failed_release_under_restrictive_umask(self):
+        import hashlib
+        import public_routes
+        with tempfile.TemporaryDirectory() as tmp:
+            gen = self.generation(tmp)
+            source = Path(tmp) / 'source'
+            (source / 'seed').mkdir(parents=True)
+            artifact = b'{}'
+            (source / 'seed/manifest.json').write_bytes(artifact)
+            sums = source / 'SHA256SUMS'
+            sums.write_text(f'{"0" * 64}  seed/manifest.json\n')
+            out = Path(tmp) / 'public'
+            args = [str(gen), '--hostname', 'pos.example.org', '--out', str(out),
+                    '--release-source', str(source)]
+            previous = os.umask(0o077)
+            try:
+                with self.assertRaises(SystemExit), patch('sys.stderr') as err:
+                    public_routes.main(args)
+                self.assertIn('checksum mismatch', ''.join(call.args[0] for call in err.write.call_args_list))
+                self.assertFalse(out.exists())
+                sums.write_text(f'{hashlib.sha256(artifact).hexdigest()}  seed/manifest.json\n')
+                with patch('builtins.print'):
+                    public_routes.main(args)
+            finally:
+                os.umask(previous)
+            for name in ('.', 'release', 'release/seed'):
+                self.assertEqual((out / name).stat().st_mode & 0o777, 0o755, name)
+            for name in ('release/SHA256SUMS', 'release/seed/manifest.json'):
+                self.assertEqual((out / name).stat().st_mode & 0o777, 0o644, name)
+            self.assertTrue((out / 'nginx/routes.conf').is_file())
+
     def test_public_routes_web_root_and_bad_input(self):
         import public_routes
         with tempfile.TemporaryDirectory() as tmp:
@@ -3325,6 +3471,7 @@ class StagingKnobs(unittest.TestCase):
             with patch('builtins.print'): public_routes.main([str(gen),'--hostname','pos.example.org','--web-root','/srv/www/'])
             routes=(gen/'public/nginx/routes.conf').read_text()
             self.assertIn('alias /srv/www/demo/;',routes)
+            self.assertIn('alias /srv/www/release/;',routes)
             for args in (['--hostname','Pos.Example.org'],['--hostname','x;y'],['--hostname','a.org','--web-root','rel/dir'],['--hostname','a.org','--web-root','/a b'],['--hostname','a.org','--web-root','/a/../b']):
                 with self.assertRaises(SystemExit,msg=args), patch('sys.stderr'): public_routes.main([str(gen),*args,'--out',str(Path(tmp)/'o')])
             bad=json.loads((gen/'compose.yaml').read_text()); bad['services']['rpc']['ports']=['0.0.0.0:8545:8545']

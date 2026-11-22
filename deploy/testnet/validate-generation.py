@@ -18,11 +18,30 @@ p.add_argument('--keygen',required=True,type=Path)
 p.add_argument('--b1genesis',required=True,type=Path)
 p.add_argument('--check-prometheus',action='store_true')
 p.add_argument('--pos-contracts',type=Path,help='a clean unicity-pos-contracts checkout at the pin (forge on PATH): also generate and probe the proof-of-stake profile')
+p.add_argument('--vr-fresh-measurement',type=Path,help='independently recorded sixteen-seat hook measurement')
 p.add_argument('--aggregator',type=Path,help='CI native nonempty-batch certification probe')
+p.add_argument('--generation',type=Path,help='check the shipped files and Compose of an existing VR generation')
 a=p.parse_args()
+if (a.pos_contracts is None) != (a.vr_fresh_measurement is None):
+    p.error('--pos-contracts and --vr-fresh-measurement are required together')
 def flags_ok(generation):
     errors=ubft_flags.check(a.ubft.resolve(),[json.loads((generation/'compose.yaml').read_text())])
     assert not errors,'; '.join(errors)
+if a.generation:
+    import importlib.util
+    g = a.generation.resolve()
+    spec = importlib.util.spec_from_file_location('pos_probe', HERE / 'validate-pos.py')
+    probe = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(probe)
+    manifest = json.loads((g / 'manifest.json').read_text())
+    network = json.loads((g / 'network/network.json').read_text())
+    assert network['chain_id'] == manifest['chain_id'] and network['genesis_hash'] == manifest['genesis_hash']
+    assert network['funding_address'] == manifest['faucet_address']
+    for name, digest in manifest['config_sha256'].items():
+        assert hashlib.sha256((g / 'network' / name).read_bytes()).hexdigest() == digest, name
+    flags_ok(g)
+    print(json.dumps(probe.validate_vr(g, a.ubft.resolve(), manifest), indent=2))
+    sys.exit()
 with tempfile.TemporaryDirectory(prefix='tnops-validation-',dir='/tmp') as tmp:
     base=Path(tmp)
     images=base/'images.json'
@@ -87,16 +106,21 @@ with tempfile.TemporaryDirectory(prefix='tnops-validation-',dir='/tmp') as tmp:
         generation=base/'tn-ceremony-pos'
         subprocess.run([sys.executable,str(HERE/'generate.py'),'--out',str(generation),'--validators','4',
             '--ubft',str(a.ubft.resolve()),'--keygen',str(a.keygen.resolve()),'--b1genesis',str(a.b1genesis.resolve()),'--images',str(images),
-            '--offline-validation','--captcha-sitekey','fixture','--captcha-secret-file',str(base/'captcha'),'--block-interval-ms','0','--no-utb',
-            '--pos','--pos-contracts',str(a.pos_contracts.resolve())],check=True,stdout=subprocess.DEVNULL)
+            '--offline-validation','--captcha-sitekey','fixture','--captcha-secret-file',str(base/'captcha'),'--block-interval-ms','10000',
+            '--vr-pos','--utb','--pos-contracts',str(a.pos_contracts.resolve()),'--vr-fresh-measurement',str(a.vr_fresh_measurement.resolve())],
+            check=True,stdout=subprocess.DEVNULL)
         subprocess.run(['docker','compose','-f',str(generation/'compose.yaml'),'--profile','OFFLINE-VALIDATION-DO-NOT-START','config','--quiet'],check=True)
         flags_ok(generation)
         spec=importlib.util.spec_from_file_location('pos_probe',HERE/'validate-pos.py')
         probe=importlib.util.module_from_spec(spec);spec.loader.exec_module(probe)
         print(json.dumps(probe.validate(generation,a.ubft.resolve(),a.keygen.resolve()),indent=2))
-        spec=importlib.util.spec_from_file_location('handoff_probe',HERE/'validate-handoff.py')
-        dry=importlib.util.module_from_spec(spec);spec.loader.exec_module(dry)
-        print(json.dumps(dry.validate(generation,a.ubft.resolve()),indent=2))
+        import vr_release
+        release = base/'vr-public'
+        release.mkdir()
+        document = json.loads((generation/'manifest.json').read_text())
+        vr_release.stage_network_files(generation/'network', release, document)
+        assert set(file.name for file in release.iterdir()) == set(vr_release.NETWORK_FILES)
+        print(json.dumps({'vr_release_genesis_files':'PASS', 'utb_genesis_id':document['utb']['genesis_id']}))
     assert generations[0]['genesis_hash']!=generations[1]['genesis_hash']
     assert generations[0]['faucet_address']!=generations[1]['faucet_address']
     print(json.dumps({'validation':'offline fixtures; optional native aggregator probe; no deployable cluster',

@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import secrets
 import shutil
+import stat
 import subprocess
 import tempfile
 import time
@@ -17,6 +18,7 @@ import time
 import operator_rpc
 import pos
 import ureth_key
+import vr_genesis
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
@@ -242,7 +244,8 @@ def check_authorities_unchanged(boot, final, n):
                                'never recreated, so everything it is started with must be known when it is first started')
 
 def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, with_pos=False, rpc_bind=operator_rpc.DEFAULT_BIND, utb=None, utb_aggregator='integration', *,
-             payout=FAUCET_PAYOUT, subnets=None, root_cpus=ROOT_CPUS, block_interval_ms=0, port_offset=0):
+             payout=FAUCET_PAYOUT, subnets=None, root_cpus=ROOT_CPUS, block_interval_ms=0, port_offset=0,
+             vr_pos=False, captcha_secret_file='./faucet-secrets/hcaptcha-secret'):
     """JSON is a YAML subset, accepted directly by Docker Compose. `utb`: the pinned EntryID of the UTB genesis entry (0x..), or None for the package without the signed history.
     `payout`: the faucet signer's payout per claim (UCT, network.json's). `subnets`: bridged_subnets(), the faucet and edge networks. `root_cpus`: each root's CPU quota.
     `block_interval_ms`: the shard nodes' --target-block-interval (0: none). `port_offset`: added to every host-published port (HOST_PORTS), so
@@ -263,21 +266,38 @@ def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, wit
         auth = './validator%d/auth:/authority' % i
         evm = './validator%d/evm:/state' % i
         common = ['--trust-base', '/network/trust-base.json']
+        execution = '127.0.0.1' if vr_pos else f'ureth{i}'
+        root_flags = pos.root_flags(i) if with_pos else ['--genesis-identities','/network/genesis-identities.json']
+        root_mounts = ['./validator%d/root:/state'%i, network, './validator%d/jwt:/jwt:ro'%i]
+        authority_flags = []
+        if vr_pos:
+            # Only the possession-proof endpoint and its own credential reach the root.
+            root_mounts.append(f'./validator{i}/auth/pop:/pop:ro')
+            root_flags += ['--vr-deployment', '/network/vr-deployment.json', '--pos-evm-rpc', f'http://{execution}:8545',
+                '--vr-evm-authority-socket', '/pop/pop.sock', '--vr-evm-authority-credential', '/pop/pop.cred',
+                '--vr-shard-rpc', f'http://{operator_rpc.listen(rpc_bind, operator_rpc.SHARD_PORT)}',
+                '--utb-bundle-address', '127.0.0.1:8011']
+            authority_flags = ['--pop-socket', '/authority/pop/pop.sock', '--pop-credential', '/authority/pop/pop.cred',
+                '--fence-provision-file', '/authority/fence.json', '--require-pos-policy', '--dev-allow-late-pos-policy']
         # One network namespace per validator ENTITY for its root and its shard node: the operator endpoints of both accept loopback peers only, so the existing
         # q3-readiness (which needs both) runs inside the entity's namespace. The holder owns the namespace and the DNS names, so recreating a root (the install
         # restart) or restarting the shard does not take the namespace down. Different entities stay in different namespaces; the authority (unix sockets), the
         # execution client and every other service keep their own.
         holder = {'validators':{'aliases':['root%d'%i,'shard%d'%i]}}
         if i == 1: holder = {'validators':{'aliases':['root1','shard1','aggregator']},'aggregator':{}}   # the aggregator's namespace, the only way to its MongoDB
+        if vr_pos: holder['validators']['aliases'].append(f'ureth{i}')
         service('pod%d'%i, node, ['sleep','infinity'], memory='16m', cpu=0.05, networks=holder, init=True)   # sleep as PID 1 would ignore SIGTERM
+        if vr_pos:
+            service(f'evm-rpc{i}', images['rpc'], ['python3','-u','gateway.py'], [network],
+                memory='128m', pod=f'pod{i}', environment={'TN_LOCAL_EXECUTION_ALIAS':f'ureth{i}'})
         service('metrics%d'%i, images['rpc'], ['python3','-u','metrics_relay.py'], memory='64m', cpu=0.1, pod='pod%d'%i,
             environment={'ROOT_RPC':operator_rpc.listen(rpc_bind,operator_rpc.ROOT_PORT),'SHARD_RPC':operator_rpc.listen(rpc_bind,operator_rpc.SHARD_PORT)})
         service('root%d'%i, node, ['ubft','root-node','run','--home','/state','--address','/ip4/0.0.0.0/tcp/8000',
             '--bootnodes', ','.join('/dns4/root%d/tcp/8000/p2p/%s' % (j,ids['root'][j-1]) for j in range(1,n+1) if j!=i),
-            '--profile-3','--q3-lane','--b1-registry'] + (pos.root_flags(i) if with_pos else ['--genesis-identities','/network/genesis-identities.json']) + [
+            '--profile-3','--q3-lane','--b1-registry'] + root_flags + [
             '--shard-conf','/network/full-shard-conf.json','--shard-conf','/network/aggregator-conf.json',
             '--rpc-server-address',operator_rpc.listen(rpc_bind,operator_rpc.ROOT_PORT),'--metrics','prometheus'] + utb_node_flags(utb) + common,
-            ['./validator%d/root:/state'%i,network,'./validator%d/jwt:/jwt:ro'%i], memory='384m', cpu=root_cpus, pod='pod%d'%i)   # the entity's Engine JWT, read-only: q3-readiness runs in the root (it holds the entity's keys.json) and checks its own Engine endpoint
+            root_mounts, memory='384m', cpu=root_cpus, pod='pod%d'%i)
         service('authority%d'%i, node, ['ubft','signing-authority','run','--home','/authority',
             '--client-socket','/authority/client.sock','--operator-socket','/authority/operator.sock',
             '--operator-credential','/authority/operator.cred','--authority-id','paired-evm-%d'%i,
@@ -285,23 +305,26 @@ def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, wit
             '--shard-epoch','0','--root-epoch','1'] + common
             # bft-core#1085: the authority verifies every activation itself from the generation's genesis trust base (advance-with-proof); the
             # operator-trusted advance-epoch is then refused (a recovery policy needs --recovery-unchecked-advance)
-            + ['--lineage-genesis-trust-base','/network/trust-base.json'] + (['--lineage-utb-genesis'] if utb else []), [auth,network])
+            + ['--lineage-genesis-trust-base','/network/trust-base.json'] + (['--lineage-utb-genesis'] if utb else []) + authority_flags,
+            [auth,network], pod=f'pod{i}' if vr_pos else None)
         # A new authority process has a new key. Never auto-restart this lifetime.
         services['authority%d'%i]['restart']='no'
         # bft-core#1148: the devp2p node key is made once (ureth_key.create) in the entity's ureth-key/, read-only here, never in the data directory a
         # cold restore empties; the preflight refuses to start without it, so reth never makes a new one
+        execution_bind='127.0.0.1' if vr_pos else '0.0.0.0'
         service('ureth%d'%i, node, ureth_key.entrypoint(['unicity-reth','node','--chain','/network/genesis.json','--datadir','/state','--p2p-secret-key',ureth_key.PATH,
-            '--authrpc.jwtsecret','/jwt/jwt.hex','--authrpc.addr','0.0.0.0','--authrpc.port','8551',
-            '--http','--http.addr','0.0.0.0','--http.port','8545','--http.api','eth,net,web3,debug',   # debug: the paired shard node reads debug_getRawHeader for the parent registry witness (without it no validator can lead a round after the first); the validator network is internal and the public gateway allow-lists methods
-            '--rpc.eth-proof-window','64','--disable-discovery','--ipcdisable',
+            '--authrpc.jwtsecret','/jwt/jwt.hex','--authrpc.addr',execution_bind,'--authrpc.port','8551',
+            '--http','--http.addr',execution_bind,'--http.port','8545','--http.api','eth,net,web3,debug',   # the paired shard reads debug_getRawHeader for the parent registry witness
+            *(['--unicity.archive-state-proofs'] if vr_pos else ['--rpc.eth-proof-window','64']), '--disable-discovery','--ipcdisable',
             '--log.file.max-files','0',   # no log file: the root filesystem is read-only (reth wants $HOME/.cache/reth/logs) and Docker's json-file driver already rotates stdout
             '--engine.persistence-threshold','64','--builder.gaslimit',str(max_gas),'--unicity.fee-collector',FEE,*ureth_flags]),
-            ['./validator%d/ureth:/state'%i,ureth_key.mount(i),'./validator%d/jwt:/jwt:ro'%i,network], memory='1536m',cpu=1.0)
+            ['./validator%d/ureth:/state'%i,ureth_key.mount(i),'./validator%d/jwt:/jwt:ro'%i,network], memory='1536m',cpu=1.0,
+            pod=f'pod{i}' if vr_pos else None)
         peers = root_boot + ''.join(',/dns4/shard%d/tcp/9000/p2p/%s'%(j,ids['evm'][j-1]) for j in range(1,n+1) if j!=i)
         service('shard%d'%i, node, ['ubft','shard-node','run','--home','/state','--executor','engine-api',
             '--address','/ip4/0.0.0.0/tcp/9000','--bootnodes',peers,
             '--full-shard-conf','/network/full-shard-conf.json','--genesis','/network/genesis.json',
-            '--engine-url','http://ureth%d:8551'%i,'--eth-url','http://ureth%d:8545'%i,
+            '--engine-url',f'http://{execution}:8551','--eth-url',f'http://{execution}:8545',
             '--jwt-secret','/jwt/jwt.hex','--engine-fee-collector',FEE,'--b1-profile','/network/b1-profile.json','--q3-lane',
             '--execution-journal','/state/execution-journal.db','--archive-store','/archive',
             '--archive-prune','--archive-public-reads','--journal-candidates','256','--trust-history-profile-2','--rpc-server-address',operator_rpc.listen(rpc_bind,operator_rpc.SHARD_PORT),'--metrics','prometheus',
@@ -338,7 +361,7 @@ def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, wit
     return {'name':out.name,'services':services,
         'networks':{'validators':{'internal':True},'aggregator':{'internal':True},'faucet':{'ipam':{'config':[dict(subnets['faucet'])]}},'edge':{'ipam':{'config':[dict(subnets['edge'])]}}},
         'secrets':{'faucet_keystore':{'file':'./faucet-secrets/keystore.json'},'faucet_password':{'file':'./faucet-secrets/password'},
-                   'hcaptcha_secret':{'file':'./faucet-secrets/hcaptcha-secret'}}}
+                   'hcaptcha_secret':{'file':str(captcha_secret_file)}}}
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
@@ -351,6 +374,8 @@ def main():
     p.add_argument('--images',type=Path,default=HERE/'artifacts/images.json')
     p.add_argument('--offline-validation',action='store_true',help='native ceremony with fixture images; output CANNOT be deployed')
     p.add_argument('--pos',action='store_true',help='the proof-of-stake profile: the contracts genesis (custody, election, evidence) in the EVM genesis, the roots on the P85 flags')
+    p.add_argument('--vr-pos',action='store_true',help='VR/P85 with the #1215 sixteen-seat profile, four genesis validators and UTB')
+    p.add_argument('--vr-fresh-measurement',dest='fresh_measurement',type=Path,help='independent #1215 hook measurement for the pinned release')
     p.add_argument('--pos-contracts',type=Path,help='a clean unicity-pos-contracts checkout at the pinned commit (needs forge on PATH)')
     p.add_argument('--rpc-bind',default=operator_rpc.DEFAULT_BIND,help='bind address of the root and shard operator RPC listeners; loopback only (default 127.0.0.1): they have no authentication')
     p.add_argument('--pos-weights',default=None,help='proof-of-stake genesis weights, comma separated, one per validator (default all 1; the genesis rules accept only 1, see pos.genesis_weights)')
@@ -361,6 +386,7 @@ def main():
     p.add_argument('--port-offset',type=int,default=0,help='added to every host-published port (RPC 8545, faucet 8088, Prometheus 9090) so a second generation can run on the same host; default 0: unchanged. Lane slot N uses 1000*N (scripts/lane-slot.sh); tooling then needs TN_PUBLIC_RPC and TN_FAUCET set to the shifted ports')
     p.add_argument('--captcha-sitekey',required=True)
     p.add_argument('--captcha-secret-file',required=True,type=Path)
+    p.add_argument('--public-rpc-url',help='wallet-facing RPC URL to advertise from the faucet')
     p.add_argument('--faucet-payout',default=FAUCET_PAYOUT,help=f'UCT per faucet claim, decimal (default {FAUCET_PAYOUT}): the signer\'s payout and the guard\'s check of it')
     p.add_argument('--faucet-balance',default=FAUCET_BALANCE,help=f'the faucet account\'s genesis balance, UCT, decimal (default {FAUCET_BALANCE})')
     p.add_argument('--faucet-daily-claims',type=int,default=FAUCET_DAILY_CLAIMS,help=f'claims in any 24 hours (default {FAUCET_DAILY_CLAIMS})')
@@ -377,6 +403,21 @@ def main():
         subnets=bridged_subnets(a.faucet_subnet,a.edge_subnet)
     except ValueError as e: p.error(str(e))
     if a.pos and a.pos_contracts is None: p.error('--pos needs --pos-contracts')
+    if a.vr_pos:
+        if a.pos or a.pos_weights is not None or a.validators != 4 or not a.utb or not a.pos_contracts or not a.fresh_measurement:
+            p.error('--vr-pos needs four validators, UTB, --pos-contracts and --vr-fresh-measurement; it excludes --pos and --pos-weights')
+        a.measurement = HERE / 'measurements/vr-hook-pos16.json'
+        if vr_genesis.git_commit(a.pos_contracts) != PINS['vr-contracts']:
+            p.error('--pos-contracts must be a clean checkout at the package pin')
+        if a.fresh_measurement.resolve() == a.measurement or not a.fresh_measurement.is_file():
+            p.error('--vr-fresh-measurement must be the independent measurement, not the recorded profile pin')
+        secret = a.captcha_secret_file.absolute()
+        secret_stat = secret.lstat()
+        if not stat.S_ISREG(secret_stat.st_mode) or (not a.offline_validation and
+                (secret_stat.st_uid != 10001 or stat.S_IMODE(secret_stat.st_mode) != 0o400)):
+            p.error('mount a regular captcha secret owned by UID 10001 with mode 0400')
+    else:
+        secret = './faucet-secrets/hcaptcha-secret'
     try: operator_rpc.check_bind(a.rpc_bind)
     except operator_rpc.BindError as e: p.error(str(e))
     if a.pos_weights is not None and not a.pos: p.error('--pos-weights needs --pos')
@@ -458,10 +499,16 @@ def main():
                 (out/f'validator{i}').mkdir()
                 auth=out/f'validator{i}/auth'; auth.mkdir()
                 cli('signing-authority','credential','--out',auth/'operator.cred')
+                if a.vr_pos:
+                    (auth/'pop').mkdir()
+                    cli('signing-authority','credential','--out',auth/'pop/pop.cred')
             # the authorities are started from THIS compose and never recreated (their keys exist only in their memory): every argument their
             # entrypoint takes, the UTB lineage pin included, must be known here already (bft-core#1091: started without --lineage-utb-genesis,
             # every authority of a --utb generation refused the first activation); main() checks the final compose names the same entrypoints
-            boot=immutable(topology(out,a.validators,{'root':roots,'evm':evms},records['images'],a.captcha_sitekey,utb=utb_pin,payout=a.faucet_payout,subnets=subnets,root_cpus=a.root_cpus,port_offset=check_port_offset(a.port_offset),block_interval_ms=a.block_interval_ms))
+            topology_options=dict(utb=utb_pin,utb_aggregator=a.utb_aggregator,payout=a.faucet_payout,subnets=subnets,
+                root_cpus=a.root_cpus,port_offset=check_port_offset(a.port_offset),block_interval_ms=a.block_interval_ms,
+                vr_pos=a.vr_pos,captcha_secret_file=secret)
+            boot=immutable(topology(out,a.validators,{'root':roots,'evm':evms},records['images'],a.captcha_sitekey,**topology_options))
             write(out/'compose.yaml',boot)
             def authority(i,*args):
                 auth=out/f'validator{i}/auth'
@@ -469,7 +516,7 @@ def main():
                     return cli('signing-authority',*args)
                 translated=[str(x).replace(str(auth),'/authority').replace(str(home/'full-shard-conf.json'),'/network/full-shard-conf.json') for x in args]
                 return subprocess.check_output(['docker','compose','-f',str(out/'compose.yaml'),'exec','-T',f'authority{i}',
-                    'ubft','signing-authority',*translated],text=True,stderr=subprocess.STDOUT)
+                    'ubft','signing-authority',*translated],text=True,stderr=subprocess.STDOUT,stdin=subprocess.DEVNULL)
             if not a.offline_validation:
                 # Host-generated private files must be readable by the image's UID.
                 # Run generator as root on Linux, then all containers remain unprivileged.
@@ -480,11 +527,14 @@ def main():
                 auth=out/f'validator{i}/auth'
                 if a.offline_validation:
                     log=open(auth/'enrollment.log','w')
+                    vr_flags=['--pop-socket',str(auth/'pop/pop.sock'),'--pop-credential',str(auth/'pop/pop.cred'),
+                        '--fence-provision-file',str(auth/'fence.json'),'--lineage-genesis-trust-base',str(home/'trust-base.json'),
+                        '--lineage-utb-genesis','--require-pos-policy','--dev-allow-late-pos-policy'] if a.vr_pos else []
                     proc=subprocess.Popen([ubft,'signing-authority','run','--home',str(auth),
                         '--client-socket',str(auth/'client.sock'),'--operator-socket',str(auth/'operator.sock'),
                         '--operator-credential',str(auth/'operator.cred'),'--authority-id',f'paired-evm-{i}',
                         '--node-id',evms[i-1],'--network-id','3','--partition-id','8','--shard-id','0x80',
-                        '--shard-epoch','0','--root-epoch','1','--trust-base',str(home/'trust-base.json')],stdout=log,stderr=log)
+                        '--shard-epoch','0','--root-epoch','1','--trust-base',str(home/'trust-base.json'),*vr_flags],stdout=log,stderr=log)
                     processes.append((proc,log))
                 for _ in range(100):
                     try:
@@ -494,12 +544,15 @@ def main():
                     except subprocess.CalledProcessError:
                         time.sleep(.1)
                 else: raise RuntimeError('authority startup timeout')
+            measurement=json.loads(a.measurement.read_text()) if a.vr_pos else None
+            partition_params=vr_genesis.partition_params(a.chain_id,measurement) if measurement else evm_partition_params(a.chain_id)
             cli('shard-conf','generate','--home',home,'--network-id','3','--partition-id','8','--partition-type-id','8',
-                '--shard-id','0x80','--epoch-start','1','--t2-timeout',str(t2_for_block_interval(a.block_interval_ms)),'--partition-params',evm_partition_params(a.chain_id),
+                '--shard-id','0x80','--epoch-start','1','--t2-timeout',str(t2_for_block_interval(a.block_interval_ms)),'--partition-params',partition_params,
                 *sum((['--node-info',out/f'validator{i}/auth/node-info.json'] for i in range(1,a.validators+1)),[]))
             # One B1 profile, then a genesis allocated from it (permanent registry layout), funded with the package's random faucet and unique entropy.
             trust=home/'trust-base.json'
             genesis=None
+            vr_info=None
             if a.pos:
                 # The first pass runs on the base configuration (the full one does not exist yet): provisional, its id is replaced after the reconciling finalization.
                 genesis=pos.Genesis(home,ubft,a.pos_contracts.resolve(),REPO,out.name,a.chain_id,tuple(map(int,EVM_CONTINUITY_MAX_DISTANCE.split('/'))),(a.pos_cadence_rounds,a.pos_cadence_seconds))
@@ -508,14 +561,16 @@ def main():
                 owners=json.loads(subprocess.check_output([str(a.keygen.resolve()),'owners',str(home/'pos-owner-keys'),str(a.validators)],text=True))
                 genesis.plan(trust,home/'shard-conf-8_0.json',owners,weights)
                 genesis.prepare(home/'shard-conf-8_0.json',provisional=True)
-            profile_out=cli('engine-api','b1-profile','--shard-conf',home/'shard-conf-8_0.json','--trust-base',trust,'--max-epochs-per-update',MAX_EPOCHS,'--delta-ev',DELTA_EV,'--delta-hold',DELTA_HOLD,'--out',home/'b1-profile.json',
-                *(pos.profile_args(genesis.deployment,{'election':genesis.dir/'elect-measurement.json','hook':genesis.dir/'hook-measurement.jsonl'}) if genesis else []))
+            profile_args=['--vr-hook-measurement',a.measurement] if a.vr_pos else (
+                pos.profile_args(genesis.deployment,{'election':genesis.dir/'elect-measurement.json','hook':genesis.dir/'hook-measurement.jsonl'}) if genesis else [])
+            profile_out=cli('engine-api','b1-profile','--shard-conf',home/'shard-conf-8_0.json','--trust-base',trust,'--max-epochs-per-update',MAX_EPOCHS,'--delta-ev',DELTA_EV,'--delta-hold',DELTA_HOLD,'--out',home/'b1-profile.json',*profile_args)
             if genesis: print(genesis.check_hook_gas(home/'b1-profile.json'))
             flags=ureth_flags_of(profile_out)
             max_gas=int(json.loads((home/'b1-profile.json').read_text())['maxGas'])
             alloc=json.loads(subprocess.check_output([str(a.keygen.resolve()),str(home/'faucet-secrets'),str(faucet['balance_wei'])],text=True))
             if [v.get('balance') for v in alloc.values()] != [str(faucet['balance_wei'])]: raise SystemExit('keygen did not fund the faucet account with --faucet-balance')
-            write(home/'funded.json',funded_base_genesis(a.chain_id,max_gas,alloc,secrets.token_hex(32)))
+            funded=funded_base_genesis(a.chain_id,max_gas,alloc,secrets.token_hex(32))
+            write(home/'funded.json',funded)
             if genesis:
                 # The id of the custody genesis is the FULL configuration's: finalize once without the PoS accounts, take the id from that configuration, then add the accounts.
                 cli('engine-api','genesis','--shard-conf',home/'shard-conf-8_0.json','--trust-base',trust,'--b1-profile',home/'b1-profile.json',
@@ -524,17 +579,22 @@ def main():
                 genesis.reconcile(genesis.dir/'reconcile-full-shard-conf.json')
                 funded=json.loads((home/'funded.json').read_text())
                 write(home/'funded.json',pos.merge_alloc(funded,json.loads((genesis.dir/'genesis/alloc.json').read_text())))
-            identity=cli('engine-api','genesis','--shard-conf',home/'shard-conf-8_0.json','--trust-base',trust,'--b1-profile',home/'b1-profile.json',
-                '--alloc-source',home/'funded.json','--out',home/'genesis.json','--full-shard-conf',home/'full-shard-conf.json',
-                '--identities-out',home/'b1-identities.json')
+            if a.vr_pos:
+                identity, flags, vr_info=vr_genesis.compose_pos_genesis(a,ubft=ubft,home=home,network=out/'network',
+                    generation=out.name,roots=roots,evms=evms,funded=funded,flags=flags)
+            else:
+                identity=cli('engine-api','genesis','--shard-conf',home/'shard-conf-8_0.json','--trust-base',trust,'--b1-profile',home/'b1-profile.json',
+                    '--alloc-source',home/'funded.json','--out',home/'genesis.json','--full-shard-conf',home/'full-shard-conf.json',
+                    '--identities-out',home/'b1-identities.json')
             print(identity)
             # The roots' committee identity records (a JSON array, what `root-node run --genesis-identities` takes): the PoA genesis committee, root i delegated
             # to EVM validator i, as scripts/lib/h3-lib.sh makes them. b1-identities.json is the B1 identity document (an object) the bridge deployment is checked against.
             if genesis:
                 genesis.verify(home/'full-shard-conf.json',genesis.dir/'reconcile-full-shard-conf.json')
-            write(home/'genesis-bindings.json',[{'rootNodeId':roots[i],'evmNodeId':evms[i]} for i in range(a.validators)])
-            cli('genesis-identities','generate','--trust-base',trust,'--shard-conf',home/'full-shard-conf.json','--bindings',home/'genesis-bindings.json',
-                '--out',home/'genesis-identities.json')
+            if not a.vr_pos:
+                write(home/'genesis-bindings.json',[{'rootNodeId':roots[i],'evmNodeId':evms[i]} for i in range(a.validators)])
+                cli('genesis-identities','generate','--trust-base',trust,'--shard-conf',home/'full-shard-conf.json','--bindings',home/'genesis-bindings.json',
+                    '--out',home/'genesis-identities.json')
             # The deployed registry must be exactly what the pinned source regenerates from the profile, the trust base and the base shard configuration.
             verified=subprocess.run([str(a.b1genesis.resolve()),'--verify',str(home/'genesis.json'),'--profile',str(home/'b1-profile.json'),
                 '--root-genesis',str(trust),'--shard-conf',str(home/'full-shard-conf.json')],text=True,capture_output=True)
@@ -543,11 +603,26 @@ def main():
             print(verified.stdout)
             block=re.search(r'block hash:\s+(?:0x)?([a-fA-F0-9]{64})',identity).group(1)
             shutil.copy2(home/'full-shard-conf.json',out/'network/full-shard-conf.json')
+            if a.vr_pos:
+                shutil.copy2(home/'b1-profile.json',out/'network/b1-profile.json')
+                if not a.offline_validation: os.chown(out/'network/b1-profile.json',10001,10001)
+                vr_ids={row['evmNodeId']: ident for ident,row in enumerate(json.loads((home/'genesis-identities.json').read_text()),1)}
             if not a.offline_validation: os.chown(out/'network/full-shard-conf.json',10001,10001)
             for i in range(1,a.validators+1):
                 auth=out/f'validator{i}/auth'
                 authority(i,'complete-enrollment','--operator-socket',auth/'operator.sock','--operator-credential',auth/'operator.cred','--shard-conf',home/'full-shard-conf.json')
                 authority(i,'replace-session','--operator-socket',auth/'operator.sock','--operator-credential',auth/'operator.cred','--out',auth/'client.cred')
+                if a.vr_pos:
+                    profile_path=home/'b1-profile.json' if a.offline_validation else '/network/b1-profile.json'
+                    evm_url='http://127.0.0.1:8545' if not a.offline_validation else 'http://127.0.0.1:1'
+                    write(auth/'fence.tmp',{'b1Profile':str(profile_path),'activationSourceUrl':evm_url,'executionGenesisHash':'0x'+block})
+                    write(auth/'pos-policy.json',{'network':vr_genesis.dev_network_word(out.name),'chainId':a.chain_id,
+                        'election':vr_info['election'],'ids':[vr_ids[evms[i-1]]]})
+                    if not a.offline_validation:
+                        for name in ('fence.tmp','pos-policy.json'): os.chown(auth/name,10001,10001)
+                    (auth/'fence.tmp').replace(auth/'fence.json')
+                    authority(i,'pos-policy','--operator-socket',auth/'operator.sock','--operator-credential',auth/'operator.cred',
+                        '--policy',auth/'pos-policy.json')
         finally:
             for proc,log in processes:
                 proc.terminate()
@@ -570,6 +645,8 @@ def main():
                 shutil.copy2(genesis.dir/src,out/'network'/name)
             (out/'network/pos-genesis-assignment.txt').write_text(genesis.assignment+'\n')
             genesis.alloc_code_hashes(json.loads((home/'genesis.json').read_text()))
+        if vr_info:
+            (out/'network/pos-genesis-assignment.txt').write_text(vr_info['genesis_assignment']+'\n')
         shutil.copy2(home/'agg-conf/shard-conf-7_0.json',out/'network/aggregator-conf.json')
         for i in range(1,a.validators+1):
             val=out/f'validator{i}'
@@ -582,7 +659,8 @@ def main():
             ureth_key.create(val/ureth_key.DIR)   # the execution client's devp2p node key, once (bft-core#1148); chowned with the rest below
         shutil.move(str(home/'faucet-secrets'),out/'faucet-secrets')
         if genesis: shutil.move(str(home/'pos-owner-keys'),out/'pos-owner-keys')   # private host material, like faucet-secrets: not mounted, not in network/
-        shutil.copy2(a.captcha_secret_file,out/'faucet-secrets/hcaptcha-secret')
+        if vr_info: shutil.move(str(home/'dev-keys'),out/'vr-owner-keys')
+        else: shutil.copy2(a.captcha_secret_file,out/'faucet-secrets/hcaptcha-secret')
         (out/'claims').mkdir()
         (out/'mongo').mkdir()
         (out/'metrics').mkdir()
@@ -600,12 +678,15 @@ def main():
         network.update(chain_id=a.chain_id,genesis_hash='0x'+block,funding_address=next(iter(alloc)),
             validator_rpc_urls=[f'http://ureth{i}:8545' for i in range(1,a.validators+1)],captcha_sitekey=a.captcha_sitekey,
             trusted_proxy_ip=subnets['faucet']['gateway'],**faucet['network'])
+        if a.public_rpc_url: network['public_rpc_url']=a.public_rpc_url
         write(out/'network/network.json',network)
-        flags=[*flags,'--unicity.genesis-commitment='+genesis_commitment(json.loads((home/'genesis.json').read_text()))]
-        final=immutable(topology(out,a.validators,{'root':roots,'evm':evms},records['images'],a.captcha_sitekey,flags,max_gas,bool(genesis),a.rpc_bind,utb_pin,a.utb_aggregator,payout=a.faucet_payout,subnets=subnets,root_cpus=a.root_cpus,port_offset=check_port_offset(a.port_offset),block_interval_ms=a.block_interval_ms))
-        if not a.offline_validation:
-            check_authorities_unchanged(boot,final,a.validators)
+        if not vr_info: flags=[*flags,'--unicity.genesis-commitment='+genesis_commitment(json.loads((home/'genesis.json').read_text()))]
+        final=immutable(topology(out,a.validators,{'root':roots,'evm':evms},records['images'],a.captcha_sitekey,flags,max_gas,bool(genesis),a.rpc_bind,**topology_options))
+        check_authorities_unchanged(boot,final,a.validators)
         write(out/'compose.yaml',final)
+        network_files = list((out/'network').glob('*.json'))
+        if vr_info:
+            network_files.extend(out/'network'/name for name in ('ureth-flags.txt', 'fee-collector.txt'))
         manifest={'offline_validation_only':a.offline_validation,'generation':out.name,'chain_id':a.chain_id,'genesis_hash':'0x'+block,'validators':a.validators,'operator_rpc':{'bind':a.rpc_bind,'root_port':operator_rpc.ROOT_PORT,'shard_port':operator_rpc.SHARD_PORT},
             'faucet_address':next(iter(alloc)), 'artifacts':records,
             'faucet':{**faucet['network'],'genesis_balance_wei':str(faucet['balance_wei'])},'networks':subnets,'root_cpus':a.root_cpus,
@@ -614,10 +695,10 @@ def main():
                     'aggregator':a.utb_aggregator,
                     **({'bundle_file':'network/utb-bundle.cbor','bundle_sha256':hashlib.sha256((out/'network/utb-bundle.cbor').read_bytes()).hexdigest(),'expected_network':TRUST_BASE_NETWORK_ID}
                        if a.utb_aggregator == 'upstream' else {'aggregator_store':'aggregator-utb'})} if utb_pin else None),
-            'pos':({'genesis_assignment':genesis.assignment,'first_pass_assignment':genesis.first,'custody':genesis.deployment['custody'],'election':genesis.deployment['election'],
+            'pos':vr_info or ({'genesis_assignment':genesis.assignment,'first_pass_assignment':genesis.first,'custody':genesis.deployment['custody'],'election':genesis.deployment['election'],
                     'contracts':PINS['contracts'],'owner_keys':'pos-owner-keys','cadence_rounds':a.pos_cadence_rounds,'cadence_seconds':a.pos_cadence_seconds} if genesis else None),
             'authority_status':{str(i):json.loads(authority(i,'status','--operator-socket',out/f'validator{i}/auth/operator.sock','--operator-credential',out/f'validator{i}/auth/operator.cred')) for i in range(1,a.validators+1)} if not a.offline_validation else {},
-            'config_sha256':{f.name:hashlib.sha256(f.read_bytes()).hexdigest() for f in (out/'network').glob('*.json')}}
+            'config_sha256':{f.name:hashlib.sha256(f.read_bytes()).hexdigest() for f in network_files}}
         write(out/'manifest.json',manifest)
         print(json.dumps(manifest,indent=2))
         if a.offline_validation:

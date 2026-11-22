@@ -145,7 +145,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(body)
         elif self.path == '/api/network':
             cfg = self.server.guard.cfg
-            self.reply(200, {**{k: cfg[k] for k in ('chain_id', 'genesis_hash', 'captcha_sitekey', 'payout')}, 'limit_per_ip': self.server.guard.per_ip()})
+            public = {k: cfg[k] for k in ('chain_id', 'genesis_hash', 'captcha_sitekey', 'payout')}
+            if 'public_rpc_url' in cfg:
+                public['rpc_url'] = cfg['public_rpc_url']
+            self.reply(200, {**public, 'limit_per_ip': self.server.guard.per_ip()})
         elif self.path == '/healthz':
             try:
                 self.reply(200, self.server.guard.health())
