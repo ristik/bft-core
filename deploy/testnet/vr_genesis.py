@@ -268,7 +268,7 @@ def plan(a):
                         '--pos-cadence-rounds', str(POS_CADENCE[0]), '--pos-cadence-seconds', str(POS_CADENCE[1])]
         run(ubft, 'vr-genesis', 'plan', '--trust-base', trust, '--shard-conf', conf, '--bindings', out / 'genesis-bindings.json',
             '--b1-profile', out / 'b1-profile.json', '--network-word', word, '--governor-signers', ','.join(signers),
-            '--limits', POS_LIMITS if a.pos else a.limits, '--fee-collector', FEE_COLLECTOR, '--out-input', out / 'vr/input.json',
+            '--limits', a.limits or (POS_LIMITS if a.pos else '4,4,16'), '--fee-collector', FEE_COLLECTOR, '--out-input', out / 'vr/input.json',
             '--out-identities', out / 'genesis-identities.json',
             '--utb-genesis', out / 'utb-genesis.cbor', '--utb-genesis-id', out / 'utb-genesis.id',   # the signed trust-base history's genesis entry and its pin
             *(['--owners', owners_file] if owners_file else []), *pos_args)
@@ -331,7 +331,7 @@ def main():
     p.add_argument('--ubft', default=str(HERE.parents[1] / 'build/ubft'))
     p.add_argument('--contracts', required=True, help='a unicity-pos-contracts checkout with script/vr-genesis.sh (forge, cast and python3 on PATH)')
     p.add_argument('--measurement', help='the complete-path VR hook measurement the profile is pinned from (not with --pos: a PoS generation takes it with --ureth)')
-    p.add_argument('--pos', action='store_true', help='the PoS-prototype generation (VT-04): the module is the PosElectionAdapter, the P85 stack its holder; limits 4,4,6')
+    p.add_argument('--pos', action='store_true', help='the PoS-prototype generation (VT-04): the module is the PosElectionAdapter, the P85 stack its holder; default limits 4,5,5')
     p.add_argument('--ureth', help='a ureth checkout at the pin (cargo on PATH): the plan runs its complete-path measurement as the fresh one')
     p.add_argument('--fresh-measurement', help='instead of --ureth: an externally taken fresh measurement (never the recorded file)')
     p.add_argument('--validators', type=int, default=4)
@@ -340,7 +340,7 @@ def main():
     p.add_argument('--network-word', help="VR's network word (default: sha256('unicity.testnet.vr.' + generation))")
     p.add_argument('--governor-signers', help='the FoundationMultisig signers, five comma-separated addresses (default: DEV keyless signers)')
     p.add_argument('--owners', help='JSON [{owner, payee}] per identity in ascending root node id (default: DEV keyless addresses)')
-    p.add_argument('--limits', default='4,4,16', help='CommitteeLimits nMin,nTarget,nMax')
+    p.add_argument('--limits', help='CommitteeLimits nMin,nTarget,nMax')
     p.add_argument('--dev-fund', action='store_true', help='DEVELOPMENT ONLY: generate keys for every owner and governor signer, fund them in the genesis '
                    '(the premine verify checks), and use the dev network word; refused with --network-word, --owners or --governor-signers')
     p.add_argument('--out', required=True)

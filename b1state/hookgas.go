@@ -129,6 +129,9 @@ var VRCaps = VRCallbackCaps{Elect: 4_000_000, Output: 1_000_000, Record: 1_500_0
 // script/gen-vr-pos-build.py; VT-04, astra's caps ruling): CAP_ELECT 5.0 M, CAP_OUTPUT 1.5 M and CAP_RECORD 2.5 M per record.
 var VRCapsPos = VRCallbackCaps{Elect: 5_000_000, Output: 1_500_000, Record: 2_500_000, Resolved: 500_000, Attach: 3_000_000, Detach: 500_000, Gov: 1_000_000, Adopt: 1_000_000}
 
+// VRCapsPos16 raises the election stipend for the compact-custody generation.
+var VRCapsPos16 = VRCallbackCaps{Elect: 7_000_000, Output: 1_500_000, Record: 2_500_000, Resolved: 500_000, Attach: 3_000_000, Detach: 500_000, Gov: 1_000_000, Adopt: 1_000_000}
+
 // VRBuild binds a cap tuple to the code that enforces it: the compile-time constants of a VR build live in its core and its three facets, so a
 // tuple is only meaningful for exactly those runtimes (astra's ruling, item 3; #1217 r1 item 4). The hashes are the runtimes at the genesis
 // addresses 0xff..03 to 0xff..06 (the VR hook fixtures of unicity-pos-contracts, test/vr/fixtures/vr-hook*.json).
@@ -141,7 +144,7 @@ type VRBuild struct {
 	RecordsFacet     [32]byte
 }
 
-// The two reviewed builds. A VR core that is in neither is refused: the caps are compile-time constants of the core and facets, and an
+// The recognized builds. A VR core that is in neither is refused: the caps are compile-time constants of the core and facets, and an
 // agreement among a PDR, an allocation and a measurement identifies the deployed bytes without establishing their callback ceilings.
 var (
 	VRBuildPoA = VRBuild{
@@ -158,8 +161,15 @@ var (
 		RepairFacet:      mustHash32("f6ca6bba00e97a6736334b0c3f77bb4515ab7a816cb93a5995964e261d532418"),
 		RecordsFacet:     mustHash32("46a2a1b9f58fe9955ddc9bf6cfa20612dd5ba566ab91c527a33a083fb0d04743"),
 	}
-	// VRBuilds enumerates every reviewed build.
-	VRBuilds = []VRBuild{VRBuildPoA, VRBuildPos}
+	VRBuildPos16 = VRBuild{
+		Name: "pos16", Caps: VRCapsPos16,
+		RegistryCodeHash: mustHash32("d6e58ab97d1502846fde15cc82b273b3f07696024249af40c13d564977fa4de5"),
+		GovernanceFacet:  mustHash32("a9479510a1a78aff1c589fbe6b6c95904e61609d27debab1c4966e65e58069f9"),
+		RepairFacet:      mustHash32("f6ca6bba00e97a6736334b0c3f77bb4515ab7a816cb93a5995964e261d532418"),
+		RecordsFacet:     mustHash32("46a2a1b9f58fe9955ddc9bf6cfa20612dd5ba566ab91c527a33a083fb0d04743"),
+	}
+	// VRBuilds enumerates every recognized build.
+	VRBuilds = []VRBuild{VRBuildPoA, VRBuildPos, VRBuildPos16}
 )
 
 func mustHash32(s string) (h [32]byte) {
@@ -188,7 +198,7 @@ func CheckVRBuildRoles(registryCodeHash, governance, repair, records [32]byte, p
 	if !ok {
 		return errors.Join(ErrVRHookMeasurement, errors.New("the VR core is not a reviewed build"))
 	}
-	if (b.Name == VRBuildPos.Name) != pos {
+	if (b.Name == VRBuildPos.Name || b.Name == VRBuildPos16.Name) != pos {
 		return errors.Join(ErrVRHookMeasurement, fmt.Errorf("the plan is %s but the allocated VR core is the %s build", map[bool]string{true: "a PoS plan", false: "a PoA plan"}[pos], b.Name))
 	}
 	if governance != b.GovernanceFacet || repair != b.RepairFacet || records != b.RecordsFacet {

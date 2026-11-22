@@ -9,14 +9,16 @@
 #                       governance delays have passed (DELAY_ROUNDS and DELAY_SECONDS, 3600 s of certified time) the change is executed
 #   vrj_validates       the joiner's root is a member of epoch 2 and its shard node validates under it
 
-vrj_id=5
+vrj_id=$((${validators:-4} + 1))
+vrj_incumbents=$(seq -s " " 1 "${validators:-4}")
+vrj_members="$vrj_incumbents $vrj_id"
 vrj_log() { vrb_log "$@"; }
 
 vrj_source_libs() {
   declare -F m2_start_root >/dev/null || source scripts/lib/m2-handoff-lib.sh || return 1
   declare -F h3_start_reth >/dev/null || source scripts/lib/h3-lib.sh || return 1
   declare -F reth_trust >/dev/null || source scripts/lib/reth-peers.sh || return 1
-  H3_ROOTS="1 2 3 4"; H3_ONLINE="1 2 3 4"; H3_DIR=test-nodes/h3; mkdir -p "$H3_DIR"
+  H3_ROOTS="$vrj_incumbents"; H3_ONLINE="$vrj_incumbents"; H3_DIR=test-nodes/h3; mkdir -p "$H3_DIR"
 }
 
 vrj_start_nodes() {
@@ -33,14 +35,14 @@ vrj_start_nodes() {
   boot=$(m2_root_addr 1)
   { m2_start_root "$i" 1 "$boot"; } >/dev/null 2>&1 || true   # its readiness check needs lsof: the RPC is the check
   vrb_wait 90 "the joiner's root answers on its RPC" curl -sf "http://127.0.0.1:$(m2_rpc_port "$i")/api/v1/roundInfo" || return 1
-  bootnodes=$(evm_bootnodes_for_peers "$boot" "$i" 1 2 3 4) || return 1
+  bootnodes=$(evm_bootnodes_for_peers "$boot" "$i" $vrj_incumbents) || return 1
   export "EVM_ENGINE_URL_$i=http://127.0.0.1:$((rethEngineBase + i - 1))" "EVM_ETH_URL_$i=http://127.0.0.1:$((rethEthBase + i - 1))"
   if [ "${VR_ARCHIVE:-0}" = 1 ]; then
     vrj_log "the joiner's shard node is restored from an incumbent's archive once the incumbents stage the successor (vrj_restore_evm5)"
     vrj_log "PASS: the joiner's root$i and reth$i are up"
     return 0
   fi
-  EVM_ARCHIVE_REPLICA_POOL="1 2 3 4 5" start_one_evm_validator "$i" "${validators:-4}" "$partitionID" "$boot" engine-api rpc "$bootnodes" || return 1
+  EVM_ARCHIVE_REPLICA_POOL="$vrj_members" start_one_evm_validator "$i" "${validators:-4}" "$partitionID" "$boot" engine-api rpc "$bootnodes" || return 1
   sleep 5
   kill -0 "$(cat "test-nodes/evm$i/pid")" 2>/dev/null || { vrj_log "FAIL: the joiner's shard node exited"; tail -30 "test-nodes/evm$i/debug.log" >&2; return 1; }
   vrj_log "PASS: the joiner's root$i, evm$i and reth$i are up"
@@ -125,7 +127,7 @@ vrj_dev_follow() {
   local rid eid n
   rid=$(build/ubft node-id --home "test-nodes/root$vrj_id" | tail -n1); eid=$(build/ubft node-id --home "test-nodes/evm$vrj_id" | tail -n1)
   export UBFT_VR_DEV_STAGE_EXTRA_ROOTS=$rid UBFT_VR_DEV_STAGE_EXTRA_EVM=$eid
-  for n in 1 2 3 4; do vrb_restart_root "$n" "with the development staging hook" || return 1; sleep 3; done
+  for n in $vrj_incumbents; do vrb_restart_root "$n" "with the development staging hook" || return 1; sleep 3; done
   vrj_log "PASS: the incumbents run with the joiner staged (development hook)"
   if [ "${VR_ARCHIVE:-0}" = 1 ]; then vrj_restore_evm5 || return 1; fi
   vrb_wait 900 "the joiner's execution client caught up with the chain (it is driven by its shard node, which syncs from the incumbents)" vrj_reth_synced || return 1
@@ -147,8 +149,8 @@ vrj_restore_evm5() {
   vrj_source_libs || return 1
   declare -F lane_go_run >/dev/null || source scripts/lib/portable.sh
   [ -z "${vrs_fetched:-}" ] || export H3_RESTORE_SEED_DIR=$vrs_fetched   # VT-11: restore from the verified seed's pin
-  export H3_ARCHIVES=$EVM_ARCHIVE_ROOT H3_RESTORE_NO_SESSION=1 H3_RESTORE_TRUST_BASE=test-nodes/trust-base.json H3_ONLINE="1 2 3 4"
-  export EVM_ARCHIVE_REPLICA_POOL="1 2 3 4 5"
+  export H3_ARCHIVES=$EVM_ARCHIVE_ROOT H3_RESTORE_NO_SESSION=1 H3_RESTORE_TRUST_BASE=test-nodes/trust-base.json H3_ONLINE="$vrj_incumbents"
+  export EVM_ARCHIVE_REPLICA_POOL="$vrj_members"
   vrb_wait 300 "the incumbents' shard nodes hold the staged successor" vrj_incumbents_staged || return 1
   export "EVM_ENGINE_URL_$i=http://127.0.0.1:$((rethEngineBase + i - 1))" "EVM_ETH_URL_$i=http://127.0.0.1:$((rethEthBase + i - 1))"
   h3_restore_validator "$i" 1 || { vrj_log "FAIL: restoring the joiner's shard node"; return 1; }

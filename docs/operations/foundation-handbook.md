@@ -24,6 +24,12 @@ The coordinator gives the three signers distinct slots and collects their approv
 
 For fees, propose `fee-params` with the floor in wei, the change denominator and the collector address. Confirm the effective EVM block and the old and new settings with validator status. For limits, check the measured module caps and a viable committee and quorum before proposing a change. In **PoA only**, use `propose admit` and `propose confirm-exit` for the ordinary operator lifecycle. PoS delegation admission and retirement use P85 custody and elections.
 
+## Choose the PoS committee profile
+
+Select the profile when building the generation. Publish the registry runtime hash, measured hook manifest, custody and election addresses, committee limits and UTB genesis EntryID in the release announcement. The existing PoS build retains its existing limits. The sixteen-seat build permits  and up to 20 live identities, including candidates outside the committee. It uses one lifetime lot per identity generation and at most four recoveries per primary committee. Set these limits in the verified genesis allocation for the generation.
+
+For the sixteen-seat build, check that the execution shard recognizes the published PoS runtime and its callback caps of 7,000,000 gas for election, 1,500,000 for output and 2,500,000 for record application. Use archive state proofs and signed UTB history. Verify a primary handoff with all 16 member proofs and a recovery referencing its incumbent slate. Check activation, the successor certificate and continued paid transaction certification in both assignments. Publish the verified profile and measurements with the release. [Execution proof profiles](validator-handbook.md#choose-the-releases-execution-proof-profile)
+
 ## Confirm admission windows
 
 For a PoS application, confirm the successor shard epoch and the cutoff for the next election from the current certified state. Check that there is time to complete registration, bond and delegation before the election takes its snapshot. If an existing result excludes the applicant, let that result resolve and give the operator a new window. If the already registered authority missed the planned assignment, check active and frozen membership before coordinating its replacement binding.

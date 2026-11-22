@@ -53,7 +53,7 @@ vrp_apply() {
 vrp_evm_key_args() {
   local i eid h ids=() a
   if [ "${SIGNING:-local}" = authority ]; then
-    for i in 1 2 3 4; do
+    for i in $(seq 1 "${validators:-4}"); do
       eid=$(python3 -c "import json;print(json.load(open('$VR_DIR/genesis-identities.json'))[$((i - 1))]['evmNodeId'])")
       for a in test-nodes/auth*/; do
         [ "$(python3 -c "import json;print(json.load(open('${a}node-info.json'))['nodeId'])")" = "$eid" ] &&
@@ -64,7 +64,7 @@ vrp_evm_key_args() {
     printf '%s\n' "${ids[@]}"
     return 0
   fi
-  for i in 1 2 3 4; do
+  for i in $(seq 1 "${validators:-4}"); do
     eid=$(python3 -c "import json;print(json.load(open('$VR_DIR/genesis-identities.json'))[$((i - 1))]['evmNodeId'])")
     for h in test-nodes/evm*/; do
       [ "$(build/ubft node-id --home "$h" 2>/dev/null | tail -n1)" = "$eid" ] && ids+=(--evm-keys "$i=$PWD/${h%/}/keys.json")
@@ -114,6 +114,10 @@ vrp_rotated() {
     case "$ids" in *"$vrj_id"*) vrb_log "PASS: VR's committee after the Boundary includes identity $vrj_id: $ids" ;; *) vrb_log "FAIL: committee $ids"; return 1 ;; esac
   else
     vrb_log "VR's committee after the Boundary: $ids"
+  fi
+  if [ "${VR_POS16:-0}" = 1 ] && [ "$(printf '%s' "$ids" | tr -cd ',' | wc -c)" -ne 15 ]; then
+    vrb_log "FAIL: the primary committee did not reach sixteen seats: $ids"
+    return 1
   fi
   rid=$(cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'lastAcked()(bytes32)')
   [ "$rid" = "$vrb_result" ] || { vrb_log "FAIL: lastAcked $rid is not R $vrb_result"; return 1; }
@@ -241,8 +245,8 @@ vrp_recovery_diag() {
     echo "health $(cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'health()(uint8)' 2>&1) lastAcked $(cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'lastAcked()(bytes32)' 2>&1) openOutput $(vrb_open_output 2>&1)"
     echo "VR cursor $(cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'recordCursor()(uint64)' 2>&1) custody cursor $(cast call --rpc-url "$vrb_rpc" "$(vrp_custody)" 'recordCursor()(uint64)' 2>&1)"
     echo "custody lastAckedAssignment $(cast call --rpc-url "$vrb_rpc" "$(vrp_custody)" 'lastAckedAssignment()(bytes32)' 2>&1) eth block $(vrp_eth_block 2>&1)"
-    for i in 1 2 3 4 5; do echo "root$i q3status: $(curl -s -m 3 -X POST -H 'Content-Type: application/json' -d '{}' "http://127.0.0.1:$(m2_rpc_port "$i")/api/v1/q3/status" | head -c 300)"; done
-    for i in 1 2 3 4; do echo "evm$i: $(grep -c 'certification request signed' test-nodes/evm$i/debug.log) signed; $(grep 'level=ERROR' test-nodes/evm$i/debug.log | tail -1 | cut -c1-300)"; done
+    for i in $vrj_members; do echo "root$i q3status: $(curl -s -m 3 -X POST -H 'Content-Type: application/json' -d '{}' "http://127.0.0.1:$(m2_rpc_port "$i")/api/v1/q3/status" | head -c 300)"; done
+    for i in $(seq 1 "${validators:-4}"); do echo "evm$i: $(grep -c 'certification request signed' test-nodes/evm$i/debug.log) signed; $(grep 'level=ERROR' test-nodes/evm$i/debug.log | tail -1 | cut -c1-300)"; done
     grep -h 'ack\|Ack' test-nodes/root1/debug.log | grep -vi 'backoff\|callback\|track\|replica' | tail -10 | cut -c1-300
   } >"$d" 2>&1
   vrb_log "recovery diagnostics written to $d"
@@ -324,16 +328,16 @@ vrp_recovery() {
     build/ubft q3 trust-base --root-rpc "http://127.0.0.1:$(m2_rpc_port 1)" --epoch 4 --out test-nodes/trust-base-epoch4.json || { vrb_log "FAIL: the trust base of epoch 4"; return 1; }
     H3_ONLINE="$(seq -s ' ' 1 "$nj")" M2_ADVANCE_NO_REPLICA_WAIT=1 h3_advance_authorities 4 3 $(seq -s ' ' 1 "$nj") || { vrb_log "FAIL: the authority advance of J''s four"; return 1; }
     # the joiner (identity 5) is a running member of K already (J named it): its authority advances and its shard node restarts under the new session
-    local op5=(--operator-socket "test-nodes/auth5/operator.sock" --operator-credential "test-nodes/auth5/operator.cred")
-    stop_one_evm_validator 5 2>/dev/null || true
+    local op5=(--operator-socket "test-nodes/auth$vrj_id/operator.sock" --operator-credential "test-nodes/auth$vrj_id/operator.cred")
+    stop_one_evm_validator "$vrj_id" 2>/dev/null || true
     source helper.sh
-    authority_advance_scope 5 4 test-nodes/trust-base-epoch4.json "$(h3_pdr_file 3)" || { vrb_log "FAIL: identity 5's authority advance"; return 1; }
-    build/ubft signing-authority replace-session "${op5[@]}" --out test-nodes/auth5/client.cred || { vrb_log "FAIL: identity 5's session"; return 1; }
-    start_one_evm_validator 5 "${validators:-4}" "$partitionID" "$(m2_root_addr 1)" engine-api rpc "$(evm_bootnodes_for_peers "$(m2_root_addr 1)" 5 1 2 3 4 5)" >/dev/null 2>&1 || { vrb_log "FAIL: identity 5's shard node did not start"; return 1; }
+    authority_advance_scope "$vrj_id" 4 test-nodes/trust-base-epoch4.json "$(h3_pdr_file 3)" || { vrb_log "FAIL: identity 5's authority advance"; return 1; }
+    build/ubft signing-authority replace-session "${op5[@]}" --out test-nodes/auth$vrj_id/client.cred || { vrb_log "FAIL: identity 5's session"; return 1; }
+    start_one_evm_validator "$vrj_id" "${validators:-4}" "$partitionID" "$(m2_root_addr 1)" engine-api rpc "$(evm_bootnodes_for_peers "$(m2_root_addr 1)" "$vrj_id" $vrj_members)" >/dev/null 2>&1 || { vrb_log "FAIL: identity 5's shard node did not start"; return 1; }
     vrb_log "PASS: K's authorities advanced into root epoch 4 / shard epoch 3"
   fi
   # 4. the three stopped validators return into K's scope; VR imports RecoveryAck(J') and the Boundary (recovered)
-  for i in $(seq $((nj - stop + 1)) "$nj"); do kill -0 "$(cat "test-nodes/evm$i/pid" 2>/dev/null)" 2>/dev/null || start_one_evm_validator "$i" "${validators:-4}" "$partitionID" "$(m2_root_addr 1)" engine-api rpc "$(evm_bootnodes_for_peers "$(m2_root_addr 1)" "$i" 1 2 3 4 5)" >/dev/null 2>&1 || true; done
+  for i in $(seq $((nj - stop + 1)) "$nj"); do kill -0 "$(cat "test-nodes/evm$i/pid" 2>/dev/null)" 2>/dev/null || start_one_evm_validator "$i" "${validators:-4}" "$partitionID" "$(m2_root_addr 1)" engine-api rpc "$(evm_bootnodes_for_peers "$(m2_root_addr 1)" "$i" $vrj_members)" >/dev/null 2>&1 || true; done
   vrb_wait 900 "VR's output of J' is Recovered (state 6)" bash -c "[ \"\$(cast call --rpc-url $vrb_rpc $vrb_vr 'output(bytes32)' $rid2 | python3 -c \"import sys;h=sys.stdin.read().strip()[2:];print(int(h[64:128],16))\")\" = 6 ]" || { vrp_recovery_diag "$rid2"; return 1; }
   [ "$(cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'health()(uint8)')" = 0 ] || { vrb_log "FAIL: VR is not Healthy after the recovery"; return 1; }
   [ "$(cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'lastAcked()(bytes32)')" = "$rid2" ] || { vrb_log "FAIL: lastAcked is not J's pair result"; return 1; }

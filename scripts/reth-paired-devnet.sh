@@ -73,7 +73,13 @@ if [ -n "$postM2aMode" ]; then
     exit 2
   fi
 fi
-if [ "${M2_PROFILE2:-0}" = 1 ] && [ "$validators" -ne 4 ]; then
+if [ "${VR_POS16:-0}" = 1 ]; then
+  [ "${VR_LANE:-0}" = 1 ] && [ "${VR_POS:-0}" = 1 ] && [ "${VR_JOINER:-0}" = 1 ] &&
+    [ "${SIGNING:-local}" = authority ] && [ "${VR_UTB:-1}" = 1 ] && [ "$validators" -eq 15 ] ||
+    { echo "VR_POS16=1 needs the PoS VR lane, 15 incumbents plus a joiner, authority signing and UTB" >&2; exit 2; }
+  export VR_POS_LIMITS=15,16,16
+fi
+if [ "${M2_PROFILE2:-0}" = 1 ] && [ "$validators" -ne 4 ] && [ "${VR_POS16:-0}" != 1 ]; then
   echo "profile-2 handoff lane requires four validators" >&2
   exit 2
 fi
@@ -146,6 +152,10 @@ fi
 
 rethEngineBase=$((18551+LANE_PORT_OFFSET))
 rethEthBase=$((18545+LANE_PORT_OFFSET))
+if [ "${VR_POS16:-0}" = 1 ]; then
+  rethEthBase=$(lane_port 18200)
+  rethEngineBase=$(lane_port 18220)
+fi
 rethP2PBase=$((30401+LANE_PORT_OFFSET))
 engineProxyPort=$((18651+LANE_PORT_OFFSET))
 d2cPersistenceThreshold=${D2C_PERSISTENCE_THRESHOLD:-64}

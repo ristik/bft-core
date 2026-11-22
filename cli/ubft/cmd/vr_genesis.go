@@ -326,7 +326,10 @@ func vrPlan(in vrPlanInput) (vrGenesisInput, []evmassign.Identity, error) {
 		MaxBatch: b1state.HookMaxRecords}
 	if in.pos != nil {
 		l.MaxBatch = in.profile.HRecords // the PoS-capable VR admits exactly the profile's H (a PoA generation keeps custody's ceiling)
-		l.VMax = vrPosMaxPool            // the PoS prototype's measured index ceiling (script/VRPosGenesis.s.sol MAX_POOL)
+		l.VMax = vrPosLegacyPool
+		if l.NMax > 5 {
+			l.VMax = vrPosMaxPool
+		}
 		if l.NMax > vrPosMaxCommittee {
 			return out, nil, fmt.Errorf("%w: a PoS generation's nMax is at most %d (the contracts' measured limit), got %d", ErrVRGenesis, vrPosMaxCommittee, l.NMax)
 		}
@@ -484,22 +487,24 @@ type vrDeploymentFile struct {
 	IdentityCount           uint64 `json:"identityCount"`
 	Members                 uint64 `json:"members"`
 	// the PoS prototype's P85 stack (script/vr-pos-genesis.sh); Composer* are absent there
-	Pos                bool   `json:"pos,omitempty"`
-	Custody            string `json:"custody,omitempty"`
-	CustodyCodeHash    string `json:"custodyCodeHash,omitempty"`
-	Election           string `json:"election,omitempty"`
-	ElectionCodeHash   string `json:"electionCodeHash,omitempty"`
-	Evidence           string `json:"evidence,omitempty"`
-	Selection          string `json:"selection,omitempty"`
-	Reader             string `json:"reader,omitempty"`
-	Policy             string `json:"policy,omitempty"`
-	PolicyCodeHash     string `json:"policyCodeHash,omitempty"`
-	RewardPool         string `json:"rewardPool,omitempty"`
-	RewardPoolCodeHash string `json:"rewardPoolCodeHash,omitempty"`
-	GenesisImpl        string `json:"genesisImpl,omitempty"`
-	Factory            string `json:"factory,omitempty"`
-	ManifestHash       string `json:"manifestHash,omitempty"`
-	PosAssignmentID    string `json:"posAssignmentId,omitempty"`
+	Pos                         bool   `json:"pos,omitempty"`
+	Custody                     string `json:"custody,omitempty"`
+	CustodyCodeHash             string `json:"custodyCodeHash,omitempty"`
+	Election                    string `json:"election,omitempty"`
+	ElectionCodeHash            string `json:"electionCodeHash,omitempty"`
+	ElectionPublication         string `json:"electionPublication,omitempty"`
+	ElectionPublicationCodeHash string `json:"electionPublicationCodeHash,omitempty"`
+	Evidence                    string `json:"evidence,omitempty"`
+	Selection                   string `json:"selection,omitempty"`
+	Reader                      string `json:"reader,omitempty"`
+	Policy                      string `json:"policy,omitempty"`
+	PolicyCodeHash              string `json:"policyCodeHash,omitempty"`
+	RewardPool                  string `json:"rewardPool,omitempty"`
+	RewardPoolCodeHash          string `json:"rewardPoolCodeHash,omitempty"`
+	GenesisImpl                 string `json:"genesisImpl,omitempty"`
+	Factory                     string `json:"factory,omitempty"`
+	ManifestHash                string `json:"manifestHash,omitempty"`
+	PosAssignmentID             string `json:"posAssignmentId,omitempty"`
 }
 
 func (d vrDeploymentFile) accounts() map[string][2]string {

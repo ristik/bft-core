@@ -39,7 +39,7 @@ vrb_published() { # VR's open output is Published (state 2)
 vrb_intent() { curl -sf -H 'Content-Type: application/json' "$1/api/v1/vr/intent"; }
 vrb_all_intents() { local r; for r in $(vrb_root_rpcs); do vrb_intent "$r" >/dev/null || return 1; done; }
 vrb_members_logged() { # every successor's root node (the four of this lane, and the joiner's) logged the line
-  local i; for i in $(seq 1 "${validators:-4}") $([ "${VR_JOINER:-0}" = 1 ] && [ "${VR_JOINER_FOLLOW:-0}" != 1 ] && echo 5); do grep -q -- "$1" "test-nodes/root$i/debug.log" 2>/dev/null || return 1; done
+  local i; for i in $(seq 1 "${validators:-4}") $([ "${VR_JOINER:-0}" = 1 ] && [ "${VR_JOINER_FOLLOW:-0}" != 1 ] && echo "$vrj_id"); do grep -q -- "$1" "test-nodes/root$i/debug.log" 2>/dev/null || return 1; done
 }
 vrb_logs_have() { grep -l -- "$1" test-nodes/root*/debug.log >/dev/null 2>&1; }
 vrb_acked() { [ "$(cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'lastAcked()(bytes32)')" = "$vrb_result" ]; }
@@ -121,8 +121,8 @@ vrb_main() {
     if [ "${VR_SEED:-0}" = 1 ]; then vrs_finish || return 1; return 0; fi
     if [ "${VR_JOINER_ONLY:-0}" = 1 ]; then
       sleep 60
-      for i in 5; do curl -sf -X POST -H 'Content-Type: application/json' -d '{}' "http://127.0.0.1:$(m2_rpc_port $i)/api/v1/q3/status" >"$VR_EVIDENCE/joiner-root-status.json"; done
-      cat "$VR_EVIDENCE/joiner-root-status.json"; tail -n 5 test-nodes/evm5/debug.log; tail -n 5 test-nodes/root5/debug.log | cut -c1-300
+      for i in "$vrj_id"; do curl -sf -X POST -H 'Content-Type: application/json' -d '{}' "http://127.0.0.1:$(m2_rpc_port $i)/api/v1/q3/status" >"$VR_EVIDENCE/joiner-root-status.json"; done
+      cat "$VR_EVIDENCE/joiner-root-status.json"; tail -n 5 test-nodes/evm$vrj_id/debug.log; tail -n 5 test-nodes/root$vrj_id/debug.log | cut -c1-300
       return 0
     fi
   fi
@@ -236,14 +236,14 @@ EOF
     if [ "${VR_POS_RECOVERY:-0}" = 1 ]; then vrp_recovery || return 1; fi
   fi
   if [ "${VR_UTB:-0}" = 1 ] && [ "${VR_AGG:-0}" = 1 ]; then vru_after || return 1; fi
-  for i in $(seq 1 "${validators:-4}") $([ "${VR_JOINER:-0}" = 1 ] && echo 5); do
+  for i in $(seq 1 "${validators:-4}") $([ "${VR_JOINER:-0}" = 1 ] && echo "$vrj_id"); do
     grep -E 'VR handoff|VR output published|root handoff outcome|switched|epoch' "test-nodes/root$i/debug.log" | tail -n 400 >"$VR_EVIDENCE/root$i-vr.log"
     cp "test-nodes/root$i/vr-member.json" "$VR_EVIDENCE/root$i-vr-member.json" 2>/dev/null || true
   done
   if [ "${VR_JOINER:-0}" = 1 ]; then
-    curl -s -X POST -H 'Content-Type: application/json' -d '{}' "http://127.0.0.1:$(m2_rpc_port 5)/api/v1/q3/status" >"$VR_EVIDENCE/root5-q3-status.json" 2>/dev/null
-    grep -v 'IR change request\|CertificationResp' test-nodes/root5/debug.log | tail -n 3000 >"$VR_EVIDENCE/root5-tail.log"
-    tail -n 1500 test-nodes/evm5/debug.log >"$VR_EVIDENCE/evm5-tail.log" 2>/dev/null; tail -n 200 test-nodes/reth5/reth.log >"$VR_EVIDENCE/reth5-tail.log" 2>/dev/null
+    curl -s -X POST -H 'Content-Type: application/json' -d '{}' "http://127.0.0.1:$(m2_rpc_port "$vrj_id")/api/v1/q3/status" >"$VR_EVIDENCE/root5-q3-status.json" 2>/dev/null
+    grep -v 'IR change request\|CertificationResp' test-nodes/root$vrj_id/debug.log | tail -n 3000 >"$VR_EVIDENCE/root5-tail.log"
+    tail -n 1500 test-nodes/evm$vrj_id/debug.log >"$VR_EVIDENCE/evm5-tail.log" 2>/dev/null; tail -n 200 test-nodes/reth$vrj_id/reth.log >"$VR_EVIDENCE/reth5-tail.log" 2>/dev/null
   fi
   if [ "${VR_SCHEDULE:-0}" != 0 ]; then source scripts/vr-schedule-steps.sh; if [ "$VR_SCHEDULE" = 2 ]; then vrs_long || return 1; else vrs_run || return 1; fi; fi
   return 0
@@ -258,8 +258,8 @@ else
   for i in $(seq 1 "${validators:-4}"); do tail -n 3000 "test-nodes/root$i/debug.log" >"$VR_EVIDENCE/root$i-tail.log" 2>/dev/null; done
   for i in $(seq 1 "${validators:-4}"); do tail -n 1000 "test-nodes/evm$i/debug.log" >"$VR_EVIDENCE/evm$i-tail.log" 2>/dev/null; done
   if [ "${VR_JOINER:-0}" = 1 ]; then
-    grep -v 'IR change request\|CertificationResp' test-nodes/root5/debug.log | tail -n 4000 >"$VR_EVIDENCE/root5-tail.log" 2>/dev/null
-    curl -s -H 'Content-Type: application/json' "http://127.0.0.1:$(m2_rpc_port 5)/api/v1/vr/member" >"$VR_EVIDENCE/root5-vr-member-status.json" 2>/dev/null
-    tail -n 1500 test-nodes/evm5/debug.log >"$VR_EVIDENCE/evm5-tail.log" 2>/dev/null; tail -n 300 test-nodes/reth5/reth.log >"$VR_EVIDENCE/reth5-tail.log" 2>/dev/null
+    grep -v 'IR change request\|CertificationResp' test-nodes/root$vrj_id/debug.log | tail -n 4000 >"$VR_EVIDENCE/root5-tail.log" 2>/dev/null
+    curl -s -H 'Content-Type: application/json' "http://127.0.0.1:$(m2_rpc_port "$vrj_id")/api/v1/vr/member" >"$VR_EVIDENCE/root5-vr-member-status.json" 2>/dev/null
+    tail -n 1500 test-nodes/evm$vrj_id/debug.log >"$VR_EVIDENCE/evm5-tail.log" 2>/dev/null; tail -n 300 test-nodes/reth$vrj_id/reth.log >"$VR_EVIDENCE/reth5-tail.log" 2>/dev/null
   fi
 fi
