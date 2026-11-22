@@ -684,6 +684,9 @@ def main():
         final=immutable(topology(out,a.validators,{'root':roots,'evm':evms},records['images'],a.captcha_sitekey,flags,max_gas,bool(genesis),a.rpc_bind,**topology_options))
         check_authorities_unchanged(boot,final,a.validators)
         write(out/'compose.yaml',final)
+        network_files = list((out/'network').glob('*.json'))
+        if vr_info:
+            network_files.extend(out/'network'/name for name in ('ureth-flags.txt', 'fee-collector.txt'))
         manifest={'offline_validation_only':a.offline_validation,'generation':out.name,'chain_id':a.chain_id,'genesis_hash':'0x'+block,'validators':a.validators,'operator_rpc':{'bind':a.rpc_bind,'root_port':operator_rpc.ROOT_PORT,'shard_port':operator_rpc.SHARD_PORT},
             'faucet_address':next(iter(alloc)), 'artifacts':records,
             'faucet':{**faucet['network'],'genesis_balance_wei':str(faucet['balance_wei'])},'networks':subnets,'root_cpus':a.root_cpus,
@@ -695,7 +698,7 @@ def main():
             'pos':vr_info or ({'genesis_assignment':genesis.assignment,'first_pass_assignment':genesis.first,'custody':genesis.deployment['custody'],'election':genesis.deployment['election'],
                     'contracts':PINS['contracts'],'owner_keys':'pos-owner-keys','cadence_rounds':a.pos_cadence_rounds,'cadence_seconds':a.pos_cadence_seconds} if genesis else None),
             'authority_status':{str(i):json.loads(authority(i,'status','--operator-socket',out/f'validator{i}/auth/operator.sock','--operator-credential',out/f'validator{i}/auth/operator.cred')) for i in range(1,a.validators+1)} if not a.offline_validation else {},
-            'config_sha256':{f.name:hashlib.sha256(f.read_bytes()).hexdigest() for f in (out/'network').glob('*.json')}}
+            'config_sha256':{f.name:hashlib.sha256(f.read_bytes()).hexdigest() for f in network_files}}
         write(out/'manifest.json',manifest)
         print(json.dumps(manifest,indent=2))
         if a.offline_validation:

@@ -38,16 +38,18 @@ def copy_regular(source, name, destination):
 
 
 def stage_network_files(source, stage, manifest):
+    utb = manifest['utb']
+    config_digests = manifest['config_sha256']
     for name in NETWORK_FILES:
         target = stage / name
         copy_regular(source, name, target)
-        if name.endswith('.json') and digest(target) != manifest['config_sha256'][name]:
+        if name == 'utb-genesis.id':
+            matches = target.read_text().strip() == utb['genesis_id']
+        else:
+            expected = utb['genesis_sha256'] if name == 'utb-genesis.cbor' else config_digests.get(name)
+            matches = digest(target) == expected
+        if not matches:
             raise ValueError(f'{name}: differs from the generation manifest')
-    utb = manifest['utb']
-    if digest(stage / 'utb-genesis.cbor') != utb['genesis_sha256']:
-        raise ValueError('utb-genesis.cbor differs from the generation manifest')
-    if (stage / 'utb-genesis.id').read_text().strip() != utb['genesis_id']:
-        raise ValueError('utb-genesis.id differs from the generation manifest')
 
 
 def copy_bootstrap_seed(source, seed):

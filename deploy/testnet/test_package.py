@@ -3208,7 +3208,7 @@ class StagingKnobs(unittest.TestCase):
         filters = [entry.args[0]['params'][0] for entry in forward.call_args_list[1:]]
         self.assertEqual([(f['fromBlock'], f['toBlock']) for f in filters], [('0x0', '0x270f'), ('0x2710', '0x2710')])
 
-    def test_vr_release_compares_the_copied_genesis_and_rejects_symlinks(self):
+    def test_vr_release_checks_staged_network_files_and_rejects_symlinks(self):
         import hashlib
         import vr_release
         sha = lambda value: hashlib.sha256(value).hexdigest()
@@ -3219,19 +3219,33 @@ class StagingKnobs(unittest.TestCase):
             files = {name: b'{}' for name in vr_release.NETWORK_FILES}
             files['utb-genesis.id'] = (pin + '\n').encode()
             files['utb-genesis.cbor'] = b'genesis record'
+            files['ureth-flags.txt'] = f'--unicity.genesis-commitment={pin}\n'.encode()
+            files['fee-collector.txt'] = b'0x00000000000000000000000000000000000000fe\n'
             for name, data in files.items():
                 (net / name).write_bytes(data)
             manifest = {'utb': {'genesis_id': pin, 'genesis_sha256': sha(files['utb-genesis.cbor'])},
-                        'config_sha256': {name: sha(data) for name, data in files.items() if name.endswith('.json')}}
+                        'config_sha256': {name: sha(data) for name, data in files.items() if not name.startswith('utb-genesis.')}}
             good = Path(tmp) / 'verified'
             good.mkdir()
             vr_release.stage_network_files(net, good, manifest)
-            for name in ('utb-genesis.id', 'utb-genesis.cbor', 'trust-base.json'):
+            for name, stale in (
+                ('utb-genesis.id', b'stale'),
+                ('utb-genesis.cbor', b'stale'),
+                ('trust-base.json', b'stale'),
+                ('ureth-flags.txt', files['ureth-flags.txt'].replace(b'31', b'32')),
+                ('fee-collector.txt', files['fee-collector.txt'].replace(b'fe', b'fd')),
+            ):
                 with self.subTest(name=name), tempfile.TemporaryDirectory() as out:
-                    (net / name).write_bytes(b'stale')
+                    (net / name).write_bytes(stale)
                     with self.assertRaisesRegex(ValueError, name):
                         vr_release.stage_network_files(net, Path(out), manifest)
                     (net / name).write_bytes(files[name])
+            for name in ('ureth-flags.txt', 'fee-collector.txt'):
+                with self.subTest(missing_digest=name), tempfile.TemporaryDirectory() as out:
+                    expected = manifest['config_sha256'].pop(name)
+                    with self.assertRaisesRegex(ValueError, name):
+                        vr_release.stage_network_files(net, Path(out), manifest)
+                    manifest['config_sha256'][name] = expected
             (net / 'genesis.json').unlink()
             (net / 'genesis.json').symlink_to(good / 'genesis.json')
             with tempfile.TemporaryDirectory() as out, self.assertRaises(OSError):

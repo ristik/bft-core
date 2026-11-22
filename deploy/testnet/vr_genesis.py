@@ -269,7 +269,7 @@ def verify_compose_pos(ubft, net, generation, configs=None, *, output=None):
         '--genesis', cfg / 'genesis.json', '--shard-conf', cfg / 'full-shard-conf.json', '--trust-base', cfg / 'trust-base.json',
         '--b1-profile', cfg / 'b1-profile.json', '--genesis-identities', cfg / 'genesis-identities.json',
         '--vr-hook-measurement', net / 'vr-hook-measurement-fresh.json', '--ureth-flags', (net / 'ureth-flags.txt').read_text().strip(),
-        '--fee-collector', FEE_COLLECTOR, '--out-root-deployment', output or net / 'vr-deployment.json',
+        '--fee-collector', (net / 'fee-collector.txt').read_text().strip(), '--out-root-deployment', output or net / 'vr-deployment.json',
         '--utb-genesis', net / 'utb-genesis.cbor', '--utb-genesis-id', net / 'utb-genesis.id',
         '--funded-accounts', net / 'funded-accounts.json', '--dev-generation', generation)
 
