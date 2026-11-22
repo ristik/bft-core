@@ -25,6 +25,13 @@ class ValidatorContainer(unittest.TestCase):
         self.assertIsNone(validator.active_member_epoch({'activeEpoch':2, 'follower':True}, 1))
         self.assertIsNone(validator.active_member_epoch({'activeEpoch':1}, 1))
 
+    def test_authority_scope_uses_a_verified_uc_from_the_selected_epoch(self):
+        with patch.object(validator, 'root_status', return_value={'activeEpoch':2, 'follower':True}), patch.object(
+                validator, 'command', side_effect=[SimpleNamespace(stdout='{"rootEpoch":1,"shardEpoch":0}'),
+                                                    SimpleNamespace(stdout='{"rootEpoch":2,"shardEpoch":1}')]):
+            self.assertIsNone(validator.provision_scope({'shardEpoch':None}, 2))
+            self.assertEqual(validator.provision_scope({'shardEpoch':None}, 2), {'rootEpoch':2, 'shardEpoch':2})
+
     def test_unpinned_release_checksum_stops_before_native_import(self):
         settings = SimpleNamespace(release_url='https://example.invalid/release')
         with patch.object(validator, 'download', return_value=b'changed'), patch.object(validator, 'ubft') as tool:

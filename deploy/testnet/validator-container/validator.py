@@ -289,12 +289,12 @@ def provision_scope(network, epoch):
     view = root_status()
     if not view or view['activeEpoch'] != epoch or not view.get('follower'):
         return None
-    with urllib.request.urlopen(ROOT + '/api/v1/roundInfo', timeout=8) as response:
-        state = json.load(response)
-    if int(state['epochNumber']) != epoch:
+    result = command('handoff-ubft', 'validator', 'last-signed-uc', '--execution', RPC,
+                     '--root-rpc', ROOT, output=True)
+    certified = json.loads(result.stdout)
+    if not certified or certified['rootEpoch'] != epoch:
         return None
-    evm, = [part for part in state['partitionShards'] if part['partitionId'] == 8]
-    return {'rootEpoch': epoch, 'shardEpoch': network['shardEpoch'] or int(evm['epochNumber']) + 1}
+    return {'rootEpoch': epoch, 'shardEpoch': network['shardEpoch'] or certified['shardEpoch'] + 1}
 
 
 def link_authority():

@@ -21,7 +21,7 @@ func validatorLastUCCmd() *cobra.Command {
 	var execution, root, signer string
 	cmd := &cobra.Command{
 		Use:   "last-signed-uc",
-		Short: "Find the newest local UC carrying this root's verified signature",
+		Short: "Find the newest verified UC, optionally with a particular root signature",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			ctx, cancel := context.WithTimeout(cmd.Context(), 12*time.Second)
 			defer cancel()
@@ -36,7 +36,7 @@ func validatorLastUCCmd() *cobra.Command {
 	cmd.Flags().StringVar(&execution, "execution", "", "local execution RPC")
 	cmd.Flags().StringVar(&root, "root-rpc", "", "local verified root RPC")
 	cmd.Flags().StringVar(&signer, "signer", "", "local root node ID")
-	for _, flag := range []string{"execution", "root-rpc", "signer"} {
+	for _, flag := range []string{"execution", "root-rpc"} {
 		_ = cmd.MarkFlagRequired(flag)
 	}
 	return cmd
@@ -46,6 +46,7 @@ type signedUCView struct {
 	Block      common.Hash `json:"blockHash"`
 	RootEpoch  uint64      `json:"rootEpoch"`
 	RootRound  uint64      `json:"rootRound"`
+	ShardEpoch uint64      `json:"shardEpoch"`
 	ShardRound uint64      `json:"shardRound"`
 	Signer     string      `json:"signer"`
 }
@@ -77,7 +78,8 @@ func findLastSignedUC(ctx context.Context, rpc ethExecution, root, signer string
 		if err := types.Cbor.Unmarshal(result.Companion.Witnesses[0], &uc); err != nil || uc.InputRecord == nil || uc.UnicitySeal == nil {
 			continue
 		}
-		if _, signed := uc.UnicitySeal.Signatures[signer]; !signed || !bytes.Equal(uc.InputRecord.BlockHash, child.Parent[:]) {
+		_, signed := uc.UnicitySeal.Signatures[signer]
+		if (signer != "" && !signed) || !bytes.Equal(uc.InputRecord.BlockHash, child.Parent[:]) {
 			continue
 		}
 		trust, err := fetchTrustBase(ctx, root, uc.UnicitySeal.Epoch)
@@ -96,7 +98,7 @@ func findLastSignedUC(ctx context.Context, rpc ethExecution, root, signer string
 			return nil, fmt.Errorf("verify UC for %s: %w", child.Parent, err)
 		}
 		return &signedUCView{Block: child.Parent, RootEpoch: uc.UnicitySeal.Epoch, RootRound: uc.UnicitySeal.RootChainRoundNumber,
-			ShardRound: uc.InputRecord.RoundNumber, Signer: signer}, nil
+			ShardEpoch: uc.InputRecord.Epoch, ShardRound: uc.InputRecord.RoundNumber, Signer: signer}, nil
 	}
 	return nil, nil
 }
