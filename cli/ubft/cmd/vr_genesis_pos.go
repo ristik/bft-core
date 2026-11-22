@@ -32,8 +32,12 @@ const (
 	vrPosLegacyPool   = 8
 )
 
-// This runtime contains the immutable address and code hash of the live custody writer.
-var vrPosCustodyWriterPinned = common.HexToHash("0x7ef8f1ca7090f9d51c58e956b424e331456ffeab1786eb64a5e03d199c2db255")
+// Reviewed VRPosGenesis custody runtime and its GENESIS_IMPL and GENESIS_IMPL_CODE_HASH immutables.
+var (
+	vrPosCustodyRuntimeHash   = common.HexToHash("0x7ef8f1ca7090f9d51c58e956b424e331456ffeab1786eb64a5e03d199c2db255")
+	vrPosCustodyWriterAddress = common.HexToAddress("0xcD220EA34A9d650f58317411A2be2733e4F0c46f")
+	vrPosCustodyWriterHash    = common.HexToHash("0xc84515c10d8de1be6f86bffd2efc164b198cf9efbca3aff74b467b38bcc19432")
+)
 
 // custody storage appended by VT-04 (docs/p85/custody-storage-layout.txt): deploymentDomain and exposureMemberDigest.
 const (
@@ -152,9 +156,6 @@ func vrCheckPosStack(in vrGenesisInput, d vrDeploymentFile, identities []evmassi
 	}
 	if strings.EqualFold(d.RegistryCodeHash, lowerHex(b1state.VRBuildPos16.RegistryCodeHash[:])) ||
 		d.ElectionPublication != "" || in.Limits.VMax > vrPosLegacyPool || d.GenesisImplCodeHash != "" {
-		if ethcrypto.Keccak256Hash(common.FromHex(alloc[common.HexToAddress(d.Custody)].Code)) != vrPosCustodyWriterPinned {
-			return fail("the PoS custody runtime is not the reviewed build with an authenticated writer")
-		}
 		if err := vrCheckPosCustodyImplementation(d, alloc); err != nil {
 			return err
 		}
@@ -238,23 +239,22 @@ func vrCheckPosStack(in vrGenesisInput, d vrDeploymentFile, identities []evmassi
 
 // The custody runtime checks this immutable address and code hash before delegating.
 func vrCheckPosCustodyImplementation(d vrDeploymentFile, alloc map[common.Address]vrAllocAccount) error {
+	if ethcrypto.Keccak256Hash(common.FromHex(alloc[common.HexToAddress(d.Custody)].Code)) != vrPosCustodyRuntimeHash {
+		return fmt.Errorf("%w: the PoS custody runtime is not the reviewed build with an authenticated writer", ErrVRGenesis)
+	}
 	impl, err := vrAddress("PoS custody implementation", d.GenesisImpl)
 	if err != nil {
 		return err
 	}
-	want, err := vrHex("PoS custody implementation code hash", d.GenesisImplCodeHash, 32)
+	digest, err := vrHex("PoS custody implementation code hash", d.GenesisImplCodeHash, 32)
 	if err != nil {
 		return err
 	}
-	runtime := common.FromHex(alloc[impl].Code)
-	got := ethcrypto.Keccak256Hash(runtime)
-	if len(runtime) == 0 || !bytes.Equal(got[:], want) {
-		return fmt.Errorf("%w: allocated PoS custody implementation does not match its runtime hash", ErrVRGenesis)
+	if impl != vrPosCustodyWriterAddress || [32]byte(digest) != vrPosCustodyWriterHash {
+		return fmt.Errorf("%w: reported PoS custody implementation address and runtime hash do not match the reviewed pair", ErrVRGenesis)
 	}
-	code := common.FromHex(alloc[common.HexToAddress(d.Custody)].Code)
-	addressWord := vrschema.AddrWord(impl)
-	if !bytes.Contains(code, addressWord[:]) || !bytes.Contains(code, want) {
-		return fmt.Errorf("%w: PoS custody does not pin its implementation address and runtime hash", ErrVRGenesis)
+	if ethcrypto.Keccak256Hash(common.FromHex(alloc[impl].Code)) != vrPosCustodyWriterHash {
+		return fmt.Errorf("%w: allocated PoS custody implementation does not match its runtime hash", ErrVRGenesis)
 	}
 	return nil
 }

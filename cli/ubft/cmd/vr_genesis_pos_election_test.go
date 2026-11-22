@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"compress/gzip"
 	"encoding/hex"
 	"encoding/json"
 	"os"
@@ -38,21 +39,39 @@ func posElectionFixture(t *testing.T) (vrGenesisInput, vrDeploymentFile, map[com
 }
 
 func TestPosCustodyImplementationMismatchIsRefused(t *testing.T) {
-	custody, impl := common.Address{19: 1}, common.Address{19: 2}
-	good, bad := []byte{0x60, 0x00, 0x00}, []byte{0x60, 0x01, 0x00}
-	hash := ethcrypto.Keccak256Hash(good)
-	addressWord := vrschema.AddrWord(impl)
-	custodyCode := append(addressWord[:], hash[:]...)
-	d := vrDeploymentFile{Custody: custody.Hex(), GenesisImpl: impl.Hex(), GenesisImplCodeHash: hash.Hex()}
-	alloc := map[common.Address]vrAllocAccount{
-		custody: {Code: "0x" + hex.EncodeToString(custodyCode)},
-		impl:    {Code: "0x" + hex.EncodeToString(good)},
-	}
+	file, err := os.Open(filepath.Join("testdata", "vr-genesis-pos16", "custody-runtimes.json.gz"))
+	require.NoError(t, err)
+	defer file.Close()
+	gz, err := gzip.NewReader(file)
+	require.NoError(t, err)
+	defer gz.Close()
+	var code struct{ Custody, Writer string }
+	require.NoError(t, json.NewDecoder(gz).Decode(&code))
+
+	custody := common.HexToAddress("0xc399A50Da6437b10e26AEf8DB67EB7f79f8f1D93")
+	impl := vrPosCustodyWriterAddress
+	d := vrDeploymentFile{Custody: custody.Hex(), GenesisImpl: impl.Hex(), GenesisImplCodeHash: vrPosCustodyWriterHash.Hex()}
+	alloc := map[common.Address]vrAllocAccount{custody: {Code: code.Custody}, impl: {Code: code.Writer}}
 	require.NoError(t, vrCheckPosCustodyImplementation(d, alloc))
-	alloc[impl] = vrAllocAccount{Code: "0x" + hex.EncodeToString(bad)}
-	require.ErrorContains(t, vrCheckPosCustodyImplementation(d, alloc), "does not match its runtime hash")
-	d.GenesisImplCodeHash = ethcrypto.Keccak256Hash(bad).Hex()
-	require.ErrorContains(t, vrCheckPosCustodyImplementation(d, alloc), "does not pin its implementation")
+
+	// Hashing this unrelated code produces a digest which occurs in the authentic custody runtime.
+	substitute := []byte("unicity.p85.exposure")
+	hash := ethcrypto.Keccak256Hash(substitute)
+	require.Contains(t, code.Custody, hex.EncodeToString(hash[:]))
+	addressWord := vrschema.AddrWord(impl)
+	require.Contains(t, code.Custody, hex.EncodeToString(addressWord[:]))
+	alloc[impl] = vrAllocAccount{Code: "0x" + hex.EncodeToString(substitute)}
+	require.ErrorContains(t, vrCheckPosCustodyImplementation(d, alloc), "allocated PoS custody implementation does not match")
+	d.GenesisImplCodeHash = hash.Hex()
+	require.ErrorContains(t, vrCheckPosCustodyImplementation(d, alloc), "do not match the reviewed pair")
+
+	// The factory address is another immutable. Even the genuine writer code at that address is refused.
+	factory := common.HexToAddress("0x1e2F6dD5321bf5657C723f7b8BdF944B3D63f693")
+	factoryWord := vrschema.AddrWord(factory)
+	require.Contains(t, code.Custody, hex.EncodeToString(factoryWord[:]))
+	alloc[factory] = vrAllocAccount{Code: code.Writer}
+	d.GenesisImpl, d.GenesisImplCodeHash = factory.Hex(), vrPosCustodyWriterHash.Hex()
+	require.ErrorContains(t, vrCheckPosCustodyImplementation(d, alloc), "do not match the reviewed pair")
 }
 
 func TestPosElectionInitializationIsBoundToThePlan(t *testing.T) {
