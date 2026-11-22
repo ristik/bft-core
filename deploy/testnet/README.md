@@ -250,6 +250,64 @@ sudo nginx -t
 sudo ss -ltnp
 ```
 
+### VR proof-of-stake package
+
+For the public profile pass `--vr-pos --validators 4 --utb`, a clean
+`--pos-contracts` checkout at `pins.json`'s `vr-contracts` commit, and
+`--vr-fresh-measurement` from the independent
+[sixteen-seat measurement](measurements/README.md). The profile fixes four
+genesis seats, a target of five and a ceiling of sixteen. Set
+`--block-interval-ms 10000 --pos-cadence-rounds 400 --pos-cadence-seconds 300`
+for the public stage and its private rehearsal. For a public generation pass
+the site's RPC URL as `--public-rpc-url`. The existing
+`--captcha-secret-file` must be a regular file with UID 10001 and mode 0400.
+This profile mounts it directly. Use a different path with a fixture secret for
+the private rehearsal.
+
+The authority starts pending while genesis is finalized. The ceremony checks
+the allocated VR and P85 graph against the two-pass assignment, installs the
+activation fence, and pins each incumbent's election and identity. These
+in-memory keys stay live across shard restarts. This ceremony uses the
+test-network late-policy option. The root sees only the authority's
+possession-proof credential. The archive-proof RPC and Engine API bind to
+validator-pod loopback. A private allow-listed wallet relay in each pod serves
+the package gateway and other internal clients.
+
+Run `validate-generation.py --generation G`, `validate-pos.py G`,
+`rehearse.py --generation G --stages up,identity,first-tx,pos-smoke`, and
+`validate-aggregator.py G` with the tools and loopback RPC address of the
+generation. Run `vr_release.py G --out RELEASE --ubft BIN --ureth BIN` after
+the first certified blocks. It exports the release manifests, binaries, peer
+addresses and independently checked `RELEASE/seed/`. Supply `--wallet-dir`
+with the deployment's public NB2 files for the final export. The peer
+addresses are for operators on the dev host's private validator network.
+Export the bootstrap seed while the archive checkpoint is in root epoch one.
+Keep the verified `RELEASE/seed/` and pass it as `--bootstrap-seed` on later
+releases for generations whose manifests pin both `ureth-flags.txt` and
+`fee-collector.txt`. A new successor-epoch seed needs the verified activation bundles
+described in [Sync from a seed](../../docs/operations/sync-seed.md).
+
+Keep the already-verified static release for `tn-public-20261122`. Its manifest
+predates the startup-file digests. Release re-export starts with the next
+generation, whose manifest must pin both files. The moving NB2 checkpoint at
+`/release/nb2-origin.json` is published independently of the static release
+and continues to refresh.
+
+For the on-host operator start `python3 deploy/testnet/validator_rpc.py` on
+loopback and use `http://127.0.0.1:18485` as the operator RPC. The wrapper
+resolves and pages registration log requests and uses the normal gateway for
+transaction fanout. Use `--gateway-port 9545` on the slot-1 rehearsal.
+
+For the join rehearsal use a separate operator home and the
+[validator handbook](../../docs/operations/validator-handbook.md). When the
+election reserves the joiner's result, the participants supply their proofs
+and the relayer publishes it. The VR roots drive the handoff. After the roots
+activate the new epoch, run `rehearse.py --generation G --stages vr-pos-advance
+--vr-target-epoch E` to deliver the verified history to the incumbent
+authorities and restart their shard clients. The joining operator advances its
+own authority. Check the new assignment, quorum and a subsequent UC before
+recording the join as complete.
+
 ## Monitoring, logs and incidents
 
 Prometheus scrapes root `/api/v1/metrics` and RPC counters, keeps seven days / 1 GiB

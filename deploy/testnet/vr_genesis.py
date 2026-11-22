@@ -196,6 +196,83 @@ def pos_measurement(a, out, module_hash, name):
     return target
 
 
+# The Compose ceremony already has a trust base and pending authorities. Use
+# those exact node keys in the same two-pass plan and verifier as the CLI.
+def compose_pos_genesis(a, *, ubft, home, network, generation, roots, evms, funded, flags):
+    trust = home / 'trust-base.json'
+    conf = home / f'shard-conf-{PARTITION}_0.json'
+    profile = home / 'b1-profile.json'
+    keys = dev_keys(home, a.validators)
+    balances = {addr: hex(int(value['balance'])) for addr, value in funded['alloc'].items()}
+    balances.update({key['address']: hex(DEV_FUND_WEI) for key in keys['owners'] + keys['signers']})
+    merge_alloc(funded, {addr: {'balance': balances[addr]} for addr in balances if addr not in funded['alloc']})
+    bindings = [{'rootNodeId': root, 'evmNodeId': evm} for root, evm in zip(roots, evms, strict=True)]
+    (network / 'genesis-bindings.json').write_text(json.dumps(bindings) + '\n')
+    (network / 'funded-accounts.json').write_text(json.dumps(balances) + '\n')
+    root_genesis = re.search(r'^root genesis id +(0x[0-9a-f]{64})$',
+        run(ubft, 'trust-base', 'utb-manifest', '--trust-base', trust, '--out-dir', home / 'utb'), re.M)
+    if root_genesis is None:
+        raise VRGenesisError('the manifest tool printed no root genesis id')
+
+    def write_plan(assignment):
+        run(ubft, 'vr-genesis', 'plan', '--trust-base', trust, '--shard-conf', conf,
+            '--bindings', network / 'genesis-bindings.json', '--owners', home / 'dev-keys/owners.json',
+            '--b1-profile', profile, '--network-word', dev_network_word(generation),
+            '--governor-signers', (home / 'dev-keys/signers.txt').read_text().strip(), '--limits', '4,5,16',
+            '--fee-collector', FEE_COLLECTOR, '--out-input', network / 'vr-input.json',
+            '--out-identities', home / 'genesis-identities.json', '--utb-genesis', home / 'vr-utb.cbor',
+            '--utb-genesis-id', home / 'vr-utb.id', '--pos', '--pos-bond-unit', POS_BOND_UNIT,
+            '--pos-treasury', POS_TREASURY, '--pos-root-genesis', root_genesis[1], '--pos-assignment-id', assignment,
+            '--pos-reward-funding', POS_REWARD_FUNDING, '--pos-reward-rate', POS_REWARD_RATE,
+            '--pos-cadence-rounds', a.pos_cadence_rounds, '--pos-cadence-seconds', a.pos_cadence_seconds)
+
+    def finalize(alloc, prefix=''):
+        source = home / (prefix + 'funded.json')
+        source.write_text(json.dumps(alloc) + '\n')
+        return run(ubft, 'engine-api', 'genesis', '--shard-conf', conf, '--trust-base', trust, '--b1-profile', profile,
+            '--alloc-source', source, '--out', home / (prefix + 'genesis.json'),
+            '--full-shard-conf', home / (prefix + 'full-shard-conf.json'), '--identities-out', home / (prefix + 'b1-identities.json'))
+
+    write_plan('0x' + '11' * 32)
+    finalize(funded, 'reconcile-')
+    reconciled = home / 'reconcile-full-shard-conf.json'
+    assignment = re.search(r'genesis assignment id (0x[0-9a-f]{64})',
+        run(ubft, 'vr-genesis', 'assignment', '--shard-conf', reconciled, '--genesis-identities', home / 'genesis-identities.json'))
+    if assignment is None:
+        raise VRGenesisError('vr-genesis assignment printed no id')
+    write_plan(assignment[1])
+    for actual, pinned in (('vr-utb.cbor', 'utb-genesis.cbor'), ('vr-utb.id', 'utb-genesis.id')):
+        if (home / actual).read_bytes() != (network / pinned).read_bytes():
+            raise VRGenesisError('the VR plan disagrees with the authority ceremony UTB genesis')
+    contracts = a.pos_contracts.resolve()
+    run(contracts / 'script/vr-pos-genesis.sh', network / 'vr-input.json', home / 'vr-contracts', cwd=contracts)
+    shutil.copy2(home / 'vr-contracts/deployment.json', network / 'deployment.json')
+    identity = finalize(merge_alloc(funded, json.loads((home / 'vr-contracts/alloc.json').read_text())))
+    full = home / 'full-shard-conf.json'
+    if full.read_bytes() != reconciled.read_bytes():
+        raise VRGenesisError('the contracts allocation changed the full shard configuration')
+    fresh, provenance = fresh_measurement(a, network)
+    flags = [*flags, '--unicity.genesis-commitment=' + genesis_commitment(json.loads((home / 'genesis.json').read_text()))]
+    (network / 'ureth-flags.txt').write_text(' '.join(flags) + f' --unicity.fee-collector={FEE_COLLECTOR}\n')
+    (network / 'fee-collector.txt').write_text(FEE_COLLECTOR + '\n')
+    print(verify_compose_pos(ubft, network, generation, home))
+    deployment = json.loads((network / 'deployment.json').read_text())
+    return identity, flags, {'profile': 'vr-pos16', 'registry': VR, 'committee_limits': [4, 5, 16], 'contracts': git_commit(contracts),
+        'genesis_assignment': assignment[1], 'custody': deployment['custody'], 'election': deployment['election'],
+        'owner_keys': 'vr-owner-keys', 'cadence_rounds': a.pos_cadence_rounds, 'cadence_seconds': a.pos_cadence_seconds,
+        'measurement_sha256': hashlib.sha256(fresh.read_bytes()).hexdigest(), 'measurement_provenance': provenance}
+
+
+def verify_compose_pos(ubft, net, generation, configs=None, *, output=None):
+    cfg = configs or net
+    return run(ubft, 'vr-genesis', 'verify', '--input', net / 'vr-input.json', '--deployment', net / 'deployment.json',
+        '--genesis', cfg / 'genesis.json', '--shard-conf', cfg / 'full-shard-conf.json', '--trust-base', cfg / 'trust-base.json',
+        '--b1-profile', cfg / 'b1-profile.json', '--genesis-identities', cfg / 'genesis-identities.json',
+        '--vr-hook-measurement', net / 'vr-hook-measurement-fresh.json', '--ureth-flags', (net / 'ureth-flags.txt').read_text().strip(),
+        '--fee-collector', (net / 'fee-collector.txt').read_text().strip(), '--out-root-deployment', output or net / 'vr-deployment.json',
+        '--utb-genesis', net / 'utb-genesis.cbor', '--utb-genesis-id', net / 'utb-genesis.id',
+        '--funded-accounts', net / 'funded-accounts.json', '--dev-generation', generation)
+
 def plan(a):
     out = Path(a.out).resolve()
     if out.exists():
