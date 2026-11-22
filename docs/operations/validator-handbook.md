@@ -12,7 +12,8 @@ on loopback. The public peer lists are in the
 
 Obtain the container bundle's `SHA256SUMS` digest from the authenticated
 announcement. The tarball is a `docker save` archive for the one image used by
-both roles.
+both roles. Use the loader from a trusted checkout of this handbook's release.
+It checks the archive's OCI manifest and platform before handing it to Docker.
 
 ```bash
 set -euo pipefail
@@ -22,9 +23,8 @@ curl -fsS "$RELEASE/SHA256SUMS" -o SHA256SUMS
 printf '%s  SHA256SUMS\n' "$BUNDLE_DIGEST" | sha256sum -c -
 while read -r digest name; do curl -fsS "$RELEASE/$name" -o "$name"; done < SHA256SUMS
 sha256sum -c SHA256SUMS
-docker load -i validator-image.tar.gz
-IMAGE=$(jq -er .imageId manifest.json)
-test "$(docker image inspect --format '{{.Id}}' "$IMAGE")" = "$IMAGE"
+# Set BFT_CORE to the absolute path of the trusted bft-core checkout.
+IMAGE=$(python3 "$BFT_CORE/deploy/testnet/validator-container/load.py" "$PWD" "$BUNDLE_DIGEST")
 ```
 
 Keep the named volume private. Start the authority once. Both roles can share
@@ -54,14 +54,34 @@ proof from its own synced root and verifies it from its pinned lineage.
 
 Keep the authority container running during node updates. Replace only
 `unicity-node`, with the same data volume, then repeat `join --yes` if the
-join was interrupted. Authority process loss requires the handbook's
-`validator rotate` procedure. For retirement run
+join was interrupted. For authority process loss, follow [Authority loss](#authority-loss).
+For retirement run
 `docker exec unicity-node ubft-validator exit --yes`. After the maturity
 conditions in section 6 hold, run
 `docker exec unicity-node ubft-validator exit --claim --yes`.
 
 The manual procedure below is the reference for incident recovery and
 for validating the resulting committee and certification evidence.
+
+## Authority loss
+
+Keep the authority volume and its fail-stop marker intact. Determine the
+identity's registration and bond state from certified chain data and reconcile
+any submitted registration, delegation or bond transactions.
+
+- If the identity is unregistered, unbonded and has no unresolved submissions,
+  keep the original volume for diagnosis. Initialize a new identity in a
+  separately named volume and fund its new payee before joining.
+- If the identity is registered, bonded, or its state is uncertain, stop the
+  join or rotation and contact the Foundation testnet maintainers through
+  the testnet operator channel. Preserve the original volume, authority
+  marker, root and shard data, join journal, receipts and relevant container
+  logs. Share only the validator ID and generation, transaction hashes,
+  last verified UC and authority fingerprint. Keep private keys and
+  credentials local. Ask the maintainers to confirm a supported recovery or
+  retirement path for the recorded state before sending another transaction.
+  The current VR binding and custody delegation can land in different
+  generations. [Bonded-identity rotation defect](https://github.com/ristik/bft-core/issues/1286)
 
 ## Rehearsal shell
 
@@ -594,7 +614,7 @@ ubft validator status --custody "$CUSTODY" --sample 0 | grep '^clock'
 
 If the application has sent no registration, confirm a new window, stop only the pending authority using its saved `AUTHORITY_PID`, and start an authority for the confirmed successor using the existing registration policy and credentials. Write its node info to a fresh filename and select it with `validator init --force`. Keep the wallet, root key, shard peer identity and payee.
 
-If PoS registration already committed, keep the authority running and contact the Foundation before staging a replacement binding or delegation. Share the identity, committed receipts, confirmed target epoch and whether the bond committed. Ask the Foundation to check custody's generation, the current and staged VR bindings, and whether an open or published result can still select the existing key. For a bonded identity, `validator rotate` stages a binding at generation `g+1` while `validator apply` writes the delegation at the open custody generation `g`. Both transactions can succeed and still leave the identity ineligible at the P85 snapshot. This release has no verified self-service recovery for that state. Preserve the authority and bond while the Foundation confirms a supported path.
+If PoS registration already committed, keep the authority running and contact the Foundation before staging a replacement binding or delegation. Share the identity, committed receipts, confirmed target epoch and whether the bond committed. Ask the Foundation to check custody's generation, the current and staged VR bindings, and whether an open or published result can still select the existing key. For a bonded identity, `validator rotate` stages a binding at generation `g+1` while `validator apply` writes the delegation at the open custody generation `g`. Both transactions can succeed and still leave the identity ineligible at the P85 snapshot. This release has no verified self-service recovery for that state. Preserve the authority and bond while the Foundation confirms a supported path. If the authority has already stopped, follow [Authority loss](#authority-loss).
 
 ## Troubleshooting
 

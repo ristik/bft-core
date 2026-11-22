@@ -92,6 +92,26 @@ find that exact transaction in its pool or chain. If the gateway cannot confirm
 acceptance, it returns HTTP 503. Check the transaction hash before retrying the
 same signed bytes.
 
+## Incumbent public P2P
+
+For a new VR generation, pass `--public-p2p-ip <host-public-ipv4>` to
+`generate.py` before the authority ceremony. The address must be assigned
+to the Docker host. Each validator pod publishes its root TCP port
+(`26662 + validator index - 1 + port offset`) and shard TCP port
+(`28111 + validator index - 1 + port offset`) on that address. The root
+and shard announce the same endpoints, and the release exporter checks
+the running Docker bindings before putting them in the peer lists. The
+operator and execution APIs in each pod continue to bind loopback.
+
+Treat the pod that owns the namespace as part of the authority lifetime.
+Docker sets port bindings at container creation. Changing them on an
+existing generation requires replacing the namespace owner, and a
+running authority keeps using the namespace it started in. In particular,
+the authorities enrolled in `tn-public-20261122` require their original
+namespaces and loopback execution clients. Apply Docker-managed publishing
+from generation creation until a live migration has been rehearsed with
+authority continuity.
+
 ## Build artifacts on Linux
 
 Use the compatible exact source revisions in [pins.json](pins.json), including the

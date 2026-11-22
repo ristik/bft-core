@@ -16,7 +16,7 @@ import (
 )
 
 // This is an observation on a validator's local, synced root and execution
-// node. Count a reported signature only once the complete UC verifies.
+// node. Verify both the complete UC and any signature attributed to a named root.
 func validatorLastUCCmd() *cobra.Command {
 	var execution, root, signer string
 	var epoch uint64
@@ -102,8 +102,27 @@ func findLastSignedUC(ctx context.Context, rpc ethExecution, root, signer string
 		if err := uc.Verify(trust, crypto.SHA256, conf.PartitionID, conf.ShardID, h); err != nil {
 			return nil, fmt.Errorf("verify UC for %s: %w", child.Parent, err)
 		}
+		if !sealSignedBy(uc.UnicitySeal, trust, signer) {
+			continue
+		}
 		return &signedUCView{Block: child.Parent, RootEpoch: uc.UnicitySeal.Epoch, RootRound: uc.UnicitySeal.RootChainRoundNumber,
 			ShardEpoch: uc.InputRecord.Epoch, ShardRound: uc.InputRecord.RoundNumber, Signer: signer}, nil
 	}
 	return nil, nil
+}
+
+func sealSignedBy(seal *types.UnicitySeal, trust types.RootTrustBase, signer string) bool {
+	if signer == "" {
+		return true
+	}
+	signature, ok := seal.Signatures[signer]
+	if !ok {
+		return false
+	}
+	message, err := seal.SigBytes()
+	if err != nil {
+		return false
+	}
+	_, err = trust.VerifySignature(message, signature, signer)
+	return err == nil
 }

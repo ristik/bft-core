@@ -70,6 +70,16 @@ def copy_bootstrap_seed(source, seed):
         copy_regular(source, name, seed / name)
 
 
+def published_peer(entrypoint, bindings):
+    if '--announce-addresses' not in entrypoint or not bindings or len(bindings) != 1:
+        raise ValueError('expected one running Docker P2P binding with a matching announce address')
+    binding, = bindings
+    address = f"/ip4/{binding['HostIp']}/tcp/{binding['HostPort']}"
+    if address != entrypoint[entrypoint.index('--announce-addresses') + 1]:
+        raise ValueError('Docker P2P binding differs from the configured announce address')
+    return address
+
+
 def export_release(generation, out, ubft, ureth, wallet_dir=None, bootstrap_seed=None):
     with release_file(generation, 'manifest.json') as file:
         manifest_bytes = file.read()
@@ -93,15 +103,23 @@ def export_release(generation, out, ubft, ureth, wallet_dir=None, bootstrap_seed
                 raise ValueError(f'{name}: differs from the deployed binary digest')
         root_peers, shard_peers = [], []
         for i in range(1, manifest['validators'] + 1):
-            networks = json.loads(checked('docker', 'inspect', '--format={{json .NetworkSettings.Networks}}', transport.holder(i)))
-            name = f"{compose['name']}_validators"
-            address = ipaddress.IPv4Address(networks[name]['IPAddress'])
-            if not address.is_private:
-                raise ValueError('Compose validator peer must have a private address')
+            holder = transport.holder(i)
+            services = compose['services']
+            if services[f'pod{i}'].get('ports'):
+                ports = json.loads(checked('docker', 'inspect', '--format={{json .NetworkSettings.Ports}}', holder))
+                root_address = published_peer(services[f'root{i}']['entrypoint'], ports.get('8000/tcp'))
+                shard_address = published_peer(services[f'shard{i}']['entrypoint'], ports.get('9000/tcp'))
+            else:
+                networks = json.loads(checked('docker', 'inspect', '--format={{json .NetworkSettings.Networks}}', holder))
+                address = ipaddress.IPv4Address(networks[f"{compose['name']}_validators"]['IPAddress'])
+                if not address.is_private:
+                    raise ValueError('Compose validator peer must have a private address')
+                root_address = f'/ip4/{address}/tcp/8000'
+                shard_address = f'/ip4/{address}/tcp/9000'
             root = checked(*cmd, 'exec', '-T', f'root{i}', 'ubft', 'node-id', '--home', '/state').splitlines()[-1]
             shard = checked(*cmd, 'exec', '-T', f'shard{i}', 'ubft', 'node-id', '--home', '/state').splitlines()[-1]
-            root_peers.append(f'/ip4/{address}/tcp/8000/p2p/{root}\n')
-            shard_peers.append(f'/ip4/{address}/tcp/9000/p2p/{shard}\n')
+            root_peers.append(f'{root_address}/p2p/{root}\n')
+            shard_peers.append(f'{shard_address}/p2p/{shard}\n')
         (stage / 'root-peers.txt').write_text(''.join(root_peers))
         (stage / 'shard-peers.txt').write_text(''.join(shard_peers))
         if wallet_dir:

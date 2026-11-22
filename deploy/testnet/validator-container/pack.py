@@ -9,6 +9,8 @@ import shutil
 import subprocess
 import tempfile
 
+from load import verify_archive
+
 
 def main():
     cli = argparse.ArgumentParser(description=__doc__)
@@ -44,6 +46,7 @@ def main():
             'sourceReleaseSha256':digest(a.source_release/'SHA256SUMS'),
             'utbGenesisId':(a.source_release/'utb-genesis.id').read_text().strip(),
         }
+        verify_archive(tar, manifest['imageId'], manifest['platform'])
         (stage/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
         files = sorted(stage.iterdir())
         (stage/'SHA256SUMS').write_text(''.join(f'{digest(path)}  {path.name}\n' for path in files))

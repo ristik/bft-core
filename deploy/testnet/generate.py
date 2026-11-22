@@ -62,6 +62,7 @@ FOLLOWER_AWAIT_CAP_MS = 5000   # shardnode.DefaultAwaitTimeout, the cap of a fol
 # The host loopback ports the package publishes. --port-offset adds to all of them; keep the offset a multiple of the lane slot stride (1000) so the
 # published ports stay clear of the lane ports (scripts/lib/lane-slot.sh).
 HOST_PORTS = {'rpc': 8545, 'faucet': 8088, 'prometheus': 9090}
+P2P_PORTS = {'root': (8000, 26662), 'shard': (9000, 28111)}
 
 
 def check_port_offset(value):
@@ -238,6 +239,10 @@ def check_authorities_unchanged(boot, final, n):
     states is something the running authorities do not have. It does not attest the contents of the mounted files or the running containers."""
     started, written = authority_services(boot, n), authority_services(final, n)
     for i in range(1, n+1):
+        if started[i].get('network_mode') == f'service:pod{i}':
+            holder = f'pod{i}'
+            if boot['services'][holder] != final['services'][holder]:
+                raise RuntimeError(f'{holder} owns the authority namespace and must match the boot Compose definition')
         if started[i] != written[i]:
             keys = sorted(k for k in set(started[i]) | set(written[i]) if started[i].get(k) != written[i].get(k))
             raise RuntimeError(f'authority{i} was started with another service definition than the final compose names (differs in {keys}): an authority is '
@@ -245,7 +250,7 @@ def check_authorities_unchanged(boot, final, n):
 
 def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, with_pos=False, rpc_bind=operator_rpc.DEFAULT_BIND, utb=None, utb_aggregator='integration', *,
              payout=FAUCET_PAYOUT, subnets=None, root_cpus=ROOT_CPUS, block_interval_ms=0, port_offset=0,
-             vr_pos=False, captcha_secret_file='./faucet-secrets/hcaptcha-secret'):
+             vr_pos=False, captcha_secret_file='./faucet-secrets/hcaptcha-secret', public_p2p_ip=None):
     """JSON is a YAML subset, accepted directly by Docker Compose. `utb`: the pinned EntryID of the UTB genesis entry (0x..), or None for the package without the signed history.
     `payout`: the faucet signer's payout per claim (UCT, network.json's). `subnets`: bridged_subnets(), the faucet and edge networks. `root_cpus`: each root's CPU quota.
     `block_interval_ms`: the shard nodes' --target-block-interval (0: none). `port_offset`: added to every host-published port (HOST_PORTS), so
@@ -286,6 +291,9 @@ def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, wit
         holder = {'validators':{'aliases':['root%d'%i,'shard%d'%i]}}
         if i == 1: holder = {'validators':{'aliases':['root1','shard1','aggregator']},'aggregator':{}}   # the aggregator's namespace, the only way to its MongoDB
         if vr_pos: holder['validators']['aliases'].append(f'ureth{i}')
+        if public_p2p_ip:
+            # Docker publishes through an external bridge. Keep the services' private DNS and listeners on the existing networks.
+            holder['p2p'] = {}
         service('pod%d'%i, node, ['sleep','infinity'], memory='16m', cpu=0.05, networks=holder, init=True)   # sleep as PID 1 would ignore SIGTERM
         if vr_pos:
             service(f'evm-rpc{i}', images['rpc'], ['python3','-u','gateway.py'], [network],
@@ -331,6 +339,13 @@ def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, wit
             '--signing-authority-socket','/authority/client.sock','--signing-authority-credential','/authority/client.cred']
             + block_interval_flags(block_interval_ms) + utb_node_flags(utb) + common,   # no --archive-replica: the node derives its replicas from the shard's validators (the next three in peer-ID order, any two make a block durable)
             [evm,auth,network,'./validator%d/jwt:/jwt:ro'%i,'./validator%d/archive:/archive'%i],memory='2048m',cpu=1.5,pod='pod%d'%i)
+        if public_p2p_ip:
+            published = []
+            for role, (target, first) in P2P_PORTS.items():
+                port = first + i - 1 + port_offset
+                published.append(f'{public_p2p_ip}:{port}:{target}/tcp')
+                services[f'{role}{i}']['entrypoint'] += ['--announce-addresses', f'/ip4/{public_p2p_ip}/tcp/{port}']
+            services[f'pod{i}']['ports'] = published
         # 2 GiB / 1.5 CPU, not 512 MiB / 0.75 (#1018): the cgroup also pays the kernel's dentry/inode cache of the per-block archive tree (about 490 MiB of 512 MiB
         # after 25 h on staging), and at 512 MiB the shards swapped until the round deadlines failed. The journal bound is the shard node's default 256 again, not 32 (#1019).
         # Go's cgo runtime aborts when pthread_create fails, and at low limits this reproduces the crash of bft-core #905, after which a restore refuses to restart, by design, on the
@@ -359,7 +374,7 @@ def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, wit
         ['./monitoring/prometheus.json:/etc/prometheus/prometheus.json:ro','./monitoring/alerts.json:/etc/prometheus/alerts.json:ro','./metrics:/prometheus'],
         memory='256m',networks=['validators','faucet'],user='10001:10001',ports=[f"127.0.0.1:{HOST_PORTS['prometheus']+port_offset}:9090"])
     return {'name':out.name,'services':services,
-        'networks':{'validators':{'internal':True},'aggregator':{'internal':True},'faucet':{'ipam':{'config':[dict(subnets['faucet'])]}},'edge':{'ipam':{'config':[dict(subnets['edge'])]}}},
+        'networks':{**({'p2p':{}} if public_p2p_ip else {}), 'validators':{'internal':True},'aggregator':{'internal':True},'faucet':{'ipam':{'config':[dict(subnets['faucet'])]}},'edge':{'ipam':{'config':[dict(subnets['edge'])]}}},
         'secrets':{'faucet_keystore':{'file':'./faucet-secrets/keystore.json'},'faucet_password':{'file':'./faucet-secrets/password'},
                    'hcaptcha_secret':{'file':str(captcha_secret_file)}}}
 
@@ -386,6 +401,8 @@ def main():
     p.add_argument('--port-offset',type=int,default=0,help='added to every host-published port (RPC 8545, faucet 8088, Prometheus 9090) so a second generation can run on the same host; default 0: unchanged. Lane slot N uses 1000*N (scripts/lane-slot.sh); tooling then needs TN_PUBLIC_RPC and TN_FAUCET set to the shifted ports')
     p.add_argument('--captcha-sitekey',required=True)
     p.add_argument('--captcha-secret-file',required=True,type=Path)
+    p.add_argument('--public-p2p-ip', type=ipaddress.IPv4Address,
+        help='public IPv4 assigned to this Docker host; publish and announce only VR root and shard P2P')
     p.add_argument('--public-rpc-url',help='wallet-facing RPC URL to advertise from the faucet')
     p.add_argument('--faucet-payout',default=FAUCET_PAYOUT,help=f'UCT per faucet claim, decimal (default {FAUCET_PAYOUT}): the signer\'s payout and the guard\'s check of it')
     p.add_argument('--faucet-balance',default=FAUCET_BALANCE,help=f'the faucet account\'s genesis balance, UCT, decimal (default {FAUCET_BALANCE})')
@@ -402,6 +419,8 @@ def main():
         faucet=faucet_settings(a.faucet_payout,a.faucet_balance,a.faucet_daily_claims,a.faucet_per_ip_limit)
         subnets=bridged_subnets(a.faucet_subnet,a.edge_subnet)
     except ValueError as e: p.error(str(e))
+    if a.public_p2p_ip and (not a.vr_pos or not a.public_p2p_ip.is_global or a.public_p2p_ip.is_multicast):
+        p.error('--public-p2p-ip requires --vr-pos and a globally routable unicast IPv4 address on the host')
     if a.pos and a.pos_contracts is None: p.error('--pos needs --pos-contracts')
     if a.vr_pos:
         if a.pos or a.pos_weights is not None or a.validators != 4 or not a.utb or not a.pos_contracts or not a.fresh_measurement:
@@ -507,7 +526,7 @@ def main():
             # every authority of a --utb generation refused the first activation); main() checks the final compose names the same entrypoints
             topology_options=dict(utb=utb_pin,utb_aggregator=a.utb_aggregator,payout=a.faucet_payout,subnets=subnets,
                 root_cpus=a.root_cpus,port_offset=check_port_offset(a.port_offset),block_interval_ms=a.block_interval_ms,
-                vr_pos=a.vr_pos,captcha_secret_file=secret)
+                vr_pos=a.vr_pos,captcha_secret_file=secret,public_p2p_ip=a.public_p2p_ip)
             boot=immutable(topology(out,a.validators,{'root':roots,'evm':evms},records['images'],a.captcha_sitekey,**topology_options))
             write(out/'compose.yaml',boot)
             def authority(i,*args):

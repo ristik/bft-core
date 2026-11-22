@@ -39,6 +39,14 @@ FILES = frozenset({
 BINARIES = {'ubft': '/usr/local/bin/ubft', 'unicity-reth': '/usr/local/bin/unicity-reth'}
 
 
+AUTHORITY_LOST = (
+    'Preserve the volume and fail-stop marker. If chain evidence confirms the identity is unregistered '
+    'and has no pending registration or bond, initialize a fresh identity in a separate volume. '
+    'For a registered, bonded, or uncertain identity, contact the Foundation testnet maintainers '
+    'before rotation. See Authority loss in the validator handbook.'
+)
+
+
 def command(*args, output=False, check=True, timeout=120):
     return subprocess.run([str(arg) for arg in args], text=True, capture_output=output, check=check,
                           timeout=timeout, stdin=subprocess.DEVNULL, cwd=HOME)
@@ -220,7 +228,7 @@ def authority_status():
 def authority_process(a, pins):
     with lock('.authority.lock'):
         if (AUTH/'lifetime').exists():
-            raise ValueError('the authority lifetime was already started. If its process is lost, rotate the validator key with ubft validator rotate')
+            raise ValueError(f'The authority lifetime has already started. {AUTHORITY_LOST}')
         n = wait_for('the node’s verified initial authority scope',
                      lambda: read(HOME/'authority-scope.json'), limit=360)
         AUTH.mkdir(mode=0o700, exist_ok=True)
@@ -302,7 +310,7 @@ def link_authority():
     observed = status['signingKeyFingerprint']
     stamp = AUTH/'fingerprint'
     if stamp.exists() and stamp.read_text() != observed:
-        raise ValueError('authority identity changed. Use ubft validator rotate before resuming')
+        raise ValueError(f'Authority identity changed. {AUTHORITY_LOST}')
     else:
         write(stamp, observed.encode())
     cfg = read(CONFIG)
