@@ -111,7 +111,8 @@ vrj_validates() {
   vrb_wait 300 "the joiner's shard node activated root epoch 2" grep -Fq 'msg="handoff activated" rootEpoch=2' "test-nodes/evm$i/debug.log" || return 1
   local ids; ids=$(cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'committeeIds()(uint64[])')
   vrj_log "VR's committee after the Boundary: $ids"
-  case "$ids" in *"$i"*) vrj_log "PASS: identity $i is in VR's committee" ;; *) vrj_log "FAIL: identity $i is not in VR's committee"; return 1 ;; esac
+  jq -e --argjson id "$i" 'index($id) != null' <<<"$ids" >/dev/null || { vrj_log "FAIL: identity $i is absent from VR's committee"; return 1; }
+  vrj_log "PASS: identity $i is in VR's committee"
 }
 vrj_root_member() {
   curl -sf -X POST -H 'Content-Type: application/json' -d '{}' "http://127.0.0.1:$(m2_rpc_port "$vrj_id")/api/v1/q3/status" | python3 -c "

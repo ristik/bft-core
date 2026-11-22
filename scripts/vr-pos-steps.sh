@@ -111,11 +111,12 @@ vrp_rotated() {
   local ids el cu rid; el=$(vrp_election); cu=$(vrp_custody)
   ids=$(cast call --rpc-url "$vrb_rpc" "$vrb_vr" 'committeeIds()(uint64[])')
   if [ "${VR_JOINER:-0}" = 1 ]; then
-    case "$ids" in *"$vrj_id"*) vrb_log "PASS: VR's committee after the Boundary includes identity $vrj_id: $ids" ;; *) vrb_log "FAIL: committee $ids"; return 1 ;; esac
+    jq -e --argjson id "$vrj_id" 'index($id) != null' <<<"$ids" >/dev/null || { vrb_log "FAIL: committee $ids"; return 1; }
+    vrb_log "PASS: VR's committee after the Boundary includes identity $vrj_id: $ids"
   else
     vrb_log "VR's committee after the Boundary: $ids"
   fi
-  if [ "${VR_POS16:-0}" = 1 ] && [ "$(printf '%s' "$ids" | tr -cd ',' | wc -c)" -ne 15 ]; then
+  if [ "${VR_POS16:-0}" = 1 ] && [ "$(jq -r length <<<"$ids")" -ne 16 ]; then
     vrb_log "FAIL: the primary committee did not reach sixteen seats: $ids"
     return 1
   fi

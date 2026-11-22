@@ -37,7 +37,19 @@ vrb_published() { # VR's open output is Published (state 2)
   python3 -c "import sys;h=sys.argv[1][2:];w=[h[i:i+64] for i in range(0,len(h),64)];sys.exit(0 if int(w[1],16)==2 else 1)" "$raw"
 }
 vrb_intent() { curl -sf -H 'Content-Type: application/json' "$1/api/v1/vr/intent"; }
-vrb_all_intents() { local r; for r in $(vrb_root_rpcs); do vrb_intent "$r" >/dev/null || return 1; done; }
+vrb_capture_intents() {
+  local rpc rows='' row count=0 expected=${validators:-4}
+  [ "${VR_JOINER:-0}" != 1 ] || expected=$((expected + 1))
+  for rpc in $(vrb_root_rpcs); do
+    row=$(vrb_intent "$rpc" | jq -er --arg rpc "$rpc" '[$rpc, .digest, .view, .assembler] | join(" ")') || return 1
+    [ -n "$row" ] || return 1
+    rows+="$row"$'\n'
+    count=$((count + 1))
+  done
+  [ "$count" -eq "$expected" ] || return 1
+  [ "$(printf '%s' "$rows" | awk '{print $2}' | sort -u | wc -l)" -eq 1 ] || return 1
+  printf '%s' "$rows" >"$VR_EVIDENCE/intents.txt"
+}
 vrb_members_logged() { # every successor's root node (the four of this lane, and the joiner's) logged the line
   local i; for i in $(seq 1 "${validators:-4}") $([ "${VR_JOINER:-0}" = 1 ] && [ "${VR_JOINER_FOLLOW:-0}" != 1 ] && echo "$vrj_id"); do grep -q -- "$1" "test-nodes/root$i/debug.log" 2>/dev/null || return 1; done
 }
@@ -178,10 +190,8 @@ EOF
   # 3. every root observed the source and derives the intent
   # the schedule lane first requires exactly this lane's roots (scoped discovery; merge dependency: bft-core#1233): a cross-lane problem shows here
   if [ "${VR_SCHEDULE:-0}" != 0 ]; then source scripts/vr-schedule-steps.sh; vrs_require_roots || return 1; fi
-  vrb_wait "$([ "${VR_JOINER:-0}" = 1 ] && echo 900 || echo 300)" "every root derives the intent over its committed state (the joiner's included)" vrb_all_intents || return 1
-  for i in $(vrb_root_rpcs); do vrb_intent "$i" | python3 -c "import json,sys;d=json.load(sys.stdin);print(sys.argv[1], d['digest'], d['view'], d['assembler'])" "$i"; done | tee "$VR_EVIDENCE/intents.txt"
-  [ "$(awk '{print $2}' "$VR_EVIDENCE/intents.txt" | sort -u | wc -l)" = 1 ] || { vrb_log "FAIL: the roots derive different intents"; return 1; }
-  vrb_log "PASS: every root derives the same intent"
+  vrb_wait "$([ "${VR_JOINER:-0}" = 1 ] && echo 900 || echo 300)" "every root derives the same intent over its committed state" vrb_capture_intents || return 1
+  cat "$VR_EVIDENCE/intents.txt"
   cp "$VR_DIR"/../root1/vr-sources.json "$VR_EVIDENCE/root1-vr-sources.json" 2>/dev/null || true
   # 4. the members do their steps themselves (VT-09): no harness message is sent. Every successor's root node logs its own proof and readiness.
   vrb_wait 300 "every successor member signed its possession proof itself" vrb_members_logged 'VR handoff member: possession proof' || return 1
