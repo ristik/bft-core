@@ -31,7 +31,7 @@ from public_relay import Relay, ResponseTooLarge
 
 # The reads a native bridge v2 wallet builds its evidence from (bft-core#1102): certified header evidence (the companion of the child block
 # carries the certificate of its parent), the block's receipts for the receipt-trie path, vault logs, and the companion retention horizon.
-WALLET_EVIDENCE = frozenset('eth_getBlockByHash eth_getBlockReceipts eth_getLogs unicity_getSealCompanionV1 unicity_sealCompanionHorizonV1'.split())
+WALLET_EVIDENCE = frozenset('eth_getBlockByHash eth_getBlockReceipts eth_getLogs eth_getRawTransactionByBlockHashAndIndex unicity_getSealCompanionV1 unicity_sealCompanionHorizonV1'.split())
 PUBLIC = frozenset('eth_chainId eth_blockNumber eth_getBlockByNumber eth_getBalance eth_getTransactionCount eth_gasPrice eth_maxPriorityFeePerGas eth_estimateGas eth_call eth_getCode eth_getTransactionReceipt eth_getTransactionByHash eth_sendRawTransaction net_version web3_clientVersion'.split()) | WALLET_EVIDENCE
 LOG_BLOCK_RANGE = 10000     # the most blocks one eth_getLogs may span (toBlock - fromBlock + 1)
 LOG_FILTER_KEYS = frozenset({'address', 'topics', 'fromBlock', 'toBlock', 'blockHash'})
@@ -56,10 +56,9 @@ def _quantity(v):
     """An explicit hex block number (no tags: a window is fixed before it is asked for), else None."""
     if not isinstance(v, str) or not v.startswith('0x') or not 2 < len(v) <= 18 or (len(v) > 3 and v[2] == '0'):
         return None
-    try:
-        return int(v[2:], 16)
-    except ValueError:
+    if any(c not in '0123456789abcdefABCDEF' for c in v[2:]):
         return None
+    return int(v[2:], 16)
 
 
 def _hexbytes(v, n):
@@ -86,6 +85,8 @@ def _topic(v):
 EVIDENCE_PARAMS = {
     'eth_getBlockByHash': ('[blockHash, false]', lambda p: len(p) == 2 and _hash(p[0]) and p[1] is False),
     'eth_getBlockReceipts': ('[blockHash] or [hex block number]', lambda p: len(p) == 1 and (_hash(p[0]) or _quantity(p[0]) is not None)),
+    'eth_getRawTransactionByBlockHashAndIndex': ('[blockHash, hex transaction index]',
+                                               lambda p: len(p) == 2 and _hash(p[0]) and _quantity(p[1]) is not None),
     'unicity_getSealCompanionV1': ('[blockHash]', lambda p: len(p) == 1 and _hash(p[0])),
     'unicity_sealCompanionHorizonV1': ('[]', lambda p: len(p) == 0),
 }
