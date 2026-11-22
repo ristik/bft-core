@@ -19,6 +19,7 @@ import (
 // node. Count a reported signature only once the complete UC verifies.
 func validatorLastUCCmd() *cobra.Command {
 	var execution, root, signer string
+	var epoch uint64
 	cmd := &cobra.Command{
 		Use:   "last-signed-uc",
 		Short: "Find the newest verified UC, optionally with a particular root signature",
@@ -26,7 +27,7 @@ func validatorLastUCCmd() *cobra.Command {
 			ctx, cancel := context.WithTimeout(cmd.Context(), 12*time.Second)
 			defer cancel()
 			rpc := ethExecution{url: execution, client: &http.Client{Timeout: 3 * time.Second}}
-			observed, err := findLastSignedUC(ctx, rpc, root, signer)
+			observed, err := findLastSignedUC(ctx, rpc, root, signer, epoch)
 			if err != nil {
 				return err
 			}
@@ -36,6 +37,7 @@ func validatorLastUCCmd() *cobra.Command {
 	cmd.Flags().StringVar(&execution, "execution", "", "local execution RPC")
 	cmd.Flags().StringVar(&root, "root-rpc", "", "local verified root RPC")
 	cmd.Flags().StringVar(&signer, "signer", "", "local root node ID")
+	cmd.Flags().Uint64Var(&epoch, "epoch", 0, "only observe UCs from this root epoch")
 	for _, flag := range []string{"execution", "root-rpc"} {
 		_ = cmd.MarkFlagRequired(flag)
 	}
@@ -51,7 +53,7 @@ type signedUCView struct {
 	Signer     string      `json:"signer"`
 }
 
-func findLastSignedUC(ctx context.Context, rpc ethExecution, root, signer string) (*signedUCView, error) {
+func findLastSignedUC(ctx context.Context, rpc ethExecution, root, signer string, epoch uint64) (*signedUCView, error) {
 	type block struct {
 		Hash   common.Hash    `json:"hash"`
 		Parent common.Hash    `json:"parentHash"`
@@ -76,6 +78,9 @@ func findLastSignedUC(ctx context.Context, rpc ethExecution, root, signer string
 		}
 		var uc types.UnicityCertificate
 		if err := types.Cbor.Unmarshal(result.Companion.Witnesses[0], &uc); err != nil || uc.InputRecord == nil || uc.UnicitySeal == nil {
+			continue
+		}
+		if epoch != 0 && uc.UnicitySeal.Epoch != epoch {
 			continue
 		}
 		_, signed := uc.UnicitySeal.Signatures[signer]

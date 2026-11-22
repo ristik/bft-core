@@ -290,7 +290,7 @@ def provision_scope(network, epoch):
     if not view or view['activeEpoch'] != epoch or not view.get('follower'):
         return None
     result = command('handoff-ubft', 'validator', 'last-signed-uc', '--execution', RPC,
-                     '--root-rpc', ROOT, output=True)
+                     '--root-rpc', ROOT, '--epoch', epoch, output=True)
     certified = json.loads(result.stdout)
     if not certified or certified['rootEpoch'] != epoch:
         return None
