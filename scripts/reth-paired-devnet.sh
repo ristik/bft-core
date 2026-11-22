@@ -155,6 +155,7 @@ rethEthBase=$((18545+LANE_PORT_OFFSET))
 if [ "${VR_POS16:-0}" = 1 ]; then
   rethEthBase=$(lane_port 18200)
   rethEngineBase=$(lane_port 18220)
+  export rethEthBase rethEngineBase
 fi
 rethP2PBase=$((30401+LANE_PORT_OFFSET))
 engineProxyPort=$((18651+LANE_PORT_OFFSET))
