@@ -129,7 +129,8 @@ class BlockInterval(unittest.TestCase):
         source=(generate.HERE/'generate.py').read_text()
         main=source.split('def main')[1]
         self.assertIn("'--t2-timeout',str(t2_for_block_interval(a.block_interval_ms))",main)
-        self.assertEqual(main.count('block_interval_ms=a.block_interval_ms))'),2,'the boot and the final compose both carry it')
+        self.assertIn('block_interval_ms=a.block_interval_ms,',main)
+        self.assertEqual(main.count('**topology_options))'),2,'the boot and the final compose use the same settings')
         # a nonzero interval with a pinned ubft that lacks the flag is refused before anything is generated, never silently dropped
         self.assertIn("if a.block_interval_ms and '--target-block-interval' not in subprocess.run([ubft,'shard-node','run','--help']",main)
         self.assertIn("p.error('the pinned ubft has no shard-node run --target-block-interval",main)
@@ -339,7 +340,8 @@ class UtbProfile(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError,r"authority3 .*\b"+field+r"\b",msg=field):
                 generate.check_authorities_unchanged(self.boot(4,self.PIN),final,4)
         source=(Path(generate.__file__)).read_text()
-        self.assertRegex(source,r"boot=immutable\(topology\([^\n]*utb=utb_pin",'main() starts the authorities from a compose that carries the UTB pin')
+        self.assertIn('topology_options=dict(utb=utb_pin', source)
+        self.assertRegex(source,r"boot=immutable\(topology\([^\n]*\*\*topology_options",'the boot Compose uses the pinned UTB settings')
         self.assertIn('check_authorities_unchanged(boot,final,a.validators)',source)
     def test_the_rehearsal_reset_keeps_the_selected_utb_profile_and_variant(self):
         import rehearse
@@ -3192,6 +3194,21 @@ class StagingKnobs(unittest.TestCase):
             self.assertIn('--unicity.archive-state-proofs', ureth['entrypoint'])
             self.assertIn('http://127.0.0.1:8551', shard['entrypoint'])
             self.assertEqual(relay['environment']['TN_LOCAL_EXECUTION_ALIAS'], f'ureth{i}')
+
+    def test_internal_operator_log_lookup_pins_latest_and_keeps_the_window(self):
+        handler = object.__new__(gateway.ExecutionHandler)
+        handler.server = unittest.mock.Mock()
+        handler.server.relay.call.return_value = {'result': '0x270f'}
+        selector = [{'address': '0x' + 'ab' * 20, 'fromBlock': '0x0', 'toBlock': 'latest'}]
+        with self.assertRaises(ValueError):
+            gateway.check_log_filter(selector)
+        handler.log_filter(selector)
+        self.assertEqual(selector[0]['toBlock'], '0x270f')
+        handler.server.relay.call.assert_called_once_with('eth_blockNumber', [])
+        handler.server.relay.call.return_value = {'result': '0x2710'}
+        selector[0]['toBlock'] = 'latest'
+        with self.assertRaises(ValueError):
+            handler.log_filter(selector)
     def test_subnets_are_options(self):
         cfg=self.topo()
         self.assertEqual(cfg['networks']['faucet']['ipam']['config'],[{'subnet':'172.30.88.0/24','gateway':'172.30.88.1'}])
