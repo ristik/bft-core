@@ -59,8 +59,16 @@ postM2aChainID=${POST_M2A_CHAIN_ID:-31337}
 # The any-age final lane (scripts/anyage-lane.sh, briefs/anyage-final-lane-plan.md): the P85 genesis AND the aggregator in one devnet. ANYAGE_LANE=1 adds
 # the aggregator-go shard(s) as BFT shard(s) of the same root chain (partition 7, the aggregation partition, scripts/lib/agg-lib.sh) beside the EVM shard. Nothing in the
 # P85 path changes when the flag is unset. (The protocol 6/7 bridge the lane once deployed here was removed, bft-core#1106.)
+if [ "${NB2_T7_LANE:-0}" = 1 ]; then
+  [ "${M2_PROFILE2:-0}:${Q3_B1:-0}:${SIGNING:-local}:${UTB_LANE:-0}:${P85_LANE:-0}:${VR_LANE:-0}:$validators" = 1:1:authority:1:0:0:4 ] ||
+    { echo "NB2 T7 needs four authority-signed validators, profile 2, B1 and UTB" >&2; exit 2; }
+  ANYAGE_LANE=1
+fi
 if [ "${ANYAGE_LANE:-0}" = 1 ]; then
-  [ "${P85_LANE:-0}" = 1 ] && [ "${M2_PROFILE2:-0}" = 1 ] && [ "$validators" -eq 4 ] || { echo "ANYAGE_LANE=1 requires the P85 lane (P85_LANE=1, M2_PROFILE2=1, four validators)" >&2; exit 2; }
+  [ "${NB2_T7_LANE:-0}" = 1 ] || {
+    [ "${P85_LANE:-0}" = 1 ] && [ "${M2_PROFILE2:-0}" = 1 ] && [ "$validators" -eq 4 ] ||
+      { echo "ANYAGE_LANE=1 requires the P85 lane (P85_LANE=1, M2_PROFILE2=1, four validators)" >&2; exit 2; }
+  }
   chainID=$postM2aChainID partitionID=8 rootRpcPort=$((25866+LANE_PORT_OFFSET))
   source scripts/lib/agg-lib.sh
 fi
@@ -211,7 +219,10 @@ dump_stalled_roots() {
 }
 
 H6_ROOT_DUMP_REASON=
+nb2DriverPid=
 cleanup() {
+  if [ "${NB2_T7_LANE:-0}" = 1 ]; then trap '' TERM HUP INT; fi
+  if [ -n "$nb2DriverPid" ]; then kill -TERM "$nb2DriverPid" 2>/dev/null || true; wait "$nb2DriverPid" || true; fi
   dump_stalled_roots
   if [ "${F8_MIXED_LANE:-0}" = 1 ]; then f8_stop; fi
   if [ "${ANYAGE_LANE:-0}" = 1 ]; then stop_aggs; fi   # by this run's own pid files
@@ -1005,6 +1016,15 @@ else
   fail "v2 bootstrap did not produce a certified transaction block within 180s (mined=$mined certified=$certified)"
   echo "--- evm1 tail ---"; tail -25 test-nodes/evm1/debug.log 2>/dev/null
   echo "--- reth1 tail ---"; tail -15 test-nodes/reth1/reth.log 2>/dev/null
+fi
+if [ "${NB2_T7_LANE:-0}" = 1 ]; then
+  $mined && $certified && [ "$failures" = "$preflightFailures" ] || exit 1
+  bash scripts/nb2-t7/drive.sh "http://127.0.0.1:$rethEthBase" "http://127.0.0.1:$(agg_port 1)" "$postM2aChainID" "$(utb_agg_history_url 1)" &
+  nb2DriverPid=$!
+  nb2Status=0
+  wait "$nb2DriverPid" || nb2Status=$?
+  nb2DriverPid=
+  exit "$nb2Status"
 fi
 if [ "${H4_RESTORE_PROBE:-0}" = 1 ]; then
   for i in $(seq 1 "$validators"); do

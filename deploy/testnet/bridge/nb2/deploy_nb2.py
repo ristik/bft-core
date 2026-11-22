@@ -76,11 +76,12 @@ def moving_estimate_head(reason):
             and reason[len(prefix):].removeprefix('server returned an error response: ') == BOUND_PARENT_REFUSAL)
 
 
-def create(gen, initcode, label):
+def create(gen, initcode, label, *, transport=None):
     """One creation from the faucet keystore; its receipt."""
+    run = tools if transport is None else transport
     for attempt in range(1, ESTIMATE_ATTEMPTS + 1):
         try:
-            out = tools(gen, 'cast', 'send', '--rpc-url', ETH, '--keystore', '/gen/faucet-secrets/keystore.json',
+            out = run(gen, 'cast', 'send', '--rpc-url', ETH, '--keystore', '/gen/faucet-secrets/keystore.json',
                         '--password-file', '/gen/faucet-secrets/password', '--json', '--create', initcode, capture=True)
             break
         except subprocess.CalledProcessError as error:
