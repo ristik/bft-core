@@ -115,6 +115,19 @@ class PublicRelayTest(unittest.TestCase):
         self.gateway(None, Node())
         self.assert_result('eth_chainId', [], '0x46')
 
+    def test_raw_transaction_read_requires_exact_block_hash_and_index(self):
+        method = 'eth_getRawTransactionByBlockHashAndIndex'
+        node = Node(answers={method: {'result': RAW}})
+        self.gateway(node)
+        self.assert_result(method, [BLOCK, '0x0'], RAW)
+        for params in [[BLOCK, 0], [BLOCK, '0x00'], [BLOCK, '0x-1'], [BLOCK, '0x1_2'],
+                       ['latest', '0x0'], [BLOCK], [BLOCK, '0x0', True]]:
+            with self.subTest(params=params):
+                status, body = self.rpc(method, params)
+                self.assertEqual(status, 400)
+                self.assertIn('[blockHash, hex transaction index]', body['error'])
+        self.assertEqual([call for call in node.calls if call[0] == method], [(method, [BLOCK, '0x0'])])
+
     def test_send_with_acceptance_and_already_known(self):
         accepted = Node(answers={'eth_sendRawTransaction': {'result': TX}})
         duplicate = Node(answers={'eth_sendRawTransaction': {'error': KNOWN}})
