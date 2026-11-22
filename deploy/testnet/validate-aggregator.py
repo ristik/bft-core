@@ -144,3 +144,33 @@ def validate(generation, ubft, aggregator):
             except subprocess.TimeoutExpired:
                 proc.kill(); proc.wait()
             log.close()
+
+
+def validate_live(generation, ubft, rpc_url, evidence):
+    """Validate the running gateway's aggregator and authenticate the served UTB from the generation pin."""
+    manifest = json.loads((generation / 'manifest.json').read_text())
+    headers = {'Content-Type': 'application/json', 'X-Forwarded-For': '198.51.100.45'}
+    body = json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': 'get_block_height', 'params': {}}).encode()
+    with urllib.request.urlopen(urllib.request.Request(rpc_url.rstrip('/') + '/aggregator', body, headers), timeout=20) as response:
+        result = json.load(response)
+    assert result.get('result') is not None, result
+    request = urllib.request.Request(rpc_url.rstrip('/') + '/api/v1/trustbases?from=1&maxEntries=64', headers=headers)
+    with urllib.request.urlopen(request, timeout=20) as response:
+        trust = response.read(16 << 20)
+    evidence.mkdir(parents=True, exist_ok=True)
+    bundle = evidence / 'served-utb.cbor'
+    bundle.write_bytes(trust)
+    pin = manifest['utb']['genesis_id']
+    subprocess.run([str(ubft), 'trust-base', 'utb-verify', '--bundle', str(bundle), '--utb-genesis-id', pin], check=True)
+    print(json.dumps({'live_aggregator_and_utb': 'PASS', 'genesis_id': pin, 'aggregator': result['result']}))
+
+
+if __name__ == '__main__':
+    import argparse
+    cli = argparse.ArgumentParser(description=validate_live.__doc__)
+    cli.add_argument('generation', type=Path)
+    cli.add_argument('--ubft', type=Path, required=True)
+    cli.add_argument('--rpc', required=True, help='gateway origin on loopback')
+    cli.add_argument('--evidence', type=Path, required=True)
+    args = cli.parse_args()
+    validate_live(args.generation, args.ubft.resolve(), args.rpc, args.evidence)

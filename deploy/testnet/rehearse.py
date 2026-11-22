@@ -505,7 +505,11 @@ class Rehearsal:
         self.expect(bool(pos), 'the manifest carries a pos block (this generation was made with --pos)')
         net = self.gen / 'network'
         self.expect((net / 'pos-genesis-assignment.txt').read_text().strip() == pos['genesis_assignment'], 'the shipped genesis assignment id is the manifest one', pos['genesis_assignment'])
-        deployment = json.loads((net / 'pos-deployment.json').read_text())
+        vr_profile = pos.get('profile') == 'vr-pos16'
+        deployment = json.loads((net / ('deployment.json' if vr_profile else 'pos-deployment.json')).read_text())
+        if vr_profile:
+            ids = json.loads(self.view_text(deployment['registry'], 'committeeIds()(uint64[])'))
+            self.expect(len(ids) == pos['committee_limits'][0], 'VR has four genesis members', str(ids))
         for name, address in (('registry', self.REGISTRY), ('custody', deployment['custody']), ('election', deployment['election'])):
             code = self.call('eth_getCode', [address, 'latest'])
             self.expect(len(code) > 100, f'the {name} contract has code at its genesis address', f'{address} {(len(code) - 2) // 2} bytes')
@@ -522,6 +526,10 @@ class Rehearsal:
         logs = self.compose('logs', '--no-color', *names, check=False)
         bad = [line for line in logs.splitlines() if 'AssignmentNotActive' in line or 'revert' in line.lower()]
         self.expect(not bad, 'no revert or AssignmentNotActive in any root or shard log', f'{len(bad)} lines' + (': ' + bad[0][:200] if bad else ''))
+
+    def vr_pos_advance(self):
+        import vr_advance
+        vr_advance.advance(self.gen, self.target, self.evh())
 
     def faucet_send(self, to, wei):
         """A value transfer from the faucet account through the public gateway (it is the only funded account: the PoS owners hold nothing at genesis)."""
@@ -1926,6 +1934,7 @@ POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-observe', 'pos_observe'), ('pos-
 POS_STAGE_NAMES = frozenset(n for n, _ in POS_STAGES)
 # Stages of the package built with --utb (the signed trust-base history, either aggregator): not in the hosted-runner rehearsal, whose package is the one without it. They run after the PoS stages.
 UTB_STAGES = (('utb-live', 'utb_live'),)
+VR_STAGES = (('vr-pos-advance', 'vr_pos_advance'),)
 
 
 def main():
@@ -1939,6 +1948,7 @@ def main():
     p.add_argument('--ubft', type=Path, help='the pinned ubft binary, for the handoff stages (they write and read files with it)')
     p.add_argument('--restore-pin', type=Path, help='scripts/h4-restore-pin built from the pinned source: the joiner\'s shard node is restored from a survivor\'s archive with it')
     p.add_argument('--restore-repeat', type=int, default=20, help='pos-restore-repeat: restores at the package pid limit (#905)')
+    p.add_argument('--vr-target-epoch', type=int, default=2, help='certified root epoch to install in the incumbent authorities for vr-pos-advance')
     p.add_argument('--restore-controls', default='24,16', help='pos-restore-repeat: deliberately low pid limits, the control; the lowest must reproduce pthread_create failed')
     p.add_argument('--stages', default=','.join(s for s, _ in STAGES), help='comma separated; selects stages, which always run in the order of STAGES + POS_STAGES (the default is the PoA stages; POS_STAGES are named explicitly)')
     a = p.parse_args()
@@ -1950,12 +1960,19 @@ def main():
     r.pods = tuple(int(x) for x in a.pods.split(',') if x)
     r.reset_args = {k[len('reset_'):]: v for k, v in vars(a).items() if k.startswith('reset_')}
     wanted = a.stages.split(',')
-    unknown = set(wanted) - {s for s, _ in STAGES + POS_STAGES + UTB_STAGES}
+    ordered = STAGES + POS_STAGES + VR_STAGES + UTB_STAGES
+    unknown = set(wanted) - {s for s, _ in ordered}
     if unknown:
         p.error(f'unknown stages {sorted(unknown)}')
+    if (r.manifest.get('pos') or {}).get('profile') == 'vr-pos16':
+        unsupported = (set(wanted) & POS_STAGE_NAMES) - {'pos-smoke', 'pos-observe'}
+        if unsupported:
+            p.error(f'legacy PoS stages are unavailable for VR: {sorted(unsupported)}')
+    if 'vr-pos-advance' in wanted:
+        r.target = a.vr_target_epoch
     code = 0
     try:
-        for name, method in STAGES + POS_STAGES + UTB_STAGES:
+        for name, method in ordered:
             if name in wanted:
                 r.stage(name, getattr(r, method))
     except Exception:

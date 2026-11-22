@@ -20,6 +20,7 @@ import http.server
 import ipaddress
 import json
 import os
+import socket
 from pathlib import Path
 import sys
 import threading
@@ -32,7 +33,7 @@ from public_relay import Relay, ResponseTooLarge
 # The reads a native bridge v2 wallet builds its evidence from (bft-core#1102): certified header evidence (the companion of the child block
 # carries the certificate of its parent), the block's receipts for the receipt-trie path, vault logs, and the companion retention horizon.
 WALLET_EVIDENCE = frozenset('eth_getBlockByHash eth_getBlockReceipts eth_getLogs eth_getRawTransactionByBlockHashAndIndex unicity_getSealCompanionV1 unicity_sealCompanionHorizonV1'.split())
-PUBLIC = frozenset('eth_chainId eth_blockNumber eth_getBlockByNumber eth_getBalance eth_getTransactionCount eth_gasPrice eth_maxPriorityFeePerGas eth_estimateGas eth_call eth_getCode eth_getTransactionReceipt eth_getTransactionByHash eth_sendRawTransaction net_version web3_clientVersion'.split()) | WALLET_EVIDENCE
+PUBLIC = frozenset('eth_chainId eth_blockNumber eth_syncing eth_getBlockByNumber eth_getBalance eth_getTransactionCount eth_gasPrice eth_maxPriorityFeePerGas eth_estimateGas eth_call eth_getCode eth_getTransactionReceipt eth_getTransactionByHash eth_sendRawTransaction net_version web3_clientVersion'.split()) | WALLET_EVIDENCE
 LOG_BLOCK_RANGE = 10000     # the most blocks one eth_getLogs may span (toBlock - fromBlock + 1)
 LOG_FILTER_KEYS = frozenset({'address', 'topics', 'fromBlock', 'toBlock', 'blockHash'})
 LOG_TOPICS = 4              # topic positions an EVM log has
@@ -181,6 +182,9 @@ class Server(http.server.HTTPServer):
         return self.rpc_limit.allowed(ip)
 
 class Handler(http.server.BaseHTTPRequestHandler):
+    def log_filter(self, params):
+        check_log_filter(params)
+
     def reply(self, status, body):
         payload = json.dumps(body).encode()
         self.send_response(status)
@@ -236,7 +240,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             method, params = body['method'], body.get('params', [])
             if method == 'eth_getLogs':
                 try:
-                    check_log_filter(params)
+                    self.log_filter(params)
                 except ValueError as e:   # named, so a wallet knows to page: one address, a blockHash or at most LOG_BLOCK_RANGE blocks
                     return self.reply(400, {'error': f'eth_getLogs: {e} (one address; blockHash, or numeric fromBlock..toBlock of at most {LOG_BLOCK_RANGE} blocks)'})
             elif method in EVIDENCE_PARAMS:
@@ -317,10 +321,42 @@ class Metrics(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
+class ExecutionHandler(Handler):
+    """Internal access to one validator's bounded wallet RPC methods."""
+
+    def do_POST(self):
+        if self.path != '/':
+            return self.reply(404, {'error': 'not found'})
+        return super().do_POST()
+
+    def do_GET(self):
+        return self.reply(404, {'error': 'not found'})
+
+    def log_filter(self, params):
+        # The local operator CLI uses the latest tag to look up registrations.
+        # Pin it to a numbered head before applying the same window and shape
+        # checks as the public gateway.
+        if len(params) == 1 and isinstance(params[0], dict) and params[0].get('toBlock') == 'latest':
+            params[0]['toBlock'] = self.server.relay.call('eth_blockNumber', []).get('result')
+        super().log_filter(params)
+
+
 if __name__ == '__main__':
     cfg = json.loads(Path(os.environ.get('FAUCET_CONFIG', '/network/network.json')).read_text())
-    server = Server(('0.0.0.0', 8545), Handler, Relay(cfg, small_body_limit=MAX_BODY))
-    metrics = http.server.HTTPServer(('0.0.0.0', 9090), Metrics)
-    metrics.gateway = server
-    threading.Thread(target=metrics.serve_forever, daemon=True).start()
+    local = os.environ.get('TN_LOCAL_EXECUTION_ALIAS')
+    if local:
+        bind = socket.gethostbyname(local)
+        if ipaddress.ip_address(bind).is_loopback:
+            raise ValueError('validator wallet relay must bind its private network address')
+        cfg['validator_rpc_urls'] = ['http://127.0.0.1:8545']
+        server = Server((bind, 8545), ExecutionHandler, Relay(cfg, small_body_limit=MAX_BODY))
+        # The public edge already limits individual clients. This listener
+        # sees the edge's single internal address for all forwarded calls.
+        server.rpc_limit = Limiter(100, 100)
+        server.heavy_limit = Limiter(20, 20)
+    else:
+        server = Server(('0.0.0.0', 8545), Handler, Relay(cfg, small_body_limit=MAX_BODY))
+        metrics = http.server.HTTPServer(('0.0.0.0', 9090), Metrics)
+        metrics.gateway = server
+        threading.Thread(target=metrics.serve_forever, daemon=True).start()
     server.serve_forever()
