@@ -3206,19 +3206,45 @@ class StagingKnobs(unittest.TestCase):
         import public_routes
         with tempfile.TemporaryDirectory() as tmp:
             gen=self.generation(tmp)
-            with patch('builtins.print'): public_routes.main([str(gen),'--hostname','pos.staging.unicity.network'])
+            with patch('builtins.print') as printed:
+                public_routes.main([str(gen),'--hostname','pos.staging.unicity.network'])
+            self.assertIn('/release/', json.loads(printed.call_args.args[0])['routes'])
             routes=(gen/'public/nginx/routes.conf').read_text(); zones=(gen/'public/nginx/zones.conf').read_text()
             for loc in ('location = /rpc ','location = /aggregator ','location = /api/v1/trustbases ','location /faucet/ ','location = /api/network ','location = /api/claim ',
                         'location /demo/ ', 'location /release/ '):
                 self.assertIn(loc,routes)
             self.assertIn('proxy_pass http://127.0.0.1:8545/;',routes); self.assertIn('proxy_pass http://127.0.0.1:8088/;',routes)
             self.assertIn('alias /var/www/pos-staging/demo/;',routes)
-            self.assertIn('alias /var/www/pos-staging/release/;\n    autoindex off;',routes)
+            self.assertIn('alias /var/www/pos-staging/release/;\n    autoindex off;\n    disable_symlinks on;',routes)
             self.assertNotIn('lockproof',routes+zones); self.assertNotIn('/bridge/',routes); self.assertFalse((gen/'public/bridge').exists())
             self.assertEqual(routes.count('{'),routes.count('}'))
             for zone in set(re.findall(r'zone=(\w+)',routes))|set(re.findall(r'limit_conn (\w+)',routes)):
                 self.assertIn(f'zone={zone}:',zones)
             with self.assertRaises(SystemExit), patch('sys.stderr'): public_routes.main([str(gen),'--hostname','pos.staging.unicity.network'])   # never overwrites
+    def test_release_stages_only_manifest_regular_files(self):
+        import hashlib
+        import public_routes
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            source = base / 'source'
+            (source / 'seed').mkdir(parents=True)
+            (source / 'seed/manifest.json').write_bytes(b'{}')
+            (source / 'private').write_bytes(b'not public')
+            digest = hashlib.sha256(b'{}').hexdigest()
+            sums = source / 'SHA256SUMS'
+            sums.write_text(f'{digest}  seed/manifest.json\n')
+            public_routes.stage_release(source, base / 'staged')
+            self.assertEqual((base / 'staged/seed/manifest.json').read_bytes(), b'{}')
+            self.assertEqual((base / 'staged/SHA256SUMS').read_text(), sums.read_text())
+            self.assertFalse((base / 'staged/private').exists())
+            (source / 'link').symlink_to('seed', target_is_directory=True)
+            (source / 'file-link').symlink_to('seed/manifest.json')
+            for path in ('../source/seed/manifest.json', 'link/manifest.json', 'file-link', 'seed', 'private'):
+                with self.subTest(path=path):
+                    sums.write_text(f'{digest}  {path}\n')
+                    with self.assertRaises((ValueError, OSError)):
+                        public_routes.stage_release(source, base / 'rejected')
+                    self.assertFalse((base / 'rejected').exists())
     def test_public_routes_web_root_and_bad_input(self):
         import public_routes
         with tempfile.TemporaryDirectory() as tmp:

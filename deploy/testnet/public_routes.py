@@ -26,9 +26,15 @@ The endpoints behind the routes keep their own limits (the gateway's methods and
 they trust X-Forwarded-For only from the generation's edge/faucet network gateways, which is where the published loopback ports arrive from.
 """
 import argparse
+from contextlib import ExitStack, contextmanager
+import hashlib
 import json
+import os
 import re
-from pathlib import Path
+import shutil
+import stat
+import tempfile
+from pathlib import Path, PurePosixPath
 
 ZONES = """# Rate-limit zones of the public routes (public_routes.py); nginx http context, once per host.
 limit_req_zone $binary_remote_addr zone=tn_rpc:10m rate=5r/s;
@@ -132,9 +138,59 @@ location /release/ {{
     limit_req zone=tn_agg burst=20 nodelay;
     alias {web_root}/release/;
     autoindex off;
+    disable_symlinks on;
 }}
 """)
     return ''.join(out)
+
+
+@contextmanager
+def release_file(source, name):
+    """Open a regular file below source without following symbolic links."""
+    parts = PurePosixPath(name).parts
+    with ExitStack() as stack:
+        folder = os.open(source, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        stack.callback(os.close, folder)
+        for part in parts[:-1]:
+            folder = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=folder)
+            stack.callback(os.close, folder)
+        fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=folder)
+        with os.fdopen(fd, 'rb') as file:
+            if not stat.S_ISREG(os.fstat(file.fileno()).st_mode):
+                raise ValueError(f'{name}: expected a regular release file')
+            yield file
+
+
+def stage_release(source, destination):
+    """Publish SHA256SUMS and its verified regular files into a fresh directory."""
+    with release_file(source, 'SHA256SUMS') as file:
+        manifest = file.read()
+    with tempfile.TemporaryDirectory(dir=destination.parent, prefix='.release-') as temp:
+        stage = Path(temp) / 'release'
+        stage.mkdir(mode=0o755)
+        names = set()
+        for line in manifest.decode('ascii').splitlines():
+            match = re.fullmatch(r'([0-9a-f]{64}) [ *]([A-Za-z0-9._/-]+)', line)
+            if not match:
+                raise ValueError('invalid SHA256SUMS entry')
+            digest, name = match.groups()
+            path = PurePosixPath(name)
+            if (path.is_absolute() or not path.parts or path.as_posix() != name or '..' in path.parts or
+                    name == 'SHA256SUMS' or name in names):
+                raise ValueError(f'{name}: invalid or duplicate release path')
+            names.add(name)
+            target = stage / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with release_file(source, name) as src, target.open('x+b') as dst:
+                shutil.copyfileobj(src, dst)
+                dst.seek(0)
+                if hashlib.file_digest(dst, 'sha256').hexdigest() != digest:
+                    raise ValueError(f'{name}: checksum mismatch')
+            target.chmod(0o644)
+        if not names:
+            raise ValueError('empty SHA256SUMS')
+        (stage / 'SHA256SUMS').write_bytes(manifest)
+        stage.rename(destination)
 
 
 def main(argv=None):
@@ -143,6 +199,7 @@ def main(argv=None):
     p.add_argument('--hostname', required=True, help='the one public host name (TLS is the host server block\'s)')
     p.add_argument('--web-root', default='/var/www/pos-staging', help='where the static /demo/ directory lives on the host')
     p.add_argument('--out', type=Path, help='output directory (default GENERATION/public); it must not exist')
+    p.add_argument('--release-source', type=Path, help='optionally verify and stage the SHA256SUMS release into OUT/release')
     a = p.parse_args(argv)
     if not HOSTNAME.fullmatch(a.hostname):
         p.error(f'--hostname {a.hostname!r} is not a lowercase DNS name')
@@ -157,8 +214,13 @@ def main(argv=None):
     (out / 'nginx').mkdir(parents=True)
     (out / 'nginx/zones.conf').write_text(ZONES)
     (out / 'nginx/routes.conf').write_text(routes(ports, web_root, gen.name))
+    if a.release_source:
+        try:
+            stage_release(a.release_source, out / 'release')
+        except (ValueError, OSError) as error:
+            p.error(f'cannot stage release: {error}')
     print(json.dumps({'generation': gen.name, 'hostname': a.hostname, 'out': str(out), 'upstreams': ports,
-                      'routes': ['/rpc', '/aggregator', '/api/v1/trustbases', '/faucet/', '/api/network', '/api/claim', '/demo/']}, indent=2))
+                      'routes': ['/rpc', '/aggregator', '/api/v1/trustbases', '/faucet/', '/api/network', '/api/claim', '/demo/', '/release/']}, indent=2))
 
 
 if __name__ == '__main__':

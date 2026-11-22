@@ -228,8 +228,9 @@ genesis identities. Track the Compose integration and NB2 continuation deploy
 steps in [#1277](https://github.com/ristik/bft-core/issues/1277) and
 [#1278](https://github.com/ristik/bft-core/issues/1278).
 
-Stage only the public artifacts listed in the operator release's `SHA256SUMS`
-under the web root's `release/` directory. Include the files required by the
+Use `public_routes.py --release-source RELEASE_DIR` to verify and stage the
+regular artifacts listed in the operator release's `SHA256SUMS`. Install the
+resulting `OUT/release/` under the web root. Include the files required by the
 [validator handbook](../../docs/operations/validator-handbook.md), the generation
 manifest, and the NB2 release and trust files. Check the digests before copying.
 Keep the faucet credential as a file mount readable by the container UID. Run
