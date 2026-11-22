@@ -272,14 +272,24 @@ def verify_graph(gen, record, head, target=ETH):
 
 def origin_checkpoint(gen, target=ETH, *, head=None):
     """Read both operator registry words at the supplied finalized checkpoint."""
+    def query(method, *params):
+        return rpc(gen, target, method, *params)
+
+    def hash_bytes(data):
+        return keccak(gen, data)
+
+    return read_origin(query, hash_bytes, head=head)
+
+
+def read_origin(query, hash_bytes, *, head=None):
     if head is None:
-        head = rpc(gen, target, 'eth_getBlockByNumber', 'finalized', False)
+        head = query('eth_getBlockByNumber', 'finalized', False)
     if not head:
         raise SystemExit('execution client has no finalized NB2 checkpoint')
     at = canonical_block(head['hash'])
     slots = {'usableEpoch': 'origin.rootEpoch', 'rootRound': 'clock.rootRound'}
-    origin = {name: str(int(rpc(gen, target, 'eth_getStorageAt', REGISTRY,
-                              keccak(gen, ('unicity.seal-registry/' + slot).encode()), at), 16))
+    origin = {name: str(int(query('eth_getStorageAt', REGISTRY,
+                                hash_bytes(('unicity.seal-registry/' + slot).encode()), at), 16))
               for name, slot in slots.items()}
     if int(origin['usableEpoch']) == 0 or int(origin['rootRound']) == 0:
         raise SystemExit('finalized seal registry has no usable origin')
