@@ -19,7 +19,7 @@ COPY contracts /opt/bridge/contracts
 # solc is fetched by forge's svm into $HOME/.svm here, once; the runtime image never compiles what this build already compiled
 RUN cd /opt/bridge/contracts && /foundry/forge build -q
 COPY native-bridge-plugins /opt/bridge/native-bridge-plugins
-RUN cd /opt/bridge/native-bridge-plugins && npm ci --no-audit --no-fund && npx --no-install tsx --version
+RUN cd /opt/bridge/native-bridge-plugins && npm ci --no-audit --no-fund && npm run build && npx --no-install tsx --version
 
 FROM ${NODE_IMAGE}
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*

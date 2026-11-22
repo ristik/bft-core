@@ -1,7 +1,4 @@
-# The bridge across a PoS root handoff, preflight (bft-core #430 row 2; briefs/pos-release-rerun-plan.md §4.1, arch §8/§9): one --pos --utb generation
-# (aggregator A, the integration variant), the native bridge v2 deployed and its epoch-1 deposit made before the election, the handoff driven by rehearse.py,
-# then the return across it with the wallet's live trust refresh (deploy/testnet/bridge/nb2/rehearse_nb2.py pos-deposit, pos-return; NB2-09 bft-core#1105).
-# A hosted-runner smoke, not the host run.
+# Exercise the NB2 v1.1 reference wallet across a PoS root handoff on a private hosted runner.
 name: testnet-bridge-pos
 on:
   pull_request:
@@ -151,12 +148,16 @@ jobs:
           echo "{\"cadenceSeconds\": $CADENCE_SECONDS, \"cadenceRounds\": $CADENCE_ROUNDS, \"utbAggregator\": \"integration\"}" > "$RUNNER_TEMP/evidence/generation-recipe.json"
       - name: 1. Package up, the 5a smoke (epoch 1)
         run: sudo -E env "PATH=$PATH" python3 deploy/testnet/rehearse.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/1-package" --ubft pinned-bft/build/ubft --stages up,identity,first-tx,pos-smoke
-      - name: 2. The native bridge v2 deployed, and a deposit, mint and transfer in epoch 1 (before the election and the root install)
-        run: sudo -E env "PATH=$PATH" python3 deploy/testnet/bridge/nb2/rehearse_nb2.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/2-nb2-epoch1" --nb2-evidence /tmp/nb2-evidence --stages deploy,fund,pos-deposit --keep-keys
+      - name: 2. Deploy NB2 v1.1 and mint in epoch 1
+        run: |
+          sudo -E env "PATH=$PATH" python3 deploy/testnet/bridge/nb2/deploy_nb2.py /srv/tn-bridge-pos --nb2-evidence /tmp/nb2-evidence
+          sudo -E env "PATH=$PATH" python3 deploy/testnet/bridge/nb2/smoke_nb2.py /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/2-nb2-epoch1" --phase mint
       - name: 3. The handoff (election, proposal, propose, install, advance)
         run: sudo -E env "PATH=$PATH" python3 deploy/testnet/rehearse.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/3-handoff" --ubft pinned-bft/build/ubft --stages pos-election,pos-proposal,pos-propose,pos-install,pos-advance
-      - name: '4. The return across the epoch change: transfer, split, burn, verdicts by the plug-in, the deployed verifier and Go, redeem; custody'
-        run: sudo -E env "PATH=$PATH" python3 deploy/testnet/bridge/nb2/rehearse_nb2.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/4-nb2-return" --nb2-evidence /tmp/nb2-evidence --stages pos-return,custody
+      - name: 4. Transfer, split and return across the epoch change
+        run: |
+          sudo -E env "PATH=$PATH" python3 deploy/testnet/bridge/nb2/smoke_nb2.py /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/4-nb2-return" --phase return
+          sudo cp -R /srv/tn-bridge-pos/bridge/nb2/public "$RUNNER_TEMP/evidence/4-nb2-return/"
       - name: 5. The second handoff (root epoch 2 -> 3)
         run: sudo -E env "PATH=$PATH" python3 deploy/testnet/rehearse.py --generation /srv/tn-bridge-pos --evidence "$RUNNER_TEMP/evidence/5-handoff-2" --ubft pinned-bft/build/ubft --stages pos-handoff-2
       - name: 6. The pods restarted at epoch 3 (each entity's execution client, root and shard node)

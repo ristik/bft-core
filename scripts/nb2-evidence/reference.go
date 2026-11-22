@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"math/big"
 	"os"
 	"strings"
@@ -87,9 +88,10 @@ func viewOf(c *nb2ref.Config) gammaJSON {
 	}
 }
 
-func gammaCmd(args []string) error {
+func gammaCmd(args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("gamma", flag.ContinueOnError)
 	decode := fs.String("decode", "", "decode this encoded Γ (raw or hex) instead of building one")
+	flat := fs.Bool("flat", false, "use the NB2 v1.1 flat continuation Γ")
 	network := fs.Uint("network", 0, "α, the SDK network ID")
 	rootGenesis := fs.String("root-genesis", "", "g_root: the genesis EntryID of the trust-base history")
 	execGenesis := fs.String("execution-genesis", "", "g_evm: the EVM genesis block hash")
@@ -112,11 +114,11 @@ func gammaCmd(args []string) error {
 		if err != nil {
 			return err
 		}
-		c, err := nb2ref.DecodeConfig(raw, nb2ref.BuildParams(buildOfGamma(raw)))
+		c, err := decodeGamma(raw, *flat)
 		if err != nil {
 			return fmt.Errorf("%s: %w", nb2ref.RuleName(err), err)
 		}
-		return json.NewEncoder(os.Stdout).Encode(viewOf(c))
+		return json.NewEncoder(out).Encode(viewOf(c))
 	}
 	c := &nb2ref.Config{ChainID: *chainID, EVMPartition: uint32(*evmPartition), AggregatorPartition: uint32(*aggPartition), K: *k, B: *b, Asset: nb2ref.AssetUCT}
 	if *network == 0 || *network > 65535 {
@@ -152,11 +154,23 @@ func gammaCmd(args []string) error {
 	c.Qmax = q
 	c.Ty = nb2ref.DeriveType(c.Network, c.RootGenesis, c.ExecutionGenesis, c.ChainID)
 	c.Aid = nb2ref.DeriveCoin(c.Network, c.RootGenesis, c.ExecutionGenesis, c.ChainID)
-	// the encoding must be one the reference itself accepts (widths, ranges, the build's admitted (K, B))
-	if _, err := nb2ref.DecodeConfig(c.Bytes(), nb2ref.BuildParams(nb2ref.BuildOf(c.K))); err != nil {
+	raw := c.Bytes()
+	if *flat {
+		c.Ty, c.Aid = nb2ref.FlatAssetIDs(c)
+		raw = nb2ref.FlatConfigBytes(c)
+	}
+	checked, err := decodeGamma(raw, *flat)
+	if err != nil {
 		return fmt.Errorf("%s: %w", nb2ref.RuleName(err), err)
 	}
-	return json.NewEncoder(os.Stdout).Encode(viewOf(c))
+	return json.NewEncoder(out).Encode(viewOf(checked))
+}
+
+func decodeGamma(raw []byte, flat bool) (*nb2ref.Config, error) {
+	if flat {
+		return nb2ref.DecodeFlatConfig(raw)
+	}
+	return nb2ref.DecodeConfig(raw, nb2ref.BuildParams(buildOfGamma(raw)))
 }
 
 // buildOfGamma picks the build whose admitted set holds Γ's K, so that decoding reports the real refusal rather than the build's.

@@ -1,19 +1,11 @@
 name: testnet-bridge
-# The bridge on the container package: the package built and brought up as testnet-rehearsal does it, then the native bridge v2 stages
-# (deploy/testnet/bridge/nb2/rehearse_nb2.py, NB2-09 bft-core#1105; they replaced the protocol 6/7 stages, removed by #1139). Evidence of the PACKAGE only, never of the host. No third-party service is contacted (the faucet signer is not
-# started). Long: it builds ureth from source. A workflow_dispatch only exists once this file is on the default branch, so it also runs on a push of a
-# tnb-rehearsal/** branch.
+# Rehearse NB2 v1.1 on the container package with the pinned wallet.
 on:
   pull_request:
     paths: ['deploy/testnet/bridge/**', 'scripts/dnb-tool/**', 'scripts/nb2-evidence/**', 'nb2ref/**', '.github/workflows/testnet-bridge.yml']
   push:
     branches: ['tnb-rehearsal/**']
   workflow_dispatch:
-    inputs:
-      stages:
-        description: 'rehearse_nb2.py stages, comma separated (default: all but the PoS ones)'
-        required: false
-        default: ''
 permissions:
   contents: read
 concurrency:
@@ -81,11 +73,10 @@ jobs:
         run: python3 deploy/testnet/build-images.py --bft-source pinned-bft --ureth-source pinned-ureth --aggregator-go-source pinned-aggregator-go
       - name: Build the bridge tools image (dnb-tool from the pinned bft, the node images' pin, contracts and plug-ins at bridge/pins.json)
         run: python3 deploy/testnet/bridge/build-bridge-image.py --bft-source pinned-bft --contracts-source pinned-contracts --nbp-source pinned-nbp
-      - name: The lane driver's unit tests (deploy/testnet/bridge/nb2/*.test.ts, the boundary search's shape steps against the pinned gas model, the ledger check, the lane's wallet open without the lock), in the bridge tools image as the driver runs
+      - name: Pinned reference wallet unit tests
         run: |
           img=$(python3 -c "import sys; sys.path[:0] = ['deploy/testnet/bridge', 'deploy/testnet']; import deploy_bridge; print(deploy_bridge.image())")
-          docker run --rm --read-only --network none --user 10001:10001 --tmpfs /tmp -e HOME=/tmp/home -v "$PWD/deploy/testnet/bridge/nb2:/opt/bridge/native-bridge-plugins/tests/live/nb2lane:ro" \
-            -w /opt/bridge/native-bridge-plugins "$img" npx --no-install tsx --test tests/live/nb2lane/boundary_search.test.ts tests/live/nb2lane/boundary_shape.test.ts tests/live/nb2lane/ledger_check.test.ts tests/live/nb2lane/lane_open.test.ts
+          docker run --rm --read-only --network none --tmpfs /tmp -e HOME=/tmp/home "$img" npx --no-install tsx --test wallet/core.test.ts wallet/recovery.test.ts wallet/trust.test.ts
       - run: go build -o /tmp/tn-keygen ./deploy/testnet/keygen
       - run: go build -C pinned-bft -o /tmp/tn-b1genesis ./scripts/b1genesis
       - name: The Go reference verifier and wallet-evidence tool (nb2ref), from this checkout
@@ -96,17 +87,14 @@ jobs:
           echo rehearsal-not-a-real-secret > /tmp/captcha-secret
           sudo -E env "PATH=$PATH" python3 deploy/testnet/generate.py --out /srv/tn-bridge-1 --validators 4 --chain-id 31337 \
             --ubft pinned-bft/build/ubft --b1genesis /tmp/tn-b1genesis --keygen /tmp/tn-keygen --block-interval-ms 0 \
-            --captcha-sitekey rehearsal-sitekey --captcha-secret-file /tmp/captcha-secret --no-utb
+            --captcha-sitekey rehearsal-sitekey --captcha-secret-file /tmp/captcha-secret --utb
       - name: Bring the package up (rehearse.py up, identity)
         run: sudo -E env "PATH=$PATH" python3 deploy/testnet/rehearse.py --generation /srv/tn-bridge-1 --evidence "$RUNNER_TEMP/evidence" --stages up,identity
-      - name: Native bridge v2 stages
-        env:
-          STAGES: ${{ inputs.stages }}
+      - name: Deploy, verify and exercise NB2 v1.1 through the gateway
         run: |
-          sudo -E env "PATH=$PATH" python3 deploy/testnet/bridge/nb2/rehearse_nb2.py --generation /srv/tn-bridge-1 --evidence "$RUNNER_TEMP/evidence" --nb2-evidence /tmp/nb2-evidence ${STAGES:+--stages "$STAGES"}
-      - name: The driver keys removed
-        if: always()
-        run: sudo rm -f /srv/tn-bridge-1/bridge/nb2/driver.env
+          sudo -E env "PATH=$PATH" python3 deploy/testnet/bridge/nb2/deploy_nb2.py /srv/tn-bridge-1 --nb2-evidence /tmp/nb2-evidence
+          sudo -E env "PATH=$PATH" python3 deploy/testnet/bridge/nb2/smoke_nb2.py /srv/tn-bridge-1 --evidence "$RUNNER_TEMP/evidence/nb2"
+          sudo cp -R /srv/tn-bridge-1/bridge/nb2/public "$RUNNER_TEMP/evidence/nb2/"
       - name: Resources and logs
         if: always()
         run: |

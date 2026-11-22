@@ -1,7 +1,11 @@
 package main
 
 import (
+	"bytes"
+	"encoding/hex"
+	"encoding/json"
 	"math/big"
+	"strings"
 	"testing"
 
 	"github.com/unicitynetwork/bft-core/nb2ref"
@@ -31,5 +35,38 @@ func TestGammaBuildAndView(t *testing.T) {
 		if _, err := nb2ref.Construct(raw, nb2ref.Environment{Address: c.Vault, ChainID: 31337, VerifierCodeHash: c.VerifierCodeHash}, nb2ref.BuildParams(want)); err != nil {
 			t.Fatalf("the vault constructor's rules refuse the encoded Γ: %v", err)
 		}
+	}
+}
+
+func TestGammaFlatFlag(t *testing.T) {
+	args := []string{
+		"-flat", "-network", "3", "-chain-id", "5587796",
+		"-root-genesis", strings.Repeat("01", 32), "-execution-genesis", strings.Repeat("02", 32),
+		"-vault", strings.Repeat("03", 20), "-verifier", strings.Repeat("04", 20),
+		"-verifier-code-hash", strings.Repeat("05", 32), "-profile-hash", strings.Repeat("06", 32),
+		"-qmax", "1000000000000000000000000000",
+	}
+	var out bytes.Buffer
+	if err := gammaCmd(args, &out); err != nil {
+		t.Fatal(err)
+	}
+	var view gammaJSON
+	if err := json.Unmarshal(out.Bytes(), &view); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := hex.DecodeString(strings.TrimPrefix(view.Gamma, "0x"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	flat, err := nb2ref.DecodeFlatConfig(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	domain := flat.Domain()
+	if view.Domain != hx(domain[:]) || flat.K != 64 || flat.B != 16 || flat.ChainID != 5587796 {
+		t.Fatalf("view %+v", view)
+	}
+	if _, err := nb2ref.DecodeConfig(raw, nb2ref.CandidateParams); err == nil {
+		t.Fatal("continuation config was accepted by the legacy decoder")
 	}
 }

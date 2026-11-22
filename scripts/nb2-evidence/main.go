@@ -82,7 +82,7 @@ func main() {
 	case "verify":
 		err = verifyCmd(os.Args[2:])
 	case "gamma":
-		err = gammaCmd(os.Args[2:])
+		err = gammaCmd(os.Args[2:], os.Stdout)
 	case "verify-return":
 		err = verifyReturnCmd(os.Args[2:])
 	case "seed":
