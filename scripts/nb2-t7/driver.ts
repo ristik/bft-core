@@ -355,7 +355,7 @@ async function runSmoke() {
 }
 type Burn = { evidence: Uint8Array; trust: TrustInput; paid: ExpectedLog };
 type Checkpoint = { from: number; seq: string; receipt: Receipt; event: { topics: string[]; data: string } };
-async function completeRecovery(b: Burn, name = 'run', restore?: Checkpoint, saveAt = Infinity) {
+async function completeRecovery(b: Burn, name = 'run', restore?: Checkpoint, saveAt = Infinity, maxOperations = packetMax) {
   const authority = new RecoveryAuthority(b.trust, async (next) => json('authority.json', next.origin));
   const session = await RecoverySession.create(gamma, b.evidence, authority, PRODUCTION_PARAMS,
     { salt, recovery: bytes(recovery), runtimeHash: recoveryHash, pins, vaultRuntimeHash: vaultHash });
@@ -374,7 +374,7 @@ async function completeRecovery(b: Burn, name = 'run', restore?: Checkpoint, sav
       restoreTx: restore.receipt.transactionHash, segment: (await reader.vaultState(c.vault)).segment });
   }
   while (from < session.operationCount) {
-    let count = Math.min(packetMax, session.operationCount - from);
+    let count = Math.min(maxOperations, session.operationCount - from);
     let packet;
     for (;;) {
       try {
@@ -407,7 +407,21 @@ async function completeRecovery(b: Burn, name = 'run', restore?: Checkpoint, sav
 }
 
 async function executeRecovery(b: Burn) {
+  const singleton = process.env.NB2_COMPARE_SINGLE_SOURCE === '1'
+    ? await completeRecovery(b, 'single-source', undefined, Infinity, 1)
+    : undefined;
   const { session, prior, trust } = await completeRecovery(b);
+  if (singleton) {
+    assert.equal(hex(singleton.session.id), hex(session.id));
+    const readComplete = (prefix: string, seq: bigint) =>
+      JSON.parse(readFileSync(join(evidenceDir, prefix + '-' + seq + '.locator.json'), 'utf8'));
+    const one = readComplete('single-source', singleton.prior.seq);
+    const packed = readComplete('run', prior.seq);
+    assert.deepEqual(one.topics, packed.topics);
+    assert.equal(one.data.slice(66), packed.data.slice(66));
+    json('same-evidence-comparison.json', { session: hex(session.id), evidenceSha256: hex(HU(b.evidence)),
+      singleSourceProgress: singleton.prior.seq, packedProgress: prior.seq });
+  }
   const payment = await session.gaps('redeemRecovered', trust, prior.receipt, { seq: prior.seq }, []);
   await certifyReceipt('recovered', await send('recovered', vault, payment.calldata), c.vault, b.paid);
   return { session: hex(session.id), packets: prior.seq, operations: session.operationCount };

@@ -56,7 +56,8 @@ driver=( "$NB2_PLUGIN/node_modules/.bin/tsx" "$scratch/driver.ts" "$NB2_OUT" "$r
   "${NB2_ARTIFACTS:-$NB2_CONTRACTS/out}" "$here/create.py" "$scratch" )
 if [[ "${NB2_QUALIFY_OFFLINE:-0}" = 1 ]]; then
   openssl rand -hex 32 >"$scratch/relayer-key"
-  python3 "$here/probe-qualification.py" archive "$rpc" "$chain" "$(cat "$NB2_OUT/execution.pin")"     "$scratch/archive-url" >"$NB2_OUT/preferred-archive.log" 2>&1 &
+  python3 "$here/probe-qualification.py" archive "$rpc" "$chain" "$(cat "$NB2_OUT/execution.pin")" \
+    "$scratch/archive-url" >"$NB2_OUT/preferred-archive.log" 2>&1 &
   archive_pid=$!
   for ((i = 0; i < 50; ++i)); do [[ -s "$scratch/archive-url" ]] && break; sleep .1; done
   export NB2_RECEIPT_PRIMARY_RPC="$(<"$scratch/archive-url")"

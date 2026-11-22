@@ -82,6 +82,11 @@ Use the same setup and a new output directory per generation.
 | `NB2_QUALIFY_CUSTODY=1` | Pay 129 one-wei returns across two rotations, refuse the first payment on both routes, authenticate the mined failed retry, and race independently funded ordinary and recovered bidders for the last payment. |
 | `NB2_QUALIFY_OFFLINE=1 NB2_QUALIFY_CASE=transfer-600-split-1 NB2_PACKET_OPERATIONS=16` | Stop the wallet after persisting its signed burn. Certify it in a relayer, checkpoint after 336 operations and stop the preferred archive. Seal two real segments, restore Progress from a second validator and settle the recovered burn after folding those seals. |
 
+Set `NB2_LOAD_SEGMENTS=12 NB2_LOAD_SKEW=1` on the custody workload for
+concentrated bucket traffic and simultaneous gap advancement. Set
+`NB2_COMPARE_SINGLE_SOURCE=1 NB2_PACKET_OPERATIONS=16` on the smoke workload
+to compare the same lineage and terminal verdict with one-source and packed cuts.
+
 These runs use disposable value and a wallet input marked for measurement. The
 driver records the wallet's admission result separately from the explicitly
 authorised test burn. Private wallet files and the signed handoff live in the
