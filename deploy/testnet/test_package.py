@@ -141,10 +141,11 @@ class B1Layout(unittest.TestCase):
         # the pinned checkouts come from pins.json itself (a pin bump is one file, #1075): no SHA is repeated in the workflow
         self.assertIn("json.load(open('deploy/testnet/pins.json'))",workflow)
         self.assertIsNone(re.search(r'ref: [0-9a-f]{40}',workflow))
-        for out,path in (('bft','pinned-bft'),('aggregator_go','pinned-aggregator-go'),('contracts','pinned-contracts')):
+        for out,path in (('bft','pinned-bft'),('aggregator_go','pinned-aggregator-go'),('vr_contracts','pinned-contracts')):
             self.assertRegex(workflow,r'ref: \$\{\{ steps\.pins\.outputs\.%s \}\}\s+path: %s'%(out,path))
         self.assertIn('./scripts/b1genesis',workflow)
         self.assertIn('--pos-contracts pinned-contracts',workflow)
+        self.assertIn('--vr-fresh-measurement deploy/testnet/measurements/vr-hook-pos16-independent.json', workflow)
     def test_every_pins_workflow_builds_dnb_tool_from_the_node_pin(self):
         # #1075: the bridge image's dnb-tool comes from the same bft checkout as the nodes (an older one cannot read their archive layout)
         for name in ('testnet-bridge.yml','testnet-bridge-pos.yml'):
