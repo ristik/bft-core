@@ -696,6 +696,31 @@ async function runQualificationCustody() {
   const sealTopic = HE(ascii('SegmentSealed(uint64,bytes32,bytes32,bytes)'));
   const windows = [];
   const batchOffers = [];
+  const catchUpMeasurements = [];
+  const loadPayer = new LocalKeySigner(randomBytes(32));
+  await send('catch-up-funding', hex(loadPayer.address), new Uint8Array(), 10n ** 18n);
+  const lateRecovery = await completeRecovery({ ...late, trust }, 'late-run');
+  type AdvanceCursor = { seq: bigint; receipt: Uint8Array; next: bigint; head: Uint8Array; trust: TrustInput };
+  let lateCursor: AdvanceCursor = { ...lateRecovery.prior, next: 0n, head: h0, trust: lateRecovery.trust };
+  let pending: Promise<AdvanceCursor> | undefined;
+  let resultReady = false;
+  const batchGaps = 3;
+  async function advance(suffix: Uint8Array[], cursor: AdvanceCursor, name: string): Promise<AdvanceCursor> {
+    const gapTrust = await trustFor(suffix.map(e => decodeDepositProof(e).uc));
+    const gaps = await lateRecovery.session.certifiedGaps(gapTrust, cursor.next, cursor.head, suffix);
+    const opened = cursor.next === 0n ? undefined : { next: cursor.next, head: cursor.head };
+    const packet = await lateRecovery.session.gaps('advanceGaps', gapTrust, cursor.receipt,
+      { seq: cursor.seq, cursor: opened }, gaps, opened === undefined ? h0 : undefined);
+    const before = await reader.vaultState(c.vault);
+    const start = Date.now();
+    const certified = await certifyReceipt(name, await send(name, recovery, packet.calldata, 0n, '0x1', loadPayer),
+      bytes(recovery), packet.event!);
+    await lateRecovery.session.verifyEvent(certified.trust, certified.encoded, packet.event!);
+    const after = await reader.vaultState(c.vault);
+    catchUpMeasurements.push({ calls: name, verifiedGaps: gaps.length, submittedAtMs: start, proofMs: Date.now() - start,
+      arrivedDuringCall: after.segment - before.segment, beforeBacklog: before.segment - cursor.next, afterBacklog: after.segment - packet.next });
+    return { seq: cursor.seq + 1n, receipt: certified.encoded, next: packet.next, head: packet.head!, trust: certified.trust };
+  }
   const eligibleHistory = (claim: typeof target, count: number) => count === 0 ? new Uint8Array() :
     encodeHistory(h0, segments.slice(0, count).map(segment => {
       const gap = GapTree.build(segment.z)!.prove(claim.verdict.eta);
@@ -704,8 +729,18 @@ async function runQualificationCustody() {
     }));
 
   // Offer batches to the pool without waiting for each transaction's receipt.
-  const size = 16;
+  const size = loadSegments > 2 ? 32 : 16;
   for (let i = 1; i < n; i += size) {
+    if (pending && resultReady) {
+      lateCursor = await pending;
+      pending = undefined;
+    }
+    if (loadSegments > 2 && !pending && sealEvidence.length >= Number(lateCursor.next) + batchGaps) {
+      const next = Number(lateCursor.next);
+      resultReady = false;
+      pending = advance(sealEvidence.slice(next, next + batchGaps), lateCursor, 'loaded-advance-' + next);
+      void pending.then(() => { resultReady = true; }, () => { resultReady = true; });
+    }
     const first = Date.now();
     const nonce = await reader.nonce(signer.address);
     const { baseFee, priority } = await reader.fees();
@@ -797,17 +832,15 @@ async function runQualificationCustody() {
     gatewayChecks.push({ url, exactFailedTransactionReceipt: true, elapsedMs: Date.now() - started });
   }
   json('gateway-checks.json', gatewayChecks);
-  const lateRecovery = await completeRecovery({ ...late, trust }, 'late-run');
   const before = Date.now();
-  const gapTrust = await trustFor(sealEvidence.map(e => decodeDepositProof(e).uc));
-  const gaps = await lateRecovery.session.certifiedGaps(gapTrust, 0n, h0, sealEvidence);
-  const advance = await lateRecovery.session.gaps('advanceGaps', gapTrust, lateRecovery.prior.receipt,
-    { seq: lateRecovery.prior.seq }, gaps, h0);
-  const advanced = await certifyReceipt('late-advance', await send('late-advance', recovery, advance.calldata),
-    bytes(recovery), advance.event!);
-  await lateRecovery.session.verifyEvent(advanced.trust, advanced.encoded, advance.event!);
-  const settlement = await lateRecovery.session.gaps('redeemRecovered', advanced.trust, advanced.encoded,
-    { seq: lateRecovery.prior.seq + 1n, cursor: { next: advance.next, head: advance.head! } }, []);
+  if (pending) lateCursor = await pending;
+  if (lateCursor.next < BigInt(sealEvidence.length)) {
+    lateCursor = await advance(sealEvidence.slice(Number(lateCursor.next)), lateCursor, 'late-advance');
+  }
+  assert.equal(lateCursor.next, BigInt(loadSegments));
+  const settlement = await lateRecovery.session.gaps('redeemRecovered', lateCursor.trust, lateCursor.receipt,
+    { seq: lateCursor.seq, cursor: { next: lateCursor.next, head: lateCursor.head } }, []);
+  const gaps = await lateRecovery.session.certifiedGaps(lateCursor.trust, 0n, h0, sealEvidence);
   const bidder = new LocalKeySigner(randomBytes(32));
   await send('race-bidder-funding', hex(bidder.address), new Uint8Array(), 10n ** 18n);
   const race = [
@@ -842,7 +875,8 @@ async function runQualificationCustody() {
   assert.equal(hex(final.head), hex(head));
   json('custody-result.json', { payments: amount, evicted: hex(target.verdict.eta), liability: final.outstanding,
     recipientBefore: initialRecipient, recipientAfter: initialRecipient + amount, head: hex(head), windows, batchOffers, skew,
-    lateGaps: gaps.length, lateAdvanceMs: Date.now() - before, segment: final.segment, elapsedMs: Date.now() - startTime });
+    lateGaps: gaps.length, lateAdvanceMs: Date.now() - before, catchUpMeasurements,
+    segment: final.segment, elapsedMs: Date.now() - startTime });
 }
 
 function laneGateways() {
