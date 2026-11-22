@@ -212,7 +212,12 @@ func vrCheckPosStack(in vrGenesisInput, d vrDeploymentFile, identities []evmassi
 	for i, id := range identities {
 		sid := uint64(i + 1)
 		eid := vrschema.PoaExposureDigest(vrschema.Word(network), chainWord, vrschema.ValidatorRegistry, vrschema.Word(assignment), sid)
-		if got := slots[vrschema.MapSlot(eid, vrschema.U64(vrCustodyMemberDigestSlot))]; !strings.EqualFold(lowerHex(got[:]), lowerHex(id.ExposureDigest)) {
+		got := slots[vrschema.MapSlot(eid, vrschema.U64(vrCustodyMemberDigestSlot))]
+		if in.Limits.VMax > vrPosLegacyPool {
+			// vrCheckPosCustody authenticated the ordered row and its binding. The compact getter derives the genesis digest.
+			got = vrschema.PoaExposureDigest(vrschema.Word(network), chainWord, vrschema.ValidatorRegistry, vrschema.GenesisResult, sid)
+		}
+		if !strings.EqualFold(lowerHex(got[:]), lowerHex(id.ExposureDigest)) {
 			return fail("custody's member digest of genesis identity %d is %x, the roots' genesis identity carries %x", sid, got, id.ExposureDigest)
 		}
 	}
