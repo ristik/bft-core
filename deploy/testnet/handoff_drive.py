@@ -1003,7 +1003,7 @@ class Drive(rehearse.Rehearsal):
             return {'joiner': True}
         if healthy(self.authority_status(i)).get('lineagePinned'):
             # bft-core#1085: the authority verifies the activation itself from its pinned lineage, and the one operation also issues the next
-            # session (a rerun is a no-op that only repairs a missing credential); the drive supplies the roots' bundles and checks the result
+            # session as needed. A rerun also reports a deliberate alternate session held for this scope.
             def proof():
                 status = self.authority_status(i)
                 self.keep_credential(i)
@@ -1016,7 +1016,10 @@ class Drive(rehearse.Rehearsal):
                 status = healthy(self.authority_status(i))
                 self.expect(not report.get('retired') and advanced(status), f'authority {i} verified and holds root epoch {self.target} and shard epoch {shard_epoch}',
                             str(report)[:300])
-                return {'generation': status.get('generation'), 'steps': len(report.get('steps') or []), 'sessionIssued': report.get('sessionIssued')}
+                detail = {'generation': status.get('generation'), 'steps': len(report.get('steps') or []), 'sessionIssued': report.get('sessionIssued')}
+                if report.get('activeAlternate'):
+                    detail['activeAlternate'] = report['activeAlternate']
+                return detail
             journal.run('advance', proof, sub=f'{unit}/advance-with-proof')
             journal.run('advance', lambda: self.compose('start', f'shard{i}') and {}, sub=f'{unit}/shard-start')
             return {'proof': True}
@@ -1075,7 +1078,10 @@ class Drive(rehearse.Rehearsal):
                 report = remote.authority_step('advance-with-proof', self.target, shard_epoch)
                 status = healthy(remote.authority_status())
                 self.expect(advanced(status), f'authority {i} (laptop) verified and holds root epoch {self.target} and shard epoch {shard_epoch}', str(report)[:300])
-                return {'generation': status.get('generation')}
+                detail = {'generation': status.get('generation')}
+                if report.get('activeAlternate'):
+                    detail['activeAlternate'] = report['activeAlternate']
+                return detail
             journal.run('advance', proof, sub=f'{unit}/advance-with-proof')
             journal.run('advance', lambda: remote.authority_step('shard-start', self.target, shard_epoch) and {}, sub=f'{unit}/shard-start')
             return {'remote': True, 'proof': True}

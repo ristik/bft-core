@@ -82,8 +82,9 @@ func testAdvanceWithProof(ctx context.Context, operator interface {
 	advanceOperator
 	ReplaceSession(context.Context) ([]byte, error)
 }, proofs []string, out string, current func(context.Context) error) (advanceWithProofReport, error) {
-	return advanceWithProof(ctx, operator, proofs, func(ctx context.Context, status signingauthority.Status) (bool, error) {
-		return ensureAuthoritySession(ctx, status, out, current, operator.ReplaceSession)
+	return advanceWithProof(ctx, operator, proofs, func(ctx context.Context, status signingauthority.Status) (service.SessionPublication, error) {
+		issued, err := ensureAuthoritySession(ctx, status, out, current, operator.ReplaceSession)
+		return service.SessionPublication{Issued: issued}, err
 	})
 }
 

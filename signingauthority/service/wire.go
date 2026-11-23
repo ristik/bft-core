@@ -162,9 +162,10 @@ type publishSessionRequest struct {
 }
 
 type publishSessionResult struct {
-	_       struct{} `cbor:",toarray"`
-	Managed bool
-	Issued  bool
+	_               struct{} `cbor:",toarray"`
+	Managed         bool
+	Issued          bool
+	ActiveAlternate string
 }
 
 type wireRequest struct {

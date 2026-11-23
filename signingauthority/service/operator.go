@@ -65,23 +65,32 @@ func (o *OperatorClient) ReplaceSessionFor(ctx context.Context, target string) (
 	return o.ex.call(ctx, opReplaceSession, payload)
 }
 
+// SessionPublication describes the managed publication requested by the operator.
+// ActiveAlternate names an admitted alternate destination relative to the operator
+// socket when a non-forced managed operation preserves that session.
+type SessionPublication struct {
+	Managed         bool
+	Issued          bool
+	ActiveAlternate string
+}
+
 // PublishSession asks the authority to publish its configured credential. A different
 // target or a legacy server leaves publication to the caller.
-func (o *OperatorClient) PublishSession(ctx context.Context, target string, replace bool) (managed, issued bool, err error) {
+func (o *OperatorClient) PublishSession(ctx context.Context, target string, replace bool) (SessionPublication, error) {
 	payload, err := types.Cbor.Marshal(publishSessionRequest{Target: target, Replace: replace})
 	if err != nil {
-		return false, false, err
+		return SessionPublication{}, err
 	}
 	answer, err := o.ex.call(ctx, opPublishSession, payload)
 	if errors.Is(err, ErrWrongEndpoint) {
-		return false, false, nil
+		return SessionPublication{}, nil
 	}
 	if err != nil {
-		return false, false, err
+		return SessionPublication{}, err
 	}
 	var result publishSessionResult
 	err = types.Cbor.Unmarshal(answer, &result)
-	return result.Managed, result.Issued, err
+	return SessionPublication{Managed: result.Managed, Issued: result.Issued, ActiveAlternate: result.ActiveAlternate}, err
 }
 
 /*

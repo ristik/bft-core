@@ -455,6 +455,7 @@ class ProofAuthority(FakeAuthority):
     def __init__(self, auth, retire=False):
         super().__init__(auth)
         self.retire, self.lineage = retire, 1
+        self.active_alternate = None
 
     def exec_in(self, service, *command, binary=False):
         verb = command[2]
@@ -470,6 +471,8 @@ class ProofAuthority(FakeAuthority):
                     raise hd.rehearse.Failure(f'{service}: advance-with-proof: exit 1: required flag(s) "{flag[2:]}" not set')
             if self.retire:
                 return json.dumps({'steps': [{}], 'retired': True})
+            if self.active_alternate and self.root_epoch == 3:
+                return json.dumps({'steps': [{'replay': True}], 'sessionIssued': False, 'activeAlternate': self.active_alternate})
             if self.root_epoch != 3:
                 self.root_epoch, self.shard_epoch, self.generation, self.lineage = 3, 2, self.generation + 2, 3
                 (self.auth / 'client.cred').write_text(f'session {self.generation}')
@@ -509,6 +512,21 @@ class AdvanceWithProof(unittest.TestCase):
         proofs = [c for c in self.fake.calls if c[1] == 'advance-with-proof']
         self.assertEqual(proofs, [('authority1', 'advance-with-proof', ('/network/handoff/q3-bundle-3.cbor',))])
         self.assertTrue(self.journal.done('advance', 'entity1/advance-with-proof'))
+
+    def test_resume_records_the_alternate_session_without_rotating_it(self):
+        self.fake.root_epoch, self.fake.shard_epoch, self.fake.lineage = 3, 2, 3
+        self.fake.generation, self.fake.active_alternate = 10, 'offline.cred'
+        alternate = self.auth / 'offline.cred'
+        alternate.write_text('session 10')
+        sub = 'entity1/advance-with-proof'
+        self.journal.write('advance', 'start', sub=sub)
+        self.run_entity()
+        self.assertEqual(self.journal.value('advance', 'activeAlternate', sub=sub), 'offline.cred')
+        self.assertIs(self.journal.value('advance', 'sessionIssued', sub=sub), False)
+        self.assertEqual(self.journal.value('advance', 'generation', sub=sub), 10)
+        self.assertEqual((self.auth / 'client.cred').read_text(), 'session 1')
+        self.assertEqual(alternate.read_text(), 'session 10')
+        self.assertNotIn('replace-session', [c[1] for c in self.fake.calls])
 
     def test_an_elected_entity_that_the_authority_retires_stops_the_drive(self):
         self.fake.retire = True

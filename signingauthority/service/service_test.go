@@ -768,7 +768,7 @@ func (f *fixture) blockedServer(t *testing.T, cfg Config) (*Server, blockedTrust
 	// Registered after Close so it runs before it: a test that fails with a lookup still blocked must
 	// not leave its own cleanup waiting on that lookup.
 	t.Cleanup(trust.free)
-	credential, err := server.replaceSession()
+	credential, err := server.replaceSession("")
 	require.NoError(t, err)
 
 	local, remote := net.Pipe()

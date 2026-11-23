@@ -112,11 +112,12 @@ type Server struct {
 	cfg       Config
 	log       *slog.Logger
 
-	mu          sync.Mutex
-	session     signingauthority.Session
-	hasSession  bool
-	credential  []byte
-	provisioned atomic.Bool // a managed credential was explicitly provisioned in this authority lifetime
+	mu            sync.Mutex
+	session       signingauthority.Session
+	hasSession    bool
+	credential    []byte
+	sessionTarget string      // destination of the admitted generation
+	provisioned   atomic.Bool // a managed credential was explicitly provisioned in this authority lifetime
 
 	// advance is the authority's AdvanceWithProof; a test of the publication-versus-cleanup interleaving replaces it (it is never set
 	// outside this package's tests)
@@ -460,8 +461,7 @@ func (s *Server) operatorOp(ctx context.Context, operation op, payload []byte) (
 		enrolled := s.authority.Enrollment()
 		s.log.Info("epoch advanced", slog.Uint64("shardEpoch", enrolled.ShardEpoch), slog.Uint64("rootEpoch", uint64(derefEpoch(enrolled.RootEpoch))),
 			slog.String("shardConfHash", hex.EncodeToString(enrolled.ShardConfHash)))
-		s.hasSession = false
-		s.credential = nil
+		s.clearSessionLocked()
 		return nil, nil
 	case opAdvanceWithProof:
 		// The proof is the payload's bytes and nothing else: the authority verifies it against its own lineage (#1085). The server's lock
@@ -482,8 +482,7 @@ func (s *Server) operatorOp(ctx context.Context, operation op, payload []byte) (
 		if res.Advanced || res.Retired {
 			s.mu.Lock()
 			if s.hasSession && s.session.Generation() <= res.Generation {
-				s.hasSession = false
-				s.credential = nil
+				s.clearSessionLocked()
 			}
 			s.mu.Unlock()
 		}
@@ -670,25 +669,26 @@ func (s *Server) operatorOp(ctx context.Context, operation op, payload []byte) (
 			slog.String("shardConfHash", fmt.Sprintf("%x", s.authority.Enrollment().ShardConfHash)))
 		return nil, nil
 	case opReplaceSession:
+		var target string
 		if managed := s.cfg.ManagedSession.Target; managed != "" {
-			var target string
 			if err := types.Cbor.Unmarshal(payload, &target); err != nil || target == "" || filepath.IsAbs(target) || filepath.Clean(target) == managed {
 				return nil, ErrManagedSession
 			}
+			target = filepath.Clean(target)
 		}
-		return s.replaceSession()
+		return s.replaceSession(target)
 	case opPublishSession:
 		var request publishSessionRequest
 		if err := types.Cbor.Unmarshal(payload, &request); err != nil {
 			return nil, fmt.Errorf("%w: publication request: %v", errMalformed, err)
 		}
-		result := publishSessionResult{Managed: request.Target != "" && filepath.Clean(request.Target) == s.cfg.ManagedSession.Target}
-		if result.Managed {
-			var err error
-			result.Issued, err = s.publishSession(request.Replace, false)
+		var result publishSessionResult
+		if request.Target != "" && filepath.Clean(request.Target) == s.cfg.ManagedSession.Target {
+			publication, err := s.publishSession(request.Replace, false)
 			if err != nil {
 				return nil, err
 			}
+			result = publishSessionResult{Managed: publication.Managed, Issued: publication.Issued, ActiveAlternate: publication.ActiveAlternate}
 		}
 		return types.Cbor.Marshal(result)
 	case opStatus, opRestoreStatus:
@@ -723,11 +723,11 @@ the authority: the two must not disagree about who is admitted. If it succeeds, 
 stops being accepted in the same step, and the new credential is returned exactly once. The server
 keeps only what it needs to compare against, and cannot produce it again for anyone who missed it.
 */
-func (s *Server) replaceSession() ([]byte, error) {
+func (s *Server) replaceSession(target string) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	return s.replaceSessionLocked(nil)
+	return s.replaceSessionLocked(target, nil)
 }
 
 // SessionProvisioned reports whether the operator has installed the first managed
@@ -747,37 +747,47 @@ func (s *Server) FollowSession() error {
 	return err
 }
 
-func (s *Server) publishSession(replace, follow bool) (bool, error) {
+func (s *Server) publishSession(replace, follow bool) (SessionPublication, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	result := SessionPublication{Managed: true}
 	status := s.authority.Status()
 	if status.Retired && !replace {
-		return false, nil
+		return result, nil
 	}
 	if !replace && s.hasSession && s.session.Generation() == status.Generation {
+		if s.sessionTarget != s.cfg.ManagedSession.Target {
+			result.ActiveAlternate = s.sessionTarget
+			return result, nil
+		}
 		if follow {
-			return false, nil
+			return result, nil
 		}
 		matches, err := s.cfg.ManagedSession.Matches(s.credential)
 		if err != nil {
 			s.log.Error("checking the managed client credential", "error", err)
-			return false, ErrCredentialPublication
+			return result, ErrCredentialPublication
 		}
 		if matches && s.session.Generation() == s.authority.Status().Generation {
 			s.provisioned.Store(true)
-			return false, nil
+			return result, nil
 		}
 	}
-	if _, err := s.replaceSessionLocked(s.cfg.ManagedSession.Publish); err != nil {
-		return false, err
-	}
-	return true, nil
+	_, err := s.replaceSessionLocked(s.cfg.ManagedSession.Target, s.cfg.ManagedSession.Publish)
+	result.Issued = err == nil
+	return result, err
+}
+
+func (s *Server) clearSessionLocked() {
+	s.hasSession = false
+	s.credential = nil
+	s.sessionTarget = ""
 }
 
 // replaceSessionLocked orders both issuance and managed publication with every
 // operator replacement. A failed publication leaves no admitted credential.
-func (s *Server) replaceSessionLocked(publish func([]byte) error) ([]byte, error) {
+func (s *Server) replaceSessionLocked(target string, publish func([]byte) error) ([]byte, error) {
 	credential, err := NewCredential()
 	if err != nil {
 		return nil, err
@@ -787,8 +797,7 @@ func (s *Server) replaceSessionLocked(publish func([]byte) error) ([]byte, error
 		return nil, err
 	}
 	if publish != nil {
-		s.hasSession = false
-		s.credential = nil
+		s.clearSessionLocked()
 		if err := publish(credential); err != nil {
 			s.log.Error("publishing the managed client credential", "error", err)
 			return nil, ErrCredentialPublication
@@ -799,6 +808,7 @@ func (s *Server) replaceSessionLocked(publish func([]byte) error) ([]byte, error
 		}
 	}
 	s.session = session
+	s.sessionTarget = target
 	s.hasSession = true
 	s.credential = append([]byte(nil), credential...)
 	return credential, nil

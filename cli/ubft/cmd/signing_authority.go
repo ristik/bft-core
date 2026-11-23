@@ -343,24 +343,28 @@ func signingAuthorityRun(ctx context.Context, flags *signingAuthorityRunFlags) e
 
 	serverConfig := service.Config{OperatorCredential: operatorCredential, PoPCredential: popCredential, Log: log}
 	if flags.FollowCredential != "" {
-		target, err := sessionPublicationTarget(flags.OperatorSocket, flags.FollowCredential)
+		destination, target, err := sessionPublicationTarget(flags.OperatorSocket, flags.FollowCredential)
 		if err != nil {
 			return err
 		}
-		operatorTarget, err := sessionPublicationTarget(flags.OperatorSocket, flags.OperatorCredential)
+		_, operatorTarget, err := sessionPublicationTarget(flags.OperatorSocket, flags.OperatorCredential)
 		if err != nil {
 			return err
 		}
-		if target == operatorTarget {
+		operatorSource, err := physicalPath(flags.OperatorCredential)
+		if err != nil {
+			return err
+		}
+		if target == operatorTarget || destination == operatorSource {
 			return errors.New("automatic activation must write a separate client credential file")
 		}
 		serverConfig.ManagedSession = service.ManagedSession{
 			Target: target,
 			Publish: func(credential []byte) error {
-				return writeCredentialFile(flags.FollowCredential, credential, true)
+				return writeCredentialFile(destination, credential, true)
 			},
 			Matches: func(credential []byte) (bool, error) {
-				current, err := readCredentialFile(flags.FollowCredential)
+				current, err := readCredentialFile(destination)
 				if errors.Is(err, os.ErrNotExist) {
 					return false, nil
 				}
@@ -611,7 +615,7 @@ func signingAuthorityAdvanceEpochCmd(baseFlags *baseFlags) *cobra.Command {
 advance-with-proof is the operator's one local operation per entity (#1085): it hands the authority the root activation bundles, one call
 each in epoch order, and the authority verifies each against its own lineage before it changes anything; then, when the scope changed or
 no session has been issued since it last changed, it replaces the session and writes the new client credential. Rerunning it with the
-same bundles is a no-op that only repairs a missing credential, so a crash between the advance and the credential is repaired by a rerun.
+same bundles repairs a missing credential after a crash. An admitted alternate session for the current generation is preserved.
 */
 func signingAuthorityAdvanceWithProofCmd(baseFlags *baseFlags) *cobra.Command {
 	flags := &signingAuthorityOperatorFlags{baseFlags: baseFlags}
@@ -626,19 +630,22 @@ func signingAuthorityAdvanceWithProofCmd(baseFlags *baseFlags) *cobra.Command {
 				return err
 			}
 			defer func() { _ = operator.Close() }()
-			current := func(ctx context.Context) error { return checkClientCredential(ctx, clientSocket, out, flags.Timeout) }
-			target, err := sessionPublicationTarget(flags.OperatorSocket, out)
+			destination, target, err := sessionPublicationTarget(flags.OperatorSocket, out)
 			if err != nil {
 				return err
 			}
-			publish := func(ctx context.Context, status signingauthority.Status) (bool, error) {
-				managed, issued, err := operator.PublishSession(ctx, target, false)
-				if managed || err != nil {
-					return issued, err
+			current := func(ctx context.Context) error {
+				return checkClientCredential(ctx, clientSocket, destination, flags.Timeout)
+			}
+			publish := func(ctx context.Context, status signingauthority.Status) (service.SessionPublication, error) {
+				publication, err := operator.PublishSession(ctx, target, false)
+				if publication.Managed || err != nil {
+					return publication, err
 				}
-				return ensureAuthoritySession(ctx, status, out, current, func(ctx context.Context) ([]byte, error) {
+				publication.Issued, err = ensureAuthoritySession(ctx, status, destination, current, func(ctx context.Context) ([]byte, error) {
 					return operator.ReplaceSessionFor(ctx, target)
 				})
+				return publication, err
 			}
 			report, err := advanceWithProof(cmd.Context(), operator, proofs, publish)
 			if err != nil {
@@ -662,13 +669,14 @@ func signingAuthorityAdvanceWithProofCmd(baseFlags *baseFlags) *cobra.Command {
 
 // advanceWithProofReport is what advance-with-proof prints.
 type advanceWithProofReport struct {
-	Steps         []signingauthority.AdvanceResult `json:"steps"`
-	Advanced      bool                             `json:"advanced"`
-	Retired       bool                             `json:"retired"`
-	SessionIssued bool                             `json:"sessionIssued"`
-	RootEpoch     uint64                           `json:"rootEpoch"`
-	ShardEpoch    uint64                           `json:"shardEpoch"`
-	LineageEpoch  uint64                           `json:"lineageEpoch"`
+	Steps           []signingauthority.AdvanceResult `json:"steps"`
+	Advanced        bool                             `json:"advanced"`
+	Retired         bool                             `json:"retired"`
+	SessionIssued   bool                             `json:"sessionIssued"`
+	ActiveAlternate string                           `json:"activeAlternate,omitempty"`
+	RootEpoch       uint64                           `json:"rootEpoch"`
+	ShardEpoch      uint64                           `json:"shardEpoch"`
+	LineageEpoch    uint64                           `json:"lineageEpoch"`
 }
 
 // advanceOperator is the part of the operator client advance-with-proof uses.
@@ -693,7 +701,7 @@ func checkClientCredential(ctx context.Context, socket, path string, timeout tim
 	return err
 }
 
-func advanceWithProof(ctx context.Context, operator advanceOperator, proofs []string, publish func(context.Context, signingauthority.Status) (bool, error)) (advanceWithProofReport, error) {
+func advanceWithProof(ctx context.Context, operator advanceOperator, proofs []string, publish func(context.Context, signingauthority.Status) (service.SessionPublication, error)) (advanceWithProofReport, error) {
 	var report advanceWithProofReport
 	if len(proofs) == 0 {
 		return report, errors.New("no activation bundle: pass at least the target epoch's (a resume replays it)")
@@ -722,7 +730,8 @@ func advanceWithProof(ctx context.Context, operator advanceOperator, proofs []st
 		return report, err
 	}
 	report.Retired, report.RootEpoch, report.ShardEpoch, report.LineageEpoch = status.Retired, status.RootEpoch, status.ShardEpoch, status.LineageEpoch
-	report.SessionIssued, err = publish(ctx, status)
+	publication, err := publish(ctx, status)
+	report.SessionIssued, report.ActiveAlternate = publication.Issued, publication.ActiveAlternate
 	return report, err
 }
 
@@ -771,19 +780,19 @@ credential is returned once to this command, which writes it; losing it requires
 				return err
 			}
 			defer func() { _ = operator.Close() }()
-			target, err := sessionPublicationTarget(flags.OperatorSocket, out)
+			destination, target, err := sessionPublicationTarget(flags.OperatorSocket, out)
 			if err != nil {
 				return err
 			}
-			managed, _, err := operator.PublishSession(cmd.Context(), target, true)
-			if managed || err != nil {
+			publication, err := operator.PublishSession(cmd.Context(), target, true)
+			if publication.Managed || err != nil {
 				return err
 			}
 			credential, err := operator.ReplaceSessionFor(cmd.Context(), target)
 			if err != nil {
 				return err
 			}
-			if err := writeCredentialFile(out, credential, true); err != nil {
+			if err := writeCredentialFile(destination, credential, true); err != nil {
 				return fmt.Errorf("the session was replaced, so the previous credential is fenced, but the new one could not be written (replace the session again): %w", err)
 			}
 			return nil

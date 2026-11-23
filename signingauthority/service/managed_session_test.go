@@ -35,9 +35,9 @@ func TestManagedOperatorAndFollowerPublishInIssueOrder(t *testing.T) {
 	ctx := t.Context()
 	require.NoError(t, f.server.FollowSession())
 	require.Zero(t, writes.Load(), "automatic following cannot bootstrap the client")
-	managed, issued, err := f.operator.PublishSession(ctx, "client.cred", true)
+	publication, err := f.operator.PublishSession(ctx, "client.cred", true)
 	require.NoError(t, err)
-	require.True(t, managed && issued && f.server.SessionProvisioned())
+	require.True(t, publication.Managed && publication.Issued && f.server.SessionProvisioned())
 	baseline, err := os.ReadFile(path)
 	require.NoError(t, err)
 
@@ -63,8 +63,8 @@ func TestManagedOperatorAndFollowerPublishInIssueOrder(t *testing.T) {
 	operatorStarted := make(chan struct{})
 	go func() {
 		close(operatorStarted)
-		managed, issued, err := f.operator.PublishSession(ctx, "client.cred", true)
-		if err == nil && !(managed && issued) {
+		publication, err := f.operator.PublishSession(ctx, "client.cred", true)
+		if err == nil && !(publication.Managed && publication.Issued) {
 			err = errors.New("operator did not replace the managed session")
 		}
 		operatorDone <- err
@@ -126,7 +126,7 @@ func TestManagedSessionRecoversAfterOperatorDisconnectsAndPublicationFails(t *te
 		},
 	})
 	ctx := t.Context()
-	_, _, err := f.operator.PublishSession(ctx, "client.cred", true)
+	_, err := f.operator.PublishSession(ctx, "client.cred", true)
 	require.NoError(t, err)
 	initial, err := os.ReadFile(path)
 	require.NoError(t, err)

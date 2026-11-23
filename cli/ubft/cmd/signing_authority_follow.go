@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -24,9 +25,6 @@ func (f *signingAuthorityRunFlags) validateActivationFollower() error {
 	if f.LineageGenesis == "" || f.FollowRootRPC == "" || f.FollowCredential == "" {
 		return errors.New("automatic activation requires a root RPC, a client credential path and a lineage pin")
 	}
-	if filepath.Clean(f.FollowCredential) == filepath.Clean(f.OperatorCredential) {
-		return errors.New("automatic activation must write a separate client credential file")
-	}
 	u, err := url.Parse(f.FollowRootRPC)
 	if err != nil || u.Scheme != "http" || !net.ParseIP(u.Hostname()).IsLoopback() ||
 		u.Port() == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
@@ -35,26 +33,45 @@ func (f *signingAuthorityRunFlags) validateActivationFollower() error {
 	return nil
 }
 
-// sessionPublicationTarget identifies a file relative to its operator socket. Use
-// its parent because atomic publication replaces the last component itself.
-func sessionPublicationTarget(socket, path string) (string, error) {
-	socketPath, err := filepath.Abs(socket)
+// physicalPath preserves the input components until symlinks and parent
+// traversals have been evaluated in filesystem order.
+func physicalPath(path string) (string, error) {
+	if !filepath.IsAbs(path) {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return "", err
+		}
+		path = cwd + string(os.PathSeparator) + path
+	}
+	return filepath.EvalSymlinks(path)
+}
+
+// sessionPublicationTarget returns the exact rename destination and its name
+// relative to the physical operator socket. The final component is replaced,
+// so only the output's parent is resolved.
+func sessionPublicationTarget(socket, path string) (destination, target string, err error) {
+	parent, base := filepath.Split(path)
+	if base == "" || base == "." || base == ".." {
+		return "", "", fmt.Errorf("invalid credential destination %q", path)
+	}
+	socketPath, err := physicalPath(socket)
 	if err != nil {
-		return "", err
+		return "", "", fmt.Errorf("resolving operator socket %q: %w", socket, err)
 	}
-	if resolved, err := filepath.EvalSymlinks(socketPath); err == nil {
-		socketPath = resolved
-	} else if parent, err := filepath.EvalSymlinks(filepath.Dir(socketPath)); err == nil {
-		socketPath = filepath.Join(parent, filepath.Base(socketPath))
-	}
-	path, err = filepath.Abs(path)
+	parent, err = physicalPath(parent)
 	if err != nil {
-		return "", err
+		return "", "", fmt.Errorf("resolving parent of credential %q: %w", path, err)
 	}
-	if parent, err := filepath.EvalSymlinks(filepath.Dir(path)); err == nil {
-		path = filepath.Join(parent, filepath.Base(path))
+	info, err := os.Stat(parent)
+	if err != nil {
+		return "", "", err
 	}
-	return filepath.Rel(filepath.Dir(socketPath), path)
+	if !info.IsDir() {
+		return "", "", fmt.Errorf("credential parent %q is not a directory", parent)
+	}
+	destination = filepath.Join(parent, base)
+	target, err = filepath.Rel(filepath.Dir(socketPath), destination)
+	return destination, target, err
 }
 
 type authorityActivationFollower struct {

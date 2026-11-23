@@ -159,9 +159,14 @@ func TestManagedSessionTargetUsesTheOperatorSocketDirectory(t *testing.T) {
 	dir := t.TempDir()
 	alias := filepath.Join(t.TempDir(), "alias")
 	require.NoError(t, os.Symlink(dir, alias))
-	target, err := sessionPublicationTarget(filepath.Join(alias, "operator.sock"), filepath.Join(dir, "client.cred"))
+	socket := filepath.Join(dir, "operator.sock")
+	require.NoError(t, os.WriteFile(socket, nil, 0o600))
+	destination, target, err := sessionPublicationTarget(filepath.Join(alias, "operator.sock"), filepath.Join(dir, "client.cred"))
 	require.NoError(t, err)
 	require.Equal(t, "client.cred", target)
+	parent, err := filepath.EvalSymlinks(dir)
+	require.NoError(t, err)
+	require.Equal(t, filepath.Join(parent, "client.cred"), destination)
 }
 
 func TestAuthorityFetchesCommittedSuccessorFromLoopback(t *testing.T) {

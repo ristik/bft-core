@@ -26,7 +26,7 @@ func TestAReplacementBetweenPublicationAndCleanupSurvivesIt(t *testing.T) {
 		}
 		published := f.authority.Status().Generation
 		// an operator's replacement lands now, before the server's cleanup
-		credential, err := f.server.replaceSession()
+		credential, err := f.server.replaceSession("")
 		require.NoError(t, err)
 		replaced = credential
 		return signingauthority.AdvanceResult{Epoch: 2, Advanced: true, Generation: published}, nil
@@ -50,7 +50,7 @@ func TestAReplacementBeforePublicationIsDroppedByTheCleanup(t *testing.T) {
 	_ = f.admit(t)
 	var early []byte
 	f.server.advance = func(context.Context, []byte) (signingauthority.AdvanceResult, error) {
-		credential, err := f.server.replaceSession()
+		credential, err := f.server.replaceSession("")
 		require.NoError(t, err)
 		early = credential
 		if _, err := f.authority.ReplaceSession(); err != nil { // the publication, after the replacement
