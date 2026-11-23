@@ -44,6 +44,52 @@ The samples set a disposable test-value envelope. Sustained peak recovery, live
 oversized archive history and the combined worst-case fee and reserve remain
 qualification gates. [#1269](https://github.com/ristik/bft-core/issues/1269)
 
+## Public B1 checkpoint refresh
+
+Publish `nb2-origin.json` beside the staged `nb2-release.json` over the same
+authenticated HTTPS channel. The checkpoint is mutable and stays outside the
+release's immutable `SHA256SUMS`. Install the job after staging the release.
+The exporter validates the installed release digest, the live generation and
+the registry runtime. It reads the epoch and round at a single canonical
+finalized block hash. The timer checks every five seconds. After the initial
+publication, a new finalized block is published only if the epoch or root
+round advanced. The exporter rejects rollback and atomically replaces the
+checkpoint with mode 0644, within the wallet's 4096-byte limit. The wallet
+checks the same deployment binding and persists accepted successors. The
+release digest stays fixed. [#1283](https://github.com/ristik/bft-core/issues/1283)
+
+Run one export from the host to check the configuration:
+
+```sh
+sudo python3 deploy/testnet/bridge/nb2/export_origin.py \
+  /srv/testnet/GENERATION /var/www/pos-staging/release "$RELEASE_SHA256"
+```
+
+For a VR package, add `--pod-cast /absolute/path/to/cast` using the operator's
+pinned host Cast. The exporter enters validator pod1's network namespace to
+read the loopback execution RPC. It needs host Docker and namespace access.
+Use the bridge tools path above for a package with a validator Compose network.
+
+For a periodic job, install the exporter and its imports from this checkout
+in a root-owned directory, keeping their repository-relative paths. Install
+the supplied `systemd/nb2-origin@.service` and `systemd/nb2-origin@.timer`
+under `/etc/systemd/system`. Set these values in
+`/etc/nb2-origin/GENERATION.conf` using absolute paths:
+
+```ini
+NB2_EXPORTER=/opt/nb2-origin/GENERATION/deploy/testnet/bridge/nb2/export_origin.py
+NB2_RELEASE_DIR=/var/www/pos-staging/release
+NB2_RELEASE_SHA256=PUT_THE_PINNED_RELEASE_DIGEST_HERE
+NB2_RPC_ARGS=--pod-cast /opt/nb2-origin/GENERATION/bin/cast
+```
+
+Leave `NB2_RPC_ARGS` empty for a regular validator network. Run
+`systemctl daemon-reload` and `systemctl enable --now nb2-origin@GENERATION.timer`.
+Check the last export with `journalctl -u nb2-origin@GENERATION.service`.
+Disable the timer when retiring the generation. The operator channel
+authenticates this testnet checkpoint and the separately published release.
+The proof-based source remains part of #1282.
+
 ## Private wallet smoke
 
 ```sh
