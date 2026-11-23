@@ -398,6 +398,10 @@ func parseHandoffID(value string) ([]byte, error) {
 }
 
 func handoffPost(ctx context.Context, client *http.Client, url string, body []byte, out any) error {
+	return handoffPostWithLimit(ctx, client, url, body, out, 1<<20)
+}
+
+func handoffPostWithLimit(ctx context.Context, client *http.Client, url string, body []byte, out any, maxResponseBytes int64) error {
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -413,7 +417,7 @@ func handoffPost(ctx context.Context, client *http.Client, url string, body []by
 		return fmt.Errorf("%s: %s: %s", url, response.Status, string(data))
 	}
 	if out != nil {
-		return json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(out)
+		return json.NewDecoder(io.LimitReader(response.Body, maxResponseBytes)).Decode(out)
 	}
 	return nil
 }

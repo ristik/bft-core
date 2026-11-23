@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"crypto"
 	"encoding/json"
 	"os"
@@ -194,4 +195,33 @@ func TestAdvanceWithProofReplayPreservesAlternateUntilForcedRotation(t *testing.
 	require.NoError(t, err)
 	require.Empty(t, report.ActiveAlternate)
 	require.False(t, report.SessionIssued)
+}
+
+func TestSuccessorSessionReadinessWakesOnAuthorityPublication(t *testing.T) {
+	f := newManagedAuthorityFixture(t)
+	_, err := f.run(t, "replace-session", f.managed)
+	require.NoError(t, err)
+	load := func() ([]byte, error) { return readCredentialFile(f.managed) }
+	client, err := service.NewReloadingClient(service.ClientConfig{Dial: service.UnixDialer(f.clientSocket), Timeout: time.Second}, load)
+	require.NoError(t, err)
+	defer client.Close()
+	client.WatchCredentialFile(f.managed)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- client.WaitRootEpoch(ctx, 2) }()
+	select {
+	case err := <-done:
+		t.Fatalf("the incumbent credential must not satisfy successor readiness: %v", err)
+	case <-time.After(30 * time.Millisecond):
+	}
+	report, err := f.run(t, "advance-with-proof", f.managed)
+	require.NoError(t, err)
+	require.True(t, report.Advanced && report.SessionIssued)
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("local credential publication did not wake the successor")
+	}
 }

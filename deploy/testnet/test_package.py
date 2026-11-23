@@ -3260,7 +3260,7 @@ class StagingKnobs(unittest.TestCase):
         self.assertNotIn("!= '0.01'",(Path(__file__).parent/'faucet/gateway.py').read_text(),'the guard checks the configured payout, not a constant')
     def test_vr_authorities_and_archive_execution_stay_in_their_pod(self):
         cfg = self.topo(vr_pos=True, utb='0x' + 'aa' * 32, port_offset=1000,
-                        vr_authority_follow='http://127.0.0.2:8002', rpc_bind='127.0.0.2',
+                        vr_authority_follow='http://127.0.0.2:8002', vr_paired_activation='http://127.0.0.2:8002', rpc_bind='127.0.0.2',
                         captcha_secret_file='/srv/secrets/captcha')
         self.assertEqual(cfg['secrets']['hcaptcha_secret'], {'file': '/srv/secrets/captcha'})
         self.assertEqual(cfg['services']['rpc']['ports'], ['127.0.0.1:9545:8545'])
@@ -3270,6 +3270,8 @@ class StagingKnobs(unittest.TestCase):
             for service in (root, authority, ureth, shard, relay):
                 self.assertEqual(service['network_mode'], f'service:pod{i}')
                 self.assertNotIn('ports', service)
+            shard_flags = shard['entrypoint']
+            self.assertEqual(shard_flags[shard_flags.index('--paired-activation-rpc') + 1], 'http://127.0.0.2:8002')
             self.assertIn('--vr-deployment', root['entrypoint'])
             self.assertIn(f'./validator{i}/auth/pop:/pop:ro', root['volumes'])
             self.assertNotIn(f'./validator{i}/auth:/authority', root['volumes'])

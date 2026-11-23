@@ -128,6 +128,7 @@ type shardQ3Installer struct {
 	InstallAssignment    func(view handoffdelivery.Bundle, step handoff.AssignmentStep) error
 	NoteJoiner           func(view handoffdelivery.Bundle, step handoff.AssignmentStep) error
 	InstallEVMTransition func(raw []byte) error
+	Begin                func(epoch uint64) error
 	Activate             func(epoch uint64) error
 	Log                  func(epoch uint64)
 
@@ -180,6 +181,11 @@ func (i *shardQ3Installer) Apply(ctx context.Context, entry q3format.Entry, proo
 	view := handoffdelivery.Bundle{Proof: proof, Snapshot: head, Candidate: candidate}
 	if err := checkTerminalCertificate(view, verified); err != nil {
 		return err
+	}
+	if i.Begin != nil {
+		if err := i.Begin(newEpoch); err != nil {
+			return err
+		}
 	}
 	if err := i.Terminal(ctx, verified); err != nil {
 		return err

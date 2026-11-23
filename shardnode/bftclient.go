@@ -135,8 +135,9 @@ var DefaultBFTClientOptions = BFTClientOptions{
 // abandon on restart, so the recovery path that machinery existed for does
 // not apply here.
 type BFTClient struct {
-	partitionID types.PartitionID
-	shardID     types.ShardID
+	activationGate *RootActivationGate
+	partitionID    types.PartitionID
+	shardID        types.ShardID
 	// shardConfHash is the hash of the GENESIS shard configuration THIS NODE was started with: the deployment identity pin. It is
 	// owned by this client — cloned on the way in — so a caller that later mutates its own slice cannot change what this node
 	// enforces, and it is never derived from a certificate, a checkpoint, a peer or the execution client: those are the claims under
@@ -731,6 +732,7 @@ func (c *BFTClient) Run(ctx context.Context) error {
 			startup.Reset(startupHandshakeDelay(c.opts.StartupHandshakeInterval, c.opts.InactivityTimeout, startupAttempt))
 		case <-c.roleWake:
 			c.checkRole(ctx)
+			c.catchUpActivation(ctx, time.Now())
 		case now := <-relayC:
 			if c.relayDue(now) {
 				c.relayStart(ctx) // in the background: the loop never waits on a relay peer
@@ -1665,6 +1667,13 @@ func (c *BFTClient) sendRequest(ctx context.Context, req *certification.BlockCer
 		if err := a(); err != nil {
 			return err
 		}
+	}
+	if c.activationGate != nil {
+		err := c.activationGate.enqueue(ctx, origin, func(sendCtx context.Context) error { return c.net.Send(sendCtx, req, rootIDs...) })
+		if errors.Is(err, ErrRootActivationSuperseded) {
+			return ErrRequestAcrossActivation
+		}
+		return err
 	}
 	return c.net.Send(ctx, req, rootIDs...)
 }

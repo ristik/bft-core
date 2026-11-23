@@ -33,7 +33,9 @@ type Submitter interface {
 // protocol knowledge beyond the certification/types packages — those live
 // in BFTClient.
 type Round struct {
-	role atomic.Pointer[roleHolder] // see SetRole
+	activation     *RootActivationGate
+	lastActivation RootActivation
+	role           atomic.Pointer[roleHolder] // see SetRole
 	// leaseToken is the role lease the current certificate's handling started under (HandleCertificate holds r.mu).
 	leaseToken  uint64
 	nodeID      string
@@ -562,7 +564,7 @@ func (r *Round) MarkRestored(round uint64) {
 // certificate, commits the previous round's result, and then drives the round
 // tr describes. Every step is idempotent, because that retry re-runs all of
 // them.
-func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertificate, tr *certification.TechnicalRecord) error {
+func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertificate, tr *certification.TechnicalRecord) (outErr error) {
 	ph := &phaseTrace{start: time.Now()}
 	defer ph.log(ctx, r, uc, tr)
 	r.mu.Lock()
@@ -682,6 +684,23 @@ func (r *Round) HandleCertificate(ctx context.Context, uc *types.UnicityCertific
 	if !r.takeLease() {
 		r.health.updateVoting(false, nonVotingFollower)
 		return nil
+	}
+	if r.activation != nil {
+		var end func()
+		ctx, end, err = r.activation.work(ctx, uc.GetRootEpoch())
+		if errors.Is(err, ErrRootActivationSuperseded) {
+			return nil
+		}
+		defer end()
+		defer func() {
+			if errors.Is(outErr, ErrRootActivationSuperseded) ||
+				(errors.Is(outErr, context.Canceled) && errors.Is(context.Cause(ctx), ErrRootActivationSuperseded)) {
+				if r.log != nil {
+					r.log.Info("speculative work ended at root activation", "rootEpoch", uc.GetRootEpoch(), "round", tr.Round)
+				}
+				outErr = nil
+			}
+		}()
 	}
 	if r.executorGenesis == nil {
 		g, gerr := r.executor.GenesisBlock(ctx)
@@ -1756,12 +1775,13 @@ func (r *Round) verifyWithRetry(ctx context.Context, block Block, params RoundPa
 // and cannot be reused by a later one.
 func (r *Round) produceBlock(ctx context.Context, head BlockRef, exp Expectation, sealHash Hash, leader string, held *types.UnicityCertificate, heldRecord *certification.TechnicalRecord, ticket ReadinessTicket) (Block, RoundParams, error) {
 	params := RoundParams{
-		Round:     exp.Round,
-		Epoch:     exp.Epoch,
-		Timestamp: exp.Timestamp,
-		SealHash:  sealHash,
-		Leader:    leader,
-		Parent:    head,
+		Activation: rootActivationOf(ctx),
+		Round:      exp.Round,
+		Epoch:      exp.Epoch,
+		Timestamp:  exp.Timestamp,
+		SealHash:   sealHash,
+		Leader:     leader,
+		Parent:     head,
 
 		// The certificate and record that authorized this round, carried whole
 		// rather than as the scalars above. held is the certificate being
@@ -1773,13 +1793,15 @@ func (r *Round) produceBlock(ctx context.Context, head BlockRef, exp Expectation
 		AuthorizingTechnicalRecord: heldRecord,
 	}
 
+	boundary := params.Activation.Epoch != 0 && r.lastActivation.Epoch != 0 && params.Activation != r.lastActivation
+	r.lastActivation = params.Activation
 	if leader == r.nodeID {
-		// Build and Seal are synchronous and nothing here reacts to a root handoff: there is no handoff-triggered
-		// cancellation of a build in progress. A proposal built across the freeze is ABANDONED: the root refuses to certify it
-		// (ErrHandoffFrozen, rootchain/consensus/storage/block_executor.go) and the successor builds on the agreed certified
-		// parent. Safety is the root freeze, not the builder. This is the project's simple-design choice and is
-		// owner-overridable (docs/design/h3-evm-assignment.md treats builder cancellation as optional responsiveness work).
-		if err := r.paceLeader(ctx, held, exp.Round); err != nil {
+		if !boundary {
+			if err := r.paceLeader(ctx, held, exp.Round); err != nil {
+				return Block{}, params, err
+			}
+		}
+		if err := ctx.Err(); err != nil {
 			return Block{}, params, err
 		}
 		if r.leaseLost() {
@@ -1822,7 +1844,7 @@ func (r *Round) produceBlock(ctx context.Context, head BlockRef, exp Expectation
 			if r.leaseLost() {
 				return Block{}, params, ErrFollower
 			}
-			if err := r.disseminator.Publish(ctx, exp.Round, block); err != nil {
+			if err := underRootPublication(ctx, func(sendCtx context.Context) error { return r.disseminator.Publish(sendCtx, exp.Round, block) }); err != nil {
 				return Block{}, params, fmt.Errorf("publishing round %d block: %w", exp.Round, err)
 			}
 		}
@@ -1835,7 +1857,7 @@ func (r *Round) produceBlock(ctx context.Context, head BlockRef, exp Expectation
 	budget := r.awaitTimeout
 	if r.awaitGaveUp.answers(held, exp) && budget > redeliveryPoll {
 		budget = redeliveryPoll // the same authorization again: the block may have arrived since, but there is nothing new to wait for
-	} else {
+	} else if !boundary {
 		// A paced leader builds up to the block interval after its previous block, so the wait is extended by what remains of it
 		// here (pacing.go). The budget for a leader that is silent is unchanged on top of that.
 		budget += r.pacer.remaining(time.Now())

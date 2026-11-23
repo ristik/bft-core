@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 
 	"github.com/unicitynetwork/bft-core/signingauthority"
 )
@@ -26,11 +27,13 @@ import (
 // current one (so a slower, older read never overwrites a newer installation), and closes the replaced client in the background (a close
 // waits for its exchange slot, which no caller waits behind). A cancelled caller does not reload and does not retry.
 type ReloadingClient struct {
-	load    func() ([]byte, error)
-	cfg     ClientConfig
-	mu      sync.Mutex
-	current *Client
-	cred    []byte
+	load           func() ([]byte, error)
+	cfg            ClientConfig
+	mu             sync.Mutex
+	current        *Client
+	cred           []byte
+	readyRootEpoch atomic.Uint64
+	credentialPath string
 }
 
 // NewReloadingClient provisions a client whose credential is read by load, now and after every fenced refusal. cfg.Credential is ignored.

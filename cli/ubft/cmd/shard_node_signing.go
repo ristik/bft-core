@@ -223,5 +223,6 @@ func reloadingAuthorityClient(flags *shardNodeSigningFlags, timeout time.Duratio
 	if err != nil {
 		return nil, err
 	}
+	client.WatchCredentialFile(flags.SigningAuthorityCredential)
 	return client, nil
 }

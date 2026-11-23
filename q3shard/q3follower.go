@@ -43,9 +43,18 @@ type Q3Follower struct {
 	Fetch func(ctx context.Context, root peer.ID, epoch uint64) (q3active.Bundle, error)
 	// Retry is the pause between rounds of fetching a bundle no root serves yet; zero is one second.
 	Retry time.Duration
+	// Local is the explicitly paired loopback root. Remote locators still
+	// follow the roots/mirrors policy. Wake hints never authenticate a bundle.
+	Local func(context.Context, uint64) (q3active.Bundle, error)
+	// Wake signals a change to the retained LocalTip. Only a tip at or past
+	// the awaited epoch can interrupt remote discovery.
+	Wake     <-chan struct{}
+	LocalTip func() uint64
 }
 
-// ErrQ3Unavailable is returned when no root served a bundle the runtime would activate.
+var errPairedActivationReady = errors.New("q3 follower: paired root published an activation")
+
+// ErrQ3Unavailable is returned when no source served a bundle the runtime would activate.
 var ErrQ3Unavailable = errors.New("q3 follower: no source served an activation the runtime accepts")
 
 func (f *Q3Follower) current() uint64 {
@@ -57,10 +66,22 @@ func (f *Q3Follower) current() uint64 {
 
 // activate fetches the bundle of epoch from each source in turn and activates the first the runtime accepts. A bundle that is refused is
 // not retried from the same peer in this round; the error of the last refusal is kept.
-func (f *Q3Follower) activate(ctx context.Context, epoch uint64) error {
+func (f *Q3Follower) activate(ctx, discovery context.Context, epoch uint64) error {
 	var last error
-	for _, id := range f.sources(ctx, epoch) {
-		bundle, err := f.Fetch(ctx, id, epoch)
+	if f.Local != nil {
+		bundle, err := f.Local(ctx, epoch)
+		if err == nil {
+			if err = f.Runtime.Activate(ctx, bundle); err == nil && f.Runtime.ActiveEpoch() >= epoch {
+				return nil
+			}
+		}
+		last = err
+	}
+	for _, id := range f.sources(discovery, epoch) {
+		if discovery.Err() != nil {
+			break
+		}
+		bundle, err := f.Fetch(discovery, id, epoch)
 		if err != nil {
 			last = err
 			continue
@@ -76,6 +97,66 @@ func (f *Q3Follower) activate(ctx context.Context, epoch uint64) error {
 		return nil
 	}
 	return errors.Join(ErrQ3Unavailable, last)
+}
+
+// awaitEpoch gives the wake reader the lifetime of this epoch's discovery,
+// including gaps between peer requests and between retries. The first hint
+// covering the awaited epoch pre-empts discovery to check the local root again.
+// If that check fails, peers get uninterrupted attempts until the follower
+// advances to a new epoch.
+func (f *Q3Follower) awaitEpoch(ctx context.Context, epoch uint64, retry time.Duration) error {
+	discovery := ctx
+	if f.Local != nil && f.Wake != nil && f.LocalTip != nil {
+		watched, cancel := context.WithCancelCause(ctx)
+		discovery = watched
+		stopped := make(chan struct{})
+		go func() {
+			defer close(stopped)
+			for {
+				select {
+				case _, ok := <-f.Wake:
+					if !ok {
+						return
+					}
+					if f.LocalTip() >= epoch {
+						cancel(errPairedActivationReady)
+						return
+					}
+				case <-watched.Done():
+					return
+				}
+			}
+		}()
+		defer func() {
+			cancel(nil)
+			<-stopped
+		}()
+	}
+	for ctx.Err() == nil {
+		if f.current() >= epoch {
+			return nil
+		}
+		if errors.Is(context.Cause(discovery), errPairedActivationReady) {
+			discovery = ctx
+		}
+		err := f.activate(ctx, discovery, epoch)
+		if err == nil {
+			return nil
+		}
+		if errors.Is(context.Cause(discovery), errPairedActivationReady) {
+			continue
+		}
+		if retry == 0 {
+			return err
+		}
+		timer := time.NewTimer(retry)
+		select {
+		case <-discovery.Done():
+		case <-timer.C:
+		}
+		timer.Stop()
+	}
+	return ctx.Err()
 }
 
 // sources is the order in which the bundle of epoch is asked for: mirrors only for a non-active node, roots first then mirrors for an active
@@ -139,8 +220,9 @@ func (f *Q3Follower) CatchUp(ctx context.Context, target uint64) error {
 	if f == nil || f.Runtime == nil || f.Fetch == nil || f.AnchorEpoch == 0 {
 		return ErrQ3FollowerConfig
 	}
-	for epoch := f.current() + 1; epoch <= target; epoch++ {
-		if err := f.activate(ctx, epoch); err != nil {
+	for f.current() < target {
+		epoch := f.current() + 1
+		if err := f.awaitEpoch(ctx, epoch, 0); err != nil {
 			return fmt.Errorf("epoch %d: %w", epoch, err)
 		}
 	}
@@ -157,19 +239,8 @@ func (f *Q3Follower) Run(ctx context.Context) error {
 	if pause == 0 {
 		pause = time.Second
 	}
-	for {
-		if ctx.Err() != nil {
-			return nil
-		}
-		if err := f.activate(ctx, f.current()+1); err == nil {
-			continue
-		}
-		timer := time.NewTimer(pause)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return nil
-		case <-timer.C:
-		}
+	for ctx.Err() == nil {
+		_ = f.awaitEpoch(ctx, f.current()+1, pause)
 	}
+	return nil
 }

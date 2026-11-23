@@ -96,13 +96,15 @@ type Runtime struct {
 	memberCeiling int
 	mu            sync.Mutex // serialises activation and recovery
 	// fence, when set (SetFence), refuses installing an epoch of a rule this binary lacks (design 7.4); guarded by mu.
-	fence     func(epoch uint64, schedule []vrschema.Activation) error
-	journal   *q3install.Journal
-	hist      atomic.Pointer[q3format.History]
-	snap      atomic.Pointer[Snapshot] // the installer's provisional snapshot: private until its epoch is journaled complete
-	active    atomic.Pointer[Snapshot] // the published active context: the provisional one once its epoch is complete
-	parts     atomic.Pointer[Participants]
-	completed sync.Map // epoch -> struct{}: journaled complete in this process
+	fence             func(epoch uint64, schedule []vrschema.Activation) error
+	journal           *q3install.Journal
+	hist              atomic.Pointer[q3format.History]
+	snap              atomic.Pointer[Snapshot] // the installer's provisional snapshot: private until its epoch is journaled complete
+	active            atomic.Pointer[Snapshot] // the published active context: the provisional one once its epoch is complete
+	parts             atomic.Pointer[Participants]
+	completed         sync.Map // epoch -> struct{}: journaled complete in this process
+	publicationMu     sync.Mutex
+	activationChanged chan struct{}
 }
 
 // ErrNotAttached is returned when an activation or recovery is asked before the participants were attached.
@@ -115,7 +117,7 @@ func New(cfg Config) (*Runtime, error) {
 	if cfg.Genesis == nil {
 		return nil, q3install.ErrComponents
 	}
-	r := &Runtime{memberCeiling: cfg.MemberCeiling}
+	r := &Runtime{memberCeiling: cfg.MemberCeiling, activationChanged: make(chan struct{})}
 	j, err := q3install.Open(q3install.Config{DB: cfg.DB, Bundles: r.verify, Components: map[q3install.Step]q3install.Component{
 		q3install.StepRoot:      &rootComponent{r: r},
 		q3install.StepSafety:    &consumerComponent{r: r, name: "safety", pick: func(p *Participants) Consumer { return p.Safety }},
@@ -201,13 +203,42 @@ func (r *Runtime) ActiveEpoch() uint64 {
 // durably complete and recovered publishes nothing, however far its steps got.
 func (r *Runtime) Snapshot() *Snapshot { return r.active.Load() }
 
+// WaitActivation waits for publication of a fully installed successor. The
+// epoch is an availability hint; consumers authenticate the bundle themselves.
+func (r *Runtime) WaitActivation(ctx context.Context, after uint64) (uint64, error) {
+	for {
+		r.publicationMu.Lock()
+		if r.activationChanged == nil {
+			r.activationChanged = make(chan struct{})
+		}
+		epoch, changed := r.ActiveEpoch(), r.activationChanged
+		r.publicationMu.Unlock()
+		if epoch > after {
+			return epoch, nil
+		}
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-changed:
+		}
+	}
+}
+
 // complete records that an epoch's installation is durably complete (and recovered), admits it, and publishes the provisional
 // snapshot when that is the epoch's.
 func (r *Runtime) complete(epoch uint64) {
 	r.completed.Store(epoch, struct{}{})
 	if s := r.snap.Load(); s != nil {
 		if _, ok := r.completed.Load(s.Epoch()); ok {
-			r.active.Store(s)
+			r.publicationMu.Lock()
+			if r.active.Load() != s {
+				r.active.Store(s)
+				if r.activationChanged != nil {
+					close(r.activationChanged)
+				}
+				r.activationChanged = make(chan struct{})
+			}
+			r.publicationMu.Unlock()
 		}
 	}
 }

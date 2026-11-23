@@ -16,6 +16,8 @@ import (
 	"github.com/unicitynetwork/bft-core/internal/quorumweight"
 	"github.com/unicitynetwork/bft-core/m2contract"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
+	"github.com/unicitynetwork/bft-core/q3active"
+	"github.com/unicitynetwork/bft-core/q3format"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/trustbase"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
@@ -384,7 +386,7 @@ func (x *ConsensusManager) ClosureWitness(ctx context.Context, epoch uint64) ([]
 		}
 		return handoffdelivery.EncodeBundle(*bundle)
 	}
-	link, head, candidate, err := x.Q3ActivationEvidence(epoch)
+	link, head, candidate, err := x.q3ClosureEvidence(ctx, epoch)
 	if err != nil {
 		return nil, err
 	}
@@ -393,6 +395,35 @@ func (x *ConsensusManager) ClosureWitness(ctx context.Context, epoch uint64) ([]
 		return nil, fmt.Errorf("retained commit proof: %w", err)
 	}
 	return handoffdelivery.EncodeWitnessV3(handoffdelivery.WitnessV3{Proof: proof, Body: link.Body.Encode(), Snapshot: head, Candidate: candidate})
+}
+
+func (x *ConsensusManager) q3ClosureEvidence(ctx context.Context, epoch uint64) (q3format.Link, *abdrc.CommittedBlock, []byte, error) {
+	link, head, candidate, err := x.Q3ActivationEvidence(epoch)
+	if !errors.Is(err, ErrNoQ3Evidence) || epoch > x.InstalledRootEpoch() {
+		return link, head, candidate, err
+	}
+	// A joining root can have installed the verified activation from a peer.
+	// Its first proposal can use that same checkpoint from the install journal.
+	journal, ok := x.q3.(interface {
+		StagedBundleAt(context.Context, uint64) (q3active.Bundle, bool, error)
+	})
+	if !ok {
+		return link, head, candidate, err
+	}
+	bundle, found, readErr := journal.StagedBundleAt(ctx, epoch)
+	if readErr != nil || !found {
+		return link, head, candidate, errors.Join(err, readErr)
+	}
+	envelope, decodeErr := q3format.DecodeEnvelope(bundle.Envelope)
+	if decodeErr != nil || len(envelope.Links) == 0 {
+		return link, head, candidate, errors.Join(err, decodeErr)
+	}
+	link = envelope.Links[len(envelope.Links)-1]
+	entry, active := x.q3.Activated(epoch)
+	if !active || link.Body.Epoch != epoch || link.Body.Identity() != entry.BodyID() {
+		return q3format.Link{}, nil, nil, fmt.Errorf("%w: retained bundle does not name installed epoch %d", ErrNoQ3Evidence, epoch)
+	}
+	return link, bundle.Snapshot, bundle.Candidate, nil
 }
 
 func (x *ConsensusManager) matchesInstalledAnchor(a *rctypes.EpochAnchor) bool {

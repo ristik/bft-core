@@ -67,9 +67,10 @@ type BlockRef struct {
 // parameters (an EVM header's timestamp, prevRandao, and so on) from it is
 // the Executor's job, not the framework's.
 type RoundParams struct {
-	Round     uint64 // TechnicalRecord.Round for this round
-	Epoch     uint64 // TechnicalRecord.Epoch for this round
-	Timestamp uint64 // UnicitySeal.Timestamp of the certificate that authorized this round (seconds)
+	Activation RootActivation // locally installed live context, absent for historical replay
+	Round      uint64         // TechnicalRecord.Round for this round
+	Epoch      uint64         // TechnicalRecord.Epoch for this round
+	Timestamp  uint64         // UnicitySeal.Timestamp of the certificate that authorized this round (seconds)
 
 	// SealHash is UnicitySeal.Hash — the certified Unicity Tree root, already
 	// a computed, signed 32-byte value. Deliberately NOT a hash of the whole

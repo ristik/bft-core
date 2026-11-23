@@ -94,6 +94,10 @@ func New(
 	}
 
 	round := NewRound(peer.ID().String(), partitionID, shardID, executor, disseminator, signer, client, log)
+	if source, ok := trustBaseStore.(interface{ RootActivationGate() *RootActivationGate }); ok {
+		round.activation = source.RootActivationGate()
+		client.activationGate = round.activation
+	}
 
 	if store != nil {
 		luc, err := store.LoadLUC()
