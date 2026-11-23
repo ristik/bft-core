@@ -2,14 +2,9 @@ package cmd
 
 import (
 	"context"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
-	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"time"
@@ -25,12 +20,7 @@ func (f *signingAuthorityRunFlags) validateActivationFollower() error {
 	if f.LineageGenesis == "" || f.FollowRootRPC == "" || f.FollowCredential == "" {
 		return errors.New("automatic activation requires a root RPC, a client credential path and a lineage pin")
 	}
-	u, err := url.Parse(f.FollowRootRPC)
-	if err != nil || u.Scheme != "http" || !net.ParseIP(u.Hostname()).IsLoopback() ||
-		u.Port() == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
-		return errors.New("activation root RPC must be a loopback HTTP origin with an explicit port")
-	}
-	return nil
+	return validatePairedActivationOrigin(f.FollowRootRPC)
 }
 
 // physicalPath preserves the input components until symlinks and parent
@@ -79,6 +69,7 @@ type authorityActivationFollower struct {
 	fetch         func(context.Context, uint64) ([]byte, error)
 	provisioned   func() bool
 	ensureSession func() error
+	wake          <-chan struct{}
 }
 
 func (f *authorityActivationFollower) step(ctx context.Context) (signingauthority.AdvanceResult, error) {
@@ -108,6 +99,9 @@ func (f *authorityActivationFollower) run(ctx context.Context, log *slog.Logger)
 		case <-ctx.Done():
 			return
 		case <-tick.C:
+		case <-f.wake:
+		}
+		for {
 			result, err := f.step(ctx)
 			if err != nil && ctx.Err() == nil && time.Since(lastFailure) >= 5*time.Second {
 				log.WarnContext(ctx, "following root activation", "error", err)
@@ -116,34 +110,29 @@ func (f *authorityActivationFollower) run(ctx context.Context, log *slog.Logger)
 			if result.Advanced || result.Retired && !result.Replay {
 				log.InfoContext(ctx, "followed root activation", "epoch", result.Epoch, "retired", result.Retired)
 			}
+			if err != nil || result.Epoch == 0 || result.Replay {
+				break
+			}
 		}
 	}
 }
 
-func fetchAuthorityActivation(origin string) func(context.Context, uint64) ([]byte, error) {
-	client := &http.Client{
-		Timeout:       time.Second,
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-	}
+func fetchAuthorityActivation(origin string, notifications ...*pairedActivation) func(context.Context, uint64) ([]byte, error) {
+	client := pairedActivationHTTP(time.Second)
 	return func(ctx context.Context, next uint64) ([]byte, error) {
-		var status q3StatusResponse
-		if err := handoffPost(ctx, client, origin+"/api/v1/q3/status", []byte("{}"), &status); err != nil {
-			return nil, err
+		if len(notifications) != 0 && notifications[0].ready.Load() {
+			if notifications[0].tip.Load() < next {
+				return nil, nil
+			}
+		} else {
+			var status q3StatusResponse
+			if err := handoffPost(ctx, client, origin+"/api/v1/q3/status", []byte("{}"), &status); err != nil {
+				return nil, err
+			}
+			if status.ActiveEpoch < next {
+				return nil, nil
+			}
 		}
-		if status.ActiveEpoch < next {
-			return nil, nil
-		}
-		body, err := json.Marshal(q3EpochRequest{Epoch: next})
-		if err != nil {
-			return nil, err
-		}
-		var bundle q3BundleResponse
-		if err := handoffPost(ctx, client, origin+"/api/v1/q3/bundle", body, &bundle); err != nil {
-			return nil, err
-		}
-		if bundle.Epoch != next || bundle.Bundle == "" || len(bundle.Bundle) > 2*service.MaxAdvanceProofBytes {
-			return nil, fmt.Errorf("invalid activation bundle response for epoch %d", next)
-		}
-		return hex.DecodeString(bundle.Bundle)
+		return fetchPairedActivationBundle(ctx, client, origin, next, service.MaxAdvanceProofBytes)
 	}
 }

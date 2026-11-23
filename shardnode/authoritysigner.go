@@ -140,6 +140,16 @@ func (a *authoritySigner) Sign(ctx context.Context, uc *types.UnicityCertificate
 	expectedRound := owned.InputRecord.RoundNumber
 	expectedDigest := sha256.Sum256(expectedUnsigned)
 
+	if epoch := rootActivationOf(ctx).Epoch; epoch > 1 {
+		if readiness, ok := a.client.(interface {
+			WaitRootEpoch(context.Context, uint64) error
+		}); ok {
+			if err := readiness.WaitRootEpoch(ctx, epoch); err != nil {
+				return nil, fmt.Errorf("waiting for the local authority's successor session: %w", err)
+			}
+		}
+	}
+
 	authorization, err := a.client.Reserve(ctx, signingauthority.Request{UC: uc, Technical: tr, Proposed: owned})
 	if err != nil {
 		return nil, fmt.Errorf("reserving the round with the signing authority: %w", err)
@@ -166,7 +176,12 @@ func (a *authoritySigner) Sign(ctx context.Context, uc *types.UnicityCertificate
 	}
 	// Released by the local round and digest, so a client that answered with someone else's round
 	// cannot also choose which response is asked for.
-	released, err := a.client.Release(ctx, expectedRound, expectedDigest)
+	var released []byte
+	err = underRootActivation(ctx, func() error {
+		var releaseErr error
+		released, releaseErr = a.client.Release(ctx, expectedRound, expectedDigest)
+		return releaseErr
+	})
 	if err != nil {
 		return nil, fmt.Errorf("releasing the signed response: %w", err)
 	}

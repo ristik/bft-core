@@ -336,6 +336,7 @@ type shardNodeRunFlags struct {
 	UTBGenesisFile       string // enables the signed trust-base entry (UTB) profile: the canonical genesis entry (trust-base utb-genesis)
 	UTBGenesisID         string // its EntryID, the pin
 	UTBEntriesDBFile     string
+	PairedActivationRPC  string
 	Q3Lane               bool // the Q3 acceptance lane: this node's own verified V3 runtime from the pinned genesis
 	Q3JournalDB          string
 	Restore              bool
@@ -471,6 +472,7 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 		"advance the certified frontier and prune acknowledged journal history; requires --archive-store")
 	cmd.Flags().BoolVar(&flags.TrustHistoryProfile2, "trust-history-profile-2", false,
 		"verify old-set handoff commit proofs before admitting successor trust epochs; requires --execution-journal")
+	cmd.Flags().StringVar(&flags.PairedActivationRPC, "paired-activation-rpc", "", "receive verified-activation availability hints from the paired loopback root")
 	cmd.Flags().BoolVar(&flags.Q3Lane, "q3-lane", false,
 		"run the Q3 acceptance lane: follow V3 root epochs through this node's own verified runtime (requires --trust-history-profile-2)")
 	cmd.Flags().StringVar(&flags.Q3JournalDB, "q3-journal-db", "",
@@ -599,6 +601,14 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	}
 	if flags.TrustHistoryProfile2 && flags.ExecutionJournal == "" {
 		return errors.New("--trust-history-profile-2 requires --execution-journal")
+	}
+	if flags.PairedActivationRPC != "" {
+		if !flags.Q3Lane {
+			return errors.New("--paired-activation-rpc requires --q3-lane")
+		}
+		if err := validatePairedActivationOrigin(flags.PairedActivationRPC); err != nil {
+			return err
+		}
 	}
 	if flags.Q3Lane && !flags.TrustHistoryProfile2 {
 		return errors.New("--q3-lane requires --trust-history-profile-2")
@@ -1070,6 +1080,8 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		if flags.ExecutionJournal == "" || flags.ArchiveStore == "" {
 			return errors.New("--follow-source requires --execution-journal and --archive-store")
 		}
+	}
+	if follower.enabled || q3rt != nil {
 		node.SetRole(role)
 		role.subscribe(node.RoleChanged) // a published promotion subscribes to the roots at once
 		// the health role is the live lease, read at every report: a restart's replay completes the activation before the runtime has
@@ -1422,6 +1434,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 					return bindLiveJoinerKey(signing)
 				},
 				InstallEVMTransition: executor.(*engineapi.Adapter).InstallEpochTransition,
+				Begin:                q3Trust.BeginQ3,
 				Activate:             q3Trust.ActivateQ3,
 				Log: func(epoch uint64) {
 					flags.observe.Logger().Info("handoff activated", "rootEpoch", epoch, "q3", true, monitoring.Event(monitoring.EvShardHandoffActive))
@@ -1881,6 +1894,30 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		g.Go(func() error { return handoffFollower.Run(gctx) })
 	}
 	if q3Follower != nil {
+		if flags.PairedActivationRPC != "" {
+			updates := newPairedActivation(flags.PairedActivationRPC)
+			client := pairedActivationHTTP(time.Second)
+			defer client.CloseIdleConnections()
+			q3Follower.Wake = updates.wake
+			q3Follower.Local = func(ctx context.Context, epoch uint64) (q3active.Bundle, error) {
+				if updates.tip.Load() < epoch {
+					return q3active.Bundle{}, q3shard.ErrQ3Unavailable
+				}
+				raw, err := fetchPairedActivationBundle(ctx, client, updates.origin, epoch, q3format.MaxEnvelopeBytes)
+				if err != nil {
+					return q3active.Bundle{}, err
+				}
+				bundle, envelope, err := q3active.DecodeBundle(raw)
+				if err != nil {
+					return q3active.Bundle{}, err
+				}
+				if envelope.Links[len(envelope.Links)-1].Claim.Epoch != epoch {
+					return q3active.Bundle{}, q3shard.ErrQ3Unavailable
+				}
+				return bundle, nil
+			}
+			g.Go(func() error { updates.run(gctx); return nil })
+		}
 		g.Go(func() error { return q3Follower.Run(gctx) })
 	}
 	if headFollower != nil {

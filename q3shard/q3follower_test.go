@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -248,4 +249,39 @@ func TestQ3FollowerRootListsAreFilteredByAuthenticatedIdentity(t *testing.T) {
 	asked, nonActive = nil, false
 	require.ErrorIs(t, f.CatchUp(context.Background(), 2), ErrQ3Unavailable)
 	require.Equal(t, []peer.ID{root, shard, mirror}, asked, "active: only the authenticated root as a root, then the mirrors")
+}
+
+func TestQ3FollowerWakeInterruptsPeerDiscovery(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	entered, wake := make(chan struct{}, 1), make(chan struct{}, 1)
+	var available atomic.Bool
+	act := &fakeActivator{active: 1}
+	f := &Q3Follower{Runtime: act, AnchorEpoch: 1, CurrentRoots: ids(t, 1), Retry: time.Hour, Wake: wake,
+		Local: func(_ context.Context, epoch uint64) (q3active.Bundle, error) {
+			if available.Load() && epoch == 2 {
+				return q3active.Bundle{}, nil
+			}
+			return q3active.Bundle{}, ErrQ3Unavailable
+		},
+		Fetch: func(ctx context.Context, _ peer.ID, _ uint64) (q3active.Bundle, error) {
+			select {
+			case entered <- struct{}{}:
+			default:
+			}
+			<-ctx.Done()
+			return q3active.Bundle{}, ctx.Err()
+		}}
+	done := make(chan error, 1)
+	go func() { done <- f.Run(ctx) }()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("fallback fetch did not start")
+	}
+	available.Store(true)
+	wake <- struct{}{}
+	require.Eventually(t, func() bool { return act.ActiveEpoch() == 2 }, time.Second, time.Millisecond)
+	cancel()
+	require.NoError(t, <-done)
 }

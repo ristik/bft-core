@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"sort"
+	"time"
 
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/q3active"
@@ -32,6 +33,28 @@ type rootQ3API struct {
 
 func (a rootQ3API) register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/v1/q3/status", q3Endpoint(func(context.Context, json.RawMessage) (any, error) { return a.statusResponse() }))
+	// Bound the long polls separately from ordinary operator requests. The hold
+	// fits under root-node's five-second write deadline.
+	activationWaiters := make(chan struct{}, 4)
+	mux.HandleFunc("POST /api/v1/q3/wait-activation", q3BodyEndpoint(func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var in q3EpochRequest
+		if err := json.Unmarshal(raw, &in); err != nil {
+			return nil, q3BadRequest{err}
+		}
+		select {
+		case activationWaiters <- struct{}{}:
+			defer func() { <-activationWaiters }()
+		default:
+			return nil, q3ServerError{errors.New("activation wait capacity exhausted")}
+		}
+		wait, cancel := context.WithTimeout(ctx, 4*time.Second)
+		defer cancel()
+		epoch, err := a.Rt.WaitActivation(wait, in.Epoch)
+		if errors.Is(err, context.DeadlineExceeded) {
+			err = nil
+		}
+		return q3EpochRequest{Epoch: epoch}, err
+	}))
 	mux.HandleFunc("POST /api/v1/q3/activation", q3Endpoint(func(_ context.Context, raw json.RawMessage) (any, error) {
 		var in q3EpochRequest
 		if err := json.Unmarshal(raw, &in); err != nil {

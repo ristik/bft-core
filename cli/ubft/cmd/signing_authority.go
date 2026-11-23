@@ -398,9 +398,12 @@ func signingAuthorityRun(ctx context.Context, flags *signingAuthorityRunFlags) e
 		if err != nil {
 			return err
 		}
+		updates := newPairedActivation(flags.FollowRootRPC)
+		g.Go(func() error { updates.run(gctx); return nil })
 		follower := authorityActivationFollower{
 			operator:      operator,
-			fetch:         fetchAuthorityActivation(flags.FollowRootRPC),
+			fetch:         fetchAuthorityActivation(flags.FollowRootRPC, updates),
+			wake:          updates.wake,
 			provisioned:   server.SessionProvisioned,
 			ensureSession: server.FollowSession,
 		}

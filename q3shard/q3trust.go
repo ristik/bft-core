@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync/atomic"
 
 	"github.com/unicitynetwork/bft-core/q3active"
 	"github.com/unicitynetwork/bft-core/shardnode"
@@ -25,14 +24,23 @@ var ErrQ3Epoch = errors.New("shardnode: V3 epoch is not the next activation of t
 // scheme.
 type Q3TrustStore struct {
 	*shardnode.HistoricalTrustBaseStore
-	rt      *q3active.Runtime
-	guarded *q3active.Guarded
-	active  atomic.Uint64 // the latest V3 epoch the follower finished installing (0: none)
+	rt         *q3active.Runtime
+	guarded    *q3active.Guarded
+	activation *shardnode.RootActivationGate
 }
 
 // NewQ3TrustStore wraps the historical store with the runtime's guarded lookup.
 func NewQ3TrustStore(base *shardnode.HistoricalTrustBaseStore, rt *q3active.Runtime) *Q3TrustStore {
-	return &Q3TrustStore{HistoricalTrustBaseStore: base, rt: rt, guarded: rt.Trust(base)}
+	epoch, _ := base.CurrentRootEpoch()
+	body, _ := base.BodyID(epoch)
+	return &Q3TrustStore{HistoricalTrustBaseStore: base, rt: rt, guarded: rt.Trust(base),
+		activation: shardnode.NewRootActivationGate(shardnode.RootActivation{Epoch: epoch, BodyID: body})}
+}
+
+// RootActivationGate is the shared identity and speculative-work fence for this
+// node's admission, executor and certification client.
+func (s *Q3TrustStore) RootActivationGate() *shardnode.RootActivationGate {
+	return s.activation
 }
 
 // Guarded is the runtime's trust lookup over this store: the shard participant of the install journal.
@@ -46,11 +54,22 @@ func (s *Q3TrustStore) GetByEpoch(ctx context.Context, epoch uint64) (*types.Roo
 
 // CurrentRootEpoch is the latest epoch whose handoff this node has installed: the V3 follower's, or the historical store's.
 func (s *Q3TrustStore) CurrentRootEpoch() (uint64, bool) {
-	base, ok := s.HistoricalTrustBaseStore.CurrentRootEpoch()
+	_, ok := s.HistoricalTrustBaseStore.CurrentRootEpoch()
 	if !ok {
 		return 0, false
 	}
-	return max(base, s.active.Load()), true
+	return s.activation.Current().Epoch, true
+}
+
+// BeginQ3 closes the old live scope for new work after authenticating the
+// successor checkpoint. The previous epoch remains the installed history until
+// ActivateQ3 publishes the new configuration.
+func (s *Q3TrustStore) BeginQ3(epoch uint64) error {
+	entry, ok := s.rt.Activated(epoch)
+	if !ok {
+		return fmt.Errorf("%w: %d is not an activation", ErrQ3Epoch, epoch)
+	}
+	return s.activation.Begin(shardnode.RootActivation{Epoch: epoch, BodyID: entry.BodyID()})
 }
 
 // ActivateQ3 advances the current root epoch to the next V3 epoch once the follower has installed everything the activation needs (the
@@ -64,11 +83,11 @@ func (s *Q3TrustStore) ActivateQ3(epoch uint64) error {
 	if epoch != current+1 {
 		return fmt.Errorf("%w: %d after %d", ErrQ3Epoch, epoch, current)
 	}
-	if _, ok := s.rt.Activated(epoch); !ok {
+	entry, ok := s.rt.Activated(epoch)
+	if !ok {
 		return fmt.Errorf("%w: %d is not an activation", ErrQ3Epoch, epoch)
 	}
-	s.active.Store(epoch)
-	return nil
+	return s.activation.Install(shardnode.RootActivation{Epoch: epoch, BodyID: entry.BodyID()})
 }
 
 // IsV2Epoch keeps certificate admission's proof-aware handoff gate closed for a V3 epoch exactly as for a V2 one.

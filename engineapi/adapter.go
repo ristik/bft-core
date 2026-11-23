@@ -635,6 +635,14 @@ func (a *Adapter) deriveV2(ctx context.Context, p shardnode.RoundParams, uc *typ
 	if err != nil {
 		return rootinput.ResultV2{}, err
 	}
+	if !historical && p.Activation.Epoch != 0 {
+		authority, ok := a.verifier.EpochAuthority.(interface {
+			RootActivationGate() *shardnode.RootActivationGate
+		})
+		if !ok || authority.RootActivationGate().Current() != p.Activation {
+			return rootinput.ResultV2{}, shardnode.ErrRootActivationSuperseded
+		}
+	}
 	var snapshot registryproof.Snapshot
 	var proof shardnode.ProofEvidence
 	if p.Parent.Number == 0 {

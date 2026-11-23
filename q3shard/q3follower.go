@@ -43,9 +43,15 @@ type Q3Follower struct {
 	Fetch func(ctx context.Context, root peer.ID, epoch uint64) (q3active.Bundle, error)
 	// Retry is the pause between rounds of fetching a bundle no root serves yet; zero is one second.
 	Retry time.Duration
+	// Local is the explicitly paired loopback root. Remote locators still
+	// follow the roots/mirrors policy. Wake hints never authenticate a bundle.
+	Local func(context.Context, uint64) (q3active.Bundle, error)
+	Wake  <-chan struct{}
 }
 
 // ErrQ3Unavailable is returned when no root served a bundle the runtime would activate.
+var errPairedActivationReady = errors.New("q3 follower: paired root published an activation")
+
 var ErrQ3Unavailable = errors.New("q3 follower: no source served an activation the runtime accepts")
 
 func (f *Q3Follower) current() uint64 {
@@ -59,8 +65,32 @@ func (f *Q3Follower) current() uint64 {
 // not retried from the same peer in this round; the error of the last refusal is kept.
 func (f *Q3Follower) activate(ctx context.Context, epoch uint64) error {
 	var last error
+	if f.Local != nil {
+		bundle, err := f.Local(ctx, epoch)
+		if err == nil {
+			if err = f.Runtime.Activate(ctx, bundle); err == nil && f.Runtime.ActiveEpoch() >= epoch {
+				return nil
+			}
+		}
+		last = err
+	}
 	for _, id := range f.sources(ctx, epoch) {
-		bundle, err := f.Fetch(ctx, id, epoch)
+		fetchCtx, cancel := context.WithCancelCause(ctx)
+		if f.Wake != nil {
+			go func() {
+				select {
+				case <-f.Wake:
+					cancel(errPairedActivationReady)
+				case <-fetchCtx.Done():
+				}
+			}()
+		}
+		bundle, err := f.Fetch(fetchCtx, id, epoch)
+		cause := context.Cause(fetchCtx)
+		cancel(nil)
+		if errors.Is(cause, errPairedActivationReady) {
+			return cause
+		}
 		if err != nil {
 			last = err
 			continue
@@ -139,8 +169,9 @@ func (f *Q3Follower) CatchUp(ctx context.Context, target uint64) error {
 	if f == nil || f.Runtime == nil || f.Fetch == nil || f.AnchorEpoch == 0 {
 		return ErrQ3FollowerConfig
 	}
-	for epoch := f.current() + 1; epoch <= target; epoch++ {
-		if err := f.activate(ctx, epoch); err != nil {
+	for f.current() < target {
+		epoch := f.current() + 1
+		if err := f.activate(ctx, epoch); err != nil && !errors.Is(err, errPairedActivationReady) {
 			return fmt.Errorf("epoch %d: %w", epoch, err)
 		}
 	}
@@ -161,7 +192,7 @@ func (f *Q3Follower) Run(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return nil
 		}
-		if err := f.activate(ctx, f.current()+1); err == nil {
+		if err := f.activate(ctx, f.current()+1); err == nil || errors.Is(err, errPairedActivationReady) {
 			continue
 		}
 		timer := time.NewTimer(pause)
@@ -170,6 +201,8 @@ func (f *Q3Follower) Run(ctx context.Context) error {
 			timer.Stop()
 			return nil
 		case <-timer.C:
+		case <-f.Wake:
+			timer.Stop()
 		}
 	}
 }
