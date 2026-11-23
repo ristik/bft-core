@@ -88,6 +88,8 @@ type signingAuthorityRunFlags struct {
 	VRNetworkWord        string
 	VRRegistryCodeHash   string
 	ClientSocket         string
+	FollowRootRPC        string
+	FollowCredential     string
 	OperatorSocket       string
 	OperatorCredential   string
 	// the automated root member's narrow channel: the handoff possession proof only (VT-09); both or neither
@@ -134,6 +136,8 @@ key exists: the authority starts pending and admits no client until complete-enr
 	flags.addTrustBaseFlags(cmd)
 	cmd.Flags().StringVar(&flags.ClientSocket, "client-socket", "", "Unix socket the shard node connects to; its directory is restricted to the owner")
 	cmd.Flags().StringVar(&flags.OperatorSocket, "operator-socket", "", "Unix socket for the operator commands; its directory is restricted to the owner")
+	cmd.Flags().StringVar(&flags.FollowRootRPC, "follow-root-activations", "", "follow committed activation proofs from this loopback root RPC")
+	cmd.Flags().StringVar(&flags.FollowCredential, "follow-client-credential", "", "client credential file to atomically replace after a verified automatic advance")
 	cmd.Flags().StringVar(&flags.OperatorCredential, "operator-credential", "", "path to the operator credential (see `signing-authority credential`)")
 	cmd.Flags().StringVar(&flags.PoPSocket, "pop-socket", "", "Unix socket of the automated root member (`root-node run --vr-evm-authority-socket`): it serves the handoff possession proof and nothing else; with --pop-credential")
 	cmd.Flags().StringVar(&flags.PoPCredential, "pop-credential", "", "path to the member's credential (see `signing-authority credential`); a credential of its own, not the operator's. The root process must run as the authority's uid to reach the socket (its directory is 0700), so keep the operator credential file unreadable by the root process: the member credential is then the only thing it can use")
@@ -171,6 +175,9 @@ key exists: the authority starts pending and admits no client until complete-enr
 
 func signingAuthorityRun(ctx context.Context, flags *signingAuthorityRunFlags) error {
 	log := flags.observe.Logger()
+	if err := flags.validateActivationFollower(); err != nil {
+		return err
+	}
 	operatorCredential, err := readCredentialFile(flags.OperatorCredential)
 	if err != nil {
 		return fmt.Errorf("loading the operator credential: %w", err)
@@ -350,6 +357,31 @@ func signingAuthorityRun(ctx context.Context, flags *signingAuthorityRunFlags) e
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error { return server.Serve(clientListener, service.ClientEndpoint) })
 	g.Go(func() error { return server.Serve(operatorListener, service.OperatorEndpoint) })
+	if flags.FollowRootRPC != "" {
+		// Use the established operator path so proof advance, credential cleanup
+		// and generation fencing are identical to advance-with-proof.
+		operator, err := service.NewOperatorClient(service.ClientConfig{
+			Dial: service.UnixDialer(flags.OperatorSocket), Credential: operatorCredential, Timeout: 3 * time.Second,
+		})
+		if err != nil {
+			return err
+		}
+		follower := authorityActivationFollower{
+			operator: operator,
+			fetch:    fetchAuthorityActivation(flags.FollowRootRPC),
+			ensureSession: func(ctx context.Context, status signingauthority.Status) error {
+				_, err := ensureAuthoritySession(ctx, operator, status, flags.FollowCredential, func(ctx context.Context) error {
+					return checkClientCredential(ctx, flags.ClientSocket, flags.FollowCredential, time.Second)
+				})
+				return err
+			},
+		}
+		g.Go(func() error {
+			defer func() { _ = operator.Close() }()
+			follower.run(gctx, log)
+			return nil
+		})
+	}
 	if popListener != nil {
 		g.Go(func() error { return server.Serve(popListener, service.PoPEndpoint) })
 	}
@@ -660,13 +692,18 @@ func advanceWithProof(ctx context.Context, operator advanceOperator, proofs []st
 		return report, err
 	}
 	report.Retired, report.RootEpoch, report.ShardEpoch, report.LineageEpoch = status.Retired, status.RootEpoch, status.ShardEpoch, status.LineageEpoch
+	report.SessionIssued, err = ensureAuthoritySession(ctx, operator, status, out, current)
+	return report, err
+}
+
+func ensureAuthoritySession(ctx context.Context, operator advanceOperator, status signingauthority.Status, out string, current func(context.Context) error) (bool, error) {
 	// the session is issued when none was since the scope last changed, or when the one issued is not the credential in --out (its
 	// answer was lost, or the file was never written): success is never reported without --out holding the admitted credential
 	issue := !status.Retired && !status.SessionIssued
 	if !issue && !status.Retired {
 		if err := current(ctx); err != nil {
 			if !errors.Is(err, signingauthority.ErrFenced) && !errors.Is(err, os.ErrNotExist) {
-				return report, fmt.Errorf("checking the current client credential: %w", err)
+				return false, fmt.Errorf("checking the current client credential: %w", err)
 			}
 			issue = true // issued, but its credential never reached the file
 		}
@@ -674,19 +711,18 @@ func advanceWithProof(ctx context.Context, operator advanceOperator, proofs []st
 	if issue {
 		credential, err := operator.ReplaceSession(ctx)
 		if err != nil {
-			return report, err
+			return false, err
 		}
 		if err := writeCredentialFile(out, credential, true); err != nil {
-			return report, fmt.Errorf("the session was replaced, so the previous credential is fenced, but the new one could not be written (run again): %w", err)
+			return false, fmt.Errorf("the session was replaced, so the previous credential is fenced, but the new one could not be written (run again): %w", err)
 		}
-		report.SessionIssued = true
 	}
 	if !status.Retired {
 		if err := current(ctx); err != nil {
-			return report, fmt.Errorf("the credential in %s is not the admitted one: %w", out, err)
+			return false, fmt.Errorf("the credential in %s is not the admitted one: %w", out, err)
 		}
 	}
-	return report, nil
+	return issue, nil
 }
 
 func signingAuthorityReplaceSessionCmd(baseFlags *baseFlags) *cobra.Command {
