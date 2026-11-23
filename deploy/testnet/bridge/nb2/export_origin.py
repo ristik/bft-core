@@ -16,6 +16,7 @@ BLOCK_HASH = re.compile(r'0x[0-9a-f]{64}')
 SHA256 = re.compile(r'[0-9a-f]{64}')
 MAX_BLOCK = (1 << 53) - 1
 MAX_WORD = (1 << 64) - 1
+MAX_NB2_ORIGIN_BYTES = 4096  # native-bridge-plugin and browser wallet decoder limit
 
 
 def run(*args):
@@ -74,13 +75,15 @@ def advance(record, previous):
 
 
 def publish(path, record):
+    encoded = json.dumps(record, indent=2) + '\n'
+    if len(encoded.encode('utf-8')) > MAX_NB2_ORIGIN_BYTES:
+        raise ValueError('checkpoint exceeds the wallet byte limit')
     tmp = None
     try:
         with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=path.parent,
                                          prefix='.nb2-origin-', delete=False) as out:
             tmp = Path(out.name)
-            json.dump(record, out, indent=2)
-            out.write('\n')
+            out.write(encoded)
             os.fchmod(out.fileno(), 0o644)
             out.flush()
             os.fsync(out.fileno())
@@ -121,13 +124,17 @@ def export(gen, release_dir, release_sha256, query, hash_bytes):
     record = {**binding, **{name: origin[name] for name in ('blockHash', 'blockNumber', 'usableEpoch', 'rootRound')}}
     advance(record, release['trust']['origin'])
     path = release_dir / 'nb2-origin.json'
+    unchanged = False
     if path.exists():
         previous = json.loads(path.read_text())
         if any(previous.get(key) != value for key, value in binding.items()):
             raise ValueError('published checkpoint belongs to a different release')
         advance(record, previous)
+        unchanged = all(record[key] == previous[key] for key in ('usableEpoch', 'rootRound'))
     if (release_dir / 'nb2-release.json').read_bytes() != release_bytes:
         raise ValueError('staged release changed during checkpoint export')
+    if unchanged:
+        return None
     publish(path, record)
     return record
 
@@ -151,7 +158,9 @@ def main():
 
     with (gen / 'bridge/nb2/.origin.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        print(json.dumps(export(gen, args.release_dir, args.release_sha256, query, hash_bytes)))
+        record = export(gen, args.release_dir, args.release_sha256, query, hash_bytes)
+        if record is not None:
+            print(json.dumps(record))
 
 
 if __name__ == '__main__':

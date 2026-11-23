@@ -84,6 +84,25 @@ class Nb2OriginExport(unittest.TestCase):
             self.assertEqual(json.loads(self.destination.read_text()), successor)
         self.assertEqual(list(self.release_dir.glob('.nb2-origin-*')), [])
 
+    def test_only_publishes_when_authenticated_checkpoint_advances(self):
+        original = self.export()
+        before = self.destination.stat()
+        self.assertIsNone(self.export())
+        self.head = dict(hash='0x' + '6' * 64, number=hex(96))
+        self.assertIsNone(self.export())
+        after = self.destination.stat()
+        self.assertEqual((after.st_ino, after.st_mtime_ns), (before.st_ino, before.st_mtime_ns))
+        self.assertEqual(json.loads(self.destination.read_text()), original)
+        self.root_round += 1
+        self.assertEqual(self.export()['blockNumber'], 96)
+        self.assertLessEqual(self.destination.stat().st_size, export_origin.MAX_NB2_ORIGIN_BYTES)
+
+    def test_oversize_checkpoint_leaves_published_file_intact(self):
+        original = self.export()
+        with self.assertRaisesRegex(ValueError, 'wallet byte limit'):
+            export_origin.publish(self.destination, {**original, 'generation': 'x' * export_origin.MAX_NB2_ORIGIN_BYTES})
+        self.assertEqual(json.loads(self.destination.read_text()), original)
+
     def test_rejects_rollback_incompatible_same_block_and_release_drift(self):
         original = self.export()
         self.head = dict(hash='0x' + '6' * 64, number=hex(95))

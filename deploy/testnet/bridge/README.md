@@ -51,9 +51,12 @@ authenticated HTTPS channel. The checkpoint is mutable and stays outside the
 release's immutable `SHA256SUMS`. Install the job after staging the release.
 The exporter validates the installed release digest, the live generation and
 the registry runtime. It reads the epoch and round at a single canonical
-finalized block hash. It rejects rollback and atomically replaces the
-checkpoint with mode 0644. The wallet checks the same deployment binding and
-persists accepted successors. The release digest stays fixed. [#1283](https://github.com/ristik/bft-core/issues/1283)
+finalized block hash. The timer checks every five seconds. After the initial
+publication, a new finalized block is published only if the epoch or root
+round advanced. The exporter rejects rollback and atomically replaces the
+checkpoint with mode 0644, within the wallet's 4096-byte limit. The wallet
+checks the same deployment binding and persists accepted successors. The
+release digest stays fixed. [#1283](https://github.com/ristik/bft-core/issues/1283)
 
 Run one export from the host to check the configuration:
 

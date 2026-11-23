@@ -3,8 +3,8 @@ Description=Refresh the published NB2 B1 checkpoint for testnet generation %i
 
 [Timer]
 OnActiveSec=1s
-OnUnitActiveSec=60s
-AccuracySec=1s
+OnCalendar=*-*-* *:*:00/5
+AccuracySec=100ms
 
 [Install]
 WantedBy=timers.target
