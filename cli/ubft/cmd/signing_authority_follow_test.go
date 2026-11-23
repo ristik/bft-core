@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -74,13 +75,14 @@ func TestAuthorityFollowsOnlyMissingProofsAndRepairsInterruptedPublication(t *te
 }
 
 func TestAuthorityFetchesCommittedSuccessorFromLoopback(t *testing.T) {
-	epoch := 1
+	var epoch atomic.Int32
+	epoch.Store(1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/v1/q3/status":
-			_, _ = fmt.Fprintf(w, `{"activeEpoch":%d}`, epoch)
+			_, _ = fmt.Fprintf(w, `{"activeEpoch":%d}`, epoch.Load())
 		case "/api/v1/q3/bundle":
-			_, _ = fmt.Fprintf(w, `{"epoch":%d,"bundle":"abcd"}`, epoch)
+			_, _ = fmt.Fprintf(w, `{"epoch":%d,"bundle":"abcd"}`, epoch.Load())
 		default:
 			t.Errorf("unexpected request %s", r.URL.Path)
 		}
@@ -90,7 +92,7 @@ func TestAuthorityFetchesCommittedSuccessorFromLoopback(t *testing.T) {
 	raw, err := fetch(t.Context(), 2)
 	require.NoError(t, err)
 	require.Empty(t, raw)
-	epoch = 2
+	epoch.Store(2)
 	raw, err = fetch(t.Context(), 2)
 	require.NoError(t, err)
 	require.Equal(t, []byte{0xab, 0xcd}, raw)

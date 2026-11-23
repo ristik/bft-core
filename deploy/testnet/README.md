@@ -301,12 +301,15 @@ transaction fanout. Use `--gateway-port 9545` on the slot-1 rehearsal.
 For the join rehearsal use a separate operator home and the
 [validator handbook](../../docs/operations/validator-handbook.md). When the
 election reserves the joiner's result, the participants supply their proofs
-and the relayer publishes it. The VR roots drive the handoff. After the roots
-activate the new epoch, run `rehearse.py --generation G --stages vr-pos-advance
---vr-target-epoch E` to deliver the verified history to the incumbent
-authorities and restart their shard clients. The joining operator advances its
-own authority. Check the new assignment, quorum and a subsequent UC before
-recording the join as complete.
+and the relayer publishes it. The VR roots drive the handoff. With a pinned
+BFT binary that supports `--follow-root-activations`, each packaged authority
+fetches missing committed activation bundles from the root in its own pod.
+It verifies each bundle under its own pinned lineage and publishes the new
+client credential after an advance. The incumbent shard reloads the credential
+in process. Use the operator's `vr-pos-advance` rehearsal stage for packages
+built with older BFT binaries. The joining operator provisions its own
+authority. Check the assignment, quorum and a subsequent UC before recording
+the join as complete.
 
 ## Monitoring, logs and incidents
 
