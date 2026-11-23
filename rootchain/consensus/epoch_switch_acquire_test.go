@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/unicitynetwork/bft-core/evmassign"
+	"github.com/unicitynetwork/bft-core/handoffdelivery"
 	"github.com/unicitynetwork/bft-core/internal/testutils/q3fixture"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/q3active"
@@ -255,6 +256,26 @@ func TestInProcessSwitchInstallsTheLineageSequentially(t *testing.T) {
 		t.Fatalf("Run ended: %v", err)
 	default:
 	}
+}
+
+func TestJoiningLeaderUsesInstalledActivationForClosure(t *testing.T) {
+	ctx := context.Background()
+	f := q3fixture.New(t, q3fixture.Options{})
+	r := openAlone(t, f, joinerIndex, func(r *q3Replica) { r.noCheckpoint = true })
+	_, err := r.manager.ClosureWitness(ctx, 2)
+	require.ErrorIs(t, err, ErrNoQ3Evidence)
+
+	require.NoError(t, r.rt.Activate(ctx, r.bundle()))
+	_, _, _, err = r.manager.Q3ActivationEvidence(2)
+	require.ErrorIs(t, err, ErrNoQ3Evidence)
+
+	want, err := handoffdelivery.EncodeWitnessV3(handoffdelivery.WitnessV3{
+		Proof: f.Proof, Body: f.Body.Encode(), Snapshot: f.Snapshot, Candidate: f.Candidate,
+	})
+	require.NoError(t, err)
+	got, err := r.manager.ClosureWitness(ctx, 2)
+	require.NoError(t, err)
+	require.Equal(t, want, got)
 }
 
 // A joiner without evidence: no peer serves the activation (or every one serves a forgery). It stays in its epoch, raises no barrier,
