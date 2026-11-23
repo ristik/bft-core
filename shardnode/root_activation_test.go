@@ -11,7 +11,7 @@ import (
 func TestVerifiedActivationCancelsWorkBeforeAdmittingSuccessor(t *testing.T) {
 	old := RootActivation{Epoch: 5, BodyID: [32]byte{1}}
 	next := RootActivation{Epoch: 6, BodyID: [32]byte{2}}
-	g := NewRootActivationGate(old)
+	g := NewRootActivationGate(t.Context(), old)
 	work, end, err := g.work(t.Context(), old.Epoch)
 	require.NoError(t, err)
 	defer end()
@@ -47,7 +47,7 @@ func (p activationBuildProbe) Build(_ context.Context, params RoundParams) (Buil
 }
 
 func TestVerifiedActivationCancelsPacedLeaderAndFirstSuccessorBuildsImmediately(t *testing.T) {
-	g := NewRootActivationGate(RootActivation{Epoch: 1})
+	g := NewRootActivationGate(t.Context(), RootActivation{Epoch: 1})
 	exec := activationBuildProbe{built: make(chan RoundParams, 1)}
 	round := &Round{nodeID: "leader", executor: exec, pacer: blockPacer{from: time.Now(), interval: time.Hour}}
 	old, done, err := g.work(t.Context(), 1)
@@ -76,4 +76,26 @@ func TestVerifiedActivationCancelsPacedLeaderAndFirstSuccessorBuildsImmediately(
 	_, _, err = round.produceBlock(fresh, BlockRef{}, Expectation{}, nil, "leader", nil, nil, nil)
 	require.ErrorIs(t, err, ErrBuildUnavailable)
 	require.Equal(t, next, (<-exec.built).Activation)
+}
+
+func TestActivationDeliveryLivesPastTheRoundAndEndsAtTheCut(t *testing.T) {
+	parent, stop := context.WithCancel(t.Context())
+	defer stop()
+	g := NewRootActivationGate(parent, RootActivation{Epoch: 1})
+	work, end, err := g.work(parent, 1)
+	require.NoError(t, err)
+	var send context.Context
+	require.NoError(t, underRootPublication(work, func(ctx context.Context) error {
+		send = ctx
+		return nil
+	}))
+	end()
+	require.ErrorIs(t, work.Err(), context.Canceled)
+	require.NoError(t, send.Err(), "returning from the round must not cancel queued sends")
+	require.NoError(t, g.Begin(RootActivation{Epoch: 2}))
+	require.ErrorIs(t, send.Err(), context.Canceled, "the activation stops old queued deliveries")
+	require.ErrorIs(t, g.enqueue(parent, 1, func(context.Context) error {
+		t.Fatal("a new send escaped the cut")
+		return nil
+	}), ErrRootActivationSuperseded)
 }

@@ -1844,7 +1844,7 @@ func (r *Round) produceBlock(ctx context.Context, head BlockRef, exp Expectation
 			if r.leaseLost() {
 				return Block{}, params, ErrFollower
 			}
-			if err := underRootActivation(ctx, func() error { return r.disseminator.Publish(ctx, exp.Round, block) }); err != nil {
+			if err := underRootPublication(ctx, func(sendCtx context.Context) error { return r.disseminator.Publish(sendCtx, exp.Round, block) }); err != nil {
 				return Block{}, params, fmt.Errorf("publishing round %d block: %w", exp.Round, err)
 			}
 		}

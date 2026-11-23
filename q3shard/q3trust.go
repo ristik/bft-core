@@ -30,11 +30,11 @@ type Q3TrustStore struct {
 }
 
 // NewQ3TrustStore wraps the historical store with the runtime's guarded lookup.
-func NewQ3TrustStore(base *shardnode.HistoricalTrustBaseStore, rt *q3active.Runtime) *Q3TrustStore {
+func NewQ3TrustStore(ctx context.Context, base *shardnode.HistoricalTrustBaseStore, rt *q3active.Runtime) *Q3TrustStore {
 	epoch, _ := base.CurrentRootEpoch()
 	body, _ := base.BodyID(epoch)
 	return &Q3TrustStore{HistoricalTrustBaseStore: base, rt: rt, guarded: rt.Trust(base),
-		activation: shardnode.NewRootActivationGate(shardnode.RootActivation{Epoch: epoch, BodyID: body})}
+		activation: shardnode.NewRootActivationGate(ctx, shardnode.RootActivation{Epoch: epoch, BodyID: body})}
 }
 
 // RootActivationGate is the shared identity and speculative-work fence for this

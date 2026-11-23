@@ -1669,7 +1669,7 @@ func (c *BFTClient) sendRequest(ctx context.Context, req *certification.BlockCer
 		}
 	}
 	if c.activationGate != nil {
-		err := c.activationGate.withEpoch(origin, func() error { return c.net.Send(ctx, req, rootIDs...) })
+		err := c.activationGate.enqueue(ctx, origin, func(sendCtx context.Context) error { return c.net.Send(sendCtx, req, rootIDs...) })
 		if errors.Is(err, ErrRootActivationSuperseded) {
 			return ErrRequestAcrossActivation
 		}

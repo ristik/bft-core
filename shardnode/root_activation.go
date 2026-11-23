@@ -22,13 +22,14 @@ type RootActivationGate struct {
 	mu       sync.RWMutex
 	current  RootActivation
 	pending  RootActivation
+	parent   context.Context
 	lifetime context.Context
 	cancel   context.CancelFunc
 }
 
-func NewRootActivationGate(initial RootActivation) *RootActivationGate {
-	ctx, cancel := context.WithCancel(context.Background())
-	return &RootActivationGate{current: initial, lifetime: ctx, cancel: cancel}
+func NewRootActivationGate(parent context.Context, initial RootActivation) *RootActivationGate {
+	ctx, cancel := context.WithCancel(parent)
+	return &RootActivationGate{current: initial, parent: parent, lifetime: ctx, cancel: cancel}
 }
 
 func (g *RootActivationGate) Current() RootActivation {
@@ -66,7 +67,7 @@ func (g *RootActivationGate) Install(next RootActivation) error {
 	}
 	g.cancel()
 	g.current, g.pending = next, RootActivation{}
-	g.lifetime, g.cancel = context.WithCancel(context.Background())
+	g.lifetime, g.cancel = context.WithCancel(g.parent)
 	return nil
 }
 
@@ -107,4 +108,32 @@ func underRootActivation(ctx context.Context, fn func() error) error {
 		return scope.gate.withEpoch(scope.id.Epoch, fn)
 	}
 	return fn()
+}
+
+// activationDeliveryContext retains tracing and request metadata from the
+// enqueue call, but lives until the activation (or node) ends. Network Send
+// takes ownership of queued bytes and may still be sending when a Round returns.
+type activationDeliveryContext struct {
+	context.Context
+	values context.Context
+}
+
+func (c activationDeliveryContext) Value(key any) any {
+	return c.values.Value(key)
+}
+
+func (g *RootActivationGate) enqueue(ctx context.Context, epoch uint64, fn func(context.Context) error) error {
+	return g.withEpoch(epoch, func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return fn(activationDeliveryContext{Context: g.lifetime, values: ctx})
+	})
+}
+
+func underRootPublication(ctx context.Context, fn func(context.Context) error) error {
+	if scope, ok := ctx.Value(rootActivationKey{}).(rootActivationContext); ok {
+		return scope.gate.enqueue(ctx, scope.id.Epoch, fn)
+	}
+	return fn(ctx)
 }

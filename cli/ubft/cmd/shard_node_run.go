@@ -960,7 +960,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			if q3Admit, jErr = wireQ3Pair(executor, q3rt, uint64(shardConf.NetworkID), origin.Valid(), [32]byte(origin.BlockHash())); jErr != nil {
 				return jErr
 			}
-			q3Trust = q3shard.NewQ3TrustStore(historical, q3rt)
+			q3Trust = q3shard.NewQ3TrustStore(ctx, historical, q3rt)
 			trustBaseStore, epochTrust = q3Trust, q3Trust
 			verifierContext.TrustBases = q3Trust
 			verifierContext.EpochAuthority = q3Trust

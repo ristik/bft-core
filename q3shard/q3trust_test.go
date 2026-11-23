@@ -20,7 +20,7 @@ func TestQ3TrustStoreServesAV3EpochOnlyOnceTheJournalCompletedItAndFollowsTheHis
 	rt := p.Start()
 	base, err := shardnode.NewHistoricalTrustBaseStore(ctx, memorydb.New(), f.Old, [32]byte{1}, true)
 	require.NoError(t, err)
-	s := NewQ3TrustStore(base, rt)
+	s := NewQ3TrustStore(t.Context(), base, rt)
 
 	epoch := f.Claim.Epoch
 	tb, err := s.GetByEpoch(ctx, 1)
@@ -71,7 +71,7 @@ func TestTheInstallVerifiesFromTheHistoryBeforeTheJournalAdmitsTheEpoch(t *testi
 	rt := p.Start()
 	base, err := shardnode.NewHistoricalTrustBaseStore(ctx, memorydb.New(), f.Old, [32]byte{1}, true)
 	require.NoError(t, err)
-	s := NewQ3TrustStore(base, rt)
+	s := NewQ3TrustStore(t.Context(), base, rt)
 	epoch := f.Claim.Epoch
 
 	var during, served error
