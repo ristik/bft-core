@@ -285,3 +285,125 @@ func TestQ3FollowerWakeInterruptsPeerDiscovery(t *testing.T) {
 	cancel()
 	require.NoError(t, <-done)
 }
+
+type followerRefusalProbe struct {
+	*fakeActivator
+	onRefusal func()
+}
+
+func (p followerRefusalProbe) Activate(ctx context.Context, b q3active.Bundle) error {
+	err := p.fakeActivator.Activate(ctx, b)
+	if err != nil {
+		p.onRefusal()
+	}
+	return err
+}
+
+func TestQ3FollowerObservesWakeBetweenPeerAttempts(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	wake := make(chan struct{}, 1)
+	act := &fakeActivator{active: 1, refuse: map[string]bool{"refused": true}}
+	roots := ids(t, 2)
+	var firstDiscovery context.Context
+	var ready bool
+	f := &Q3Follower{
+		Runtime: followerRefusalProbe{act, func() {
+			// The first remote fetch has returned. Publish while its
+			// bundle is being refused, before the next peer is tried.
+			require.NoError(t, firstDiscovery.Err())
+			ready = true
+			wake <- struct{}{}
+			select {
+			case <-firstDiscovery.Done():
+				require.ErrorIs(t, context.Cause(firstDiscovery), errPairedActivationReady)
+			case <-ctx.Done():
+				t.Fatal("the discovery reader missed the wake between peers")
+			}
+		}},
+		AnchorEpoch: 1, CurrentRoots: roots, Wake: wake,
+		Local: func(context.Context, uint64) (q3active.Bundle, error) {
+			if ready {
+				return q3active.Bundle{Candidate: []byte("local")}, nil
+			}
+			return q3active.Bundle{}, ErrQ3Unavailable
+		},
+		Fetch: func(ctx context.Context, id peer.ID, _ uint64) (q3active.Bundle, error) {
+			require.Equal(t, roots[0], id, "the local bundle is ready before the next peer")
+			firstDiscovery = ctx
+			return q3active.Bundle{Candidate: []byte("refused")}, nil
+		},
+	}
+	require.NoError(t, f.CatchUp(ctx, 2))
+	require.EqualValues(t, 2, act.ActiveEpoch())
+}
+
+func TestQ3FollowerContinuingHintsCannotStarveAValidPeer(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	entered, wake := make(chan struct{}, 1), make(chan struct{}, 1)
+	act := &fakeActivator{active: 1}
+	var attempts, local atomic.Int32
+	f := &Q3Follower{
+		Runtime: act, AnchorEpoch: 1, CurrentRoots: ids(t, 1), Wake: wake, Retry: time.Millisecond,
+		Local: func(_ context.Context, epoch uint64) (q3active.Bundle, error) {
+			if epoch == 2 {
+				local.Add(1)
+			}
+			return q3active.Bundle{}, ErrQ3Unavailable
+		},
+		Fetch: func(ctx context.Context, _ peer.ID, epoch uint64) (q3active.Bundle, error) {
+			if epoch != 2 {
+				return q3active.Bundle{}, ErrQ3Unavailable
+			}
+			switch attempts.Add(1) {
+			case 1:
+				entered <- struct{}{}
+				<-ctx.Done()
+				return q3active.Bundle{}, ctx.Err()
+			case 2:
+				// Exercise another sweep at the same epoch.
+				return q3active.Bundle{}, ErrQ3Unavailable
+			}
+			select {
+			case <-ctx.Done():
+				return q3active.Bundle{}, ctx.Err()
+			case <-time.After(30 * time.Millisecond):
+				return q3active.Bundle{Candidate: []byte("valid peer")}, nil
+			}
+		},
+	}
+	done := make(chan error, 1)
+	go func() { done <- f.Run(ctx) }()
+	select {
+	case <-entered:
+	case <-ctx.Done():
+		t.Fatal("first peer fetch did not start")
+	}
+	wake <- struct{}{}
+	hintsDone := make(chan struct{})
+	go func() {
+		defer close(hintsDone)
+		tick := time.NewTicker(time.Millisecond)
+		defer tick.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-tick.C:
+				select {
+				case wake <- struct{}{}:
+				default:
+				}
+			}
+		}
+	}()
+	defer func() {
+		cancel()
+		<-hintsDone
+		require.NoError(t, <-done)
+	}()
+	require.Eventually(t, func() bool { return act.ActiveEpoch() == 2 }, time.Second, time.Millisecond)
+	require.EqualValues(t, 3, attempts.Load(), "only the first hint interrupted a peer fetch")
+	require.EqualValues(t, 3, local.Load(), "initial discovery, one hint, and the timer retry")
+}

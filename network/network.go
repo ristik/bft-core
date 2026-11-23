@@ -389,7 +389,7 @@ func (n *LibP2PNetwork) SetSendFault(f SendFault) {
 	n.fault.Store(&f)
 }
 
-func sendMsg(ctx context.Context, host *Peer, protocolID string, data []byte, receiverID peer.ID) (err error) {
+func sendMsg(ctx context.Context, host *Peer, protocolID string, data []byte, receiverID peer.ID) error {
 	s, err := host.CreateStream(ctx, receiverID, protocolID)
 	if err != nil {
 		err = fmt.Errorf("open p2p stream: %w", err)
@@ -398,7 +398,21 @@ func sendMsg(ctx context.Context, host *Peer, protocolID string, data []byte, re
 		}
 		return notDelivered{err}
 	}
+	return writeMsg(ctx, s, data)
+}
+
+func writeMsg(ctx context.Context, s libp2pNetwork.Stream, data []byte) (err error) {
+	// Opening a stream observes ctx, but an open stream needs an explicit
+	// reset to interrupt a write when its delivery lifetime ends.
+	resetDone := make(chan struct{})
+	stopReset := context.AfterFunc(ctx, func() {
+		defer close(resetDone)
+		_ = s.Reset()
+	})
 	defer func() {
+		if !stopReset() {
+			<-resetDone
+		}
 		if closeErr := s.Close(); closeErr != nil {
 			err = errors.Join(err, fmt.Errorf("closing p2p stream: %w", closeErr))
 		}
@@ -408,12 +422,15 @@ func sendMsg(ctx context.Context, host *Peer, protocolID string, data []byte, re
 			return notDelivered{fmt.Errorf("error setting write deadline: %w", err)}
 		}
 	}
+	if err = ctx.Err(); err != nil {
+		return notDelivered{err}
+	}
 	if _, err = s.Write(data); err != nil {
 		err = fmt.Errorf("writing data to p2p stream: %w", err)
 		if lazyHandshakeRefused(err) {
 			return err
 		}
-		return notDelivered{err}
+		return notDelivered{errors.Join(err, ctx.Err())}
 	}
 	// done close the stream
 	return nil

@@ -70,7 +70,10 @@ func (p *pairedActivation) run(ctx context.Context) {
 func fetchPairedActivationBundle(ctx context.Context, client *http.Client, origin string, epoch uint64, limit int) ([]byte, error) {
 	body, _ := json.Marshal(q3EpochRequest{Epoch: epoch})
 	var bundle q3BundleResponse
-	if err := handoffPost(ctx, client, origin+"/api/v1/q3/bundle", body, &bundle); err != nil {
+	// The bundle needs two hex characters per byte. Allow room for the
+	// field names, the uint64 epoch and the JSON framing.
+	const bundleResponseOverhead = 128
+	if err := handoffPostWithLimit(ctx, client, origin+"/api/v1/q3/bundle", body, &bundle, 2*int64(limit)+bundleResponseOverhead); err != nil {
 		return nil, err
 	}
 	if bundle.Epoch != epoch || bundle.Bundle == "" || len(bundle.Bundle) > 2*limit {
