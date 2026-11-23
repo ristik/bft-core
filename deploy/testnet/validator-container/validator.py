@@ -1,0 +1,624 @@
+#!/usr/bin/env python3
+"""Entrypoint for the public VR validator's two container roles."""
+import argparse
+import contextlib
+import fcntl
+import hashlib
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import ipaddress
+import json
+import os
+from pathlib import Path
+import re
+import signal
+import subprocess
+import tempfile
+import threading
+import time
+import urllib.error
+import urllib.request
+
+HOME = Path('/data')
+RELEASE = HOME / 'release'
+AUTH = HOME / 'authority'
+CONFIG = HOME / 'validator.json'
+LOCK = '/opt/validator/release-lock.json'
+ROOT = 'http://127.0.0.1:26852'
+SHARD = 'http://127.0.0.1:29352'
+EXECUTION = 'http://127.0.0.1:18552'
+ENGINE = 'http://127.0.0.1:18553'
+RPC = 'http://127.0.0.1:18485'
+AUTH_FLAGS = ['--operator-socket', AUTH/'operator.sock', '--operator-credential', AUTH/'operator.cred']
+UTB = ['--utb-genesis', RELEASE/'utb-genesis.cbor']
+MAX_RELEASE_FILE = 32 << 20
+FILES = frozenset({
+    'manifest.json', 'deployment.json', 'vr-deployment.json', 'genesis.json', 'genesis-identities.json',
+    'full-shard-conf.json', 'b1-profile.json', 'trust-base.json', 'utb-genesis.cbor', 'utb-genesis.id',
+    'ureth-flags.txt', 'fee-collector.txt', 'aggregator-conf.json', 'root-peers.txt', 'shard-peers.txt',
+})
+BINARIES = {'ubft': '/usr/local/bin/ubft', 'unicity-reth': '/usr/local/bin/unicity-reth'}
+
+
+AUTHORITY_LOST = (
+    'Preserve the volume and fail-stop marker. If chain evidence confirms the identity is unregistered '
+    'and has no pending registration or bond, initialize a fresh identity in a separate volume. '
+    'For a registered, bonded, or uncertain identity, contact the Foundation testnet maintainers '
+    'before rotation. See Authority loss in the validator handbook.'
+)
+
+
+def command(*args, output=False, check=True, timeout=120):
+    return subprocess.run([str(arg) for arg in args], text=True, capture_output=output, check=check,
+                          timeout=timeout, stdin=subprocess.DEVNULL, cwd=HOME)
+
+
+def ubft(*args, **options):
+    return command('ubft', *args, **options)
+
+
+def read(path):
+    return json.loads(Path(path).read_text())
+
+
+def write(path, data):
+    fd, tmp = tempfile.mkstemp(prefix='.' + path.name + '-', dir=path.parent)
+    with contextlib.ExitStack() as clean:
+        clean.callback(Path(tmp).unlink, missing_ok=True)
+        with os.fdopen(fd, 'wb') as output:
+            output.write(data)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(tmp, path)
+        with directory(path.parent) as parent:
+            os.fsync(parent)
+
+
+@contextlib.contextmanager
+def directory(path):
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        yield fd
+    finally:
+        os.close(fd)
+
+
+@contextlib.contextmanager
+def lock(name):
+    with (HOME/name).open('a') as file:
+        fcntl.flock(file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield
+
+
+def digest(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def file_digest(path):
+    with Path(path).open('rb') as file:
+        return hashlib.file_digest(file, 'sha256').hexdigest()
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        raise ValueError('redirects are refused for release artifacts')
+
+
+def download(url, limit):
+    with urllib.request.build_opener(NoRedirect()).open(url, timeout=15) as response:
+        data = response.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError('release artifact exceeds the size limit')
+    return data
+
+
+def bootstrap(a, pins):
+    sums = download(a.release_url + '/SHA256SUMS', 1 << 16)
+    if digest(sums) != pins['sha256sums']:
+        raise ValueError('release SHA256SUMS differs from the authenticated image pin')
+    entries = {}
+    for line in sums.decode('ascii').splitlines():
+        match = re.fullmatch(r'([0-9a-f]{64})  ([a-zA-Z0-9._-]+(?:/[a-zA-Z0-9._-]+)?)', line)
+        if not match:
+            raise ValueError('invalid release checksum entry')
+        sha, name = match.groups()
+        if name in entries or any(part in ('.', '..') for part in name.split('/')):
+            raise ValueError('duplicate or invalid release path')
+        entries[name] = sha
+    release_files = FILES | {name for name in entries if name.startswith('seed/')}
+    if not (release_files | BINARIES.keys()) <= entries.keys() or 'seed/manifest.json' not in release_files:
+        raise ValueError('release is missing a required file')
+    for name, path in BINARIES.items():
+        if file_digest(path) != entries[name]:
+            raise ValueError(f'{name} differs from the authenticated release')
+    if RELEASE.exists():
+        for name in release_files:
+            if file_digest(RELEASE/name) != entries[name]:
+                raise ValueError(f'cached release file differs: {name}')
+    else:
+        with tempfile.TemporaryDirectory(prefix='.release-', dir=HOME) as temp:
+            stage = Path(temp)/'release'
+            (stage/'seed').mkdir(parents=True)
+            for name in sorted(release_files):
+                data = download(a.release_url + '/' + name, MAX_RELEASE_FILE)
+                if digest(data) != entries[name]:
+                    raise ValueError(f'release checksum mismatch: {name}')
+                write(stage/name, data)
+            if (stage/'utb-genesis.id').read_text().strip() != pins['utb_genesis_id']:
+                raise ValueError('UTB genesis EntryID differs from the image pin')
+            stage.rename(RELEASE)
+            with directory(HOME) as parent:
+                os.fsync(parent)
+    if (RELEASE/'utb-genesis.id').read_text().strip() != pins['utb_genesis_id']:
+        raise ValueError('UTB genesis EntryID differs from the image pin')
+    if 'public_peers' in pins:
+        output = HOME/'public-peers'
+        output.mkdir(mode=0o700, exist_ok=True)
+        for name, expected in pins['public_peers'].items():
+            data = download(a.release_url + '/validator-container/' + name, 4096)
+            if digest(data) != expected:
+                raise ValueError(f'public peer list differs from the image pin: {name}')
+            write(output/name, data)
+    proof = HOME/'bootstrap.json'
+    if not proof.exists():
+        for name in ('root', 'evm'):
+            (HOME/name).mkdir(mode=0o700, exist_ok=True)
+        utb = ['--utb-genesis-id', pins['utb_genesis_id']]
+        full = ['--full-shard-conf', RELEASE/'full-shard-conf.json']
+        args = ['--dir', RELEASE/'seed', *utb, *full]
+        with tempfile.TemporaryDirectory(prefix='.pin-', dir=HOME) as temp:
+            prefix = Path(temp)/'seed-pin'
+            restored = ubft('seed', 'restore-pin', *args, '--trust-base', RELEASE/'trust-base.json',
+                            '--out', prefix, output=True).stdout
+            body = re.search(r'bodyID=(0x[0-9a-f]{64})', restored)
+            if body is None:
+                raise ValueError('seed verification returned no trust body ID')
+            for name in ('seed-pin.uc.cbor', 'seed-pin.tr.cbor'):
+                write(HOME/name, (Path(temp)/name).read_bytes())
+        ubft('seed', 'import', *args, '--home', HOME, '--source', a.release_url + '/seed', *UTB,
+             '--root-utb-db', 'root/root-utb-entries.db', '--shard-utb-db', 'evm/shard-utb-entries.db')
+        write(proof, json.dumps({'body':body[1]}).encode())
+
+
+def rpc(url, method, params, *, evm=True):
+    data = {'jsonrpc':'2.0', 'id':1, 'method':method, 'params':params} if evm else params
+    req = urllib.request.Request(url, json.dumps(data).encode(), {'Content-Type':'application/json'})
+    with urllib.request.urlopen(req, timeout=12) as response:
+        result = json.load(response)
+    if evm and 'result' not in result:
+        raise ValueError(f'{method} failed: {result.get("error")}')
+    return result['result'] if evm else result
+
+
+def wait_for(description, read_value, limit=None):
+    end = None if limit is None else time.monotonic() + limit
+    while end is None or time.monotonic() < end:
+        try:
+            value = read_value()
+            if value:
+                return value
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
+        time.sleep(2)
+    raise RuntimeError(f'timed out waiting for {description}')
+
+
+def init(a, pins):
+    with lock('.init.lock'):
+        bootstrap(a, pins)
+        if not CONFIG.exists():
+            ubft('validator', 'init', '--rpc', a.rpc_url, '--local-rpc', EXECUTION,
+                 '--chain-id', read(RELEASE/'manifest.json')['chain_id'], '--ports', ','.join(map(str, a.ports)))
+        if not (HOME/'network.json').exists():
+            write(HOME/'network.json', json.dumps({
+                'rpc':a.rpc_url, 'release':a.release_url, 'ports':a.ports, 'announce':a.announce_addresses,
+                'rootEpoch':a.root_epoch, 'shardEpoch':a.shard_epoch,
+            }).encode())
+        info = read(CONFIG)
+        print(f"Payee {info['payee']}. Fund 100 UCT plus gas. One faucet claim pays 200 UCT.")
+
+
+def authority(*args, **options):
+    return ubft('signing-authority', *args, *AUTH_FLAGS, **options)
+
+
+def authority_status():
+    return json.loads(authority('status', output=True, timeout=8).stdout)
+
+
+def authority_process(a, pins):
+    with lock('.authority.lock'):
+        if (AUTH/'lifetime').exists():
+            raise ValueError(f'The authority lifetime has already started. {AUTHORITY_LOST}')
+        n = wait_for('the node’s verified initial authority scope',
+                     lambda: read(HOME/'authority-scope.json'), limit=360)
+        AUTH.mkdir(mode=0o700, exist_ok=True)
+        for name in ('operator.cred', 'pop.cred'):
+            if not (AUTH/name).exists():
+                ubft('signing-authority', 'credential', '--out', AUTH/name)
+        owner = read(CONFIG)['payee']
+        root = read(HOME/'root/node-info.json')
+        deployment = read(RELEASE/'vr-deployment.json')
+        doc = {'network':deployment['networkWord'], 'chainId':read(RELEASE/'manifest.json')['chain_id'],
+               'registry':read(RELEASE/'deployment.json')['registry'],
+               'authorized':[{'action':'register', 'owner':owner, 'payee':owner,
+                              'rootNodeId':root['nodeId'], 'rootKey':root['sigKey']}]}
+        write(AUTH/'registration.json', json.dumps(doc).encode())
+        node = ubft('node-id', '--home', HOME/'evm', output=True).stdout.strip().splitlines()[-1]
+        trust = RELEASE/'trust-base.json'
+        if n['rootEpoch'] > 1:
+            trust = AUTH/'current-trust.json'
+            wait_for('the local root to verify the incumbent trust epoch',
+                     lambda: ubft('q3', 'trust-base', '--root-rpc', ROOT, '--epoch', n['rootEpoch'],
+                                  '--out', trust, output=True).returncode == 0, limit=300)
+        # A lost process must never be recreated with the old enrollment.
+        write(AUTH/'lifetime', b'fail-stop\n')
+        args = ['ubft', 'signing-authority', 'run', '--home', AUTH, '--authority-id', node,
+                '--network-id', 3, '--partition-id', 8, '--shard-id', '0x80', '--node-id', node,
+                '--shard-epoch', n['shardEpoch'], '--root-epoch', n['rootEpoch'], '--trust-base', trust,
+                '--client-socket', AUTH/'client.sock', *AUTH_FLAGS,
+                '--pop-socket', AUTH/'pop.sock', '--pop-credential', AUTH/'pop.cred',
+                '--registration-policy', AUTH/'registration.json', '--dev-allow-late-pos-policy', '--require-pos-policy',
+                '--lineage-genesis-trust-base', RELEASE/'trust-base.json', '--lineage-utb-genesis',
+                '--b1-profile', RELEASE/'b1-profile.json', '--activation-source-url', EXECUTION,
+                '--execution-genesis-hash', read(RELEASE/'manifest.json')['genesis_hash']]
+        proc = subprocess.Popen([str(x) for x in args], cwd=HOME)
+        signal.signal(signal.SIGTERM, lambda *_: proc.terminate())
+        raise SystemExit(proc.wait())
+
+
+def peers(role):
+    folder = HOME/'public-peers'
+    file = (folder if folder.exists() else RELEASE)/f'{role}-peers.txt'
+    return file.read_text().splitlines()
+
+
+def p2p(n, role, index):
+    port = n['ports'][index]
+    result = ['--address', f'/ip4/0.0.0.0/tcp/{port}']
+    if n['announce']:
+        result.extend(['--announce-addresses', f'{n["announce"]}/tcp/{port}'])
+    return result
+
+
+def root_status():
+    r = rpc(ROOT + '/api/v1/q3/status', '', {}, evm=False)
+    if r.get('switch') and r['switch']['phase'] not in ('running', 'following'):
+        return None
+    return r
+
+
+def active_member_epoch(status, previous):
+    if status and not status.get('follower', False) and status['activeEpoch'] > previous:
+        return status['activeEpoch']
+    return None
+
+
+def provision_scope(network, epoch):
+    view = root_status()
+    if not view or view['activeEpoch'] != epoch or not view.get('follower'):
+        return None
+    result = command('handoff-ubft', 'validator', 'last-signed-uc', '--execution', RPC,
+                     '--root-rpc', ROOT, '--epoch', epoch, output=True)
+    certified = json.loads(result.stdout)
+    if not certified or certified['rootEpoch'] != epoch:
+        return None
+    return {'rootEpoch': epoch, 'shardEpoch': network['shardEpoch'] or certified['shardEpoch'] + 1}
+
+
+def link_authority():
+    status = wait_for('the long-lived authority container', authority_status, limit=60)
+    observed = status['signingKeyFingerprint']
+    stamp = AUTH/'fingerprint'
+    if stamp.exists() and stamp.read_text() != observed:
+        raise ValueError(f'Authority identity changed. {AUTHORITY_LOST}')
+    else:
+        write(stamp, observed.encode())
+    cfg = read(CONFIG)
+    if not cfg.get('evmAuthority'):
+        authority('node-info', '--out', AUTH/'node-info.json')
+        n = read(HOME/'network.json')
+        ubft('validator', 'init', '--force', '--rpc', RPC, '--local-rpc', EXECUTION,
+             '--chain-id', read(RELEASE/'manifest.json')['chain_id'], '--ports', ','.join(map(str, n['ports'])),
+             '--evm-authority-socket', 'authority/operator.sock', '--evm-authority-credential', 'authority/operator.cred',
+             '--evm-authority-node-info', 'authority/node-info.json')
+
+
+def run(a, pins):
+    with lock('.node.lock'):
+        n = read(HOME/'network.json')
+        bootstrap(a, pins)
+        procs = {}
+
+        def start(name, args):
+            procs[name] = subprocess.Popen([str(x) for x in args], cwd=HOME, stdin=subprocess.DEVNULL)
+
+        def stop(name):
+            p = procs.pop(name)
+            if p.poll() is None:
+                p.terminate()
+                try:
+                    p.wait(12)
+                except subprocess.TimeoutExpired:
+                    p.kill()
+                    p.wait()
+
+        def shutdown(*_):
+            raise SystemExit(0)
+
+        signal.signal(signal.SIGTERM, shutdown)
+        signal.signal(signal.SIGINT, shutdown)
+        try:
+            private_rpc = ['--allow-private-http'] if pins.get('private_rehearsal') else []
+            start('rpc', ['python3', '/opt/validator/validator_rpc.py', '--upstream', n['rpc'], '--listen-port', 18485,
+                          *private_rpc])
+            start('ureth', ['unicity-reth', 'node', '--chain', RELEASE/'genesis.json', '--datadir', HOME/'ureth',
+                  '--p2p-secret-key', HOME/'ureth-key/p2p-secret', '--disable-discovery', '--addr', '127.0.0.1', '--port', n['ports'][2],
+                  '--ipcdisable', '--http', '--http.addr', '127.0.0.1', '--http.port', 18552, '--http.api', 'eth,net,debug',
+                  '--unicity.archive-state-proofs', '--authrpc.addr', '127.0.0.1', '--authrpc.port', 18553,
+                  '--authrpc.jwtsecret', HOME/'jwt/jwt.hex', '--log.file.max-files', 0,
+                  *(RELEASE/'ureth-flags.txt').read_text().split()])
+            wait_for('execution', lambda: rpc(EXECUTION, 'eth_chainId', []), limit=50)
+            utb = [*UTB, '--utb-genesis-id', pins['utb_genesis_id']]
+            roots, shards = peers('root'), peers('shard')
+            root_args = ['ubft', 'root-node', 'run', '--home', HOME/'root', *p2p(n, 'root', 0), '--bootnodes', ','.join(roots),
+                  '--rpc-server-address', '127.0.0.1:26852', '--trust-base', RELEASE/'trust-base.json',
+                  '--shard-conf', RELEASE/'full-shard-conf.json', '--shard-conf', RELEASE/'aggregator-conf.json',
+                  '--profile-3', '--q3-lane', '--b1-registry', '--genesis-identities', RELEASE/'genesis-identities.json',
+                  '--vr-deployment', RELEASE/'vr-deployment.json', '--pos-evm-rpc', EXECUTION, '--vr-shard-rpc', SHARD, *utb]
+            if not (AUTH/'fingerprint').exists():
+                epoch = n['rootEpoch']
+                if epoch is None:
+                    # A chain observation selects what the local root must
+                    # verify from genesis. It cannot authorize the authority.
+                    def hint():
+                        result = ubft('validator', 'status', '--rpc', RPC, '--json', output=True, check=False)
+                        if result.stdout:
+                            return json.loads(result.stdout).get('rootEpoch')
+                        return None
+                    epoch = wait_for('the current registry epoch', hint, limit=60)
+                install = ['--install-handoff-epoch', epoch] if epoch > 1 else []
+                start('root', [*root_args, *install])
+                scope = wait_for('the locally verified initial root and shard scope',
+                                 lambda: provision_scope(n, epoch), limit=300)
+                write(HOME/'authority-scope.json', json.dumps(scope).encode())
+                link_authority()
+                stop('root')
+            else:
+                link_authority()
+            start('root', [*root_args, '--vr-evm-authority-socket', AUTH/'pop.sock',
+                           '--vr-evm-authority-credential', AUTH/'pop.cred'])
+            shard_args = ['--home', HOME/'evm', *p2p(n, 'shard', 1), '--bootnodes', ','.join(roots + shards),
+                          '--rpc-server-address', '127.0.0.1:29352', '--trust-base', RELEASE/'trust-base.json',
+                          '--full-shard-conf', RELEASE/'full-shard-conf.json', '--executor', 'engine-api',
+                          '--genesis', RELEASE/'genesis.json', '--b1-profile', RELEASE/'b1-profile.json',
+                          '--engine-url', ENGINE, '--eth-url', EXECUTION, '--jwt-secret', HOME/'jwt/jwt.hex',
+                          '--engine-fee-collector', (RELEASE/'fee-collector.txt').read_text().strip(),
+                          '--execution-journal', HOME/'evm/execution-journal.db', '--archive-store', HOME/'evm/archive',
+                          '--archive-prune', '--archive-replica', shards[0].rsplit('/',1)[1],
+                          '--archive-replica', shards[1].rsplit('/',1)[1], '--trust-history-profile-2', '--q3-lane',
+                          '--journal-candidates', 4096, '--journal-observations', 8192, '--journal-bytes', 134217728,
+                          '--signing-authority-socket', AUTH/'client.sock', '--signing-authority-credential', AUTH/'client.cred',
+                          '--target-block-interval', '10000ms', *utb]
+            active = HOME/'shard-active.json'
+
+            def shard():
+                if active.exists():
+                    start('shard', ['ubft', 'shard-node', 'run', *shard_args])
+                else:
+                    start('shard', ['ubft', 'shard-node', 'restore', *shard_args,
+                          '--tip-uc', HOME/'seed-pin.uc.cbor', '--tip-tr', HOME/'seed-pin.tr.cbor',
+                          '--trust-body-id', read(HOME/'bootstrap.json')['body']])
+
+            shard()
+            enrolled = active.read_bytes() if active.exists() else None
+
+            class Health(BaseHTTPRequestHandler):
+                def do_GET(self):
+                    try:
+                        ready = bool(root_status()) and all(p.poll() is None for p in procs.values())
+                    except (OSError, ValueError):
+                        ready = False
+                    self.send_response(200 if ready else 503)
+                    self.end_headers()
+                    self.wfile.write(b'{"ready":true}\n' if ready else b'{"ready":false}\n')
+
+            with HTTPServer(('127.0.0.1', 29452), Health) as health:
+                health.timeout = 1
+                halted = threading.Event()
+                participant = threading.Thread(target=participate, args=(halted,), daemon=True)
+                participant.start()
+                while True:
+                    if active.exists() and active.read_bytes() != enrolled:
+                        stop('shard')
+                        shard()
+                        enrolled = active.read_bytes()
+                    for name, proc in procs.items():
+                        if proc.poll() is not None:
+                            raise RuntimeError(f'{name} exited with status {proc.returncode}')
+                    health.handle_request()
+        finally:
+            if 'halted' in locals():
+                halted.set()
+            for name in reversed(list(procs)):
+                stop(name)
+
+
+def local_status():
+    return ubft('validator', 'status', '--custody', read(RELEASE/'deployment.json')['custody'],
+                '--json', output=True, check=False, timeout=25)
+
+
+def show_status(_a, _pins):
+    result = local_status()
+    report = json.loads(result.stdout)
+    info = authority_status()
+    report['seat'] = (report.get('committee') or []).index(report['id']) + 1 if report.get('member') else None
+    report['authorityFingerprint'] = info['signingKeyFingerprint']
+    report['lastSignedCertificationRound'] = info['reservedRound'] if info['responseRetained'] else None
+    try:
+        with urllib.request.urlopen(SHARD + '/api/v1/operator/status', timeout=5) as response:
+            report['certifiedTip'] = json.load(response).get('certifiedTip')
+    except (OSError, ValueError):
+        report['certifiedTip'] = None
+    report['lastSignedUC'] = None
+    if report.get('member') and report.get('rootNodeId'):
+        observed = command('handoff-ubft', 'validator', 'last-signed-uc', '--execution', EXECUTION,
+                           '--root-rpc', ROOT, '--signer', report['rootNodeId'], output=True, check=False)
+        if observed.returncode == 0:
+            report['lastSignedUC'] = json.loads(observed.stdout)
+    print(json.dumps(report, indent=2))
+    return result.returncode
+
+
+def journal(path, phase, **data):
+    write(path, json.dumps({'phase':phase, **data}).encode())
+
+
+def participate(halted, *, execution=RPC, root=ROOT, member=None):
+    deployment = read(RELEASE/'deployment.json')
+    manifest = RELEASE/'manifest.json' if member is None else HOME/'deployment-manifest.json'
+    expected_genesis = read(manifest)['genesis_hash']
+    while not halted.wait(5):
+        try:
+            journal_path = HOME/'join.json'
+            if member is None and (not journal_path.exists() or
+                                   read(journal_path)['phase'] not in ('electing', 'activation', 'activated')):
+                continue
+            if rpc(execution, 'eth_getBlockByNumber', ['0x0', False])['hash'] != expected_genesis:
+                raise ValueError('the election source is on a different execution genesis')
+            block = rpc(execution, 'eth_getBlockByNumber', ['finalized', False])
+            result = rpc(execution, 'eth_call', [{'to':deployment['election'], 'data':'0x5552dcb8'},
+                                           {'blockHash':block['hash'], 'requireCanonical':True}])
+            if re.fullmatch(r'0x[0-9a-f]{64}', result) and int(result, 16):
+                local = ['--proof-member', member] if member is not None else []
+                with lock('.tx.lock'):
+                    command('handoff-ubft', 'validator', 'pos-publish', '--participate', '--result', result, *local)
+            view = rpc(root + '/api/v1/q3/status', '', {}, evm=False)
+            if view.get('switch') and view['switch']['phase'] not in ('running', 'following'):
+                continue
+            active = HOME/'shard-active.json'
+            if view['activeEpoch'] > 1 and (member is not None or active.exists()):
+                old = authority_status()
+                if (old['rootEpoch'] < view['activeEpoch'] or not old['sessionIssued'] or
+                        not active.exists() or read(active)['rootEpoch'] < view['activeEpoch']):
+                    advance(view['activeEpoch'], root=root, member=member)
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+            print(f'authority handoff: {error}', flush=True)
+
+
+def advance(target, *, root=ROOT, member=None):
+    with lock('.advance.lock'), tempfile.TemporaryDirectory(prefix='.activation-', dir=HOME) as temp:
+        proofs = []
+        for epoch in range(2, target + 1):
+            path = Path(temp)/f'activation-{epoch}.cbor'
+            ubft('q3', 'proof-envelope', '--root-rpc', root, '--epoch', epoch, '--out', path)
+            proofs.extend(['--proof', path])
+        advanced = json.loads(authority('advance-with-proof', '--client-socket', AUTH/'client.sock',
+                              '--out', AUTH/'client.cred', *proofs, output=True).stdout)
+        if advanced['rootEpoch'] != target or advanced['retired']:
+            raise ValueError('verified activation did not admit this authority')
+        journal(HOME/'shard-active.json', 'activated', rootEpoch=target, shardEpoch=advanced['shardEpoch'],
+                id=read(CONFIG)['id'] if member is None else member)
+
+
+def incumbent(a, _pins):
+    if not a.member_id:
+        raise ValueError('incumbent participation requires this authority’s --member-id')
+    with lock('.node.lock'):
+        participate(threading.Event(), execution='http://127.0.0.1:8545',
+                    root='http://127.0.0.1:8002', member=a.member_id)
+
+
+def join(a, pins):
+    if not a.yes:
+        raise ValueError('confirm the bond and gas payment with join --yes')
+    with lock('.join.lock'):
+        cfg = read(CONFIG)
+        if not cfg.get('evmAuthority'):
+            raise ValueError('start the authority and node containers before joining')
+        active = HOME/'shard-active.json'
+        if active.exists():
+            show_status(a, pins)
+            return 0
+        progress = HOME/'join.json'
+        if not progress.exists():
+            journal(progress, 'waiting-funding')
+        phase = read(progress)['phase']
+        if phase == 'waiting-funding':
+            def funded():
+                value = rpc(RPC, 'eth_getBalance', [cfg['payee'], 'latest'])
+                return int(value, 16) >= 101 * 10**18 or read(CONFIG).get('id')
+            wait_for('funding', funded)
+            journal(progress, 'applying')
+        if read(progress)['phase'] == 'applying':
+            first = ubft('validator', 'apply', output=True, check=False)
+            if first.returncode and 'signing-pos-policy-refused' not in first.stdout + first.stderr:
+                raise RuntimeError(first.stderr or first.stdout)
+            ident = read(CONFIG)['id']
+            if first.returncode:
+                policy = {'network':read(RELEASE/'vr-deployment.json')['networkWord'],
+                          'chainId':read(RELEASE/'manifest.json')['chain_id'], 'election':read(RELEASE/'deployment.json')['election'],
+                          'ids':[ident]}
+                write(AUTH/'pos-policy.json', json.dumps(policy).encode())
+                authority('pos-policy', '--policy', AUTH/'pos-policy.json')
+                ubft('validator', 'apply')
+            journal(progress, 'electing', id=ident)
+        ident = read(CONFIG)['id']
+        status = authority_status()
+        scope = HOME/'authority-scope.json'
+        base = read(scope if scope.exists() else HOME/'network.json')
+        target = wait_for('activated root epoch', lambda: active_member_epoch(root_status(), base['rootEpoch']))
+        journal(progress, 'activation', id=ident, rootEpoch=target)
+        shard = base['shardEpoch']
+        conf = AUTH/'activated-shard.json'
+        ubft('q3', 'shard-conf', '--root-rpc', ROOT, '--epoch', shard, '--out', conf)
+        if not status['enrollmentComplete']:
+            authority('complete-enrollment', '--shard-conf', conf)
+        advance(target)
+        journal(progress, 'activated', id=ident, rootEpoch=target)
+        wait_for('committee membership', lambda: json.loads(local_status().stdout).get('member'))
+        show_status(a, pins)
+        return 0
+
+
+def leave(a, _pins):
+    if not a.yes:
+        raise ValueError('confirm retirement with exit --yes, or claim after maturity with exit --claim --yes')
+    with lock('.join.lock'), lock('.tx.lock'):
+        ubft('validator', 'claim' if a.claim else 'exit')
+
+
+def main():
+    os.umask(0o077)
+    os.environ['UBFT_HOME'] = str(HOME)
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument('action', choices=['init', 'authority', 'run', 'join', 'status', 'exit', 'incumbent'])
+    p.add_argument('--ports', type=int, nargs=3, default=(27652, 29252, 31452))
+    p.add_argument('--announce-addresses', help='a reachable IPv4 multiaddress prefix, e.g. /ip4/192.0.2.10')
+    p.add_argument('--root-epoch', type=int, help='override the initial root epoch hint')
+    p.add_argument('--shard-epoch', type=int, help='override the successor shard epoch hint')
+    p.add_argument('--yes', action='store_true')
+    p.add_argument('--claim', action='store_true')
+    p.add_argument('--member-id', type=int)
+    a = p.parse_args()
+    pins = read(LOCK)
+    a.release_url, a.rpc_url = (pins[k] for k in ('release_url', 'rpc_url'))
+    if a.announce_addresses:
+        prefix, kind, address = a.announce_addresses.split('/')
+        if prefix or kind != 'ip4':
+            p.error('--announce-addresses requires an IPv4 multiaddress prefix')
+        ipaddress.IPv4Address(address)
+    if len(set(a.ports)) != 3 or any(not 1024 <= port <= 65535 for port in a.ports):
+        p.error('choose three distinct unprivileged P2P ports')
+    if HOME.stat().st_mode & 0o077:
+        p.error('/data must be private (0700)')
+    try:
+        fn = {'init':init, 'authority':authority_process, 'run':run, 'join':join, 'status':show_status, 'exit':leave,
+              'incumbent':incumbent}
+        raise SystemExit(fn[a.action](a, pins) or 0)
+    except (ValueError, OSError, RuntimeError, subprocess.SubprocessError) as error:
+        p.exit(1, f'validator: {error}\n')
+
+
+if __name__ == '__main__':
+    main()

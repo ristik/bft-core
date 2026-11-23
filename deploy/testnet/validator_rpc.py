@@ -6,6 +6,7 @@ import ipaddress
 import json
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import urlsplit
 
 from gateway import LOG_BLOCK_RANGE, MAX_BODY, MAX_RESULT_BYTES, check_log_filter
 
@@ -44,9 +45,24 @@ def operator_request(request, forward):
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--gateway-port', type=int, default=8545)
+    p.add_argument('--upstream', help='the public HTTPS RPC, or a private loopback HTTP gateway')
+    p.add_argument('--allow-private-http', action='store_true', help='private rehearsal access to an IPv4 bridge gateway')
     p.add_argument('--listen-port', type=int, default=18485)
+    p.add_argument('--listen-ip', type=ipaddress.IPv4Address, default=ipaddress.IPv4Address('127.0.0.1'))
     p.add_argument('--client-ip', type=ipaddress.ip_address, default=ipaddress.ip_address('127.0.0.1'))
     a = p.parse_args()
+    if not (a.listen_ip.is_loopback or (a.allow_private_http and a.listen_ip.is_private and not a.listen_ip.is_unspecified)):
+        p.error('the operator adapter must listen on loopback or a private rehearsal gateway')
+    upstream = urlsplit(a.upstream or f'http://127.0.0.1:{a.gateway_port}/')
+    private = upstream.hostname == '127.0.0.1'
+    if not private and a.allow_private_http:
+        try:
+            private = ipaddress.IPv4Address(upstream.hostname).is_private
+        except (TypeError, ValueError):
+            pass
+    if (not upstream.hostname or upstream.username or upstream.password or upstream.query or upstream.fragment
+            or (upstream.scheme != 'https' and (upstream.scheme != 'http' or not private))):
+        p.error('upstream must be HTTPS or an allowed private HTTP gateway')
     last = 0.0
 
     def forward(obj):
@@ -55,9 +71,10 @@ def main():
         interval = 0.55 if obj.get('method') == 'eth_getLogs' else 0.14
         time.sleep(max(0.0, last + interval - time.monotonic()))
         last = time.monotonic()
-        conn = http.client.HTTPConnection('127.0.0.1', a.gateway_port, timeout=20)
+        connection = http.client.HTTPSConnection if upstream.scheme == 'https' else http.client.HTTPConnection
+        conn = connection(upstream.hostname, upstream.port, timeout=20)
         try:
-            conn.request('POST', '/', json.dumps(obj), {'X-Forwarded-For': str(a.client_ip), 'Content-Type': 'application/json'})
+            conn.request('POST', upstream.path or '/', json.dumps(obj), {'X-Forwarded-For': str(a.client_ip), 'Content-Type': 'application/json'})
             response = conn.getresponse()
             return response.status, json.loads(response.read(MAX_RESULT_BYTES + 1024))
         finally:
@@ -81,7 +98,7 @@ def main():
             self.end_headers()
             self.wfile.write(data)
 
-    with HTTPServer(('127.0.0.1', a.listen_port), Handler) as server:
+    with HTTPServer((str(a.listen_ip), a.listen_port), Handler) as server:
         server.serve_forever()
 
 

@@ -225,3 +225,22 @@ func TestPosPublishCommandRequiresEachEffect(t *testing.T) {
 		require.Empty(t, f.sent)
 	})
 }
+
+func TestPublishReadyResultNeedsEveryMemberProofAndCanBeRetried(t *testing.T) {
+	f := &fakePosChain{pops: 4, vrState: 1, publishState: 2}
+	key, err := ethcrypto.GenerateKey()
+	require.NoError(t, err)
+	r := posPublishRun{
+		Election: common.Address{0xe1}, Registry: common.Address{3}, Rid: [32]byte{1},
+		Members: make([]vrclient.FrozenMember, 5), Chain: f,
+		Sender: vrclient.Sender{RPC: f.serve(t, 5), Key: key, ChainID: big.NewInt(1), Poll: time.Millisecond},
+	}
+	var out strings.Builder
+	require.NoError(t, publishReadyResult(context.Background(), &out, r))
+	require.Empty(t, f.sent, "a partial proof set never leads to a send")
+	f.pops = 5
+	require.NoError(t, publishReadyResult(context.Background(), &out, r))
+	require.Equal(t, []string{"finalize", "publish"}, f.sent)
+	require.NoError(t, publishReadyResult(context.Background(), &out, r))
+	require.Equal(t, []string{"finalize", "publish"}, f.sent, "retry sends nothing after agreed publication")
+}
