@@ -46,7 +46,10 @@ type Q3Follower struct {
 	// Local is the explicitly paired loopback root. Remote locators still
 	// follow the roots/mirrors policy. Wake hints never authenticate a bundle.
 	Local func(context.Context, uint64) (q3active.Bundle, error)
-	Wake  <-chan struct{}
+	// Wake signals a change to the retained LocalTip. Only a tip at or past
+	// the awaited epoch can interrupt remote discovery.
+	Wake     <-chan struct{}
+	LocalTip func() uint64
 }
 
 var errPairedActivationReady = errors.New("q3 follower: paired root published an activation")
@@ -98,20 +101,30 @@ func (f *Q3Follower) activate(ctx, discovery context.Context, epoch uint64) erro
 
 // awaitEpoch gives the wake reader the lifetime of this epoch's discovery,
 // including gaps between peer requests and between retries. The first hint
-// pre-empts discovery to check the local root again. If that check fails,
-// peers get uninterrupted attempts until the follower advances to a new epoch.
+// covering the awaited epoch pre-empts discovery to check the local root again.
+// If that check fails, peers get uninterrupted attempts until the follower
+// advances to a new epoch.
 func (f *Q3Follower) awaitEpoch(ctx context.Context, epoch uint64, retry time.Duration) error {
 	discovery := ctx
-	if f.Local != nil && f.Wake != nil {
+	if f.Local != nil && f.Wake != nil && f.LocalTip != nil {
 		watched, cancel := context.WithCancelCause(ctx)
 		discovery = watched
 		stopped := make(chan struct{})
 		go func() {
 			defer close(stopped)
-			select {
-			case <-f.Wake:
-				cancel(errPairedActivationReady)
-			case <-watched.Done():
+			for {
+				select {
+				case _, ok := <-f.Wake:
+					if !ok {
+						return
+					}
+					if f.LocalTip() >= epoch {
+						cancel(errPairedActivationReady)
+						return
+					}
+				case <-watched.Done():
+					return
+				}
 			}
 		}()
 		defer func() {

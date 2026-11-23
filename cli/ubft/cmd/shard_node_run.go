@@ -1899,6 +1899,7 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 			client := pairedActivationHTTP(time.Second)
 			defer client.CloseIdleConnections()
 			q3Follower.Wake = updates.wake
+			q3Follower.LocalTip = updates.tip.Load
 			q3Follower.Local = func(ctx context.Context, epoch uint64) (q3active.Bundle, error) {
 				if updates.tip.Load() < epoch {
 					return q3active.Bundle{}, q3shard.ErrQ3Unavailable

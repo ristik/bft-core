@@ -255,11 +255,11 @@ func TestQ3FollowerWakeInterruptsPeerDiscovery(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	entered, wake := make(chan struct{}, 1), make(chan struct{}, 1)
-	var available atomic.Bool
+	var tip atomic.Uint64
 	act := &fakeActivator{active: 1}
-	f := &Q3Follower{Runtime: act, AnchorEpoch: 1, CurrentRoots: ids(t, 1), Retry: time.Hour, Wake: wake,
+	f := &Q3Follower{Runtime: act, AnchorEpoch: 1, CurrentRoots: ids(t, 1), Retry: time.Hour, Wake: wake, LocalTip: tip.Load,
 		Local: func(_ context.Context, epoch uint64) (q3active.Bundle, error) {
-			if available.Load() && epoch == 2 {
+			if tip.Load() >= epoch {
 				return q3active.Bundle{}, nil
 			}
 			return q3active.Bundle{}, ErrQ3Unavailable
@@ -279,7 +279,7 @@ func TestQ3FollowerWakeInterruptsPeerDiscovery(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("fallback fetch did not start")
 	}
-	available.Store(true)
+	tip.Store(2)
 	wake <- struct{}{}
 	require.Eventually(t, func() bool { return act.ActiveEpoch() == 2 }, time.Second, time.Millisecond)
 	cancel()
@@ -306,13 +306,13 @@ func TestQ3FollowerObservesWakeBetweenPeerAttempts(t *testing.T) {
 	act := &fakeActivator{active: 1, refuse: map[string]bool{"refused": true}}
 	roots := ids(t, 2)
 	var firstDiscovery context.Context
-	var ready bool
+	var tip atomic.Uint64
 	f := &Q3Follower{
 		Runtime: followerRefusalProbe{act, func() {
 			// The first remote fetch has returned. Publish while its
 			// bundle is being refused, before the next peer is tried.
 			require.NoError(t, firstDiscovery.Err())
-			ready = true
+			tip.Store(2)
 			wake <- struct{}{}
 			select {
 			case <-firstDiscovery.Done():
@@ -321,9 +321,9 @@ func TestQ3FollowerObservesWakeBetweenPeerAttempts(t *testing.T) {
 				t.Fatal("the discovery reader missed the wake between peers")
 			}
 		}},
-		AnchorEpoch: 1, CurrentRoots: roots, Wake: wake,
-		Local: func(context.Context, uint64) (q3active.Bundle, error) {
-			if ready {
+		AnchorEpoch: 1, CurrentRoots: roots, Wake: wake, LocalTip: tip.Load,
+		Local: func(_ context.Context, epoch uint64) (q3active.Bundle, error) {
+			if tip.Load() >= epoch {
 				return q3active.Bundle{Candidate: []byte("local")}, nil
 			}
 			return q3active.Bundle{}, ErrQ3Unavailable
@@ -338,14 +338,97 @@ func TestQ3FollowerObservesWakeBetweenPeerAttempts(t *testing.T) {
 	require.EqualValues(t, 2, act.ActiveEpoch())
 }
 
+func TestQ3FollowerOnlyWakesForTheAwaitedEpoch(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		start uint64
+	}{
+		{name: "restart replays installed epoch", start: 2},
+		{name: "paired publication follows peer installation", start: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			const installed, awaited = 2, 3
+			act := &fakeActivator{active: tc.start}
+			wake := make(chan struct{}, 1)
+			observed := make(chan uint64, 2)
+			entered := make(chan context.Context, 1)
+			var tip atomic.Uint64
+			f := &Q3Follower{
+				Runtime: act, AnchorEpoch: 1, CurrentRoots: ids(t, 1), Wake: wake, Retry: time.Hour,
+				LocalTip: func() uint64 {
+					latest := tip.Load()
+					observed <- latest
+					return latest
+				},
+				Local: func(_ context.Context, epoch uint64) (q3active.Bundle, error) {
+					if tip.Load() >= epoch {
+						return q3active.Bundle{Candidate: []byte("local successor")}, nil
+					}
+					return q3active.Bundle{}, ErrQ3Unavailable
+				},
+				Fetch: func(ctx context.Context, _ peer.ID, epoch uint64) (q3active.Bundle, error) {
+					if epoch == installed {
+						return q3active.Bundle{Candidate: []byte("peer predecessor")}, nil
+					}
+					if epoch == awaited {
+						select {
+						case entered <- ctx:
+						default:
+						}
+					}
+					// No peer can finish discovery for the successor until
+					// the paired publication interrupts it.
+					<-ctx.Done()
+					return q3active.Bundle{}, ctx.Err()
+				},
+			}
+			done := make(chan error, 1)
+			go func() { done <- f.Run(ctx) }()
+			defer func() {
+				cancel()
+				require.NoError(t, <-done)
+			}()
+			var slow context.Context
+			select {
+			case slow = <-entered:
+			case <-ctx.Done():
+				t.Fatal("successor discovery did not start")
+			}
+			require.EqualValues(t, installed, act.ActiveEpoch())
+			tip.Store(installed)
+			wake <- struct{}{}
+			select {
+			case latest := <-observed:
+				require.EqualValues(t, installed, latest)
+			case <-ctx.Done():
+				t.Fatal("watcher did not observe the stale publication")
+			}
+			require.NoError(t, slow.Err(), "the installed epoch must leave the current peer request running")
+			tip.Store(awaited)
+			wake <- struct{}{}
+			select {
+			case latest := <-observed:
+				require.EqualValues(t, awaited, latest)
+			case <-ctx.Done():
+				t.Fatal("watcher stopped listening before the successor publication")
+			}
+			require.Eventually(t, func() bool { return act.ActiveEpoch() == awaited }, time.Second, time.Millisecond)
+			require.ErrorIs(t, context.Cause(slow), errPairedActivationReady)
+		})
+	}
+}
+
 func TestQ3FollowerContinuingHintsCannotStarveAValidPeer(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	entered, wake := make(chan struct{}, 1), make(chan struct{}, 1)
 	act := &fakeActivator{active: 1}
 	var attempts, local atomic.Int32
+	var tip atomic.Uint64
 	f := &Q3Follower{
-		Runtime: act, AnchorEpoch: 1, CurrentRoots: ids(t, 1), Wake: wake, Retry: time.Millisecond,
+		Runtime: act, AnchorEpoch: 1, CurrentRoots: ids(t, 1), Wake: wake, LocalTip: tip.Load, Retry: time.Millisecond,
 		Local: func(_ context.Context, epoch uint64) (q3active.Bundle, error) {
 			if epoch == 2 {
 				local.Add(1)
@@ -380,6 +463,7 @@ func TestQ3FollowerContinuingHintsCannotStarveAValidPeer(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("first peer fetch did not start")
 	}
+	tip.Store(2)
 	wake <- struct{}{}
 	hintsDone := make(chan struct{})
 	go func() {
