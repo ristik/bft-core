@@ -35,3 +35,45 @@ func TestVerifiedActivationCancelsWorkBeforeAdmittingSuccessor(t *testing.T) {
 	require.Equal(t, next, rootActivationOf(fresh))
 	require.NoError(t, underRootActivation(fresh, func() error { return nil }))
 }
+
+type activationBuildProbe struct {
+	Executor
+	built chan RoundParams
+}
+
+func (p activationBuildProbe) Build(_ context.Context, params RoundParams) (BuildID, error) {
+	p.built <- params
+	return "", ErrBuildUnavailable
+}
+
+func TestVerifiedActivationCancelsPacedLeaderAndFirstSuccessorBuildsImmediately(t *testing.T) {
+	g := NewRootActivationGate(RootActivation{Epoch: 1})
+	exec := activationBuildProbe{built: make(chan RoundParams, 1)}
+	round := &Round{nodeID: "leader", executor: exec, pacer: blockPacer{from: time.Now(), interval: time.Hour}}
+	old, done, err := g.work(t.Context(), 1)
+	require.NoError(t, err)
+	defer done()
+	returned := make(chan error, 1)
+	go func() {
+		_, _, err := round.produceBlock(old, BlockRef{}, Expectation{}, nil, "leader", nil, nil, nil)
+		returned <- err
+	}()
+	next := RootActivation{Epoch: 2, BodyID: [32]byte{1}}
+	require.NoError(t, g.Begin(next))
+	select {
+	case err := <-returned:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(time.Second):
+		t.Fatal("obsolete leader pacing did not stop")
+	}
+	require.Empty(t, exec.built)
+	require.NoError(t, g.Install(next))
+	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+	defer cancel()
+	fresh, end, err := g.work(ctx, 2)
+	require.NoError(t, err)
+	defer end()
+	_, _, err = round.produceBlock(fresh, BlockRef{}, Expectation{}, nil, "leader", nil, nil, nil)
+	require.ErrorIs(t, err, ErrBuildUnavailable)
+	require.Equal(t, next, (<-exec.built).Activation)
+}
