@@ -108,6 +108,41 @@ func TestJournalAdmissionDropsRetiredPendingResponse(t *testing.T) {
 		"the current epoch must reach authentication rather than being discarded as stale")
 }
 
+type movingJournalEpoch struct{ current uint64 }
+
+func (e *movingJournalEpoch) CurrentRootEpoch() (uint64, bool) { return e.current, true }
+
+func TestJournalAdmissionDoesNotDriveRetiredCertificateAfterActivationDuringDelivery(t *testing.T) {
+	chain, origin, c, id := adapterFixture(t)
+	ctx := t.Context()
+	limits := configuredprogress.JournalLimits{Candidates: 2, Observations: 3, Bytes: 16 << 20}
+	store, err := configuredprogress.OpenConfiguredV2(t.TempDir()+"/journal.db", configuredprogress.Settings{Retain: 2})
+	require.NoError(t, err)
+	defer store.Close()
+	_, _, err = store.Initialize(ctx, c)
+	require.NoError(t, err)
+	require.NoError(t, store.EnableJournal(ctx, c, limits))
+	uc, tr := journalBootstrap(t, chain)
+	epoch := &movingJournalEpoch{current: uc.GetRootEpoch()}
+	var fed, driven bool
+	a, err := (JournalFactory{Store: store, Origin: origin, Limits: limits, EpochAuthority: epoch}).Start(ctx, id, adapterGate{}, shardnode.AdmissionCallbacks{
+		AuthenticatedFeed: func(*types.UnicityCertificate, *certification.TechnicalRecord) {
+			fed = true
+			epoch.current++
+		},
+		DeliverDurable: func(context.Context, *types.UnicityCertificate, *certification.TechnicalRecord) error {
+			driven = true
+			return rootinput.ErrV2Context
+		},
+	})
+	require.NoError(t, err)
+	defer a.Close()
+	require.NoError(t, a.Submit(ctx, uc, tr))
+	require.True(t, fed, "the authenticated terminal observation is retained")
+	require.False(t, driven, "the retired certificate never supplies live round input")
+	require.False(t, a.(*journalAdmission).Pending())
+}
+
 func TestJournalFactoryCarriesCheckedExecutionIdentity(t *testing.T) {
 	_, origin, c, id := adapterFixture(t)
 	c.ExecutionConfigV2 = sha256.Sum256([]byte("checked execution identity"))

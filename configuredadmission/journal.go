@@ -209,7 +209,15 @@ func (a *journalAdmission) Submit(ctx context.Context, uc *types.UnicityCertific
 			return fmt.Errorf("%w: certified target %x has no retained proposal body; certification is durable but the shard remains unready", configuredprogress.ErrUnavailable, observed.TargetHash)
 		}
 	}
-	return a.callbacks.DeliverDurable(ctx, current.Certificate(), current.TechnicalRecord())
+	currentUC := current.Certificate()
+	// The journal read and peer catch-up can span a handoff. Preserve the
+	// authenticated observation, but do not start a round with retired authority.
+	if authority := a.context.Observation.EpochAuthority; authority != nil {
+		if epoch, ready := authority.CurrentRootEpoch(); ready && currentUC.GetRootEpoch() < epoch {
+			return nil
+		}
+	}
+	return a.callbacks.DeliverDurable(ctx, currentUC, current.TechnicalRecord())
 }
 
 func laterRootUC(a, b *types.UnicityCertificate) bool {

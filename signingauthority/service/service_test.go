@@ -69,6 +69,11 @@ func newFixtureWithLog(t *testing.T, log *slog.Logger) *fixture { return newFixt
 // newFixtureWith builds the fixture with authority options; pin, when set, is given the fixture's own trust base as its lineage pin.
 func newFixtureWith(t *testing.T, log *slog.Logger, options func(tb *types.RootTrustBaseV1) []signingauthority.Option) *fixture {
 	t.Helper()
+	return newConfiguredFixture(t, log, options, ManagedSession{})
+}
+
+func newConfiguredFixture(t *testing.T, log *slog.Logger, options func(*types.RootTrustBaseV1) []signingauthority.Option, managed ManagedSession) *fixture {
+	t.Helper()
 	rootSigner, err := abcrypto.NewInMemorySecp256K1Signer()
 	require.NoError(t, err)
 	tb, ok := testtrustbase.NewTrustBase(t, rootSigner).(*types.RootTrustBaseV1)
@@ -99,7 +104,7 @@ func newFixtureWith(t *testing.T, log *slog.Logger, options func(tb *types.RootT
 
 	operatorCredential, err := NewCredential()
 	require.NoError(t, err)
-	server, err := NewServer(authority, Config{OperatorCredential: operatorCredential, Log: log})
+	server, err := NewServer(authority, Config{OperatorCredential: operatorCredential, Log: log, ManagedSession: managed})
 	require.NoError(t, err)
 	t.Cleanup(server.Close)
 
@@ -399,7 +404,7 @@ func TestTheClientOffersSigningAndReadOnlyRestoreStatus(t *testing.T) {
 	for i := 0; i < reflect.TypeOf(&OperatorClient{}).NumMethod(); i++ {
 		operatorMethods = append(operatorMethods, reflect.TypeOf(&OperatorClient{}).Method(i).Name)
 	}
-	require.ElementsMatch(t, []string{"AdvanceEpoch", "AdvanceWithProof", "Close", "CompleteEnrollment", "Enrollment", "ReplaceSession", "SignDelegationPossession", "SignElectionPoP", "SignHandoffPoP", "SignRegistration", "SignPosPoP", "SetPosPolicy", "ReloadRegistrationPolicy", "Status"}, operatorMethods,
+	require.ElementsMatch(t, []string{"AdvanceEpoch", "AdvanceWithProof", "Close", "CompleteEnrollment", "Enrollment", "PublishSession", "ReplaceSession", "ReplaceSessionFor", "SignDelegationPossession", "SignElectionPoP", "SignHandoffPoP", "SignRegistration", "SignPosPoP", "SetPosPolicy", "ReloadRegistrationPolicy", "Status"}, operatorMethods,
 		"and the control plane signs nothing but the three possession messages (its own key, each recomputed from typed inputs), never a certification")
 }
 
@@ -763,7 +768,7 @@ func (f *fixture) blockedServer(t *testing.T, cfg Config) (*Server, blockedTrust
 	// Registered after Close so it runs before it: a test that fails with a lookup still blocked must
 	// not leave its own cleanup waiting on that lookup.
 	t.Cleanup(trust.free)
-	credential, err := server.replaceSession()
+	credential, err := server.replaceSession("")
 	require.NoError(t, err)
 
 	local, remote := net.Pipe()

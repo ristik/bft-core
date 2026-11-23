@@ -250,7 +250,7 @@ def check_authorities_unchanged(boot, final, n):
 
 def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, with_pos=False, rpc_bind=operator_rpc.DEFAULT_BIND, utb=None, utb_aggregator='integration', *,
              payout=FAUCET_PAYOUT, subnets=None, root_cpus=ROOT_CPUS, block_interval_ms=0, port_offset=0,
-             vr_pos=False, captcha_secret_file='./faucet-secrets/hcaptcha-secret', public_p2p_ip=None):
+             vr_pos=False, vr_authority_follow=None, captcha_secret_file='./faucet-secrets/hcaptcha-secret', public_p2p_ip=None):
     """JSON is a YAML subset, accepted directly by Docker Compose. `utb`: the pinned EntryID of the UTB genesis entry (0x..), or None for the package without the signed history.
     `payout`: the faucet signer's payout per claim (UCT, network.json's). `subnets`: bridged_subnets(), the faucet and edge networks. `root_cpus`: each root's CPU quota.
     `block_interval_ms`: the shard nodes' --target-block-interval (0: none). `port_offset`: added to every host-published port (HOST_PORTS), so
@@ -284,6 +284,9 @@ def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, wit
                 '--utb-bundle-address', '127.0.0.1:8011']
             authority_flags = ['--pop-socket', '/authority/pop/pop.sock', '--pop-credential', '/authority/pop/pop.cred',
                 '--fence-provision-file', '/authority/fence.json', '--require-pos-policy', '--dev-allow-late-pos-policy']
+            if vr_authority_follow:
+                authority_flags += ['--follow-root-activations', vr_authority_follow,
+                                    '--follow-client-credential', '/authority/client.cred']
         # One network namespace per validator ENTITY for its root and its shard node: the operator endpoints of both accept loopback peers only, so the existing
         # q3-readiness (which needs both) runs inside the entity's namespace. The holder owns the namespace and the DNS names, so recreating a root (the install
         # restart) or restarting the shard does not take the namespace down. Different entities stay in different namespaces; the authority (unix sockets), the
@@ -465,6 +468,11 @@ def main():
             p.error(f'{Path(tool).name} must be built from clean pinned BFT source')
     if a.block_interval_ms and '--target-block-interval' not in subprocess.run([ubft,'shard-node','run','--help'],capture_output=True,text=True).stdout:
         p.error('the pinned ubft has no shard-node run --target-block-interval (bft-core#1167): bump pins.json past it, or pass --block-interval-ms 0')
+    vr_authority_follow = None
+    if a.vr_pos:
+        authority_help = subprocess.check_output([ubft, 'signing-authority', 'run', '--help'], text=True)
+        if '--follow-root-activations' in authority_help:
+            vr_authority_follow = 'http://' + operator_rpc.listen(a.rpc_bind, operator_rpc.ROOT_PORT)
     if not a.offline_validation:
         if os.geteuid()!=0: p.error('live generation must run as root on Linux to assign UID 10001 ownership')
         subprocess.run(['docker','info'],check=True,stdout=subprocess.DEVNULL)
@@ -526,7 +534,7 @@ def main():
             # every authority of a --utb generation refused the first activation); main() checks the final compose names the same entrypoints
             topology_options=dict(utb=utb_pin,utb_aggregator=a.utb_aggregator,payout=a.faucet_payout,subnets=subnets,
                 root_cpus=a.root_cpus,port_offset=check_port_offset(a.port_offset),block_interval_ms=a.block_interval_ms,
-                vr_pos=a.vr_pos,captcha_secret_file=secret,public_p2p_ip=a.public_p2p_ip)
+                vr_pos=a.vr_pos,vr_authority_follow=vr_authority_follow,captcha_secret_file=secret,public_p2p_ip=a.public_p2p_ip)
             boot=immutable(topology(out,a.validators,{'root':roots,'evm':evms},records['images'],a.captcha_sitekey,**topology_options))
             write(out/'compose.yaml',boot)
             def authority(i,*args):
