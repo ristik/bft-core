@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 
@@ -24,13 +27,10 @@ func (o *followingOperator) Status(context.Context) (signingauthority.Status, er
 func (o *followingOperator) AdvanceWithProof(_ context.Context, proof []byte) (signingauthority.AdvanceResult, error) {
 	return o.prove(proof)
 }
-func (o *followingOperator) ReplaceSession(context.Context) ([]byte, error) {
-	return nil, errors.New("unexpected session replacement")
-}
-
 func TestAuthorityFollowsOnlyMissingProofsAndRepairsInterruptedPublication(t *testing.T) {
 	o := &followingOperator{status: signingauthority.Status{RootEpoch: 128, LineageEpoch: 128, LineagePinned: true}}
 	var fetched []uint64
+	provisioned := false
 	proofs, sessions := 0, 0
 	errDisk := errors.New("publication interrupted")
 	o.prove = func(raw []byte) (signingauthority.AdvanceResult, error) {
@@ -48,8 +48,12 @@ func TestAuthorityFollowsOnlyMissingProofsAndRepairsInterruptedPublication(t *te
 			}
 			return nil, nil
 		},
-		ensureSession: func(_ context.Context, status signingauthority.Status) error {
-			require.EqualValues(t, 129, status.RootEpoch)
+		provisioned: func() bool { return provisioned },
+		ensureSession: func() error {
+			if o.status.SessionIssued {
+				return nil
+			}
+			require.EqualValues(t, 129, o.status.RootEpoch)
 			sessions++
 			if sessions == 1 {
 				return errDisk
@@ -61,17 +65,103 @@ func TestAuthorityFollowsOnlyMissingProofsAndRepairsInterruptedPublication(t *te
 	_, err := f.step(t.Context())
 	require.NoError(t, err)
 	require.Empty(t, fetched, "bootstrap stays operator-provisioned")
-	o.status.SessionIssued = true
+	o.status.SessionIssued, provisioned = true, true
 	_, err = f.step(t.Context())
 	require.ErrorIs(t, err, errDisk)
 	_, err = f.step(t.Context())
 	require.NoError(t, err)
-	require.Equal(t, []uint64{129}, fetched, "the verified proof was not replayed for the lost file")
+	require.Equal(t, []uint64{129, 130}, fetched, "the verified proof was not replayed for the lost file")
 	_, err = f.step(t.Context())
 	require.NoError(t, err)
-	require.Equal(t, []uint64{129, 130}, fetched)
+	require.Equal(t, []uint64{129, 130, 130}, fetched)
 	require.Equal(t, 1, proofs)
 	require.Equal(t, 2, sessions)
+}
+
+func TestAuthorityRepairsOperatorOnlyAdvanceWithLostReply(t *testing.T) {
+	o := &followingOperator{status: signingauthority.Status{
+		RootEpoch: 128, LineageEpoch: 128, LineagePinned: true, SessionIssued: true,
+	}}
+	o.prove = func([]byte) (signingauthority.AdvanceResult, error) {
+		o.status.RootEpoch, o.status.LineageEpoch, o.status.SessionIssued = 129, 129, false
+		return signingauthority.AdvanceResult{}, io.ErrUnexpectedEOF
+	}
+	_, err := o.AdvanceWithProof(t.Context(), []byte("operator's epoch 129 proof"))
+	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+
+	f := authorityActivationFollower{
+		operator:    o,
+		provisioned: func() bool { return true }, // managed bootstrap happened before this worker ever polled
+		fetch: func(_ context.Context, epoch uint64) ([]byte, error) {
+			require.EqualValues(t, 130, epoch)
+			return nil, nil
+		},
+		ensureSession: func() error {
+			require.False(t, o.status.SessionIssued)
+			o.status.SessionIssued = true
+			return nil
+		},
+	}
+	_, err = f.step(t.Context())
+	require.NoError(t, err)
+	require.True(t, o.status.SessionIssued)
+}
+
+func TestAuthorityFollowsRemovalWhileCredentialPublicationFails(t *testing.T) {
+	o := &followingOperator{status: signingauthority.Status{
+		RootEpoch: 128, LineageEpoch: 128, LineagePinned: true, SessionIssued: true,
+	}}
+	o.prove = func(raw []byte) (signingauthority.AdvanceResult, error) {
+		switch string(raw) {
+		case "epoch 129":
+			o.status.RootEpoch, o.status.LineageEpoch, o.status.SessionIssued = 129, 129, false
+			return signingauthority.AdvanceResult{Epoch: 129, Advanced: true}, nil
+		case "epoch 130":
+			o.status.LineageEpoch, o.status.Retired = 130, true
+			return signingauthority.AdvanceResult{Epoch: 130, Retired: true}, nil
+		}
+		return signingauthority.AdvanceResult{}, fmt.Errorf("unexpected proof %s", raw)
+	}
+	publications := 0
+	active := uint64(129)
+	f := authorityActivationFollower{
+		operator:    o,
+		provisioned: func() bool { return true },
+		fetch: func(_ context.Context, epoch uint64) ([]byte, error) {
+			if epoch <= active {
+				return fmt.Appendf(nil, "epoch %d", epoch), nil
+			}
+			return nil, nil
+		},
+		ensureSession: func() error {
+			if o.status.Retired {
+				return nil
+			}
+			publications++
+			return os.ErrPermission
+		},
+	}
+	result, err := f.step(t.Context())
+	require.True(t, result.Advanced)
+	require.ErrorIs(t, err, os.ErrPermission)
+	_, err = f.step(t.Context())
+	require.ErrorIs(t, err, os.ErrPermission)
+	active = 130
+	result, err = f.step(t.Context())
+	require.NoError(t, err)
+	require.True(t, result.Retired)
+	require.True(t, o.status.Retired)
+	require.EqualValues(t, 130, o.status.LineageEpoch)
+	require.Equal(t, 2, publications, "the retired scope no longer tries to write the still-unwritable file")
+}
+
+func TestManagedSessionTargetUsesTheOperatorSocketDirectory(t *testing.T) {
+	dir := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "alias")
+	require.NoError(t, os.Symlink(dir, alias))
+	target, err := sessionPublicationTarget(filepath.Join(alias, "operator.sock"), filepath.Join(dir, "client.cred"))
+	require.NoError(t, err)
+	require.Equal(t, "client.cred", target)
 }
 
 func TestAuthorityFetchesCommittedSuccessorFromLoopback(t *testing.T) {

@@ -326,9 +326,14 @@ BFT binary that supports `--follow-root-activations`, each packaged authority
 fetches missing committed activation bundles from the root in its own pod.
 It verifies each bundle under its own pinned lineage and publishes the new
 client credential after an advance. The incumbent shard reloads the credential
-in process. Use the operator's `vr-pos-advance` rehearsal stage for packages
-built with older BFT binaries. The joining operator provisions its own
-authority. Check the assignment, quorum and a subsequent UC before recording
+in process. Use the matching binary for operator commands on a managed authority.
+With `--out` pointing to the managed file, operator rotation and automatic renewal
+use the same authority-side publication order. An explicit alternate `--out`
+fences the managed file for the current scope. The operator provisions the first
+managed session. From then on the authority can recover a session after a lost
+operator reply and continue verifying handoffs even during a publication error.
+Use the operator's `vr-pos-advance` rehearsal stage for packages built with older
+BFT binaries. Check the assignment, quorum and a subsequent UC before recording
 the join as complete.
 
 ## Monitoring, logs and incidents

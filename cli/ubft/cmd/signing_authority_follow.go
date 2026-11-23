@@ -35,13 +35,33 @@ func (f *signingAuthorityRunFlags) validateActivationFollower() error {
 	return nil
 }
 
+// sessionPublicationTarget identifies a file relative to its operator socket. Use
+// its parent because atomic publication replaces the last component itself.
+func sessionPublicationTarget(socket, path string) (string, error) {
+	socketPath, err := filepath.Abs(socket)
+	if err != nil {
+		return "", err
+	}
+	if resolved, err := filepath.EvalSymlinks(socketPath); err == nil {
+		socketPath = resolved
+	} else if parent, err := filepath.EvalSymlinks(filepath.Dir(socketPath)); err == nil {
+		socketPath = filepath.Join(parent, filepath.Base(socketPath))
+	}
+	path, err = filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	if parent, err := filepath.EvalSymlinks(filepath.Dir(path)); err == nil {
+		path = filepath.Join(parent, filepath.Base(path))
+	}
+	return filepath.Rel(filepath.Dir(socketPath), path)
+}
+
 type authorityActivationFollower struct {
 	operator      advanceOperator
 	fetch         func(context.Context, uint64) ([]byte, error)
-	ensureSession func(context.Context, signingauthority.Status) error
-	// Keep the obligation to publish the new credential even if the local
-	// call failed after advancing or replacing the session.
-	pendingEpoch uint64
+	provisioned   func() bool
+	ensureSession func() error
 }
 
 func (f *authorityActivationFollower) step(ctx context.Context) (signingauthority.AdvanceResult, error) {
@@ -49,47 +69,17 @@ func (f *authorityActivationFollower) step(ctx context.Context) (signingauthorit
 	if err != nil {
 		return signingauthority.AdvanceResult{}, err
 	}
-	if status.Faulted || status.KeyLost || !status.LineagePinned {
+	if status.Faulted || status.KeyLost || !status.LineagePinned || (!status.Retired && !f.provisioned()) {
 		return signingauthority.AdvanceResult{}, nil
 	}
-	if f.pendingEpoch != 0 && status.RootEpoch >= f.pendingEpoch {
-		if !status.Retired {
-			if err := f.ensureSession(ctx, status); err != nil {
-				return signingauthority.AdvanceResult{}, err
-			}
-		}
-		f.pendingEpoch = 0
+	// A verified exclusion fences locally even when the credential cannot be
+	// written. Follow the lineage before attempting to repair the latest session.
+	raw, proofErr := f.fetch(ctx, status.LineageEpoch+1)
+	var result signingauthority.AdvanceResult
+	if proofErr == nil && len(raw) != 0 {
+		result, proofErr = f.operator.AdvanceWithProof(ctx, raw)
 	}
-	// Enrollment and the first session are explicitly provisioned by the operator.
-	// A retired authority can still follow lineage to a verified recovery.
-	if !status.SessionIssued && !status.Retired {
-		return signingauthority.AdvanceResult{}, nil
-	}
-	next := status.LineageEpoch + 1
-	raw, err := f.fetch(ctx, next)
-	if err != nil || len(raw) == 0 {
-		return signingauthority.AdvanceResult{}, err
-	}
-	if next > status.RootEpoch {
-		f.pendingEpoch = next
-	}
-	result, err := f.operator.AdvanceWithProof(ctx, raw)
-	if err != nil {
-		return result, err
-	}
-	if result.Retired {
-		f.pendingEpoch = 0
-	} else if result.Advanced {
-		current, err := f.operator.Status(ctx)
-		if err != nil {
-			return result, err
-		}
-		if err := f.ensureSession(ctx, current); err != nil {
-			return result, err
-		}
-		f.pendingEpoch = 0
-	}
-	return result, nil
+	return result, errors.Join(proofErr, f.ensureSession())
 }
 
 func (f *authorityActivationFollower) run(ctx context.Context, log *slog.Logger) {
@@ -106,7 +96,7 @@ func (f *authorityActivationFollower) run(ctx context.Context, log *slog.Logger)
 				log.WarnContext(ctx, "following root activation", "error", err)
 				lastFailure = time.Now()
 			}
-			if err == nil && (result.Advanced || result.Retired && !result.Replay) {
+			if result.Advanced || result.Retired && !result.Replay {
 				log.InfoContext(ctx, "followed root activation", "epoch", result.Epoch, "retired", result.Retired)
 			}
 		}

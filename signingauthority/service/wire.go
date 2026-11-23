@@ -80,8 +80,9 @@ const (
 	opReloadRegistrationPolicy op = 111
 	// opSignPosPoP asks for the P85 assignment possession proof of the pinned election; opSetPosPolicy pins that election once (#1216).
 	// Operator channel only.
-	opSignPosPoP   op = 112
-	opSetPosPolicy op = 113
+	opSignPosPoP     op = 112
+	opSetPosPolicy   op = 113
+	opPublishSession op = 114
 )
 
 // MaxAdvanceProofBytes is the largest activation bundle one opAdvanceWithProof can carry: the frame less an allowance for the request's
@@ -104,7 +105,7 @@ func (o op) servedToPoP() bool { return o == opSignHandoffPoP }
 func (o op) servedToOperator() bool {
 	switch o {
 	case opReplaceSession, opStatus, opEnrollment, opCompleteEnrollment, opAdvanceEpoch, opSignHandoffPoP, opSignElectionPoP, opSignDelegationPossession,
-		opAdvanceWithProof, opSignRegistration, opReloadRegistrationPolicy, opSignPosPoP, opSetPosPolicy:
+		opAdvanceWithProof, opSignRegistration, opReloadRegistrationPolicy, opSignPosPoP, opSetPosPolicy, opPublishSession:
 		return true
 	}
 	return false
@@ -124,6 +125,8 @@ func (o op) String() string {
 		return "restore-status"
 	case opReplaceSession:
 		return "replace-session"
+	case opPublishSession:
+		return "publish-session"
 	case opStatus:
 		return "status"
 	case opEnrollment:
@@ -150,6 +153,18 @@ func (o op) String() string {
 		return "set-pos-policy"
 	}
 	return fmt.Sprintf("unknown(%d)", uint64(o))
+}
+
+type publishSessionRequest struct {
+	_       struct{} `cbor:",toarray"`
+	Target  string
+	Replace bool
+}
+
+type publishSessionResult struct {
+	_       struct{} `cbor:",toarray"`
+	Managed bool
+	Issued  bool
 }
 
 type wireRequest struct {

@@ -322,10 +322,6 @@ func signingAuthorityRun(ctx context.Context, flags *signingAuthorityRunFlags) e
 		go provisionFenceWhenReady(ctx, log, flags.FenceProvisionFile, fenceGen, flags.ActivationSourceURL, authority, flags.observe.Meter("signingauthority"), func() uint64 { return flags.RootEpoch })
 	}
 
-	server, err := service.NewServer(authority, service.Config{OperatorCredential: operatorCredential, PoPCredential: popCredential, Log: log})
-	if err != nil {
-		return err
-	}
 	clientListener, err := service.ListenUnix(flags.ClientSocket)
 	if err != nil {
 		return fmt.Errorf("client socket: %w", err)
@@ -343,6 +339,38 @@ func signingAuthorityRun(ctx context.Context, flags *signingAuthorityRunFlags) e
 			return fmt.Errorf("possession-proof socket: %w", err)
 		}
 		defer func() { _ = popListener.Close() }()
+	}
+
+	serverConfig := service.Config{OperatorCredential: operatorCredential, PoPCredential: popCredential, Log: log}
+	if flags.FollowCredential != "" {
+		target, err := sessionPublicationTarget(flags.OperatorSocket, flags.FollowCredential)
+		if err != nil {
+			return err
+		}
+		operatorTarget, err := sessionPublicationTarget(flags.OperatorSocket, flags.OperatorCredential)
+		if err != nil {
+			return err
+		}
+		if target == operatorTarget {
+			return errors.New("automatic activation must write a separate client credential file")
+		}
+		serverConfig.ManagedSession = service.ManagedSession{
+			Target: target,
+			Publish: func(credential []byte) error {
+				return writeCredentialFile(flags.FollowCredential, credential, true)
+			},
+			Matches: func(credential []byte) (bool, error) {
+				current, err := readCredentialFile(flags.FollowCredential)
+				if errors.Is(err, os.ErrNotExist) {
+					return false, nil
+				}
+				return bytes.Equal(current, credential), err
+			},
+		}
+	}
+	server, err := service.NewServer(authority, serverConfig)
+	if err != nil {
+		return err
 	}
 
 	publicKey, err := authority.SigningPublicKey()
@@ -367,14 +395,10 @@ func signingAuthorityRun(ctx context.Context, flags *signingAuthorityRunFlags) e
 			return err
 		}
 		follower := authorityActivationFollower{
-			operator: operator,
-			fetch:    fetchAuthorityActivation(flags.FollowRootRPC),
-			ensureSession: func(ctx context.Context, status signingauthority.Status) error {
-				_, err := ensureAuthoritySession(ctx, operator, status, flags.FollowCredential, func(ctx context.Context) error {
-					return checkClientCredential(ctx, flags.ClientSocket, flags.FollowCredential, time.Second)
-				})
-				return err
-			},
+			operator:      operator,
+			fetch:         fetchAuthorityActivation(flags.FollowRootRPC),
+			provisioned:   server.SessionProvisioned,
+			ensureSession: server.FollowSession,
 		}
 		g.Go(func() error {
 			defer func() { _ = operator.Close() }()
@@ -603,7 +627,20 @@ func signingAuthorityAdvanceWithProofCmd(baseFlags *baseFlags) *cobra.Command {
 			}
 			defer func() { _ = operator.Close() }()
 			current := func(ctx context.Context) error { return checkClientCredential(ctx, clientSocket, out, flags.Timeout) }
-			report, err := advanceWithProof(cmd.Context(), operator, proofs, out, current)
+			target, err := sessionPublicationTarget(flags.OperatorSocket, out)
+			if err != nil {
+				return err
+			}
+			publish := func(ctx context.Context, status signingauthority.Status) (bool, error) {
+				managed, issued, err := operator.PublishSession(ctx, target, false)
+				if managed || err != nil {
+					return issued, err
+				}
+				return ensureAuthoritySession(ctx, status, out, current, func(ctx context.Context) ([]byte, error) {
+					return operator.ReplaceSessionFor(ctx, target)
+				})
+			}
+			report, err := advanceWithProof(cmd.Context(), operator, proofs, publish)
 			if err != nil {
 				return err
 			}
@@ -638,7 +675,6 @@ type advanceWithProofReport struct {
 type advanceOperator interface {
 	AdvanceWithProof(ctx context.Context, bundle []byte) (signingauthority.AdvanceResult, error)
 	Status(ctx context.Context) (signingauthority.Status, error)
-	ReplaceSession(ctx context.Context) ([]byte, error)
 }
 
 // checkClientCredential asks the authority's client socket for its status with the credential in path: nil when that credential is the
@@ -657,17 +693,10 @@ func checkClientCredential(ctx context.Context, socket, path string, timeout tim
 	return err
 }
 
-func advanceWithProof(ctx context.Context, operator advanceOperator, proofs []string, out string, current func(context.Context) error) (advanceWithProofReport, error) {
+func advanceWithProof(ctx context.Context, operator advanceOperator, proofs []string, publish func(context.Context, signingauthority.Status) (bool, error)) (advanceWithProofReport, error) {
 	var report advanceWithProofReport
-	status, err := operator.Status(ctx)
-	if err != nil {
-		return report, err
-	}
 	if len(proofs) == 0 {
 		return report, errors.New("no activation bundle: pass at least the target epoch's (a resume replays it)")
-	}
-	if current == nil {
-		return report, errors.New("no check of the current client credential")
 	}
 	for _, path := range proofs {
 		info, err := os.Stat(path)
@@ -688,15 +717,16 @@ func advanceWithProof(ctx context.Context, operator advanceOperator, proofs []st
 		report.Steps = append(report.Steps, res)
 		report.Advanced = report.Advanced || res.Advanced
 	}
-	if status, err = operator.Status(ctx); err != nil {
+	status, err := operator.Status(ctx)
+	if err != nil {
 		return report, err
 	}
 	report.Retired, report.RootEpoch, report.ShardEpoch, report.LineageEpoch = status.Retired, status.RootEpoch, status.ShardEpoch, status.LineageEpoch
-	report.SessionIssued, err = ensureAuthoritySession(ctx, operator, status, out, current)
+	report.SessionIssued, err = publish(ctx, status)
 	return report, err
 }
 
-func ensureAuthoritySession(ctx context.Context, operator advanceOperator, status signingauthority.Status, out string, current func(context.Context) error) (bool, error) {
+func ensureAuthoritySession(ctx context.Context, status signingauthority.Status, out string, current func(context.Context) error, replace func(context.Context) ([]byte, error)) (bool, error) {
 	// the session is issued when none was since the scope last changed, or when the one issued is not the credential in --out (its
 	// answer was lost, or the file was never written): success is never reported without --out holding the admitted credential
 	issue := !status.Retired && !status.SessionIssued
@@ -709,7 +739,7 @@ func ensureAuthoritySession(ctx context.Context, operator advanceOperator, statu
 		}
 	}
 	if issue {
-		credential, err := operator.ReplaceSession(ctx)
+		credential, err := replace(ctx)
 		if err != nil {
 			return false, err
 		}
@@ -732,16 +762,24 @@ func signingAuthorityReplaceSessionCmd(baseFlags *baseFlags) *cobra.Command {
 		Use:   "replace-session",
 		Short: "Fence the current shard client and write the credential for the next one",
 		Long: `Advance the authority's client generation and write the new client credential. The
-credential previously issued stops being admitted in the same step, so a shard node still holding it
-abstains. The authority keeps its signing record: the new client inherits it. The credential is
-returned once and cannot be read back; losing it means replacing the session again.`,
+previous credential is fenced and the new client inherits the signing record. For a managed
+output the authority publishes the file itself. For an alternate or unmanaged output the
+credential is returned once to this command, which writes it; losing it requires a new replacement.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			operator, err := flags.operator()
 			if err != nil {
 				return err
 			}
 			defer func() { _ = operator.Close() }()
-			credential, err := operator.ReplaceSession(cmd.Context())
+			target, err := sessionPublicationTarget(flags.OperatorSocket, out)
+			if err != nil {
+				return err
+			}
+			managed, _, err := operator.PublishSession(cmd.Context(), target, true)
+			if managed || err != nil {
+				return err
+			}
+			credential, err := operator.ReplaceSessionFor(cmd.Context(), target)
 			if err != nil {
 				return err
 			}

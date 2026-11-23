@@ -78,6 +78,15 @@ func admittedOnFile(t *testing.T, f *fakeAdvanceOperator, path string) {
 	require.NoError(t, f.current(path)(context.Background()), "--out holds the admitted credential")
 }
 
+func testAdvanceWithProof(ctx context.Context, operator interface {
+	advanceOperator
+	ReplaceSession(context.Context) ([]byte, error)
+}, proofs []string, out string, current func(context.Context) error) (advanceWithProofReport, error) {
+	return advanceWithProof(ctx, operator, proofs, func(ctx context.Context, status signingauthority.Status) (bool, error) {
+		return ensureAuthoritySession(ctx, status, out, current, operator.ReplaceSession)
+	})
+}
+
 // Every crash point of the one operation is repaired by running it again with the same proof (the drive always passes the target's):
 // after the proof was published, after the session was issued but its answer lost, after a failed write, after a complete run.
 func TestAdvanceWithProofIsRepairedByARerunAtEveryCrashPoint(t *testing.T) {
@@ -93,10 +102,10 @@ func TestAdvanceWithProofIsRepairedByARerunAtEveryCrashPoint(t *testing.T) {
 			}
 			op := &fakeAdvanceOperator{status: signingauthority.Status{RootEpoch: 1, SessionIssued: true}, loseAnswer: true}
 
-			_, err := advanceWithProof(ctx, op, []string{proof}, cred, op.current(cred))
+			_, err := testAdvanceWithProof(ctx, op, []string{proof}, cred, op.current(cred))
 			require.Error(t, err, "the proof was published and the session issued, but its answer was lost")
 
-			report, err := advanceWithProof(ctx, op, []string{proof}, cred, op.current(cred))
+			report, err := testAdvanceWithProof(ctx, op, []string{proof}, cred, op.current(cred))
 			require.NoError(t, err, "the rerun replays the proof and replaces the session whose credential never reached the file")
 			require.False(t, report.Advanced)
 			require.True(t, report.SessionIssued)
@@ -105,16 +114,16 @@ func TestAdvanceWithProofIsRepairedByARerunAtEveryCrashPoint(t *testing.T) {
 			// a failed write: the session is replaced, the file cannot be written
 			op.status.SessionIssued, op.admitted = false, nil
 			require.NoError(t, os.Chmod(dir, 0o500))
-			_, err = advanceWithProof(ctx, op, []string{proof}, cred, op.current(cred))
+			_, err = testAdvanceWithProof(ctx, op, []string{proof}, cred, op.current(cred))
 			require.NoError(t, os.Chmod(dir, 0o700))
 			require.Error(t, err, "the credential could not be written")
-			report, err = advanceWithProof(ctx, op, []string{proof}, cred, op.current(cred))
+			report, err = testAdvanceWithProof(ctx, op, []string{proof}, cred, op.current(cred))
 			require.NoError(t, err)
 			require.True(t, report.SessionIssued, "the rerun issues again: the file does not hold the admitted credential")
 			admittedOnFile(t, op, cred)
 
 			replaced := op.replacements
-			report, err = advanceWithProof(ctx, op, []string{proof}, cred, op.current(cred))
+			report, err = testAdvanceWithProof(ctx, op, []string{proof}, cred, op.current(cred))
 			require.NoError(t, err)
 			require.False(t, report.SessionIssued, "a rerun after a complete run replaces nothing")
 			require.Equal(t, replaced, op.replacements)
@@ -127,21 +136,21 @@ func TestAdvanceWithProofStopsAtARefusedBundleAndIssuesNothingForARetiredAuthori
 	dir := t.TempDir()
 	cred := filepath.Join(dir, "client.cred")
 	op := &fakeAdvanceOperator{status: signingauthority.Status{RootEpoch: 1, SessionIssued: true}}
-	_, err := advanceWithProof(ctx, op, []string{proofFile(t, dir, "bad.cbor", "bad")}, cred, op.current(cred))
+	_, err := testAdvanceWithProof(ctx, op, []string{proofFile(t, dir, "bad.cbor", "bad")}, cred, op.current(cred))
 	require.ErrorIs(t, err, signingauthority.ErrLineageUnverified)
 	require.Equal(t, 0, op.replacements)
 
 	retired := &fakeAdvanceOperator{status: signingauthority.Status{RootEpoch: 1, Retired: true}, advanced: true}
-	report, err := advanceWithProof(ctx, retired, []string{proofFile(t, dir, "b.cbor", "bundle")}, cred, retired.current(cred))
+	report, err := testAdvanceWithProof(ctx, retired, []string{proofFile(t, dir, "b.cbor", "bundle")}, cred, retired.current(cred))
 	require.NoError(t, err)
 	require.True(t, report.Retired)
 	require.Equal(t, 0, retired.replacements, "a retired authority issues no session")
 
-	_, err = advanceWithProof(ctx, op, nil, cred, op.current(cred))
+	_, err = testAdvanceWithProof(ctx, op, nil, cred, op.current(cred))
 	require.Error(t, err, "no proof: a resume passes the target's")
 	big := filepath.Join(dir, "big.cbor")
 	require.NoError(t, os.WriteFile(big, make([]byte, service.MaxAdvanceProofBytes+1), 0o600))
-	_, err = advanceWithProof(ctx, op, []string{big}, cred, op.current(cred))
+	_, err = testAdvanceWithProof(ctx, op, []string{big}, cred, op.current(cred))
 	require.ErrorContains(t, err, "an activation proof is at most")
 }
 
@@ -181,13 +190,13 @@ func TestThePreReadSizeCheckIsTheFrameBound(t *testing.T) {
 	op := &sizeOperator{fakeAdvanceOperator: fakeAdvanceOperator{status: signingauthority.Status{RootEpoch: 1}}}
 	at := filepath.Join(dir, "at.cbor")
 	require.NoError(t, os.WriteFile(at, make([]byte, service.MaxAdvanceProofBytes), 0o600))
-	_, err := advanceWithProof(ctx, op, []string{at}, cred, op.current(cred))
+	_, err := testAdvanceWithProof(ctx, op, []string{at}, cred, op.current(cred))
 	require.NoError(t, err)
 	require.Equal(t, service.MaxAdvanceProofBytes, op.sent)
 	over := filepath.Join(dir, "over.cbor")
 	require.NoError(t, os.WriteFile(over, make([]byte, service.MaxAdvanceProofBytes+1), 0o600))
 	op.sent = 0
-	_, err = advanceWithProof(ctx, op, []string{over}, cred, op.current(cred))
+	_, err = testAdvanceWithProof(ctx, op, []string{over}, cred, op.current(cred))
 	require.ErrorContains(t, err, "an activation proof is at most")
 	require.Zero(t, op.sent, "refused before it is read or sent")
 }

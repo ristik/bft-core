@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -47,8 +48,18 @@ func (e Endpoint) String() string {
 	return "client"
 }
 
+// ManagedSession binds publication to one operator-configured file. The target is
+// relative to the operator socket so a caller can address it through a bind mount.
+type ManagedSession struct {
+	Target  string
+	Publish func([]byte) error
+	Matches func([]byte) (bool, error)
+}
+
 // Config is what an operator provides when starting an authority process.
 type Config struct {
+	ManagedSession ManagedSession
+
 	// OperatorCredential admits the operator endpoint. It is provisioned here, by whoever starts
 	// the process, and the server neither generates nor stores it anywhere else. At least
 	// CredentialBytes of entropy.
@@ -101,10 +112,11 @@ type Server struct {
 	cfg       Config
 	log       *slog.Logger
 
-	mu         sync.Mutex
-	session    signingauthority.Session
-	hasSession bool
-	credential []byte
+	mu          sync.Mutex
+	session     signingauthority.Session
+	hasSession  bool
+	credential  []byte
+	provisioned atomic.Bool // a managed credential was explicitly provisioned in this authority lifetime
 
 	// advance is the authority's AdvanceWithProof; a test of the publication-versus-cleanup interleaving replaces it (it is never set
 	// outside this package's tests)
@@ -130,6 +142,9 @@ type Server struct {
 func NewServer(authority *signingauthority.Authority, cfg Config) (*Server, error) {
 	if authority == nil {
 		return nil, errors.New("service: no authority")
+	}
+	if cfg.ManagedSession.Target != "" && (cfg.ManagedSession.Publish == nil || cfg.ManagedSession.Matches == nil) {
+		return nil, errors.New("service: managed session requires publication and credential comparison")
 	}
 	if len(cfg.OperatorCredential) < CredentialBytes {
 		return nil, fmt.Errorf("service: the operator credential must be at least %d bytes", CredentialBytes)
@@ -655,7 +670,27 @@ func (s *Server) operatorOp(ctx context.Context, operation op, payload []byte) (
 			slog.String("shardConfHash", fmt.Sprintf("%x", s.authority.Enrollment().ShardConfHash)))
 		return nil, nil
 	case opReplaceSession:
+		if managed := s.cfg.ManagedSession.Target; managed != "" {
+			var target string
+			if err := types.Cbor.Unmarshal(payload, &target); err != nil || target == "" || filepath.IsAbs(target) || filepath.Clean(target) == managed {
+				return nil, ErrManagedSession
+			}
+		}
 		return s.replaceSession()
+	case opPublishSession:
+		var request publishSessionRequest
+		if err := types.Cbor.Unmarshal(payload, &request); err != nil {
+			return nil, fmt.Errorf("%w: publication request: %v", errMalformed, err)
+		}
+		result := publishSessionResult{Managed: request.Target != "" && filepath.Clean(request.Target) == s.cfg.ManagedSession.Target}
+		if result.Managed {
+			var err error
+			result.Issued, err = s.publishSession(request.Replace, false)
+			if err != nil {
+				return nil, err
+			}
+		}
+		return types.Cbor.Marshal(result)
 	case opStatus, opRestoreStatus:
 		return types.Cbor.Marshal(statusPayloadOf(s.authority.Status()))
 	case opEnrollment:
@@ -679,10 +714,8 @@ replaceSession fences the current client and issues the credential for the new o
 
 The whole replacement is one critical section, and this is the reason: the authority decides the
 order of two concurrent replacements, and the server must store them in that same order. Advancing
-the generation outside the lock lets a replacement that won inside the authority lose the race to
-install its credential, which leaves the server admitting a credential the authority has already
-fenced. Both operators would then hold a credential that cannot be used, and an operator would read
-that as an authority that has broken rather than as one it has to ask again.
+the generation outside the lock lets an earlier issuance overwrite a later credential. Managed
+publication uses the same lock through the file write so its writers follow the issuance order.
 
 Within the section the authority advances its generation first. If that fails there is no new
 credential and the old one keeps working, because the old generation is still the current one inside
@@ -694,18 +727,76 @@ func (s *Server) replaceSession() ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	return s.replaceSessionLocked(nil)
+}
+
+// SessionProvisioned reports whether the operator has installed the first managed
+// credential. Scope changes can fence that session without losing this fact.
+func (s *Server) SessionProvisioned() bool {
+	return s.provisioned.Load()
+}
+
+// FollowSession repairs an incumbent's session after a verified scope change.
+// An explicit replacement to another destination fences the managed credential
+// for the rest of that scope, so a live session takes precedence over the file.
+func (s *Server) FollowSession() error {
+	if !s.SessionProvisioned() {
+		return nil
+	}
+	_, err := s.publishSession(false, true)
+	return err
+}
+
+func (s *Server) publishSession(replace, follow bool) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	status := s.authority.Status()
+	if status.Retired && !replace {
+		return false, nil
+	}
+	if !replace && s.hasSession && s.session.Generation() == status.Generation {
+		if follow {
+			return false, nil
+		}
+		matches, err := s.cfg.ManagedSession.Matches(s.credential)
+		if err != nil {
+			s.log.Error("checking the managed client credential", "error", err)
+			return false, ErrCredentialPublication
+		}
+		if matches && s.session.Generation() == s.authority.Status().Generation {
+			s.provisioned.Store(true)
+			return false, nil
+		}
+	}
+	if _, err := s.replaceSessionLocked(s.cfg.ManagedSession.Publish); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// replaceSessionLocked orders both issuance and managed publication with every
+// operator replacement. A failed publication leaves no admitted credential.
+func (s *Server) replaceSessionLocked(publish func([]byte) error) ([]byte, error) {
+	credential, err := NewCredential()
+	if err != nil {
+		return nil, err
+	}
 	session, err := s.authority.ReplaceSession()
 	if err != nil {
 		return nil, err
 	}
-	credential, err := NewCredential()
-	if err != nil {
-		// The generation has already advanced, so the previous client is fenced whatever happens
-		// here. Leaving the server with no admitted credential is the safe side of that: nothing is
-		// admitted until the operator asks again and gets one.
+	if publish != nil {
 		s.hasSession = false
 		s.credential = nil
-		return nil, err
+		if err := publish(credential); err != nil {
+			s.log.Error("publishing the managed client credential", "error", err)
+			return nil, ErrCredentialPublication
+		}
+		s.provisioned.Store(true)
+		if session.Generation() != s.authority.Status().Generation {
+			return nil, signingauthority.ErrFenced
+		}
 	}
 	s.session = session
 	s.hasSession = true

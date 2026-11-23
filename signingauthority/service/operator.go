@@ -55,6 +55,35 @@ func (o *OperatorClient) ReplaceSession(ctx context.Context) ([]byte, error) {
 	return o.ex.call(ctx, opReplaceSession, nil)
 }
 
+// ReplaceSessionFor deliberately fences the configured client in favor of an
+// operator-managed credential at a different target. Legacy servers ignore the target.
+func (o *OperatorClient) ReplaceSessionFor(ctx context.Context, target string) ([]byte, error) {
+	payload, err := types.Cbor.Marshal(target)
+	if err != nil {
+		return nil, err
+	}
+	return o.ex.call(ctx, opReplaceSession, payload)
+}
+
+// PublishSession asks the authority to publish its configured credential. A different
+// target or a legacy server leaves publication to the caller.
+func (o *OperatorClient) PublishSession(ctx context.Context, target string, replace bool) (managed, issued bool, err error) {
+	payload, err := types.Cbor.Marshal(publishSessionRequest{Target: target, Replace: replace})
+	if err != nil {
+		return false, false, err
+	}
+	answer, err := o.ex.call(ctx, opPublishSession, payload)
+	if errors.Is(err, ErrWrongEndpoint) {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, err
+	}
+	var result publishSessionResult
+	err = types.Cbor.Unmarshal(answer, &result)
+	return result.Managed, result.Issued, err
+}
+
 /*
 CompleteEnrollment states the shard configuration of a pending authority.
 
