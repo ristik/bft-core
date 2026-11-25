@@ -169,6 +169,15 @@ class ExitCheck(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(json.loads(r.stdout)["reason"], "TermAnchorPending")
 
+    def test_the_anchor_calls_are_the_final_contracts_selectors(self):
+        # forge's method identifiers of StakeCustody and SealRegistry at unicity-pos-contracts e2b995b (#1297)
+        final = {"anchorTerm(bytes32,bytes32,bytes32)": "baed1b42", "termAnchors(bytes32)": "895915f0", "lotUnanchoredTerms(uint256)": "304ab606",
+                 "roots()": "393fe1cd", "assignments(bytes32)": "82c2901c", "recordAt(uint64)": "b2cee303", "recordCount()": "900407bc"}
+        sources = [(HERE / "exit_check.py").read_text(), (HERE / "lib.sh").read_text(), (HERE.parent.parent / "deploy/testnet/remote_entity.py").read_text()]
+        for sig, want in final.items():
+            self.assertEqual(keccak256(sig.encode()).hex()[:8], want, sig)
+            self.assertTrue(any(sig in src for src in sources), sig)
+
     def test_the_checks_survive_python_optimize(self):
         import ast
         self.assertEqual([n.lineno for n in ast.walk(ast.parse((HERE / "exit_check.py").read_text())) if isinstance(n, ast.Assert)], [])
