@@ -1384,15 +1384,15 @@ class ProofOfStake(unittest.TestCase):
             self.assertEqual(pos.code_hash(genesis,'0xaa'),'0xabcd');self.assertEqual(run.call_args[0][0],['cast','keccak','0x6001'])
         for address in ('0xbb','0xcc'):
             with self.assertRaisesRegex(pos.PosError,'no code'): pos.code_hash(genesis,address)
-        d=pos.Genesis.__new__(pos.Genesis);d.deployment={'custody':'0xaa','custodyCodeHash':'0xdead','election':'0xaa','electionCodeHash':'0xabcd'}
+        d=pos.Genesis.__new__(pos.Genesis);d.deployment={'custody':'0xaa','custodyCodeHash':'0xdead','election':'0xaa','electionCodeHash':'0xabcd','electionPublication':'0xaa'}
         with patch('pos.subprocess.run',return_value=R):
             with self.assertRaisesRegex(pos.PosError,'custody code'): d.alloc_code_hashes(genesis)
     def test_the_reward_pool_code_and_funding_are_checked_against_the_genesis_state(self):
         class R: returncode=0;stdout='0xABCD\n';stderr=''
         dep={'custody':'0xaa','custodyCodeHash':'0xabcd','election':'0xaa','electionCodeHash':'0xabcd','policy':'0xaa','policyCodeHash':'0xabcd',
-             'rewardPool':'0xcc','rewardPoolCodeHash':'0xabcd','rewardFunding':'1000'}
-        def genesis(balance):
-            return {'alloc':{'0xAA':{'code':'0x6001'},'0xCC':{'code':'0x6001','balance':balance}}}
+             'rewardPool':'0xcc','rewardPoolCodeHash':'0xabcd','rewardFunding':'1000','electionPublication':'0xdd','electionPublicationCodeHash':'0xabcd'}
+        def genesis(balance, publication=True):
+            return {'alloc':{'0xAA':{'code':'0x6001'},'0xCC':{'code':'0x6001','balance':balance},**({'0xDD':{'code':'0x6001'}} if publication else {})}}
         d=pos.Genesis.__new__(pos.Genesis);d.deployment=dep
         with patch('pos.subprocess.run',return_value=R):
             d.alloc_code_hashes(genesis(hex(1000)))
@@ -1402,6 +1402,13 @@ class ProofOfStake(unittest.TestCase):
             with self.assertRaisesRegex(pos.PosError,'rewardPool code'): d.alloc_code_hashes(genesis(hex(1000)))
             d.deployment=dict(dep,policyCodeHash='0xdead')
             with self.assertRaisesRegex(pos.PosError,'policy code'): d.alloc_code_hashes(genesis(hex(1000)))
+            # the election's publication implementation (PoPs, finalization): recorded, allocated and the recorded code (contracts P85Genesis)
+            d.deployment=dict(dep,electionPublicationCodeHash='0xdead')
+            with self.assertRaisesRegex(pos.PosError,'electionPublication code'): d.alloc_code_hashes(genesis(hex(1000)))
+            d.deployment=dep
+            with self.assertRaisesRegex(pos.PosError,'no code at 0xdd'): d.alloc_code_hashes(genesis(hex(1000),publication=False))
+            d.deployment={k:v for k,v in dep.items() if not k.startswith('electionPublication')}
+            with self.assertRaisesRegex(pos.PosError,'records no electionPublication'): d.alloc_code_hashes(genesis(hex(1000)))
 
 class EntityNamespace(unittest.TestCase):
     def cfg(self,n=4):

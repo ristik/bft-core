@@ -236,8 +236,12 @@ class Genesis:
 
     def alloc_code_hashes(self, genesis):
         """The code hashes the deployment file records must be those of the code the genesis carries (the keccak of the runtime code): custody, election, the
-        governed policy source and the reward pool. The reward pool must also hold exactly its recorded funding from block 0 (T8: allocated, not promised)."""
-        for module, key in (('custody', 'custody'), ('election', 'election'), ('policy', 'policy'), ('rewardPool', 'rewardPool')):
+        governed policy source, the reward pool and the election's publication implementation, which it delegatecalls for PoPs and finalization (a genesis
+        without it cannot publish a result). The reward pool must also hold exactly its recorded funding from block 0 (T8: allocated, not promised)."""
+        if 'electionPublication' not in self.deployment:
+            raise PosError('the deployment records no electionPublication: the contracts genesis script predates allocating it (unicity-pos-contracts P85Genesis)')
+        for module, key in (('custody', 'custody'), ('election', 'election'), ('policy', 'policy'), ('rewardPool', 'rewardPool'),
+                            ('electionPublication', 'electionPublication')):
             want = self.deployment[module + 'CodeHash']
             have = code_hash(genesis, self.deployment[key])
             if want.lower() != have:
