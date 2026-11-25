@@ -561,6 +561,9 @@ def main():
                 if a.vr_pos:
                     (auth/'pop').mkdir()
                     cli('signing-authority','credential','--out',auth/'pop/pop.cred')
+                    # the fail-stop marker (as the validator container writes it): this directory never runs a second authority lifetime;
+                    # `ubft validator recover` requires it in the lost authority's preserved directory (#1286)
+                    (auth/'lifetime').write_text('fail-stop\n')
             # the authorities are started from THIS compose and never recreated (their keys exist only in their memory): every argument their
             # entrypoint takes, the UTB lineage pin included, must be known here already (bft-core#1091: started without --lineage-utb-genesis,
             # every authority of a --utb generation refused the first activation); main() checks the final compose names the same entrypoints

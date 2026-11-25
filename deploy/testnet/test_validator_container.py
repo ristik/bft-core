@@ -10,6 +10,8 @@ import unittest
 from unittest.mock import patch
 
 import generate
+import handoff_ops
+import vr_recover
 import vr_release
 
 
@@ -283,3 +285,78 @@ class ValidatorContainer(unittest.TestCase):
                 docker.assert_not_called()
                 self.assertEqual(loader.load_bundle(bundle, pin(entry['digest'])), entry['digest'])
                 docker.assert_called_once()
+
+
+class VRRecoverStage(unittest.TestCase):
+    """vr-pos-recover (#1286): the fresh node slot of a recovered Compose entity."""
+
+    def compose(self):
+        images = {role:'sha256:' + '0'*64 for role in ('node', 'rpc', 'signer', 'guard')}
+        ids = {'root':[f'16Uiu2root{i}' for i in range(1, 5)], 'evm':[f'16Uiu2evm{i}' for i in range(1, 5)]}
+        return generate.topology(Path('test'), 4, ids, images, '', vr_pos=True, vr_authority_follow='http://127.0.0.1:8002')
+
+    def test_the_recovered_entity_runs_on_a_fresh_slot_only(self):
+        compose = self.compose()
+        services = vr_recover.recover_services(compose, 4, 2, '16Uiu2fresh', 2, 3, '/authority/current-trust.json', '0x' + 'ab'*32)
+        self.assertEqual(sorted(services), ['authority4', 'root4', 'shard4'])
+        entry = services['authority4']['entrypoint']
+        value = lambda flag: entry[entry.index(flag) + 1]
+        self.assertEqual((value('--node-id'), value('--root-epoch'), value('--shard-epoch'), value('--trust-base')),
+                         ('16Uiu2fresh', '2', '3', '/authority/current-trust.json'))
+        self.assertEqual(value('--registration-policy'), '/authority/registration.json')
+        self.assertEqual(value('--execution-genesis-hash'), '0x' + 'ab'*32)
+        for gone in ('--fence-provision-file', '--follow-root-activations', '--follow-client-credential'):
+            self.assertNotIn(gone, entry)
+        self.assertIn('--require-pos-policy', entry)
+        self.assertEqual(services['authority4']['restart'], 'no')
+        self.assertEqual(services['authority4']['network_mode'], 'service:pod4')
+        self.assertIn('./validator4/recover-2/auth:/authority', services['authority4']['volumes'])
+        self.assertIn('./validator4/recover-2/auth/pop:/pop:ro', services['root4']['volumes'])
+        shard = services['shard4']
+        self.assertEqual({v.split(':')[1]: v.split(':')[0] for v in shard['volumes']}['/state'], './validator4/recover-2/evm')
+        self.assertIn('./validator4/recover-2/auth:/authority', shard['volumes'])
+        self.assertIn('./validator4/recover-2/archive:/archive', shard['volumes'])
+        follow = shard['entrypoint'][shard['entrypoint'].index('--follow-source') + 1].split(',')
+        self.assertEqual(follow, [f'/dns4/shard{j}/tcp/9000/p2p/16Uiu2evm{j}' for j in (1, 2, 3)])
+        # nothing of the old slot is mounted any more, and the other entities are untouched
+        for svc in services.values():
+            for volume in svc['volumes']:
+                self.assertFalse(volume.startswith(('./validator4/auth', './validator4/evm', './validator4/archive')), volume)
+        self.assertEqual(compose['services']['authority4']['volumes'][0], './validator4/auth:/authority')
+
+    def test_the_override_is_part_of_every_compose_operation(self):
+        compose = self.compose()
+        with tempfile.TemporaryDirectory() as path:
+            gen = Path(path)
+            (gen/'compose.yaml').write_text(json.dumps(compose))
+            self.assertEqual(vr_recover.authority_dir(gen, handoff_ops.load_compose(gen), 4), (gen/'validator4/auth').resolve())
+            services = vr_recover.recover_services(compose, 4, 2, '16Uiu2fresh', 2, 3, '/network/trust-base.json', '0x00')
+            (gen/handoff_ops.RECOVER_OVERRIDE).write_text(json.dumps({'services':services}))
+            self.assertEqual(handoff_ops.compose_files(gen)[-2:], ['-f', str(gen/handoff_ops.RECOVER_OVERRIDE)])
+            loaded = handoff_ops.load_compose(gen)
+            self.assertEqual(vr_recover.authority_dir(gen, loaded, 4), (gen/'validator4/recover-2/auth').resolve())
+            self.assertEqual(vr_recover.authority_dir(gen, loaded, 3), (gen/'validator3/auth').resolve())
+            (gen/'validator4/recover-2').mkdir(parents=True)
+            self.assertEqual(vr_recover.next_slot(gen, 4), 3)
+
+    def test_genesis_identity_and_owner_key(self):
+        import base64
+        with tempfile.TemporaryDirectory() as path:
+            gen = Path(path)
+            (gen/'validator2/root').mkdir(parents=True)
+            (gen/'network').mkdir()
+            (gen/'vr-owner-keys').mkdir()
+            (gen/'validator2/root/node-info.json').write_text(json.dumps({'nodeId':'16Uiu2root2'}))
+            payee = bytes.fromhex('11'*20)
+            rows = [{'stakingId':base64.b64encode((n).to_bytes(8, 'big')).decode(), 'rootNodeId':f'16Uiu2root{n}', 'evmNodeId':f'16Uiu2evm{n}',
+                     'operatorPayee':base64.b64encode(payee if n == 2 else bytes(20)).decode()} for n in (1, 2)]
+            (gen/'network/genesis-identities.json').write_text(json.dumps(rows))
+            (gen/'vr-owner-keys/keys.json').write_text(json.dumps({'owners':[{'address':'0x' + '11'*20, 'privateKey':'0xkey'}]}))
+            self.assertEqual(vr_recover.genesis_identity(gen, 2), (2, '0x' + '11'*20, '16Uiu2root2', '16Uiu2evm2'))
+            self.assertEqual(vr_recover.owner_key(gen, {'pos':{'owner_keys':'vr-owner-keys'}}, '0x' + '11'*20), '0xkey')
+
+    def test_the_stage_runs_after_vr_pos_advance(self):
+        import rehearse
+        names = [n for n, _ in rehearse.VR_STAGES]
+        self.assertEqual(names[:2], ['vr-pos-advance', 'vr-pos-recover'])
+        self.assertTrue(hasattr(rehearse.Rehearsal, 'vr_pos_recover'))
