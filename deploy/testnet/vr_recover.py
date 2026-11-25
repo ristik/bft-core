@@ -349,21 +349,7 @@ class Recovery:
         r.expect(f'shard{i}' in running, f'the fresh shard node shard{i} stays up as a staging-only joiner')
 
         # 5. the next election: every frozen member proves possession itself, anyone publishes; the roots activate the next epoch
-        homes = {m: (self.home(m, 'recover-participant') if m != i else home) for m in members}
-        auths = {m: authority_dir(gen, handoff_ops.load_compose(gen), m) for m in members}
-        ids = {m: genesis_identity(gen, m)[0] for m in members}
-        election = self.deployment['election']
-
-        def participate():
-            result = r.view_text(election, 'openResult()(bytes32)').strip()
-            if int(result, 16):
-                for m in members:
-                    done = self.cli(m if m != i else live, homes[m], 'validator', 'pos-publish', '--participate', '--result', result,
-                                    '--proof-member', str(ids[m]), mounts=[(auths[m], '/home/authority')], check=False)
-                    r.say(f'  member {ids[m]} on result {result[:18]}: exit {done.returncode}: ' + r.scrub(' | '.join(done.stdout.strip().splitlines()[-2:])[-240:]))
-            view = self.root_view(i)
-            return view['activeEpoch'] if view['activeEpoch'] > epoch and not (view.get('switch') and view['switch']['phase'] not in ('running', 'following')) else None
-        target = r.wait(f'the roots activate an epoch after {epoch}', participate, 3600, every=10)
+        target = self.participate_until(epoch, {i: home}, {i: live})
         conf = json.loads(self.fetch(f'root{i}', 'q3', 'shard-conf', '--root-rpc', self.root_rpc, '--epoch', str(shard_epoch)))
         named = [v for v in conf['validators'] if v['nodeId'] == new_evm]
         r.expect(named and named[0]['sigKey'].lower() == info['sigKey'].lower() and old_evm not in [v['nodeId'] for v in conf['validators']],
@@ -434,6 +420,30 @@ class Recovery:
             'slot': f'recover-{k}', 'rootEpoch': target, 'shardEpoch': shard_epoch, 'generation': after.get('generation'),
             'oldFingerprint': old_status['signingKeyFingerprint'], 'newFingerprint': signed['signingKeyFingerprint']}, indent=1) + '\n')
 
+    def participate_until(self, epoch, homes=None, pods=None, seconds=3600):
+        """Until the roots activate an epoch after `epoch`: every genesis member's own `pos-publish --participate` on the open result (its
+        possession proof from its own authority, then anyone's publication), each in its own pod unless `pods` names another (a member
+        whose own shard node does not sign yet sends through a live one). Returns the activated epoch."""
+        r, gen = self.r, self.gen
+        members = r.members()
+        homes = {m: (homes or {}).get(m) or self.home(m, 'recover-participant') for m in members}
+        auths = {m: authority_dir(gen, handoff_ops.load_compose(gen), m) for m in members}
+        ids = {m: genesis_identity(gen, m)[0] for m in members}
+        election = self.deployment['election']
+
+        def participate():
+            result = r.view_text(election, 'openResult()(bytes32)').strip()
+            if int(result, 16):
+                for m in members:
+                    done = self.cli((pods or {}).get(m, m), homes[m], 'validator', 'pos-publish', '--participate', '--result', result,
+                                    '--proof-member', str(ids[m]), mounts=[(auths[m], '/home/authority')], check=False)
+                    r.say(f'  member {ids[m]} on result {result[:18]}: exit {done.returncode}: ' +
+                          r.scrub(' | '.join((done.stdout + done.stderr).strip().splitlines()[-2:])[-240:]))
+            view = self.root_view(self.i)
+            switching = view.get('switch') and view['switch']['phase'] not in ('running', 'following')
+            return view['activeEpoch'] if view['activeEpoch'] > epoch and not switching else None
+        return r.wait(f'the roots activate an epoch after {epoch}', participate, seconds, every=10)
+
     def follows(self, m):
         entry = handoff_ops.load_compose(self.gen)['services'][f'authority{m}']['entrypoint']
         return '--follow-root-activations' in entry
@@ -441,6 +451,17 @@ class Recovery:
     def position(self, ident):
         """custody.positions(id) as text: owner, withdrawal, root key hash, staged root key hash, generation, role nonce, open lots, lots, retirement."""
         return self.r.view_text(self.deployment['custody'], 'positions(uint64)(address,address,bytes32,bytes32,uint64,uint64,uint32,uint32,bool)', str(ident))
+
+
+def vr_pos_publish(r):
+    """The next election after the current epoch, published by the genesis members' own proofs (no relay): for a Compose VR generation that
+    runs no participant containers, before vr-pos-advance."""
+    if (r.manifest.get('pos') or {}).get('profile') != 'vr-pos16':
+        raise ValueError('vr-pos-publish needs a VR/P85 Compose generation')
+    rec = Recovery(r, r.n)
+    epoch = rec.root_view(r.n)['activeEpoch']
+    target = rec.participate_until(epoch)
+    r.expect(target > epoch, f'the members published the election after root epoch {epoch} and the roots activated it', str(target))
 
 
 def vr_pos_recover(r):

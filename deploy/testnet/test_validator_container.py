@@ -358,5 +358,5 @@ class VRRecoverStage(unittest.TestCase):
     def test_the_stage_runs_after_vr_pos_advance(self):
         import rehearse
         names = [n for n, _ in rehearse.VR_STAGES]
-        self.assertEqual(names[:2], ['vr-pos-advance', 'vr-pos-recover'])
+        self.assertEqual(names[:3], ['vr-pos-publish', 'vr-pos-advance', 'vr-pos-recover'])
         self.assertTrue(hasattr(rehearse.Rehearsal, 'vr_pos_recover'))
