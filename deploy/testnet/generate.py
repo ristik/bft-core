@@ -17,6 +17,7 @@ import time
 
 import operator_rpc
 import pos
+import root_keys
 import ureth_key
 import vr_genesis
 
@@ -403,6 +404,10 @@ def main():
     p.add_argument('--utb',action=argparse.BooleanOptionalAction,default=True,help='the signed trust-base entry (UTB) profile, ON by default: the roots produce and serve the signed history, shard nodes and the aggregator verify it from the genesis entry pinned in the manifest. --no-utb is the escape hatch for the package without it (old tests)')
     p.add_argument('--utb-aggregator',choices=UTB_AGGREGATORS,default='integration',help='with --utb: which aggregator the images carry (build-images.py --aggregator-variant): the integration aggregator (genesis entry file, own store) or the upstream-facing one (one-entry bundle, expected network, history in its MongoDB)')
     p.add_argument('--port-offset',type=int,default=0,help='added to every host-published port (RPC 8545, faucet 8088, Prometheus 9090) so a second generation can run on the same host; default 0: unchanged. Lane slot N uses 1000*N (scripts/lane-slot.sh); tooling then needs TN_PUBLIC_RPC and TN_FAUCET set to the shifted ports')
+    p.add_argument('--prior-generation',action='append',default=[],type=Path,metavar='PATH',
+                   help='an earlier root history this generation must not share a root key with (#1297, D5 section 2.1): its generation directory, '
+                        'its manifest.json or a published retired-root-keys.json; repeat for each. The new keys are checked against them and the '
+                        'union is published as network/retired-root-keys.json, which joiner, enrollment and rotation tooling refuses')
     p.add_argument('--captcha-sitekey',required=True)
     p.add_argument('--captcha-secret-file',required=True,type=Path)
     p.add_argument('--public-p2p-ip', type=ipaddress.IPv4Address,
@@ -486,6 +491,13 @@ def main():
         # before any key: compose would fail only at `up`, after the authorities hold their keys in memory (the 2026-11-12 dev generation hit this)
         clash=subnet_conflicts(subnets,docker_subnets())
         if clash: p.error('subnet in use: '+'; '.join(f'--{ours}-subnet overlaps Docker network {other} ({sub})' for ours,other,sub in clash)+'. Choose free subnets, or remove that (stopped) generation\'s network.')
+    # the earlier root histories, read before any key exists (an unreadable or keyless prior manifest is refused, never skipped)
+    retired=set()
+    try:
+        for prior in a.prior_generation:
+            retired|=root_keys.load(prior)
+    except (OSError,ValueError,KeyError,root_keys.RetiredKeyError) as error:
+        p.error(f'--prior-generation: {error}')
     os.umask(0o077)
     processes=[]
     with tempfile.TemporaryDirectory(prefix='tn-',dir='/tmp') as tmp:
@@ -499,6 +511,12 @@ def main():
                     cli('root-node' if kind=='root' else 'shard-node','init','--home',home/f'{kind}{i}','--generate')
                 roots += [cli('node-id','--home',home/f'root{i}').strip().splitlines()[-1]]
                 evms += [cli('node-id','--home',home/f'evm{i}').strip().splitlines()[-1]]
+            # fresh root keys, never a reused home: refuse any key of an earlier root history (#1297: the seal bytes bind N, not the root genesis)
+            root_signing=[root_keys.node_info_key(home/f'root{i}/node-info.json') for i in range(1,a.validators+1)]
+            try:
+                root_keys.check_fresh(root_signing,retired,'generate')
+            except root_keys.RetiredKeyError as error:
+                p.error(str(error))
             cli('trust-base','generate','--home',home,'--epoch','1','--epoch-start','1','--network-id','3',
                 *sum((['--node-info',home/f'root{i}/node-info.json'] for i in range(1,a.validators+1)),[]))
             for i in range(1,a.validators+1):
@@ -506,6 +524,7 @@ def main():
             out.mkdir(parents=True)
             (out/'network').mkdir()
             shutil.copy2(home/'trust-base.json',out/'network/trust-base.json')
+            root_keys.write(out/'network',retired)
             utb_pin=None
             if a.utb:
                 # The pin is the EntryID of the genesis entry derived from THIS trust base at generation time, recorded in the manifest and passed to every process as its own
@@ -730,6 +749,7 @@ def main():
             'pos':vr_info or ({'genesis_assignment':genesis.assignment,'first_pass_assignment':genesis.first,'custody':genesis.deployment['custody'],'election':genesis.deployment['election'],
                     'contracts':PINS['contracts'],'owner_keys':'pos-owner-keys','cadence_rounds':a.pos_cadence_rounds,'cadence_seconds':a.pos_cadence_seconds} if genesis else None),
             'authority_status':{str(i):json.loads(authority(i,'status','--operator-socket',out/f'validator{i}/auth/operator.sock','--operator-credential',out/f'validator{i}/auth/operator.cred')) for i in range(1,a.validators+1)} if not a.offline_validation else {},
+            'root_signing_keys':root_keys.manifest_entries(roots,root_signing),
             'config_sha256':{f.name:hashlib.sha256(f.read_bytes()).hexdigest() for f in network_files}}
         write(out/'manifest.json',manifest)
         print(json.dumps(manifest,indent=2))

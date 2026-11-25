@@ -25,6 +25,7 @@ import handoff
 import observe
 import joiner
 import pos_join
+import root_keys
 import pos_sample
 import pos_crash
 
@@ -2964,9 +2965,14 @@ class Joiner(unittest.TestCase):
             gen=Path(d)/'gen';gen.mkdir();(gen/'compose.yaml').write_text(json.dumps(self.topology(4)))
             fake=Path(d)/'ubft'   # the three commands prepare runs: init (makes the home), credential (a file), node-id (prints one)
             fake.write_text("#!/usr/bin/env python3\nimport sys,os\na=sys.argv[1:]\n"
-                            "if a[1]=='init': os.makedirs(a[a.index('--home')+1])\n"
+                            "if a[1]=='init': h=a[a.index('--home')+1]; os.makedirs(h); open(h+'/node-info.json','w').write('{\"sigKey\":\"0x02'+'ab'*32+'\"}')\n"
                             "elif a[0]=='signing-authority': open(a[a.index('--out')+1],'w').write('c')\n"
                             "elif a[0]=='node-id': print('id-'+os.path.basename(a[a.index('--home')+1]))\n");fake.chmod(0o755)
+            # #1297: a root key on the generation's retired list is refused, and the half-made entity is removed
+            (gen/'network').mkdir();root_keys.write(gen/'network',{root_keys.key_hash('0x02'+'ab'*32)})
+            with self.assertRaises(root_keys.RetiredKeyError): joiner.prepare(gen,fake)
+            self.assertFalse((gen/'validator5').exists())
+            root_keys.write(gen/'network',set())
             old=os.umask(0o022)   # a permissive caller: prepare must not inherit it
             try: out=joiner.prepare(gen,fake)
             finally: os.umask(old)
@@ -3685,5 +3691,61 @@ class PosTooLateAfterAnInProcessSwitch(unittest.TestCase):
             with self.assertRaises(rehearse.Failure, msg=name) as raised:
                 self.run_too_late({1: list(answers), 2: self.published}, {1: None, 2: None})
             self.assertIn('reports its switch into epoch 2 published', str(raised.exception), name)
+
+
+class RootKeyIsolation(unittest.TestCase):
+    """#1297 (astra): a root key signs one root history only. A generation records its root keys and publishes the retired ones of the earlier
+    histories it was generated against; generation, joiners, enrollment and rotation refuse a retired key."""
+    K1 = '0x02' + '11' * 32
+    K2 = '0x03' + '22' * 32
+    K3 = '0x02' + '33' * 32
+
+    def generation(self, tmp, name, keys, published=()):
+        g = Path(tmp) / name
+        (g / 'network').mkdir(parents=True)
+        (g / 'manifest.json').write_text(json.dumps({'generation': name, 'root_signing_keys': root_keys.manifest_entries([f'n{i}' for i in range(len(keys))], keys)}))
+        root_keys.write(g / 'network', set(published))
+        return g
+
+    def test_the_key_hash_is_custody_s_root_key_hash(self):
+        import evm_keys
+        self.assertEqual(root_keys.key_hash(self.K1), '0x' + evm_keys.keccak256(bytes.fromhex(self.K1[2:])).hex())
+        with self.assertRaises(ValueError):
+            root_keys.key_hash('0x04' + '11' * 32)
+
+    def test_prior_generations_name_their_keys_and_their_published_lists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old = self.generation(tmp, 'tn-1', [self.K1], published=[root_keys.key_hash(self.K3)])
+            want = {root_keys.key_hash(self.K1), root_keys.key_hash(self.K3)}
+            self.assertEqual(root_keys.load(old), want)
+            self.assertEqual(root_keys.load(old / 'manifest.json'), want)
+            self.assertEqual(root_keys.load(old / 'network' / root_keys.FILE), {root_keys.key_hash(self.K3)})
+            root_keys.check_fresh([self.K2], want, 'generate')
+            with self.assertRaises(root_keys.RetiredKeyError) as e:
+                root_keys.check_fresh([self.K2, self.K3], want, 'generate')
+            self.assertIn(root_keys.key_hash(self.K3), str(e.exception))
+            # a manifest from before the list (no root keys) is refused, never read as "nothing retired"
+            keyless = Path(tmp) / 'keyless.json'
+            keyless.write_text(json.dumps({'generation': 'tn-0'}))
+            with self.assertRaises(root_keys.RetiredKeyError):
+                root_keys.load(keyless)
+
+    def test_joiners_refuse_a_retired_or_genesis_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gen = self.generation(tmp, 'tn-2', [self.K2], published=[root_keys.key_hash(self.K1)])
+            root_keys.check_generation(gen, self.K3, 'joiner')
+            for key in (self.K1, self.K2):
+                with self.assertRaises(root_keys.RetiredKeyError):
+                    root_keys.check_generation(gen, key, 'joiner')
+            self.assertEqual(root_keys.published(Path(tmp) / 'none'), set())
+
+    def test_the_generator_reads_the_prior_histories_before_any_key_and_records_and_publishes(self):
+        source = (generate.HERE / 'generate.py').read_text().split('def main')[1]
+        self.assertLess(source.index('retired|=root_keys.load(prior)'), source.index("'init','--home'"))
+        self.assertLess(source.index("root_keys.check_fresh(root_signing,retired,'generate')"), source.index("cli('trust-base','generate'"))
+        self.assertIn("root_keys.write(out/'network',retired)", source)
+        self.assertIn("'root_signing_keys':root_keys.manifest_entries(roots,root_signing)", source)
+        for name in ('joiner.py', 'pos_join.py', 'remote_joiner.py'):
+            self.assertIn('root_keys.check_', (generate.HERE / name).read_text(), name)
 
 if __name__=='__main__': unittest.main()

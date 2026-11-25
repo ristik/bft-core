@@ -20,9 +20,11 @@ import json
 import os
 import re
 import secrets
+import shutil
 import subprocess
 from pathlib import Path
 
+import root_keys
 import ureth_key
 
 PARTS = ('pod', 'metrics', 'root', 'authority', 'ureth', 'shard')
@@ -114,6 +116,12 @@ def _prepare(generation, ubft, index):
     val.mkdir()
     for kind, group in (('root', 'root-node'), ('evm', 'shard-node')):
         subprocess.run([str(ubft), group, 'init', '--home', str(val / kind), '--generate'], check=True, capture_output=True)
+    # #1297: a root key belongs to one root history and one validator; refuse one the generation lists as retired (or a genesis validator's)
+    try:
+        root_keys.check_generation(generation, root_keys.node_info_key(val / 'root' / 'node-info.json'), f'joiner validator{index}')
+    except root_keys.RetiredKeyError:
+        shutil.rmtree(val)
+        raise
     (val / 'auth').mkdir()
     subprocess.run([str(ubft), 'signing-authority', 'credential', '--out', str(val / 'auth' / 'operator.cred')], check=True, capture_output=True)
     for kind in ('ureth', 'archive', 'jwt'):

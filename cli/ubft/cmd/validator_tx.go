@@ -99,12 +99,15 @@ type txFlags struct {
 	validatorFlags
 	DryRun bool
 	Wait   time.Duration
+	// RetiredRootKeys is the release's published list of earlier root histories' root key hashes (#1297): a configured root key on it is refused.
+	RetiredRootKeys string
 }
 
 func (f *txFlags) add(cmd *cobra.Command) {
 	f.validatorFlags.add(cmd)
 	cmd.Flags().BoolVar(&f.DryRun, "dry-run", false, "build, decode and simulate the transactions, send nothing")
 	cmd.Flags().DurationVar(&f.Wait, "wait", 2*time.Minute, "how long to wait for each receipt")
+	cmd.Flags().StringVar(&f.RetiredRootKeys, "retired-root-keys", "", "the release's published retired-root-keys.json: refuse a root signing key of an earlier root history (a root key signs one root history only, #1297)")
 }
 
 // step is one transaction of a command, with its plan built lazily (the second transaction of apply depends on the first's id).
@@ -178,6 +181,16 @@ func openTx(cmd *cobra.Command, f *txFlags) (*loadedValidator, *validatorKeys, *
 	keys, err := v.keys()
 	if err != nil {
 		return nil, nil, nil, vrclient.Sender{}, err
+	}
+	// enrollment and rotation use the configured root key: never one of an earlier root history
+	if f.RetiredRootKeys != "" {
+		root, err := nodeKeys(keys.Root)
+		if err != nil {
+			return nil, nil, nil, vrclient.Sender{}, err
+		}
+		if err := checkRetiredRootKey(f.RetiredRootKeys, root.Public()); err != nil {
+			return nil, nil, nil, vrclient.Sender{}, err
+		}
 	}
 	ch, err := v.dial(cmd.Context())
 	if err != nil {
