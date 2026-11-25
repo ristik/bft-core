@@ -4,7 +4,7 @@
   "components": {
     "ureth": {
       "repository": "https://github.com/ristik/ureth.git",
-      "commit": "3df0d4012fb9057cb71d35b67095ec8b8c139c57",
+      "commit": "0e17a7172f89d8bbfeaf2b3688c16506c566f213",
       "package": "unicity-reth",
       "cargoArgs": [
         "build",

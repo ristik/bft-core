@@ -2532,12 +2532,19 @@ class NB2DriverKeys(unittest.TestCase):
             work = Path(tmp)
             (work / 'public').mkdir()
             hashes = m.descriptors(work, manifest, 'bridge', work)
-            for name, sections in (
-                ('primitive-vectors', {'artifacts': bft}),
-                ('registry-layout', {'sources': bft, 'native': ureth}),
+            release = m.HERE
+            for name, template, sections in (
+                ('cert-batch-v2', release / 'cert-batch-v2-tip.json', {'sources': ureth}),
+                ('rsmt-member-v1', historical / 'rsmt-member-v1.json', {'sources': ureth}),
+                ('execution', historical / 'execution.json', {'rules': ureth}),
+                ('primitive-vectors', historical / 'primitive-vectors.json', {'artifacts': bft}),
+                ('registry-layout', historical / 'registry-layout.json', {'sources': bft, 'native': ureth}),
+                ('semantic-profile', release / 'semantic-profile-tip.json', {'specification': bft}),
             ):
                 with self.subTest(descriptor=name):
-                    expected = json.loads((historical / f'{name}.json').read_bytes())
+                    expected = json.loads(template.read_bytes())
+                    if 'ureth' in expected:
+                        expected['ureth'] = pins['ureth']
                     for section, (checkout, revision) in sections.items():
                         for path in expected[section]:
                             blob = subprocess.check_output(
