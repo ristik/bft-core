@@ -163,7 +163,7 @@ var (
 	}
 	VRBuildPos16 = VRBuild{
 		Name: "pos16", Caps: VRCapsPos16,
-		RegistryCodeHash: mustHash32("d6e58ab97d1502846fde15cc82b273b3f07696024249af40c13d564977fa4de5"),
+		RegistryCodeHash: mustHash32("bd919cb812ebf204a45fce24526dd06460f93fa53a1a212d4501c8e02e8233ff"),
 		GovernanceFacet:  mustHash32("a9479510a1a78aff1c589fbe6b6c95904e61609d27debab1c4966e65e58069f9"),
 		RepairFacet:      mustHash32("f6ca6bba00e97a6736334b0c3f77bb4515ab7a816cb93a5995964e261d532418"),
 		RecordsFacet:     mustHash32("46a2a1b9f58fe9955ddc9bf6cfa20612dd5ba566ab91c527a33a083fb0d04743"),
