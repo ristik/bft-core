@@ -17,7 +17,10 @@ import (
 // semantics of the initial implementation, ureth b8a50547 (existing profile fields keep the deployment-specific parameters). A future
 // consensus-affecting change takes a new revision even if names and addresses stay identical. It is not a build SHA: equivalent builds implement
 // the same revision. Zero is legacy/absent and always refused.
-const CurrentExecutionRevision uint64 = 1
+//
+// Revision 2 (bft-core#1294) admits certificates against the imported tip, independent of D1's observation.
+// The native name at 0x0100 changes so eth_config distinguishes the verifier rules at startup.
+const CurrentExecutionRevision uint64 = 2
 
 // ErrExecutionRevision is returned for an absent (zero, legacy), unknown or future execution revision.
 var ErrExecutionRevision = errors.New("b1state: execution revision absent, legacy or not implemented by this binary")
@@ -43,12 +46,12 @@ type NativePrecompile struct {
 // set the profile commits and the set enforced locally cannot drift. Operators cannot supply another map. ok is false for any revision but the
 // current one.
 func ExecutionRevisionNatives(r uint64) (set []NativePrecompile, ok bool) {
-	if r != 1 {
+	if r != CurrentExecutionRevision {
 		return nil, false
 	}
 	return []NativePrecompile{
-		{"unicity-b1-cert-batch-v2", [20]byte{18: 0x01, 19: 0x00}}, // 0x0100: the any-age certificate batch (protocol 4)
-		{"unicity-b1-membership", [20]byte{18: 0x01, 19: 0x02}},    // 0x0102: the stateless RSMT membership check
-		{"unicity-b2-sdk3", [20]byte{18: 0x01, 19: 0x04}},          // 0x0104: the B2 native token kernel
+		{"unicity-b1-cert-batch-v2-tip", [20]byte{18: 0x01, 19: 0x00}}, // 0x0100: the any-age certificate batch (protocol 4)
+		{"unicity-b1-membership", [20]byte{18: 0x01, 19: 0x02}},        // 0x0102: the stateless RSMT membership check
+		{"unicity-b2-sdk3", [20]byte{18: 0x01, 19: 0x04}},              // 0x0104: the B2 native token kernel
 	}, true
 }

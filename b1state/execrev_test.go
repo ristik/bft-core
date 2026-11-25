@@ -21,7 +21,7 @@ func execRevProfile() Profile {
 func TestExecutionRevisionMustBeExactlyTheCurrentOne(t *testing.T) {
 	p := execRevProfile()
 	require.NoError(t, p.Validate())
-	for _, rev := range []uint64{0, 2, 3, 1 << 63} {
+	for _, rev := range []uint64{0, 1, 3, 1 << 63} {
 		q := p
 		q.ExecutionRevision = rev
 		require.ErrorIs(t, q.Validate(), ErrExecutionRevision, "revision %d", rev)
@@ -31,8 +31,8 @@ func TestExecutionRevisionMustBeExactlyTheCurrentOne(t *testing.T) {
 }
 
 // The profile hash is under the V2 domain with the revision right after it. The preimage is rebuilt here by hand (header: array of 36, text
-// "UNICITY_B1_PROFILE_V2", uint 1) and compared to the production encoding's prefix, and the hash is frozen as a golden value.
-const goldenV2ProfileHash = "0563b8ce769d5a610def9b455120c7a2791c0b4c9ae2f81bca7cf35e28369e13"
+// "UNICITY_B1_PROFILE_V2", uint 2) and compared to the production encoding's prefix, and the hash is frozen as a golden value.
+const goldenV2ProfileHash = "5be7072b5f0e925f62cbebe0761d5bddc378220206d783405f50601281970078"
 
 func TestProfileHashV2GoldenAndPreimage(t *testing.T) {
 	p := execRevProfile()
@@ -62,11 +62,11 @@ func TestExecutionRevisionNativesAreExactlyTheCurrentSet(t *testing.T) {
 		got[n.Name] = n.Address
 	}
 	require.Equal(t, map[string][20]byte{
-		"unicity-b1-cert-batch-v2": {18: 0x01, 19: 0x00},
-		"unicity-b1-membership":    {18: 0x01, 19: 0x02},
-		"unicity-b2-sdk3":          {18: 0x01, 19: 0x04},
+		"unicity-b1-cert-batch-v2-tip": {18: 0x01, 19: 0x00},
+		"unicity-b1-membership":        {18: 0x01, 19: 0x02},
+		"unicity-b2-sdk3":              {18: 0x01, 19: 0x04},
 	}, got) // no 0x0101, 0x0103, 0x0105
-	for _, rev := range []uint64{0, 2} {
+	for _, rev := range []uint64{0, 1, 3} {
 		_, ok := ExecutionRevisionNatives(rev)
 		require.False(t, ok)
 	}
@@ -77,7 +77,7 @@ func TestPreRevisionDecoderRefusesARevisionCarryingProfile(t *testing.T) {
 	type pre1199 struct {
 		Network uint16 `json:"network"`
 	}
-	dec := json.NewDecoder(strings.NewReader(`{"network":3,"executionRevision":1}`))
+	dec := json.NewDecoder(strings.NewReader(`{"network":3,"executionRevision":2}`))
 	dec.DisallowUnknownFields()
 	require.ErrorContains(t, dec.Decode(&pre1199{}), "unknown field \"executionRevision\"")
 }
