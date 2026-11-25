@@ -28,7 +28,7 @@ NBP = '/opt/bridge/native-bridge-plugins'
 REPO = HERE.parents[3]
 # The package ships the imported-tip certificate relation. The T7 membership
 # and execution descriptor sources still match this ureth pin.
-RELEASE_URETH = '0e17a7172f89d8bbfeaf2b3688c16506c566f213'
+RELEASE_URETH = '7550439772e25990ff4f313de3dc67cf544be258'
 RELEASE_URETH_LOCK = '99e0b3f3bcae2ded12eecf1d7563a455d05e67d1502137a6ef813a2e0cf075af'
 REGISTRY = '0xff00000000000000000000000000000000000002'
 NETWORK_ID, EVM_PARTITION, EVM_SHARD, AGG_PARTITION = 3, 8, '0x80', 7
