@@ -69,7 +69,7 @@ var (
 var (
 	ErrNetwork            = newSentinel(ErrInvalid, "network mismatch")
 	ErrEpochBeforeGenesis = newSentinel(ErrInvalid, "seal epoch is before the registry's genesis epoch")
-	ErrEpochNotUsable     = newSentinel(ErrInvalid, "seal epoch is after the usable origin epoch")
+	ErrEpochNotUsable     = newSentinel(ErrInvalid, "seal epoch is after the imported registry tip")
 	ErrBeforeStart        = newSentinel(ErrInvalid, "root round before the interval start")
 	ErrAfterEnd           = newSentinel(ErrInvalid, "root round at or after the interval end")
 
