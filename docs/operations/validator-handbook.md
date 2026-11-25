@@ -119,7 +119,29 @@ keys (or re-bond and `apply` at the next generation).
 For the container, the old authority container has already stopped (it is
 fail-stop). Keep `unicity-node` running and its volume mounted:
 
-RECOVER_CONTAINER_COMMANDS
+```bash
+# 1: checks the marker and that the authority is gone; prepares authority-2 and evm-2 (a fresh shard node key)
+docker exec unicity-node ubft-validator recover --yes
+# keep the lost container for its logs; never start it again
+docker rename unicity-authority unicity-authority-lost
+docker run -d --name unicity-authority-2 --restart=no --network host \
+  -v unicity-validator:/data "$IMAGE" authority
+# 2: sends the delegation, then the binding; relinks; waits for the boundary, enrolls and advances
+docker exec unicity-node ubft-validator recover --yes
+docker exec unicity-node ubft-validator status
+```
+
+Each recovery slot has its own authority directory, shard home and
+activation journal (`authority-k/`, `evm-k/`, `shard-active-k.json`;
+`/data/node-slot` names the current one), and a marked slot is never
+reused. The node restarts itself on the new slot, and its fresh shard joins
+staging-only from the verified seed until the boundary. Step 2 resumes from
+`/data/recover.json`; if it is interrupted, run it again. A replaced
+`unicity-node` starts even while its authority is lost, so `recover` can
+run. If another election activates before the one that carries the new key,
+`recover` says so: remove `unicity-authority-2` and repeat the steps, which
+prepares slot 3. `status` shows `authorityDirectory`, `shardHome` and the
+recovery phase.
 
 ## Rehearsal shell## Rehearsal shell
 
