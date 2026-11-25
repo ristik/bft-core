@@ -3,7 +3,8 @@
 
 A new EVM key is a new EVM node identity. The stage kills only validator i's authority container (by its exact name), keeps that authority's
 directory and fail-stop marker, and builds a fresh node slot beside it, validator<i>/recover-<k>/: a fresh authority directory (auth/), a fresh
-shard node key in an empty shard home (evm/) and an empty archive. `ubft validator recover` (the owner's key, the unchanged root key) admits the
+shard node key in an empty shard home (evm/), an empty archive and an empty execution data directory (ureth/: a fresh shard node cannot
+admit an execution head certified in an epoch its own verified history does not hold yet, so it syncs the execution from genesis, as a joiner). `ubft validator recover` (the owner's key, the unchanged root key) admits the
 delegation of the new EVM node and key at custody's generation, then stages the identical VR binding. compose.recover.json points the
 entity's authority, root (possession-proof endpoint) and shard node at the slot; the shard node starts as a staging-only joiner that follows
 the other shard nodes. Every frozen member then submits its own possession proof (the stage runs each member's `pos-publish --participate`)
@@ -30,7 +31,7 @@ import handoff_ops
 import operator_rpc
 
 OPERATOR = ['--operator-socket', '/authority/operator.sock', '--operator-credential', '/authority/operator.cred']
-NODE_PARTS = ('auth', 'evm', 'archive')
+NODE_PARTS = ('auth', 'evm', 'archive', 'ureth')
 
 
 def b64int(value):
@@ -123,7 +124,8 @@ def authority_entrypoint(entry, evm_node, root_epoch, shard_epoch, trust, genesi
 
 
 def recover_services(compose, i, slot, evm_node, root_epoch, shard_epoch, trust, genesis_hash):
-    """compose.recover.json's services for entity i on node slot `slot` (validator<i>/recover-<slot>/): its authority, root and shard node."""
+    """compose.recover.json's services for entity i on node slot `slot` (validator<i>/recover-<slot>/): its authority, root, execution client
+    and shard node."""
     base = f'./validator{i}/recover-{slot}'
     svc = compose['services']
     authority = dict(svc[f'authority{i}'])
@@ -142,7 +144,9 @@ def recover_services(compose, i, slot, evm_node, root_epoch, shard_epoch, trust,
         others = [b for b in entry[entry.index('--bootnodes') + 1].split(',') if '/dns4/shard' in b]
         entry += ['--follow-source', ','.join(others)]
     shard['entrypoint'] = entry
-    return {f'authority{i}': authority, f'root{i}': root, f'shard{i}': shard}
+    ureth = dict(svc[f'ureth{i}'])
+    ureth['volumes'] = replace_volume(ureth['volumes'], '/state', f'{base}/ureth')
+    return {f'authority{i}': authority, f'root{i}': root, f'shard{i}': shard, f'ureth{i}': ureth}
 
 
 def operator_config(manifest, deployment, payee, ident):
@@ -260,6 +264,7 @@ class Recovery:
         ident, payee, root_node, old_evm = genesis_identity(gen, i)
         old_auth = authority_dir(gen, self.compose, i)
         old_evm_dir = (gen / mount_source(self.compose['services'][f'shard{i}'], '/state')).resolve()
+        old_ureth_dir = (gen / mount_source(self.compose['services'][f'ureth{i}'], '/state')).resolve()
         r.say(f'  validator {i}: identity {ident}, root {root_node}, EVM node {old_evm}; transactions through pod{live}')
         home = self.home(i, f'recover-operator')
         before = self.status(live, home, old_auth)
@@ -281,12 +286,13 @@ class Recovery:
         subprocess.run(['docker', 'rm', '-f', name], check=True, capture_output=True)
         r.expect(self.container(f'authority{i}') is None, f'only {name} was removed; its directory and marker stay', str(old_auth))
 
-        # 2. the fresh slot: authority directory, shard node key, empty shard data and archive
+        # 2. the fresh slot: authority directory, shard node key, empty shard data, archive and execution data
         k = next_slot(gen, i)
         slot = gen / f'validator{i}/recover-{k}'
         auth = slot / 'auth'
         (auth / 'pop').mkdir(parents=True, mode=0o700)
-        (slot / 'archive').mkdir(mode=0o700)
+        for part in ('archive', 'ureth'):
+            (slot / part).mkdir(mode=0o700)
         subprocess.run([str(r.ubft), 'shard-node', 'init', '--home', str(slot / 'evm'), '--generate'], check=True, capture_output=True)
         new_evm = subprocess.run([str(r.ubft), 'node-id', '--home', str(slot / 'evm')], check=True, capture_output=True, text=True).stdout.strip().splitlines()[-1]
         r.expect(new_evm != old_evm, 'the fresh shard node key is a new EVM node identity', new_evm)
@@ -341,8 +347,9 @@ class Recovery:
                          '--new-evm-node-info', 'authority-new/node-info.json', mounts=mounts)
         r.expect('nothing to do' in again.stdout, 'a re-run of recover sends nothing', r.scrub(again.stdout.strip()[-200:]))
 
-        # 4. the entity's root and shard node on the slot: the root's possession-proof endpoint, a staging-only joiner shard node
-        self.dc('up', '-d', '--no-deps', f'root{i}', f'shard{i}')
+        # 4. the entity's execution client, root and shard node on the slot: an empty execution data directory, the root's possession-proof
+        # endpoint, a staging-only joiner shard node that drives the execution from genesis
+        self.dc('up', '-d', '--no-deps', f'ureth{i}', f'root{i}', f'shard{i}')
         r.wait(f'root{i} answers again', lambda: self.root_view(i), 180)
         time.sleep(15)
         running = self.dc('ps', '--status', 'running', '--services').stdout.split()
@@ -410,12 +417,12 @@ class Recovery:
         r.expect(marker.read_text() == 'fail-stop\n' and tree(old_auth) == old_tree, 'the old authority directory and its fail-stop marker are unchanged', str(old_auth))
         r.expect(sorted(p.name for p in old_evm_dir.iterdir()) == old_evm_tree, 'the old shard home is kept', str(old_evm_dir))
         used = set()
-        for service in (f'authority{i}', f'root{i}', f'shard{i}'):
+        for service in (f'authority{i}', f'root{i}', f'shard{i}', f'ureth{i}'):
             cid = self.dc('ps', '-q', service).stdout.strip()
             mounts_json = subprocess.run(['docker', 'inspect', '--format', '{{json .Mounts}}', cid], check=True, text=True, capture_output=True).stdout
             used |= {Path(m['Source']).resolve() for m in json.loads(mounts_json)}
-        r.expect(old_auth not in used and (old_auth / 'pop') not in used and old_evm_dir not in used,
-                 'no container mounts the old authority directory or the old shard home')
+        r.expect(old_auth not in used and (old_auth / 'pop') not in used and old_evm_dir not in used and old_ureth_dir not in used,
+                 'no container mounts the old authority directory, the old shard home or the old execution data')
         (self.ev / 'summary.json').write_text(json.dumps({'validator': i, 'identity': ident, 'oldEvmNode': old_evm, 'newEvmNode': new_evm,
             'slot': f'recover-{k}', 'rootEpoch': target, 'shardEpoch': shard_epoch, 'generation': after.get('generation'),
             'oldFingerprint': old_status['signingKeyFingerprint'], 'newFingerprint': signed['signingKeyFingerprint']}, indent=1) + '\n')

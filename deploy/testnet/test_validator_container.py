@@ -189,8 +189,8 @@ class ValidatorContainer(unittest.TestCase):
             self.assertEqual(json.loads((home/'recover.json').read_text())['phase'], 'activated')
             self.assertEqual((home/'authority/lifetime').read_text(), 'fail-stop\n')
             with patch.object(validator, 'HOME', home), patch.object(validator, 'RELEASE', home/'release'):
-                self.assertEqual((validator.slot(), validator.auth_dir().name, validator.evm_dir().name, validator.active_file().name),
-                                 (2, 'authority-2', 'evm-2', 'shard-active-2.json'))
+                self.assertEqual((validator.slot(), validator.auth_dir().name, validator.evm_dir().name, validator.ureth_dir().name,
+                                  validator.active_file().name), (2, 'authority-2', 'evm-2', 'ureth-2', 'shard-active-2.json'))
                 (home/'release/fee-collector.txt').write_text('0x' + '33'*20)
                 (home/'bootstrap.json').write_text('{"body":"0x01"}')
                 with patch.object(validator, 'peers', return_value=['/ip4/1/tcp/1/p2p/a', '/ip4/1/tcp/2/p2p/b']):
@@ -298,7 +298,8 @@ class VRRecoverStage(unittest.TestCase):
     def test_the_recovered_entity_runs_on_a_fresh_slot_only(self):
         compose = self.compose()
         services = vr_recover.recover_services(compose, 4, 2, '16Uiu2fresh', 2, 3, '/authority/current-trust.json', '0x' + 'ab'*32)
-        self.assertEqual(sorted(services), ['authority4', 'root4', 'shard4'])
+        self.assertEqual(sorted(services), ['authority4', 'root4', 'shard4', 'ureth4'])
+        self.assertIn('./validator4/recover-2/ureth:/state', services['ureth4']['volumes'])
         entry = services['authority4']['entrypoint']
         value = lambda flag: entry[entry.index(flag) + 1]
         self.assertEqual((value('--node-id'), value('--root-epoch'), value('--shard-epoch'), value('--trust-base')),
@@ -321,7 +322,7 @@ class VRRecoverStage(unittest.TestCase):
         # nothing of the old slot is mounted any more, and the other entities are untouched
         for svc in services.values():
             for volume in svc['volumes']:
-                self.assertFalse(volume.startswith(('./validator4/auth', './validator4/evm', './validator4/archive')), volume)
+                self.assertFalse(volume.startswith(('./validator4/auth', './validator4/evm', './validator4/archive', './validator4/ureth:')), volume)
         self.assertEqual(compose['services']['authority4']['volumes'][0], './validator4/auth:/authority')
 
     def test_the_override_is_part_of_every_compose_operation(self):
