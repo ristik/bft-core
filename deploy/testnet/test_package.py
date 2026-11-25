@@ -1,3 +1,4 @@
+import hashlib
 import re
 import http.client
 import http.server
