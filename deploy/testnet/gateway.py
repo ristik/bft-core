@@ -32,7 +32,7 @@ from public_relay import Relay, ResponseTooLarge
 
 # The reads a native bridge v2 wallet builds its evidence from (bft-core#1102): certified header evidence (the companion of the child block
 # carries the certificate of its parent), the block's receipts for the receipt-trie path, vault logs, and the companion retention horizon.
-WALLET_EVIDENCE = frozenset('eth_getBlockByHash eth_getBlockReceipts eth_getLogs eth_getRawTransactionByBlockHashAndIndex unicity_getSealCompanionV1 unicity_sealCompanionHorizonV1'.split())
+WALLET_EVIDENCE = frozenset('eth_getStorageAt eth_getBlockByHash eth_getBlockReceipts eth_getLogs eth_getRawTransactionByBlockHashAndIndex unicity_getSealCompanionV1 unicity_sealCompanionHorizonV1'.split())
 PUBLIC = frozenset('eth_chainId eth_blockNumber eth_syncing eth_getBlockByNumber eth_getBalance eth_getTransactionCount eth_gasPrice eth_maxPriorityFeePerGas eth_estimateGas eth_call eth_getCode eth_getTransactionReceipt eth_getTransactionByHash eth_sendRawTransaction net_version web3_clientVersion'.split()) | WALLET_EVIDENCE
 LOG_BLOCK_RANGE = 10000     # the most blocks one eth_getLogs may span (toBlock - fromBlock + 1)
 LOG_FILTER_KEYS = frozenset({'address', 'topics', 'fromBlock', 'toBlock', 'blockHash'})
@@ -82,8 +82,22 @@ def _topic(v):
     return isinstance(v, list) and 0 < len(v) <= LOG_TOPIC_ALTERNATIVES and all(_hash(t) for t in v)
 
 
+# NB2 return admission reads just this public consensus word.
+B1_REGISTRY = '0xff00000000000000000000000000000000000002'
+B1_IMPORTED_TIP_SLOT = '0xefa6b7f0bacdcf81ddd8a710fb8420140ae07d47982dc167bb647c00d3f5f4fc'
+
+
+def _b1_tip_read(params):
+    if len(params) != 3 or params[0] != B1_REGISTRY or params[1] != B1_IMPORTED_TIP_SLOT:
+        return False
+    block = params[2]
+    return (isinstance(block, dict) and set(block) == {'blockHash', 'requireCanonical'}
+            and _hash(block['blockHash']) and block['requireCanonical'] is True)
+
+
 # The exact parameters of each wallet evidence read besides eth_getLogs (check_log_filter); a refusal names the accepted shape.
 EVIDENCE_PARAMS = {
+    'eth_getStorageAt': ('[B1 registry, imported tip slot, {blockHash, requireCanonical: true}]', _b1_tip_read),
     'eth_getBlockByHash': ('[blockHash, false]', lambda p: len(p) == 2 and _hash(p[0]) and p[1] is False),
     'eth_getBlockReceipts': ('[blockHash] or [hex block number]', lambda p: len(p) == 1 and (_hash(p[0]) or _quantity(p[0]) is not None)),
     'eth_getRawTransactionByBlockHashAndIndex': ('[blockHash, hex transaction index]',
