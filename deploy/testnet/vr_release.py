@@ -13,6 +13,7 @@ import tempfile
 import uuid
 
 import handoff_ops
+import root_keys
 import operator_rpc
 from public_routes import release_file
 
@@ -57,6 +58,13 @@ def stage_network_files(source, stage, manifest):
             matches = digest(target) == expected
         if not matches:
             raise ValueError(f'{name}: differs from the generation manifest')
+    # #1297: the retired root key hashes of the earlier root histories, which `ubft validator apply/rotate` refuse by default (release/<name>).
+    # A generation made before the list existed pins none and ships none.
+    if config_digests.get(root_keys.FILE):
+        target = stage / root_keys.FILE
+        copy_regular(source, root_keys.FILE, target)
+        if digest(target) != config_digests[root_keys.FILE]:
+            raise ValueError(f'{root_keys.FILE}: differs from the generation manifest')
 
 
 def copy_bootstrap_seed(source, seed):

@@ -3390,6 +3390,19 @@ class StagingKnobs(unittest.TestCase):
             good = Path(tmp) / 'verified'
             good.mkdir()
             vr_release.stage_network_files(net, good, manifest)
+            self.assertFalse((good / root_keys.FILE).exists(), 'a generation that pins no retired-key list ships none')
+            # #1297: the pinned retired-root-keys list ships with the release, checked against its digest
+            listed = b'{"format":"unicity-retired-root-keys/1","keyHashes":[]}\n'
+            (net / root_keys.FILE).write_bytes(listed)
+            manifest['config_sha256'][root_keys.FILE] = sha(listed)
+            shipped = Path(tmp) / 'shipped'
+            shipped.mkdir()
+            vr_release.stage_network_files(net, shipped, manifest)
+            self.assertEqual((shipped / root_keys.FILE).read_bytes(), listed)
+            (net / root_keys.FILE).write_bytes(b'{}')
+            with tempfile.TemporaryDirectory() as out, self.assertRaisesRegex(ValueError, root_keys.FILE):
+                vr_release.stage_network_files(net, Path(out), manifest)
+            (net / root_keys.FILE).write_bytes(listed)
             for name, stale in (
                 ('utb-genesis.id', b'stale'),
                 ('utb-genesis.cbor', b'stale'),

@@ -34,3 +34,19 @@ func TestCheckRetiredRootKey(t *testing.T) {
 	require.NoError(t, os.WriteFile(bad, []byte(`{"format":"unicity-retired-root-keys/1"}`), 0o600))
 	require.ErrorIs(t, checkRetiredRootKey(bad, freshKey), ErrValidator)
 }
+
+// apply and rotate read the release's shipped list by default when it exists; --no-retired-root-keys opts out; an explicit list always applies;
+// other commands and a missing shipped list (a first generation) check nothing.
+func TestRetiredRootKeysDefaultsToTheShippedList(t *testing.T) {
+	home := t.TempDir()
+	v := &loadedValidator{home: home}
+	enroll := &txFlags{enrollsRootKey: true}
+	require.Empty(t, enroll.retiredRootKeys(v), "no shipped list: a first generation")
+	require.NoError(t, os.MkdirAll(filepath.Join(home, "release"), 0o700))
+	shipped := filepath.Join(home, releaseRetiredRootKeys)
+	require.NoError(t, os.WriteFile(shipped, []byte(`{"format":"unicity-retired-root-keys/1","keyHashes":[]}`), 0o600))
+	require.Equal(t, shipped, enroll.retiredRootKeys(v))
+	require.Empty(t, (&txFlags{enrollsRootKey: true, NoRetiredRootKeys: true}).retiredRootKeys(v), "opted out")
+	require.Empty(t, (&txFlags{}).retiredRootKeys(v), "exit, claim and the other commands do not enroll a root key")
+	require.Equal(t, "/x/list.json", (&txFlags{RetiredRootKeys: "/x/list.json", NoRetiredRootKeys: true}).retiredRootKeys(v), "an explicit list is always checked")
+}
