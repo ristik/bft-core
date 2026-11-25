@@ -51,11 +51,159 @@ class ValidatorContainer(unittest.TestCase):
             auth = home/'authority'
             auth.mkdir()
             (auth/'lifetime').write_text('fail-stop\n')
-            with patch.object(validator, 'HOME', home), patch.object(validator, 'AUTH', auth), patch.object(validator, 'ubft') as tool:
-                with self.assertRaisesRegex(ValueError, 'Preserve the volume and fail-stop marker.*bonded.*Foundation'):
+            with patch.object(validator, 'HOME', home), patch.object(validator, 'ubft') as tool:
+                with self.assertRaisesRegex(ValueError, 'Preserve the volume and fail-stop marker.*bonded.*recover --yes'):
                     validator.authority_process(None, None)
                 tool.assert_not_called()
                 self.assertEqual((auth/'lifetime').read_text(), 'fail-stop\n')
+
+    # --- #1286: recover a bonded identity whose authority is lost --------------------------------------------------------------
+    def volume(self, path, marker=True):
+        home = Path(path)
+        (home/'authority').mkdir()
+        (home/'evm').mkdir()
+        if marker:
+            (home/'authority/lifetime').write_text('fail-stop\n')
+        (home/'validator.json').write_text(json.dumps({'id':3, 'payee':'0x' + '11'*20,
+            'evmAuthority':{'socket':'authority/operator.sock', 'credential':'authority/operator.cred', 'nodeInfo':'authority/node-info.json'}}))
+        return home
+
+    def patched(self, home, calls, **extra):
+        def tool(*args, **_):
+            calls.append([str(a) for a in args])
+            if args[:2] == ('shard-node', 'init'):
+                Path(args[3]).mkdir()
+            return SimpleNamespace(stdout='{}', returncode=0)
+        settings = dict(HOME=home, CONFIG=home/'validator.json', ubft=tool,
+                        recovery_scope=lambda: {'rootEpoch':2, 'shardEpoch':2}, **extra)
+        return [patch.object(validator, k, v) for k, v in settings.items()]
+
+    def run_patched(self, patches, fn, *args):
+        for p in patches:
+            p.start()
+        try:
+            return fn(*args)
+        finally:
+            for p in reversed(patches):
+                p.stop()
+
+    def settings(self):
+        return SimpleNamespace(yes=True, release_url='https://example.invalid/release', shard_epoch=None)
+
+    def test_recover_refuses_without_a_fail_stop_marker(self):
+        with tempfile.TemporaryDirectory() as path:
+            home, calls = self.volume(path, marker=False), []
+            lost = patch.object(validator, 'authority_status', side_effect=OSError('no socket'))
+            with self.assertRaisesRegex(ValueError, 'fail-stop marker'):
+                self.run_patched([*self.patched(home, calls), lost], validator.recover, self.settings(), {'utb_genesis_id':'0x01'})
+            self.assertEqual(calls, [])
+            self.assertEqual(sorted(p.name for p in home.iterdir() if not p.name.startswith('.')), ['authority', 'evm', 'validator.json'])
+
+    def test_recover_refuses_an_authority_that_still_holds_its_key(self):
+        with tempfile.TemporaryDirectory() as path:
+            home, calls = self.volume(path), []
+            alive = patch.object(validator, 'authority_status', return_value={'keyLost':False, 'faulted':False})
+            with self.assertRaisesRegex(ValueError, 'still answers and holds its key'):
+                self.run_patched([*self.patched(home, calls), alive], validator.recover, self.settings(), {'utb_genesis_id':'0x01'})
+            self.assertEqual(calls, [])
+
+    def test_recover_prepares_a_fresh_slot_and_keeps_the_marked_one(self):
+        with tempfile.TemporaryDirectory() as path:
+            home, calls = self.volume(path), []
+            (home/'authority/fingerprint').write_text('old')
+            before = sorted(p.name for p in (home/'authority').iterdir())
+            lost = patch.object(validator, 'authority_status', side_effect=OSError('no socket'))
+            patches = [*self.patched(home, calls), lost]
+            self.assertEqual(self.run_patched(patches, validator.recover, self.settings(), {'utb_genesis_id':'0x01'}), 0)
+            rec = json.loads((home/'recover.json').read_text())
+            self.assertEqual((rec['phase'], rec['old'], rec['new'], rec['id']), ('authority', 1, 2, 3))
+            self.assertEqual(rec['scope'], {'rootEpoch':2, 'shardEpoch':2})
+            # a fresh shard node key in an empty shard home, its UTB store from the verified seed; nothing in the marked slot
+            self.assertIn(['shard-node', 'init', '--home', str(home/'evm-2'), '--generate'], calls)
+            seed, = [c for c in calls if c[:2] == ['seed', 'import']]
+            self.assertEqual(seed[seed.index('--shard-utb-db') + 1], 'evm-2/shard-utb-entries.db')
+            self.assertNotIn('--root-utb-db', seed)
+            self.assertEqual((home/'authority/lifetime').read_text(), 'fail-stop\n')
+            self.assertEqual(sorted(p.name for p in (home/'authority').iterdir()), before)
+            self.assertFalse((home/'node-slot').exists())
+            # the authority container now starts only in the fresh directory, once
+            with patch.object(validator, 'HOME', home):
+                k, d, pending = validator.authority_target()
+                self.assertEqual((k, d.name, pending['new']), (2, 'authority-2', 2))
+                self.assertNotEqual(d, home/'authority')
+                (d).mkdir()
+                (d/'lifetime').write_text('fail-stop\n')
+                with self.assertRaisesRegex(ValueError, 'lifetime has already started'):
+                    validator.authority_target()
+            # a second loss before linking never reuses a marked slot
+            patches = [*self.patched(home, calls), patch.object(validator, 'authority_status', side_effect=OSError('gone'))]
+            self.run_patched(patches, validator.recover, self.settings(), {'utb_genesis_id':'0x01'})
+            rec = json.loads((home/'recover.json').read_text())
+            self.assertEqual((rec['old'], rec['new']), (1, 3))
+            self.assertEqual((home/'authority-2/lifetime').read_text(), 'fail-stop\n')
+
+    def test_recover_switches_the_node_to_the_fresh_authority(self):
+        with tempfile.TemporaryDirectory() as path:
+            home, calls = self.volume(path), []
+            (home/'authority-2').mkdir()
+            (home/'evm-2').mkdir()
+            (home/'network.json').write_text(json.dumps({'ports':[1, 2, 3]}))
+            (home/'recover.json').write_text(json.dumps({'phase':'authority', 'id':3, 'old':1, 'new':2,
+                                                          'scope':{'rootEpoch':2, 'shardEpoch':2}}))
+            info = {'nodeId':'16Uiu2new', 'sigKey':'0x02AB'}
+            def tool(*args, **_):
+                calls.append([str(a) for a in args])
+                if 'node-info' in args:
+                    (home/'authority-2/node-info.json').write_text(json.dumps(info))
+                if args[:2] == ('q3', 'shard-conf'):
+                    Path(args[args.index('--out') + 1]).write_text(json.dumps({'epoch':2, 'validators':[{'nodeId':'16Uiu2new', 'sigKey':'0x02ab'}]}))
+                return SimpleNamespace(stdout='{}', returncode=0)
+            status = {'signingKeyFingerprint':'new', 'enrollmentComplete':False}
+            advanced = []
+            patches = [*self.patched(home, calls), patch.object(validator, 'ubft', tool),
+                       patch.object(validator, 'RELEASE', home/'release'),
+                       patch.object(validator, 'authority_status', return_value=status),
+                       patch.object(validator, 'root_status', return_value={'activeEpoch':3}),
+                       patch.object(validator, 'advance', side_effect=lambda target: advanced.append((target, validator.auth_dir().name))),
+                       patch.object(validator, 'local_status', return_value=SimpleNamespace(stdout='{"member":true}')),
+                       patch.object(validator, 'show_status')]
+            (home/'release').mkdir()
+            for name, doc in (('manifest.json', {'chain_id':7}), ('vr-deployment.json', {'networkWord':'0x' + '00'*32}),
+                              ('deployment.json', {'election':'0x' + '22'*20})):
+                (home/'release'/name).write_text(json.dumps(doc))
+            self.assertEqual(self.run_patched(patches, validator.recover, self.settings(), {}), 0)
+            order = [c[:2] for c in calls if c[0] == 'validator']
+            self.assertEqual(order, [['validator', 'recover'], ['validator', 'init']])   # the transactions before the relink
+            rec, = [c for c in calls if c[:2] == ['validator', 'recover']]
+            self.assertEqual(rec[rec.index('--old-authority-home') + 1], 'authority')
+            self.assertEqual(rec[rec.index('--new-evm-authority-socket') + 1], 'authority-2/operator.sock')
+            init, = [c for c in calls if c[:2] == ['validator', 'init']]
+            self.assertEqual(init[init.index('--evm-authority-socket') + 1], 'authority-2/operator.sock')
+            self.assertEqual(init[init.index('--id') + 1], '3')
+            self.assertIn(['signing-authority', 'complete-enrollment', '--shard-conf', str(home/'authority-2/activated-shard.json'),
+                           '--operator-socket', str(home/'authority-2/operator.sock'), '--operator-credential', str(home/'authority-2/operator.cred')], calls)
+            self.assertEqual(advanced, [(3, 'authority-2')])
+            self.assertEqual((home/'authority-2/fingerprint').read_text(), 'new')
+            self.assertEqual(json.loads((home/'recover.json').read_text())['phase'], 'activated')
+            self.assertEqual((home/'authority/lifetime').read_text(), 'fail-stop\n')
+            with patch.object(validator, 'HOME', home), patch.object(validator, 'RELEASE', home/'release'):
+                self.assertEqual((validator.slot(), validator.auth_dir().name, validator.evm_dir().name, validator.active_file().name),
+                                 (2, 'authority-2', 'evm-2', 'shard-active-2.json'))
+                (home/'release/fee-collector.txt').write_text('0x' + '33'*20)
+                (home/'bootstrap.json').write_text('{"body":"0x01"}')
+                with patch.object(validator, 'peers', return_value=['/ip4/1/tcp/1/p2p/a', '/ip4/1/tcp/2/p2p/b']):
+                    shard = [str(x) for x in validator.shard_command({'ports':[1, 2, 3], 'announce':None}, {'utb_genesis_id':'0x01'}, 2)]
+                self.assertEqual(shard[1:3], ['shard-node', 'restore'])   # the fresh node joins from the seed, staging-only
+                self.assertEqual(shard[shard.index('--home') + 1], str(home/'evm-2'))
+                self.assertEqual(shard[shard.index('--signing-authority-socket') + 1], str(home/'authority-2/client.sock'))
+                self.assertEqual(shard[shard.index('--archive-store') + 1], str(home/'evm-2/archive'))
+
+    def test_an_activation_that_does_not_name_the_fresh_key_is_refused(self):
+        info = {'nodeId':'16Uiu2new', 'sigKey':'0x02ab'}
+        validator.check_activated_conf({'validators':[{'nodeId':'16Uiu2new', 'sigKey':'0x02AB'}]}, info)
+        for conf in ({'validators':[{'nodeId':'16Uiu2old', 'sigKey':'0x02ab'}]}, {'validators':[{'nodeId':'16Uiu2new', 'sigKey':'0x03ab'}]}):
+            with self.assertRaisesRegex(ValueError, 'another election activated first'):
+                validator.check_activated_conf(conf, info)
 
     def test_compose_publishes_only_the_announced_p2p_ports(self):
         images = {role:'sha256:' + '0'*64 for role in ('node', 'rpc', 'signer', 'guard')}
