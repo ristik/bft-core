@@ -360,10 +360,12 @@ Check the new local epoch with the same round-info request. Repeat only after on
 
 Check the PoS committee profile in the authenticated release announcement. A sixteen-seat generation allows up to 16 seats in primary and recovered assignments and 20 live identities. Each identity generation has one lifetime lot with room for four simultaneous assignment references. Released obligations free capacity. A recovery preserves the incumbent's ordered seats and historical lot references. Check the certified assignment and epoch before changing your authority scope. The existing PoS generation uses the limits in its own release announcement.
 
+Use a fresh root signing key for every root history. Never bring a root key from an earlier generation or reset, whether you enroll now, join later or rotate. Post-term evidence charges a quorum seal from its signed bytes, and those bytes bind the network but not the root genesis. A seal your old key signed in another history that shares the network would therefore be chargeable here ([D5 §2.1](../design/d5-accountability-retirement-inbox.md#21-post-term-seal-offence-1297)). The release publishes the retired root key hashes as `network/retired-root-keys.json`. Pass that file to `apply` and `rotate`, which then refuse a configured root key on the list:
 
 ```bash
-ubft validator apply --dry-run
-ubft validator apply
+RETIRED="$NETWORK_DIR/retired-root-keys.json"
+ubft validator apply --dry-run --retired-root-keys "$RETIRED"
+ubft validator apply --retired-root-keys "$RETIRED"
 ID=$(jq -er '.id' validator.json)
 jq -n --arg network "$NETWORK_WORD" --argjson chainId "$CHAIN_ID" --arg election "$ELECTION" \
   --argjson id "$ID" '{network:$network,chainId:$chainId,election:$election,ids:[$id]}' > authority/pos-policy.json
@@ -495,6 +497,8 @@ ubft validator status --custody "$CUSTODY" --json --exit-code
 ```
 
 On PoS, exit requests custody retirement. Keep serving until the committee has excluded your identity through an acknowledged handoff. Wait for closure, the HolderRetirement record and custody's maturity gates. With the default withdrawal address, the operator account can then mature and claim. A different withdrawal address must claim its own credit through custody.
+
+Custody also refuses `mature` with `TermAnchorPending` while a closed term of your lots has no report anchors ([D5 §2.1](../design/d5-accountability-retirement-inbox.md#21-post-term-seal-offence-1297)). Anyone can capture them with `custody.anchorTerm(assignmentID, hRecordID, terminalRoot)`, using the words of the term's Closure record. There is no keeper. `validator claim` first sends one `anchorTerm` for each such term, then matures and claims. If the dry run shows `SuccessorNotInstalled`, the successor epoch is not installed yet: run the claim again later. The floors then count from the anchor.
 
 ```bash
 ubft validator claim --dry-run && ubft validator claim

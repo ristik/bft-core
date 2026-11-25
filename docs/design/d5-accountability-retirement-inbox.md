@@ -86,15 +86,16 @@ not an offence either. The post-term offence ([#1297](https://github.com/ristik/
   test on `VoteInfo.exec` turns such a seal into a charge. The signature bytes
   cannot tell an honest late repeat from a backdated one; distinguishing intent
   among signatures on the frozen root would need a protocol change.
-- **Statement.** The reporter supplies typed fields only: the VoteInfo opening
-  (`votingEpoch = e`, `votingRound`, `parent`, `exec`, proposal timestamp) and
-  the seal fields (`commitRound`, `commitEpoch = e`, `commitTimestamp`, `Hash`).
-  Evidence rebuilds `VI` under its installed `N` and `root-vote/hex(G)`, sets
-  `PreviousHash = SHA-256(VI)`, rebuilds the seal bytes with null signatures and
-  verifies over `SHA-256` of those bytes. Shape: `parent < votingRound`,
-  `0 < commitRound < votingRound`. An opaque `PreviousHash` without its opening
-  is not evidence; no PV signature, QC envelope or shard inclusion proof is
-  needed.
+- **Statement (astra's option (a)).** The reporter supplies the native seal
+  fields: `commitRound`, `commitEpoch = e`, `commitTimestamp`, `PreviousHash`
+  and `Hash`. `PreviousHash` is an opaque signed word, and no VoteInfo opening
+  is required. Wallets and B1 accept a quorum seal without that opening. If
+  evidence needed it, a reporter holding a whole accepted seal could charge
+  nobody. Evidence rebuilds the tag-39005 seal bytes with null signatures under
+  its installed `N` and verifies over `SHA-256` of those bytes. The statement
+  conditions are `commitEpoch = e` and `commitRound > 0`. A wrong opening, an
+  altered field or another `N` changes the signed bytes and fails the
+  signatures. No PV signature, QC envelope or shard inclusion proof is needed.
 - **Installed lineage.** Evidence reads epochs `e` and `e+1` (presence, start,
   end, signing scheme, member keys and weights, `activationCommitID`) from a
   bounded read-only view of the genesis-pinned SealRegistry and requires both
@@ -126,25 +127,63 @@ not an offence either. The post-term offence ([#1297](https://github.com/ristik/
   reporter of the same seal and signer is the same case and debits once. Holds,
   exclusion, the capped historical debit, bounded settlement and the incremental
   bounty are the equivocation path's.
-- **Admission deadline.** It runs from the moment the evidence context is first
-  jointly usable on chain — the applied Closure, its attribution and the
-  installed successor — not from the Closure record's own `pClose`/`tClose`
-  (those date the source record, which custody may apply much later). Custody
-  captures the current authenticated `p0 = progress()` and `t0 = ucTime()` once,
-  at that transition, independently of any reporter; until then the term's
-  liability stays open and its lots cannot mature. A report is admitted while
+- **Admission deadline.** The deadline does not start from the Closure
+  record's own `pClose`/`tClose`. Those date the source record, and custody may
+  apply it much later. The anchors come from the first permissionless
+  `custody.anchorTerm(assignmentID, hRecordID, terminalRoot)` call at or after
+  the moment the evidence context is jointly usable on chain: the applied
+  Closure (the call opens its closure key with the H RecordID and `R_H` from
+  the Closure record), its attribution and the installed successor
+  (`SuccessorNotInstalled` before that). The call captures the current
+  authenticated `p0 = progress()` and `t0 = ucTime()` once. Waiting before the
+  call cannot consume the report window, because both clocks start at the call.
+  Until the call, the term stays fail-safe: its lots cannot mature
+  (`TermAnchorPending`) and no post-term report against it is admitted. There
+  is no keeper or relay, so the parties that need the call make it. The exit
+  tooling makes it: `ubft validator claim`, the package's
+  `remote_entity.py claim` and the lanes' exit step all anchor every closed,
+  unanchored term of the exiting lots first. Any reporter can make it too. A
+  report is the two-call path: `anchorTerm` once, then the evidence submission.
+  A report is admitted while
   `p ≤ p0 + suffixEvidenceWindow` **or** `t ≤ t0 + reportWindow`; only the
   expiry of both closes admission. The progress clock can run out in minutes when
   rounds are fast; the UC-seconds clock keeps the report window open for real
   time. Each historical lot's floors rise from the same anchors
   (`timeUntil ≥ t0 + timeFloor`, progress floors likewise). Equivocation keeps
   its existing deadline.
+- **Key isolation across root histories.** `N` is signed, but the root genesis
+  `G` is not: it appears only inside a VoteInfo opening, and an opaque
+  `PreviousHash` hides it. `G`, the chain id and the Evidence address in the
+  offence ID name this deployment, not the history that produced a signature.
+  Consider a seal signed by an honest key in another root history that shares
+  `N`, such as an earlier reset generation. This deployment would charge it.
+  Every validator must therefore sign each independent root history with a
+  fresh, genesis-specific consensus key, including when it enrolls later and
+  when it rotates. The reset tooling enforces this:
+  - `generate.py` records the generation's root signing keys in its manifest.
+  - It checks new keys against `--prior-generation` manifests or published
+    lists and refuses any overlap.
+  - It publishes the union as `network/retired-root-keys.json`.
+  - The joiner, enrollment and rotation tooling refuse any key on that list:
+    `joiner.py`, `pos_join.py`, `remote_joiner.py`, and
+    `ubft validator --retired-root-keys`.
+
+  The key hash is keccak256 of the compressed key, which is custody's root key
+  hash. If this isolation cannot be guaranteed for a deployment, opaque evidence
+  must stay disabled there until the native signed statement binds the root
+  genesis.
 - **Corpus.** Go-signed vectors through the native paths (votesig,
   `types.UnicitySeal`, `types.RootTrustBaseV2`, the secp256k1 signer):
-  [`s1ref/s1gen/testdata/post-term-corpus-go-v1.json`](../../s1ref/s1gen/testdata/post-term-corpus-go-v1.json)
-  — the `A*`/`A*−1` boundary, the exempt H commit and suffix repeats, quorum and
-  subset cases, and every signature edge case with what `ecrecover` and the
-  native verifier make of it.
+  [`s1ref/s1gen/testdata/post-term-corpus-go-v1.json`](../../s1ref/s1gen/testdata/post-term-corpus-go-v1.json).
+  It covers:
+  - the `A*`/`A*−1` boundary, the exempt H commit and the suffix repeats;
+  - opaque-`PreviousHash` seals that b1ref accepts with `e` as the open tip,
+    charged from the seal alone, and a genuine frozen-root repeat that stays
+    exempt;
+  - a seal from another root history, charged when presented with its own word;
+  - quorum and subset cases;
+  - every signature edge case, with what `ecrecover` and the native verifier
+    make of it.
 
 ## 3. Reservation and retirement lifecycle
 
