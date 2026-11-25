@@ -64,6 +64,7 @@ Producer -> consumer pairs that are pinned (file in `fixtures.json`):
 | **A root-signed equivocation of a retired generation's key, attributed to its historical exposure** | Go -> contracts | this suite |
 | **Root-signed equivocations across a root-key rotation activated by an Ack: historical attribution and KeyMismatch** | Go -> contracts | this suite |
 | **The contracts genesis input: field names and types, and the genesis assignment id = the root's custody key of the genesis epoch over the FULL configuration** | Go -> contracts | this suite |
+| **Post-term seals (#1297): native seals with an opaque PreviousHash that b1ref accepts with the predecessor as the open tip, the A*/A*-1 boundary, the frozen-root exemption, quorum subsets and the strict signature verdicts** (`s1ref/s1gen/testdata/post-term-corpus-go-v1.json`, replayed by `PostTermCorpus.t.sol`; the contracts name two refusals by their own first check: commitEpoch e+1 is `SuccessorUnknown`, commitRound 0 is `NotPostTerm`) | Go -> contracts | #1297 |
 
 ## Evidence parity and remaining boundaries
 

@@ -60,8 +60,8 @@
     },
     "contracts": {
       "repository": "https://github.com/ristik/unicity-pos-contracts.git",
-      "commit": "4fd6b1a3ddf53f13ed31e7f9c44eb2808776ba4f",
-      "note": "contracts main at the merge of contracts#91 (4fd6b1a3: VT-14 VR genesis on #89 VT-02 hook fixtures, #88 VT-15 record kinds 6 to 8 in the SealRegistry, custody and RewardPool, #87 PoA election, #86/#84 VT-16 vectors, #85 the ValidatorRegistry, #83 the protocol 6/7 bridge removed, #81/#82 the NB2 vault and verifier; bft-core#1139). Before: contracts#78 squash-merged to main as 7b510f6b: protocol 7 bridge-golden pins",
+      "commit": "e2b995b273da2d11f0093118e2e8aa30ed9c2664",
+      "note": "contracts#99 head (e2b995b: #1297/#1298 post-term seal evidence, the SealRegistry sealEpoch/sealMember views (runtime 0x8b3105bf), term anchors and the retirement report window; NB2 sources unchanged since e159bea). Before: contracts main at the merge of contracts#91 (4fd6b1a3: VT-14 VR genesis on #89 VT-02 hook fixtures, #88 VT-15 record kinds 6 to 8 in the SealRegistry, custody and RewardPool, #87 PoA election, #86/#84 VT-16 vectors, #85 the ValidatorRegistry, #83 the protocol 6/7 bridge removed, #81/#82 the NB2 vault and verifier; bft-core#1139). Before: contracts#78 squash-merged to main as 7b510f6b: protocol 7 bridge-golden pins",
       "branch": "main"
     },
     "state-transition-sdk-js": {

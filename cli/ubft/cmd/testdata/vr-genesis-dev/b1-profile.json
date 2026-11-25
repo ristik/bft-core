@@ -3,7 +3,7 @@
   "rootGenesisId": "0x2f8966df663d980aecbc1cf9e513a2a4c00e98fef041129c2ee0a097442c3cad",
   "executionChainId": 3,
   "executionRevision": 2,
-  "runtimeHash": "0xebbadc64b3f723741dbf79e3ffd7bf2ea31daf4e4a949a3e01e5656926f446ae",
+  "runtimeHash": "0x8b3105bfc06dae2a5755e78a66e9675172da8cd9d532dc4e8f44b01afd6f0e6c",
   "compilerHash": "0x2f93eb970bd354a7878eaef2409b6a3466324740a616491c76fbba8ae4eed575",
   "maxEpochsPerUpdate": 2,
   "deltaEv": 16,

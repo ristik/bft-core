@@ -34,9 +34,9 @@ const (
 
 // Reviewed VRPosGenesis custody runtime and its GENESIS_IMPL and GENESIS_IMPL_CODE_HASH immutables.
 var (
-	vrPosCustodyRuntimeHash   = common.HexToHash("0x7ef8f1ca7090f9d51c58e956b424e331456ffeab1786eb64a5e03d199c2db255")
+	vrPosCustodyRuntimeHash   = common.HexToHash("0xc574cc4205affdf13b3ca8f3c41adb4e48e6026ce55db94f1d90fe173a19319f")
 	vrPosCustodyWriterAddress = common.HexToAddress("0xcD220EA34A9d650f58317411A2be2733e4F0c46f")
-	vrPosCustodyWriterHash    = common.HexToHash("0xc84515c10d8de1be6f86bffd2efc164b198cf9efbca3aff74b467b38bcc19432")
+	vrPosCustodyWriterHash    = common.HexToHash("0x9f4d1c91f5a37188708ab2c52a444e58b994f1d44d0065f4e6cb458c2e8313c7")
 )
 
 // custody storage appended by VT-04 (docs/p85/custody-storage-layout.txt): deploymentDomain and exposureMemberDigest.
