@@ -1491,6 +1491,75 @@ class CustodyTxRetry(unittest.TestCase):
         self.assertIn('bound parent hash mismatch', str(e.exception))
 
 
+class TermAnchors(unittest.TestCase):
+    """#1297/#1298: the exit anchors each closed, unanchored term of its lots with the words of the term's Closure record (pending_terms); the laptop agent
+    signs anchorTerm (permissionless) and nothing else new."""
+    A, B, C = '0x' + 'a1' * 32, '0x' + 'b2' * 32, '0x' + 'c3' * 32
+    H, T = '0x' + 'd4' * 32, '0x' + 'e5' * 32
+
+    def closure(self, aid):
+        return '(%d, 0x%s, 0x%s, 4, 10 [1e1], 17 [1.7e1], 0x%s)' % (0, '11' * 32, '22' * 32, aid[2:] + '%064x' % 7 + self.H[2:] + self.T[2:] + '33' * 64)
+
+    def drive(self, unanchored, records, anchored=(), closed=(), preview=None):
+        d = unittest.mock.Mock()
+        d.custody, d.REGISTRY = '0xC', '0xR'
+        sigs = {n: '0x%08x' % i for i, n in enumerate(re_.TERM_ERRORS, 1)}
+
+        def view(to, sig, *args):
+            if sig.startswith('lotUnanchoredTerms'):
+                if unanchored is None:
+                    raise RuntimeError('no such function')
+                return [unanchored.get(args[0], 0)]
+            if sig.startswith('recordCount'):
+                return [len(records)]
+            raise AssertionError(sig)
+
+        def view_text(to, sig, *args):
+            if sig.startswith('recordAt'):
+                return records[int(args[0])]
+            if sig.startswith('termAnchors'):
+                return '\n'.join(['0x00', '0x00', '0', '0', 'true' if args[0] in anchored else 'false'])
+            if sig.startswith('assignments'):
+                return '\n'.join(['2', '0x00'] + ['0'] * 7 + ['true' if args[0] in closed else 'false'] + ['0'] * 6)
+            raise AssertionError(sig)
+        d.view.side_effect, d.view_text.side_effect = view, view_text
+        d.cast_run.side_effect = lambda *a: sigs[a[1][:-2]] if a[0] == 'sig' else '0xcalldata' + a[2]
+
+        def rpc(body, ip):
+            aid = body['params'][0]['data'][len('0xcalldata'):]
+            err = (preview or {}).get(aid)
+            return 200, json.dumps({'jsonrpc': '2.0', 'id': 1, 'error': {'code': 3, 'message': 'execution reverted', 'data': sigs[err]}} if err else {'result': '0x'})
+        d.rpc.side_effect = rpc
+        return d
+
+    def test_closure_words(self):
+        self.assertEqual(re_.closure_words(self.closure(self.A)), (self.A, self.H, self.T))
+        self.assertIsNone(re_.closure_words('(0, 0x11, 0x22, 2, 10, 17, 0x)'))
+        with self.assertRaises(RuntimeError):
+            re_.closure_words('(1, 2)')
+
+    def test_pending_terms(self):
+        records = ['(0, 0x11, 0x22, 2, 10, 17, 0x)', self.closure(self.A), self.closure(self.B), self.closure(self.C), self.closure(self.A)]
+        d = self.drive({'4': 1}, records, anchored=(self.B,), closed=(self.A, self.B))
+        self.assertEqual(re_.pending_terms(d, [4], '0xowner'), [{'assignmentID': self.A, 'hRecordID': self.H, 'terminalRoot': self.T, 'ready': True, 'reason': None}])
+        d = self.drive({'4': 1}, records, closed=(self.A,), preview={self.A: 'SuccessorNotInstalled'})
+        self.assertEqual([(t['ready'], t['reason']) for t in re_.pending_terms(d, [4], '0xowner')], [(False, 'SuccessorNotInstalled')])
+        d = self.drive({'4': 1}, records, closed=(self.A,), preview={self.A: 'TermNotPending'})
+        self.assertEqual(re_.pending_terms(d, [4], '0xowner'), [])
+        self.assertEqual(re_.pending_terms(self.drive({}, records), [4], '0xowner'), [])
+        self.assertEqual(re_.pending_terms(self.drive(None, records), [4], '0xowner'), [])
+
+    def test_the_agent_signs_anchor_term_with_word_arguments(self):
+        lap = CustodyTxRetry.lap(CustodyTxRetry(), [subprocess.CompletedProcess([], 0, 'tx 0xab', '')])
+        with unittest.mock.patch.object(rj, 'say'):
+            out = lap.op_custody_tx('anchorTerm(bytes32,bytes32,bytes32)', [self.A, self.H, self.T])
+        self.assertEqual(out['signer'], 'owner')
+        with self.assertRaises(rj.Failure):
+            lap.op_custody_tx('anchorTerm(bytes32,bytes32,bytes32)', [self.A, self.H, '0x12; rm'])
+        with self.assertRaises(rj.Failure):
+            lap.op_custody_tx('settleEvidence(bytes32,uint256[])', [self.A, '[1]'])
+
+
 class MemberTunnelGuard(unittest.TestCase):
     """background-stop never stops the tunnel and agent of an entity that is a committee member or whose membership is unknown (#1130)."""
 

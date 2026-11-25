@@ -747,7 +747,9 @@ class Laptop:
             self.save()
         return out
 
-    CUSTODY_CALLS = {'requestRetirement(uint64)': 'owner', 'mature(uint256[])': 'owner', 'claim(uint256,address)': 'withdrawal'}
+    # anchorTerm (#1297/#1298) is permissionless: the owner key pays for it, as for mature
+    CUSTODY_CALLS = {'requestRetirement(uint64)': 'owner', 'mature(uint256[])': 'owner', 'claim(uint256,address)': 'withdrawal',
+                     'anchorTerm(bytes32,bytes32,bytes32)': 'owner'}
 
     # posrelayer/tx.go transientEstimate: the bound-execution node refuses an estimate whose block was built on a head that moved meanwhile (#1130)
     TRANSIENT_ESTIMATE = 'bound execution input rejected the block'
@@ -756,10 +758,10 @@ class Laptop:
 
     def op_custody_tx(self, signature, args):
         """A custody call signed HERE with this entity's owner or withdrawal key (cast in the node image, keys from the wallet volume, never printed): only
-        requestRetirement, mature and claim, only to the deployment's custody. Sent to every host execution client (their pools do not gossip)."""
+        requestRetirement, mature, claim and anchorTerm, only to the deployment's custody. Sent to every host execution client (their pools do not gossip)."""
         if signature not in self.CUSTODY_CALLS:
             raise Failure(f'{signature}: not a custody call this agent signs')
-        if not all(re.fullmatch(r'[0-9]+|0x[0-9a-fA-F]{40}|\[[0-9, ]*\]', str(a)) for a in args):
+        if not all(re.fullmatch(r'[0-9]+|0x[0-9a-fA-F]{40}|0x[0-9a-fA-F]{64}|\[[0-9, ]*\]', str(a)) for a in args):
             raise Failure('bad arguments')
         custody = json.loads(self.vol_read('network', 'pos-deployment.json'))['custody']
         signer = self.CUSTODY_CALLS[signature]

@@ -79,6 +79,68 @@ class RegistryError(RuntimeError):
     """The registry (handoff/remote-joiners/<J>.json) refused a write (an illegal or stale state change) or cannot be read: nothing was written."""
 
 
+# #1297/#1298: custody refuses a lot's mature (TermAnchorPending) while a closed term of it waits for its report anchors. anchorTerm is permissionless and
+# there is no keeper or relay: the exiting entity's own tooling sends it, with the words of the term's authenticated Closure record (registry recordAt, kind 4).
+CLOSURE_KIND = 4
+TERM_ERRORS = ('TermNotPending', 'SuccessorNotInstalled', 'ClosureOpeningMismatch', 'NotInitialized')
+RECORD_AT = 'recordAt(uint64)((uint64,bytes32,bytes32,uint8,uint64,uint64,bytes))'
+ASSIGNMENT = 'assignments(bytes32)(uint8,bytes32,uint64,uint64,uint64,uint64,bool,bool,uint64,bool,uint64,uint64,bytes32,bytes32,bytes32,uint32)'
+TERM_ANCHORS = 'termAnchors(bytes32)(bytes32,bytes32,uint64,uint64,bool)'
+LOT_CATEGORY = 'lots(uint256)(uint64,uint64,uint128,uint128,uint128,uint8,uint16,uint32,uint64,uint64,uint64,uint64,uint64)'
+
+
+def closure_words(record_text):
+    """(assignmentID, hRecordID, terminalRoot) of a decoded recordAt tuple that is a Closure, else None."""
+    fields = [f.strip().split()[0] for f in record_text.strip().strip('()').split(',')]
+    if len(fields) != 7:
+        raise RuntimeError(f'not a root record: {record_text[:200]}')
+    if int(fields[3]) != CLOSURE_KIND:
+        return None
+    data = fields[6][2:]
+    if len(data) != 6 * 64:
+        raise RuntimeError('a Closure record whose data is not six words')
+    w = ['0x' + data[k * 64:(k + 1) * 64].lower() for k in range(6)]
+    return w[0], w[2], w[3]
+
+
+def pending_terms(d, lots, sender):
+    """The closed terms the given lots wait on, each previewed with an eth_call from `sender`: [{assignmentID, hRecordID, terminalRoot, ready, reason}].
+    Empty when no lot waits (lotUnanchoredTerms 0) or the contracts predate anchoring. A term anchored meanwhile is left out, so it is idempotent."""
+    import rehearse   # the package's gateway client (handoff_drive.Drive is a rehearse.Rehearsal)
+    try:
+        waiting = [lot for lot in lots if d.view(d.custody, 'lotUnanchoredTerms(uint256)(uint32)', str(lot))[0]]
+    except Exception:   # no such getter: contracts before #1297
+        return []
+    if not waiting:
+        return []
+    seen = {}
+    for i in range(d.view(d.REGISTRY, 'recordCount()(uint64)')[0]):
+        words = closure_words(d.view_text(d.REGISTRY, RECORD_AT, str(i)))
+        if words:
+            seen.setdefault(words[0], words[1:])
+    names = {d.cast_run('sig', f'{n}()').lower(): n for n in TERM_ERRORS}
+    out = []
+    for aid, (h, t) in sorted(seen.items()):
+        if d.view_text(d.custody, TERM_ANCHORS, aid).splitlines()[-1].strip() == 'true':
+            continue
+        if d.view_text(d.custody, ASSIGNMENT, aid).splitlines()[9].strip() != 'true':
+            continue
+        data = d.cast_run('calldata', 'anchorTerm(bytes32,bytes32,bytes32)', aid, h, t)
+        status, text = d.rpc({'jsonrpc': '2.0', 'id': 1, 'method': 'eth_call', 'params': [{'from': sender, 'to': d.custody, 'data': data}, 'latest']},
+                             rehearse.PROXY_IPS[0] + '10')   # the client address the gateway's views use (rehearse.Rehearsal.call)
+        reply = json.loads(text) if status == 200 else {'error': {'message': f'HTTP {status}'}}
+        reason = None
+        if 'error' in reply:
+            err = reply['error']
+            raw = str(err.get('data') or '') + ' ' + str(err.get('message') or '')
+            m = re.search(r'0x[0-9a-fA-F]{8}', raw)
+            reason = next((n for n in TERM_ERRORS if n in raw), None) or (names.get(m.group(0).lower()) if m else None) or raw.strip()[:200]
+            if reason == 'TermNotPending':
+                continue
+        out.append({'assignmentID': aid, 'hRecordID': h, 'terminalRoot': t, 'ready': reason is None, 'reason': reason})
+    return out
+
+
 def tree_digest(directory):
     """SHA-256 over the sorted (name, SHA-256 of content) of the *.py files of `directory`: the code the host runs as root, as copied from the laptop."""
     import hashlib
@@ -784,8 +846,10 @@ class Join:
         say('stopping its validator services (keys and volumes kept)')
         say(f'  {r.client.op("stop-validator", timeout=300)}')
         self.save(stoppedAt=time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()))   # no longer a writer the other retirements' gates must read
-        say('next: custody.mature([lot]) once the holds pass (holdRetirement 2000 rounds, timeFloor 3600 s, evidence holds), then claim(amount, to) by the '
-            'withdrawal key: `remote_entity.py claim` (not run automatically)')
+        say('next: `remote_entity.py claim` (not run automatically): it first anchors every closed term of the lots (custody.anchorTerm, permissionless, '
+            'the words of the term\'s Closure record; mature refuses TermAnchorPending until then), then custody.mature([lot]) once the holds pass '
+            '(holdRetirement 2000 rounds, timeFloor 3600 s from the later of the retirement and the term anchor, evidence holds), then claim(amount, to) '
+            'by the withdrawal key')
         return 0
 
     def archive_writers(self):
@@ -880,6 +944,13 @@ class Join:
         ident = int(r.info['stakingId'])
         lots = [int(x) for x in self.custody_lots(ident)]
         withdrawal = r.info['accounts']['withdrawal']
+        open_lots = [lot for lot in lots if d.view(d.custody, LOT_CATEGORY, str(lot))[5] != 4]
+        for term in pending_terms(d, open_lots, r.info['accounts']['owner']):
+            if not term['ready']:
+                say(f'term {term["assignmentID"]}: its report anchors cannot be captured yet ({term["reason"]}); claim again later')
+                continue
+            out = r.custody_tx('anchorTerm(bytes32,bytes32,bytes32)', term['assignmentID'], term['hRecordID'], term['terminalRoot'])
+            say(f'anchorTerm({term["assignmentID"]}) by the owner (permissionless; the words of its Closure record): {out.get("out", "")[-160:]}')
         p, t = d.progress(), d.view(d.REGISTRY, 'ucTime()(uint64)')[0]
         lot_sig = 'lots(uint256)(uint64,uint64,uint128,uint128,uint128,uint8,uint16,uint32,uint64,uint64,uint64,uint64,uint64)'
         pending = []
@@ -892,7 +963,13 @@ class Join:
             round_gate, time_gate = max(p_ret + f[8], f[10]) + 1, max(t_ret + f[9], f[12])
             say(f'lot {lot}: refCount {f[7]}, retirement imported {imported}, rounds {p} / {round_gate}, evidence {p} / {f[11] + 1}, time {t} / {time_gate} '
                 f'(~{max(0, time_gate - t) / 60:.0f} min)')
-            if not imported or f[7] or p < max(round_gate, f[11] + 1) or t < time_gate:
+            try:
+                unanchored = d.view(d.custody, 'lotUnanchoredTerms(uint256)(uint32)', str(lot))[0]
+            except Exception:   # contracts before #1297
+                unanchored = 0
+            if unanchored:
+                say(f'lot {lot}: {unanchored} closed term(s) still wait for their report anchors (anchorTerm)')
+            if not imported or f[7] or unanchored or p < max(round_gate, f[11] + 1) or t < time_gate:
                 pending.append(lot)
         if pending:
             say(f'not yet: lots {pending} are held')
@@ -1135,7 +1212,9 @@ def retire_plan(generation, entity):
         f'3. the next election result excludes custody id {ident}: frozenMembers shows the four genesis identities',
         f'4. host: handoff_drive.py <gen> <result> --allow-unrehearsed-retirement: the trust base and the proofs are made by the ELECTED entities only; '
         f'the install barrier still restarts every root of the committee being left, root{entity} on the laptop included (this transport), and the leaver gets no advance',
-        '5. after holdRetirement (2000 rounds) and timeFloor (3600 s): anyone calls custody.mature([lot]); the withdrawal address (its key is on the laptop) calls claim(amount, to)',
+        '5. anyone calls custody.anchorTerm(assignment, hRecordID, terminalRoot) for each closed term of the lots, with the words of its Closure record '
+        '(permissionless; mature refuses TermAnchorPending until then; remote_entity.py claim does it); after holdRetirement (2000 rounds) and timeFloor '
+        '(3600 s): anyone calls custody.mature([lot]); the withdrawal address (its key is on the laptop) calls claim(amount, to)',
         f'6. only once every root certifies the new epoch without root{entity}: stop the laptop services (remote_joiner.py stop), then the tunnel; the host relay may stay',
     ]
 
