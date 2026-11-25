@@ -410,7 +410,7 @@ procedure against the surviving authority, not a bare DB rollback or clone.
 
 Copy encrypted archives, digest, exact `docker save` images and checkout off host.
 Check decrypt/load before relying on them. Backups contain disposable root/shard
-keys, ureth node keys (`validator<N>/ureth-key`), Engine JWTs, faucet key/password, operator/client credentials, the aggregator
+keys, ureth node keys (`validator<N>/ureth-key`), Engine JWTs, faucet key/password, the funder key/password (`funder-secrets/`), operator/client credentials, the aggregator
 key (`aggregator/keys.json`) and the aggregator's MongoDB data; restrict access. SHA-256 checks integrity, not authentication against a
 malicious supplier. Off-host archives support investigation and retained history;
 they are **not full-host same-network disaster recovery**. Coupled rotation,

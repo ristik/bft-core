@@ -3318,6 +3318,12 @@ class StagingKnobs(unittest.TestCase):
                 if "['faucet_address']" in line and not (path.name=='validate-generation.py' or 'old_faucet' in line):
                     self.fail(f'{path.name}: a sender from the faucet account: {line.strip()}')
         self.assertGreaterEqual(generate.uct_wei(generate.FUNDER_BALANCE,'x'),450*10**18,'the funder pays a full rehearsal')
+        # no service mounts the funder's keys (review of #1304): the compose file names neither its directory nor a secret from it
+        for kw in ({},{'payout':'0.5'}):
+            cfg=self.topo(**kw)
+            self.assertNotIn('funder-secrets',json.dumps(cfg))
+            self.assertEqual(sorted(cfg['secrets']),['faucet_keystore','faucet_password','hcaptcha_secret'])
+            self.assertEqual(sorted(n for n,svc in cfg['services'].items() if svc.get('secrets')),['signer'],'only the signer gets the faucet secrets')
     def test_payout_reaches_the_signer(self):
         cfg=self.topo()
         self.assertEqual(cfg['services']['signer']['environment']['FAUCET_PAYOUT'],'200')

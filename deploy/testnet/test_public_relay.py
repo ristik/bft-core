@@ -15,7 +15,7 @@ import urllib.error
 import urllib.request
 
 from faucet import gateway as faucet_gateway, relay as faucet_relay
-from gateway import Handler, Limiter, MAX_BODY, Relay, Server
+from gateway import ExecutionHandler, Handler, Limiter, MAX_BODY, Relay, Server
 
 GENESIS = '0x' + 'aa' * 32
 TX = '0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347'
@@ -164,7 +164,9 @@ class PublicRelayTest(unittest.TestCase):
     def gateway(self, *nodes, hostname=None):
         urls = []
         for node in nodes:
-            if node is None:
+            if isinstance(node, str):
+                urls.append(node)   # an execution guard (self.guard)
+            elif node is None:
                 # Reserve the port without listening, to exercise a refused connection.
                 server = ThreadingHTTPServer(('127.0.0.1', 0), Node().handler(), bind_and_activate=False)
                 server.server_bind()
@@ -180,6 +182,16 @@ class PublicRelayTest(unittest.TestCase):
         self.stack.callback(self.relay.close)
         self.stack.callback(server.pool.shutdown)
         self.url = self.serve(server)
+
+    def guard(self, node):
+        """One validator's execution guard (gateway.py with TN_LOCAL_EXECUTION_ALIAS): ExecutionHandler over that validator's client alone."""
+        relay = Relay(dict(validator_rpc_urls=[self.serve(ThreadingHTTPServer(('127.0.0.1', 0), node.handler()))], chain_id=70, genesis_hash=GENESIS),
+                      small_body_limit=MAX_BODY)
+        server = Server(('127.0.0.1', 0), ExecutionHandler, relay)
+        server.rpc_limit, server.heavy_limit = Limiter(100, 100), Limiter(20, 20)
+        self.stack.callback(relay.close)
+        self.stack.callback(server.pool.shutdown)
+        return self.serve(server)
 
     def rpc(self, method, params=()):
         body = dict(jsonrpc='2.0', id='caller', method=method, params=list(params))
@@ -381,6 +393,58 @@ class PublicRelayTest(unittest.TestCase):
         self.stack.close()
         self.gateway(no_hash)
         self.assertEqual(self.rpc('eth_sendRawTransaction', [RAW])[0], 503)
+
+    def test_unrecognised_errors_stay_ambiguous(self):
+        for message in ('txpool is full', 'internal error', 'nonce too high', 'Already Known: pooled'):
+            with self.subTest(message=message):
+                self.stack.close()
+                error = {'error': {'code': -32603, 'message': message}}
+                self.gateway(Node(answers={'eth_sendRawTransaction': error}), Node(answers={'eth_sendRawTransaction': error}))
+                self.assertEqual(self.rpc('eth_sendRawTransaction', [RAW])[0], 503)
+
+    def test_an_absence_seen_before_the_send_answer_does_not_confirm_it(self):
+        """A lookup of a validator that has not answered the send (yet) says nothing about a later "nonce too low" from it (review of #1304, P3-1): only
+        validators that already refused the nonce are recorded as lacking the hash."""
+        def node():
+            return Node(answers={'web3_sha3': {'result': TX}, 'eth_getTransactionByHash': {'result': None}})
+        self.gateway(node(), node(), node())
+        urls = list(self.relay.urls)
+        absent = set()
+        answers = {urls[0]: {'error': NONCE}, urls[1]: {'error': {'code': -32000, 'message': 'insufficient funds'}}}
+        self.assertIsNone(self.relay.duplicate_hash([RAW], [urls[0]], time.monotonic() + 5, absent, answers))
+        self.assertEqual(absent, {urls[0]})
+
+    def test_wallets_get_definite_errors_through_the_validator_guards(self):
+        """The generated topology (review of #1304, P2): the public gateway relays to every validator's execution guard, each of which relays to its own
+        client. A stale nonce and a refusal reach a public /rpc wallet as the JSON-RPC error, not 503; a lost answer behind one guard stays 503."""
+        reth = FakeReth()
+        account = '0x' + '34' * 20
+        self.gateway(self.guard(reth.node()), self.guard(reth.node()))
+        stale = FakeReth.raw(account, 0, '0x' + '99' * 20)
+        self.assertEqual(self.rpc('eth_sendRawTransaction', [stale])[0], 200)
+        self.assertEqual(self.rpc('eth_sendRawTransaction', [stale]), (200, dict(jsonrpc='2.0', id='caller', result=FakeReth.hash(stale))),
+                         'the same bytes again: the duplicate check through the guards finds the hash')
+        other = FakeReth.raw(account, 0, '0x' + '98' * 20)   # another transaction for the used nonce
+        status, body = self.rpc('eth_sendRawTransaction', [other])
+        self.assertEqual(status, 200, body)
+        self.assertTrue(body['error']['message'].startswith('nonce too low'), body)
+        refused = {'error': {'code': -32003, 'message': 'insufficient funds for gas * price + value'}}
+        self.stack.close()
+        self.gateway(self.guard(Node(answers={'eth_sendRawTransaction': refused})), self.guard(Node(answers={'eth_sendRawTransaction': refused})))
+        self.assertEqual(self.rpc('eth_sendRawTransaction', [RAW]), (200, dict(jsonrpc='2.0', id='caller', **refused)))
+        self.stack.close()
+        self.gateway(self.guard(Node(answers={'eth_sendRawTransaction': refused})), self.guard(Node(answers={'eth_sendRawTransaction': None})))
+        self.assertEqual(self.rpc('eth_sendRawTransaction', [RAW])[0], 503)
+
+    def test_the_guard_hashes_for_the_duplicate_check_only_internally(self):
+        node = Node(answers={'web3_sha3': {'result': TX}})
+        url = self.guard(node)
+        big = '0x' + 'ab' * 20000
+        for raw in (RAW, big):
+            reply = json.load(urllib.request.urlopen(urllib.request.Request(url, json.dumps(dict(jsonrpc='2.0', id=1, method='web3_sha3', params=[raw])).encode()), timeout=8))
+            self.assertEqual(reply['result'], TX)
+        self.gateway(node)
+        self.assertEqual(self.rpc('web3_sha3', [RAW])[0], 400, 'the public gateway does not serve it')
 
     def test_rejection_with_an_unanswered_or_pooled_peer_stays_ambiguous(self):
         refused = {'error': {'code': -32000, 'message': 'insufficient funds for gas * price + value'}}

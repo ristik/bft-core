@@ -9,7 +9,7 @@ import threading
 import time
 from urllib.parse import urlsplit
 
-from faucet.gateway import ResponseTooLarge
+from faucet.gateway import REFUSALS, ResponseTooLarge
 
 # Upstream work starts after the HTTP handler validates the client body. Leave
 # time for the gateway to answer its ten-second Docker health probe.
@@ -78,8 +78,9 @@ def publish(answer, reply):
 
 def rejection_kind(reply):
     """'known' (the transaction is already in the pool), 'nonce' (nonce too low:
-    this transaction or another one used the nonce), 'other' (a JSON-RPC error
-    that refuses the transaction) or None (not an error)."""
+    this transaction or another one used the nonce), 'refused' (an execution
+    client refusal, faucet.gateway.REFUSALS), 'other' (an unrecognised error:
+    ambiguous) or None (not an error)."""
     error = reply.get('error')
     if not isinstance(error, dict):
         return None
@@ -88,7 +89,7 @@ def rejection_kind(reply):
         return 'known'
     if message == 'nonce too low' or message.startswith('nonce too low:'):
         return 'nonce'
-    return 'other'
+    return 'refused' if any(refusal in message for refusal in REFUSALS) else 'other'
 
 
 def definite_rejection(urls, answers, absent):
@@ -99,8 +100,9 @@ def definite_rejection(urls, answers, absent):
     that validator's pool. "already known" means it is in a pool. "nonce too
     low" is definite only when the same validator then reported that it does
     not know this transaction's hash (duplicate_hash), so the nonce went to
-    another transaction. Any other error is the validator's refusal (insufficient
-    funds, underpriced, replacement, decode or sender errors).
+    another transaction. A recognised refusal (REFUSALS: insufficient funds,
+    underpriced, replacement, decode or sender errors) is definite; an
+    unrecognised error stays ambiguous.
     """
     chosen = None
     for url in urls:
@@ -108,7 +110,7 @@ def definite_rejection(urls, answers, absent):
         if reply is None:
             return None
         kind = rejection_kind(reply)
-        if kind is None or kind == 'known' or (kind == 'nonce' and url not in absent):
+        if kind not in ('nonce', 'refused') or (kind == 'nonce' and url not in absent):
             return None
         if chosen is None:
             chosen = reply
@@ -349,7 +351,7 @@ class Relay:
             if rejection_kind(reply) in ('known', 'nonce'):
                 outcomes.put(url)
 
-    def duplicate_hash(self, params, preferred, deadline, absent=None):
+    def duplicate_hash(self, params, preferred, deadline, absent=None, answers=None):
         # A duplicate responder is a good hash source. Check all configured
         # validators, including ones that could not be reached during broadcast.
         urls = preferred + [url for url in self.read_order() if url not in preferred]
@@ -374,9 +376,11 @@ class Relay:
                 found = self.rpc(url, body, attempt, max_bytes=8 << 20).get('result')
                 if isinstance(found, dict) and same_hash(found.get('hash'), tx_hash):
                     return tx_hash
-                if found is None and absent is not None:
-                    # This validator neither has the transaction in its pool nor
-                    # on its chain: its nonce rejection was for another one.
+                if found is None and absent is not None and answers is not None and rejection_kind(answers.get(url) or {}) == 'nonce':
+                    # This validator had already refused the nonce and now has the
+                    # transaction neither in its pool nor on its chain: the nonce
+                    # went to another one. A lookup before its send answer proves
+                    # nothing about it; its own answer queues another check.
                     absent.add(url)
             except (Unavailable, ResponseTooLarge):
                 continue
@@ -420,7 +424,7 @@ class Relay:
                     except Empty:
                         break
                 if preferred and not answer.done():
-                    tx_hash = self.duplicate_hash(params, preferred, deadline, absent)
+                    tx_hash = self.duplicate_hash(params, preferred, deadline, absent, answers)
                     if tx_hash is not None:
                         publish(answer, dict(jsonrpc='2.0', id=1, result=tx_hash))
             if not pending and not answer.done():

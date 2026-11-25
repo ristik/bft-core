@@ -196,6 +196,8 @@ class Server(http.server.HTTPServer):
         return self.rpc_limit.allowed(ip)
 
 class Handler(http.server.BaseHTTPRequestHandler):
+    methods, large_methods = PUBLIC, LARGE_METHODS
+
     def log_filter(self, params):
         check_log_filter(params)
 
@@ -245,9 +247,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     return self.reply(503, {'error': 'busy: too many large requests, retry'})
                 large = True
             body = json.loads(self.rfile.read(length))
-            if not isinstance(body, dict) or body.get('jsonrpc') != '2.0' or body.get('method') not in PUBLIC or not isinstance(body.get('params', []), list):
+            if not isinstance(body, dict) or body.get('jsonrpc') != '2.0' or body.get('method') not in self.methods or not isinstance(body.get('params', []), list):
                 raise ValueError('unsupported JSON-RPC request')
-            if length > MAX_BODY and body.get('method') not in LARGE_METHODS:
+            if length > MAX_BODY and body.get('method') not in self.large_methods:
                 raise ValueError('body size')
             if not isinstance(body.get('id'), (str, int, type(None))):
                 raise ValueError('id')
@@ -337,6 +339,9 @@ class Metrics(http.server.BaseHTTPRequestHandler):
 
 class ExecutionHandler(Handler):
     """Internal access to one validator's bounded wallet RPC methods."""
+    # The public gateway's duplicate check hashes the raw transaction it relays (public_relay.duplicate_hash: web3_sha3, then eth_getTransactionByHash) on
+    # these guards: a pure function, internal only, as large as the transaction (bft-core#1287).
+    methods, large_methods = PUBLIC | {'web3_sha3'}, LARGE_METHODS | {'web3_sha3'}
 
     def do_POST(self):
         if self.path != '/':
