@@ -1,6 +1,6 @@
 {
   "bft": "09e6ba9acc77869da0a491db5352b4edc3ce6672",
-  "ureth": "00c059e80212d05a8a439a8fe7b3ab249158ee39",
+  "ureth": "ea45372c803749b981ed2471b14af0b22e1e436c",
   "aggregator-go": "c3ec8b8748dbbf196cc43d1b735e8f6d0470a04f",
   "aggregator-go-upstream": "12ab9074b02dedf39b90b0bb49829ac77fb2da68",
   "mongo": "mongo:7.0.45@sha256:c53852c00c23ca9f23fc39690350ffa9a80e3642fe8f96879726d8da0abe80a7",
