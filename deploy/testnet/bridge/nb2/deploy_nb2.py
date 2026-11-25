@@ -130,7 +130,7 @@ def descriptors(gen, manifest, bridge, work):
     dest.mkdir(exist_ok=True)
     native = manifest['artifacts']
     hashes = {}
-    tip_descriptors = {'cert-batch-v2', 'semantic-profile'}
+    tip_descriptors = {'cert-batch-v2', 'primitive-vectors', 'registry-layout', 'semantic-profile'}
     for name in (*DESCRIPTORS, 'semantic-profile'):
         if name in tip_descriptors:
             data = (HERE / f'{name}-tip.json').read_bytes()

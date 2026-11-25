@@ -2519,6 +2519,34 @@ class NB2DriverKeys(unittest.TestCase):
                 with self.assertRaisesRegex(SystemExit, 'require B1 execution revision 2'):
                     m.run_deployment(gen, gen / 'evidence', 1, gen / 'output')
 
+    @unittest.skipUnless(os.getenv('TN_PINNED_URETH'), 'requires the pinned ureth checkout')
+    def test_nb2_descriptors_match_paired_source_revisions(self):
+        m = self.deploy_module()
+        pins = json.loads((m.REPO / 'deploy/testnet/pins.json').read_bytes())
+        bft = (os.getenv('TN_PINNED_BFT', m.REPO), pins['bft'])
+        ureth = (os.environ['TN_PINNED_URETH'], pins['ureth'])
+        historical = m.REPO / 'testvectors/nb2-continuation-v1.1-supplement/descriptors'
+        manifest = {'artifacts': {'sources': {'bft': pins['bft'], 'ureth': pins['ureth']},
+                                  'binary_sha256': {}, 'images': {}}}
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            (work / 'public').mkdir()
+            hashes = m.descriptors(work, manifest, 'bridge', work)
+            for name, sections in (
+                ('primitive-vectors', {'artifacts': bft}),
+                ('registry-layout', {'sources': bft, 'native': ureth}),
+            ):
+                with self.subTest(descriptor=name):
+                    expected = json.loads((historical / f'{name}.json').read_bytes())
+                    for section, (checkout, revision) in sections.items():
+                        for path in expected[section]:
+                            blob = subprocess.check_output(
+                                ['git', '-C', str(checkout), 'show', f'{revision}:{path}'])
+                            expected[section][path] = hashlib.sha256(blob).hexdigest()
+                    data = (work / 'public/descriptors' / f'{name}.json').read_bytes()
+                    self.assertEqual(json.loads(data), expected)
+                    self.assertEqual(hashes[name], '0x' + hashlib.sha256(data).hexdigest())
+
     def test_graph_and_origin_readback_use_the_recorded_finalized_hash(self):
         m = self.deploy_module()
         roles = ['registry', 'receipts', 'lineage', 'ordinary', 'recovery', 'vault']
