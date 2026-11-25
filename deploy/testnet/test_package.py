@@ -1724,6 +1724,23 @@ class PublicRPC(unittest.TestCase):
                       ('unicity_getSealCompanionV1',[{'hash':h}]),('unicity_sealCompanionHorizonV1',[1])])
         status,result=self.call('eth_getBlockByHash',[h,True])
         self.assertIn('[blockHash, false]',result['error'],'the refusal names the accepted shape')
+    def test_nb2_imported_tip_read_requires_fixed_slot_and_canonical_block_hash(self):
+        method = 'eth_getStorageAt'
+        registry, slot = gateway.B1_REGISTRY, gateway.B1_IMPORTED_TIP_SLOT
+        block_hash = '0x' + 'ab' * 32
+        block = {'blockHash': block_hash, 'requireCanonical': True}
+        self.assertEqual(self.call(method, [registry, slot, block])[0], 200)
+        self.refused([
+            (method, ['0x' + '11' * 20, slot, block]),
+            (method, [registry, '0x' + '00' * 32, block]),
+            (method, [registry, slot, 'finalized']),
+            (method, [registry, slot, {'blockHash': block_hash}]),
+            (method, [registry, slot, {**block, 'requireCanonical': False}]),
+            (method, [registry, slot, {**block, 'requireCanonical': 1}]),
+            (method, [registry, slot, {**block, 'blockNumber': '0x1'}]),
+            (method, [registry, slot, {**block, 'blockHash': '0x0'}]),
+        ])
+
     def test_log_filter_edges_are_refused_before_any_upstream_call(self):
         self.server.rpc_limit=self.server.heavy_limit=gateway.Limiter(1000,1000)
         vault='0x'+'cd'*20; h='0x'+'11'*32
