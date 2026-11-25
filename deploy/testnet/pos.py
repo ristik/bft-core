@@ -204,7 +204,8 @@ class Genesis:
         env = dict(clean_environ(), P85_NETWORK_WORD=network_word(self.generation), P85_CHAIN_ID=str(self.chain_id), P85_ROOTS=REGISTRY, P85_TREASURY=TREASURY,
                    P85_GOVERNANCE_AUTHORITY=GOVERNANCE_AUTHORITY, P85_REWARD_FUNDING=str(REWARD_FUNDING), P85_REWARD_RATE=str(REWARD_RATE),
                    P85_V_MAX=str(CAPS[0]), P85_L_MAX=str(CAPS[1]), P85_N_MAX=str(CAPS[2]), P85_CADENCE_ROUNDS=str(self.cadence[0]),
-                   P85_CADENCE_SECONDS=str(self.cadence[1]), P85_DIST_NUM=str(self.dist[0]), P85_DIST_DEN=str(self.dist[1]))
+                   P85_CADENCE_SECONDS=str(self.cadence[1]), P85_DIST_NUM=str(self.dist[0]), P85_DIST_DEN=str(self.dist[1]),
+                   P85_PROFILE='testnet')   # #1298: reportWindow 1,800 + settlementMargin 1,800 <= timeFloor 3,600 (older contracts ignore it)
         if self.contracts_take_root_identity():   # contracts#46 and later; an older pinned checkout does not know the variables
             env['P85_ROOT_NETWORK'], env['P85_ROOT_GENESIS'] = self.root_identity()
         self._run(self.contracts / 'script/p85-genesis.sh', self.dir / 'contracts-genesis.json', self.dir / 'genesis', env=env)

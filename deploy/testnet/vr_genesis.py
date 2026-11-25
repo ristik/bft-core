@@ -67,6 +67,12 @@ def run(*args, cwd=None, env=None):
     return done.stdout
 
 
+# The P85 retirement report profile the contracts' genesis scripts take (#1297/#1298): a resettable testnet is always the testnet profile
+# (reportWindow 1,800 s + settlementMargin 1,800 s <= timeFloor 3,600 s), never an operator's ambient P85_PROFILE. Older contracts ignore it.
+def pos_genesis_env():
+    return dict(os.environ, P85_PROFILE='testnet')
+
+
 # A development generation's premine (--dev-fund): each identity owner and governor signer, whose keys the plan generates, holds this many
 # wei, so they can send the transactions an election needs (an owner's proposeBinding, a multisig queue and execute).
 DEV_FUND_WEI = 1000 * 10**18
@@ -179,7 +185,7 @@ def pos_module_hash(contracts, work):
                      'cadenceRounds': POS_CADENCE[0], 'cadenceSeconds': POS_CADENCE[1]}
     work.mkdir(parents=True)
     (work / 'sample-input.json').write_text(json.dumps(sample))
-    run(contracts / 'script/vr-pos-genesis.sh', work / 'sample-input.json', work / 'out', cwd=contracts)
+    run(contracts / 'script/vr-pos-genesis.sh', work / 'sample-input.json', work / 'out', cwd=contracts, env=pos_genesis_env())
     return json.loads((work / 'out/deployment.json').read_text())['moduleCodeHash']
 
 
@@ -245,7 +251,7 @@ def compose_pos_genesis(a, *, ubft, home, network, generation, roots, evms, fund
         if (home / actual).read_bytes() != (network / pinned).read_bytes():
             raise VRGenesisError('the VR plan disagrees with the authority ceremony UTB genesis')
     contracts = a.pos_contracts.resolve()
-    run(contracts / 'script/vr-pos-genesis.sh', network / 'vr-input.json', home / 'vr-contracts', cwd=contracts)
+    run(contracts / 'script/vr-pos-genesis.sh', network / 'vr-input.json', home / 'vr-contracts', cwd=contracts, env=pos_genesis_env())
     shutil.copy2(home / 'vr-contracts/deployment.json', network / 'deployment.json')
     identity = finalize(merge_alloc(funded, json.loads((home / 'vr-contracts/alloc.json').read_text())))
     full = home / 'full-shard-conf.json'
@@ -371,7 +377,7 @@ def plan(a):
         genesis_extra = pre['extraData']
     else:
         plan_cmd('')
-    run(contracts / ('script/vr-pos-genesis.sh' if a.pos else 'script/vr-genesis.sh'), out / 'vr/input.json', out / 'vr', cwd=contracts)
+    run(contracts / ('script/vr-pos-genesis.sh' if a.pos else 'script/vr-genesis.sh'), out / 'vr/input.json', out / 'vr', cwd=contracts, env=pos_genesis_env())
 
     funded_genesis = funded_base_genesis(a.chain_id, int(profile['maxGas']), pre['extraData'].removeprefix('0x') if a.pos else secrets.token_hex(32))
     merge_alloc(funded_genesis, json.loads((out / 'vr/alloc.json').read_text()))
