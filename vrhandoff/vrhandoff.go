@@ -570,8 +570,10 @@ func SignReadiness(i Intent, a Assembly, body q3format.BodyV3, self string, trus
 
 // SignCommitment signs one rule-support commitment of a member's exact binding.
 func SignCommitment(network uint64, m evmassign.Identity, rule, release vrschema.Word, s abcrypto.Signer) (SupportCommitment, error) {
+	ref := m.BindingRef()
 	c := SupportCommitment{Network: network, StakingID: bytes.Clone(m.StakingID), Generation: m.Generation, RootKeyHash: ethcrypto.Keccak256(m.RootKey),
-		RuleID: bytes.Clone(rule[:]), ReleaseDigest: bytes.Clone(release[:])}
+		BindingRef: bytes.Clone(ref[:]),
+		RuleID:     bytes.Clone(rule[:]), ReleaseDigest: bytes.Clone(release[:])}
 	msg, err := c.SignedBytes()
 	if err != nil {
 		return c, err

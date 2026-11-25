@@ -162,7 +162,7 @@ func (p *posStep) ruleSupport(c rctypes.PosControl, block *rctypes.BlockData, sv
 	schedule := env.vr.step.state.Schedule
 	cs := make([]vrschema.SupportCommitment, len(c.Support))
 	for i, x := range c.Support {
-		cs[i] = vrschema.SupportCommitment{Network: x.Network, StakingID: x.StakingID, Generation: x.Generation, RootKeyHash: x.RootKeyHash,
+		cs[i] = vrschema.SupportCommitment{Network: x.Network, StakingID: x.StakingID, Generation: x.Generation, RootKeyHash: x.RootKeyHash, BindingRef: x.BindingRef,
 			RuleID: x.RuleID, ReleaseDigest: x.ReleaseDigest, Sig: x.Sig}
 	}
 	v := env.vr.step

@@ -105,7 +105,7 @@ func TestVRControlRefusals(t *testing.T) {
 	require.ErrorIs(t, sup.Validate(), rctypes.ErrPosControl, "RuleSupport empty")
 	c := func(id, rule byte) rctypes.SupportCommitment {
 		w := func(b byte) []byte { x := make([]byte, 32); x[31] = b; return x }
-		return rctypes.SupportCommitment{Network: 3, StakingID: w(id), Generation: 1, RootKeyHash: w(7), RuleID: w(rule), ReleaseDigest: w(8), Sig: make([]byte, 65)}
+		return rctypes.SupportCommitment{Network: 3, StakingID: w(id), Generation: 1, RootKeyHash: w(7), BindingRef: w(9), RuleID: w(rule), ReleaseDigest: w(8), Sig: make([]byte, 65)}
 	}
 	sup.Support = []rctypes.SupportCommitment{c(1, 2), c(1, 1)}
 	require.ErrorIs(t, sup.Validate(), rctypes.ErrPosControl, "RuleSupport unsorted")

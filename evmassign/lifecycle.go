@@ -7,6 +7,7 @@ import (
 	"github.com/unicitynetwork/bft-core/internal/weightcap"
 	"sort"
 
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/unicitynetwork/bft-core/continuity"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
@@ -76,6 +77,21 @@ func (i Identity) valid() error {
 		return fmt.Errorf("%w: zero operator payee or exposure digest for %x", ErrIdentity, i.StakingID)
 	}
 	return nil
+}
+
+// BindingRef is the validator registry's binding reference of this identity, VRShared._ref:
+// keccak256(abi.encode(rootNodeWord, rootKeyHash, evmNodeWord, evmKeyHash, payee)), the payee left-padded to 32 bytes. It changes
+// whenever any part of the binding does, an EVM-key-only rotation included, while the staking id and generation stay.
+func (i Identity) BindingRef() [32]byte {
+	rw, _ := NodeIDWord(i.RootNodeID)
+	buf := append([]byte(nil), rw[:]...)
+	buf = append(buf, ethcrypto.Keccak256(i.RootKey)...)
+	ew, _ := NodeIDWord(i.EVMNodeID)
+	buf = append(buf, ew[:]...)
+	buf = append(buf, ethcrypto.Keccak256(i.EVMKey)...)
+	buf = append(buf, make([]byte, 32-len(i.OperatorPayee))...)
+	buf = append(buf, i.OperatorPayee...)
+	return keccak(buf)
 }
 
 func isZero(b []byte) bool { return bytes.Equal(b, make([]byte, len(b))) }
