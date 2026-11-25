@@ -339,6 +339,28 @@ class UtbProfile(unittest.TestCase):
             r=R(); r.manifest=manifest
             self.assertEqual(rehearse.Rehearsal.reset_utb_args(r),want)
         self.assertIn('*self.reset_utb_args()',(Path(generate.__file__).with_name('rehearse.py')).read_text(),'the reset stage passes them to reset.py')
+    def test_the_rehearsal_reset_supplies_its_own_inventory_or_is_disposable(self):
+        import rehearse
+        class R:
+            def __init__(self, manifest, ev): self.manifest, self.ev, self.calls = manifest, ev, []
+            def evh(self): return self.ev
+            def expect(self, ok, what, detail=''):
+                if not ok: raise AssertionError(what + ' ' + str(detail))
+            def utb_history(self, label, pin, snapshot=None):
+                self.calls.append((label, pin)); b = self.ev / 'h.cbor'; b.write_bytes(b'x'); return 5, '0x' + 'aa' * 32, b
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            self.assertEqual(rehearse.Rehearsal.reset_inventory_args(R({}, d), {'ubft': 'x'}), (['--disposable'], []), 'a --no-utb rehearsal is disposable')
+            ubft = d / 'ubft'
+            ubft.write_text('#!/bin/sh\nwhile [ $# -gt 0 ]; do [ "$1" = --keys-out ] && echo {} > "$2"; shift; done\n'); ubft.chmod(0o755)
+            r = R({'utb': {'genesis_id': '0x' + 'ab' * 32}}, d)
+            flags, gen = rehearse.Rehearsal.reset_inventory_args(r, {'ubft': str(ubft)})
+            self.assertEqual(flags, [])
+            self.assertEqual(gen, ['--prior-generation', str(d / 'utb-history-reset-inventory-keys.json')], 'a UTB generation supplies its own served history')
+            self.assertEqual(r.calls, [('reset-inventory', '0x' + 'ab' * 32)])
+        source = (Path(generate.__file__).with_name('rehearse.py')).read_text()
+        self.assertIn("'--lose-all-assets', *reset_flags", source)
+        self.assertIn("'--', '--out', str(new), *inventory", source)
     def test_image_records_must_match_the_aggregator_variant_before_a_reset_tears_anything_down(self):
         integration={'sources':dict(generate.PINS)}
         upstream={'sources':{**generate.PINS,'aggregator-go':generate.PINS['aggregator-go-upstream']}}
@@ -373,6 +395,16 @@ class UtbProfile(unittest.TestCase):
                 done=reset(*gen)
                 self.assertEqual(done.returncode,2,(why,done.stderr)); self.assertIn('--prior-generation',done.stderr,why)
                 self.assertFalse(spy.exists(),why+': docker must not be called')
+            # a disposable --no-utb generation (no pin anywhere) resets without a history; --disposable never applies to one with a pin
+            def reset_disposable(*gen):
+                return subprocess.run([sys.executable,str(here/'reset.py'),'--old',str(old),'--lose-all-assets','--disposable','--','--out',str(d/'tn-new'),*gen],
+                                      env={**os.environ,'PATH':str(bin)+os.pathsep+os.environ['PATH']},capture_output=True,text=True)
+            done=reset_disposable('--no-utb','--images',str(integration),'--prior-generation',str(history))
+            self.assertEqual(done.returncode,2,done.stderr); self.assertIn('fresh inventory',done.stderr); self.assertFalse(spy.exists())
+            disposable=d/'tn-disposable'; shutil.copytree(old,disposable)
+            done=subprocess.run([sys.executable,str(here/'reset.py'),'--old',str(disposable),'--lose-all-assets','--disposable','--','--out',str(d/'tn-new'),'--no-utb','--images',str(integration)],
+                                env={**os.environ,'PATH':str(bin)+os.pathsep+os.environ['PATH']},capture_output=True,text=True)
+            self.assertTrue(spy.exists(),'a disposable --no-utb generation reaches the teardown without a history'); spy.unlink()
             # astra r3: without a trusted root-genesis pin nothing binds the history to the old generation: refused before any teardown
             (old/'network/handoff').mkdir(parents=True)
             done=reset('--no-utb','--images',str(integration),'--prior-generation',str(history))
@@ -385,6 +417,9 @@ class UtbProfile(unittest.TestCase):
             self.assertEqual(done.returncode,2,done.stderr); self.assertIn('complete one',done.stderr)
             self.assertFalse(spy.exists(),'a foreign history: docker must not be called')
             self.assertEqual(root_keys.generation_pin(old),'0x'+'ab'*32)
+            done=reset_disposable('--no-utb','--images',str(integration))
+            self.assertEqual(done.returncode,2,done.stderr); self.assertIn('only for a generation without a signed history',done.stderr)
+            self.assertFalse(spy.exists(),'--disposable is refused for a generation with a pin')
             # review r2 P3-2: the history is bound to the generation it replaces: its own genesis, through its newest installed epoch
             (old/'network/utb-genesis.id').write_text('0x'+'ab'*32+'\n')
             (old/'network/handoff/trust-base-epoch3.json').write_text('{}')

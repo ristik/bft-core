@@ -10,6 +10,9 @@ import sys
 p=argparse.ArgumentParser(description=__doc__)
 p.add_argument('--old',required=True,type=Path)
 p.add_argument('--lose-all-assets',action='store_true',required=True)
+p.add_argument('--disposable',action='store_true',help='the old generation is a disposable one WITHOUT a signed history (made with --no-utb, no root-genesis '
+               'pin): the replacement starts a fresh retired-key inventory (generate.py --first-generation). Refused for a generation that has a UTB pin, '
+               'whose reset always needs its own verified history (#1297)')
 p.add_argument('generator_args',nargs=argparse.REMAINDER)
 a=p.parse_args()
 old=a.old.resolve()
@@ -38,14 +41,22 @@ if err: p.error(err)
 import root_keys
 priors=[Path(args[i+1]) for i,x in enumerate(args[:-1]) if x=='--prior-generation']
 if '--first-generation' in args: p.error('a reset replaces an existing root history: pass its UTB history keys as --prior-generation, not --first-generation')
-if not any(root_keys.is_history(x) for x in priors):
+kept=[]
+if a.disposable:
+    # a throwaway rehearsal generation with no signed history: nothing can bind an inventory to it, and its keys were made fresh
+    if root_keys.generation_pin(old) or manifest.get('utb'):
+        p.error('--disposable is only for a generation without a signed history; this one has a root-genesis pin: pass its verified UTB history keys')
+    if priors: p.error('--disposable starts a fresh inventory: give no --prior-generation')
+    args=args+['--first-generation']
+elif not any(root_keys.is_history(x) for x in priors):
     p.error('supply --prior-generation <utb-verify --keys-out file of the old generation> before anything is deleted')
 # the history must be THIS generation's, complete through its newest installed epoch (a stale export or a truncated --url read is refused)
-why=root_keys.bind_to_generation([x for x in priors if root_keys.is_history(x)],old)
+why=None if a.disposable else root_keys.bind_to_generation([x for x in priors if root_keys.is_history(x)],old)
 if why: p.error(why)
 # the old generation's inherited list and its genesis keys are part of the inventory: kept beside it and passed on, never optional
-kept=[]
 for name,src in (('retired-root-keys.json',old/'network'/root_keys.FILE),('retired-root-signing-keys.json',old/'manifest.json')):
+    if a.disposable:
+        break
     if src==old/'manifest.json' and not manifest.get('root_signing_keys'):
         continue
     if src.is_file():

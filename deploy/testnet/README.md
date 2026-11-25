@@ -489,6 +489,14 @@ sudo -E python3 /path/to/repo/deploy/testnet/reset.py \
 sudo chown -R 10001:10001 /srv/testnet/tn-20261008
 ```
 
+A disposable `--no-utb` rehearsal generation has no signed history and no
+root-genesis pin, so nothing can bind an inventory to it: `reset.py --old ...
+--lose-all-assets --disposable -- ...` resets it with a fresh inventory
+(`--first-generation`). `--disposable` is refused for any generation with a UTB
+pin, so the public reset stays bound to its verified history. `rehearse.py`'s
+reset stage uses `--disposable` for a `--no-utb` generation and otherwise
+exports the generation's own served history with `--keys-out`.
+
 Start as above. Require changed block-zero hash, new keys/account, all validators
 matching the new manifest, old wallet claim 409, new-wallet faucet claim and a
 paid external-client transaction. Update public manifests/wallets/status and

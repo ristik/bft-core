@@ -346,6 +346,23 @@ type Terms struct {
 	// anchorTerm (their successor epoch is not installed).
 	Backs    map[[32]byte][]*big.Int
 	NotReady map[[32]byte]bool
+	// Seats are compact-seat lots per term (assignmentSeat), instead of Backs' legacy exposure; Race terms are anchored by another party
+	// between the caller's preview and its transaction (the caller's send reverts).
+	Seats map[[32]byte][]*big.Int
+	Race  map[[32]byte]bool
+}
+
+type seatBinding struct {
+	Id, Generation                             uint64
+	RootNode, RootKeyHash, EvmNode, EvmKeyHash [32]byte
+	Payee                                      ethcommon.Address
+}
+
+type assignmentSeat struct {
+	Binding                               seatBinding
+	Weight, RawWeight                     uint64
+	BindingHash, ExposureID, MemberDigest [32]byte
+	LotID                                 *big.Int
 }
 
 func (t *Terms) record(i uint64) vrclient.RootRecord {
@@ -379,7 +396,13 @@ func (c *Chain) terms(from ethcommon.Address, data []byte, write bool) ([]byte, 
 		return pack(a, "assignments", uint8(2), [32]byte{}, uint64(0), uint64(0), uint64(0), uint64(0), false, false, uint64(0), t.Closed[in[0].([32]byte)],
 			uint64(0), uint64(0), [32]byte{}, [32]byte{}, [32]byte{}, uint32(0)), nil
 	case "assignmentSeatCount":
-		return pack(a, "assignmentSeatCount", big.NewInt(0)), nil
+		return pack(a, "assignmentSeatCount", big.NewInt(int64(len(t.Seats[in[0].([32]byte)])))), nil
+	case "assignmentSeat":
+		seats, i := t.Seats[in[0].([32]byte)], in[1].(*big.Int)
+		if !i.IsInt64() || i.Int64() >= int64(len(seats)) {
+			return nil, &rpcError{Code: 3, Message: "execution reverted"}
+		}
+		return pack(a, "assignmentSeat", assignmentSeat{LotID: seats[i.Int64()]}), nil
 	case "assignmentExposures":
 		aid := in[0].([32]byte)
 		if len(t.Backs[aid]) == 0 {
@@ -400,10 +423,20 @@ func (c *Chain) terms(from ethcommon.Address, data []byte, write bool) ([]byte, 
 		if t.NotReady[aid] {
 			return nil, &rpcError{Code: 3, Message: "execution reverted: SuccessorNotInstalled"}
 		}
+		if write && t.Race[aid] {
+			// another party's anchor lands first: the term is anchored, this transaction reverts
+			t.Anchored[aid] = true
+			for _, lot := range append(append([]*big.Int{}, t.Backs[aid]...), t.Seats[aid]...) {
+				if n := t.Unanchored[lot.String()]; n > 0 {
+					t.Unanchored[lot.String()] = n - 1
+				}
+			}
+			return nil, &rpcError{Code: 3, Message: "execution reverted: TermNotPending"}
+		}
 		if write {
 			t.Anchored[aid] = true
 			t.Anchors++
-			for _, lot := range t.Backs[aid] {
+			for _, lot := range append(append([]*big.Int{}, t.Backs[aid]...), t.Seats[aid]...) {
 				if n := t.Unanchored[lot.String()]; n > 0 {
 					t.Unanchored[lot.String()] = n - 1
 				}

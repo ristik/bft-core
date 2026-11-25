@@ -212,6 +212,42 @@ func TestValidatorClaimAnchorsClosedTerms(t *testing.T) {
 	require.Contains(t, out, "claimed 100 base units to "+operator.Hex())
 }
 
+// review r3 P3: a compact-seat term (sixteen-seat custody: the lot is a seat's, no exposure lots) is anchored, and an anchor that loses to another
+// party's between the preview and the send is accepted (the term is anchored), so the claim matures and claims.
+func TestValidatorClaimAnchorsACompactSeatTermAndSurvivesALostRace(t *testing.T) {
+	chain, url := fakeNetwork(t)
+	home := initHome(t, url)
+	_, keys := loadHome(t, home)
+	operator := ethcrypto.PubkeyToAddress(keys.Operator.PublicKey)
+	chain.Fund(operator, big.NewInt(1e18))
+	id := chain.AddMember(operator, vrclient.Registration{RootNodeID: "seat-root", EvmNodeID: "seat-evm"})
+	seat, raced, foreign := [32]byte{0x5e}, [32]byte{0x7a}, [32]byte{0xf0}
+	lot := big.NewInt(9)
+	chain.Mu.Lock()
+	chain.Tag = vrclient.ModuleTagPoS
+	chain.Custody = ethcommon.Address{0xc1}
+	chain.Election = ethcommon.Address{0xe1}
+	chain.ClaimLots = []*big.Int{lot}
+	chain.Terms = &vrfake.Terms{
+		Closures:   [][3][32]byte{{seat, {0x01}, {0x02}}, {raced, {0x03}, {0x04}}, {foreign, {0x05}, {0x06}}},
+		Closed:     map[[32]byte]bool{seat: true, raced: true, foreign: true},
+		Anchored:   map[[32]byte]bool{},
+		Unanchored: map[string]uint32{"9": 2},
+		Seats:      map[[32]byte][]*big.Int{seat: {big.NewInt(3), lot}, raced: {lot}, foreign: {big.NewInt(4), big.NewInt(5)}},
+		Race:       map[[32]byte]bool{raced: true},
+	}
+	chain.Mu.Unlock()
+
+	out, err := runValidator(t, home, "claim", "--id", fmt.Sprint(id))
+	require.NoError(t, err, out)
+	require.Contains(t, out, "[anchor] anchor closed term "+hexutil.Encode(seat[:]), "the compact seat's lot is this identity's")
+	require.NotContains(t, out, hexutil.Encode(foreign[:]), "no seat of that term is this identity's lot")
+	require.Contains(t, out, "anchored meanwhile by another party")
+	require.Equal(t, 1, chain.Terms.Anchors, "the seat term by this claim; the raced one by the other party")
+	require.True(t, chain.Terms.Anchored[raced])
+	require.Contains(t, out, "claimed 100 base units to "+operator.Hex())
+}
+
 func TestValidatorApplyAdmitExit(t *testing.T) {
 	chain, url := fakeNetwork(t)
 	home := initHome(t, url)

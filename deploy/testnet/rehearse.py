@@ -209,6 +209,20 @@ class Rehearsal:
         self.n = self.manifest['validators']
         self.chain_id, self.genesis = self.manifest['chain_id'], self.manifest['genesis_hash'].lower()
 
+    def reset_inventory_args(self, a):
+        """(reset.py flags, generator arguments) for the old generation's retired-key inventory (#1297): a generation with a signed history
+        supplies its own, the history its aggregator serves, verified against the pinned genesis and exported with --keys-out; a --no-utb
+        rehearsal generation has none and is reset as --disposable."""
+        utb = self.manifest.get('utb')
+        if not utb:
+            return ['--disposable'], []
+        _, _, bundle = self.utb_history('reset-inventory', utb['genesis_id'])
+        keys = self.evh() / 'utb-history-reset-inventory-keys.json'
+        run = subprocess.run([a['ubft'], 'trust-base', 'utb-verify', '--bundle', str(bundle), '--utb-genesis-id', utb['genesis_id'], '--keys-out', str(keys)],
+                             text=True, capture_output=True)
+        self.expect(run.returncode == 0 and keys.is_file(), 'the old generation\'s signed history exports its root keys (the reset inventory)', (run.stdout + run.stderr).strip()[-300:])
+        return [], ['--prior-generation', str(keys)]
+
     def reset_utb_args(self):
         """The signed-history profile of the old generation, for the replacement: --no-utb, or --utb with the aggregator variant its manifest records."""
         utb = self.manifest.get('utb')
@@ -1886,7 +1900,9 @@ class Rehearsal:
         old, old_genesis, old_faucet, old_tx = self.gen, self.genesis, self.manifest['faucet_address'], getattr(self, 'tx', None)
         new = Path(self.reset_args['out'])
         a = self.reset_args
-        out = subprocess.run([sys.executable, str(Path(__file__).with_name('reset.py')), '--old', str(old), '--lose-all-assets', '--', '--out', str(new),
+        reset_flags, inventory = self.reset_inventory_args(a)
+        out = subprocess.run([sys.executable, str(Path(__file__).with_name('reset.py')), '--old', str(old), '--lose-all-assets', *reset_flags,
+                              '--', '--out', str(new), *inventory,
                               '--validators', str(self.n), '--chain-id', str(self.chain_id), '--ubft', a['ubft'], '--b1genesis', a['b1genesis'], '--keygen', a['keygen'],
                               '--captcha-sitekey', a['captcha_sitekey'], '--captcha-secret-file', a['captcha_secret_file'],
                               # the replacement keeps the selected signed-history profile (generate.py's default is on)
