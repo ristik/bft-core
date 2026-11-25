@@ -8,6 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum/accounts/abi"
+	"github.com/ethereum/go-ethereum/common"
+	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/continuity"
 	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
@@ -596,5 +599,28 @@ func TestAuthorizationIsolatedRefusals(t *testing.T) {
 			_, err := a.Digest()
 			require.ErrorIs(t, err, ErrAuthorization)
 		})
+	}
+}
+
+// BindingRef is VRShared._ref: keccak256(abi.encode(bytes32 rootNode, bytes32 rootKeyHash, bytes32 evmNode, bytes32 evmKeyHash, address payee)).
+func TestBindingRefMatchesABIEncoding(t *testing.T) {
+	b32, _ := abi.NewType("bytes32", "", nil)
+	addr, _ := abi.NewType("address", "", nil)
+	id := Identity{StakingID: bytes.Repeat([]byte{1}, 32), Generation: 3, RootNodeID: "root-node", RootKey: append([]byte{2}, bytes.Repeat([]byte{7}, 32)...),
+		EVMNodeID: "evm-node", EVMKey: append([]byte{3}, bytes.Repeat([]byte{9}, 32)...), OperatorPayee: bytes.Repeat([]byte{0xab}, 20)}
+	k := func(b []byte) [32]byte { var o [32]byte; copy(o[:], ethcrypto.Keccak256(b)); return o }
+	packed, err := abi.Arguments{{Type: b32}, {Type: b32}, {Type: b32}, {Type: b32}, {Type: addr}}.Pack(
+		k([]byte("root-node")), k(id.RootKey), k([]byte("evm-node")), k(id.EVMKey), common.BytesToAddress(id.OperatorPayee))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := ethcrypto.Keccak256Hash(packed)
+	if got := id.BindingRef(); got != [32]byte(want) {
+		t.Fatalf("BindingRef %x, want %x", got, want)
+	}
+	rot := id
+	rot.EVMKey = append([]byte{3}, bytes.Repeat([]byte{8}, 32)...)
+	if rot.BindingRef() == id.BindingRef() {
+		t.Fatal("an EVM key change must change the binding ref")
 	}
 }

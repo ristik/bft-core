@@ -9,7 +9,6 @@ import (
 	"sort"
 	"sync"
 
-	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/unicitynetwork/bft-core/evmassign"
 	"github.com/unicitynetwork/bft-core/monitoring"
 	"github.com/unicitynetwork/bft-core/q3format"
@@ -1062,7 +1061,7 @@ func supportEvidence(sch []vrschema.Activation, tab vradmit.SupportTable, k []ev
 			continue
 		}
 		for _, m := range k {
-			if bytes.Equal(m.StakingID, c.StakingID) && c.Generation == m.Generation && bytes.Equal(c.RootKeyHash, ethcrypto.Keccak256(m.RootKey)) {
+			if vradmit.BindsTo(c, m) {
 				d, err := c.Digest()
 				if err == nil {
 					ev.Refs = append(ev.Refs, d[:])

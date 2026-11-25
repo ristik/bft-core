@@ -533,11 +533,13 @@ carrying commitments whose `ruleSupportDigest` it states and the singleton recei
 ### 10.4 Rule support
 
 ```
-SupportCommitment = [network uint, stakingID bstr32, generation uint, rootKeyHash bstr32, ruleId bstr32, releaseDigest bstr32, sig]
-sig by that binding's root key over CBOR(["UNICITY_VR_RULE_SUPPORT", 1, network, stakingID, generation, rootKeyHash, ruleId, releaseDigest])
+SupportCommitment = [network uint, stakingID bstr32, generation uint, rootKeyHash bstr32, bindingRef bstr32, ruleId bstr32, releaseDigest bstr32, sig]
+sig by that binding's root key over CBOR(["UNICITY_VR_RULE_SUPPORT", 2, network, stakingID, generation, rootKeyHash, bindingRef, ruleId, releaseDigest])
 commitment digest = SHA-256(CBOR(commitment))                     (the Freeze reference)
 ruleSupportDigest = SHA-256(CBOR(["UNICITY_VR_RULE_SUPPORT_SET", 1, commitments]))   one member's commitments, strictly ascending ruleId
 ```
+
+`bindingRef` is the registry binding ref `keccak256(abi.encode(rootNodeWord, rootKeyHash, evmNodeWord, evmKeyHash, payee))` of the signing member. A commitment counts only for the exact binding (stakingID, generation, rootKeyHash, bindingRef), so a rotation of any binding part, an EVM-key-only rotation included, invalidates it and the support table drops it on pruning.
 
 ### 10.5 HandoffView replay and timeouts
 

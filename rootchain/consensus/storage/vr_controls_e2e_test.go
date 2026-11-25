@@ -78,7 +78,7 @@ func TestVRRuleSupportThroughTheExecutor(t *testing.T) {
 	support := func(cs ...vrschema.SupportCommitment) rctypes.PosControl {
 		var out []rctypes.SupportCommitment
 		for _, c := range cs {
-			out = append(out, rctypes.SupportCommitment{Network: c.Network, StakingID: c.StakingID, Generation: c.Generation, RootKeyHash: c.RootKeyHash,
+			out = append(out, rctypes.SupportCommitment{Network: c.Network, StakingID: c.StakingID, Generation: c.Generation, RootKeyHash: c.RootKeyHash, BindingRef: c.BindingRef,
 				RuleID: c.RuleID, ReleaseDigest: c.ReleaseDigest, Sig: c.Sig})
 		}
 		return rctypes.PosControl{Registry: true, Network: vxNetwork, ChainID: f.dep.ChainID, Custody: f.dep.Registry, OrderingEpoch: 1, OrderingRound: 11,

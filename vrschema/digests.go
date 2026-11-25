@@ -48,6 +48,13 @@ func DecodeMember(b []byte) (Member, error) {
 	return m, nil
 }
 
+// BindingRef is the registry's binding ref of the member, VRShared._ref: keccak256(abi.encode(rootNodeWord, rootKeyHash, evmNodeWord,
+// evmKeyHash, payee)). It is what a rule-support commitment names, so an EVM-key-only rotation (same id, generation and root key)
+// still changes it.
+func (m Member) BindingRef() Word {
+	return keccak(words(m.RootNodeWord, m.RootKeyHash, m.EVMNodeWord, m.EVMKeyHash, AddrWord(m.Payee)))
+}
+
 // MemberHash is h_i = keccak256(abi.encode(member)).
 func MemberHash(m Member) Word { return keccak(m.Words()) }
 
