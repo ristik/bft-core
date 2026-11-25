@@ -189,7 +189,7 @@ func TestCheckProfile_UnicityPrecompilesOfAB1Deployment(t *testing.T) {
 	})
 	t.Run("the plain profile still refuses them", func(t *testing.T) {
 		_, err := checkProfile(withNative(nil), 31337)
-		require.ErrorContains(t, err, "unexpected unicity-b1-cert-batch-v2, unicity-b1-membership")
+		require.ErrorContains(t, err, "unexpected unicity-b1-cert-batch-v2-tip, unicity-b1-membership")
 	})
 	t.Run("a B1 deployment refuses a client without B2", func(t *testing.T) {
 		_, err := checkProfileWith(withNative(func(p map[string]any) { delete(p, "unicity-b2-sdk3") }), 31337, nativeRev2)
@@ -201,8 +201,10 @@ func TestCheckProfile_UnicityPrecompilesOfAB1Deployment(t *testing.T) {
 		require.ErrorContains(t, err, "unexpected unicity-bridge-compose-v2")
 	})
 	t.Run("a B1 deployment refuses a moved verifier", func(t *testing.T) {
-		_, err := checkProfileWith(withNative(func(p map[string]any) { p["unicity-b1-cert-batch-v2"] = "0x0000000000000000000000000000000000000200" }), 31337, nativeRev2)
-		require.ErrorContains(t, err, "moved unicity-b1-cert-batch-v2")
+		_, err := checkProfileWith(withNative(func(p map[string]any) {
+			p["unicity-b1-cert-batch-v2-tip"] = "0x0000000000000000000000000000000000000200"
+		}), 31337, nativeRev2)
+		require.ErrorContains(t, err, "moved unicity-b1-cert-batch-v2-tip")
 	})
 	t.Run("a B1 deployment refuses the retired v1 verifiers", func(t *testing.T) {
 		for name, addr := range map[string]string{"unicity-b1-Uc": "0x0000000000000000000000000000000000000100", "unicity-b1-Shared": "0x0000000000000000000000000000000000000101"} {
@@ -211,8 +213,8 @@ func TestCheckProfile_UnicityPrecompilesOfAB1Deployment(t *testing.T) {
 		}
 	})
 	t.Run("a B1 deployment refuses a client without CERT_BATCH_V2", func(t *testing.T) {
-		_, err := checkProfileWith(withNative(func(p map[string]any) { delete(p, "unicity-b1-cert-batch-v2") }), 31337, nativeRev2)
-		require.ErrorContains(t, err, "missing unicity-b1-cert-batch-v2")
+		_, err := checkProfileWith(withNative(func(p map[string]any) { delete(p, "unicity-b1-cert-batch-v2-tip") }), 31337, nativeRev2)
+		require.ErrorContains(t, err, "missing unicity-b1-cert-batch-v2-tip")
 	})
 	t.Run("a B1 deployment refuses S1 at 0x0103", func(t *testing.T) {
 		_, err := checkProfileWith(withNative(func(p map[string]any) { p["unicity-s1"] = "0x0000000000000000000000000000000000000103" }), 31337, nativeRev2)

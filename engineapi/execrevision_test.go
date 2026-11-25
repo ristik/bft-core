@@ -36,7 +36,7 @@ func ethConfigWith(t *testing.T, natives map[string]string) json.RawMessage {
 }
 
 func TestExpectUnicityPrecompilesRefusesAnyRevisionButTheCurrentOne(t *testing.T) {
-	for _, rev := range []uint64{0, 2, 1 << 40} {
+	for _, rev := range []uint64{0, 1, 3, 1 << 40} {
 		a := &Adapter{}
 		require.ErrorIs(t, a.ExpectUnicityPrecompiles(rev), b1state.ErrExecutionRevision, "revision %d", rev)
 		require.Nil(t, a.unicityPrecompiles, "a refused revision must not leave an expectation behind")
@@ -56,6 +56,17 @@ func TestExecutionRevisionStartupMatrix_BFTUrethPairs(t *testing.T) {
 	}
 	_, err := checkProfileWith(ethConfigWith(t, nativeRev2), 31337, newBFT())
 	require.NoError(t, err, "new BFT with new ureth participates")
+	previous := make(map[string]string, len(nativeRev2))
+	for name, address := range nativeRev2 {
+		if name == "unicity-b1-cert-batch-v2-tip" {
+			name = "unicity-b1-cert-batch-v2"
+		}
+		previous[name] = address
+	}
+	_, err = checkProfileWith(ethConfigWith(t, previous), 31337, newBFT())
+	require.ErrorContains(t, err, "missing unicity-b1-cert-batch-v2-tip")
+	_, err = checkProfileWith(ethConfigWith(t, nativeRev2), 31337, previous)
+	require.ErrorContains(t, err, "unexpected unicity-b1-cert-batch-v2-tip")
 	_, err = checkProfileWith(ethConfigWith(t, legacyUreth()), 31337, newBFT())
 	require.ErrorContains(t, err, "unexpected unicity-bridge-compose-v2", "new BFT with old ureth is refused")
 	m := legacyUreth()

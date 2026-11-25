@@ -39,7 +39,8 @@ func TestTheProfileReaderRequiresTheCurrentExecutionRevision(t *testing.T) {
 	for name, edit := range map[string]func(map[string]any){
 		"stripped":       func(m map[string]any) { delete(m, "executionRevision") },
 		"zero":           func(m map[string]any) { m["executionRevision"] = 0 },
-		"unknown future": func(m map[string]any) { m["executionRevision"] = 2 },
+		"previous":       func(m map[string]any) { m["executionRevision"] = 1 },
+		"unknown future": func(m map[string]any) { m["executionRevision"] = 3 },
 		"string":         func(m map[string]any) { m["executionRevision"] = "1" },
 	} {
 		_, err := readB1Profile(writeProfileEdit(t, cur, edit))
@@ -62,14 +63,14 @@ func TestTheProfileFileRoundTripsItsExecutionRevision(t *testing.T) {
 	require.Equal(t, p, f.profile())
 	b, err := json.Marshal(f)
 	require.NoError(t, err)
-	require.Contains(t, string(b), `"executionRevision":1`)
+	require.Contains(t, string(b), `"executionRevision":2`)
 }
 
 func TestBindB1ProfileRefusesAnotherRevision(t *testing.T) {
 	v := vrFixtureInput(t)
 	_, err := bindB1Profile(v.profile, v.tb, v.full)
 	require.NoError(t, err)
-	for _, rev := range []uint64{0, 2} {
+	for _, rev := range []uint64{0, 1, 3} {
 		p := v.profile
 		p.ExecutionRevision = rev
 		_, err := bindB1Profile(p, v.tb, v.full)
@@ -78,7 +79,7 @@ func TestBindB1ProfileRefusesAnotherRevision(t *testing.T) {
 }
 
 // New and legacy generations: every pairing of one generation's profile with the other's genesis, shard configuration or ureth flags is refused by
-// the complete verify, and revision 1 added by hand to the legacy profile does not make the legacy genesis or PDR match.
+// the complete verify, and the current revision added by hand to the legacy profile does not make the legacy genesis or PDR match.
 func TestTheGenerationsCannotBeMixedInVRVerify(t *testing.T) {
 	_, err := vrVerify(vrFixtureInput(t))
 	require.NoError(t, err, "the current generation verifies")
@@ -112,8 +113,8 @@ func TestTheGenerationsCannotBeMixedInVRVerify(t *testing.T) {
 		_, _, err := readB1ProfileFile(legacyTestdata("b1-profile.json"))
 		require.ErrorIs(t, err, ErrB1Profile)
 	})
-	t.Run("revision 1 added by hand to the legacy profile, with the legacy genesis and PDR", func(t *testing.T) {
-		p := writeProfileEdit(t, legacyTestdata("b1-profile.json"), func(m map[string]any) { m["executionRevision"] = 1 })
+	t.Run("the current revision added by hand to the legacy profile, with the legacy genesis and PDR", func(t *testing.T) {
+		p := writeProfileEdit(t, legacyTestdata("b1-profile.json"), func(m map[string]any) { m["executionRevision"] = b1state.CurrentExecutionRevision })
 		profile, file, err := readB1ProfileFile(p)
 		require.NoError(t, err)
 		v := vrFixtureInput(t)

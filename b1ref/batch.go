@@ -8,11 +8,11 @@ import (
 // evalBatch is the staged evaluator of a scanned and decoded CERT_BATCH_V2 request (briefs/b1-any-age-contract.md section 3). It
 // returns the batch's false reason (nil when valid) or an infrastructure error, in the contract's precedence:
 //
-//  1. the common words (Registry/Host first); then phase 1 or no usable origin yet is false, with no epoch read;
-//  2. every requested epoch in [g, U], in first-use order, read and validated once with its keys parsed (Registry/Host first);
+//  1. the common words (Registry/Host first); then phase 1 is false, with no epoch read;
+//  2. every requested epoch in [g, I], in first-use order, read and validated once with its keys parsed (Registry/Host first);
 //  3. every distinct claim, in first-use order: binding and folds, and conflict with an earlier different claim for the same
 //     (partition, shard) under the same seal;
-//  4. every distinct complete seal, in first-use order: network, epoch admissibility, start <= r, r < end when closed, r <= O, then
+//  4. every distinct complete seal, in first-use order: network, epoch admissibility, start <= r, r < end when closed, then
 //     every supplied signature and the weighted quorum.
 //
 // All of 3 and 4 is evaluated, so the work done depends on the request and state, not on which check fails first; the reason is
@@ -25,13 +25,10 @@ func evalBatch(pl *plan, claims []claim, st State, pins Pins) (error, error) {
 	if c.phase == 1 {
 		return ErrPhase, nil
 	}
-	if !c.ready {
-		return ErrOriginNotReady, nil
-	}
 	epochs := make(map[uint64]*epochAuth, pl.e)
 	for i := uint64(0); i < pl.k; i++ {
 		e := pl.occ[i].epoch
-		if _, seen := epochs[e]; seen || e < c.g || e > c.origin {
+		if _, seen := epochs[e]; seen || e < c.g || e > c.tip {
 			continue
 		}
 		auth, err := loadEpoch(st, c, e)
@@ -95,7 +92,7 @@ func conflicts(claims []claim, pl *plan, i uint64) bool {
 }
 
 // sealRelation checks one complete seal against its epoch's authority. There is no certificate-age window: a seal of an admitted
-// epoch is valid while start_e <= r <= O and, for a closed epoch, r < end_e.
+// epoch is valid while start_e <= r and, for a closed epoch, r < end_e.
 func sealRelation(c *claim, cm *common, epochs map[uint64]*epochAuth) error {
 	seal := c.uc.UnicitySeal
 	if uint64(seal.NetworkID) != uint64(cm.network) {
@@ -104,7 +101,7 @@ func sealRelation(c *claim, cm *common, epochs map[uint64]*epochAuth) error {
 	if seal.Epoch < cm.g {
 		return ErrEpochBeforeGenesis
 	}
-	if seal.Epoch > cm.origin {
+	if seal.Epoch > cm.tip {
 		return ErrEpochNotUsable
 	}
 	auth := epochs[seal.Epoch]
@@ -114,9 +111,6 @@ func sealRelation(c *claim, cm *common, epochs map[uint64]*epochAuth) error {
 	}
 	if auth.entry.End != nil && r >= *auth.entry.End {
 		return ErrAfterEnd
-	}
-	if r > cm.o {
-		return ErrFuture
 	}
 	return verifySignatures(c, auth)
 }
