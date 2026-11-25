@@ -1532,6 +1532,15 @@ class TermAnchors(unittest.TestCase):
         d.rpc.side_effect = rpc
         return d
 
+    def test_the_anchor_calls_are_the_final_contracts_selectors(self):
+        # forge's method identifiers at unicity-pos-contracts e2b995b/3cbb999 (#1297), and the signatures remote_entity casts them with
+        final = {'anchorTerm(bytes32,bytes32,bytes32)': 'baed1b42', 'termAnchors(bytes32)': '895915f0', 'lotUnanchoredTerms(uint256)': '304ab606',
+                 'assignments(bytes32)': '82c2901c', 'recordAt(uint64)': 'b2cee303', 'recordCount()': '900407bc'}
+        source = (Path(re_.__file__)).read_text()
+        for sig, want in final.items():
+            self.assertEqual(evm_keys.keccak256(sig.encode()).hex()[:8], want, sig)
+            self.assertIn(sig, source, sig)
+
     def test_closure_words(self):
         self.assertEqual(re_.closure_words(self.closure(self.A)), (self.A, self.H, self.T))
         self.assertIsNone(re_.closure_words('(0, 0x11, 0x22, 2, 10, 17, 0x)'))

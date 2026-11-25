@@ -16,6 +16,7 @@ The key hash is keccak256 of the 33-byte compressed key: the root key hash custo
 """
 import json
 from pathlib import Path
+import re
 
 from evm_keys import keccak256
 
@@ -70,6 +71,38 @@ def is_history(source):
         return json.loads(p.read_text()).get('format') == HISTORY_FORMAT
     except (ValueError, AttributeError):
         return False
+
+
+def history_of(path):
+    """(genesisId, last epoch) of a verified UTB history keys file."""
+    doc = json.loads(Path(path).read_text())
+    epochs = [int(e['epoch']) for e in doc.get('epochs') or []]
+    return (doc.get('genesisId') or '').lower(), max(epochs) if epochs else 0
+
+
+def generation_epoch(generation):
+    """The newest root epoch a generation directory holds a trust base for: network/trust-base.json is epoch 1, every installed handoff
+    writes network/handoff/trust-base-epoch<N>.json."""
+    net = Path(generation) / 'network'
+    found = [int(m.group(1)) for f in (net / 'handoff').glob('trust-base-epoch*.json') if (m := re.fullmatch(r'trust-base-epoch(\d+)\.json', f.name))]
+    return max(found + [1])
+
+
+def bind_to_generation(histories, generation):
+    """Refuse an inventory that is not the generation's own complete history: a history of another root genesis (a stale export of an earlier
+    reset), or one that ends before the generation's newest installed epoch (a truncated `utb-verify --url` read). Returns the error text, or None."""
+    gen = Path(generation)
+    pin_file = gen / 'network' / 'utb-genesis.id'
+    pin = pin_file.read_text().strip().lower() if pin_file.is_file() else None
+    want = generation_epoch(gen)
+    for h in histories:
+        gid, last = history_of(h)
+        if pin and gid == pin and last >= want:
+            return None
+    if pin:
+        return (f'no --prior-generation history is {gen.name}\'s own complete one: it needs genesisId {pin} and epochs through {want} '
+                f'(the newest trust base the generation holds); export it again from the running generation')
+    return None if any(history_of(h)[1] >= want for h in histories) else f'no --prior-generation history reaches {gen.name}\'s epoch {want}'
 
 
 def load(source):

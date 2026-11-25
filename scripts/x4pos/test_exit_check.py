@@ -173,7 +173,7 @@ class ExitCheck(unittest.TestCase):
         # forge's method identifiers of StakeCustody and SealRegistry at unicity-pos-contracts e2b995b (#1297)
         final = {"anchorTerm(bytes32,bytes32,bytes32)": "baed1b42", "termAnchors(bytes32)": "895915f0", "lotUnanchoredTerms(uint256)": "304ab606",
                  "roots()": "393fe1cd", "assignments(bytes32)": "82c2901c", "recordAt(uint64)": "b2cee303", "recordCount()": "900407bc"}
-        sources = [(HERE / "exit_check.py").read_text(), (HERE / "lib.sh").read_text(), (HERE.parent.parent / "deploy/testnet/remote_entity.py").read_text()]
+        sources = [(HERE / "exit_check.py").read_text(), (HERE / "lib.sh").read_text()]   # deploy/testnet's copy: test_remote_joiner.TermAnchors
         for sig, want in final.items():
             self.assertEqual(keccak256(sig.encode()).hex()[:8], want, sig)
             self.assertTrue(any(sig in src for src in sources), sig)

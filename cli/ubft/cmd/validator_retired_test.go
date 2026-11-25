@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"math/big"
 	"os"
 	"path/filepath"
 	"testing"
@@ -63,4 +64,36 @@ func TestARotatedInKeyOfThePriorGenerationIsRefusedByDefault(t *testing.T) {
 		[]byte(`{"format":"unicity-retired-root-keys/1","keyHashes":["`+hexutil.Encode(ethcrypto.Keccak256(key))+`"]}`), 0o600))
 	f := &txFlags{enrollsRootKey: true}
 	require.ErrorContains(t, checkRetiredRootKey(f.retiredRootKeys(&loadedValidator{home: home}), key), "earlier root history")
+}
+
+// review r2 P2-1: rotate checks the key it rotates TO against the shipped list, with the same default and opt-out (the command itself).
+func TestValidatorRotateRefusesARetiredNewRootKey(t *testing.T) {
+	chain, url := fakeNetwork(t)
+	home := initHome(t, url)
+	_, keys := loadHome(t, home)
+	chain.Fund(ethcrypto.PubkeyToAddress(keys.Operator.PublicKey), big.NewInt(1e18))
+	out, err := runValidator(t, home, "apply")
+	require.NoError(t, err, out)
+
+	retired, fresh := filepath.Join(t.TempDir(), "keys.json"), filepath.Join(t.TempDir(), "keys.json")
+	for _, p := range []string{retired, fresh} {
+		_, _, err = ensureKeyConf(p)
+		require.NoError(t, err)
+	}
+	kc, err := readKeyConf(retired)
+	require.NoError(t, err)
+	nk, err := nodeKeys(kc)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Join(home, "release"), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(home, releaseRetiredRootKeys),
+		[]byte(`{"format":"unicity-retired-root-keys/1","keyHashes":["`+hexutil.Encode(ethcrypto.Keccak256(nk.Public()))+`"]}`), 0o600))
+
+	sent := chain.Sends()
+	_, err = runValidator(t, home, "rotate", "--new-root-keys", retired)
+	require.ErrorContains(t, err, "earlier root history", "the shipped list is read by default")
+	require.Equal(t, sent, chain.Sends(), "nothing is sent")
+	out, err = runValidator(t, home, "rotate", "--new-root-keys", retired, "--dry-run", "--no-retired-root-keys")
+	require.NoError(t, err, out)
+	out, err = runValidator(t, home, "rotate", "--new-root-keys", fresh, "--dry-run")
+	require.NoError(t, err, out)
 }

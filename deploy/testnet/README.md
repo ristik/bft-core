@@ -296,8 +296,21 @@ sudo -E python3 deploy/testnet/generate.py --out /srv/testnet/tn-NEXT ... \
 `tn-public-20261126` predates the list, so its signed history is the whole
 inventory. Use the `ubft` built from the pinned source: the release's own
 `ubft` predates `--url` and `--keys-out`. Keep `prior-utb.cbor` and
-`prior-utb-keys.json` with the new generation's evidence. `reset.py` performs the
-same check before it deletes anything.
+`prior-utb-keys.json` with the new generation's evidence.
+
+`utb-verify --url` verifies what the gateway serves. A gateway that lags serves
+a valid prefix, and that prefix verifies too. Export from the running
+generation right before the regeneration, after its last handoff. Check that
+the printed `epochs 1..N` reaches the epoch its roots certify now. `reset.py`
+enforces this before it deletes anything:
+
+- the history's `genesisId` must be the old generation's
+  `network/utb-genesis.id`;
+- its last epoch must reach the newest `network/handoff/trust-base-epoch<N>.json`
+  the generation holds;
+- the old generation's own `network/retired-root-keys.json` and its manifest's
+  genesis keys are kept beside it and passed on as further
+  `--prior-generation` inputs.
 
 Keep nginx stopped and disabled during regeneration. At handoff, the owner
 checks both HTTP/2 backports before opening the front. Use Ubuntu nginx

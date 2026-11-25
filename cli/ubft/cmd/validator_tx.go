@@ -566,6 +566,16 @@ func validatorRotate(cmd *cobra.Command, f *rotateFlags) error {
 		if next.Root, err = readKeyConf(f.RootKeys); err != nil {
 			return fmt.Errorf("%w: new root keys: %w", ErrValidator, err)
 		}
+		// #1297: the key rotated to must not be one of an earlier root history (the same list and opt-out as the configured key in openTx)
+		if list := f.retiredRootKeys(v); list != "" {
+			nk, err := nodeKeys(next.Root)
+			if err != nil {
+				return fmt.Errorf("%w: new root keys: %w", ErrValidator, err)
+			}
+			if err := checkRetiredRootKey(list, nk.Public()); err != nil {
+				return err
+			}
+		}
 	}
 	if f.EVMKeys != "" {
 		if next.EVM, err = readKeyConf(f.EVMKeys); err != nil {

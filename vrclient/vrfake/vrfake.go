@@ -342,6 +342,10 @@ type Terms struct {
 	Anchored   map[[32]byte]bool
 	Unanchored map[string]uint32 // by lot id (decimal)
 	Anchors    int               // anchorTerm transactions applied
+	// Backs names the lots each term's assignment references (one exposure per term, its id the assignment id); NotReady terms refuse
+	// anchorTerm (their successor epoch is not installed).
+	Backs    map[[32]byte][]*big.Int
+	NotReady map[[32]byte]bool
 }
 
 func (t *Terms) record(i uint64) vrclient.RootRecord {
@@ -374,17 +378,34 @@ func (c *Chain) terms(from ethcommon.Address, data []byte, write bool) ([]byte, 
 	case "assignments":
 		return pack(a, "assignments", uint8(2), [32]byte{}, uint64(0), uint64(0), uint64(0), uint64(0), false, false, uint64(0), t.Closed[in[0].([32]byte)],
 			uint64(0), uint64(0), [32]byte{}, [32]byte{}, [32]byte{}, uint32(0)), nil
+	case "assignmentSeatCount":
+		return pack(a, "assignmentSeatCount", big.NewInt(0)), nil
+	case "assignmentExposures":
+		aid := in[0].([32]byte)
+		if len(t.Backs[aid]) == 0 {
+			return pack(a, "assignmentExposures", [][32]byte{}), nil
+		}
+		return pack(a, "assignmentExposures", [][32]byte{aid}), nil
+	case "exposureLots":
+		lots := t.Backs[in[0].([32]byte)]
+		if lots == nil {
+			lots = []*big.Int{}
+		}
+		return pack(a, "exposureLots", lots), nil
 	case "anchorTerm":
 		aid := in[0].([32]byte)
 		if !t.Closed[aid] || t.Anchored[aid] {
 			return nil, &rpcError{Code: 3, Message: "execution reverted: TermNotPending"}
 		}
+		if t.NotReady[aid] {
+			return nil, &rpcError{Code: 3, Message: "execution reverted: SuccessorNotInstalled"}
+		}
 		if write {
 			t.Anchored[aid] = true
 			t.Anchors++
-			for k, n := range t.Unanchored {
-				if n > 0 {
-					t.Unanchored[k] = n - 1
+			for _, lot := range t.Backs[aid] {
+				if n := t.Unanchored[lot.String()]; n > 0 {
+					t.Unanchored[lot.String()] = n - 1
 				}
 			}
 		}

@@ -48,6 +48,10 @@ func TestThePoSABIsMatchTheCompiledSelectors(t *testing.T) {
 		{CustodyTermsABI, "lotUnanchoredTerms", "304ab606"},
 		{CustodyTermsABI, "roots", "393fe1cd"},
 		{CustodyTermsABI, "termAnchors", "895915f0"},
+		{CustodyTermsABI, "assignmentExposures", "b40fe7d4"},
+		{CustodyTermsABI, "exposureLots", "c03e0a67"},
+		{CustodyTermsABI, "assignmentSeatCount", "1543ae1d"},
+		{CustodyTermsABI, "assignmentSeat", "d6b00661"},
 		{SealRecordsABI, "recordAt", "b2cee303"},
 		{SealRecordsABI, "recordCount", "900407bc"},
 	}

@@ -373,8 +373,22 @@ class UtbProfile(unittest.TestCase):
                 done=reset(*gen)
                 self.assertEqual(done.returncode,2,(why,done.stderr)); self.assertIn('--prior-generation',done.stderr,why)
                 self.assertFalse(spy.exists(),why+': docker must not be called')
-            done=reset('--no-utb','--images',str(integration),'--prior-generation',str(history))   # accepted by the preflight: it reaches the teardown (the spy) and fails later in generate
+            # review r2 P3-2: the history is bound to the generation it replaces: its own genesis, through its newest installed epoch
+            (old/'network/handoff').mkdir(parents=True); (old/'network/utb-genesis.id').write_text('0x'+'ab'*32+'\n')
+            (old/'network/handoff/trust-base-epoch3.json').write_text('{}')
+            root_keys.write(old/'network',{root_keys.key_hash('0x03'+'99'*32)})
+            def hist(name,gid,last):
+                h=d/name; h.write_text(json.dumps({'format':root_keys.HISTORY_FORMAT,'genesisId':gid,'epochs':[{'epoch':e,'keys':['0x02'+'11'*32]} for e in range(1,last+1)]}))
+                return h
+            for h,why in ((hist('stale.json','0x'+'cd'*32,5),'another root genesis (a stale export)'),(hist('short.json','0x'+'ab'*32,2),'truncated before epoch 3')):
+                done=reset('--no-utb','--images',str(integration),'--prior-generation',str(h))
+                self.assertEqual(done.returncode,2,(why,done.stderr)); self.assertIn('complete one',done.stderr,why)
+                self.assertFalse(spy.exists(),why+': docker must not be called')
+            done=reset('--no-utb','--images',str(integration),'--prior-generation',str(hist('own.json','0x'+'ab'*32,3)))   # accepted by the preflight: it reaches the teardown (the spy) and fails later in generate
             self.assertTrue(spy.exists(),'a matching profile proceeds to the teardown')
+            kept=old.with_suffix('.retired-root-keys.json')
+            self.assertTrue(kept.is_file(),'the old generation\'s own retired list is kept beside it and passed on')
+            self.assertEqual(root_keys.read_list(kept),{root_keys.key_hash('0x03'+'99'*32)})
     def test_the_signed_history_is_on_by_default_and_no_utb_is_the_escape_hatch(self):
         source=(Path(generate.__file__)).read_text()
         self.assertRegex(source,r"add_argument\('--utb',action=argparse\.BooleanOptionalAction,default=True",'--utb defaults on; argparse adds --no-utb')
