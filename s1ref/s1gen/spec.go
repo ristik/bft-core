@@ -254,7 +254,7 @@ func (w *world) signWith(e *ev, v validator) *ev {
 		h := sum(e.legacyRoundInfo())
 		e.prev = h[:]
 		e.pv = e.sealBytes()
-		e.voteSig = v.sign(e.pv)
+		e.voteSig = v.signV(e.pv)
 		e.sealSig = nil
 		e.content = sha256.Sum256(e.pv)
 		return e
@@ -262,10 +262,10 @@ func (w *world) signWith(e *ev, v validator) *ev {
 	vh := sum(e.vi(w.net, w.genesis))
 	e.prev = vh[:]
 	e.pv = e.preimage(w.net, w.genesis, vh[:])
-	e.voteSig = v.sign(e.pv)
+	e.voteSig = v.signV(e.pv)
 	e.sealSig = nil
 	if e.committing() {
-		e.sealSig = v.sign(e.sealBytes())
+		e.sealSig = v.signV(e.sealBytes())
 	}
 	e.content = sha256.Sum256(e.pv)
 	return e

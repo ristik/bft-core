@@ -43,7 +43,7 @@ var (
 	ErrReencode        = newSentinel(ErrMalformed, "s1ref: decode/re-encode mismatch")
 	ErrViewKind        = newSentinel(ErrMalformed, "s1ref: unknown trust view source kind")
 	ErrScheme          = newSentinel(ErrMalformed, "s1ref: unknown signing scheme")
-	ErrSigShape        = newSentinel(ErrMalformed, "s1ref: signature is not 64 bytes or 65 bytes with v in {0,1}")
+	ErrSigShape        = newSentinel(ErrMalformed, "s1ref: signature is not 65 bytes with v in {0,1}")
 )
 
 // Bound reasons (all wrap ErrBound).

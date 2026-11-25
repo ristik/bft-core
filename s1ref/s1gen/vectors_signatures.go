@@ -19,6 +19,7 @@ func (g *gen) signatures() {
 
 	g.no("sig.wrong-key", fam, "signature made by another member", c, v2, "ErrSigInvalid", with(v2sign(w, "v2", base.pv, "")))
 	g.no("sig.byte-flipped", fam, "one signature byte flipped", c, v2, "ErrSigInvalid", with(flip(sig, 40)))
+	g.no("sig.wrong-parity", fam, "the opposite recovery parity: one recovery, another key", c, v2, "ErrSigInvalid", with(withV(sig, sig[64]^1)))
 	g.no("sig.high-s", fam, "high-s twin of a valid signature is never normalized into acceptance", c, v2, "ErrSigRange", with(highS(sig)))
 	g.no("sig.high-s.65", fam, "high-s twin with a recovery byte", c, v2, "ErrSigRange", with(withV(highS(sig), 0)))
 	g.no("sig.s-half-plus-one", fam, "s = n/2 + 1 is the smallest high s", c, v2, "ErrSigRange", with(setRS(sig, r, new(big.Int).Add(half, big.NewInt(1)))))
@@ -36,7 +37,8 @@ func (g *gen) signatures() {
 	}{
 		{"sig.malformed.empty", "empty signature byte string", "ErrSigShape", []byte{}},
 		{"sig.malformed.63", "63-byte signature", "ErrSigShape", sig[:63]},
-		{"sig.malformed.66", "66-byte signature", "ErrSigShape", append(append([]byte{}, sig...), 0, 0)},
+		{"sig.malformed.64", "64-byte compact r||s: not a native signature", "ErrSigShape", sig[:64]},
+		{"sig.malformed.66", "66-byte signature", "ErrSigShape", append(append([]byte{}, sig...), 0)},
 		{"sig.malformed.v2", "65-byte signature with v=2", "ErrSigShape", withV(sig, 2)},
 		{"sig.malformed.v255", "65-byte signature with v=255", "ErrSigShape", withV(sig, 255)},
 		{"sig.malformed.high-s-bad-v", "high-s signature with an invalid v is malformed before it is false", "ErrSigShape", withV(highS(sig), 2)},
@@ -47,6 +49,7 @@ func (g *gen) signatures() {
 	badSeal := func(s []byte) []byte { e := cm.cp(); e.sealSig = s; return frame(v2.cbor(), e.enc()) }
 	g.bad("sig.malformed.seal-empty", fam, "empty seal signature byte string", c, badSeal([]byte{}), "ErrSigShape")
 	g.bad("sig.malformed.seal-63", fam, "63-byte seal signature", c, badSeal(cm.sealSig[:63]), "ErrSigShape")
+	g.bad("sig.malformed.seal-64", fam, "64-byte compact seal signature", c, badSeal(cm.sealSig[:64]), "ErrSigShape")
 	g.bad("sig.malformed.seal-v2", fam, "seal signature with v=2", c, badSeal(withV(cm.sealSig, 2)), "ErrSigShape")
 	g.no("sig.seal.high-s", fam, "high-s seal signature", c, v2, "ErrSigRange", func() *ev { e := cm.cp(); e.sealSig = highS(cm.sealSig); return e }())
 

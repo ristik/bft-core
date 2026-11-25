@@ -21,7 +21,7 @@ func (g *gen) context() {
 	// A forged view: the attacker's key under the honest member's name, same body and epoch.
 	forged := v2.with(func(v *viewSpec) { v.members[0].key = w.vals["x1"].pub })
 	fe := w.sign(w.nc("v1", 150, 0x11))
-	fe.voteSig = w.vals["x1"].sign(fe.pv)
+	fe.voteSig = w.vals["x1"].signV(fe.pv)
 	g.no("ctx.view-substituted", fam, "attacker view carrying the honest body identity and an attacker key for the author", c, forged, "ErrViewHash", fe)
 
 	// Signing history.

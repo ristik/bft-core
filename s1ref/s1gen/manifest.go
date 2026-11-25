@@ -105,6 +105,7 @@ var OpenItems = []OpenItem{
 	{"S1-O2", "\"Apply Q1 statement rules\" follows both scheme paragraphs; the legacy verifier applies only RoundInfo.IsValid, the binding and the signature.", "the Q1 statement rules (votesig preimage rules, commit network/epoch, empty seal of a non-committing vote) apply to scheme 2 only; scheme 1 gets native IsValid, the binding, the single signature and sealSignature=null"},
 	{"S1-O3", "The design gives the signing configuration network no cross-check against N.", "a context whose signing configuration is invalid (unknown scheme, scheme 2 with zero G) or whose network differs from N is false (ErrSigningConfig): an authenticated context cannot legitimately carry one"},
 	{"S1-O4", "An evidence record whose voting epoch differs from the carried view's epoch.", "false (ErrEpochMismatch): the view is authenticated for exactly one epoch, so it can authorise only votes of that epoch"},
+	{"S1-O5", "The design took 64-byte r||s or 65 bytes with v in {0,1} and discarded v (#1297 review P3-2).", "the strict native rule P85 evidence uses for both offences (D5 section 2): exactly 65 bytes, v in {0,1}, 1 <= r < n, 1 <= s <= n/2, one recovery with the supplied parity; a 64-byte signature or v 2/3 is malformed (ErrSigShape), the opposite parity false (ErrSigInvalid)"},
 }
 
 // Notes qualify every number in the manifest.
