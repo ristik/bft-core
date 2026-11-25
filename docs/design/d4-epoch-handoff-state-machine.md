@@ -216,6 +216,13 @@ verified checkpoint import. Once proof is installed, no old UC becomes current,
 even before new certification is ready. Old signatures and high numeric rounds
 cannot replace a new UC. Historical old LastCRs remain available.
 
+These same-root suffix seals are **exempt from accountability by rule**: the
+post-term seal offence (D5 §2.1, #1297) charges an old-committee quorum seal at
+`commitRound ≥ A*` only when its root differs from `R_H`. Every old seal with
+`Hash = R_H` — H's own commit at `c ≥ A*` and any later empty-suffix repeat — is
+exempt, whatever its VoteInfo says, so honest suffix certification never risks
+a penalty.
+
 The first ordinary new block applies deferred `nextEpoch` under authenticated
 shard configuration. It preserves IR/TR/LastCR semantics, exact fee/stat/config
 state and does not set Changed or emit a UC merely for `nextEpoch`. Replay and
