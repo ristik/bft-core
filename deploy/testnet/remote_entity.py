@@ -27,7 +27,7 @@ Every root and shard node of the generation dials root<J>/shard<J> by these alia
     remote_entity.py join         <generation> --entity J --ubft UBFT --restore-pin H4PIN [--cast CAST] [--dry-run]
     remote_entity.py retire-plan  <generation> --entity J                                              (prints the retirement sequence; changes nothing)
 
-`join` is the whole act (briefs/laptop-join-runbook.md): fund the laptop's owner from the operator account (--funder) or the faucet account (100 UCT bond + gas), register and bond (the
+`join` is the whole act (briefs/laptop-join-runbook.md): fund the laptop's owner from the operator account (--funder) or the generation's funder account (100 UCT bond + gas), register and bond (the
 laptop signs), then, right after an acknowledged handoff (driving the open no-change result first if there is one) the trust base of E+1 over the
 committee and the joiner, the joiner's signing authority started at that scope, admitDelegation; then the election's next result must name the joiner
 and handoff_drive.py drives it with this transport. While the joiner is `prepared`, handoff_drive refuses a result that leaves it out (the epoch would move
@@ -683,13 +683,13 @@ class Join:
         if st.get('follower') is not True and r.state in ('follower', 'registered', 'bonded'):
             raise RuntimeError('the laptop root does not report itself a follower: remote_joiner.py up, and check the tunnel')
         owner = r.info['accounts']['owner']
-        # 1. funding: the bond unit and the gas of three transactions, from the operator account (--funder) or else the faucet account; the key stays on the host
+        # 1. funding: the bond unit and the gas of three transactions, from the operator account (--funder) or else the generation's funder account; the key stays on the host
         need = BOND_UNIT + GAS if r.state in ('follower', 'registered') else GAS // 2
         have = d.balance(owner)
         say(f'owner {owner}: {have / 1e18:.4f} UCT')
         if have < need and r.state in ('follower', 'registered', 'bonded'):
             if self.dry:
-                say(f'[dry-run] would fund {owner} with {(need - have) / 1e18:.4f} UCT from the {"operator account " + str(self.funder) if self.funder else "faucet account"}')
+                say(f'[dry-run] would fund {owner} with {(need - have) / 1e18:.4f} UCT from the {"operator account " + str(self.funder) if self.funder else "funder account"}')
             else:
                 d.fund(owner, need - have)
         # 2. register and bond, signed on the laptop (any time: an identity without a delegation is not eligible)
@@ -983,7 +983,7 @@ class Join:
         say(f'credit of the withdrawal address {withdrawal}: {credit / 1e18:.4f} UCT')
         if credit:
             if d.balance(withdrawal) < 10 ** 16:
-                d.fund(withdrawal, 5 * 10 ** 16)   # its gas, from the operator account (--funder)
+                d.fund(withdrawal, 5 * 10 ** 16)   # its gas, from the operator account (--funder) or the funder account
             out = r.custody_tx('claim(uint256,address)', credit, withdrawal)
             say(f'claim({credit / 1e18:.4f} UCT -> {withdrawal}) by the withdrawal key: {out.get("out", "")[-160:]}')
             say(f'balance of {withdrawal}: {d.balance(withdrawal) / 1e18:.4f} UCT; credit left {d.view(d.custody, "credit(address)(uint256)", withdrawal)[0]}')
@@ -1239,7 +1239,7 @@ def main(argv=None):
             s.add_argument('--restore-pin', type=Path, required=True)
             s.add_argument('--cast', default='cast')
             s.add_argument('--funder', type=Path, help='a directory with keystore.json and password on the host: the operator account that funds the owner (bond and gas) '
-                           'and the drives\' gas top-ups (default: the faucet account, whose nonces the public faucet uses)')
+                           'and the drives\' gas top-ups (default: the generation\'s funder-secrets/; never the faucet account, whose nonces the public faucet uses)')
             s.add_argument('--busy-wait', type=int, default=BUSY_WAIT, help='seconds a drive waits for another one holding handoff/drive.lock')
             s.add_argument('--dry-run', action='store_true')
             s.add_argument('--source-digest', help='the laptop checkout\'s tree_digest (remote_joiner.py join passes it): refused when the deployed copy differs')

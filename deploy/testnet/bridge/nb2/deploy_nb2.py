@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Deploy and verify the NB2 v1.1 graph on a running testnet generation.
 
-Use an idle faucet signer during deployment. The release is written only after
+The generation's funder account deploys (never the faucet key: its nonces are the faucet signer's,
+bft-core#1287). The release is written only after
 readback of the five contracts and the native seal registry. Publish the release
 and its trust files together through the authenticated operator channel.
 """
@@ -95,12 +96,12 @@ def moving_estimate_head(reason):
 
 
 def create(gen, initcode, label, *, transport=None):
-    """One creation from the faucet keystore; its receipt."""
+    """One creation from the funder keystore; its receipt."""
     run = tools if transport is None else transport
     for attempt in range(1, ESTIMATE_ATTEMPTS + 1):
         try:
-            out = run(gen, 'cast', 'send', '--rpc-url', ETH, '--keystore', '/gen/faucet-secrets/keystore.json',
-                        '--password-file', '/gen/faucet-secrets/password', '--json', '--create', initcode, capture=True)
+            out = run(gen, 'cast', 'send', '--rpc-url', ETH, '--keystore', '/gen/funder-secrets/keystore.json',
+                        '--password-file', '/gen/funder-secrets/password', '--json', '--create', initcode, capture=True)
             break
         except subprocess.CalledProcessError as error:
             reasons = cast_failure_reasons(error)
@@ -164,7 +165,9 @@ def deploy_graph(gen, evidence_bin, manifest, work, bridge, pin, qmax):
     fields = [descriptor_hashes[name] for name in DESCRIPTORS]
     profile = descriptor_hashes['semantic-profile']
     nodes = {'registry': {'address': REGISTRY, 'runtimeCodeHash': registry_hash}}
-    deployer = manifest['faucet_address']
+    if 'funder_address' not in manifest:
+        raise SystemExit('the generation has no funder account (generate.py funder-secrets/): the faucet key is the faucet signer\'s alone')
+    deployer = manifest['funder_address']
     # On a partial failure there is no safe implicit retry of a creation.
     (work / '.deployment-started').touch(exist_ok=False)
 

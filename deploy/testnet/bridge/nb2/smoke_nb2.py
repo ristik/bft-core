@@ -37,13 +37,13 @@ def main():
 
     if a.phase in ('all', 'mint'):
         key_address = run('key')
-        # The generation's keystore signs a plain, bounded funding transfer. Only
+        # The generation's funder keystore signs a plain, bounded funding transfer. Only
         # the test wallet uses the fresh private key created inside the container.
         if int(cast(gen, 'balance', '--rpc-url', rpc, key_address)) == 0:
             gas_price = cast(gen, 'gas-price', '--rpc-url', rpc)
             try:
-                funding = cast(gen, 'send', '--rpc-url', rpc, '--keystore', '/gen/faucet-secrets/keystore.json',
-                               '--password-file', '/gen/faucet-secrets/password', '--legacy', '--gas-price', gas_price,
+                funding = cast(gen, 'send', '--rpc-url', rpc, '--keystore', '/gen/funder-secrets/keystore.json',
+                               '--password-file', '/gen/funder-secrets/password', '--legacy', '--gas-price', gas_price,
                                '--gas-limit', '21000', '--value', '2000000000000000000', '--json', key_address)
             except subprocess.CalledProcessError as exc:
                 raise SystemExit('test-wallet funding failed: ' + ' | '.join(cast_failure_reasons(exc))) from None

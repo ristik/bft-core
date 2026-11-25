@@ -9,7 +9,7 @@ import threading
 import time
 from urllib.parse import urlsplit
 
-from faucet.gateway import ResponseTooLarge
+from faucet.gateway import REFUSALS, ResponseTooLarge
 
 # Upstream work starts after the HTTP handler validates the client body. Leave
 # time for the gateway to answer its ten-second Docker health probe.
@@ -74,6 +74,47 @@ def publish(answer, reply):
         answer.set_result(reply)
     except InvalidStateError:
         pass  # Another worker already published an answer.
+
+
+def rejection_kind(reply):
+    """'known' (the transaction is already in the pool), 'nonce' (nonce too low:
+    this transaction or another one used the nonce), 'refused' (an execution
+    client refusal, faucet.gateway.REFUSALS), 'other' (an unrecognised error:
+    ambiguous) or None (not an error)."""
+    error = reply.get('error')
+    if not isinstance(error, dict):
+        return None
+    message = str(error.get('message', '')).lower()
+    if message == 'already known':
+        return 'known'
+    if message == 'nonce too low' or message.startswith('nonce too low:'):
+        return 'nonce'
+    return 'refused' if any(refusal in message for refusal in REFUSALS) else 'other'
+
+
+def definite_rejection(urls, answers, absent):
+    """The JSON-RPC error to relay when every validator answered the send and
+    none took the transaction, else None (the outcome stays ambiguous).
+
+    A missing, timed-out or failed answer leaves the transaction possibly in
+    that validator's pool. "already known" means it is in a pool. "nonce too
+    low" is definite only when the same validator then reported that it does
+    not know this transaction's hash (duplicate_hash), so the nonce went to
+    another transaction. A recognised refusal (REFUSALS: insufficient funds,
+    underpriced, replacement, decode or sender errors) is definite; an
+    unrecognised error stays ambiguous.
+    """
+    chosen = None
+    for url in urls:
+        reply = answers.get(url)
+        if reply is None:
+            return None
+        kind = rejection_kind(reply)
+        if kind not in ('nonce', 'refused') or (kind == 'nonce' and url not in absent):
+            return None
+        if chosen is None:
+            chosen = reply
+    return chosen
 
 
 class Relay:
@@ -296,21 +337,21 @@ class Relay:
         self.health(url, True)
         return reply
 
-    def fanout(self, urls, body, deadline, answer, outcomes):
+    def fanout(self, urls, body, deadline, answer, outcomes, answers):
         for index, url in enumerate(urls):
             if time.monotonic() >= deadline:
                 break
             reply = self.send_to(url, body, fair_slice(deadline, len(urls) - index))
             if reply is None:
                 continue
+            answers[url] = reply
             if is_hash(reply.get('result')):
                 publish(answer, reply)
                 continue
-            message = reply.get('error', {}).get('message', '').lower()
-            if message in ('already known', 'nonce too low') or message.startswith('nonce too low:'):
+            if rejection_kind(reply) in ('known', 'nonce'):
                 outcomes.put(url)
 
-    def duplicate_hash(self, params, preferred, deadline):
+    def duplicate_hash(self, params, preferred, deadline, absent=None, answers=None):
         # A duplicate responder is a good hash source. Check all configured
         # validators, including ones that could not be reached during broadcast.
         urls = preferred + [url for url in self.read_order() if url not in preferred]
@@ -335,6 +376,12 @@ class Relay:
                 found = self.rpc(url, body, attempt, max_bytes=8 << 20).get('result')
                 if isinstance(found, dict) and same_hash(found.get('hash'), tx_hash):
                     return tx_hash
+                if found is None and absent is not None and answers is not None and rejection_kind(answers.get(url) or {}) == 'nonce':
+                    # This validator had already refused the nonce and now has the
+                    # transaction neither in its pool nor on its chain: the nonce
+                    # went to another one. A lookup before its send answer proves
+                    # nothing about it; its own answer queues another check.
+                    absent.add(url)
             except (Unavailable, ResponseTooLarge):
                 continue
         return None
@@ -344,12 +391,13 @@ class Relay:
         # requests cannot queue behind a slow 16-validator fan-out.
         tasks = []
         outcomes = SimpleQueue()
+        answers, absent = {}, set()
         try:
             urls = self.read_order()
             broadcast_deadline = deadline - DUPLICATE_RESERVE
             for index in range(min(SEND_WIDTH, len(urls))):
                 task = self.peer_pool.submit(
-                    self.fanout, urls[index::SEND_WIDTH], body, broadcast_deadline, answer, outcomes)
+                    self.fanout, urls[index::SEND_WIDTH], body, broadcast_deadline, answer, outcomes, answers)
                 tasks.append(task)
                 task.add_done_callback(lambda _: outcomes.put(None))
             wait(tasks, timeout=max(0, broadcast_deadline - time.monotonic()))
@@ -376,9 +424,13 @@ class Relay:
                     except Empty:
                         break
                 if preferred and not answer.done():
-                    tx_hash = self.duplicate_hash(params, preferred, deadline)
+                    tx_hash = self.duplicate_hash(params, preferred, deadline, absent, answers)
                     if tx_hash is not None:
                         publish(answer, dict(jsonrpc='2.0', id=1, result=tx_hash))
+            if not pending and not answer.done():
+                rejection = definite_rejection(urls, answers, absent)
+                if rejection is not None:
+                    publish(answer, rejection)
         finally:
             # Keep a positive acknowledgement eligible to win until workers
             # finish publishing. The caller enforces its own request deadline.

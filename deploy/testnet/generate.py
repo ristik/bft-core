@@ -40,6 +40,12 @@ MAX_EPOCHS, DELTA_EV, DELTA_HOLD = 2, 16, 17
 # The faucet (faucet/README.md): one claim pays FAUCET_PAYOUT UCT; the faucet account starts with FAUCET_BALANCE UCT (keygen's default too). 200 UCT covers a
 # demo wallet's 100 UCT bond plus gas (owner decision 2026-11-12); 50,000 UCT is 250 claims, five days at 50 a day.
 FAUCET_PAYOUT, FAUCET_BALANCE, FAUCET_DAILY_CLAIMS = '200', '50000', 50
+# The funder account (funder-secrets/, host-private like faucet-secrets/): every transfer the package's tools make (rehearse.py and its stages, handoff_drive.py and
+# remote_entity.py owner top-ups and joins, the bridge deployment and smoke). The faucet key belongs to the eth-faucet signer alone: a transaction from it
+# anywhere else leaves the signer's nonce stale (bft-core#1287). 5,000 UCT: a full rehearsal spends about 450 (the PoS joins bond 300, the owners' gas
+# top-ups about 20, the NB2 driver keys 75, the load and the deployments well under 1), a laptop join 102 (one bond unit and gas), so a public generation
+# has room for about 40 joins besides.
+FUNDER_BALANCE = '5000'
 # The two bridged networks whose gateway address a service trusts as its proxy: the faucet guard trusts the faucet network's gateway, the RPC gateway and the
 # lock-proof endpoint trust the edge network's (the address the host's nginx reaches published ports from). Docker refuses a second network on a subnet in
 # use, also by a stopped generation's networks, so two generations on one host need different subnets (--faucet-subnet, --edge-subnet).
@@ -418,6 +424,7 @@ def main():
     p.add_argument('--public-rpc-url',help='wallet-facing RPC URL to advertise from the faucet')
     p.add_argument('--faucet-payout',default=FAUCET_PAYOUT,help=f'UCT per faucet claim, decimal (default {FAUCET_PAYOUT}): the signer\'s payout and the guard\'s check of it')
     p.add_argument('--faucet-balance',default=FAUCET_BALANCE,help=f'the faucet account\'s genesis balance, UCT, decimal (default {FAUCET_BALANCE})')
+    p.add_argument('--funder-balance',default=FUNDER_BALANCE,help=f'the funder account\'s genesis balance, UCT, decimal (default {FUNDER_BALANCE}): it pays every transfer of the package\'s tools, so the faucet key stays the signer\'s alone')
     p.add_argument('--faucet-daily-claims',type=int,default=FAUCET_DAILY_CLAIMS,help=f'claims in any 24 hours (default {FAUCET_DAILY_CLAIMS})')
     p.add_argument('--faucet-per-ip-limit',action='store_true',help='also one claim per client IP per 24 hours (off by default: clients behind one NAT would share a claim)')
     p.add_argument('--faucet-subnet',default=DEFAULT_SUBNETS['faucet'],help=f'the faucet network (default {DEFAULT_SUBNETS["faucet"]}); its first address is the guard\'s trusted proxy')
@@ -429,6 +436,7 @@ def main():
     if not 0 <= a.block_interval_ms <= 60000: p.error(f'--block-interval-ms must be 0..60000, got {a.block_interval_ms}')
     try:
         faucet=faucet_settings(a.faucet_payout,a.faucet_balance,a.faucet_daily_claims,a.faucet_per_ip_limit)
+        funder_wei=uct_wei(a.funder_balance,'--funder-balance')
         subnets=bridged_subnets(a.faucet_subnet,a.edge_subnet)
     except ValueError as e: p.error(str(e))
     if a.public_p2p_ip and (not a.vr_pos or not a.public_p2p_ip.is_global or a.public_p2p_ip.is_multicast):
@@ -628,6 +636,12 @@ def main():
             max_gas=int(json.loads((home/'b1-profile.json').read_text())['maxGas'])
             alloc=json.loads(subprocess.check_output([str(a.keygen.resolve()),str(home/'faucet-secrets'),str(faucet['balance_wei'])],text=True))
             if [v.get('balance') for v in alloc.values()] != [str(faucet['balance_wei'])]: raise SystemExit('keygen did not fund the faucet account with --faucet-balance')
+            faucet_address=next(iter(alloc))
+            funder_alloc=json.loads(subprocess.check_output([str(a.keygen.resolve()),str(home/'funder-secrets'),str(funder_wei)],text=True))
+            if [v.get('balance') for v in funder_alloc.values()] != [str(funder_wei)] or set(funder_alloc) & set(alloc):
+                raise SystemExit('keygen did not fund a separate funder account with --funder-balance')
+            funder_address=next(iter(funder_alloc))
+            alloc={**alloc,**funder_alloc}
             funded=funded_base_genesis(a.chain_id,max_gas,alloc,secrets.token_hex(32))
             write(home/'funded.json',funded)
             if genesis:
@@ -717,6 +731,7 @@ def main():
             (val/'jwt/jwt.hex').write_text(secrets.token_hex(32)+'\n')
             ureth_key.create(val/ureth_key.DIR)   # the execution client's devp2p node key, once (bft-core#1148); chowned with the rest below
         shutil.move(str(home/'faucet-secrets'),out/'faucet-secrets')
+        shutil.move(str(home/'funder-secrets'),out/'funder-secrets')   # private host material like faucet-secrets, never mounted by a service
         if genesis: shutil.move(str(home/'pos-owner-keys'),out/'pos-owner-keys')   # private host material, like faucet-secrets: not mounted, not in network/
         if vr_info: shutil.move(str(home/'dev-keys'),out/'vr-owner-keys')
         else: shutil.copy2(a.captcha_secret_file,out/'faucet-secrets/hcaptcha-secret')
@@ -734,7 +749,7 @@ def main():
             {'alert':'TestnetTargetDown','expr':'up == 0','for':'1m','labels':{'severity':'page'},'annotations':{'summary':'Testnet target unavailable; contact duty operator'}},
             {'alert':'TestnetRPCFailures','expr':'increase(tn_rpc_upstream_errors_total[5m]) > 0','labels':{'severity':'warning'},'annotations':{'summary':'RPC identity or upstream failures'}}]}]})
         network=json.loads((HERE/'faucet/network.example.json').read_text())
-        network.update(chain_id=a.chain_id,genesis_hash='0x'+block,funding_address=next(iter(alloc)),
+        network.update(chain_id=a.chain_id,genesis_hash='0x'+block,funding_address=faucet_address,
             validator_rpc_urls=[f'http://ureth{i}:8545' for i in range(1,a.validators+1)],captcha_sitekey=a.captcha_sitekey,
             trusted_proxy_ip=subnets['faucet']['gateway'],**faucet['network'])
         if a.public_rpc_url: network['public_rpc_url']=a.public_rpc_url
@@ -747,8 +762,8 @@ def main():
         if vr_info:
             network_files.extend(out/'network'/name for name in ('ureth-flags.txt', 'fee-collector.txt'))
         manifest={'offline_validation_only':a.offline_validation,'generation':out.name,'chain_id':a.chain_id,'genesis_hash':'0x'+block,'validators':a.validators,'operator_rpc':{'bind':a.rpc_bind,'root_port':operator_rpc.ROOT_PORT,'shard_port':operator_rpc.SHARD_PORT},
-            'faucet_address':next(iter(alloc)), 'artifacts':records,
-            'faucet':{**faucet['network'],'genesis_balance_wei':str(faucet['balance_wei'])},'networks':subnets,'root_cpus':a.root_cpus,
+            'faucet_address':faucet_address, 'funder_address':funder_address, 'artifacts':records,
+            'faucet':{**faucet['network'],'genesis_balance_wei':str(faucet['balance_wei'])},'funder':{'genesis_balance_wei':str(funder_wei),'keys':'funder-secrets'},'networks':subnets,'root_cpus':a.root_cpus,
             'evm_block':{'interval_ms':a.block_interval_ms,'t2_ms':t2_for_block_interval(a.block_interval_ms)},
             'utb':({'genesis_id':utb_pin,'genesis_sha256':hashlib.sha256((out/'network/utb-genesis.cbor').read_bytes()).hexdigest(),'genesis_file':'network/utb-genesis.cbor',
                     'aggregator':a.utb_aggregator,

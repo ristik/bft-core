@@ -856,7 +856,7 @@ class JoinAndTimer(unittest.TestCase):
         with unittest.mock.patch.object(re_.subprocess, 'run', return_value=unittest.mock.Mock(returncode=1)) as run, unittest.mock.patch.object(re_, 'say'):
             self.assertEqual(j.drive(None), 1)
         self.assertEqual(run.call_count, 1)
-        self.assertNotIn('--funder', run.call_args.args[0], 'no funder: the faucet account, as before')
+        self.assertNotIn('--funder', run.call_args.args[0], 'no --funder: the host uses the generation\'s funder account')
 
     def test_the_laptop_passes_the_funder_to_the_host(self):
         lap = unittest.mock.Mock(entity=5, state={'hostCast': '/h/cast', 'hostDir': '/h/rjoin', 'hostGeneration': '/srv/tn-x', 'hostUbft': '/h/ubft',

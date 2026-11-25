@@ -61,7 +61,7 @@ CAPTURE_MAX_LINES = 6000          # per service and window; the rest is counted,
 SECRET_LINE = re.compile(r'(?i)(secret|priv(ate)?[ _-]?key|mnemonic|passphrase|password|credential|\.cred\b|keystore|authorization|bearer|api[ _-]?key|\btoken\b|\bseed\b|ciphertext)')
 WITHHELD_LINE = '[line withheld: it matches a secret pattern]'
 SECRET_FILE = re.compile(r'(?i)(^password$|identity\.json$|secret|\.cred(\.|$)|\.key$|^keys?\.json$|^keystore\.json$|^priv|^jwt)')
-SECRET_DIRS = ('faucet-secrets', 'pos-owner-keys', 'auth', 'jwt', 'ureth-key')   # every file in these is a secret (auth and jwt are what the root and shard services mount besides their own state; ureth-key, ureth's node key)
+SECRET_DIRS = ('faucet-secrets', 'funder-secrets', 'pos-owner-keys', 'auth', 'jwt', 'ureth-key')   # every file in these is a secret (auth and jwt are what the root and shard services mount besides their own state; ureth-key, ureth's node key)
 
 
 class SecretScanError(Exception):
@@ -82,7 +82,7 @@ def _json_secrets(node, out, under_secret=False):
 
 
 def known_secrets(gen):
-    """The literal secrets of a generation: whole contents of the files that are secrets by name (faucet-secrets/*, pos-owner-keys/*, validator*/auth credentials and every
+    """The literal secrets of a generation: whole contents of the files that are secrets by name (faucet-secrets/*, funder-secrets/*, pos-owner-keys/*, validator*/auth credentials and every
     *.key/*.cred), and the private fields of its JSON key files. Shallow walk (depth 4, files under 256 KB): the chain data directories are not entered.
     Fails closed (SecretScanError): no generation directory, a walk error, a file of the secret kind that cannot be read, or a scan that finds nothing (a real generation
     always has its faucet password and Engine JWT, so an empty result means the scan did not see it)."""
@@ -401,10 +401,9 @@ class Rehearsal:
         self.expect(int(self.call('eth_chainId'), 16) == self.chain_id, 'the public gateway reports the manifest chain id')
 
     def first_tx(self):
-        secrets = self.gen / 'faucet-secrets'
         to = '0x' + '11' * 20   # an ordinary account (0x..01 is the ecrecover precompile)
         before = int(self.call('eth_getBalance', [to, 'latest']), 16)
-        receipt = json.loads(self.send_via_gateway(secrets, to))
+        receipt = json.loads(self.send_via_gateway(to))
         self.expect(receipt['status'] == '0x1', 'the funded first transaction succeeded', json.dumps(receipt)[:600])
         self.expect(int(self.call('eth_getBalance', [to, 'latest']), 16) == before + 1, 'the recipient balance grew by the transferred wei')
         for i in range(1, self.n + 1):
@@ -412,15 +411,29 @@ class Rehearsal:
             self.expect(r['blockHash'] == receipt['blockHash'], f'validator {i} has it in the same block', r['blockHash'])
         self.tx = receipt
 
+    def funder_address(self):
+        """The generation's funder account (generate.py: funder-secrets/, manifest funder_address): it signs every transfer the tools make. The faucet key
+        is the eth-faucet signer's alone; a transaction from it anywhere else leaves the signer's nonce stale (bft-core#1287)."""
+        if 'funder_address' not in self.manifest:
+            raise Failure('the generation has no funder account (manifest funder_address, funder-secrets/): the faucet key is the faucet signer\'s alone')
+        return self.manifest['funder_address']
+
+    def funder_keys(self):
+        """(funder-secrets/ with keystore.json and password, the funder address)."""
+        secrets = self.gen / 'funder-secrets'
+        if not (secrets / 'keystore.json').is_file():
+            raise Failure(f'{secrets} has no keystore.json: the faucet key is the faucet signer\'s alone')
+        return secrets, self.funder_address()
+
     def raw_tx(self, to, nonce, price, value=1):
-        secrets = self.gen / 'faucet-secrets'
+        secrets, _ = self.funder_keys()
         return self.cast_run('mktx', '--keystore', str(secrets / 'keystore.json'), '--password-file', str(secrets / 'password'), '--legacy', '--nonce', str(nonce),
                              '--gas-price', str(price), '--gas-limit', '21000', '--chain', str(self.chain_id), '--value', str(value), to)
 
-    def send_via_gateway(self, secrets, to):
+    def send_via_gateway(self, to):
         # cast talks to the public gateway: the gateway only accepts the allow-listed methods, and the generated proxy peer is trusted only with X-Forwarded-For,
         # which cast cannot set: sign offline, then submit through the gateway ourselves
-        sender = self.manifest['faucet_address']
+        sender = self.funder_address()
         nonce = int(self.call('eth_getTransactionCount', [sender, 'latest']), 16)
         price = int(self.call('eth_gasPrice'), 16)
         sent = self.call('eth_sendRawTransaction', [self.raw_tx(to, nonce, price)])
@@ -487,14 +500,13 @@ class Rehearsal:
     def load(self):
         """Sustained load at the gateway's limits (loadgen.py, the tool the host runs too): 20 signed transfers a second for 20 s from four client addresses (5/s
         each, under the 10/s per-address limit), every accepted transfer must be mined successfully and every validator must agree on the sender's nonce after."""
-        secrets, summary = self.gen / 'faucet-secrets', self.evidence / 'load.json'
+        (secrets, sender), summary = self.funder_keys(), self.evidence / 'load.json'
         out = subprocess.run([sys.executable, str(Path(__file__).with_name('loadgen.py')), '--rpc', 'http://' + PUBLIC_RPC + '/', '--chain-id', str(self.chain_id),
-                              '--sender', self.manifest['faucet_address'], '--keystore', str(secrets / 'keystore.json'), '--password-file', str(secrets / 'password'),
+                              '--sender', sender, '--keystore', str(secrets / 'keystore.json'), '--password-file', str(secrets / 'password'),
                               '--cast', self.cast, '--rate', '20', '--duration', '20', '--ips', '4', '--min-accepted', '350', '--out', str(summary)],
                              text=True, capture_output=True)
         self.say(out.stdout.strip() or out.stderr.strip())
         self.expect(out.returncode == 0, 'the generated load was accepted and every accepted transfer mined successfully', (json.loads(summary.read_text()) if summary.exists() else {}).get('problems', out.stderr[-300:]))
-        sender = self.manifest['faucet_address']
         nonces = {i: self.ureth(i, 'eth_getTransactionCount', [sender, 'latest']) for i in range(1, self.n + 1)}
         self.wait('every validator has the same sender nonce', lambda: len({self.ureth(i, 'eth_getTransactionCount', [sender, 'latest']) for i in range(1, self.n + 1)}) == 1, 120)
         self.expect(True, 'every validator agrees on the sender nonce after the load', str(nonces))
@@ -545,9 +557,9 @@ class Rehearsal:
         import vr_advance
         vr_advance.advance(self.gen, self.target, self.evh())
 
-    def faucet_send(self, to, wei):
-        """A value transfer from the faucet account through the public gateway (it is the only funded account: the PoS owners hold nothing at genesis)."""
-        sender = self.manifest['faucet_address']
+    def funder_send(self, to, wei):
+        """A value transfer from the funder account through the public gateway (the PoS owners hold nothing at genesis)."""
+        sender = self.funder_address()
         nonce = int(self.call('eth_getTransactionCount', [sender, 'latest']), 16)
         sent = self.call('eth_sendRawTransaction', [self.raw_tx(to, nonce, int(self.call('eth_gasPrice'), 16), wei)])
         receipt = self.wait(f'the funding of {to} is mined', lambda: self.call('eth_getTransactionReceipt', [sent]), 180)
@@ -590,7 +602,7 @@ class Rehearsal:
         return run.returncode, run.stderr
 
     def pos_rewards(self):
-        """The owner keys the ceremony generated, used: an owner and a payee funded from the faucet account, the reward pool funded by the relayer (its balance
+        """The owner keys the ceremony generated, used: an owner and a payee funded from the funder account, the reward pool funded by the relayer (its balance
         rises by exactly the funding), `reward settle` run against a chain with no root record yet (it must find nothing to close and say so), and a claim by a
         payee with no credit (nothing may leave the pool). Credits, a paid claim and an owner's custody calls (top-up, exit, withdrawal) need root records or an
         election and are later stages."""
@@ -603,7 +615,7 @@ class Rehearsal:
         keys = self.gen / pos['owner_keys'] / f'identity-{identity["stakingId"]}'
         for role in ('owner', 'payee'):
             self.expect(self.balance(identity[role]) == 0, f'the {role} of identity {identity["stakingId"]} holds nothing at genesis', identity[role])
-            self.faucet_send(identity[role], 10 ** 18)
+            self.funder_send(identity[role], 10 ** 18)
         funding = 10 ** 15
         before = self.balance(pool)
         self.say(f'  reward pool balance {before}')
@@ -643,7 +655,7 @@ class Rehearsal:
         live = self.view(election, 'liveCount()(uint32)')[0]
         self.expect(live == self.n, 'the election\'s live index holds every genesis identity', str(live))
         if self.balance(identity['owner']) < 10 ** 17:   # pos-rewards funds the owner; this stage must not depend on it
-            self.faucet_send(identity['owner'], 10 ** 18)
+            self.funder_send(identity['owner'], 10 ** 18)
         # a second lot for an existing identity: an eth_call from the owner (one wei is enough, the lot limit is checked after the zero-value check)
         status, text = self.rpc({'jsonrpc': '2.0', 'id': 1, 'method': 'eth_call', 'params': [{
             'from': identity['owner'], 'to': custody, 'value': '0x1', 'data': self.cast_run('calldata', 'bond(uint64)', str(identity['stakingId']))}, 'latest']},
@@ -804,7 +816,7 @@ class Rehearsal:
             # 3 submit the proofs and finalize the result: the funded owner key of a genesis identity pays
             identity = json.loads((net / 'pos-plan.json').read_text())['identities'][0]
             if self.balance(identity['owner']) < 10 ** 17:
-                self.faucet_send(identity['owner'], 10 ** 18)
+                self.funder_send(identity['owner'], 10 ** 18)
             owner_key = self.gen / pos['owner_keys'] / f'identity-{identity["stakingId"]}' / 'owner.key'
             subprocess.run(['chown', '-R', '10001:10001', str(work)], check=True)
             for step, extra in (('submit-pops', ['--evm-pops', '/work/evm-pops-collected.json']), ('finalize', [])):
@@ -939,7 +951,7 @@ class Rehearsal:
         (self.evh() / 'abort-target.json').write_text(json.dumps(target, indent=1, sort_keys=True) + '\n')
         self.say(f'  target: attempt {target["attempt"]}, old epoch {target["oldEpoch"]}, successor body {target["nextBodyId"]}')
         # the EVM is frozen from the Prepare: a transaction sent now is not mined (a few seconds, well inside the 24 rounds before the freeze lapses) ...
-        sender, to = self.manifest['faucet_address'], '0x' + '33' * 20
+        sender, to = self.funder_address(), '0x' + '33' * 20
         frozen_at = int(self.call('eth_blockNumber'), 16)
         nonce = int(self.call('eth_getTransactionCount', [sender, 'latest']), 16)
         sent = self.call('eth_sendRawTransaction', [self.raw_tx(to, nonce, int(self.call('eth_gasPrice'), 16), 1)])
@@ -1246,7 +1258,7 @@ class Rehearsal:
             self.compose('start', f'shard{i}')
         # 13 paid work at the new epoch
         self.wait('the public gateway is healthy', lambda: self.http(PUBLIC_RPC, 'GET', '/healthz')[0] == 200, 300)
-        receipt = json.loads(self.send_via_gateway(self.gen / 'faucet-secrets', '0x' + '44' * 20))
+        receipt = json.loads(self.send_via_gateway('0x' + '44' * 20))
         self.expect(receipt['status'] == '0x1', 'a transaction through the gateway is mined after the switch', receipt['transactionHash'])
         for i in range(1, self.n + 1):
             r = self.wait(f'validator {i} has it', lambda i=i: self.ureth(i, 'eth_getTransactionReceipt', [receipt['transactionHash']]), 180)
@@ -1670,7 +1682,7 @@ class Rehearsal:
         shutil.copy(auth / 'client.cred.epoch-2', current)
         restored = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='microseconds').replace('+00:00', 'Z')   # sub-second: a whole-second stamp reaches back to lines of the same second
         self.compose('start', 'shard1')
-        receipt = json.loads(self.send_via_gateway(self.gen / 'faucet-secrets', '0x' + '55' * 20))
+        receipt = json.loads(self.send_via_gateway('0x' + '55' * 20))
         self.expect(receipt['status'] == '0x1', 'a transaction through the gateway is mined with the current credential back', receipt['transactionHash'])
         self.wait('validator 1 has it', lambda: self.ureth(1, 'eth_getTransactionReceipt', [receipt['transactionHash']]), 180)
         time.sleep(20)
@@ -1711,7 +1723,7 @@ class Rehearsal:
         the adaptation burst: they start when the transition transaction mines, which can be 37 s after its acceptance with the burst running about 80 s more, and a T2 repeat in
         the burst took one sample 81.7 s (bft-core #886, run 41862942889). So phase 'after_transition' says only when they start, and runs before this name call it
         'settled'. Each row's `since_stop` and `accepted_at` let the report split them. Recorded, never judged here: the numbers go to the #886 report."""
-        sender, to = self.manifest['faucet_address'], '0x' + '44' * 20
+        sender, to = self.funder_address(), '0x' + '44' * 20
         tx = None
         for k in range(AFTER_TRANSITION_SAMPLES):
             nonce = int(self.ureth(survivors[0], 'eth_getTransactionCount', [sender, 'latest']), 16)
@@ -1797,7 +1809,7 @@ class Rehearsal:
         """One validator entity at a time: stop its execution client, root and shard node (its signing authority stays live, as the README requires), check what the
         public gateway availability and survivor agreement, then start them again and check they rejoin."""
         capture_logs = (not rotated) if capture_logs is None else capture_logs   # the PoA stage keeps the logs of each stop window (bft-core #886), the rotated epochs do not
-        sender, to = self.manifest['faucet_address'], '0x' + '22' * 20
+        sender, to = self.funder_address(), '0x' + '22' * 20
         for i in self.pods:
             names = [f'ureth{i}', f'root{i}', f'shard{i}']
             survivors = [j for j in range(1, self.n + 1) if j != i]
@@ -1843,7 +1855,7 @@ class Rehearsal:
             # the gateway reads the sender's nonce from a validator: wait until the restarted one has everything mined without it
             self.wait(f'validator {i} catches up to the last transaction mined without it', lambda: self.ureth(i, 'eth_getTransactionReceipt', [last]), 300)
             self.wait('the public gateway is healthy again', lambda: self.http(PUBLIC_RPC, 'GET', '/healthz')[0] == 200, 120)
-            receipt = json.loads(self.send_via_gateway(self.gen / 'faucet-secrets', '0x' + '33' * 20))
+            receipt = json.loads(self.send_via_gateway('0x' + '33' * 20))
             self.expect(receipt['status'] == '0x1', f'a transaction through the public gateway succeeds after validator {i} rejoined', receipt['transactionHash'])
             for j in range(1, self.n + 1):
                 r = self.wait(f'validator {j} has it', lambda j=j: self.ureth(j, 'eth_getTransactionReceipt', [receipt['transactionHash']]), 120)
@@ -1857,9 +1869,9 @@ class Rehearsal:
         archive = self.gen.parent / 'backups' / (self.gen.name + '.tar.gz')
         archive.parent.mkdir(mode=0o700, exist_ok=True)
         restored = self.gen.parent / (self.gen.name + '-restored')
-        marker = json.loads(self.send_via_gateway(self.gen / 'faucet-secrets', '0x' + '44' * 20))
+        marker = json.loads(self.send_via_gateway('0x' + '44' * 20))
         self.expect(marker['status'] == '0x1', 'a transaction before the backup', marker['transactionHash'])
-        sender = self.manifest['faucet_address']
+        sender = self.funder_address()
         nonce_before = int(self.call('eth_getTransactionCount', [sender, 'latest']), 16)
         out = subprocess.run([sys.executable, str(backup), 'backup', str(self.gen), str(archive)], check=True, text=True, capture_output=True).stdout
         self.say('  ' + out.strip())
@@ -1882,7 +1894,7 @@ class Rehearsal:
         s, text = self.http(FAUCET, 'GET', '/api/network')
         pin = json.loads(text) if s == 200 else {}
         self.expect(pin.get('genesis_hash', '').lower() == self.genesis, 'the faucet guard publishes the same network pin after the restore')
-        after = json.loads(self.send_via_gateway(self.gen / 'faucet-secrets', '0x' + '55' * 20))
+        after = json.loads(self.send_via_gateway('0x' + '55' * 20))
         self.expect(after['status'] == '0x1', 'a fresh transaction through the public gateway succeeds from the restored generation', after['transactionHash'])
         self.expect(int(after['blockNumber'], 16) > int(marker['blockNumber'], 16), 'it lands after the pre-backup block')
         for i in range(1, self.n + 1):
@@ -1897,7 +1909,7 @@ class Rehearsal:
         missing = [k for k in need if not self.reset_args.get(k)]
         if missing:
             raise Failure('the reset stage needs --reset-' + ', --reset-'.join(m.replace('_', '-') for m in missing))
-        old, old_genesis, old_faucet, old_tx = self.gen, self.genesis, self.manifest['faucet_address'], getattr(self, 'tx', None)
+        old, old_genesis, old_faucet, old_funder, old_tx = self.gen, self.genesis, self.manifest['faucet_address'], self.funder_address(), getattr(self, 'tx', None)
         new = Path(self.reset_args['out'])
         a = self.reset_args
         reset_flags, inventory = self.reset_inventory_args(a)
@@ -1915,7 +1927,7 @@ class Rehearsal:
         self.expect(retired.is_file() and json.loads(retired.read_text())['genesis_hash'].lower() == old_genesis, 'the old public manifest was kept beside it')
         self.adopt(new)
         self.expect(self.genesis != old_genesis, 'the block-zero hash changed', f'{old_genesis[:12]}.. -> {self.genesis[:12]}..')
-        self.expect(self.manifest['faucet_address'] != old_faucet, 'the funded (faucet) account is a new one')
+        self.expect(self.manifest['faucet_address'] != old_faucet and self.funder_address() != old_funder, 'the faucet and funder accounts are new ones')
         self.up()
         self.identity()
         if old_tx:
@@ -1930,7 +1942,7 @@ class Rehearsal:
         self.expect(s == 400 and 'hCaptcha' in text, 'a wallet on the new pin passes the network check and stops at the captcha (the signer is not started)', f'status {s}')
         pin = json.loads(self.http(FAUCET, 'GET', '/api/network')[1])
         self.expect(pin['genesis_hash'].lower() == self.genesis, 'the faucet guard publishes the new pin')
-        receipt = json.loads(self.send_via_gateway(self.gen / 'faucet-secrets', '0x' + '66' * 20))
+        receipt = json.loads(self.send_via_gateway('0x' + '66' * 20))
         self.expect(receipt['status'] == '0x1', 'a paid transfer on the new network succeeds', receipt['transactionHash'])
         self.say('  note the old generation\'s surviving authority directories (the restore pointed at them) are left on disk by reset.py; a host removes them by hand')
 

@@ -13,7 +13,7 @@ Part 2, an exit declaration: a non-owner's `requestRetirement` is refused (NotOw
 holds no credit afterwards (nothing was released). A completed withdrawal needs the identity to leave the committee through a handoff and the retirement imported
 by the roots: NOT covered here.
 
-The module only uses what `Rehearsal` already provides (call, view, expect, relayer, faucet_send, balance, cast_run, wait, rpc); nothing here changes those.
+The module only uses what `Rehearsal` already provides (call, view, expect, relayer, funder_send, balance, cast_run, wait, rpc); nothing here changes those.
 """
 import json
 import subprocess
@@ -68,7 +68,7 @@ def pos_owner(r):
     for who in (identities[0], identities[1]):
         for role in ('owner', 'withdrawal', 'payee'):
             if r.balance(who[role]) < 10 ** 17:
-                r.faucet_send(who[role], 10 ** 18)
+                r.funder_send(who[role], 10 ** 18)
 
     # --- part 1: a paid reward claim --------------------------------------------------------------------------------------------
     first = identities[0]

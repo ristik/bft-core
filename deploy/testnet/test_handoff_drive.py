@@ -786,7 +786,7 @@ class BackupAndAckBlock(unittest.TestCase):
 
 class Unattended(unittest.TestCase):
     """--only-if-members, the drive lock and --funder (Q35: a timer drives only the host committee's results, one drive at a time, never from the faucet
-    account), and handoff_auto.py's pass."""
+    account; bft-core#1287), and handoff_auto.py's pass."""
     def test_members_are_parsed(self):
         self.assertEqual(hd.parse_members('4,1,3,2'), [1, 2, 3, 4])
         for bad in ('', '1,,2', 'a', '0,1', '1,1', '-1'):
@@ -814,6 +814,37 @@ class Unattended(unittest.TestCase):
             (d / 'keystore.json').write_text(json.dumps({'address': 'nope'}))
             with self.assertRaises(hd.Refused):
                 hd.funder_address(d)
+
+    def test_the_drive_funds_from_the_funder_account_never_the_faucet(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gen = Path(tmp) / 'tn-x'
+            (gen / 'faucet-secrets').mkdir(parents=True)
+            (gen / 'faucet-secrets' / 'keystore.json').write_text(json.dumps({'address': 'fa' * 20}))
+            (gen / 'faucet-secrets' / 'password').write_text('x')
+            drive = hd.Drive.__new__(hd.Drive)
+            drive.gen, drive.funder, drive.chain_id = gen, None, 1
+            drive.call = unittest.mock.Mock(side_effect=lambda method, params=(): {'eth_sendRawTransaction': '0xtx'}.get(method, '0x1'))
+            drive.cast_run = unittest.mock.Mock(return_value='0xraw')
+            drive.wait = unittest.mock.Mock(return_value={'status': '0x1'})
+            drive.expect = unittest.mock.Mock()
+            with self.assertRaisesRegex(hd.Refused, 'faucet signer'):
+                drive.fund('0x' + '22' * 20, 10 ** 18)   # a generation without funder-secrets/ (bft-core#1287): refused, not the faucet key
+            drive.call.assert_not_called()
+            (gen / 'funder-secrets').mkdir()
+            (gen / 'funder-secrets' / 'keystore.json').write_text(json.dumps({'address': 'fd' * 20}))
+            (gen / 'funder-secrets' / 'password').write_text('x')
+            drive.fund('0x' + '22' * 20, 10 ** 18)
+            self.assertEqual(drive.call.call_args_list[0].args, ('eth_getTransactionCount', ['0x' + 'fd' * 20, 'pending']))
+            mktx = drive.cast_run.call_args.args
+            self.assertEqual(mktx[mktx.index('--keystore') + 1], str(gen / 'funder-secrets' / 'keystore.json'))
+            operator = Path(tmp) / 'operator'
+            operator.mkdir()
+            (operator / 'keystore.json').write_text(json.dumps({'address': 'ab' * 20}))
+            (operator / 'password').write_text('x')
+            drive.funder = operator
+            drive.fund('0x' + '22' * 20, 10 ** 18)
+            mktx = drive.cast_run.call_args.args
+            self.assertEqual(mktx[mktx.index('--keystore') + 1], str(operator / 'keystore.json'), '--funder wins')
 
     def run_main(self, tmp, new, *extra):
         gen = Path(tmp) / 'tn-x'
