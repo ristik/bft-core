@@ -114,6 +114,7 @@ Bundle.Snapshot.Block.Payload.PosControls[].Reject.EVMStateRoot hashed
 Bundle.Snapshot.Block.Payload.PosControls[].Reject.PredecessorBodyID hashed
 Bundle.Snapshot.Block.Payload.PosControls[].Retire.EVMBlockHash hashed
 Bundle.Snapshot.Block.Payload.PosControls[].Retire.EVMStateRoot hashed
+Bundle.Snapshot.Block.Payload.PosControls[].Support[].BindingRef hashed
 Bundle.Snapshot.Block.Payload.PosControls[].Support[].Generation hashed
 Bundle.Snapshot.Block.Payload.PosControls[].Support[].Network hashed
 Bundle.Snapshot.Block.Payload.PosControls[].Support[].ReleaseDigest hashed
