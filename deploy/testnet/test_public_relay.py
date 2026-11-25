@@ -1,9 +1,12 @@
 """Public relay regressions against controllable JSON-RPC validators."""
 from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import ExitStack
+import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+from pathlib import Path
 import socket
+import tempfile
 import threading
 import time
 import unittest
@@ -11,7 +14,8 @@ from unittest.mock import Mock, patch
 import urllib.error
 import urllib.request
 
-from gateway import Handler, MAX_BODY, Relay, Server
+from faucet import gateway as faucet_gateway, relay as faucet_relay
+from gateway import ExecutionHandler, Handler, Limiter, MAX_BODY, Relay, Server
 
 GENESIS = '0x' + 'aa' * 32
 TX = '0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347'
@@ -65,6 +69,85 @@ class Node:
         return Handler
 
 
+class FakeReth:
+    """One execution client's view of the faucet account: a nonce, and the transactions it took (mined at once). A raw transaction here is
+    0x + the hex of its JSON {from, nonce, to}; its hash is the SHA-256 of those bytes (web3_sha3 answers the same, as reth's keccak would)."""
+
+    def __init__(self):
+        self.nonces, self.txs = {}, {}
+
+    @staticmethod
+    def raw(sender, nonce, to):
+        return '0x' + json.dumps({'from': sender, 'nonce': nonce, 'to': to}).encode().hex()
+
+    @staticmethod
+    def hash(raw):
+        return '0x' + hashlib.sha256(bytes.fromhex(raw[2:])).hexdigest()
+
+    def send(self, params):
+        tx = json.loads(bytes.fromhex(params[0][2:]))
+        have = self.nonces.get(tx['from'], 0)
+        if tx['nonce'] < have:
+            return {'error': {'code': -32003, 'message': f'nonce too low: next nonce {have}, tx nonce {tx["nonce"]}'}}
+        if tx['nonce'] > have:
+            return {'error': {'code': -32003, 'message': 'nonce too high'}}
+        self.nonces[tx['from']] = have + 1
+        self.txs[self.hash(params[0])] = tx
+        return {'result': self.hash(params[0])}
+
+    def node(self):
+        return Node(answers={
+            'eth_sendRawTransaction': self.send,
+            'web3_sha3': lambda params: {'result': self.hash(params[0])},
+            'eth_getTransactionByHash': lambda params: {'result': {'hash': params[0], 'blockNumber': '0x1'} if params[0] in self.txs else None},
+            'eth_getTransactionCount': lambda params: {'result': hex(self.nonces.get(params[0], 0))},
+        })
+
+
+class Signer(BaseHTTPRequestHandler):
+    """The pinned eth-faucet signer's transfer path (chainflag/eth-faucet e7572628 internal/chain/transaction.go, internal/server/server.go): a nonce
+    read once at start and counted locally, refreshed only when a send error names the nonce; a failed send answers 500 "Transaction failed: <error>"
+    (the JSON-RPC message, or the HTTP status and body when the RPC answered no JSON-RPC), as its JSON field msg."""
+
+    @staticmethod
+    def rpc(server, method, params):
+        body = json.dumps(dict(jsonrpc='2.0', id=1, method=method, params=params)).encode()
+        try:
+            with urllib.request.urlopen(urllib.request.Request(server.rpc_url, body, {'Content-Type': 'application/json'}), timeout=8) as r:
+                reply = json.load(r)
+        except urllib.error.HTTPError as e:
+            with e:
+                raise RuntimeError(f'{e.code} {e.reason}: {e.read().decode()}')
+        if 'error' in reply:
+            raise RuntimeError(reply['error']['message'])
+        return reply['result']
+
+    @staticmethod
+    def refresh(server):
+        server.nonce = int(Signer.rpc(server, 'eth_getTransactionCount', [server.account, 'pending']), 16)
+
+    def do_POST(self):
+        address = json.loads(self.rfile.read(int(self.headers['Content-Length'])))['address']
+        server = self.server
+        with server.lock:
+            try:
+                tx_hash = self.rpc(server, 'eth_sendRawTransaction', [FakeReth.raw(server.account, server.nonce, address)])
+                server.nonce += 1
+                code, message = 200, f'Txhash: {tx_hash}'
+            except RuntimeError as error:
+                if 'nonce' in str(error).lower():
+                    self.refresh(server)
+                code, message = 500, f'Transaction failed: {error}'
+        payload = json.dumps({'msg': message}).encode()
+        self.send_response(code)
+        self.send_header('Content-Length', str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, *args):
+        pass
+
+
 class PublicRelayTest(unittest.TestCase):
     def setUp(self):
         self.stack = ExitStack()
@@ -81,7 +164,9 @@ class PublicRelayTest(unittest.TestCase):
     def gateway(self, *nodes, hostname=None):
         urls = []
         for node in nodes:
-            if node is None:
+            if isinstance(node, str):
+                urls.append(node)   # an execution guard (self.guard)
+            elif node is None:
                 # Reserve the port without listening, to exercise a refused connection.
                 server = ThreadingHTTPServer(('127.0.0.1', 0), Node().handler(), bind_and_activate=False)
                 server.server_bind()
@@ -93,10 +178,20 @@ class PublicRelayTest(unittest.TestCase):
             urls[0] = urls[0].replace('127.0.0.1', hostname)
         cfg = dict(validator_rpc_urls=urls, chain_id=70, genesis_hash=GENESIS)
         self.relay = Relay(cfg, small_body_limit=MAX_BODY)
-        server = Server(('127.0.0.1', 0), Handler, self.relay)
+        server = self.server = Server(('127.0.0.1', 0), Handler, self.relay)
         self.stack.callback(self.relay.close)
         self.stack.callback(server.pool.shutdown)
         self.url = self.serve(server)
+
+    def guard(self, node):
+        """One validator's execution guard (gateway.py with TN_LOCAL_EXECUTION_ALIAS): ExecutionHandler over that validator's client alone."""
+        relay = Relay(dict(validator_rpc_urls=[self.serve(ThreadingHTTPServer(('127.0.0.1', 0), node.handler()))], chain_id=70, genesis_hash=GENESIS),
+                      small_body_limit=MAX_BODY)
+        server = Server(('127.0.0.1', 0), ExecutionHandler, relay)
+        server.rpc_limit, server.heavy_limit = Limiter(100, 100), Limiter(20, 20)
+        self.stack.callback(relay.close)
+        self.stack.callback(server.pool.shutdown)
+        return self.serve(server)
 
     def rpc(self, method, params=()):
         body = dict(jsonrpc='2.0', id='caller', method=method, params=list(params))
@@ -251,7 +346,9 @@ class PublicRelayTest(unittest.TestCase):
         node.answers['eth_sendRawTransaction'] = {'error': NONCE}
         transaction['blockNumber'] = '0x7'
         self.assert_result('eth_sendRawTransaction', [RAW], TX)
-        self.assertEqual(self.rpc('eth_sendRawTransaction', ['0xc1'])[0], 503)
+        # Another transaction took the nonce: the validator does not know this
+        # hash, so its rejection is definite and reaches the client (#1287).
+        self.assertEqual(self.rpc('eth_sendRawTransaction', ['0xc1']), (200, dict(jsonrpc='2.0', id='caller', error=NONCE)))
         self.assertIn(('eth_getTransactionByHash', [BLOCK]), node.calls)
 
     def test_no_acceptance_with_rejection_or_lost_reply_returns_503(self):
@@ -261,6 +358,163 @@ class PublicRelayTest(unittest.TestCase):
         self.assertEqual(self.rpc('eth_sendRawTransaction', [RAW])[0], 503)
         for node in (rejected, lost):
             self.assertIn(('eth_sendRawTransaction', [RAW]), node.calls)
+
+    def test_definite_rejection_from_every_validator_is_relayed(self):
+        for message in ('insufficient funds for gas * price + value', 'replacement transaction underpriced',
+                        'transaction underpriced', 'invalid sender', 'failed to decode signed transaction'):
+            with self.subTest(message=message):
+                self.stack.close()
+                error = {'code': -32000, 'message': message}
+                nodes = [Node(answers={'eth_sendRawTransaction': {'error': error}}) for _ in range(3)]
+                self.gateway(*nodes)
+                self.assertEqual(self.rpc('eth_sendRawTransaction', [RAW]), (200, dict(jsonrpc='2.0', id='caller', error=error)))
+                self.relay.close()
+                for node in nodes:
+                    self.assertIn(('eth_sendRawTransaction', [RAW]), node.calls)
+                    self.assertNotIn('web3_sha3', [method for method, _ in node.calls])
+
+    def test_stale_nonce_is_relayed_once_every_validator_lacks_the_hash(self):
+        def node():
+            return Node(answers={'eth_sendRawTransaction': {'error': NONCE}, 'web3_sha3': {'result': TX},
+                                 'eth_getTransactionByHash': {'result': None}})
+        nodes = [node(), node()]
+        self.gateway(*nodes)
+        self.assertEqual(self.rpc('eth_sendRawTransaction', [RAW]), (200, dict(jsonrpc='2.0', id='caller', error=NONCE)))
+        for n in nodes:
+            self.assertIn(('eth_getTransactionByHash', [TX]), n.calls)
+
+    def test_stale_nonce_stays_ambiguous_without_a_hash_check(self):
+        lookup_down = Node(answers={'eth_sendRawTransaction': {'error': NONCE}, 'web3_sha3': {'result': TX},
+                                    'eth_getTransactionByHash': None})
+        self.gateway(lookup_down)
+        self.assertEqual(self.rpc('eth_sendRawTransaction', [RAW])[0], 503)
+        no_hash = Node(answers={'eth_sendRawTransaction': {'error': NONCE}, 'web3_sha3': None,
+                                'eth_getTransactionByHash': {'result': None}})
+        self.stack.close()
+        self.gateway(no_hash)
+        self.assertEqual(self.rpc('eth_sendRawTransaction', [RAW])[0], 503)
+
+    def test_unrecognised_errors_stay_ambiguous(self):
+        for message in ('txpool is full', 'internal error', 'nonce too high', 'Already Known: pooled'):
+            with self.subTest(message=message):
+                self.stack.close()
+                error = {'error': {'code': -32603, 'message': message}}
+                self.gateway(Node(answers={'eth_sendRawTransaction': error}), Node(answers={'eth_sendRawTransaction': error}))
+                self.assertEqual(self.rpc('eth_sendRawTransaction', [RAW])[0], 503)
+
+    def test_an_absence_seen_before_the_send_answer_does_not_confirm_it(self):
+        """A lookup of a validator that has not answered the send (yet) says nothing about a later "nonce too low" from it (review of #1304, P3-1): only
+        validators that already refused the nonce are recorded as lacking the hash."""
+        def node():
+            return Node(answers={'web3_sha3': {'result': TX}, 'eth_getTransactionByHash': {'result': None}})
+        self.gateway(node(), node(), node())
+        urls = list(self.relay.urls)
+        absent = set()
+        answers = {urls[0]: {'error': NONCE}, urls[1]: {'error': {'code': -32000, 'message': 'insufficient funds'}}}
+        self.assertIsNone(self.relay.duplicate_hash([RAW], [urls[0]], time.monotonic() + 5, absent, answers))
+        self.assertEqual(absent, {urls[0]})
+
+    def test_wallets_get_definite_errors_through_the_validator_guards(self):
+        """The generated topology (review of #1304, P2): the public gateway relays to every validator's execution guard, each of which relays to its own
+        client. A stale nonce and a refusal reach a public /rpc wallet as the JSON-RPC error, not 503; a lost answer behind one guard stays 503."""
+        reth = FakeReth()
+        account = '0x' + '34' * 20
+        self.gateway(self.guard(reth.node()), self.guard(reth.node()))
+        stale = FakeReth.raw(account, 0, '0x' + '99' * 20)
+        self.assertEqual(self.rpc('eth_sendRawTransaction', [stale])[0], 200)
+        self.assertEqual(self.rpc('eth_sendRawTransaction', [stale]), (200, dict(jsonrpc='2.0', id='caller', result=FakeReth.hash(stale))),
+                         'the same bytes again: the duplicate check through the guards finds the hash')
+        other = FakeReth.raw(account, 0, '0x' + '98' * 20)   # another transaction for the used nonce
+        status, body = self.rpc('eth_sendRawTransaction', [other])
+        self.assertEqual(status, 200, body)
+        self.assertTrue(body['error']['message'].startswith('nonce too low'), body)
+        refused = {'error': {'code': -32003, 'message': 'insufficient funds for gas * price + value'}}
+        self.stack.close()
+        self.gateway(self.guard(Node(answers={'eth_sendRawTransaction': refused})), self.guard(Node(answers={'eth_sendRawTransaction': refused})))
+        self.assertEqual(self.rpc('eth_sendRawTransaction', [RAW]), (200, dict(jsonrpc='2.0', id='caller', **refused)))
+        self.stack.close()
+        self.gateway(self.guard(Node(answers={'eth_sendRawTransaction': refused})), self.guard(Node(answers={'eth_sendRawTransaction': None})))
+        self.assertEqual(self.rpc('eth_sendRawTransaction', [RAW])[0], 503)
+
+    def test_the_guard_hashes_for_the_duplicate_check_only_internally(self):
+        node = Node(answers={'web3_sha3': {'result': TX}})
+        url = self.guard(node)
+        big = '0x' + 'ab' * 20000
+        for raw in (RAW, big):
+            reply = json.load(urllib.request.urlopen(urllib.request.Request(url, json.dumps(dict(jsonrpc='2.0', id=1, method='web3_sha3', params=[raw])).encode()), timeout=8))
+            self.assertEqual(reply['result'], TX)
+        self.gateway(node)
+        self.assertEqual(self.rpc('web3_sha3', [RAW])[0], 400, 'the public gateway does not serve it')
+
+    def test_rejection_with_an_unanswered_or_pooled_peer_stays_ambiguous(self):
+        refused = {'error': {'code': -32000, 'message': 'insufficient funds for gas * price + value'}}
+        cases = (
+            ('lost reply', Node(answers={'eth_sendRawTransaction': None})),
+            ('wrong genesis', Node(answers={'eth_getBlockByNumber': {'result': {'hash': BLOCK}}})),
+            ('in a pool', Node(answers={'eth_sendRawTransaction': {'error': KNOWN}, 'web3_sha3': {'result': TX},
+                                        'eth_getTransactionByHash': {'result': None}})),
+            ('nonce, hash unchecked', Node(answers={'eth_sendRawTransaction': {'error': NONCE}, 'web3_sha3': None})),
+        )
+        for what, other in cases:
+            with self.subTest(what):
+                self.stack.close()
+                self.gateway(Node(answers={'eth_sendRawTransaction': refused}), other)
+                self.assertEqual(self.rpc('eth_sendRawTransaction', [RAW])[0], 503)
+        self.stack.close()
+        self.gateway(None, Node(answers={'eth_sendRawTransaction': refused}))
+        self.assertEqual(self.rpc('eth_sendRawTransaction', [RAW])[0], 503, 'a refused connection is not an answer')
+
+    def test_faucet_recovers_after_an_out_of_band_send(self):
+        """bft-core#1287: a transaction from the faucet key outside the signer makes the signer's nonce stale. The claim after it must succeed or fail
+        definitely (its reservation released), and the next claim must succeed: the refusal reaches the signer, which refreshes its nonce."""
+        reth = FakeReth()
+        self.gateway(reth.node(), reth.node())   # two validators of one chain (they share the fake chain state)
+        self.server.rpc_limit = Limiter(1000, 1000)
+        account = '0x' + '34' * 20
+        cfg = dict(chain_id=70, genesis_hash=GENESIS, funding_address=account, rpc_url=self.url, backend_url=None, captcha_sitekey='',
+                   dev_only=True, daily_claims=10, minimum_balance_wei=1, payout='200', validator_rpc_urls=[self.url])
+        relay_server = ThreadingHTTPServer(('127.0.0.1', 0), faucet_relay.Handler)
+        relay_server.relay = faucet_relay.Relay(cfg)
+        signer = ThreadingHTTPServer(('127.0.0.1', 0), Signer)
+        signer.rpc_url, signer.account, signer.lock = self.serve(relay_server), account, threading.Lock()
+        Signer.refresh(signer)   # at its start
+        self.assertEqual(signer.nonce, 0)
+        cfg['backend_url'] = self.serve(signer)
+        state = tempfile.TemporaryDirectory()
+        self.stack.callback(state.cleanup)
+        guard = faucet_gateway.Guard(cfg, str(Path(state.name) / 'claims.sqlite'))
+        front = ThreadingHTTPServer(('127.0.0.1', 0), faucet_gateway.Handler)
+        front.guard = guard
+        claim_url = self.serve(front) + '/api/claim'
+        self.stack.enter_context(patch.object(guard, 'health', return_value={'status': 'ready'}))
+
+        def claim(address):
+            body = json.dumps(dict(address=address, chain_id=70, genesis_hash=GENESIS)).encode()
+            try:
+                with urllib.request.urlopen(urllib.request.Request(claim_url, body, {'Content-Type': 'application/json'}), timeout=15) as r:
+                    return r.status, json.load(r)
+            except urllib.error.HTTPError as e:
+                with e:
+                    return e.code, json.load(e)
+
+        first, second = '0x' + '56' * 20, '0x' + '57' * 20
+        self.assertEqual(claim(first)[0], 200)
+        # The out-of-band transaction: the faucet key's next nonce, sent past the signer through the public RPC.
+        status, sent = self.rpc('eth_sendRawTransaction', [FakeReth.raw(account, 1, '0x' + '99' * 20)])
+        self.assertEqual((status, 'result' in sent), (200, True))
+        status, answer = claim(second)
+        self.assertIn(status, (200, 502), answer)
+        if status == 502:
+            self.assertIn('nothing was sent', answer['message'])
+            with guard.db() as db:
+                self.assertEqual(db.execute('SELECT count(*) FROM claims WHERE address=?', (second,)).fetchone()[0], 0, 'the refusal released the reservation')
+            status, answer = claim(second)
+        self.assertEqual(status, 200, answer)
+        self.assertEqual(reth.nonces[account], 3)
+        self.assertEqual(sorted(tx['to'] for tx in reth.txs.values()), sorted([first, second, '0x' + '99' * 20]))
+        third = '0x' + '58' * 20
+        self.assertEqual(claim(third)[0], 200, 'the signer keeps counting from the refreshed nonce')
+        self.assertEqual(reth.nonces[account], 4)
 
     def test_block_receipts_by_hash_require_a_covering_head_even_for_empty_results(self):
         header = {'hash': BLOCK, 'number': '0x7'}

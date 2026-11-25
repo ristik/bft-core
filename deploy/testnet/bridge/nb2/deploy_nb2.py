@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Deploy and verify the NB2 v1.1 graph on a running testnet generation.
 
-Use an idle faucet signer during deployment. The release is written only after
+The generation's funder account deploys (never the faucet key: its nonces are the faucet signer's,
+bft-core#1287). The release is written only after
 readback of the five contracts and the native seal registry. Publish the release
 and its trust files together through the authenticated operator channel.
 """
@@ -28,7 +29,7 @@ NBP = '/opt/bridge/native-bridge-plugins'
 REPO = HERE.parents[3]
 # The package ships the imported-tip certificate relation. The T7 membership
 # and execution descriptor sources still match this ureth pin.
-RELEASE_URETH = '9b704a8fa21637229206d71d8d27589befac9e89'
+RELEASE_URETH = '00c059e80212d05a8a439a8fe7b3ab249158ee39'
 RELEASE_URETH_LOCK = '99e0b3f3bcae2ded12eecf1d7563a455d05e67d1502137a6ef813a2e0cf075af'
 REGISTRY = '0xff00000000000000000000000000000000000002'
 NETWORK_ID, EVM_PARTITION, EVM_SHARD, AGG_PARTITION = 3, 8, '0x80', 7
@@ -95,12 +96,12 @@ def moving_estimate_head(reason):
 
 
 def create(gen, initcode, label, *, transport=None):
-    """One creation from the faucet keystore; its receipt."""
+    """One creation from the funder keystore; its receipt."""
     run = tools if transport is None else transport
     for attempt in range(1, ESTIMATE_ATTEMPTS + 1):
         try:
-            out = run(gen, 'cast', 'send', '--rpc-url', ETH, '--keystore', '/gen/faucet-secrets/keystore.json',
-                        '--password-file', '/gen/faucet-secrets/password', '--json', '--create', initcode, capture=True)
+            out = run(gen, 'cast', 'send', '--rpc-url', ETH, '--keystore', '/gen/funder-secrets/keystore.json',
+                        '--password-file', '/gen/funder-secrets/password', '--json', '--create', initcode, capture=True)
             break
         except subprocess.CalledProcessError as error:
             reasons = cast_failure_reasons(error)
@@ -164,7 +165,9 @@ def deploy_graph(gen, evidence_bin, manifest, work, bridge, pin, qmax):
     fields = [descriptor_hashes[name] for name in DESCRIPTORS]
     profile = descriptor_hashes['semantic-profile']
     nodes = {'registry': {'address': REGISTRY, 'runtimeCodeHash': registry_hash}}
-    deployer = manifest['faucet_address']
+    if 'funder_address' not in manifest:
+        raise SystemExit('the generation has no funder account (generate.py funder-secrets/): the faucet key is the faucet signer\'s alone')
+    deployer = manifest['funder_address']
     # On a partial failure there is no safe implicit retry of a creation.
     (work / '.deployment-started').touch(exist_ok=False)
 

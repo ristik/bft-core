@@ -1,5 +1,6 @@
 import concurrent.futures
 import http.server
+import io
 import json
 from pathlib import Path
 import tempfile
@@ -146,11 +147,30 @@ class GuardTests(unittest.TestCase):
             self.assertEqual(backend.call_count, calls + 2)  # both reached the signer
             with self.guard.db() as db:
                 self.assertEqual(db.execute('SELECT count(*) FROM claims').fetchone()[0], 0)
+            # A transfer the chain refused (the signer relays the JSON-RPC error) releases the reservation too: nothing was sent (#1287).
+            def signer_failed(message):
+                def fail(*args):
+                    raise urllib.error.HTTPError('http://signer/api/claim', 500, 'signer', {},
+                                                 io.BytesIO(json.dumps({'msg': message}).encode()))
+                return fail
+
+            for refusal in ('Transaction failed: nonce too low: next nonce 8, tx nonce 1',
+                            'Transaction failed: insufficient funds for gas * price + value: balance 0, tx cost 1',
+                            'Transaction failed: replacement transaction underpriced'):
+                backend.side_effect = signer_failed(refusal)
+                self.assertEqual(claim(body), 502, refusal)
+                with self.guard.db() as db:
+                    self.assertEqual(db.execute('SELECT count(*) FROM claims').fetchone()[0], 0, refusal)
             # Any other signer error stays uncertain and keeps the reservation.
-            backend.side_effect = signer_status(500)
-            self.assertEqual(claim(body), 503)
-            backend.side_effect = None
-            self.assertEqual(claim(body), 429)
+            for uncertain in (signer_status(500), signer_failed('Transaction failed: Post "http://relay:8545": context deadline exceeded'),
+                              signer_failed('Transaction failed: 503 Service Unavailable: {"error": "RPC unavailable or identity mismatch"}'),
+                              signer_failed('nonce too low'), signer_status(502)):
+                with self.guard.db() as db:
+                    db.execute('DELETE FROM claims')
+                backend.side_effect = uncertain
+                self.assertEqual(claim(body), 503)
+                backend.side_effect = None
+                self.assertEqual(claim(body), 429)
             self.assertEqual(claim(other), 200)
             with self.guard.db() as db:
                 self.assertEqual(db.execute('SELECT count(*) FROM claims').fetchone()[0], 2)

@@ -146,6 +146,25 @@ def main():
             evidence['paid_transaction'] = receipt(paid)
             evidence['final_balance'] = rpc('eth_getBalance', [wallet, 'latest'])
             assert 0 < int(evidence['final_balance'], 16) < 10**16
+            # bft-core#1287: a transaction from the faucet key sent past the signer leaves the signer's nonce stale. The next claim must succeed or be
+            # refused definitely (502, its reservation released: reth's "nonce too low" reaches the signer, which refreshes its nonce), and the claim
+            # after it must succeed. A fresh guard state without the per-IP limit: this host already claimed above.
+            out_of_band = tx('-send', '-eth-url', cfg['rpc_url'], '-chain-id', str(cfg['chain_id']), '-private-key', faucet_key,
+                             '-nonce', str(int(rpc('eth_getTransactionCount', [faucet, 'pending']), 16)), '-to', '0x' + '43'*20, '-value', '1')
+            evidence['out_of_band_transaction'] = receipt(out_of_band)
+            gs.guard = gateway.Guard(dict(cfg, limit_per_ip=False), str(Path(tmp) / 'out-of-band.sqlite'))
+            second_wallet = tx('-private-key', secrets.token_hex(32), '-address')
+            second = dict(body, address=second_wallet)
+            evidence['claim_after_out_of_band'] = claim(second)
+            assert evidence['claim_after_out_of_band'][0] in (200, 502), evidence['claim_after_out_of_band']
+            if evidence['claim_after_out_of_band'][0] == 502:
+                evidence['claim_after_refusal'] = claim(second)
+                assert evidence['claim_after_refusal'][0] == 200, evidence['claim_after_refusal']
+                sent = evidence['claim_after_refusal'][1]
+            else:
+                sent = evidence['claim_after_out_of_band'][1]
+            evidence['dispense_after_out_of_band'] = receipt(sent['msg'].split()[-1])
+            assert int(rpc('eth_getBalance', [second_wallet, 'latest']), 16) == 10**16
             reset = copy.deepcopy(cfg)
             reset['genesis_hash'] = '0x' + '99'*32
             try:

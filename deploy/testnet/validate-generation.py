@@ -68,6 +68,12 @@ with tempfile.TemporaryDirectory(prefix='tnops-validation-',dir='/tmp') as tmp:
         assert network['funding_address']==manifest['faucet_address']
         assert len(network['validator_rpc_urls'])==3
         genesis=json.loads((generation/'network/genesis.json').read_text())
+        # the tools' own funder account (bft-core#1287): separate from the faucet, funded at genesis, its keys host-private beside the faucet's
+        assert manifest['funder_address'].lower()!=manifest['faucet_address'].lower()
+        assert all((generation/'funder-secrets'/name).is_file() for name in ('keystore.json','password'))
+        balances={k.lower().removeprefix('0x'):int(str(v['balance']),0) for k,v in genesis['alloc'].items() if 'balance' in v}
+        assert balances.get(manifest['funder_address'].lower().removeprefix('0x'))==int(manifest['funder']['genesis_balance_wei'])
+        assert balances.get(manifest['faucet_address'].lower().removeprefix('0x'))==int(manifest['faucet']['genesis_balance_wei'])
         assert 'f39fd6e51aad88f6f4ce6ab8827279cfffb92266' not in str(genesis['alloc']).lower()
         # The deployed registry is the single B1 layout: an independent regeneration agrees with the shipped files, and refuses a changed storage word.
         verify=[str(a.b1genesis.resolve()),'--verify',None,'--profile',str(generation/'network/b1-profile.json'),
