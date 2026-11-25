@@ -4,7 +4,7 @@
   "components": {
     "ureth": {
       "repository": "https://github.com/ristik/ureth.git",
-      "commit": "7550439772e25990ff4f313de3dc67cf544be258",
+      "commit": "9b704a8fa21637229206d71d8d27589befac9e89",
       "package": "unicity-reth",
       "cargoArgs": [
         "build",
@@ -14,7 +14,7 @@
         "unicity-reth"
       ],
       "features": "default (jemalloc)",
-      "note": "ureth#111 (bft-core#1297) pins the SealRegistry runtime 0x8b3105bf of contracts e2b995b (the post-term evidence views); 0x0100 unchanged. Previous: bft-core#1294 pairs the checkout with the imported-tip B1 verifier. Previous: ureth#107 (VT-06c) supplies parent-state VR fees and the genesis fee identity fields. Previous pin: ureth unicity/main at the merge of ureth#103 (b8a50547: VT-14 VR batch pins on #102, the VT-02 hook, and #101, VT-15: record kinds 6 to 8 and the SealRegistry pin 0xebbadc64, the runtime this bft-core genesis carries), which includes ureth#97: the protocol 6/7 bridge precompile 0x0105 removed, so engineapi/profile.go no longer requires it (bft-core#1139; a consensus change, a fresh network generation). Before: ureth vt15/lane-pin (7fdc5a32): the lane pin 10552af2 plus the VT-15 commit of ristik/ureth#101, kept off unicity/main while engineapi still required 0x0105. Before: ureth unicity/main at the merge of ureth#94 (10552af2: the snapshots of the resealed corpus) on ureth#93 (870c1d01, the native B1 precompile on the upstream seal rule, 7,200 gas per supplied seal signature, protocol 7, bft-core#920)",
+      "note": "ureth#111 (bft-core#1297) pins the SealRegistry runtime 0x8b3105bf of contracts e2b995b/3cbb999 (the post-term evidence views); 0x0100 unchanged. Previous: bft-core#1294 pairs the checkout with the imported-tip B1 verifier. Previous: ureth#107 (VT-06c) supplies parent-state VR fees and the genesis fee identity fields. Previous pin: ureth unicity/main at the merge of ureth#103 (b8a50547: VT-14 VR batch pins on #102, the VT-02 hook, and #101, VT-15: record kinds 6 to 8 and the SealRegistry pin 0xebbadc64, the runtime this bft-core genesis carries), which includes ureth#97: the protocol 6/7 bridge precompile 0x0105 removed, so engineapi/profile.go no longer requires it (bft-core#1139; a consensus change, a fresh network generation). Before: ureth vt15/lane-pin (7fdc5a32): the lane pin 10552af2 plus the VT-15 commit of ristik/ureth#101, kept off unicity/main while engineapi still required 0x0105. Before: ureth unicity/main at the merge of ureth#94 (10552af2: the snapshots of the resealed corpus) on ureth#93 (870c1d01, the native B1 precompile on the upstream seal rule, 7,200 gas per supplied seal signature, protocol 7, bft-core#920)",
       "nativePrecompiles": {
         "unicity-b1-cert-batch-v2-tip": "0x0000000000000000000000000000000000000100",
         "unicity-b1-membership": "0x0000000000000000000000000000000000000102",
