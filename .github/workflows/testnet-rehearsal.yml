@@ -185,7 +185,7 @@ jobs:
         run: |
           umask 077
           echo rehearsal-not-a-real-secret > /tmp/captcha-secret
-          sudo -E env "PATH=$PATH" python3 deploy/testnet/generate.py --out /srv/tn-rehearsal-1 --validators 4 --chain-id 31337 \
+          sudo -E env "PATH=$PATH" python3 deploy/testnet/generate.py --first-generation --out /srv/tn-rehearsal-1 --validators 4 --chain-id 31337 \
             --ubft pinned-bft/build/ubft --b1genesis /tmp/tn-b1genesis --keygen /tmp/tn-keygen --block-interval-ms 0 \
             --captcha-sitekey rehearsal-sitekey --captcha-secret-file /tmp/captcha-secret --no-utb
       - name: Rehearse
@@ -269,7 +269,7 @@ jobs:
             if sudo test -f "$d/compose.yaml"; then sudo docker compose -f "$d/compose.yaml" down; fi
           done
           umask 077
-          sudo -E env "PATH=$PATH" python3 deploy/testnet/generate.py --out /srv/tn-rehearsal-pos --validators 4 --chain-id 31337 \
+          sudo -E env "PATH=$PATH" python3 deploy/testnet/generate.py --first-generation --out /srv/tn-rehearsal-pos --validators 4 --chain-id 31337 \
             --ubft pinned-bft/build/ubft --b1genesis /tmp/tn-b1genesis --keygen /tmp/tn-keygen --block-interval-ms 0 \
             --captcha-sitekey rehearsal-sitekey --captcha-secret-file /tmp/captcha-secret --no-utb \
             --pos --pos-contracts pinned-contracts
@@ -351,7 +351,7 @@ jobs:
         run: |
           if sudo test -f /srv/tn-rehearsal-pos/compose.yaml; then sudo docker compose -f /srv/tn-rehearsal-pos/compose.yaml down; fi
           umask 077
-          sudo -E env "PATH=$PATH" python3 deploy/testnet/generate.py --out /srv/tn-rehearsal-join --validators 4 --chain-id 31337 \
+          sudo -E env "PATH=$PATH" python3 deploy/testnet/generate.py --first-generation --out /srv/tn-rehearsal-join --validators 4 --chain-id 31337 \
             --ubft pinned-bft/build/ubft --b1genesis /tmp/tn-b1genesis --keygen /tmp/tn-keygen --block-interval-ms 0 \
             --captcha-sitekey rehearsal-sitekey --captcha-secret-file /tmp/captcha-secret --no-utb \
             --pos --pos-contracts pinned-contracts

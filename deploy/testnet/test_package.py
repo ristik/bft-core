@@ -366,7 +366,14 @@ class UtbProfile(unittest.TestCase):
                 self.assertEqual(done.returncode,2,(why,done.stderr))
                 self.assertFalse(spy.exists(),why+': docker must not be called')
                 self.assertTrue(old.exists(),why+': the old generation stays')
-            done=reset('--no-utb','--images',str(integration))   # accepted by the preflight: it reaches the teardown (the spy) and fails later in generate
+            # #1297: the old generation's UTB history keys are required before the teardown; --first-generation is not a reset
+            history=d/'old-utb-keys.json'; history.write_text(json.dumps({'format':root_keys.HISTORY_FORMAT,'epochs':[{'epoch':1,'keys':['0x02'+'11'*32]}]}))
+            for gen,why in ((('--no-utb','--images',str(integration)),'no prior history'),
+                            (('--no-utb','--images',str(integration),'--first-generation','--prior-generation',str(history)),'a reset is not a first generation')):
+                done=reset(*gen)
+                self.assertEqual(done.returncode,2,(why,done.stderr)); self.assertIn('--prior-generation',done.stderr,why)
+                self.assertFalse(spy.exists(),why+': docker must not be called')
+            done=reset('--no-utb','--images',str(integration),'--prior-generation',str(history))   # accepted by the preflight: it reaches the teardown (the spy) and fails later in generate
             self.assertTrue(spy.exists(),'a matching profile proceeds to the teardown')
     def test_the_signed_history_is_on_by_default_and_no_utb_is_the_escape_hatch(self):
         source=(Path(generate.__file__)).read_text()
@@ -1158,7 +1165,7 @@ class ProofOfStake(unittest.TestCase):
         self.assertGreater(3_629_888*125//100,pos.HOOK_RECORD_GAS)
     def test_pos_refuses_more_validators_than_the_caps_cover_before_any_key(self):
         done=subprocess.run([sys.executable,str(Path(__file__).parent/'generate.py'),'--out','/nonexistent/tn-x','--validators',str(pos.CAPS[2]+1),'--ubft','x','--keygen','x','--b1genesis','x',
-            '--images','x','--captcha-sitekey','a','--captcha-secret-file','x','--pos','--pos-contracts','x'],text=True,capture_output=True)
+            '--images','x','--captcha-sitekey','a','--captcha-secret-file','x','--first-generation','--pos','--pos-contracts','x'],text=True,capture_output=True)
         self.assertEqual(done.returncode,2);self.assertIn('cover at most %d genesis identities'%pos.CAPS[2],done.stderr)
     def test_genesis_weights_default_to_one_and_nothing_else_is_buildable(self):
         self.assertEqual(pos.genesis_weights(4),[1,1,1,1]);self.assertEqual(pos.genesis_weights(3,['1','1','1']),[1,1,1])
@@ -1392,7 +1399,7 @@ class EntityNamespace(unittest.TestCase):
     def test_the_generator_refuses_a_non_loopback_bind_before_any_key(self):
         for bad in ('0.0.0.0','10.1.2.3','example.org'):
             done=subprocess.run([sys.executable,str(Path(__file__).parent/'generate.py'),'--out','/nonexistent/tn-x','--validators','4','--ubft','x','--keygen','x','--b1genesis','x',
-                '--images','x','--captcha-sitekey','a','--captcha-secret-file','x','--rpc-bind',bad],text=True,capture_output=True)
+                '--images','x','--captcha-sitekey','a','--captcha-secret-file','x','--first-generation','--rpc-bind',bad],text=True,capture_output=True)
             self.assertEqual(done.returncode,2,bad);self.assertIn('--rpc-bind',done.stderr)
     def test_every_root_must_carry_the_same_operator_address(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1411,7 +1418,7 @@ class EntityNamespace(unittest.TestCase):
     def test_the_validator_count_is_capped_at_the_registry_ceiling_with_the_reason(self):
         for n,ok in ((2,False),(3,True),(16,True),(17,False),(32,False)):
             done=subprocess.run([sys.executable,str(Path(__file__).parent/'generate.py'),'--out','/nonexistent/tn-x','--validators',str(n),'--ubft','/nonexistent/ubft','--keygen','x','--b1genesis','x',
-                '--images','x','--captcha-sitekey','a','--captcha-secret-file','x'],text=True,capture_output=True)
+                '--images','x','--captcha-sitekey','a','--captcha-secret-file','x','--first-generation'],text=True,capture_output=True)
             if ok: self.assertNotIn('validators must be 3..16',done.stderr,n)
             else:
                 self.assertEqual(done.returncode,2,n);self.assertIn('validators must be 3..16, got %d'%n,done.stderr);self.assertIn('at most 16 committee members',done.stderr)
@@ -3446,7 +3453,7 @@ class StagingKnobs(unittest.TestCase):
         with patch.object(generate.subprocess,'check_output',side_effect=['a b\n',json.dumps([{'Name':'x','IPAM':{'Config':[{'Subnet':'172.30.88.0/24','Gateway':'172.30.88.1'}]}},{'Name':'host','IPAM':{'Config':None}}])]):
             self.assertEqual(generate.docker_subnets(),{'x':['172.30.88.0/24'],'host':[]})
     def test_the_generator_refuses_bad_faucet_and_subnet_options_before_any_key(self):
-        base=[sys.executable,str(Path(__file__).parent/'generate.py'),'--out','/nonexistent/tn-x','--validators','4','--ubft','x','--keygen','x','--b1genesis','x','--images','x','--captcha-sitekey','a','--captcha-secret-file','x']
+        base=[sys.executable,str(Path(__file__).parent/'generate.py'),'--out','/nonexistent/tn-x','--validators','4','--ubft','x','--keygen','x','--b1genesis','x','--images','x','--captcha-sitekey','a','--captcha-secret-file','x','--first-generation']
         for extra,want in ((['--faucet-payout','0'],'--faucet-payout'),(['--faucet-balance','100'],'--faucet-balance'),(['--faucet-subnet','172.30.89.0/24'],'overlap'),(['--edge-subnet','8.8.8.0/24'],'--edge-subnet')):
             done=subprocess.run(base+extra,text=True,capture_output=True)
             self.assertEqual(done.returncode,2,extra); self.assertIn(want,done.stderr)
@@ -3568,7 +3575,7 @@ class RootCpus(unittest.TestCase):
     def test_the_generator_refuses_an_out_of_range_quota_before_any_key(self):
         for bad in ('0.1','9'):
             done=subprocess.run([sys.executable,str(Path(__file__).parent/'generate.py'),'--out','/nonexistent/tn-x','--validators','4','--ubft','x','--keygen','x','--b1genesis','x',
-                '--images','x','--captcha-sitekey','a','--captcha-secret-file','x','--root-cpus',bad],text=True,capture_output=True)
+                '--images','x','--captcha-sitekey','a','--captcha-secret-file','x','--first-generation','--root-cpus',bad],text=True,capture_output=True)
             self.assertEqual(done.returncode,2,bad); self.assertIn('--root-cpus',done.stderr)
 
 
@@ -3751,6 +3758,51 @@ class RootKeyIsolation(unittest.TestCase):
                 with self.assertRaises(root_keys.RetiredKeyError):
                     root_keys.check_generation(gen, key, 'joiner')
             self.assertEqual(root_keys.published(Path(tmp) / 'none'), set())
+
+    def history(self, tmp, epochs):
+        h = Path(tmp) / 'prior-utb-keys.json'
+        h.write_text(json.dumps({'format': root_keys.HISTORY_FORMAT, 'networkId': 3, 'genesisId': '0x' + '00' * 32, 'tipId': '0x' + '00' * 32,
+                                 'epochs': [{'epoch': e, 'keys': keys} for e, keys in epochs]}))
+        return h
+
+    def test_keys_that_joined_or_rotated_during_the_prior_generation_are_retired_by_default(self):
+        """Generation k: genesis K1, K2; epoch 3 rotates K1 to K3; epoch 4 a joiner with K4. Its manifest names only K1, K2. Generation k+1 is generated
+        against k's verified UTB history: K3 and K4 are refused by generate, by the joiner tooling, and land in the shipped list `ubft validator`
+        apply/rotate read by default."""
+        K4 = '0x03' + '44' * 32
+        with tempfile.TemporaryDirectory() as tmp:
+            prior = self.generation(tmp, 'tn-k', [self.K1, self.K2])
+            hist = self.history(tmp, [(1, [self.K1, self.K2]), (2, [self.K1, self.K2]), (3, [self.K3, self.K2]), (4, [self.K3, self.K2, K4])])
+            self.assertTrue(root_keys.is_history(hist))
+            self.assertFalse(root_keys.is_history(prior / 'manifest.json'))
+            self.assertEqual(root_keys.load(prior), {root_keys.key_hash(self.K1), root_keys.key_hash(self.K2)}, 'the manifest alone misses later keys')
+            retired = root_keys.load(hist) | root_keys.load(prior)
+            for key in (self.K3, K4):
+                with self.assertRaises(root_keys.RetiredKeyError):
+                    root_keys.check_fresh([key], retired, 'generate')
+            nxt = self.generation(tmp, 'tn-k1', ['0x02' + '55' * 32], published=retired)
+            for key in (self.K3, K4):
+                with self.assertRaises(root_keys.RetiredKeyError):
+                    root_keys.check_generation(nxt, key, 'joiner')
+            # the release ships network/retired-root-keys.json as release/retired-root-keys.json: the list `ubft validator` reads by default
+            self.assertTrue({root_keys.key_hash(self.K3), root_keys.key_hash(K4)} <= root_keys.read_list(nxt / 'network' / root_keys.FILE))
+            with self.assertRaises(root_keys.RetiredKeyError):
+                root_keys.load(self.history(tmp, [(1, [])]))
+
+    def test_generate_needs_the_prior_history_or_an_explicit_first_generation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = [sys.executable, str(generate.HERE / 'generate.py'), '--out', '/nonexistent/tn-x', '--validators', '4', '--ubft', 'x', '--keygen', 'x',
+                    '--b1genesis', 'x', '--images', str(Path(tmp) / 'no-images.json'), '--captcha-sitekey', 'a', '--captcha-secret-file', 'x']
+            prior = self.generation(tmp, 'tn-k', [self.K1])
+            hist = self.history(tmp, [(1, [self.K1])])
+            for extra, want in (([], 'needs the prior generation'), (['--prior-generation', str(prior)], 'needs the prior generation'),
+                                (['--first-generation', '--prior-generation', str(hist)], 'contradict')):
+                done = subprocess.run(base + extra, text=True, capture_output=True)
+                self.assertEqual(done.returncode, 2, extra)
+                self.assertIn(want, done.stderr, extra)
+            for extra in (['--first-generation'], ['--prior-generation', str(hist), '--prior-generation', str(prior)]):
+                done = subprocess.run(base + extra, text=True, capture_output=True)
+                self.assertNotIn('prior generation', done.stderr, extra)   # past the inventory check (it fails later, on the missing image records)
 
     def test_the_generator_reads_the_prior_histories_before_any_key_and_records_and_publishes(self):
         source = (generate.HERE / 'generate.py').read_text().split('def main')[1]

@@ -50,3 +50,17 @@ func TestRetiredRootKeysDefaultsToTheShippedList(t *testing.T) {
 	require.Empty(t, (&txFlags{}).retiredRootKeys(v), "exit, claim and the other commands do not enroll a root key")
 	require.Equal(t, "/x/list.json", (&txFlags{RetiredRootKeys: "/x/list.json", NoRetiredRootKeys: true}).retiredRootKeys(v), "an explicit list is always checked")
 }
+
+// #1297 (astra r2): a key that rotated in or joined during generation k is in k's UTB history, hence in generation k+1's shipped list, and
+// apply/rotate refuse it by default.
+func TestARotatedInKeyOfThePriorGenerationIsRefusedByDefault(t *testing.T) {
+	rotated, err := ethcrypto.GenerateKey()
+	require.NoError(t, err)
+	key := ethcrypto.CompressPubkey(&rotated.PublicKey)
+	home := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(home, "release"), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(home, releaseRetiredRootKeys),
+		[]byte(`{"format":"unicity-retired-root-keys/1","keyHashes":["`+hexutil.Encode(ethcrypto.Keccak256(key))+`"]}`), 0o600))
+	f := &txFlags{enrollsRootKey: true}
+	require.ErrorContains(t, checkRetiredRootKey(f.retiredRootKeys(&loadedValidator{home: home}), key), "earlier root history")
+}

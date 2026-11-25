@@ -33,6 +33,13 @@ if not known.utb and known.utb_aggregator!='integration': p.error('--utb-aggrega
 if not known.images.is_file(): p.error(f'image records {known.images} not found')
 err=generate.image_sources_error(json.loads(known.images.read_text()),known.utb_aggregator if known.utb else 'integration')
 if err: p.error(err)
+# #1297: the replacement's retired-key inventory needs the old generation's signed UTB history (every epoch's root keys, joins and rotations
+# included): export and verify it BEFORE the teardown (deploy/testnet/README.md, "Retired root keys"); generate.py refuses only after it
+import root_keys
+priors=[Path(args[i+1]) for i,x in enumerate(args[:-1]) if x=='--prior-generation']
+if '--first-generation' in args: p.error('a reset replaces an existing root history: pass its UTB history keys as --prior-generation, not --first-generation')
+if not any(root_keys.is_history(x) for x in priors):
+    p.error('supply --prior-generation <utb-verify --keys-out file of the old generation> (and its network/retired-root-keys.json when it has one) before anything is deleted')
 new=Path(args[args.index('--out')+1]).resolve()
 if new.exists() or old==new or old in new.parents or new in old.parents:
     p.error('new generation must be a distinct, nonexistent directory')

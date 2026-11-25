@@ -4,9 +4,12 @@ Post-term evidence charges a quorum seal from its signed bytes alone. Those byte
 signed in another root history that shares N would be chargeable here. A validator must therefore sign every root history (every reset generation)
 with a fresh consensus key, including when it joins later and when it rotates. This module holds the guard:
 
-- a generation's manifest records its root signing keys (`root_signing_keys`: node id, compressed key, key hash);
-- the generation publishes `network/retired-root-keys.json`: the key hashes of every root key of the earlier root histories it was generated
-  against (`generate.py --prior-generation`), together with their own published lists;
+- a generation's manifest records its genesis root signing keys (`root_signing_keys`: node id, compressed key, key hash);
+- the retired inventory is cumulative and comes from the prior generation's signed history: `ubft trust-base utb-verify --keys-out` writes every
+  epoch's root signing keys of the verified UTB history (so the keys that joined or rotated after genesis are in it), and the prior generation's
+  own published list carries everything retired before it;
+- `generate.py` refuses to run without that history (`--prior-generation <keys file>`) unless `--first-generation` says there is none, and
+  publishes the union as `network/retired-root-keys.json`;
 - generation, joiner, enrollment and rotation tooling refuse a root key whose hash is in that list (`check_fresh`).
 
 The key hash is keccak256 of the 33-byte compressed key: the root key hash custody and the validator registry store. Stdlib only.
@@ -17,6 +20,7 @@ from pathlib import Path
 from evm_keys import keccak256
 
 FORMAT = 'unicity-retired-root-keys/1'
+HISTORY_FORMAT = 'unicity-utb-root-keys/1'   # `ubft trust-base utb-verify --keys-out`
 FILE = 'retired-root-keys.json'   # under the generation's network/ directory
 
 
@@ -57,9 +61,21 @@ def read_list(path):
     return read_list_text(Path(path).read_text(), path)
 
 
+def is_history(source):
+    """Whether `source` is a verified UTB history keys file (the authoritative inventory of the keys that signed for a root history)."""
+    p = Path(source)
+    if not p.is_file():
+        return False
+    try:
+        return json.loads(p.read_text()).get('format') == HISTORY_FORMAT
+    except (ValueError, AttributeError):
+        return False
+
+
 def load(source):
-    """The retired key hashes a prior source names: a generation directory (its manifest's root keys and its own published list), a manifest.json,
-    or a published list file. A source that names no root key is refused: a guard fed an unreadable or keyless manifest would pass everything."""
+    """The retired key hashes a prior source names: a verified UTB history keys file (every epoch's root signing keys), a generation directory
+    (its manifest's root keys and its own published list), a manifest.json, or a published list file. A source that names no root key is refused:
+    a guard fed an unreadable or keyless manifest would pass everything."""
     p = Path(source)
     if p.is_dir():
         out = load(p / 'manifest.json')
@@ -69,6 +85,11 @@ def load(source):
     doc = json.loads(p.read_text())
     if doc.get('format') == FORMAT:
         return read_list(p)
+    if doc.get('format') == HISTORY_FORMAT:
+        keys = {key_hash(k) for e in doc.get('epochs') or [] for k in e.get('keys') or []}
+        if not keys:
+            raise RetiredKeyError(f'{source}: the UTB history names no root keys')
+        return keys
     entries = doc.get('root_signing_keys')
     if not entries:
         raise RetiredKeyError(f'{source}: the manifest records no root signing keys (made before #1297): pass its retired-root-keys list or its keys instead')

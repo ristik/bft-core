@@ -154,7 +154,7 @@ the lock releases on exit. Do not remove a live lock or run alongside its owner.
 ```sh
 umask 077
 sudo -E python3 deploy/testnet/generate.py --out /srv/testnet/tn-20261007 \
-  --validators 4 --chain-id 31337 \
+  --validators 4 --chain-id 31337 --first-generation \
   --ubft /srv/src/bft-pinned/build/ubft \
   --captcha-sitekey YOUR_SITE_KEY \
   --captcha-secret-file /srv/secrets/hcaptcha-secret
@@ -255,6 +255,49 @@ resulting `OUT/release/` under the web root. Include the files required by the
 manifest, and the NB2 release and trust files. Check the digests before copying.
 Keep the faucet credential as a file mount readable by the container UID. Run
 the route tests on loopback before the owner opens ingress.
+
+#### Retired root keys (#1297)
+
+A root key signs one root history only. Post-term evidence charges a seal from
+its signed bytes, which bind the network N but not the root genesis, so a key
+reused in the next generation could be charged for seals of the old one
+([D5 §2.1](../../docs/design/d5-accountability-retirement-inbox.md#21-post-term-seal-offence-1297)).
+
+`generate.py` refuses to run without the prior generation's retired-key
+inventory. The only exception is `--first-generation` for a history with no
+predecessor. The inventory is cumulative:
+
+- **The signed history.** This is the key list of the prior generation's
+  verified UTB history. It covers every epoch's committee, including the keys
+  that joined or rotated after genesis.
+- **The inherited list.** This is the prior generation's own published
+  `retired-root-keys.json`, if it has one.
+
+The new generation publishes the union as `network/retired-root-keys.json`.
+The release ships it, and `joiner.py`, `pos_join.py`, `remote_joiner.py` and
+`ubft validator apply` and `rotate` refuse any key on it by default.
+
+The live prior generation is `tn-public-20261126` on the dev server under
+`~/public-testnet-20261126`. Read it only through its public gateway (127.0.0.1:9545
+behind the proxy) and its published release. No private key leaves the server,
+and nothing there is written:
+
+```sh
+PRIOR=~/public-testnet-20261126/release
+ubft trust-base utb-verify --url http://127.0.0.1:9545 --forwarded-for 203.0.113.10 \
+  --utb-genesis-id "$(cat $PRIOR/utb-genesis.id)" \
+  --save-bundle prior-utb.cbor --keys-out prior-utb-keys.json
+# prints: ok: epochs 1..N, tip 0x...
+sudo -E python3 deploy/testnet/generate.py --out /srv/testnet/tn-NEXT ... \
+  --prior-generation prior-utb-keys.json \
+  $( [ -f $PRIOR/retired-root-keys.json ] && echo --prior-generation $PRIOR/retired-root-keys.json )
+```
+
+`tn-public-20261126` predates the list, so its signed history is the whole
+inventory. Use the `ubft` built from the pinned source: the release's own
+`ubft` predates `--url` and `--keys-out`. Keep `prior-utb.cbor` and
+`prior-utb-keys.json` with the new generation's evidence. `reset.py` performs the
+same check before it deletes anything.
 
 Keep nginx stopped and disabled during regeneration. At handoff, the owner
 checks both HTTP/2 backports before opening the front. Use Ubuntu nginx
@@ -415,7 +458,9 @@ constraints prevent recovery, use the explicitly asset-losing reset below.
 ## ASSET-LOSING arbitrary reset
 
 Stop public nginx routing/claims; export public evidence and a quiesced backup if
-wanted. The following **deletes the old generation, including all balances,
+wanted. Before the teardown, export the old generation's signed UTB history keys
+(`ubft trust-base utb-verify --url ... --keys-out`, see "Retired root keys"):
+`reset.py` refuses without them. The following **deletes the old generation, including all balances,
 history, keys, authority state and faucet budgets**. It records the old public
 manifest beside the old directory and builds a new network. A failed regeneration
 leaves the old network destroyed: retain a backup first when recovery is desired.
@@ -424,6 +469,7 @@ leaves the old network destroyed: retain a backup first when recovery is desired
 sudo -E python3 /path/to/repo/deploy/testnet/reset.py \
   --old /srv/testnet/tn-20261007 --lose-all-assets -- \
   --out /srv/testnet/tn-20261008 --validators 4 --chain-id 31337 \
+  --prior-generation /srv/evidence/tn-20261007-utb-keys.json \
   --ubft /srv/src/bft-pinned/build/ubft \
   --keygen /path/to/repo/build/tn-keygen \
   --captcha-sitekey YOUR_SITE_KEY --captcha-secret-file /srv/secrets/hcaptcha-secret

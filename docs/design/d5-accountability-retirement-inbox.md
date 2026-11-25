@@ -160,9 +160,13 @@ not an offence either. The post-term offence ([#1297](https://github.com/ristik/
   Every validator must therefore sign each independent root history with a
   fresh, genesis-specific consensus key, including when it enrolls later and
   when it rotates. The reset tooling enforces this:
-  - `generate.py` records the generation's root signing keys in its manifest.
-  - It checks new keys against `--prior-generation` manifests or published
-    lists and refuses any overlap.
+  - `generate.py` records the generation's genesis root signing keys in its
+    manifest.
+  - Its retired inventory is cumulative. It holds every root key of the prior
+    generation's verified UTB history (`ubft trust-base utb-verify --keys-out`),
+    which covers keys that joined or rotated after genesis, and the prior
+    generation's own inherited list. It refuses to run without that history,
+    unless `--first-generation` says there is none.
   - It publishes the union as `network/retired-root-keys.json`.
   - The joiner, enrollment and rotation tooling refuse any key on that list:
     `joiner.py`, `pos_join.py`, `remote_joiner.py`, and
