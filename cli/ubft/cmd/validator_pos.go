@@ -166,6 +166,17 @@ func validatorApplyPoS(cmd *cobra.Command, f *txFlags, pf *posFlags) error {
 		if err := ch.vr.CallPosMulti(ctx, election, vrclient.PosElectionABI, "delegation", &d, id, pos.Generation); err != nil {
 			return nil, err
 		}
+		// #1286: on a bonded identity the delegation must be VR's current or staged binding; other words are rotate's or recover's
+		if pos.OpenLots != 0 {
+			idn, err := ch.vr.Identity(ctx, id)
+			if err != nil {
+				return nil, err
+			}
+			want := vrclient.Registration{RootNodeID: root.NodeID, RootKey: root.Public(), EvmNodeID: evmNode, EvmKey: evmPub, Payee: payee}
+			if err := refuseBondedMismatch(idn, id, want); err != nil {
+				return nil, err
+			}
+		}
 		req := vrclient.DelegationRequest{Id: id, Generation: pos.Generation, RoleNonce: pos.RoleNonce, DelegationNonce: d.NextNonce, Expiry: math.MaxUint64,
 			Binding: vrclient.Delegation{RootNodeID: vrclient.NodeIDWord(root.NodeID), RootKey: root.Public(), EvmNodeID: vrclient.NodeIDWord(evmNode),
 				EvmKey: evmPub, OperatorPayee: payee}}
