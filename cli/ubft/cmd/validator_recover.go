@@ -10,6 +10,10 @@ package cmd
 //  2. VR.proposeBinding of the identical words. The next snapshot freezes the new key, its authority proves possession, and the
 //     acknowledgement installs the binding at the unchanged custody generation; the bond stays in its lots.
 //
+// A new EVM key is a new EVM node identity: a fresh shard node key (new EVM node id), a fresh authority volume and an empty shard data
+// directory, which join through the joiner path and activate at the boundary; the old node and authority stay stopped, their volumes and
+// the fail-stop marker preserved and never reused.
+//
 // Each step is skipped when its words are already in place (a resumed run compares the exact words after every confirmed transaction). A
 // staged binding that an open result froze is never replaced. The root key never changes here: root-key loss takes the exit path.
 
@@ -122,6 +126,12 @@ func planPosKeyChange(st posBindingState, operator common.Address, want vrclient
 	}
 	if evmOnly && bytes.Equal(want.EvmKey, idn.Current.EvmKey) && !installed {
 		return p, fmt.Errorf("%w: the new EVM key is identity %d's current one with other words: pass a fresh authority's key", ErrValidator, st.ID)
+	}
+	// a new EVM key is a new EVM node identity (the shard node's signer is bound to its node id): a fresh shard node key, a fresh
+	// authority and an empty shard data directory, which join through the joiner path
+	if !installed && !bytes.Equal(want.EvmKey, idn.Current.EvmKey) && want.EvmNodeID == idn.Current.EvmNodeID {
+		return p, fmt.Errorf("%w: the new EVM key keeps identity %d's EVM node id %s: a new EVM key is a new EVM node identity (a fresh shard node key, a fresh authority volume and an empty shard data directory)",
+			ErrValidator, st.ID, want.EvmNodeID)
 	}
 	staged := idn.StagedRef != ([32]byte{})
 	p.Admit = !sameDelegation(st.Delegation, delegationOf(want))
@@ -412,7 +422,8 @@ func validatorRecoverCmd(base *baseFlags) *cobra.Command {
 		Use:   "recover",
 		Short: "PoS: move a bonded identity whose EVM signing authority is lost to a fresh EVM key (delegation first, then VR)",
 		Long: `For a bonded PoS identity whose EVM key is gone with its signing authority (#1286). The root key, root node and payee stay; only
-the EVM node and key change, at custody's current generation, so the bond stays in its lots. Preflight from the certified (finalized)
+the EVM node and key change: a new EVM key is a new EVM node identity (a fresh shard node key, a fresh authority volume, an empty
+shard data directory) that joins through the joiner path, at custody's current generation, so the bond stays in its lots. Preflight from the certified (finalized)
 state: the custody owner is the operator, the identity has open lots, no retirement request and no exclusion. The old authority's
 fail-stop marker must be present in its preserved volume (--old-authority-home): an unreachable authority alone is not evidence of loss.
 Then ElectionPolicy.admitDelegation of the new EVM key, confirmed, fences the old key from later snapshots, and VR.proposeBinding stages

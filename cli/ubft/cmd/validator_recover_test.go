@@ -284,3 +284,23 @@ func TestDelegationBindingHashIsTheElectionsFormula(t *testing.T) {
 	require.Equal(t, [32]byte(ethcrypto.Keccak256(enc)), delegationBindingHash(9, 2, d))
 	require.Equal(t, vrfake.BindingHash(9, 2, d), delegationBindingHash(9, 2, d))
 }
+
+// A new EVM key is a new EVM node identity: a new key under the old EVM node id is refused.
+func TestPlanPosKeyChangeRefusesANewKeyUnderTheOldNodeID(t *testing.T) {
+	f := newRecoverFixture(t)
+	var st posBindingState
+	f.chain.With(func(c *vrfake.Chain) {
+		idn := c.Identities[f.id]
+		st = posBindingState{ID: f.id, Position: custodyPosition{Owner: idn.Owner, RootKeyHash: [32]byte(ethcrypto.Keccak256(f.old.RootKey)), Generation: 1, OpenLots: 1},
+			Delegation: delegationOf(f.old), DelegationNonce: 1,
+			Identity: vrclient.IdentityView{Owner: idn.Owner, Generation: 1, CurrentRef: [32]byte{1}, Current: vrclient.Binding{RootNodeID: f.old.RootNodeID,
+				RootKey: f.old.RootKey, EvmNodeID: f.old.EvmNodeID, EvmKey: f.old.EvmKey, Payee: f.old.Payee}}}
+	})
+	same := f.want
+	same.EvmNodeID = f.old.EvmNodeID
+	_, err := planPosKeyChange(st, st.Position.Owner, same, true)
+	require.ErrorContains(t, err, "a new EVM key is a new EVM node identity")
+	p, err := planPosKeyChange(st, st.Position.Owner, f.want, true)
+	require.NoError(t, err)
+	require.Equal(t, posKeyChange{Admit: true, Stage: true}, p)
+}
