@@ -1151,7 +1151,7 @@ def main(argv=None):
     p.add_argument('--allow-dirty', action='store_true', help='init/join: deploy or run a dirty, uncommitted or mismatched copy of deploy/testnet on the host')
     p.add_argument('--stop-after', choices=('bonded',), help='join: stop after the bond')
     p.add_argument('--funder', help='join: a directory ON THE HOST with keystore.json and password, the operator account that pays the owner\'s 100 UCT bond and gas '
-                   '(default: the faucet account)')
+                   '(default: the generation\'s funder account)')
     a = p.parse_args(argv)
     home = a.home or (f'~/unicity-joiner/{a.generation}' if a.generation else None)
     if home is None:

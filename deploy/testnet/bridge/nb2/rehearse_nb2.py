@@ -6,7 +6,7 @@ built from this checkout) is the independent verifier.
 
     rehearse_nb2.py --generation GEN --evidence DIR --nb2-evidence BIN [--stages ...] [--long-transfers N] [--keep-keys] [--ubft BIN]
 
-The driver keys (`fund`: bridge/nb2/driver.env, funded from the faucet) are this run's secrets. They reach the driver only through its environment
+The driver keys (`fund`: bridge/nb2/driver.env, funded from the generation's funder account) are this run's secrets. They reach the driver only through its environment
 file, never a command line (the lane's own signing goes through the driver's `address` and `mktx`), and every console line, log and result is
 redacted of them. A run deletes them at its end, on success and on failure. --keep-keys hands them to a later invocation on the same generation: the
 PoS sequence's first invocation (deploy,fund,pos-deposit) keeps them, and its last one (pos-return,custody) runs without it and deletes them.
@@ -16,7 +16,7 @@ PoS sequence's first invocation (deploy,fund,pos-deposit) keeps them, and its la
   limits        the pinned limits measured: a transaction of exactly maxEncodedTxBytes admitted by every validator through the gateway and included
                 (every validator holds the block), one byte more refused by each pool; the gateway's large body bound; a transaction at userGasLimit
                 included, and what happens to one above it
-  fund          the driver keys (bridge/nb2/driver.env, never in the evidence) funded from the faucet
+  fund          the driver keys (bridge/nb2/driver.env, never in the evidence) funded from the generation's funder account
   circulate     deposit 100 (EIP-1559), mint, transfer, split 60 + 40, split 40 into 15 + 25, transfer again; an origin-only token from a legacy
                 deposit; a one-transfer token; a three-level nested split; the 16- and 17-claim tokens (one certificate per transfer)
   returns       the 60, 15 and 25 returned with their own indices while a second key's small returns rotate the segments (at least twice):
@@ -182,7 +182,7 @@ class NB2Rehearsal(SdkClients, Rehearsal):
 
     def finalize_keys(self, keep):
         """The run's end: the driver keys (funded, disposable) are deleted unless --keep-keys hands them to a later invocation (the PoS sequence's
-        stages around the handoff). The generation's faucet keystore is not the driver's and stays."""
+        stages around the handoff). The generation's funder keystore is not the driver's and stays."""
         env = self.nb2 / 'driver.env'
         if keep or not env.exists():
             return
@@ -341,8 +341,8 @@ class NB2Rehearsal(SdkClients, Rehearsal):
         for w in WALLETS:
             a = self.address(w)
             if self.balance(a) < FUNDS[w] // 2:
-                self.faucet_send(a, FUNDS[w])
-            self.expect(self.balance(a) >= FUNDS[w] // 2, f'the {w} key {a} is funded from the faucet')
+                self.funder_send(a, FUNDS[w])
+            self.expect(self.balance(a) >= FUNDS[w] // 2, f'the {w} key {a} is funded from the funder account')
 
     # --- circulate -------------------------------------------------------------------------------------------------------------
     def legacy_deposit(self, wallet, label, units):

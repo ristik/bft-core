@@ -163,7 +163,7 @@ Host evidence (driver revisions 2 to 4, section 9.1): `~/evidence/430-437-pos-ho
 |---|---|
 | `driver.log` | every driver line with a UTC timestamp, including the running-container count after each teardown |
 | `pins.json`, `checkouts.txt`, `images.json`, `host-env.txt`, `build-*.log` | what was built: the pin file copy, `git rev-parse` of every checkout, image ids, tool versions |
-| `network/`, `network.sha256`, `manifest.json`, `verify-genesis.log`, `generate*.log` | public generation material only (never `pos-owner-keys/` or `faucet-secrets/`) |
+| `network/`, `network.sha256`, `manifest.json`, `verify-genesis.log`, `generate*.log` | public generation material only (never `pos-owner-keys/`, `faucet-secrets/` or `funder-secrets/`) |
 | `core/`, `crash/`, `owner/`, `e12-a/` (epoch 1), `e2/`, `join/` | each: `rehearse.log`, `result.json`, `generation.txt` (name, `utb` on/off, cadence), per-stage JSON and kept logs, `compose-ps.txt`, `docker-stats.txt` |
 | `resources/` | `compose-limits.txt`, `sample/samples.jsonl`, `sampler.log` |
 | `NOT-RUN.txt` | what did not run (written by `finish`) |

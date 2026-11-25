@@ -100,13 +100,19 @@ named in `X-Forwarded-For`; without the per-IP limit the guard sends the address
 so both of the signer's keys are the address. The signer verifies hCaptcha. Gateway reservations survive process/container restarts and are committed
 **before** submitting to the signer. Backend failures and ambiguous timeouts
 consume a reservation, intentionally. A signer 429 (failed CAPTCHA or its own rate
-limit, both answered before any transfer) releases the reservation. A client can receive
+limit, both answered before any transfer) releases the reservation. So does a transfer
+the chain definitely refused (the signer's 500 carries the execution client's JSON-RPC
+error: nonce too low, insufficient funds, underpriced, decode or sender errors): nothing
+was sent, the client gets 502 and may retry. The validators' execution guard and
+relay.py pass such an error on only when every validator answered and none holds the
+transaction; a missing, timed-out or failed answer stays a 503 (bft-core#1287). A client can receive
 503 after a transaction was accepted; inspect the wallet/chain before intervening.
 Never automatically replay a request. With `limit_per_ip`, shared NAT users share the IP cap.
 
 400 means malformed address/body or missing CAPTCHA; 409 means the client network
 pin differs; 429 means address (and, with `limit_per_ip`, IP) or global reservation limits, or a failed CAPTCHA
-(retry allowed); 503 means unavailable,
+(retry allowed); 502 means the chain refused the transfer and nothing was sent (retry allowed);
+503 means unavailable,
 exhausted, mismatched backend/network or uncertain submission. A 200 response
 contains the broadcast transaction hash, not a finality guarantee. Check its
 successful receipt and certified/finalized state before relying on the funds.
@@ -129,8 +135,10 @@ refill account; wait for a successful receipt/certified state and healthy status
 No restart is needed. If a broadcast outcome is uncertain or the signer nonce is
 stuck, stop public claims, inspect all validator mempools/receipts, and reconcile
 the dedicated account's pending nonce before restarting the signer. Upstream only
-refreshes its cached nonce automatically on nonce errors; never run two signers
-for one key. The global budget remains in place even after refill/restart.
+refreshes its cached nonce automatically on nonce errors (the guard now relays reth's
+`nonce too low`, so after a transaction sent past the signer one claim gets 502 and the
+next is signed with the refreshed nonce); never run two signers for one key and never
+send from the faucet key elsewhere: tools use the generation's funder account. The global budget remains in place even after refill/restart.
 
 ## Arbitrary reset / reconfiguration
 
@@ -169,7 +177,9 @@ then use the shared devnet lock (from the repository root):
 
 `devnet_probe.py` funds a new random faucet account from the lane's disposable
 genesis account, verifies a zero-balance fresh wallet, claims and pays gas, checks
-duplicate/IP/restart/invalid/network/reset/exhaustion cases, and writes only public
+duplicate/IP/restart/invalid/network/reset/exhaustion cases and a transaction sent from
+the faucet key past the signer (the next claim pays or gets 502, the one after it pays:
+bft-core#1287), and writes only public
 evidence to test-nodes/faucet-evidence.json. Temporary keys are discarded. Faucet
 mode stops before unrelated handoff/continuous-execution tests. Local
 native tests disable CAPTCHA and do not establish public TLS, DNS, real hCaptcha

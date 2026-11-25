@@ -86,7 +86,7 @@ def pos_joiner(r):
     with os.fdopen(fd, 'w') as out:
         json.dump(joiner_file(owner['private_key'], root_key, withdrawal, payee, info['root'], info['evm']), out)
     r.rescan()   # the identity file and the joiner's authority credentials are secrets the generation scan did not see at the start
-    r.faucet_send(owner['address'], BOND_UNIT + 10 ** 18)   # the one bond unit and the gas of three transactions
+    r.funder_send(owner['address'], BOND_UNIT + 10 ** 18)   # the one bond unit and the gas of three transactions
     mounts = [f'{val / "auth"}:/auth']
     evm = ['--evm-authority-socket', '/auth/operator.sock', '--evm-authority-credential', '/auth/operator.cred']
     status, out = r.relayer(identity, 'join', 'register', *evm, joiner=True, mounts=mounts)
@@ -187,7 +187,7 @@ def pos_join_heavy(r):
     with os.fdopen(fd, 'w') as out:
         json.dump(dict(joiner_file(owner['private_key'], keys['root'], withdrawal, payee, node['root'], node['evm']), evmKey=keys['evm']), out)
     r.rescan()
-    r.faucet_send(owner['address'], 2 * BOND_UNIT + 10 ** 18)
+    r.funder_send(owner['address'], 2 * BOND_UNIT + 10 ** 18)
     status, out = r.relayer(identity, 'join', 'register', joiner=True)
     found = re.search(r'custody id (\d+)', out)
     r.expect(status == 0 and bool(found), 'join register: the heavy joiner has a custody identity', out.strip()[-300:])

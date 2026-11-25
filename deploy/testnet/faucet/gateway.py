@@ -14,6 +14,11 @@ import urllib.request
 
 
 PAYOUT = re.compile(r'[0-9]+(\.[0-9]+)?')
+# The pinned signer answers a failed transfer 500 {"msg": "Transaction failed: <error>"}, the error being the JSON-RPC message when the RPC answered one. These
+# are the execution client's refusals of eth_sendRawTransaction: the validators answered and none holds the transaction (the execution guard and
+# relay.py relay such an error only when every validator refused). A transport failure or timeout matches none of them and stays ambiguous.
+REFUSALS = ('nonce too low', 'insufficient funds', 'underpriced', 'replacement transaction', 'invalid sender', 'intrinsic gas too low',
+            'exceeds block gas limit', 'less than block base fee', 'failed to decode signed transaction', 'rlp:')
 
 
 class ResponseTooLarge(ValueError):
@@ -120,6 +125,20 @@ class Guard:
             db.execute('DELETE FROM claims WHERE address=? AND ip=?', (address, ip))
 
 
+def signer_refusal(error):
+    """True when the signer's HTTP error says the chain refused the transfer (REFUSALS): nothing was broadcast."""
+    if error.code != 500:
+        return False
+    try:
+        message = json.loads(error.read(4096)).get('msg')
+    except (OSError, ValueError, AttributeError):
+        return False
+    if not isinstance(message, str) or not message.startswith('Transaction failed: '):
+        return False
+    message = message.lower()
+    return any(refusal in message for refusal in REFUSALS)
+
+
 def same_payout(reported, configured):
     """The signer's /api/info payout (Go's FormatFloat of -faucet.amount: '200', '0.01') against the configured one, as numbers."""
     return isinstance(reported, str) and bool(PAYOUT.fullmatch(reported)) and Decimal(reported) == Decimal(configured)
@@ -205,11 +224,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except urllib.error.HTTPError as error:
                 # The pinned signer answers 429 only from its captcha and rate-limit
                 # middlewares, which run before the transfer handler: nothing was sent.
-                if error.code != 429:
-                    raise
+                if error.code == 429:
+                    error.close()
+                    guard.release(address.lower(), ip)
+                    self.reply(429, dict(message='Captcha verification failed or rate limited; try again'))
+                    return
+                # A definite refusal by the chain: nothing was sent. On a stale nonce the signer has already refreshed its nonce (it does so on any
+                # error that names the nonce), so the next claim is signed with the current one (bft-core#1287).
+                refused = signer_refusal(error)
                 error.close()
+                if not refused:
+                    raise
                 guard.release(address.lower(), ip)
-                self.reply(429, dict(message='Captcha verification failed or rate limited; try again'))
+                print('claim refused by the chain; reservation released', flush=True)
+                self.reply(502, dict(message='The network refused the transfer and nothing was sent; try again in a minute'))
                 return
             self.reply(200, result)
         except Exception as error:

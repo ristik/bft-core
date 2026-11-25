@@ -608,7 +608,7 @@ class ProofOfStake(unittest.TestCase):
         self.assertLessEqual(rehearse.MINE_SECONDS_ROTATED,360,'the design\'s one-stage ceiling: raising this hides a defect')
         waits=[]
         class Fake(rehearse.Rehearsal):
-            def __init__(self): self.n,self.pods,self.manifest,self.evidence=3,[1],{'faucet_address':'0x'+'11'*20},Path(tempfile.mkdtemp())
+            def __init__(self): self.n,self.pods,self.manifest,self.evidence=3,[1],{'funder_address':'0x'+'11'*20},Path(tempfile.mkdtemp())
             def say(self,*a): pass
             def expect(self,ok,what,detail=''): assert ok,what
             def compose(self,*a,**k): return ''
@@ -642,7 +642,7 @@ class ProofOfStake(unittest.TestCase):
         import rehearse
         said=[]
         class Fake(rehearse.Rehearsal):
-            def __init__(self): self.n,self.pods,self.manifest,self.evidence,self.target=3,[1],{'faucet_address':'0x'+'11'*20},Path(tempfile.mkdtemp()),2
+            def __init__(self): self.n,self.pods,self.manifest,self.evidence,self.target=3,[1],{'funder_address':'0x'+'11'*20},Path(tempfile.mkdtemp()),2
             def say(self,m): said.append(m)
             def expect(self,ok,what,detail=''): assert ok,what
             def compose(self,*a,**k): return 'a stop window line'
@@ -677,7 +677,7 @@ class ProofOfStake(unittest.TestCase):
         import rehearse
         said=[]
         class Fake(rehearse.Rehearsal):
-            def __init__(self): self.n,self.pods,self.manifest,self.evidence,self.target=3,[1],{'faucet_address':'0x'+'11'*20},Path(tempfile.mkdtemp()),2
+            def __init__(self): self.n,self.pods,self.manifest,self.evidence,self.target=3,[1],{'funder_address':'0x'+'11'*20},Path(tempfile.mkdtemp()),2
             def say(self,m): said.append(m)
             def expect(self,ok,what,detail=''): assert ok,what
             def compose(self,*a,**k): return 'a stop window line'
@@ -710,7 +710,7 @@ class ProofOfStake(unittest.TestCase):
     def after_transition_fake(self,replies):
         import rehearse
         class Fake(rehearse.Rehearsal):
-            def __init__(self): self.manifest,self.evidence,self.sent={'faucet_address':'0x'+'11'*20},Path(tempfile.mkdtemp()),[]
+            def __init__(self): self.manifest,self.evidence,self.sent={'funder_address':'0x'+'11'*20},Path(tempfile.mkdtemp()),[]
             def say(self,m): pass
             def expect(self,ok,what,detail=''):
                 if not ok: raise rehearse.Failure(what+' '+detail)
@@ -728,7 +728,7 @@ class ProofOfStake(unittest.TestCase):
 
         class Fake(rehearse.Rehearsal):
             n, pods, chain_id = 4, [2], 1
-            manifest = {'faucet_address': '0x' + '11' * 20}
+            manifest = {'funder_address': '0x' + '11' * 20}
 
             def __init__(self): pass
             def say(self, message): pass
@@ -752,7 +752,7 @@ class ProofOfStake(unittest.TestCase):
         self.assertEqual(calls, [
             ('stop', 'ureth2', 'root2', 'shard2'),
             ('eth_chainId', ()),
-            ('eth_getTransactionCount', [Fake.manifest['faucet_address'], 'latest']),
+            ('eth_getTransactionCount', [Fake.manifest['funder_address'], 'latest']),
             ('eth_gasPrice', ()),
             ('eth_sendRawTransaction', ['0xraw']),
         ])
@@ -971,7 +971,7 @@ class ProofOfStake(unittest.TestCase):
         import rehearse
         said=[]
         class Fake(rehearse.Rehearsal):
-            def __init__(self): self.n,self.pods,self.manifest,self.evidence,self.target=3,[1],{'faucet_address':'0x'+'11'*20},Path(tempfile.mkdtemp()),2
+            def __init__(self): self.n,self.pods,self.manifest,self.evidence,self.target=3,[1],{'funder_address':'0x'+'11'*20},Path(tempfile.mkdtemp()),2
             def say(self,m): said.append(m)
             def expect(self,ok,what,detail=''): assert ok,what
             def compose(self,*a,**k): return 'a stop window line'
@@ -1084,7 +1084,7 @@ class ProofOfStake(unittest.TestCase):
         import rehearse
         kept=[]
         class Fake(rehearse.Rehearsal):
-            def __init__(self): self.n,self.pods,self.manifest,self.evidence,self.target=3,[1],{'faucet_address':'0x'+'11'*20},Path(tempfile.mkdtemp()),2
+            def __init__(self): self.n,self.pods,self.manifest,self.evidence,self.target=3,[1],{'funder_address':'0x'+'11'*20},Path(tempfile.mkdtemp()),2
             def say(self,*a): pass
             def expect(self,ok,what,detail=''): assert ok,what
             def compose(self,*a,**k): return ''
@@ -3301,6 +3301,29 @@ class StagingKnobs(unittest.TestCase):
         for args in (('200','10000',50),('200','50000',0),('200','50000',10001),('0','50000',50)):
             with self.assertRaises(ValueError,msg=args): generate.faucet_settings(*args)
         generate.faucet_settings('200','10400',50)   # exactly the reserve plus one day
+    def test_only_the_signer_holds_the_faucet_key(self):
+        """bft-core#1287: a transaction from the faucet key outside the eth-faucet signer leaves its nonce stale. The generation's signer service is the only
+        user of faucet-secrets/: every tool signs with funder-secrets/ (the funder account) or an operator's --funder."""
+        here=Path(__file__).parent
+        allowed={'generate.py','validate-pos.py','rehearse.py'}   # making and mounting it for the signer; the captcha-copy check; the secret scan
+        for path in sorted(here.rglob('*.py'))+sorted(here.rglob('*.sh'))+sorted(here.rglob('*.ts')):
+            if path.name.startswith('test_') or path.name.endswith('.test.ts') or 'evidence' in path.parts: continue
+            text=path.read_text()
+            if path.name not in allowed:
+                self.assertFalse('faucet-secrets' in text,f'{path} names faucet-secrets')
+            self.assertFalse('faucet_send' in text,f'{path} sends from the faucet')
+            for line in text.splitlines():
+                if 'faucet-secrets' in line and path.name=='rehearse.py': self.assertIn('funder-secrets',line,'rehearse.py names faucet-secrets only to scan it for secrets')
+                # the faucet address is compared (validate-generation.py, the reset stage), never used as a sender
+                if "['faucet_address']" in line and not (path.name=='validate-generation.py' or 'old_faucet' in line):
+                    self.fail(f'{path.name}: a sender from the faucet account: {line.strip()}')
+        self.assertGreaterEqual(generate.uct_wei(generate.FUNDER_BALANCE,'x'),450*10**18,'the funder pays a full rehearsal')
+        # no service mounts the funder's keys (review of #1304): the compose file names neither its directory nor a secret from it
+        for kw in ({},{'payout':'0.5'}):
+            cfg=self.topo(**kw)
+            self.assertNotIn('funder-secrets',json.dumps(cfg))
+            self.assertEqual(sorted(cfg['secrets']),['faucet_keystore','faucet_password','hcaptcha_secret'])
+            self.assertEqual(sorted(n for n,svc in cfg['services'].items() if svc.get('secrets')),['signer'],'only the signer gets the faucet secrets')
     def test_payout_reaches_the_signer(self):
         cfg=self.topo()
         self.assertEqual(cfg['services']['signer']['environment']['FAUCET_PAYOUT'],'200')
@@ -3428,7 +3451,7 @@ class StagingKnobs(unittest.TestCase):
             self.assertEqual(generate.docker_subnets(),{'x':['172.30.88.0/24'],'host':[]})
     def test_the_generator_refuses_bad_faucet_and_subnet_options_before_any_key(self):
         base=[sys.executable,str(Path(__file__).parent/'generate.py'),'--out','/nonexistent/tn-x','--validators','4','--ubft','x','--keygen','x','--b1genesis','x','--images','x','--captcha-sitekey','a','--captcha-secret-file','x']
-        for extra,want in ((['--faucet-payout','0'],'--faucet-payout'),(['--faucet-balance','100'],'--faucet-balance'),(['--faucet-subnet','172.30.89.0/24'],'overlap'),(['--edge-subnet','8.8.8.0/24'],'--edge-subnet')):
+        for extra,want in ((['--faucet-payout','0'],'--faucet-payout'),(['--faucet-balance','100'],'--faucet-balance'),(['--funder-balance','0'],'--funder-balance'),(['--funder-balance','1e3'],'--funder-balance'),(['--faucet-subnet','172.30.89.0/24'],'overlap'),(['--edge-subnet','8.8.8.0/24'],'--edge-subnet')):
             done=subprocess.run(base+extra,text=True,capture_output=True)
             self.assertEqual(done.returncode,2,extra); self.assertIn(want,done.stderr)
     def generation(self,tmp):

@@ -5,7 +5,7 @@
                           artifacts/bridge-images.json, refused unless its dnb-tool was built from the node images' bft pin (bft-core#1075)
   record_image(gen, id)   the generation's record of the image it was deployed with (GENERATION/bridge/bridge-image.json), written once
   validators_network(gen) the Compose network of the generation's validators
-  tools(gen, *args)       one command in the image on that network: the public network files and the faucet's keystore read-only, GENERATION/bridge
+  tools(gen, *args)       one command in the image on that network: the public network files and the funder's keystore read-only, GENERATION/bridge
                           writable at /work
 
 This module deploys nothing itself. The protocol 6/7 bridge it used to deploy (BridgeVault, TokenVerifier, the lock-proof endpoint, the tester) was
@@ -73,10 +73,12 @@ def validators_network(gen):
 
 
 def tools(gen, *args, capture=False):
-    # only the public network files and the faucet's keystore, read-only (never the validators' or owners' keys); the bridge directory writable at
-    # /work; the image itself is read-only. HOME and every scratch copy live on the tmpfs: GENERATION/bridge is backed up with the generation, and
-    # backup.py restores plain files and directories only
+    # only the public network files and the funder's keystore (funder-secrets/, when the generation has one), read-only: never the faucet's, whose nonces
+    # are the faucet signer's alone (bft-core#1287), nor the validators' or owners' keys; the bridge directory writable at /work; the image itself is
+    # read-only. HOME and every scratch copy live on the tmpfs: GENERATION/bridge is backed up with the generation, and backup.py restores plain files
+    # and directories only
+    keys = ['-v', f'{gen / "funder-secrets"}:/gen/funder-secrets:ro'] if (gen / 'funder-secrets').is_dir() else []
     cmd = ['docker', 'run', '--rm', '--read-only', '--network', validators_network(gen), '--user', f'{os.getuid()}:{os.getgid()}', '-e', 'HOME=/tmp/home',
-           '-v', f'{gen / "network"}:/gen/network:ro', '-v', f'{gen / "faucet-secrets"}:/gen/faucet-secrets:ro', '-v', f'{gen / "bridge"}:/work',
+           '-v', f'{gen / "network"}:/gen/network:ro', *keys, '-v', f'{gen / "bridge"}:/work',
            '--tmpfs', '/tmp', '-w', '/work', image(gen), *args]
     return subprocess.run(cmd, check=True, text=True, capture_output=capture).stdout
