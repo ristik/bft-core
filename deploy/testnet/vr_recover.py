@@ -285,6 +285,11 @@ class Recovery:
         r.expect(bool(name) and name.startswith(self.project + '-'), f'authority{i} runs as a container of this generation', str(name))
         subprocess.run(['docker', 'rm', '-f', name], check=True, capture_output=True)
         r.expect(self.container(f'authority{i}') is None, f'only {name} was removed; its directory and marker stay', str(old_auth))
+        lost = time.monotonic()
+        # the committee certifies on n-1 signers again (the fault transition) before the owner's transactions are sent
+        first = int(r.call('eth_blockNumber'), 16)
+        resumed = r.wait('the chain makes progress without the lost signer', lambda: (lambda b: b if b >= first + 2 else None)(int(r.call('eth_blockNumber'), 16)), 900)
+        r.say(f'  blocks {first} -> {resumed}, {time.monotonic() - lost:.0f} s after the loss')
 
         # 2. the fresh slot: authority directory, shard node key, empty shard data, archive and execution data
         k = next_slot(gen, i)
@@ -339,7 +344,7 @@ class Recovery:
                  r.scrub(refused.stderr.strip()[-200:]))
         done = self.cli(live, home, 'validator', 'recover', '--old-authority-home', 'authority', '--new-evm-authority-socket',
                         'authority-new/operator.sock', '--new-evm-authority-credential', 'authority-new/operator.cred',
-                        '--new-evm-node-info', 'authority-new/node-info.json', mounts=mounts)
+                        '--new-evm-node-info', 'authority-new/node-info.json', '--wait', '10m', mounts=mounts)
         r.keep_redacted(self.ev / 'recover.log', done.stdout + done.stderr)
         r.expect('confirmed: VR stages identity' in done.stdout, 'recover: the delegation, then the identical VR binding, confirmed', r.scrub(done.stdout.strip()[-400:]))
         again = self.cli(live, home, 'validator', 'recover', '--old-authority-home', 'authority', '--new-evm-authority-socket',

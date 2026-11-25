@@ -813,7 +813,8 @@ def recover(a, pins):
             with lock('.tx.lock', wait=True):
                 ubft('validator', 'recover', '--old-authority-home', auth_name(old),
                      '--new-evm-authority-socket', f'{d.name}/operator.sock',
-                     '--new-evm-authority-credential', f'{d.name}/operator.cred', '--new-evm-node-info', f'{d.name}/node-info.json')
+                     '--new-evm-authority-credential', f'{d.name}/operator.cred', '--new-evm-node-info', f'{d.name}/node-info.json',
+                     '--wait', '10m', timeout=1800)   # the committee certifies on n-1 signers; a re-run resumes either way
             journal(HOME/RECOVERY, 'linking', **{k: rec[k] for k in ('id', 'old', 'new', 'scope')})
         if read(HOME/RECOVERY)['phase'] == 'linking':
             configure_authority(new)
