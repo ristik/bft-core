@@ -187,6 +187,7 @@ class Rehearsal:
         self.target = 2   # the root epoch the handoff being driven installs (pos-handoff-2 drives the next one, 3)
         self.joiners = set()   # entities started but not yet members of the committee that certifies (pos-joiner adds one, pos-advance clears them)
         self.committed_target = None   # the Abort target of the handoff pos-propose committed (pos-too-late)
+        self.recover_index = None   # vr-pos-recover: the validator whose authority is lost (default: the last)
 
     def members(self):
         """The entities of the committee that certifies now: every entity but the joiners."""
@@ -556,6 +557,11 @@ class Rehearsal:
     def vr_pos_advance(self):
         import vr_advance
         vr_advance.advance(self.gen, self.target, self.evh())
+
+    def vr_pos_recover(self):
+        """#1286: one genesis validator's authority is lost; the identity recovers in place on a fresh EVM node identity (vr_recover.py)."""
+        import vr_recover
+        vr_recover.vr_pos_recover(self)
 
     def funder_send(self, to, wei):
         """A value transfer from the funder account through the public gateway (the PoS owners hold nothing at genesis)."""
@@ -1962,7 +1968,7 @@ POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-observe', 'pos_observe'), ('pos-
 POS_STAGE_NAMES = frozenset(n for n, _ in POS_STAGES)
 # Stages of the package built with --utb (the signed trust-base history, either aggregator): not in the hosted-runner rehearsal, whose package is the one without it. They run after the PoS stages.
 UTB_STAGES = (('utb-live', 'utb_live'),)
-VR_STAGES = (('vr-pos-advance', 'vr_pos_advance'),)
+VR_STAGES = (('vr-pos-advance', 'vr_pos_advance'), ('vr-pos-recover', 'vr_pos_recover'))
 
 
 def main():
@@ -1977,6 +1983,7 @@ def main():
     p.add_argument('--restore-pin', type=Path, help='scripts/h4-restore-pin built from the pinned source: the joiner\'s shard node is restored from a survivor\'s archive with it')
     p.add_argument('--restore-repeat', type=int, default=20, help='pos-restore-repeat: restores at the package pid limit (#905)')
     p.add_argument('--vr-target-epoch', type=int, default=2, help='certified root epoch to install in the incumbent authorities for vr-pos-advance')
+    p.add_argument('--vr-recover-validator', type=int, help='vr-pos-recover: the genesis validator whose authority is lost (default: the last)')
     p.add_argument('--restore-controls', default='24,16', help='pos-restore-repeat: deliberately low pid limits, the control; the lowest must reproduce pthread_create failed')
     p.add_argument('--stages', default=','.join(s for s, _ in STAGES), help='comma separated; selects stages, which always run in the order of STAGES + POS_STAGES (the default is the PoA stages; POS_STAGES are named explicitly)')
     a = p.parse_args()
@@ -1986,6 +1993,7 @@ def main():
     r.restore_repeat_count = a.restore_repeat
     r.restore_control_limits = tuple(int(x) for x in a.restore_controls.split(',') if x)
     r.pods = tuple(int(x) for x in a.pods.split(',') if x)
+    r.recover_index = a.vr_recover_validator
     r.reset_args = {k[len('reset_'):]: v for k, v in vars(a).items() if k.startswith('reset_')}
     wanted = a.stages.split(',')
     ordered = STAGES + POS_STAGES + VR_STAGES + UTB_STAGES
