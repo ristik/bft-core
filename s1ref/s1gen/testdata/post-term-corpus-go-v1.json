@@ -3,7 +3,9 @@
  "seed": "p85-post-term-seal",
  "notes": [
   "Offence (#1297): a quorum of epoch e's installed committee signed a native scheme 2 seal with commitEpoch e, commitRound >= A* = start[e+1] = end[e] and Hash != R_H, the terminal root of epoch e's applied Closure. commitRound is the seal's RootChainRoundNumber; the VoteInfo round is never compared with A*, so commitRound A*-1 is in term even when votingRound >= A*. Every seal with Hash == R_H is exempt (H's own late commit and honest empty-suffix repeats), whatever VoteInfo.exec says.",
-  "Statement: VI = C([N, Dv, votingEpoch, votingRound, parent, exec(, voteTimestamp if non-zero)]) with Dv = \"root-vote/\"+hex(G); previousHash = sha256(VI); sigBytes = C(tag 39005 [1, N, commitRound, commitEpoch, commitTimestamp, previousHash, Hash, null]); the members sign sha256(sigBytes). N and G are the verifier's installed values: a submission's voteInfo, previousHash, sigBytes and digest are what that verifier rebuilds from the typed statement, never bytes the reporter supplies. Shape: 0 < commitRound < votingRound, parent < votingRound, votingEpoch = commitEpoch = e. A statement type with one epoch field cannot express votingEpoch != commitEpoch: such a verifier skips no.statement.commit-epoch and reads no.statement.voting-epoch as a statement of epoch e+1.",
+  "Statement (astra's option (a)): the reporter supplies the native seal fields with PreviousHash as an opaque signed word; no VoteInfo opening is required or checked. sigBytes = C(tag 39005 [1, N, commitRound, commitEpoch, commitTimestamp, previousHash, Hash, null]) under the verifier's installed N; the members sign sha256(sigBytes). A submission's sigBytes and digest are what that verifier rebuilds from the typed statement, never bytes the reporter supplies. The only statement conditions are commitEpoch = e and commitRound > 0. The VoteInfo fields are informational: where the opening is known, previousHash = sha256(VI) with VI = C([N, Dv, votingEpoch, votingRound, parent, exec(, voteTimestamp if non-zero)]) and Dv = \"root-vote/\"+hex(G); an altered opening changes previousHash and so fails the signatures (the no.statement.* cases that alter VoteInfo fields).",
+  "Open-tip consumers: the opaque.* seals certify a real UC (their Hash is its unicity tree root) and carry openTip: a CERT_BATCH_V2 request and the registry words in which epoch e is the installed, usable and open tip. bft-core's b1ref verifier accepts each one (as a wallet or B1 caller that has not installed the successor would), while the post-term rule charges the random-previousHash and successor-epoch-VoteInfo seals and exempts the frozen-root repeat (Hash = R_H; R_H is that repeat's tree root here).",
+  "Root genesis: N is signed, G is not (only inside a VoteInfo opening). ok.foreign-genesis.opaque is a seal signed by e's keys for another root history sharing N, presented with its own previousHash: the opaque rule charges it. Honest signers are protected only by key isolation: fresh, genesis-specific consensus keys for every validator in every root history (D5 section 2.1).",
   "Signature rule (P85, both offences): exactly 65 bytes r||s||v, 1 <= r < n, 1 <= s <= n/2, v in {0,1}, one recovery with that parity (ecrecover with v+27) equal to the member's installed key. v 2 and 3 are ineligible (the native signer emits only 0 and 1; 2/3 need r+n < p). A 64-byte compact signature, a high s (whose parity-flipped twin ecrecover still maps to the signer: the 'ecrecover' field shows it) and a v of 27/28 are refused.",
   "Quorum: one strictly increasing subset of 1..16 distinct predecessor member indices, one signature per index; every supplied signature must be valid (an invalid, unknown or repeated extra refuses the whole submission); the distinct signed weight must reach floor(2W/3)+1 (the registry's W - floor((W-1)/3)); the charged index must be in the subset.",
   "Failure order: statement, indices, signature, below-threshold, charged-not-in-subset, not-post-term, exempt-terminal-root. A verifier may check in another order; 'reason' is the condition a case is built to break and 'failures' lists every condition that fails. Accepted submissions with the same 'offence' label are one case (one signer, one statement): a different subset or reporter must not debit twice.",
@@ -124,9 +126,273 @@
     "closedEpoch": "2",
     "hRound": "65530",
     "hRecordId": "a0a455c165eb4a34c4b221cb0bcb5c254098b96aadc70249a6c7eb395920788d",
-    "terminalRoot": "858716df327d61ef9c3412e6bb18b7859e1a5b689b424b9fcc95d847dc8f7231"
+    "terminalRoot": "6a09af5e1513ff7c9a443bf6e02b90161444402c80940604ece408ba15209168"
    },
    "seals": [
+    {
+     "id": "opaque.frozen-root",
+     "description": "a genuine frozen-root repeat at c' = A*+60 with an opaque previousHash: Hash = R_H, exempt; the open-tip consumer accepts it",
+     "class": "exempt",
+     "signedNetwork": 5,
+     "signedGenesis": "9224ba588bfcf7d954e00a6f1392a9fdf7ac5563b1a2df2487d6772a1282baf8",
+     "statement": {
+      "commitRound": "65596",
+      "commitEpoch": "2",
+      "commitTimestamp": "1682041680",
+      "previousHash": "3af83750b817d8e3b92b5e0771730002b7672bdb1868cd0ca7bf75c89e6a559e",
+      "hash": "6a09af5e1513ff7c9a443bf6e02b90161444402c80940604ece408ba15209168"
+     },
+     "voteInfo": "",
+     "previousHash": "3af83750b817d8e3b92b5e0771730002b7672bdb1868cd0ca7bf75c89e6a559e",
+     "sigBytes": "d9985d8801051a0001003c021a6441eb5058203af83750b817d8e3b92b5e0771730002b7672bdb1868cd0ca7bf75c89e6a559e58206a09af5e1513ff7c9a443bf6e02b90161444402c80940604ece408ba15209168f6",
+     "sealDigest": "e6a39245fae03decebb62c338b5d5ca61006871dbbc9795c9e1df13136f5f174",
+     "signatures": [
+      {
+       "index": 0,
+       "nodeId": "r1",
+       "signer": "r1",
+       "mutation": "",
+       "signature": "c133f328722f3e28a99f011cf55996a5c96df713baa7b794e5a6b75c6c0a483a5ab9e6fb6b5efe180c82a25306a45cc4bd050e8590a2829d5b69ab674a8b391701",
+       "recoveredKey": "0283a94286013ee9e7ea97bcd039e9fb273b2613c633fad49e547d32e284560244",
+       "ecrecover": "9aeb33e25eafc6830f603124575d63798f650fc0",
+       "native": true,
+       "valid": true,
+       "reason": "ok"
+      },
+      {
+       "index": 1,
+       "nodeId": "r2",
+       "signer": "r2",
+       "mutation": "",
+       "signature": "428bf2e44c38720dbb94652cbd023ea439436f22efbd6bbde747f935dba2af6e5bda59b4f88d7f3ccb70d9b9f0cbf71ad99c2e4a51a62d73fa4d5a39b61dcb8c00",
+       "recoveredKey": "03cb029416b9907113979d8fac7e8058662897cc61083642d5bd4892dcb6fb28c3",
+       "ecrecover": "4a1072f0a4c94f357886e6a137a6ec7eff3fdfca",
+       "native": true,
+       "valid": true,
+       "reason": "ok"
+      },
+      {
+       "index": 2,
+       "nodeId": "r3",
+       "signer": "r3",
+       "mutation": "",
+       "signature": "1d240218084be23987caef0abe1f25d23d8fb47dc3499460f71c00c2f3fdea2759ca533be357d6fcc47d2c8919a6666cf687b9847393a0e84d8ced81193d754a00",
+       "recoveredKey": "03d10c4032ad2e51131280aa93d9da6d8e1c08fb6906a85da2c33c6d63506f9430",
+       "ecrecover": "ad1bc7700a524a352d49a488b6c1ea4ab0d3ad78",
+       "native": true,
+       "valid": true,
+       "reason": "ok"
+      },
+      {
+       "index": 3,
+       "nodeId": "r4",
+       "signer": "r4",
+       "mutation": "",
+       "signature": "4677b0c5aaf0826b80af469f20ad06f207a253041aa6cc9f3915dd80cf4936b0124c3c43cfd436fb81a9244daa62aa082b50f8fe9734696bd15a22bb504f0fb700",
+       "recoveredKey": "02d010428be6f3b780c73a79744fb2f2d741eb5e3efb81bcc1c7e60f0a2e12ed4f",
+       "ecrecover": "02bc056aaed762465cf74294216244809fe216cb",
+       "native": true,
+       "valid": true,
+       "reason": "ok"
+      },
+      {
+       "index": 4,
+       "nodeId": "r5",
+       "signer": "r5",
+       "mutation": "",
+       "signature": "07f55ca4070dc785fe9fd006f2ec63f228aa9ca7f4511162842db004fe9efde47a80c164cc78b465742f88df6f55109a07e0f21ad1c18c58d7b4ce2ee6162e6301",
+       "recoveredKey": "03e698cdfec1cd7d9a9c22da661661b67c9c477aea2b1f65d7adaea8d5790254bc",
+       "ecrecover": "e276e3bcb3bd3792b00f6a53105069047d9409d3",
+       "native": true,
+       "valid": true,
+       "reason": "ok"
+      }
+     ],
+     "openTip": {
+      "request": "0200000100000001000180ff7653ef24a766a1982c2c0445a55e9ee18982fbeaa1d8539c3aa6d1f40ee77b6c8abcdbaa95ac7badc56ab7373fe59dda614773e2e0021948f0921384991472307005a3f7fe6976d40b5683df0209671fee4272a15f8550ed28e84a20d5ea5800000316d998598701d9985a8a01050158207599c6b822d1b21b5631068bba9da4f6bd61ee0b554384a6e56991a16835318c58206c8abcdbaa95ac7badc56ab7373fe59dda614773e2e0021948f092138499147248719ea6f387da2e7e1a6440db745820c4f366a733bd9b11d5401d44893d5e365a7191d3ce8860e118e8282fa33ff8630c58208dbeefe9ad5a65ef55eb81d1301354afc53b7ee06cb6945c06e722bef86b8fbc5820c5d9c28703c2cb477e8dd3408f7cb28a19a74d717fd48661d65d4bb99270d3625820ff7653ef24a766a1982c2c0445a55e9ee18982fbeaa1d8539c3aa6d1f40ee77bd9985b8301418080d9985c83010183820158203f5338838727dab784c24aacb8af728eee302c9f68e0b1330141674d4ee6c9b88202582091e272883be5c79244bebea05fa2d94f1068e4a63f8b154bf42324dcfa1aa3ca8204582069ca4ff5c4397f3e38f31ae8284f90029e19d9b07b4463a13772feeecfd0c0f5d9985d8801051a0001003c021a6441eb5058203af83750b817d8e3b92b5e0771730002b7672bdb1868cd0ca7bf75c89e6a559e58206a09af5e1513ff7c9a443bf6e02b90161444402c80940604ece408ba15209168a56272315841c133f328722f3e28a99f011cf55996a5c96df713baa7b794e5a6b75c6c0a483a5ab9e6fb6b5efe180c82a25306a45cc4bd050e8590a2829d5b69ab674a8b3917016272325841428bf2e44c38720dbb94652cbd023ea439436f22efbd6bbde747f935dba2af6e5bda59b4f88d7f3ccb70d9b9f0cbf71ad99c2e4a51a62d73fa4d5a39b61dcb8c0062723358411d240218084be23987caef0abe1f25d23d8fb47dc3499460f71c00c2f3fdea2759ca533be357d6fcc47d2c8919a6666cf687b9847393a0e84d8ced81193d754a0062723458414677b0c5aaf0826b80af469f20ad06f207a253041aa6cc9f3915dd80cf4936b0124c3c43cfd436fb81a9244daa62aa082b50f8fe9734696bd15a22bb504f0fb700627235584107f55ca4070dc785fe9fd006f2ec63f228aa9ca7f4511162842db004fe9efde47a80c164cc78b465742f88df6f55109a07e0f21ad1c18c58d7b4ce2ee6162e6301",
+      "storage": [
+       {
+        "slot": "077bd95350e6ea4ec351df02cf5e3ae60955b86659cca5df6651916dd36bfeef",
+        "value": "03d10c4032ad2e51131280aa93d9da6d8e1c08fb6906a85da2c33c6d63506f94"
+       },
+       {
+        "slot": "096c19a50ce24b41565128f2c22bae4167d491d9c5e60e822c0aec7c318cce45",
+        "value": "bc00000000000000000000000000000000000000000000000000000000000000"
+       },
+       {
+        "slot": "1173547ea53868d1f7beeb83c32f9b13b40a38479a13297a8866a56841fa2741",
+        "value": "4f00000000000000000000000000000000000000000000000000000000000000"
+       },
+       {
+        "slot": "134a17ec577b5250d3bf72a1025982cb0e0dcc333f6fcb9e4b09f238d462e907",
+        "value": "2c0cbdf0e018f9269ec448c4da39694f143516ccb019768251c344dc0552ef24"
+       },
+       {
+        "slot": "184dca1edd98a90c34df33b3efbfe84d04606a0e83fd64f7c8fbf5b5d1d59a19",
+        "value": "0000000000000000000000000000000000000000000000000000000000000002"
+       },
+       {
+        "slot": "22a24ec5a22d57750ea294ff52051fc89f1759c0ffef3b82a76c7d21c13c8a6d",
+        "value": "3f386bf62e318823ef11294803ac61e87d81981a3a0399bf1ad189bd9940f364"
+       },
+       {
+        "slot": "22b4a5015824cd36597d149a3239b0f0476d5b5054b7d81e73319409ecf5a554",
+        "value": "0000000000000000000000000000000000000000000000000000000000000001"
+       },
+       {
+        "slot": "23ac7380b9049f7d709444ee3ebeca4029e825babbcf62fee624151dd6aa6c8f",
+        "value": "03cb029416b9907113979d8fac7e8058662897cc61083642d5bd4892dcb6fb28"
+       },
+       {
+        "slot": "26e534362274dc65eb981afa5a3faa1526d49a3cfe471231dfcc12d0fc631168",
+        "value": "4400000000000000000000000000000000000000000000000000000000000000"
+       },
+       {
+        "slot": "2c4765927235dc15d4471f7eac11b39372cb7c177f72b79d276122784e746af7",
+        "value": "0000000000000000000000000000000000000000000000000000000000000002"
+       },
+       {
+        "slot": "2d4c56cc2e5e6359278ccd26c935f31d15bedaeff39fc3c6a82ab884c5969c32",
+        "value": "00000000000000000000000000000000000000000000000000000000000100a0"
+       },
+       {
+        "slot": "36655612ed573010c759ea2241753af111519811fe26d69e6b788feffd5d8a5a",
+        "value": "0000000000000000000000000000000000000000000000000000000000000005"
+       },
+       {
+        "slot": "4d2a977d24a0102ef60a00409c2e9141e4c2e7a4b283f8be6b1c65da6c2cce08",
+        "value": "0000000000000000000000000000000000000000000000000000000000000005"
+       },
+       {
+        "slot": "50c73faf0470e9c3e896c438f719572e9f9f22982ea96c626ce71d985c8f4b50",
+        "value": "3000000000000000000000000000000000000000000000000000000000000000"
+       },
+       {
+        "slot": "52be4745e167ce9d426b5dd3207d5fc37c4f09f67222a77f75b57e0c91495aaa",
+        "value": "0000000000000000000000000000000000000000000000000000000000000002"
+       },
+       {
+        "slot": "56334681525e1d249572f306df30668c2d1292a70816ed3d3bd27662f1f28739",
+        "value": "0000000000000000000000000000000000000000000000000000000000000001"
+       },
+       {
+        "slot": "5d63963dabc5ae34b43066faccdfb6801132f9f5bc8751fdc27fc669b90eab78",
+        "value": "000000000000000000000000000000000000000000000000000000000000000f"
+       },
+       {
+        "slot": "5d93d17ee33a618c658dc8663dfa3651ac82bc8fd6f450855fa2af3a309d51ac",
+        "value": "0000000000000000000000000000000000000000000000000000000000000002"
+       },
+       {
+        "slot": "6af6b754bbe0b957ca911a6d4388f15f7e3217aac19aad9b4c0a7e569f78276e",
+        "value": "0000000000000000000000000000000000000000000000000000000000001000"
+       },
+       {
+        "slot": "789eec2741273f01ec302fbb04911d3d22628b9a99d1ef273841e3c461cbaf33",
+        "value": "0000000000000000000000000000000000000000000000000000000000000002"
+       },
+       {
+        "slot": "85280375cf04f39147421e280d2449fd18332f0a2ae86c6787981004a6d84331",
+        "value": "0000000000000000000000000000000000000000000000000000000000000003"
+       },
+       {
+        "slot": "861945d16dbfb3b529bb48de40fffc7b1f2e98cbf521e4ca25382736a0bcc003",
+        "value": "0000000000000000000000000000000000000000000000000000000000000001"
+       },
+       {
+        "slot": "86dbc6fb003fd76a5c36b58ac720e220e7b567a5a78a807dd5110458760d889b",
+        "value": "0000000000000000000000000000000000000000000000000000000000000001"
+       },
+       {
+        "slot": "8a93328f9008bc1f9fc31c297ed51b1ddb24248870d07dfc5c5c16671cd1031f",
+        "value": "0000000000000000000000000000000000000000000000000000000000000001"
+       },
+       {
+        "slot": "8ed5de60d6816041cf9c37aca5157d62a0e96b46fffcd55804117357fadb99e6",
+        "value": "7233000000000000000000000000000000000000000000000000000000000000"
+       },
+       {
+        "slot": "94bd80fdb9ee69e560fd1318df79f57163d282432c52ac5b9dc6cc5015f860f3",
+        "value": "0000000000000000000000000000000000000000000000000000000000000002"
+       },
+       {
+        "slot": "99a21f62987273d1f96e4f40fd2b3d8288b5a90be67eed9c293826430a451bbe",
+        "value": "7234000000000000000000000000000000000000000000000000000000000000"
+       },
+       {
+        "slot": "a6506c34d79b561e2f97f6021f2ca3d11f2df5d89047b29356e8d044b8f7e9ab",
+        "value": "0000000000000000000000000000000000000000000000000000000000000004"
+       },
+       {
+        "slot": "b359f627843a908e03883efb97a883ed817269bb1c3d28778c9c26ded67c65ed",
+        "value": "c300000000000000000000000000000000000000000000000000000000000000"
+       },
+       {
+        "slot": "bd46d80656ebd65ff40d271a180003a97a8f7200d2b0562e68a0b3455cd447d1",
+        "value": "0000000000000000000000000000000000000000000000000000000000000002"
+       },
+       {
+        "slot": "c164664631ab03247087a217b9b5b5fd834d26cf063555dba261bf56a84a5245",
+        "value": "7235000000000000000000000000000000000000000000000000000000000000"
+       },
+       {
+        "slot": "c20ac95bd1f18a98e5ed96b1b03ef2b328ecb52f3bbcd1e981a85385fa0fb5ba",
+        "value": "0000000000000000000000000000000000000000000000000000000000000002"
+       },
+       {
+        "slot": "ce567ee57ab6fc4db983c8b91ddce8041dca275d7f12d6abbdd933be257894cd",
+        "value": "7232000000000000000000000000000000000000000000000000000000000000"
+       },
+       {
+        "slot": "d4f3e3a6f5eecd0fe47411def9dabcdb3acd4759f22aa1975e240fb8aac49ef6",
+        "value": "0000000000000000000000000000000000000000000000000000000000000002"
+       },
+       {
+        "slot": "d8bca5e427ffd163d8a9ae9d34b57a2dc9411da674c0294a9a8e272173e6aa2c",
+        "value": "02d010428be6f3b780c73a79744fb2f2d741eb5e3efb81bcc1c7e60f0a2e12ed"
+       },
+       {
+        "slot": "dc49b01e3f36cb500c8ebb4d7fe830ee55f6e9a08d49aa6521d27c8d7f37e328",
+        "value": "0000000000000000000000000000000000000000000000000000000000000002"
+       },
+       {
+        "slot": "df9952ba1f261c68fa3fa17ad2a6520ec12be1c55b59da58ba0e0fbdebde7047",
+        "value": "84598ac1d66823c042c5d8a7882abddce2dd0d2e6a7cc927348420dc87d8d5ab"
+       },
+       {
+        "slot": "e00560690974f72bb582aba8e826ee38222838cda4354d63469358f7986ef5b2",
+        "value": "7231000000000000000000000000000000000000000000000000000000000000"
+       },
+       {
+        "slot": "e0dbe2e575b13a4989dfa51513fbb575a6faef4cd360b66bbf77abd16d92f3ff",
+        "value": "0000000000000000000000000000000000000000000000000000000000000005"
+       },
+       {
+        "slot": "e4756cc967765a03ac699a0196af5ec73c15ae2739f43da745666a02a12a2bc0",
+        "value": "23cf5b840be0e1118afd1a949ad0f3833198ffc381a0ef4bfc7ea028b4de4c94"
+       },
+       {
+        "slot": "e915d2240d003b807b886bdb9b4d9bb37d2c233dbc5025129bec1026e6b5322e",
+        "value": "0283a94286013ee9e7ea97bcd039e9fb273b2613c633fad49e547d32e2845602"
+       },
+       {
+        "slot": "efa6b7f0bacdcf81ddd8a710fb8420140ae07d47982dc167bb647c00d3f5f4fc",
+        "value": "0000000000000000000000000000000000000000000000000000000000000002"
+       },
+       {
+        "slot": "f5153c70c89c8b0c861b2546f614d01ee5aa5b0be85397ed9a1479d21e8dcada",
+        "value": "0000000000000000000000000000000000000000000000000000000000000002"
+       },
+       {
+        "slot": "f9cbfc25d4f0c781851051dab6f4c718e1de226a27432d5a3f292ef10f45db4f",
+        "value": "03e698cdfec1cd7d9a9c22da661661b67c9c477aea2b1f65d7adaea8d5790254"
+       }
+      ],
+      "pinnedGenesisCommitment": "23cf5b840be0e1118afd1a949ad0f3833198ffc381a0ef4bfc7ea028b4de4c94",
+      "pinnedProfileHash": "2c0cbdf0e018f9269ec448c4da39694f143516ccb019768251c344dc0552ef24",
+      "accepted": true
+     }
+    },
     {
      "id": "post.at-a",
      "description": "commitRound = A*, Hash != R_H: the offence at the boundary",
@@ -142,6 +408,7 @@
       "commitRound": "65536",
       "commitEpoch": "2",
       "commitTimestamp": "1764094337",
+      "previousHash": "788f256d104d45975e25e1ac662ac918f81aae6e0d924e2d0ffda2015b78ae56",
       "hash": "d18f2743f11c7ed2261afa42839f2445084502a7115806f5e19c575ce5301a56"
      },
      "voteInfo": "8705784a726f6f742d766f74652f39323234626135383862666366376439353465303061366631333932613966646637616335353633623161326466323438376436373732613132383262616638021a000100011a0001000058203c65c3403eaa79aa8d0ef29f43d5892ad1016f304782e8ce47d8565b4d5b5dc11a6925f181",
@@ -226,6 +493,7 @@
       "commitRound": "65543",
       "commitEpoch": "2",
       "commitTimestamp": "1764094344",
+      "previousHash": "d9a347debad6c7192cdc93b302f4bd69a7802b96765fb848f12417dd792ebe37",
       "hash": "d18f2743f11c7ed2261afa42839f2445084502a7115806f5e19c575ce5301a56"
      },
      "voteInfo": "8705784a726f6f742d766f74652f39323234626135383862666366376439353465303061366631333932613966646637616335353633623161326466323438376436373732613132383262616638021a000100081a0001000758203c65c3403eaa79aa8d0ef29f43d5892ad1016f304782e8ce47d8565b4d5b5dc11a6925f188",
@@ -305,24 +573,25 @@
       "votingEpoch": "2",
       "votingRound": "65539",
       "parent": "65538",
-      "exec": "858716df327d61ef9c3412e6bb18b7859e1a5b689b424b9fcc95d847dc8f7231",
+      "exec": "6a09af5e1513ff7c9a443bf6e02b90161444402c80940604ece408ba15209168",
       "voteTimestamp": "1764094339",
       "commitRound": "65538",
       "commitEpoch": "2",
       "commitTimestamp": "1764094339",
+      "previousHash": "86aa42990fa9b37eb6382a42039ab03e922667c5dc10da90de0588c0e1f30b44",
       "hash": "d18f2743f11c7ed2261afa42839f2445084502a7115806f5e19c575ce5301a56"
      },
-     "voteInfo": "8705784a726f6f742d766f74652f39323234626135383862666366376439353465303061366631333932613966646637616335353633623161326466323438376436373732613132383262616638021a000100031a000100025820858716df327d61ef9c3412e6bb18b7859e1a5b689b424b9fcc95d847dc8f72311a6925f183",
-     "previousHash": "b09b06f3ee60712865e908da9687c1a2296268bb28961f0933ebfb0ff86b1d3f",
-     "sigBytes": "d9985d8801051a00010002021a6925f1835820b09b06f3ee60712865e908da9687c1a2296268bb28961f0933ebfb0ff86b1d3f5820d18f2743f11c7ed2261afa42839f2445084502a7115806f5e19c575ce5301a56f6",
-     "sealDigest": "647c286049f9a632247da55db8ebfd2c01b3d3075fda2586bf9ea6f2c2cccb6c",
+     "voteInfo": "8705784a726f6f742d766f74652f39323234626135383862666366376439353465303061366631333932613966646637616335353633623161326466323438376436373732613132383262616638021a000100031a0001000258206a09af5e1513ff7c9a443bf6e02b90161444402c80940604ece408ba152091681a6925f183",
+     "previousHash": "86aa42990fa9b37eb6382a42039ab03e922667c5dc10da90de0588c0e1f30b44",
+     "sigBytes": "d9985d8801051a00010002021a6925f183582086aa42990fa9b37eb6382a42039ab03e922667c5dc10da90de0588c0e1f30b445820d18f2743f11c7ed2261afa42839f2445084502a7115806f5e19c575ce5301a56f6",
+     "sealDigest": "a87f9e6ee0e4cea3114fdfbdc3cf5083fcab36351f72d951dcfcef3094b7214f",
      "signatures": [
       {
        "index": 0,
        "nodeId": "r1",
        "signer": "r1",
        "mutation": "",
-       "signature": "d6c9b4666ac3b6c03f024a999f4f14a7408c6e5a4feee249090511cfe0c94d202563b34841d9a53d81f86d8521f9ebc35b515b3f3a63d9bf308fe48430d7bba201",
+       "signature": "e0bc16505d94ce74ef6fb20014fd77ee130e2479c0c0e8bfb436eb6c8fffecbf48a23c8dff87d3d616fbe20791fe9ae5adff1ea84d3093b3d437181655cd05d601",
        "recoveredKey": "0283a94286013ee9e7ea97bcd039e9fb273b2613c633fad49e547d32e284560244",
        "ecrecover": "9aeb33e25eafc6830f603124575d63798f650fc0",
        "native": true,
@@ -334,7 +603,7 @@
        "nodeId": "r2",
        "signer": "r2",
        "mutation": "",
-       "signature": "9548da98e1db5db7561fdfc0deac6ada68b9622785db97b5d2a7df9a9f0be061614d55522e469065f649aa42b24334a964ba28eb80ceb3ebf91390d69c7907a400",
+       "signature": "837486293cb8084fbdaa6dca07aa3f40cf3d0c02d1c1783af7e5273058090a5508ffb66ea2e204e065f7de3b6061dcacb5375d0c05604e5437eea5457d9fbfe101",
        "recoveredKey": "03cb029416b9907113979d8fac7e8058662897cc61083642d5bd4892dcb6fb28c3",
        "ecrecover": "4a1072f0a4c94f357886e6a137a6ec7eff3fdfca",
        "native": true,
@@ -346,7 +615,7 @@
        "nodeId": "r3",
        "signer": "r3",
        "mutation": "",
-       "signature": "2426acc42f61ac95eae50ac870abbb595691669c1d686273b9ceb591545565744fda7c0feddf98b2c4eaafb3dad4f2c9a5e532a47052627dabeefdebf2c5232a00",
+       "signature": "5368714179bf8d2797b6c911e98abce499faaed8142097157cb62adc017c4db9613611cc82d35ed7dc27bd5383f16eb6d582ea9577f09f62542ebbea700adfe601",
        "recoveredKey": "03d10c4032ad2e51131280aa93d9da6d8e1c08fb6906a85da2c33c6d63506f9430",
        "ecrecover": "ad1bc7700a524a352d49a488b6c1ea4ab0d3ad78",
        "native": true,
@@ -358,7 +627,7 @@
        "nodeId": "r4",
        "signer": "r4",
        "mutation": "",
-       "signature": "24c89b83f85a903a18423547864f8abbc00b010d97a2522a2c2b1d99a0edf34a6ec4d481b8ceaa96341bc213c76f7def99308b0d817deae92536685c846e5c1301",
+       "signature": "a24579c190b802ce6dd7597bac2ee57c9b138c20c2e41784fe93a4b393158ca407a9b7e9c726a9835362b544fecc7153b0a0f16742c034c323292b90109742be00",
        "recoveredKey": "02d010428be6f3b780c73a79744fb2f2d741eb5e3efb81bcc1c7e60f0a2e12ed4f",
        "ecrecover": "02bc056aaed762465cf74294216244809fe216cb",
        "native": true,
@@ -370,7 +639,7 @@
        "nodeId": "r5",
        "signer": "r5",
        "mutation": "",
-       "signature": "db4e2b3b1f65f8a5ce6c44e440fa2b01fc4dca4330b3674d613630fcd2a5eb2408b51943e564957756d2d5c4824977e67f335f41bd5f08ab8e9795ba676f6dc201",
+       "signature": "90f7f9b4811420e204192bd2eaeda144d763afb6d6b5613fe2507f4a7682da4d28bba3e8d71c1056cf0d357e8a03d2a360ff1ca6436f759328fef249b3412ba500",
        "recoveredKey": "03e698cdfec1cd7d9a9c22da661661b67c9c477aea2b1f65d7adaea8d5790254bc",
        "ecrecover": "e276e3bcb3bd3792b00f6a53105069047d9409d3",
        "native": true,
@@ -394,6 +663,7 @@
       "commitRound": "65535",
       "commitEpoch": "2",
       "commitTimestamp": "1764094336",
+      "previousHash": "97071fb8d384cb8039f95c5056faeddcdb50e0f5b1cb86be804a8cca9ca1b2e1",
       "hash": "c3f1b78b0a3b1414c6d513cdc987c98d315462d6f24b855ece0789780000e220"
      },
      "voteInfo": "8705784a726f6f742d766f74652f39323234626135383862666366376439353465303061366631333932613966646637616335353633623161326466323438376436373732613132383262616638021a0001000019ffff5820c3f1b78b0a3b1414c6d513cdc987c98d315462d6f24b855ece0789780000e2201a6925f180",
@@ -478,6 +748,7 @@
       "commitRound": "65535",
       "commitEpoch": "2",
       "commitTimestamp": "1764094336",
+      "previousHash": "fa458b78e68a7a95a12359d8e64a74712be183aa54d4a1752137e03c2e7c74fe",
       "hash": "c3f1b78b0a3b1414c6d513cdc987c98d315462d6f24b855ece0789780000e220"
      },
      "voteInfo": "8705784a726f6f742d766f74652f39323234626135383862666366376439353465303061366631333932613966646637616335353633623161326466323438376436373732613132383262616638021a000100031a000100025820c3f1b78b0a3b1414c6d513cdc987c98d315462d6f24b855ece0789780000e2201a6925f183",
@@ -557,24 +828,25 @@
       "votingEpoch": "2",
       "votingRound": "65537",
       "parent": "65536",
-      "exec": "858716df327d61ef9c3412e6bb18b7859e1a5b689b424b9fcc95d847dc8f7231",
+      "exec": "6a09af5e1513ff7c9a443bf6e02b90161444402c80940604ece408ba15209168",
       "voteTimestamp": "1764094337",
       "commitRound": "65536",
       "commitEpoch": "2",
       "commitTimestamp": "1764094337",
-      "hash": "858716df327d61ef9c3412e6bb18b7859e1a5b689b424b9fcc95d847dc8f7231"
+      "previousHash": "b02bd6ac60a8e092d3d292552f87504d39c7c9b34783ddd20f70b48bea3633f1",
+      "hash": "6a09af5e1513ff7c9a443bf6e02b90161444402c80940604ece408ba15209168"
      },
-     "voteInfo": "8705784a726f6f742d766f74652f39323234626135383862666366376439353465303061366631333932613966646637616335353633623161326466323438376436373732613132383262616638021a000100011a000100005820858716df327d61ef9c3412e6bb18b7859e1a5b689b424b9fcc95d847dc8f72311a6925f181",
-     "previousHash": "3e42cbae332f4bd9fbaec4c21ee286c10b16660feeb9c87ea94aaf1080cd4af7",
-     "sigBytes": "d9985d8801051a00010000021a6925f18158203e42cbae332f4bd9fbaec4c21ee286c10b16660feeb9c87ea94aaf1080cd4af75820858716df327d61ef9c3412e6bb18b7859e1a5b689b424b9fcc95d847dc8f7231f6",
-     "sealDigest": "6f110c28417644c7e25b5ae14e973f532da1ce4c1bcd5210b204087fc322cee9",
+     "voteInfo": "8705784a726f6f742d766f74652f39323234626135383862666366376439353465303061366631333932613966646637616335353633623161326466323438376436373732613132383262616638021a000100011a0001000058206a09af5e1513ff7c9a443bf6e02b90161444402c80940604ece408ba152091681a6925f181",
+     "previousHash": "b02bd6ac60a8e092d3d292552f87504d39c7c9b34783ddd20f70b48bea3633f1",
+     "sigBytes": "d9985d8801051a00010000021a6925f1815820b02bd6ac60a8e092d3d292552f87504d39c7c9b34783ddd20f70b48bea3633f158206a09af5e1513ff7c9a443bf6e02b90161444402c80940604ece408ba15209168f6",
+     "sealDigest": "8f8062731e47efe2531f7af83b7504dc2560cb26ccc71864e29fd8f9d1643623",
      "signatures": [
       {
        "index": 0,
        "nodeId": "r1",
        "signer": "r1",
        "mutation": "",
-       "signature": "2504e84a4d59c89eaaaee14b1f9e3d41967f715f2f6bbc9ff58ff72303e5258731b7ef19e211d04e84b721f38d39ac0023cda81a554bb00e1e8be41ec00f1f5d01",
+       "signature": "ceae06fa1e06c0bae56b5343fae39ea0d506aceee3c55ec4a7c3d95e4076c5c278200e1b0d132beb3222a7492927d59e215064f8f8cb3109450a857d61e8077401",
        "recoveredKey": "0283a94286013ee9e7ea97bcd039e9fb273b2613c633fad49e547d32e284560244",
        "ecrecover": "9aeb33e25eafc6830f603124575d63798f650fc0",
        "native": true,
@@ -586,7 +858,7 @@
        "nodeId": "r2",
        "signer": "r2",
        "mutation": "",
-       "signature": "47ae0e9d5f47ca97487cc1511b1575c5d00f613bea8be09e7afc8e49d31a973477807683ebf83b923385fcc955a3fc2866a51f805546ce866753424a82746f0c00",
+       "signature": "917c38c99cbfa2c2f74f75b7032e56aba23723ef3681a79b53eb57ecab8e998d36b878e65c975ff9e44d8d0ca7d61b6589efbd330bf18ba98a36f431ae0eed5101",
        "recoveredKey": "03cb029416b9907113979d8fac7e8058662897cc61083642d5bd4892dcb6fb28c3",
        "ecrecover": "4a1072f0a4c94f357886e6a137a6ec7eff3fdfca",
        "native": true,
@@ -598,7 +870,7 @@
        "nodeId": "r3",
        "signer": "r3",
        "mutation": "",
-       "signature": "5bcaf43f2dedd5ccd2c863708fd93973f296003fb92fc60c4f3beba4eec578ec1d490f54c51fd5ff6f6ec3020dadc32015f6830456ff0f0b5dc09fa97a65766601",
+       "signature": "6c135866058f4c39ddd6d9e93dd5970d3d0701cb13e026e66943cbe6e29123330a826518f4a0c3da0c79d29d895b2ee88bf7c388cab4201209f6453288d10cf100",
        "recoveredKey": "03d10c4032ad2e51131280aa93d9da6d8e1c08fb6906a85da2c33c6d63506f9430",
        "ecrecover": "ad1bc7700a524a352d49a488b6c1ea4ab0d3ad78",
        "native": true,
@@ -610,7 +882,7 @@
        "nodeId": "r4",
        "signer": "r4",
        "mutation": "",
-       "signature": "93aac269e722e1ba840946e48e54ad0b1dd30eba304f51e0d5dc589fc1349daf0eac38d309b60b4da683a90f8035e9fbd1bb757800df3d416127d787671d65fc01",
+       "signature": "ee16782253488c5386f98e25afeb8e0fdd60db2f31c26a09f38c35dbee03392406b5282b88fd704fa670f7ca09a02fff5c1c6bcf969f3582ab1823975823606400",
        "recoveredKey": "02d010428be6f3b780c73a79744fb2f2d741eb5e3efb81bcc1c7e60f0a2e12ed4f",
        "ecrecover": "02bc056aaed762465cf74294216244809fe216cb",
        "native": true,
@@ -622,7 +894,7 @@
        "nodeId": "r5",
        "signer": "r5",
        "mutation": "",
-       "signature": "9ff8ebdf002c2cf15189e6b29a157b377fca643e000b4780c1901c254f3862c8736bdb7f6b4fecd6d69a4717ad3cbf7390a7d968db819c0415c5fb520dc822c201",
+       "signature": "19cbb17aaa3df0b601abe05a00db2c1ed13d2691ad794e37b9ebd9c7ec39fd83035f22a566d2ca9ca7d673b1f6855f07c6819e55929f780f59da94a94dc3021301",
        "recoveredKey": "03e698cdfec1cd7d9a9c22da661661b67c9c477aea2b1f65d7adaea8d5790254bc",
        "ecrecover": "e276e3bcb3bd3792b00f6a53105069047d9409d3",
        "native": true,
@@ -641,24 +913,25 @@
       "votingEpoch": "2",
       "votingRound": "65577",
       "parent": "65576",
-      "exec": "858716df327d61ef9c3412e6bb18b7859e1a5b689b424b9fcc95d847dc8f7231",
+      "exec": "6a09af5e1513ff7c9a443bf6e02b90161444402c80940604ece408ba15209168",
       "voteTimestamp": "1764094377",
       "commitRound": "65576",
       "commitEpoch": "2",
       "commitTimestamp": "1764094377",
-      "hash": "858716df327d61ef9c3412e6bb18b7859e1a5b689b424b9fcc95d847dc8f7231"
+      "previousHash": "84adcfc46c4bb368775a4350f9f886b7d7b22d62e09d2f31658c5fa23ba2e8e6",
+      "hash": "6a09af5e1513ff7c9a443bf6e02b90161444402c80940604ece408ba15209168"
      },
-     "voteInfo": "8705784a726f6f742d766f74652f39323234626135383862666366376439353465303061366631333932613966646637616335353633623161326466323438376436373732613132383262616638021a000100291a000100285820858716df327d61ef9c3412e6bb18b7859e1a5b689b424b9fcc95d847dc8f72311a6925f1a9",
-     "previousHash": "e1a32791162409df87a4b3649b9508d7b4434a995256de0785dd7580b81b6d1f",
-     "sigBytes": "d9985d8801051a00010028021a6925f1a95820e1a32791162409df87a4b3649b9508d7b4434a995256de0785dd7580b81b6d1f5820858716df327d61ef9c3412e6bb18b7859e1a5b689b424b9fcc95d847dc8f7231f6",
-     "sealDigest": "cc21106027bb0ad20c9910e0d5717b947ea364401e168ee90fedb2d033a07650",
+     "voteInfo": "8705784a726f6f742d766f74652f39323234626135383862666366376439353465303061366631333932613966646637616335353633623161326466323438376436373732613132383262616638021a000100291a0001002858206a09af5e1513ff7c9a443bf6e02b90161444402c80940604ece408ba152091681a6925f1a9",
+     "previousHash": "84adcfc46c4bb368775a4350f9f886b7d7b22d62e09d2f31658c5fa23ba2e8e6",
+     "sigBytes": "d9985d8801051a00010028021a6925f1a9582084adcfc46c4bb368775a4350f9f886b7d7b22d62e09d2f31658c5fa23ba2e8e658206a09af5e1513ff7c9a443bf6e02b90161444402c80940604ece408ba15209168f6",
+     "sealDigest": "22d203c2a13baf18c67fdd1fe9ede985d007f0636d0d94c2c1b598034606a8df",
      "signatures": [
       {
        "index": 0,
        "nodeId": "r1",
        "signer": "r1",
        "mutation": "",
-       "signature": "17cb45ccffa0c19e81b21dfc55b2ce2ffbd35a778fd4fe44d39a26e21ab4e3865abec19a8e4ccd3c5c7fd6917a11b8e046c760fd13fb6ea2e12ca858a06183b400",
+       "signature": "9d44aa3ae9c84466f3af77005e8a25133710934349a40abd960b5a8665da4e7474c11be44973735213b693f062f31679d20b43dff9fe9409f00b9aa2b3aa479200",
        "recoveredKey": "0283a94286013ee9e7ea97bcd039e9fb273b2613c633fad49e547d32e284560244",
        "ecrecover": "9aeb33e25eafc6830f603124575d63798f650fc0",
        "native": true,
@@ -670,7 +943,7 @@
        "nodeId": "r2",
        "signer": "r2",
        "mutation": "",
-       "signature": "387bd5fb7eb6dc0590d67f091861a33a593351d2ce83744cdfbb62e450cb628372da8e180fa3d5ef3ac3200d9f75456629b1e8a20217ecbbd7880054bf6dfc7a00",
+       "signature": "eb78f55922fa424aed8af6c24f3fbb1268d4f954905de8dfba2d2a0df5eb45661273d79518a0f2eeb9caa92072d3ad617f22658c770c5ef3e9491e7b28a826b700",
        "recoveredKey": "03cb029416b9907113979d8fac7e8058662897cc61083642d5bd4892dcb6fb28c3",
        "ecrecover": "4a1072f0a4c94f357886e6a137a6ec7eff3fdfca",
        "native": true,
@@ -682,7 +955,7 @@
        "nodeId": "r3",
        "signer": "r3",
        "mutation": "",
-       "signature": "ba7d92cd39fa8c798de770d02fe057d88164d052b359544fe783121f90ebe3ad2c6cdbcf907b1af6b3a92788358047ecc4e51285cee20bf8866eb66ad3a33a6101",
+       "signature": "b96b735a647b91468a00eba86a4c777b800e9957afce0696eb58092eeac2915a02708a38de8484de88457ed733f0d9060b75015638966dbfef891b3650143f7a01",
        "recoveredKey": "03d10c4032ad2e51131280aa93d9da6d8e1c08fb6906a85da2c33c6d63506f9430",
        "ecrecover": "ad1bc7700a524a352d49a488b6c1ea4ab0d3ad78",
        "native": true,
@@ -694,7 +967,7 @@
        "nodeId": "r4",
        "signer": "r4",
        "mutation": "",
-       "signature": "110a3a5674b279a08edfc5c02ef3b4763c78df179c338ac915c4f57df999aa484d2afa4df7039cfe2ed650ffbc2700c2bd7dc0c2bcf07620944765b157417cb701",
+       "signature": "ee76cb1b4b21cbd5abb83f2471c744dae0609ed66cbd5e0201cf21db15e4c8af42bc7070079e8dfa4110d3af529731ea47622c03b7ded5bc79a32a0dbf196b8000",
        "recoveredKey": "02d010428be6f3b780c73a79744fb2f2d741eb5e3efb81bcc1c7e60f0a2e12ed4f",
        "ecrecover": "02bc056aaed762465cf74294216244809fe216cb",
        "native": true,
@@ -706,7 +979,7 @@
        "nodeId": "r5",
        "signer": "r5",
        "mutation": "",
-       "signature": "f48d2075b10b116a17a7a9ef8a5f39b6fac5527327b6a16cd19af8354d6d69cd2d1230a56ef7c0f636bf17ef388f06a43919b601bbacc43d75b418939ec6bc3f01",
+       "signature": "9966b1038f8c47b66ef38e64f913c38c31682bc6591c38f85e0dbbc6ad1582dd13321674c8856e22305e314d4a05bcb327ff8bfe0b1ccfe823aac994af272ae400",
        "recoveredKey": "03e698cdfec1cd7d9a9c22da661661b67c9c477aea2b1f65d7adaea8d5790254bc",
        "ecrecover": "e276e3bcb3bd3792b00f6a53105069047d9409d3",
        "native": true,
@@ -730,19 +1003,20 @@
       "commitRound": "65577",
       "commitEpoch": "2",
       "commitTimestamp": "1764094378",
-      "hash": "858716df327d61ef9c3412e6bb18b7859e1a5b689b424b9fcc95d847dc8f7231"
+      "previousHash": "8f7724e61a425a50bed79ef5aecace9aed3ca9e83752095a409aa32ff65c0cde",
+      "hash": "6a09af5e1513ff7c9a443bf6e02b90161444402c80940604ece408ba15209168"
      },
      "voteInfo": "8705784a726f6f742d766f74652f39323234626135383862666366376439353465303061366631333932613966646637616335353633623161326466323438376436373732613132383262616638021a0001002a1a0001002958203c65c3403eaa79aa8d0ef29f43d5892ad1016f304782e8ce47d8565b4d5b5dc11a6925f1aa",
      "previousHash": "8f7724e61a425a50bed79ef5aecace9aed3ca9e83752095a409aa32ff65c0cde",
-     "sigBytes": "d9985d8801051a00010029021a6925f1aa58208f7724e61a425a50bed79ef5aecace9aed3ca9e83752095a409aa32ff65c0cde5820858716df327d61ef9c3412e6bb18b7859e1a5b689b424b9fcc95d847dc8f7231f6",
-     "sealDigest": "e76d897572ab4d210c419e0539af52e1dcd3d8f3590717956b71d9332e1d3565",
+     "sigBytes": "d9985d8801051a00010029021a6925f1aa58208f7724e61a425a50bed79ef5aecace9aed3ca9e83752095a409aa32ff65c0cde58206a09af5e1513ff7c9a443bf6e02b90161444402c80940604ece408ba15209168f6",
+     "sealDigest": "fea8f05ac0873001cef53379e19c94f16cb1bbed6e2992e406c24d80652a6abb",
      "signatures": [
       {
        "index": 0,
        "nodeId": "r1",
        "signer": "r1",
        "mutation": "",
-       "signature": "24aba9758f341080b4d0920c6f91b82c9d92f5e76ddf9ef981d7f2936d1ce7e067b047b8adf090e06c0bd11ea736205bf304891691c687fc7746222f76f1e9dc00",
+       "signature": "3167ebc25926280ad41e9b7fed66922e1feb2985aabe3c6a54363c742cbde0414420b2d04e8d4c6bc3491f3809e6c63d79d8013a51d5139632efa9da6c71c7b801",
        "recoveredKey": "0283a94286013ee9e7ea97bcd039e9fb273b2613c633fad49e547d32e284560244",
        "ecrecover": "9aeb33e25eafc6830f603124575d63798f650fc0",
        "native": true,
@@ -754,7 +1028,7 @@
        "nodeId": "r2",
        "signer": "r2",
        "mutation": "",
-       "signature": "698f4184ebfcdfe7e698e49bd24c35a975a99e0118336b026f8001ca8c3680b75bc61d39a8211db0f4c053cd3d1eb1d1bf195f28e95f2d137bb78cd802fc82ab00",
+       "signature": "76df234cbc866ef2eb8e1011fd8b91d63488022237cc6d64d45789741cd5eef3236807ad8442d4e865302b27581ab6910fef3597cd92a4dc63c913dff086906401",
        "recoveredKey": "03cb029416b9907113979d8fac7e8058662897cc61083642d5bd4892dcb6fb28c3",
        "ecrecover": "4a1072f0a4c94f357886e6a137a6ec7eff3fdfca",
        "native": true,
@@ -766,7 +1040,7 @@
        "nodeId": "r3",
        "signer": "r3",
        "mutation": "",
-       "signature": "f2f9a252d20f6b8ae22f606c85491493cb4cca2a038f5bd236754a4fbeadb3210e7fe196c63448d213c410ae9cb47ddf3bb5a7ef8cdfe8859b2272a5a361156601",
+       "signature": "f29be587f09ce637b4b16a7b3c5bb21f74bec5442e9b458c3e14bd4e97c2ebca6f0c734bf8c4dbd188d0e5e961a09e9ef3609d4a19898e7d0f760b0c6067218e01",
        "recoveredKey": "03d10c4032ad2e51131280aa93d9da6d8e1c08fb6906a85da2c33c6d63506f9430",
        "ecrecover": "ad1bc7700a524a352d49a488b6c1ea4ab0d3ad78",
        "native": true,
@@ -778,7 +1052,7 @@
        "nodeId": "r4",
        "signer": "r4",
        "mutation": "",
-       "signature": "bd982a163e3889ec36fb43cfce2f173a016ab7fbd7396e28ac8dfe34f408779113df3b94be8a1fff996f826a4e41922b1e96e0b47098c9f02f362a02dae9111401",
+       "signature": "a0db09177112b672de6f04eca17a12f725f45a4d81825ad6b1821d516e7ae915330109b0c4938d245a1443b99cdf4622e08faa6dc8e4bf2d82a220c42fcf1dd101",
        "recoveredKey": "02d010428be6f3b780c73a79744fb2f2d741eb5e3efb81bcc1c7e60f0a2e12ed4f",
        "ecrecover": "02bc056aaed762465cf74294216244809fe216cb",
        "native": true,
@@ -790,7 +1064,7 @@
        "nodeId": "r5",
        "signer": "r5",
        "mutation": "",
-       "signature": "59be0a3ead9dc8384b6431f081f214bd114ae9419f5202dcfb0887c48ba3ad1f1feab38ab341950fd2e8ca171ed309209a0e1bc632a40e60466f59a75051ccd600",
+       "signature": "c442c79e9007466efbc7d2489bcd3688baf9b49fa8d3cace4da4a13b9cdf04025a4ff721d13a782c3e8a7d386a5365354dba35487ab983557f72b3216bc6ff6200",
        "recoveredKey": "03e698cdfec1cd7d9a9c22da661661b67c9c477aea2b1f65d7adaea8d5790254bc",
        "ecrecover": "e276e3bcb3bd3792b00f6a53105069047d9409d3",
        "native": true,
@@ -814,6 +1088,7 @@
       "commitRound": "65536",
       "commitEpoch": "2",
       "commitTimestamp": "1764094337",
+      "previousHash": "4c779c1e311a275e53544cb39c546e78f6bcd540676e365f4b33975827879975",
       "hash": "d18f2743f11c7ed2261afa42839f2445084502a7115806f5e19c575ce5301a56"
      },
      "voteInfo": "8706784a726f6f742d766f74652f39323234626135383862666366376439353465303061366631333932613966646637616335353633623161326466323438376436373732613132383262616638021a000100011a0001000058203c65c3403eaa79aa8d0ef29f43d5892ad1016f304782e8ce47d8565b4d5b5dc11a6925f181",
@@ -885,7 +1160,7 @@
     },
     {
      "id": "foreign.genesis",
-     "description": "the post.at-a statement signed under another root genesis",
+     "description": "the post.at-a statement signed under another root genesis (the same N)",
      "class": "offence",
      "signedNetwork": 5,
      "signedGenesis": "a1c9fcf8dd6ddbcaf46c1590e0f4c57c79df8854f5de0d5cca5913fdb5e99703",
@@ -898,6 +1173,7 @@
       "commitRound": "65536",
       "commitEpoch": "2",
       "commitTimestamp": "1764094337",
+      "previousHash": "ce782923966071afba980e69c95c1277ae9f9099dc41fa0a2168d2987f203995",
       "hash": "d18f2743f11c7ed2261afa42839f2445084502a7115806f5e19c575ce5301a56"
      },
      "voteInfo": "8705784a726f6f742d766f74652f61316339666366386464366464626361663436633135393065306634633537633739646638383534663564653064356363613539313366646235653939373033021a000100011a0001000058203c65c3403eaa79aa8d0ef29f43d5892ad1016f304782e8ce47d8565b4d5b5dc11a6925f181",
@@ -966,6 +1242,803 @@
        "reason": "ok"
       }
      ]
+    },
+    {
+     "id": "opaque.random-prev",
+     "description": "commitRound = A*, previousHash random bytes (no VoteInfo opening): an offence; the open-tip consumer accepts the seal",
+     "class": "offence",
+     "signedNetwork": 5,
+     "signedGenesis": "9224ba588bfcf7d954e00a6f1392a9fdf7ac5563b1a2df2487d6772a1282baf8",
+     "statement": {
+      "commitRound": "65536",
+      "commitEpoch": "2",
+      "commitTimestamp": "1682041620",
+      "previousHash": "8361872c8aa24aa6aee95516dca2717d7d9931467eb0a5873afa1f2c8cf513cc",
+      "hash": "26213fe8b6ca7cc4a00d324c0f62a53e4ddc94ec5cc3c6d08bb2c9bc8193f8b3"
+     },
+     "voteInfo": "",
+     "previousHash": "8361872c8aa24aa6aee95516dca2717d7d9931467eb0a5873afa1f2c8cf513cc",
+     "sigBytes": "d9985d8801051a00010000021a6441eb1458208361872c8aa24aa6aee95516dca2717d7d9931467eb0a5873afa1f2c8cf513cc582026213fe8b6ca7cc4a00d324c0f62a53e4ddc94ec5cc3c6d08bb2c9bc8193f8b3f6",
+     "sealDigest": "04dcf291063d7f02162e58f98d45315ba798164cbf418cb13ae5cfc294507e6c",
+     "signatures": [
+      {
+       "index": 0,
+       "nodeId": "r1",
+       "signer": "r1",
+       "mutation": "",
+       "signature": "da59484b6ae20867ebdddb493e7a94f5a004583cfd4bef8178d38b06f623f3cd0bbfdd5fe6740b36601a2cb89dec542259332700186c7fa3cc64bc7d8fe6520b01",
+       "recoveredKey": "0283a94286013ee9e7ea97bcd039e9fb273b2613c633fad49e547d32e284560244",
+       "ecrecover": "9aeb33e25eafc6830f603124575d63798f650fc0",
+       "native": true,
+       "valid": true,
+       "reason": "ok"
+      },
+      {
+       "index": 1,
+       "nodeId": "r2",
+       "signer": "r2",
+       "mutation": "",
+       "signature": "faeda650e1fd20f43f6c1dd6d109f50e4ed73960eba9334367b101863d38a8823e4062445cd4d68d873e7f738c96a15ad736fce4891744877155965706f5306b00",
+       "recoveredKey": "03cb029416b9907113979d8fac7e8058662897cc61083642d5bd4892dcb6fb28c3",
+       "ecrecover": "4a1072f0a4c94f357886e6a137a6ec7eff3fdfca",
+       "native": true,
+       "valid": true,
+       "reason": "ok"
+      },
+      {
+       "index": 2,
+       "nodeId": "r3",
+       "signer": "r3",
+       "mutation": "",
+       "signature": "d1cf8f1b4a5ee5451cfda47a252ebd8922f390f39ca2cc235e26ac8a6d9266ad775d944495b94445354c179be5a6927820c5ba4bc5ad5602c732b8f81f843c8f01",
+       "recoveredKey": "03d10c4032ad2e51131280aa93d9da6d8e1c08fb6906a85da2c33c6d63506f9430",
+       "ecrecover": "ad1bc7700a524a352d49a488b6c1ea4ab0d3ad78",
+       "native": true,
+       "valid": true,
+       "reason": "ok"
+      },
+      {
+       "index": 3,
+       "nodeId": "r4",
+       "signer": "r4",
+       "mutation": "",
+       "signature": "c3e5de92ad0932273c58898b2850cbc27f06e720098b938b0b40bd460ce3ab7d00040d2e3e0bbb27676a192a59fafb9f573fd9aa04ea99aab2bdc9698bcf518601",
+       "recoveredKey": "02d010428be6f3b780c73a79744fb2f2d741eb5e3efb81bcc1c7e60f0a2e12ed4f",
+       "ecrecover": "02bc056aaed762465cf74294216244809fe216cb",
+       "native": true,
+       "valid": true,
+       "reason": "ok"
+      },
+      {
+       "index": 4,
+       "nodeId": "r5",
+       "signer": "r5",
+       "mutation": "",
+       "signature": "eb453f098f7cf9668a36edcc4339e1e05e0f124b382c60461cedb6b6f8cbcdcd196b3a99b0bd826132b5dd23bbe876cea7a3b87301341a5a18d1a99c89db766e00",
+       "recoveredKey": "03e698cdfec1cd7d9a9c22da661661b67c9c477aea2b1f65d7adaea8d5790254bc",
+       "ecrecover": "e276e3bcb3bd3792b00f6a53105069047d9409d3",
+       "native": true,
+       "valid": true,
+       "reason": "ok"
+      }
+     ],
+     "openTip": {
+      "request": "020000010000000100018070b35ece26b41a630f92557c8a98b3b42ee2d6fa69a4e057bb66ef999fbb2b9b2d0e21fe466ee5fc6c92eec036bea6d0d0fa29abe6b747e92291f751e1200a272bc12376d68ae6575cc0801569ac29f6cf8565b7b62e91c134f3c9636b522c8b00000316d998598701d9985a8a01050158205b0c318d0de9a710124e8309833e704dd1de6e9ec239481b07bed77fb8f0248b58202d0e21fe466ee5fc6c92eec036bea6d0d0fa29abe6b747e92291f751e1200a2748a1cf95ac52447e461a6440db745820cc2c68117c2329453f7b1bf560bb39dcfde426b615e85dd72ab2cf80a927f5dc0c5820fec8be579a6f17ccc1d0b8f8fb4d5e44206cbde906dea3a4fcdfa7927e1e8bc5582067294a89f29eceac4ff5645606a76ef265d0f6f1434d247a50273f7e71aa350d582070b35ece26b41a630f92557c8a98b3b42ee2d6fa69a4e057bb66ef999fbb2b9bd9985b8301418080d9985c83010183820158200ff570652b86277ce195600e59e4b45b18609b4a347db3a64251dcce035999d3820258204eed34356e658d058dd68cc8fefde220cbc0bf55a36a8995abe0c8ea4b42ef21820458201706292fafadefd7fe9b05b9ada9aa725507e3195489f7c9b61bb20fa4510f69d9985d8801051a00010000021a6441eb1458208361872c8aa24aa6aee95516dca2717d7d9931467eb0a5873afa1f2c8cf513cc582026213fe8b6ca7cc4a00d324c0f62a53e4ddc94ec5cc3c6d08bb2c9bc8193f8b3a56272315841da59484b6ae20867ebdddb493e7a94f5a004583cfd4bef8178d38b06f623f3cd0bbfdd5fe6740b36601a2cb89dec542259332700186c7fa3cc64bc7d8fe6520b016272325841faeda650e1fd20f43f6c1dd6d109f50e4ed73960eba9334367b101863d38a8823e4062445cd4d68d873e7f738c96a15ad736fce4891744877155965706f5306b006272335841d1cf8f1b4a5ee5451cfda47a252ebd8922f390f39ca2cc235e26ac8a6d9266ad775d944495b94445354c179be5a6927820c5ba4bc5ad5602c732b8f81f843c8f016272345841c3e5de92ad0932273c58898b2850cbc27f06e720098b938b0b40bd460ce3ab7d00040d2e3e0bbb27676a192a59fafb9f573fd9aa04ea99aab2bdc9698bcf5186016272355841eb453f098f7cf9668a36edcc4339e1e05e0f124b382c60461cedb6b6f8cbcdcd196b3a99b0bd826132b5dd23bbe876cea7a3b87301341a5a18d1a99c89db766e00",
+      "storage": [
+       {
+        "slot": "077bd95350e6ea4ec351df02cf5e3ae60955b86659cca5df6651916dd36bfeef",
+        "value": "03d10c4032ad2e51131280aa93d9da6d8e1c08fb6906a85da2c33c6d63506f94"
+       },
+       {
+        "slot": "096c19a50ce24b41565128f2c22bae4167d491d9c5e60e822c0aec7c318cce45",
+        "value": "bc00000000000000000000000000000000000000000000000000000000000000"
+       },
+       {
+        "slot": "1173547ea53868d1f7beeb83c32f9b13b40a38479a13297a8866a56841fa2741",
+        "value": "4f00000000000000000000000000000000000000000000000000000000000000"
+       },
+       {
+        "slot": "134a17ec577b5250d3bf72a1025982cb0e0dcc333f6fcb9e4b09f238d462e907",
+        "value": "2c0cbdf0e018f9269ec448c4da39694f143516ccb019768251c344dc0552ef24"
+       },
+       {
+        "slot": "184dca1edd98a90c34df33b3efbfe84d04606a0e83fd64f7c8fbf5b5d1d59a19",
+        "value": "0000000000000000000000000000000000000000000000000000000000000002"
+       },
+       {
+        "slot": "22a24ec5a22d57750ea294ff52051fc89f1759c0ffef3b82a76c7d21c13c8a6d",
+        "value": "3f386bf62e318823ef11294803ac61e87d81981a3a0399bf1ad189bd9940f364"
+       },
+       {
+        "slot": "22b4a5015824cd36597d149a3239b0f0476d5b5054b7d81e73319409ecf5a554",
+        "value": "0000000000000000000000000000000000000000000000000000000000000001"
+       },
+       {
+        "slot": "23ac7380b9049f7d709444ee3ebeca4029e825babbcf62fee624151dd6aa6c8f",
+        "value": "03cb029416b9907113979d8fac7e8058662897cc61083642d5bd4892dcb6fb28"
+       },
+       {
+        "slot": "26e534362274dc65eb981afa5a3faa1526d49a3cfe471231dfcc12d0fc631168",
+        "value": "4400000000000000000000000000000000000000000000000000000000000000"
+       },
+       {
+        "slot": "2c4765927235dc15d4471f7eac11b39372cb7c177f72b79d276122784e746af7",
+        "value": "0000000000000000000000000000000000000000000000000000000000000002"
+       },
+       {
+        "slot": "2d4c56cc2e5e6359278ccd26c935f31d15bedaeff39fc3c6a82ab884c5969c32",
+        "value": "0000000000000000000000000000000000000000000000000000000000010064"
+       },
+       {
+        "slot": "36655612ed573010c759ea2241753af111519811fe26d69e6b788feffd5d8a5a",
+        "value": "0000000000000000000000000000000000000000000000000000000000000005"
+       },
+       {
+        "slot": "4d2a977d24a0102ef60a00409c2e9141e4c2e7a4b283f8be6b1c65da6c2cce08",
+        "value": "0000000000000000000000000000000000000000000000000000000000000005"
+       },
+       {
+        "slot": "50c73faf0470e9c3e896c438f719572e9f9f22982ea96c626ce71d985c8f4b50",
+        "value": "3000000000000000000000000000000000000000000000000000000000000000"
+       },
+       {
+        "slot": "52be4745e167ce9d426b5dd3207d5fc37c4f09f67222a77f75b57e0c91495aaa",
+        "value": "0000000000000000000000000000000000000000000000000000000000000002"
+       },
+       {
+        "slot": "56334681525e1d249572f306df30668c2d1292a70816ed3d3bd27662f1f28739",
+        "value": "0000000000000000000000000000000000000000000000000000000000000001"
+       },
+       {
+        "slot": "5d63963dabc5ae34b43066faccdfb6801132f9f5bc8751fdc27fc669b90eab78",
+        "value": "000000000000000000000000000000000000000000000000000000000000000f"
+       },
+       {
+        "slot": "5d93d17ee33a618c658dc8663dfa3651ac82bc8fd6f450855fa2af3a309d51ac",
+        "value": "0000000000000000000000000000000000000000000000000000000000000002"
+       },
+       {
+        "slot": "6af6b754bbe0b957ca911a6d4388f15f7e3217aac19aad9b4c0a7e569f78276e",
+        "value": "0000000000000000000000000000000000000000000000000000000000001000"
+       },
+       {
+        "slot": "789eec2741273f01ec302fbb04911d3d22628b9a99d1ef273841e3c461cbaf33",
+        "value": "0000000000000000000000000000000000000000000000000000000000000002"
+       },
+       {
+        "slot": "85280375cf04f39147421e280d2449fd18332f0a2ae86c6787981004a6d84331",
+        "value": "0000000000000000000000000000000000000000000000000000000000000003"
+       },
+       {
+        "slot": "861945d16dbfb3b529bb48de40fffc7b1f2e98cbf521e4ca25382736a0bcc003",
+        "value": "0000000000000000000000000000000000000000000000000000000000000001"
+       },
+       {
+        "slot": "86dbc6fb003fd76a5c36b58ac720e220e7b567a5a78a807dd5110458760d889b",
+        "value": "0000000000000000000000000000000000000000000000000000000000000001"
+       },
+       {
+        "slot": "8a93328f9008bc1f9fc31c297ed51b1ddb24248870d07dfc5c5c16671cd1031f",
+        "value": "0000000000000000000000000000000000000000000000000000000000000001"
+       },
+       {
+        "slot": "8ed5de60d6816041cf9c37aca5157d62a0e96b46fffcd55804117357fadb99e6",
+        "value": "7233000000000000000000000000000000000000000000000000000000000000"
+       },
+       {
+        "slot": "94bd80fdb9ee69e560fd1318df79f57163d282432c52ac5b9dc6cc5015f860f3",
+        "value": "0000000000000000000000000000000000000000000000000000000000000002"
+       },
+       {
+        "slot": "99a21f62987273d1f96e4f40fd2b3d8288b5a90be67eed9c293826430a451bbe",
+        "value": "7234000000000000000000000000000000000000000000000000000000000000"
+       },
+       {
+        "slot": "a6506c34d79b561e2f97f6021f2ca3d11f2df5d89047b29356e8d044b8f7e9ab",
+        "value": "0000000000000000000000000000000000000000000000000000000000000004"
+       },
+       {
+        "slot": "b359f627843a908e03883efb97a883ed817269bb1c3d28778c9c26ded67c65ed",
+        "value": "c300000000000000000000000000000000000000000000000000000000000000"
+       },
+       {
+        "slot": "bd46d80656ebd65ff40d271a180003a97a8f7200d2b0562e68a0b3455cd447d1",
+        "value": "0000000000000000000000000000000000000000000000000000000000000002"
+       },
+       {
+        "slot": "c164664631ab03247087a217b9b5b5fd834d26cf063555dba261bf56a84a5245",
+        "value": "7235000000000000000000000000000000000000000000000000000000000000"
+       },
+       {
+        "slot": "c20ac95bd1f18a98e5ed96b1b03ef2b328ecb52f3bbcd1e981a85385fa0fb5ba",
+        "value": "0000000000000000000000000000000000000000000000000000000000000002"
+       },
+       {
+        "slot": "ce567ee57ab6fc4db983c8b91ddce8041dca275d7f12d6abbdd933be257894cd",
+        "value": "7232000000000000000000000000000000000000000000000000000000000000"
+       },
+       {
+        "slot": "d4f3e3a6f5eecd0fe47411def9dabcdb3acd4759f22aa1975e240fb8aac49ef6",
+        "value": "0000000000000000000000000000000000000000000000000000000000000002"
+       },
+       {
+        "slot": "d8bca5e427ffd163d8a9ae9d34b57a2dc9411da674c0294a9a8e272173e6aa2c",
+        "value": "02d010428be6f3b780c73a79744fb2f2d741eb5e3efb81bcc1c7e60f0a2e12ed"
+       },
+       {
+        "slot": "dc49b01e3f36cb500c8ebb4d7fe830ee55f6e9a08d49aa6521d27c8d7f37e328",
+        "value": "0000000000000000000000000000000000000000000000000000000000000002"
+       },
+       {
+        "slot": "df9952ba1f261c68fa3fa17ad2a6520ec12be1c55b59da58ba0e0fbdebde7047",
+        "value": "84598ac1d66823c042c5d8a7882abddce2dd0d2e6a7cc927348420dc87d8d5ab"
+       },
+       {
+        "slot": "e00560690974f72bb582aba8e826ee38222838cda4354d63469358f7986ef5b2",
+        "value": "7231000000000000000000000000000000000000000000000000000000000000"
+       },
+       {
+        "slot": "e0dbe2e575b13a4989dfa51513fbb575a6faef4cd360b66bbf77abd16d92f3ff",
+        "value": "0000000000000000000000000000000000000000000000000000000000000005"
+       },
+       {
+        "slot": "e4756cc967765a03ac699a0196af5ec73c15ae2739f43da745666a02a12a2bc0",
+        "value": "23cf5b840be0e1118afd1a949ad0f3833198ffc381a0ef4bfc7ea028b4de4c94"
+       },
+       {
+        "slot": "e915d2240d003b807b886bdb9b4d9bb37d2c233dbc5025129bec1026e6b5322e",
+        "value": "0283a94286013ee9e7ea97bcd039e9fb273b2613c633fad49e547d32e2845602"
+       },
+       {
+        "slot": "efa6b7f0bacdcf81ddd8a710fb8420140ae07d47982dc167bb647c00d3f5f4fc",
+        "value": "0000000000000000000000000000000000000000000000000000000000000002"
+       },
+       {
+        "slot": "f5153c70c89c8b0c861b2546f614d01ee5aa5b0be85397ed9a1479d21e8dcada",
+        "value": "0000000000000000000000000000000000000000000000000000000000000002"
+       },
+       {
+        "slot": "f9cbfc25d4f0c781851051dab6f4c718e1de226a27432d5a3f292ef10f45db4f",
+        "value": "03e698cdfec1cd7d9a9c22da661661b67c9c477aea2b1f65d7adaea8d5790254"
+       }
+      ],
+      "pinnedGenesisCommitment": "23cf5b840be0e1118afd1a949ad0f3833198ffc381a0ef4bfc7ea028b4de4c94",
+      "pinnedProfileHash": "2c0cbdf0e018f9269ec448c4da39694f143516ccb019768251c344dc0552ef24",
+      "accepted": true
+     }
+    },
+    {
+     "id": "opaque.random-prev.above",
+     "description": "commitRound = A*+9, previousHash random bytes: an offence; the open-tip consumer accepts the seal",
+     "class": "offence",
+     "signedNetwork": 5,
+     "signedGenesis": "9224ba588bfcf7d954e00a6f1392a9fdf7ac5563b1a2df2487d6772a1282baf8",
+     "statement": {
+      "commitRound": "65545",
+      "commitEpoch": "2",
+      "commitTimestamp": "1682041629",
+      "previousHash": "4c70fa94baf4f9f676448591b8f2c6c4b5b44bb9aa50bc3fb6f89207e9a75b93",
+      "hash": "0c3c999d9f67a9b18bc4166ac86ee8964aee63be1af5451ea8755c16e3c8dc03"
+     },
+     "voteInfo": "",
+     "previousHash": "4c70fa94baf4f9f676448591b8f2c6c4b5b44bb9aa50bc3fb6f89207e9a75b93",
+     "sigBytes": "d9985d8801051a00010009021a6441eb1d58204c70fa94baf4f9f676448591b8f2c6c4b5b44bb9aa50bc3fb6f89207e9a75b9358200c3c999d9f67a9b18bc4166ac86ee8964aee63be1af5451ea8755c16e3c8dc03f6",
+     "sealDigest": "2a9dced854eaa83de61893389f0948e3f72166dd97995f8504d0cc64e1cd5d47",
+     "signatures": [
+      {
+       "index": 0,
+       "nodeId": "r1",
+       "signer": "r1",
+       "mutation": "",
+       "signature": "de1e9880f642d563be1a21cc10ec15dd07a3bb85d8951e7a060d52403cbda36d697c9d6e9310262e8c6095cf65bd10e745901dda06bf11a567888fb45827d12700",
+       "recoveredKey": "0283a94286013ee9e7ea97bcd039e9fb273b2613c633fad49e547d32e284560244",
+       "ecrecover": "9aeb33e25eafc6830f603124575d63798f650fc0",
+       "native": true,
+       "valid": true,
+       "reason": "ok"
+      },
+      {
+       "index": 1,
+       "nodeId": "r2",
+       "signer": "r2",
+       "mutation": "",
+       "signature": "53fc3118f8340fd2cf95b80a78f2a5edf8eae8968ec641c72bbb107919e4c3654686c8574f22409caf26c0fe6d2440299b7a59d919a603675556192495a5bea901",
+       "recoveredKey": "03cb029416b9907113979d8fac7e8058662897cc61083642d5bd4892dcb6fb28c3",
+       "ecrecover": "4a1072f0a4c94f357886e6a137a6ec7eff3fdfca",
+       "native": true,
+       "valid": true,
+       "reason": "ok"
+      },
+      {
+       "index": 2,
+       "nodeId": "r3",
+       "signer": "r3",
+       "mutation": "",
+       "signature": "283fe31d64ba9fd849bb213da3b717ad97197ab355bca59c657e3806769d37e149ad780a31f45af9901afcadb203c89f35663608b9cf89d3766f819d8bc2fb8b01",
+       "recoveredKey": "03d10c4032ad2e51131280aa93d9da6d8e1c08fb6906a85da2c33c6d63506f9430",
+       "ecrecover": "ad1bc7700a524a352d49a488b6c1ea4ab0d3ad78",
+       "native": true,
+       "valid": true,
+       "reason": "ok"
+      },
+      {
+       "index": 3,
+       "nodeId": "r4",
+       "signer": "r4",
+       "mutation": "",
+       "signature": "6f2bf8fcf8b55cefcc197294772f401c30bf505134b93bc39d59b2bed76b115b31d00f93baeb8dd8bd254b88764f335fe0d61a8a52847381004398df71986a1b00",
+       "recoveredKey": "02d010428be6f3b780c73a79744fb2f2d741eb5e3efb81bcc1c7e60f0a2e12ed4f",
+       "ecrecover": "02bc056aaed762465cf74294216244809fe216cb",
+       "native": true,
+       "valid": true,
+       "reason": "ok"
+      },
+      {
+       "index": 4,
+       "nodeId": "r5",
+       "signer": "r5",
+       "mutation": "",
+       "signature": "212d978de3b70a350117d0e2e77fc54cc734cc9ba60508c78f9251a9477e17704c3b7c43f4d4b07dacf10048cb579745828037881ed669421377dd4ebbceb72501",
+       "recoveredKey": "03e698cdfec1cd7d9a9c22da661661b67c9c477aea2b1f65d7adaea8d5790254bc",
+       "ecrecover": "e276e3bcb3bd3792b00f6a53105069047d9409d3",
+       "native": true,
+       "valid": true,
+       "reason": "ok"
+      }
+     ],
+     "openTip": {
+      "request": "02000001000000010001804f143d821f4f49948853e033c4a52c48251c824cd669dc87abfc4219680fee357b766bb2b17ffff1eb079f423ebf14b939f40f1e05576736ff6c819b70f528acd0e40c60a7343c01e664ebd8df0be376744bdd9baa8091890623f9c89612b9e200000316d998598701d9985a8a0105015820f0cd3b12a9bf6881bec8b553cd7d2c98dc2eb27befbaf7cbd8dafb81445697af58207b766bb2b17ffff1eb079f423ebf14b939f40f1e05576736ff6c819b70f528ac48793a3244af78faba1a6440db7458201774adc7775aac5be461895427c3fd9ae5aac2c3b53fb9ad4273884c5765a16f0c5820575928fbfd8ea111796ea5e7ca3ad73e2785cfcbd5444aac86b0bed4a98d2855582018d5260b52b52151dfa78a2c1a29d76bf39c3dac9f477b51cb06411af33dc5f958204f143d821f4f49948853e033c4a52c48251c824cd669dc87abfc4219680fee35d9985b8301418080d9985c830101838201582034fa487b20e7b38d7a12997393ab5dc6b9182a2495b6fa1e330eae1d1dc5904582025820de2ce3accc45308fe1707425879e8542028d6976caedb5b0caf4953c7a2cc85b8204582060e0b80ee02e1fe1409455fba2fae002835ad8770711e68aa3ac0eeb971aa142d9985d8801051a00010009021a6441eb1d58204c70fa94baf4f9f676448591b8f2c6c4b5b44bb9aa50bc3fb6f89207e9a75b9358200c3c999d9f67a9b18bc4166ac86ee8964aee63be1af5451ea8755c16e3c8dc03a56272315841de1e9880f642d563be1a21cc10ec15dd07a3bb85d8951e7a060d52403cbda36d697c9d6e9310262e8c6095cf65bd10e745901dda06bf11a567888fb45827d12700627232584153fc3118f8340fd2cf95b80a78f2a5edf8eae8968ec641c72bbb107919e4c3654686c8574f22409caf26c0fe6d2440299b7a59d919a603675556192495a5bea9016272335841283fe31d64ba9fd849bb213da3b717ad97197ab355bca59c657e3806769d37e149ad780a31f45af9901afcadb203c89f35663608b9cf89d3766f819d8bc2fb8b0162723458416f2bf8fcf8b55cefcc197294772f401c30bf505134b93bc39d59b2bed76b115b31d00f93baeb8dd8bd254b88764f335fe0d61a8a52847381004398df71986a1b006272355841212d978de3b70a350117d0e2e77fc54cc734cc9ba60508c78f9251a9477e17704c3b7c43f4d4b07dacf10048cb579745828037881ed669421377dd4ebbceb72501",
+      "storage": [
+       {
+        "slot": "077bd95350e6ea4ec351df02cf5e3ae60955b86659cca5df6651916dd36bfeef",
+        "value": "03d10c4032ad2e51131280aa93d9da6d8e1c08fb6906a85da2c33c6d63506f94"
+       },
+       {
+        "slot": "096c19a50ce24b41565128f2c22bae4167d491d9c5e60e822c0aec7c318cce45",
+        "value": "bc00000000000000000000000000000000000000000000000000000000000000"
+       },
+       {
+        "slot": "1173547ea53868d1f7beeb83c32f9b13b40a38479a13297a8866a56841fa2741",
+        "value": "4f00000000000000000000000000000000000000000000000000000000000000"
+       },
+       {
+        "slot": "134a17ec577b5250d3bf72a1025982cb0e0dcc333f6fcb9e4b09f238d462e907",
+        "value": "2c0cbdf0e018f9269ec448c4da39694f143516ccb019768251c344dc0552ef24"
+       },
+       {
+        "slot": "184dca1edd98a90c34df33b3efbfe84d04606a0e83fd64f7c8fbf5b5d1d59a19",
+        "value": "0000000000000000000000000000000000000000000000000000000000000002"
+       },
+       {
+        "slot": "22a24ec5a22d57750ea294ff52051fc89f1759c0ffef3b82a76c7d21c13c8a6d",
+        "value": "3f386bf62e318823ef11294803ac61e87d81981a3a0399bf1ad189bd9940f364"
+       },
+       {
+        "slot": "22b4a5015824cd36597d149a3239b0f0476d5b5054b7d81e73319409ecf5a554",
+        "value": "0000000000000000000000000000000000000000000000000000000000000001"
+       },
+       {
+        "slot": "23ac7380b9049f7d709444ee3ebeca4029e825babbcf62fee624151dd6aa6c8f",
+        "value": "03cb029416b9907113979d8fac7e8058662897cc61083642d5bd4892dcb6fb28"
+       },
+       {
+        "slot": "26e534362274dc65eb981afa5a3faa1526d49a3cfe471231dfcc12d0fc631168",
+        "value": "4400000000000000000000000000000000000000000000000000000000000000"
+       },
+       {
+        "slot": "2c4765927235dc15d4471f7eac11b39372cb7c177f72b79d276122784e746af7",
+        "value": "0000000000000000000000000000000000000000000000000000000000000002"
+       },
+       {
+        "slot": "2d4c56cc2e5e6359278ccd26c935f31d15bedaeff39fc3c6a82ab884c5969c32",
+        "value": "000000000000000000000000000000000000000000000000000000000001006d"
+       },
+       {
+        "slot": "36655612ed573010c759ea2241753af111519811fe26d69e6b788feffd5d8a5a",
+        "value": "0000000000000000000000000000000000000000000000000000000000000005"
+       },
+       {
+        "slot": "4d2a977d24a0102ef60a00409c2e9141e4c2e7a4b283f8be6b1c65da6c2cce08",
+        "value": "0000000000000000000000000000000000000000000000000000000000000005"
+       },
+       {
+        "slot": "50c73faf0470e9c3e896c438f719572e9f9f22982ea96c626ce71d985c8f4b50",
+        "value": "3000000000000000000000000000000000000000000000000000000000000000"
+       },
+       {
+        "slot": "52be4745e167ce9d426b5dd3207d5fc37c4f09f67222a77f75b57e0c91495aaa",
+        "value": "0000000000000000000000000000000000000000000000000000000000000002"
+       },
+       {
+        "slot": "56334681525e1d249572f306df30668c2d1292a70816ed3d3bd27662f1f28739",
+        "value": "0000000000000000000000000000000000000000000000000000000000000001"
+       },
+       {
+        "slot": "5d63963dabc5ae34b43066faccdfb6801132f9f5bc8751fdc27fc669b90eab78",
+        "value": "000000000000000000000000000000000000000000000000000000000000000f"
+       },
+       {
+        "slot": "5d93d17ee33a618c658dc8663dfa3651ac82bc8fd6f450855fa2af3a309d51ac",
+        "value": "0000000000000000000000000000000000000000000000000000000000000002"
+       },
+       {
+        "slot": "6af6b754bbe0b957ca911a6d4388f15f7e3217aac19aad9b4c0a7e569f78276e",
+        "value": "0000000000000000000000000000000000000000000000000000000000001000"
+       },
+       {
+        "slot": "789eec2741273f01ec302fbb04911d3d22628b9a99d1ef273841e3c461cbaf33",
+        "value": "0000000000000000000000000000000000000000000000000000000000000002"
+       },
+       {
+        "slot": "85280375cf04f39147421e280d2449fd18332f0a2ae86c6787981004a6d84331",
+        "value": "0000000000000000000000000000000000000000000000000000000000000003"
+       },
+       {
+        "slot": "861945d16dbfb3b529bb48de40fffc7b1f2e98cbf521e4ca25382736a0bcc003",
+        "value": "0000000000000000000000000000000000000000000000000000000000000001"
+       },
+       {
+        "slot": "86dbc6fb003fd76a5c36b58ac720e220e7b567a5a78a807dd5110458760d889b",
+        "value": "0000000000000000000000000000000000000000000000000000000000000001"
+       },
+       {
+        "slot": "8a93328f9008bc1f9fc31c297ed51b1ddb24248870d07dfc5c5c16671cd1031f",
+        "value": "0000000000000000000000000000000000000000000000000000000000000001"
+       },
+       {
+        "slot": "8ed5de60d6816041cf9c37aca5157d62a0e96b46fffcd55804117357fadb99e6",
+        "value": "7233000000000000000000000000000000000000000000000000000000000000"
+       },
+       {
+        "slot": "94bd80fdb9ee69e560fd1318df79f57163d282432c52ac5b9dc6cc5015f860f3",
+        "value": "0000000000000000000000000000000000000000000000000000000000000002"
+       },
+       {
+        "slot": "99a21f62987273d1f96e4f40fd2b3d8288b5a90be67eed9c293826430a451bbe",
+        "value": "7234000000000000000000000000000000000000000000000000000000000000"
+       },
+       {
+        "slot": "a6506c34d79b561e2f97f6021f2ca3d11f2df5d89047b29356e8d044b8f7e9ab",
+        "value": "0000000000000000000000000000000000000000000000000000000000000004"
+       },
+       {
+        "slot": "b359f627843a908e03883efb97a883ed817269bb1c3d28778c9c26ded67c65ed",
+        "value": "c300000000000000000000000000000000000000000000000000000000000000"
+       },
+       {
+        "slot": "bd46d80656ebd65ff40d271a180003a97a8f7200d2b0562e68a0b3455cd447d1",
+        "value": "0000000000000000000000000000000000000000000000000000000000000002"
+       },
+       {
+        "slot": "c164664631ab03247087a217b9b5b5fd834d26cf063555dba261bf56a84a5245",
+        "value": "7235000000000000000000000000000000000000000000000000000000000000"
+       },
+       {
+        "slot": "c20ac95bd1f18a98e5ed96b1b03ef2b328ecb52f3bbcd1e981a85385fa0fb5ba",
+        "value": "0000000000000000000000000000000000000000000000000000000000000002"
+       },
+       {
+        "slot": "ce567ee57ab6fc4db983c8b91ddce8041dca275d7f12d6abbdd933be257894cd",
+        "value": "7232000000000000000000000000000000000000000000000000000000000000"
+       },
+       {
+        "slot": "d4f3e3a6f5eecd0fe47411def9dabcdb3acd4759f22aa1975e240fb8aac49ef6",
+        "value": "0000000000000000000000000000000000000000000000000000000000000002"
+       },
+       {
+        "slot": "d8bca5e427ffd163d8a9ae9d34b57a2dc9411da674c0294a9a8e272173e6aa2c",
+        "value": "02d010428be6f3b780c73a79744fb2f2d741eb5e3efb81bcc1c7e60f0a2e12ed"
+       },
+       {
+        "slot": "dc49b01e3f36cb500c8ebb4d7fe830ee55f6e9a08d49aa6521d27c8d7f37e328",
+        "value": "0000000000000000000000000000000000000000000000000000000000000002"
+       },
+       {
+        "slot": "df9952ba1f261c68fa3fa17ad2a6520ec12be1c55b59da58ba0e0fbdebde7047",
+        "value": "84598ac1d66823c042c5d8a7882abddce2dd0d2e6a7cc927348420dc87d8d5ab"
+       },
+       {
+        "slot": "e00560690974f72bb582aba8e826ee38222838cda4354d63469358f7986ef5b2",
+        "value": "7231000000000000000000000000000000000000000000000000000000000000"
+       },
+       {
+        "slot": "e0dbe2e575b13a4989dfa51513fbb575a6faef4cd360b66bbf77abd16d92f3ff",
+        "value": "0000000000000000000000000000000000000000000000000000000000000005"
+       },
+       {
+        "slot": "e4756cc967765a03ac699a0196af5ec73c15ae2739f43da745666a02a12a2bc0",
+        "value": "23cf5b840be0e1118afd1a949ad0f3833198ffc381a0ef4bfc7ea028b4de4c94"
+       },
+       {
+        "slot": "e915d2240d003b807b886bdb9b4d9bb37d2c233dbc5025129bec1026e6b5322e",
+        "value": "0283a94286013ee9e7ea97bcd039e9fb273b2613c633fad49e547d32e2845602"
+       },
+       {
+        "slot": "efa6b7f0bacdcf81ddd8a710fb8420140ae07d47982dc167bb647c00d3f5f4fc",
+        "value": "0000000000000000000000000000000000000000000000000000000000000002"
+       },
+       {
+        "slot": "f5153c70c89c8b0c861b2546f614d01ee5aa5b0be85397ed9a1479d21e8dcada",
+        "value": "0000000000000000000000000000000000000000000000000000000000000002"
+       },
+       {
+        "slot": "f9cbfc25d4f0c781851051dab6f4c718e1de226a27432d5a3f292ef10f45db4f",
+        "value": "03e698cdfec1cd7d9a9c22da661661b67c9c477aea2b1f65d7adaea8d5790254"
+       }
+      ],
+      "pinnedGenesisCommitment": "23cf5b840be0e1118afd1a949ad0f3833198ffc381a0ef4bfc7ea028b4de4c94",
+      "pinnedProfileHash": "2c0cbdf0e018f9269ec448c4da39694f143516ccb019768251c344dc0552ef24",
+      "accepted": true
+     }
+    },
+    {
+     "id": "opaque.vi-successor-epoch",
+     "description": "previousHash = sha256(VI) of a VoteInfo with voting epoch e+1, signed by e's quorum as an epoch-e seal at A*+3: an offence; the open-tip consumer accepts it",
+     "class": "offence",
+     "signedNetwork": 5,
+     "signedGenesis": "9224ba588bfcf7d954e00a6f1392a9fdf7ac5563b1a2df2487d6772a1282baf8",
+     "statement": {
+      "votingEpoch": "3",
+      "votingRound": "65540",
+      "parent": "65539",
+      "exec": "3c65c3403eaa79aa8d0ef29f43d5892ad1016f304782e8ce47d8565b4d5b5dc1",
+      "voteTimestamp": "1764094340",
+      "commitRound": "65539",
+      "commitEpoch": "2",
+      "commitTimestamp": "1682041623",
+      "previousHash": "b8ea5682e3c860b2b7f865435dc15ab5b9469b41461a7c19ce5333de0e5dc52a",
+      "hash": "48806aedf042c78e6d5fac89ed7987df92c96cfa9d24c0953ad981d922386df8"
+     },
+     "voteInfo": "8705784a726f6f742d766f74652f39323234626135383862666366376439353465303061366631333932613966646637616335353633623161326466323438376436373732613132383262616638031a000100041a0001000358203c65c3403eaa79aa8d0ef29f43d5892ad1016f304782e8ce47d8565b4d5b5dc11a6925f184",
+     "previousHash": "b8ea5682e3c860b2b7f865435dc15ab5b9469b41461a7c19ce5333de0e5dc52a",
+     "sigBytes": "d9985d8801051a00010003021a6441eb175820b8ea5682e3c860b2b7f865435dc15ab5b9469b41461a7c19ce5333de0e5dc52a582048806aedf042c78e6d5fac89ed7987df92c96cfa9d24c0953ad981d922386df8f6",
+     "sealDigest": "2421414bd99751359d26d5ca14a82162f16e35b926ceeb6f8d8fd391c719fe16",
+     "signatures": [
+      {
+       "index": 0,
+       "nodeId": "r1",
+       "signer": "r1",
+       "mutation": "",
+       "signature": "68963232503e6cdbf8a300eb4243c82495771e290d7fe175fe70c0c93a6eeb4c67431a61cb92bb3ddcf0e28513fb08b8ceed20fb40d4ccf18507fe00b6bc246301",
+       "recoveredKey": "0283a94286013ee9e7ea97bcd039e9fb273b2613c633fad49e547d32e284560244",
+       "ecrecover": "9aeb33e25eafc6830f603124575d63798f650fc0",
+       "native": true,
+       "valid": true,
+       "reason": "ok"
+      },
+      {
+       "index": 1,
+       "nodeId": "r2",
+       "signer": "r2",
+       "mutation": "",
+       "signature": "0e404bcce3bef5eb5d63f577f223fb7cfbcf0ded28a5a51e398ff6078d4e974967331f53d7a7126b6374745ff8ebbf31c9b194c5847eb7e531884ff6a6d97f7100",
+       "recoveredKey": "03cb029416b9907113979d8fac7e8058662897cc61083642d5bd4892dcb6fb28c3",
+       "ecrecover": "4a1072f0a4c94f357886e6a137a6ec7eff3fdfca",
+       "native": true,
+       "valid": true,
+       "reason": "ok"
+      },
+      {
+       "index": 2,
+       "nodeId": "r3",
+       "signer": "r3",
+       "mutation": "",
+       "signature": "94a5c111a0c656dfe2c788b5d6238bc105808d4961964193178f320db5594b5b6ab7035c5a847390528c7b121b7707470f22e82fa8cdadeb6c7e3e1d7f8b819401",
+       "recoveredKey": "03d10c4032ad2e51131280aa93d9da6d8e1c08fb6906a85da2c33c6d63506f9430",
+       "ecrecover": "ad1bc7700a524a352d49a488b6c1ea4ab0d3ad78",
+       "native": true,
+       "valid": true,
+       "reason": "ok"
+      },
+      {
+       "index": 3,
+       "nodeId": "r4",
+       "signer": "r4",
+       "mutation": "",
+       "signature": "173b453ff503585dffee2d4df79202854153c1910107cee8050a7c3f37bd189b1993498e6657754eb5e10eb65f460764debaf91fadc2fc9130a78b5ca596615f01",
+       "recoveredKey": "02d010428be6f3b780c73a79744fb2f2d741eb5e3efb81bcc1c7e60f0a2e12ed4f",
+       "ecrecover": "02bc056aaed762465cf74294216244809fe216cb",
+       "native": true,
+       "valid": true,
+       "reason": "ok"
+      },
+      {
+       "index": 4,
+       "nodeId": "r5",
+       "signer": "r5",
+       "mutation": "",
+       "signature": "b84c545d37a24041d0bc0ce3a072b69a4a4d0d0fe015fd55b70b71110e4d73ec0c423d8a12823d90aa975343b9ec6a4ae445a3c0e974c390cbe56c41a9ed861100",
+       "recoveredKey": "03e698cdfec1cd7d9a9c22da661661b67c9c477aea2b1f65d7adaea8d5790254bc",
+       "ecrecover": "e276e3bcb3bd3792b00f6a53105069047d9409d3",
+       "native": true,
+       "valid": true,
+       "reason": "ok"
+      }
+     ],
+     "openTip": {
+      "request": "020000010000000100018085779994099f49215843e49f52836faebd9bc9b8f88b3dc94943b2e879a3ad6d4084fbac673b51de8c82e26c6549335512a13b4ae3f1dd1dd311bd5c80166f1c32a9e68166f47698ad190b13249d8ddbeacf58311da1fac8c14bd4dddea4196000000316d998598701d9985a8a0105015820022e26511c7829a18d84de34ba65b42abd01cf9729d62e908846c9ff07d9132a58204084fbac673b51de8c82e26c6549335512a13b4ae3f1dd1dd311bd5c80166f1c48bd6e98cf8df4a8b91a6440db7458208353523bcbd60d35e0336f434c4f9947aa85d58094b64d59673d340eeb1598de0c58205e2ff774c59c413a215121f34474e960a3a957ab1809e259bc89d5671dabf03958208e1f9b76b7e84e0262ffce7f612e65e0292bd3d013b3c924812eeaf64dd757dd582085779994099f49215843e49f52836faebd9bc9b8f88b3dc94943b2e879a3ad6dd9985b8301418080d9985c8301018382015820ab1b66fcbfd8bc7bc461a77202ef7d4af53f640c8aeea8e5409784f826b2137782025820bdcf8dade903cedf5902874d79161b71bf5f8ee2c92ded4d90e83d919bf1e44882045820ab5022dcffc6fbcaa4a986c95e9be3ea3cb176feb2cc9786afd0343d853df0ecd9985d8801051a00010003021a6441eb175820b8ea5682e3c860b2b7f865435dc15ab5b9469b41461a7c19ce5333de0e5dc52a582048806aedf042c78e6d5fac89ed7987df92c96cfa9d24c0953ad981d922386df8a5627231584168963232503e6cdbf8a300eb4243c82495771e290d7fe175fe70c0c93a6eeb4c67431a61cb92bb3ddcf0e28513fb08b8ceed20fb40d4ccf18507fe00b6bc24630162723258410e404bcce3bef5eb5d63f577f223fb7cfbcf0ded28a5a51e398ff6078d4e974967331f53d7a7126b6374745ff8ebbf31c9b194c5847eb7e531884ff6a6d97f7100627233584194a5c111a0c656dfe2c788b5d6238bc105808d4961964193178f320db5594b5b6ab7035c5a847390528c7b121b7707470f22e82fa8cdadeb6c7e3e1d7f8b8194016272345841173b453ff503585dffee2d4df79202854153c1910107cee8050a7c3f37bd189b1993498e6657754eb5e10eb65f460764debaf91fadc2fc9130a78b5ca596615f016272355841b84c545d37a24041d0bc0ce3a072b69a4a4d0d0fe015fd55b70b71110e4d73ec0c423d8a12823d90aa975343b9ec6a4ae445a3c0e974c390cbe56c41a9ed861100",
+      "storage": [
+       {
+        "slot": "077bd95350e6ea4ec351df02cf5e3ae60955b86659cca5df6651916dd36bfeef",
+        "value": "03d10c4032ad2e51131280aa93d9da6d8e1c08fb6906a85da2c33c6d63506f94"
+       },
+       {
+        "slot": "096c19a50ce24b41565128f2c22bae4167d491d9c5e60e822c0aec7c318cce45",
+        "value": "bc00000000000000000000000000000000000000000000000000000000000000"
+       },
+       {
+        "slot": "1173547ea53868d1f7beeb83c32f9b13b40a38479a13297a8866a56841fa2741",
+        "value": "4f00000000000000000000000000000000000000000000000000000000000000"
+       },
+       {
+        "slot": "134a17ec577b5250d3bf72a1025982cb0e0dcc333f6fcb9e4b09f238d462e907",
+        "value": "2c0cbdf0e018f9269ec448c4da39694f143516ccb019768251c344dc0552ef24"
+       },
+       {
+        "slot": "184dca1edd98a90c34df33b3efbfe84d04606a0e83fd64f7c8fbf5b5d1d59a19",
+        "value": "0000000000000000000000000000000000000000000000000000000000000002"
+       },
+       {
+        "slot": "22a24ec5a22d57750ea294ff52051fc89f1759c0ffef3b82a76c7d21c13c8a6d",
+        "value": "3f386bf62e318823ef11294803ac61e87d81981a3a0399bf1ad189bd9940f364"
+       },
+       {
+        "slot": "22b4a5015824cd36597d149a3239b0f0476d5b5054b7d81e73319409ecf5a554",
+        "value": "0000000000000000000000000000000000000000000000000000000000000001"
+       },
+       {
+        "slot": "23ac7380b9049f7d709444ee3ebeca4029e825babbcf62fee624151dd6aa6c8f",
+        "value": "03cb029416b9907113979d8fac7e8058662897cc61083642d5bd4892dcb6fb28"
+       },
+       {
+        "slot": "26e534362274dc65eb981afa5a3faa1526d49a3cfe471231dfcc12d0fc631168",
+        "value": "4400000000000000000000000000000000000000000000000000000000000000"
+       },
+       {
+        "slot": "2c4765927235dc15d4471f7eac11b39372cb7c177f72b79d276122784e746af7",
+        "value": "0000000000000000000000000000000000000000000000000000000000000002"
+       },
+       {
+        "slot": "2d4c56cc2e5e6359278ccd26c935f31d15bedaeff39fc3c6a82ab884c5969c32",
+        "value": "0000000000000000000000000000000000000000000000000000000000010067"
+       },
+       {
+        "slot": "36655612ed573010c759ea2241753af111519811fe26d69e6b788feffd5d8a5a",
+        "value": "0000000000000000000000000000000000000000000000000000000000000005"
+       },
+       {
+        "slot": "4d2a977d24a0102ef60a00409c2e9141e4c2e7a4b283f8be6b1c65da6c2cce08",
+        "value": "0000000000000000000000000000000000000000000000000000000000000005"
+       },
+       {
+        "slot": "50c73faf0470e9c3e896c438f719572e9f9f22982ea96c626ce71d985c8f4b50",
+        "value": "3000000000000000000000000000000000000000000000000000000000000000"
+       },
+       {
+        "slot": "52be4745e167ce9d426b5dd3207d5fc37c4f09f67222a77f75b57e0c91495aaa",
+        "value": "0000000000000000000000000000000000000000000000000000000000000002"
+       },
+       {
+        "slot": "56334681525e1d249572f306df30668c2d1292a70816ed3d3bd27662f1f28739",
+        "value": "0000000000000000000000000000000000000000000000000000000000000001"
+       },
+       {
+        "slot": "5d63963dabc5ae34b43066faccdfb6801132f9f5bc8751fdc27fc669b90eab78",
+        "value": "000000000000000000000000000000000000000000000000000000000000000f"
+       },
+       {
+        "slot": "5d93d17ee33a618c658dc8663dfa3651ac82bc8fd6f450855fa2af3a309d51ac",
+        "value": "0000000000000000000000000000000000000000000000000000000000000002"
+       },
+       {
+        "slot": "6af6b754bbe0b957ca911a6d4388f15f7e3217aac19aad9b4c0a7e569f78276e",
+        "value": "0000000000000000000000000000000000000000000000000000000000001000"
+       },
+       {
+        "slot": "789eec2741273f01ec302fbb04911d3d22628b9a99d1ef273841e3c461cbaf33",
+        "value": "0000000000000000000000000000000000000000000000000000000000000002"
+       },
+       {
+        "slot": "85280375cf04f39147421e280d2449fd18332f0a2ae86c6787981004a6d84331",
+        "value": "0000000000000000000000000000000000000000000000000000000000000003"
+       },
+       {
+        "slot": "861945d16dbfb3b529bb48de40fffc7b1f2e98cbf521e4ca25382736a0bcc003",
+        "value": "0000000000000000000000000000000000000000000000000000000000000001"
+       },
+       {
+        "slot": "86dbc6fb003fd76a5c36b58ac720e220e7b567a5a78a807dd5110458760d889b",
+        "value": "0000000000000000000000000000000000000000000000000000000000000001"
+       },
+       {
+        "slot": "8a93328f9008bc1f9fc31c297ed51b1ddb24248870d07dfc5c5c16671cd1031f",
+        "value": "0000000000000000000000000000000000000000000000000000000000000001"
+       },
+       {
+        "slot": "8ed5de60d6816041cf9c37aca5157d62a0e96b46fffcd55804117357fadb99e6",
+        "value": "7233000000000000000000000000000000000000000000000000000000000000"
+       },
+       {
+        "slot": "94bd80fdb9ee69e560fd1318df79f57163d282432c52ac5b9dc6cc5015f860f3",
+        "value": "0000000000000000000000000000000000000000000000000000000000000002"
+       },
+       {
+        "slot": "99a21f62987273d1f96e4f40fd2b3d8288b5a90be67eed9c293826430a451bbe",
+        "value": "7234000000000000000000000000000000000000000000000000000000000000"
+       },
+       {
+        "slot": "a6506c34d79b561e2f97f6021f2ca3d11f2df5d89047b29356e8d044b8f7e9ab",
+        "value": "0000000000000000000000000000000000000000000000000000000000000004"
+       },
+       {
+        "slot": "b359f627843a908e03883efb97a883ed817269bb1c3d28778c9c26ded67c65ed",
+        "value": "c300000000000000000000000000000000000000000000000000000000000000"
+       },
+       {
+        "slot": "bd46d80656ebd65ff40d271a180003a97a8f7200d2b0562e68a0b3455cd447d1",
+        "value": "0000000000000000000000000000000000000000000000000000000000000002"
+       },
+       {
+        "slot": "c164664631ab03247087a217b9b5b5fd834d26cf063555dba261bf56a84a5245",
+        "value": "7235000000000000000000000000000000000000000000000000000000000000"
+       },
+       {
+        "slot": "c20ac95bd1f18a98e5ed96b1b03ef2b328ecb52f3bbcd1e981a85385fa0fb5ba",
+        "value": "0000000000000000000000000000000000000000000000000000000000000002"
+       },
+       {
+        "slot": "ce567ee57ab6fc4db983c8b91ddce8041dca275d7f12d6abbdd933be257894cd",
+        "value": "7232000000000000000000000000000000000000000000000000000000000000"
+       },
+       {
+        "slot": "d4f3e3a6f5eecd0fe47411def9dabcdb3acd4759f22aa1975e240fb8aac49ef6",
+        "value": "0000000000000000000000000000000000000000000000000000000000000002"
+       },
+       {
+        "slot": "d8bca5e427ffd163d8a9ae9d34b57a2dc9411da674c0294a9a8e272173e6aa2c",
+        "value": "02d010428be6f3b780c73a79744fb2f2d741eb5e3efb81bcc1c7e60f0a2e12ed"
+       },
+       {
+        "slot": "dc49b01e3f36cb500c8ebb4d7fe830ee55f6e9a08d49aa6521d27c8d7f37e328",
+        "value": "0000000000000000000000000000000000000000000000000000000000000002"
+       },
+       {
+        "slot": "df9952ba1f261c68fa3fa17ad2a6520ec12be1c55b59da58ba0e0fbdebde7047",
+        "value": "84598ac1d66823c042c5d8a7882abddce2dd0d2e6a7cc927348420dc87d8d5ab"
+       },
+       {
+        "slot": "e00560690974f72bb582aba8e826ee38222838cda4354d63469358f7986ef5b2",
+        "value": "7231000000000000000000000000000000000000000000000000000000000000"
+       },
+       {
+        "slot": "e0dbe2e575b13a4989dfa51513fbb575a6faef4cd360b66bbf77abd16d92f3ff",
+        "value": "0000000000000000000000000000000000000000000000000000000000000005"
+       },
+       {
+        "slot": "e4756cc967765a03ac699a0196af5ec73c15ae2739f43da745666a02a12a2bc0",
+        "value": "23cf5b840be0e1118afd1a949ad0f3833198ffc381a0ef4bfc7ea028b4de4c94"
+       },
+       {
+        "slot": "e915d2240d003b807b886bdb9b4d9bb37d2c233dbc5025129bec1026e6b5322e",
+        "value": "0283a94286013ee9e7ea97bcd039e9fb273b2613c633fad49e547d32e2845602"
+       },
+       {
+        "slot": "efa6b7f0bacdcf81ddd8a710fb8420140ae07d47982dc167bb647c00d3f5f4fc",
+        "value": "0000000000000000000000000000000000000000000000000000000000000002"
+       },
+       {
+        "slot": "f5153c70c89c8b0c861b2546f614d01ee5aa5b0be85397ed9a1479d21e8dcada",
+        "value": "0000000000000000000000000000000000000000000000000000000000000002"
+       },
+       {
+        "slot": "f9cbfc25d4f0c781851051dab6f4c718e1de226a27432d5a3f292ef10f45db4f",
+        "value": "03e698cdfec1cd7d9a9c22da661661b67c9c477aea2b1f65d7adaea8d5790254"
+       }
+      ],
+      "pinnedGenesisCommitment": "23cf5b840be0e1118afd1a949ad0f3833198ffc381a0ef4bfc7ea028b4de4c94",
+      "pinnedProfileHash": "2c0cbdf0e018f9269ec448c4da39694f143516ccb019768251c344dc0552ef24",
+      "accepted": true
+     }
     }
    ],
    "submissions": [
@@ -982,6 +2055,7 @@
       "commitRound": "65536",
       "commitEpoch": "2",
       "commitTimestamp": "1764094337",
+      "previousHash": "788f256d104d45975e25e1ac662ac918f81aae6e0d924e2d0ffda2015b78ae56",
       "hash": "d18f2743f11c7ed2261afa42839f2445084502a7115806f5e19c575ce5301a56"
      },
      "indices": [
@@ -1051,6 +2125,7 @@
       "commitRound": "65536",
       "commitEpoch": "2",
       "commitTimestamp": "1764094337",
+      "previousHash": "788f256d104d45975e25e1ac662ac918f81aae6e0d924e2d0ffda2015b78ae56",
       "hash": "d18f2743f11c7ed2261afa42839f2445084502a7115806f5e19c575ce5301a56"
      },
      "indices": [
@@ -1120,6 +2195,7 @@
       "commitRound": "65536",
       "commitEpoch": "2",
       "commitTimestamp": "1764094337",
+      "previousHash": "788f256d104d45975e25e1ac662ac918f81aae6e0d924e2d0ffda2015b78ae56",
       "hash": "d18f2743f11c7ed2261afa42839f2445084502a7115806f5e19c575ce5301a56"
      },
      "indices": [
@@ -1215,6 +2291,7 @@
       "commitRound": "65536",
       "commitEpoch": "2",
       "commitTimestamp": "1764094337",
+      "previousHash": "788f256d104d45975e25e1ac662ac918f81aae6e0d924e2d0ffda2015b78ae56",
       "hash": "d18f2743f11c7ed2261afa42839f2445084502a7115806f5e19c575ce5301a56"
      },
      "indices": [
@@ -1297,6 +2374,7 @@
       "commitRound": "65543",
       "commitEpoch": "2",
       "commitTimestamp": "1764094344",
+      "previousHash": "d9a347debad6c7192cdc93b302f4bd69a7802b96765fb848f12417dd792ebe37",
       "hash": "d18f2743f11c7ed2261afa42839f2445084502a7115806f5e19c575ce5301a56"
      },
      "indices": [
@@ -1361,11 +2439,12 @@
       "votingEpoch": "2",
       "votingRound": "65539",
       "parent": "65538",
-      "exec": "858716df327d61ef9c3412e6bb18b7859e1a5b689b424b9fcc95d847dc8f7231",
+      "exec": "6a09af5e1513ff7c9a443bf6e02b90161444402c80940604ece408ba15209168",
       "voteTimestamp": "1764094339",
       "commitRound": "65538",
       "commitEpoch": "2",
       "commitTimestamp": "1764094339",
+      "previousHash": "86aa42990fa9b37eb6382a42039ab03e922667c5dc10da90de0588c0e1f30b44",
       "hash": "d18f2743f11c7ed2261afa42839f2445084502a7115806f5e19c575ce5301a56"
      },
      "indices": [
@@ -1379,7 +2458,7 @@
        "nodeId": "r2",
        "signer": "r2",
        "mutation": "",
-       "signature": "9548da98e1db5db7561fdfc0deac6ada68b9622785db97b5d2a7df9a9f0be061614d55522e469065f649aa42b24334a964ba28eb80ceb3ebf91390d69c7907a400",
+       "signature": "837486293cb8084fbdaa6dca07aa3f40cf3d0c02d1c1783af7e5273058090a5508ffb66ea2e204e065f7de3b6061dcacb5375d0c05604e5437eea5457d9fbfe101",
        "recoveredKey": "03cb029416b9907113979d8fac7e8058662897cc61083642d5bd4892dcb6fb28c3",
        "ecrecover": "4a1072f0a4c94f357886e6a137a6ec7eff3fdfca",
        "native": true,
@@ -1391,7 +2470,7 @@
        "nodeId": "r4",
        "signer": "r4",
        "mutation": "",
-       "signature": "24c89b83f85a903a18423547864f8abbc00b010d97a2522a2c2b1d99a0edf34a6ec4d481b8ceaa96341bc213c76f7def99308b0d817deae92536685c846e5c1301",
+       "signature": "a24579c190b802ce6dd7597bac2ee57c9b138c20c2e41784fe93a4b393158ca407a9b7e9c726a9835362b544fecc7153b0a0f16742c034c323292b90109742be00",
        "recoveredKey": "02d010428be6f3b780c73a79744fb2f2d741eb5e3efb81bcc1c7e60f0a2e12ed4f",
        "ecrecover": "02bc056aaed762465cf74294216244809fe216cb",
        "native": true,
@@ -1403,7 +2482,7 @@
        "nodeId": "r5",
        "signer": "r5",
        "mutation": "",
-       "signature": "db4e2b3b1f65f8a5ce6c44e440fa2b01fc4dca4330b3674d613630fcd2a5eb2408b51943e564957756d2d5c4824977e67f335f41bd5f08ab8e9795ba676f6dc201",
+       "signature": "90f7f9b4811420e204192bd2eaeda144d763afb6d6b5613fe2507f4a7682da4d28bba3e8d71c1056cf0d357e8a03d2a360ff1ca6436f759328fef249b3412ba500",
        "recoveredKey": "03e698cdfec1cd7d9a9c22da661661b67c9c477aea2b1f65d7adaea8d5790254bc",
        "ecrecover": "e276e3bcb3bd3792b00f6a53105069047d9409d3",
        "native": true,
@@ -1412,10 +2491,10 @@
       }
      ],
      "charged": 4,
-     "voteInfo": "8705784a726f6f742d766f74652f39323234626135383862666366376439353465303061366631333932613966646637616335353633623161326466323438376436373732613132383262616638021a000100031a000100025820858716df327d61ef9c3412e6bb18b7859e1a5b689b424b9fcc95d847dc8f72311a6925f183",
-     "previousHash": "b09b06f3ee60712865e908da9687c1a2296268bb28961f0933ebfb0ff86b1d3f",
-     "sigBytes": "d9985d8801051a00010002021a6925f1835820b09b06f3ee60712865e908da9687c1a2296268bb28961f0933ebfb0ff86b1d3f5820d18f2743f11c7ed2261afa42839f2445084502a7115806f5e19c575ce5301a56f6",
-     "digest": "647c286049f9a632247da55db8ebfd2c01b3d3075fda2586bf9ea6f2c2cccb6c",
+     "voteInfo": "8705784a726f6f742d766f74652f39323234626135383862666366376439353465303061366631333932613966646637616335353633623161326466323438376436373732613132383262616638021a000100031a0001000258206a09af5e1513ff7c9a443bf6e02b90161444402c80940604ece408ba152091681a6925f183",
+     "previousHash": "86aa42990fa9b37eb6382a42039ab03e922667c5dc10da90de0588c0e1f30b44",
+     "sigBytes": "d9985d8801051a00010002021a6925f183582086aa42990fa9b37eb6382a42039ab03e922667c5dc10da90de0588c0e1f30b445820d18f2743f11c7ed2261afa42839f2445084502a7115806f5e19c575ce5301a56f6",
+     "digest": "a87f9e6ee0e4cea3114fdfbdc3cf5083fcab36351f72d951dcfcef3094b7214f",
      "signedWeight": "11",
      "accept": true,
      "reason": "ok",
@@ -1435,6 +2514,7 @@
       "commitRound": "65535",
       "commitEpoch": "2",
       "commitTimestamp": "1764094336",
+      "previousHash": "97071fb8d384cb8039f95c5056faeddcdb50e0f5b1cb86be804a8cca9ca1b2e1",
       "hash": "c3f1b78b0a3b1414c6d513cdc987c98d315462d6f24b855ece0789780000e220"
      },
      "indices": [
@@ -1506,6 +2586,7 @@
       "commitRound": "65535",
       "commitEpoch": "2",
       "commitTimestamp": "1764094336",
+      "previousHash": "fa458b78e68a7a95a12359d8e64a74712be183aa54d4a1752137e03c2e7c74fe",
       "hash": "c3f1b78b0a3b1414c6d513cdc987c98d315462d6f24b855ece0789780000e220"
      },
      "indices": [
@@ -1572,12 +2653,13 @@
       "votingEpoch": "2",
       "votingRound": "65537",
       "parent": "65536",
-      "exec": "858716df327d61ef9c3412e6bb18b7859e1a5b689b424b9fcc95d847dc8f7231",
+      "exec": "6a09af5e1513ff7c9a443bf6e02b90161444402c80940604ece408ba15209168",
       "voteTimestamp": "1764094337",
       "commitRound": "65536",
       "commitEpoch": "2",
       "commitTimestamp": "1764094337",
-      "hash": "858716df327d61ef9c3412e6bb18b7859e1a5b689b424b9fcc95d847dc8f7231"
+      "previousHash": "b02bd6ac60a8e092d3d292552f87504d39c7c9b34783ddd20f70b48bea3633f1",
+      "hash": "6a09af5e1513ff7c9a443bf6e02b90161444402c80940604ece408ba15209168"
      },
      "indices": [
       1,
@@ -1590,7 +2672,7 @@
        "nodeId": "r2",
        "signer": "r2",
        "mutation": "",
-       "signature": "47ae0e9d5f47ca97487cc1511b1575c5d00f613bea8be09e7afc8e49d31a973477807683ebf83b923385fcc955a3fc2866a51f805546ce866753424a82746f0c00",
+       "signature": "917c38c99cbfa2c2f74f75b7032e56aba23723ef3681a79b53eb57ecab8e998d36b878e65c975ff9e44d8d0ca7d61b6589efbd330bf18ba98a36f431ae0eed5101",
        "recoveredKey": "03cb029416b9907113979d8fac7e8058662897cc61083642d5bd4892dcb6fb28c3",
        "ecrecover": "4a1072f0a4c94f357886e6a137a6ec7eff3fdfca",
        "native": true,
@@ -1602,7 +2684,7 @@
        "nodeId": "r4",
        "signer": "r4",
        "mutation": "",
-       "signature": "93aac269e722e1ba840946e48e54ad0b1dd30eba304f51e0d5dc589fc1349daf0eac38d309b60b4da683a90f8035e9fbd1bb757800df3d416127d787671d65fc01",
+       "signature": "ee16782253488c5386f98e25afeb8e0fdd60db2f31c26a09f38c35dbee03392406b5282b88fd704fa670f7ca09a02fff5c1c6bcf969f3582ab1823975823606400",
        "recoveredKey": "02d010428be6f3b780c73a79744fb2f2d741eb5e3efb81bcc1c7e60f0a2e12ed4f",
        "ecrecover": "02bc056aaed762465cf74294216244809fe216cb",
        "native": true,
@@ -1614,7 +2696,7 @@
        "nodeId": "r5",
        "signer": "r5",
        "mutation": "",
-       "signature": "9ff8ebdf002c2cf15189e6b29a157b377fca643e000b4780c1901c254f3862c8736bdb7f6b4fecd6d69a4717ad3cbf7390a7d968db819c0415c5fb520dc822c201",
+       "signature": "19cbb17aaa3df0b601abe05a00db2c1ed13d2691ad794e37b9ebd9c7ec39fd83035f22a566d2ca9ca7d673b1f6855f07c6819e55929f780f59da94a94dc3021301",
        "recoveredKey": "03e698cdfec1cd7d9a9c22da661661b67c9c477aea2b1f65d7adaea8d5790254bc",
        "ecrecover": "e276e3bcb3bd3792b00f6a53105069047d9409d3",
        "native": true,
@@ -1623,10 +2705,10 @@
       }
      ],
      "charged": 4,
-     "voteInfo": "8705784a726f6f742d766f74652f39323234626135383862666366376439353465303061366631333932613966646637616335353633623161326466323438376436373732613132383262616638021a000100011a000100005820858716df327d61ef9c3412e6bb18b7859e1a5b689b424b9fcc95d847dc8f72311a6925f181",
-     "previousHash": "3e42cbae332f4bd9fbaec4c21ee286c10b16660feeb9c87ea94aaf1080cd4af7",
-     "sigBytes": "d9985d8801051a00010000021a6925f18158203e42cbae332f4bd9fbaec4c21ee286c10b16660feeb9c87ea94aaf1080cd4af75820858716df327d61ef9c3412e6bb18b7859e1a5b689b424b9fcc95d847dc8f7231f6",
-     "digest": "6f110c28417644c7e25b5ae14e973f532da1ce4c1bcd5210b204087fc322cee9",
+     "voteInfo": "8705784a726f6f742d766f74652f39323234626135383862666366376439353465303061366631333932613966646637616335353633623161326466323438376436373732613132383262616638021a000100011a0001000058206a09af5e1513ff7c9a443bf6e02b90161444402c80940604ece408ba152091681a6925f181",
+     "previousHash": "b02bd6ac60a8e092d3d292552f87504d39c7c9b34783ddd20f70b48bea3633f1",
+     "sigBytes": "d9985d8801051a00010000021a6925f1815820b02bd6ac60a8e092d3d292552f87504d39c7c9b34783ddd20f70b48bea3633f158206a09af5e1513ff7c9a443bf6e02b90161444402c80940604ece408ba15209168f6",
+     "digest": "8f8062731e47efe2531f7af83b7504dc2560cb26ccc71864e29fd8f9d1643623",
      "signedWeight": "11",
      "accept": false,
      "reason": "exempt-terminal-root",
@@ -1643,12 +2725,13 @@
       "votingEpoch": "2",
       "votingRound": "65577",
       "parent": "65576",
-      "exec": "858716df327d61ef9c3412e6bb18b7859e1a5b689b424b9fcc95d847dc8f7231",
+      "exec": "6a09af5e1513ff7c9a443bf6e02b90161444402c80940604ece408ba15209168",
       "voteTimestamp": "1764094377",
       "commitRound": "65576",
       "commitEpoch": "2",
       "commitTimestamp": "1764094377",
-      "hash": "858716df327d61ef9c3412e6bb18b7859e1a5b689b424b9fcc95d847dc8f7231"
+      "previousHash": "84adcfc46c4bb368775a4350f9f886b7d7b22d62e09d2f31658c5fa23ba2e8e6",
+      "hash": "6a09af5e1513ff7c9a443bf6e02b90161444402c80940604ece408ba15209168"
      },
      "indices": [
       1,
@@ -1661,7 +2744,7 @@
        "nodeId": "r2",
        "signer": "r2",
        "mutation": "",
-       "signature": "387bd5fb7eb6dc0590d67f091861a33a593351d2ce83744cdfbb62e450cb628372da8e180fa3d5ef3ac3200d9f75456629b1e8a20217ecbbd7880054bf6dfc7a00",
+       "signature": "eb78f55922fa424aed8af6c24f3fbb1268d4f954905de8dfba2d2a0df5eb45661273d79518a0f2eeb9caa92072d3ad617f22658c770c5ef3e9491e7b28a826b700",
        "recoveredKey": "03cb029416b9907113979d8fac7e8058662897cc61083642d5bd4892dcb6fb28c3",
        "ecrecover": "4a1072f0a4c94f357886e6a137a6ec7eff3fdfca",
        "native": true,
@@ -1673,7 +2756,7 @@
        "nodeId": "r4",
        "signer": "r4",
        "mutation": "",
-       "signature": "110a3a5674b279a08edfc5c02ef3b4763c78df179c338ac915c4f57df999aa484d2afa4df7039cfe2ed650ffbc2700c2bd7dc0c2bcf07620944765b157417cb701",
+       "signature": "ee76cb1b4b21cbd5abb83f2471c744dae0609ed66cbd5e0201cf21db15e4c8af42bc7070079e8dfa4110d3af529731ea47622c03b7ded5bc79a32a0dbf196b8000",
        "recoveredKey": "02d010428be6f3b780c73a79744fb2f2d741eb5e3efb81bcc1c7e60f0a2e12ed4f",
        "ecrecover": "02bc056aaed762465cf74294216244809fe216cb",
        "native": true,
@@ -1685,7 +2768,7 @@
        "nodeId": "r5",
        "signer": "r5",
        "mutation": "",
-       "signature": "f48d2075b10b116a17a7a9ef8a5f39b6fac5527327b6a16cd19af8354d6d69cd2d1230a56ef7c0f636bf17ef388f06a43919b601bbacc43d75b418939ec6bc3f01",
+       "signature": "9966b1038f8c47b66ef38e64f913c38c31682bc6591c38f85e0dbbc6ad1582dd13321674c8856e22305e314d4a05bcb327ff8bfe0b1ccfe823aac994af272ae400",
        "recoveredKey": "03e698cdfec1cd7d9a9c22da661661b67c9c477aea2b1f65d7adaea8d5790254bc",
        "ecrecover": "e276e3bcb3bd3792b00f6a53105069047d9409d3",
        "native": true,
@@ -1694,10 +2777,10 @@
       }
      ],
      "charged": 4,
-     "voteInfo": "8705784a726f6f742d766f74652f39323234626135383862666366376439353465303061366631333932613966646637616335353633623161326466323438376436373732613132383262616638021a000100291a000100285820858716df327d61ef9c3412e6bb18b7859e1a5b689b424b9fcc95d847dc8f72311a6925f1a9",
-     "previousHash": "e1a32791162409df87a4b3649b9508d7b4434a995256de0785dd7580b81b6d1f",
-     "sigBytes": "d9985d8801051a00010028021a6925f1a95820e1a32791162409df87a4b3649b9508d7b4434a995256de0785dd7580b81b6d1f5820858716df327d61ef9c3412e6bb18b7859e1a5b689b424b9fcc95d847dc8f7231f6",
-     "digest": "cc21106027bb0ad20c9910e0d5717b947ea364401e168ee90fedb2d033a07650",
+     "voteInfo": "8705784a726f6f742d766f74652f39323234626135383862666366376439353465303061366631333932613966646637616335353633623161326466323438376436373732613132383262616638021a000100291a0001002858206a09af5e1513ff7c9a443bf6e02b90161444402c80940604ece408ba152091681a6925f1a9",
+     "previousHash": "84adcfc46c4bb368775a4350f9f886b7d7b22d62e09d2f31658c5fa23ba2e8e6",
+     "sigBytes": "d9985d8801051a00010028021a6925f1a9582084adcfc46c4bb368775a4350f9f886b7d7b22d62e09d2f31658c5fa23ba2e8e658206a09af5e1513ff7c9a443bf6e02b90161444402c80940604ece408ba15209168f6",
+     "digest": "22d203c2a13baf18c67fdd1fe9ede985d007f0636d0d94c2c1b598034606a8df",
      "signedWeight": "11",
      "accept": false,
      "reason": "exempt-terminal-root",
@@ -1719,7 +2802,8 @@
       "commitRound": "65577",
       "commitEpoch": "2",
       "commitTimestamp": "1764094378",
-      "hash": "858716df327d61ef9c3412e6bb18b7859e1a5b689b424b9fcc95d847dc8f7231"
+      "previousHash": "8f7724e61a425a50bed79ef5aecace9aed3ca9e83752095a409aa32ff65c0cde",
+      "hash": "6a09af5e1513ff7c9a443bf6e02b90161444402c80940604ece408ba15209168"
      },
      "indices": [
       1,
@@ -1732,7 +2816,7 @@
        "nodeId": "r2",
        "signer": "r2",
        "mutation": "",
-       "signature": "698f4184ebfcdfe7e698e49bd24c35a975a99e0118336b026f8001ca8c3680b75bc61d39a8211db0f4c053cd3d1eb1d1bf195f28e95f2d137bb78cd802fc82ab00",
+       "signature": "76df234cbc866ef2eb8e1011fd8b91d63488022237cc6d64d45789741cd5eef3236807ad8442d4e865302b27581ab6910fef3597cd92a4dc63c913dff086906401",
        "recoveredKey": "03cb029416b9907113979d8fac7e8058662897cc61083642d5bd4892dcb6fb28c3",
        "ecrecover": "4a1072f0a4c94f357886e6a137a6ec7eff3fdfca",
        "native": true,
@@ -1744,7 +2828,7 @@
        "nodeId": "r4",
        "signer": "r4",
        "mutation": "",
-       "signature": "bd982a163e3889ec36fb43cfce2f173a016ab7fbd7396e28ac8dfe34f408779113df3b94be8a1fff996f826a4e41922b1e96e0b47098c9f02f362a02dae9111401",
+       "signature": "a0db09177112b672de6f04eca17a12f725f45a4d81825ad6b1821d516e7ae915330109b0c4938d245a1443b99cdf4622e08faa6dc8e4bf2d82a220c42fcf1dd101",
        "recoveredKey": "02d010428be6f3b780c73a79744fb2f2d741eb5e3efb81bcc1c7e60f0a2e12ed4f",
        "ecrecover": "02bc056aaed762465cf74294216244809fe216cb",
        "native": true,
@@ -1756,7 +2840,7 @@
        "nodeId": "r5",
        "signer": "r5",
        "mutation": "",
-       "signature": "59be0a3ead9dc8384b6431f081f214bd114ae9419f5202dcfb0887c48ba3ad1f1feab38ab341950fd2e8ca171ed309209a0e1bc632a40e60466f59a75051ccd600",
+       "signature": "c442c79e9007466efbc7d2489bcd3688baf9b49fa8d3cace4da4a13b9cdf04025a4ff721d13a782c3e8a7d386a5365354dba35487ab983557f72b3216bc6ff6200",
        "recoveredKey": "03e698cdfec1cd7d9a9c22da661661b67c9c477aea2b1f65d7adaea8d5790254bc",
        "ecrecover": "e276e3bcb3bd3792b00f6a53105069047d9409d3",
        "native": true,
@@ -1767,8 +2851,8 @@
      "charged": 4,
      "voteInfo": "8705784a726f6f742d766f74652f39323234626135383862666366376439353465303061366631333932613966646637616335353633623161326466323438376436373732613132383262616638021a0001002a1a0001002958203c65c3403eaa79aa8d0ef29f43d5892ad1016f304782e8ce47d8565b4d5b5dc11a6925f1aa",
      "previousHash": "8f7724e61a425a50bed79ef5aecace9aed3ca9e83752095a409aa32ff65c0cde",
-     "sigBytes": "d9985d8801051a00010029021a6925f1aa58208f7724e61a425a50bed79ef5aecace9aed3ca9e83752095a409aa32ff65c0cde5820858716df327d61ef9c3412e6bb18b7859e1a5b689b424b9fcc95d847dc8f7231f6",
-     "digest": "e76d897572ab4d210c419e0539af52e1dcd3d8f3590717956b71d9332e1d3565",
+     "sigBytes": "d9985d8801051a00010029021a6925f1aa58208f7724e61a425a50bed79ef5aecace9aed3ca9e83752095a409aa32ff65c0cde58206a09af5e1513ff7c9a443bf6e02b90161444402c80940604ece408ba15209168f6",
+     "digest": "fea8f05ac0873001cef53379e19c94f16cb1bbed6e2992e406c24d80652a6abb",
      "signedWeight": "11",
      "accept": false,
      "reason": "exempt-terminal-root",
@@ -1790,6 +2874,7 @@
       "commitRound": "65536",
       "commitEpoch": "2",
       "commitTimestamp": "1764094337",
+      "previousHash": "788f256d104d45975e25e1ac662ac918f81aae6e0d924e2d0ffda2015b78ae56",
       "hash": "d18f2743f11c7ed2261afa42839f2445084502a7115806f5e19c575ce5301a56"
      },
      "indices": [
@@ -1835,6 +2920,7 @@
       "commitRound": "65536",
       "commitEpoch": "2",
       "commitTimestamp": "1764094337",
+      "previousHash": "788f256d104d45975e25e1ac662ac918f81aae6e0d924e2d0ffda2015b78ae56",
       "hash": "d18f2743f11c7ed2261afa42839f2445084502a7115806f5e19c575ce5301a56"
      },
      "indices": [
@@ -1906,6 +2992,7 @@
       "commitRound": "65536",
       "commitEpoch": "2",
       "commitTimestamp": "1764094337",
+      "previousHash": "788f256d104d45975e25e1ac662ac918f81aae6e0d924e2d0ffda2015b78ae56",
       "hash": "d18f2743f11c7ed2261afa42839f2445084502a7115806f5e19c575ce5301a56"
      },
      "indices": [
@@ -1977,6 +3064,7 @@
       "commitRound": "65536",
       "commitEpoch": "2",
       "commitTimestamp": "1764094337",
+      "previousHash": "788f256d104d45975e25e1ac662ac918f81aae6e0d924e2d0ffda2015b78ae56",
       "hash": "d18f2743f11c7ed2261afa42839f2445084502a7115806f5e19c575ce5301a56"
      },
      "indices": [
@@ -2074,6 +3162,7 @@
       "commitRound": "65536",
       "commitEpoch": "2",
       "commitTimestamp": "1764094337",
+      "previousHash": "788f256d104d45975e25e1ac662ac918f81aae6e0d924e2d0ffda2015b78ae56",
       "hash": "d18f2743f11c7ed2261afa42839f2445084502a7115806f5e19c575ce5301a56"
      },
      "indices": [
@@ -2171,6 +3260,7 @@
       "commitRound": "65536",
       "commitEpoch": "2",
       "commitTimestamp": "1764094337",
+      "previousHash": "788f256d104d45975e25e1ac662ac918f81aae6e0d924e2d0ffda2015b78ae56",
       "hash": "d18f2743f11c7ed2261afa42839f2445084502a7115806f5e19c575ce5301a56"
      },
      "indices": [
@@ -2268,6 +3358,7 @@
       "commitRound": "65536",
       "commitEpoch": "2",
       "commitTimestamp": "1764094337",
+      "previousHash": "788f256d104d45975e25e1ac662ac918f81aae6e0d924e2d0ffda2015b78ae56",
       "hash": "d18f2743f11c7ed2261afa42839f2445084502a7115806f5e19c575ce5301a56"
      },
      "indices": [
@@ -2365,6 +3456,7 @@
       "commitRound": "65536",
       "commitEpoch": "2",
       "commitTimestamp": "1764094337",
+      "previousHash": "788f256d104d45975e25e1ac662ac918f81aae6e0d924e2d0ffda2015b78ae56",
       "hash": "d18f2743f11c7ed2261afa42839f2445084502a7115806f5e19c575ce5301a56"
      },
      "indices": [
@@ -2462,6 +3554,7 @@
       "commitRound": "65536",
       "commitEpoch": "2",
       "commitTimestamp": "1764094337",
+      "previousHash": "788f256d104d45975e25e1ac662ac918f81aae6e0d924e2d0ffda2015b78ae56",
       "hash": "d18f2743f11c7ed2261afa42839f2445084502a7115806f5e19c575ce5301a56"
      },
      "indices": [
@@ -2559,6 +3652,7 @@
       "commitRound": "65536",
       "commitEpoch": "2",
       "commitTimestamp": "1764094337",
+      "previousHash": "788f256d104d45975e25e1ac662ac918f81aae6e0d924e2d0ffda2015b78ae56",
       "hash": "d18f2743f11c7ed2261afa42839f2445084502a7115806f5e19c575ce5301a56"
      },
      "indices": [
@@ -2656,6 +3750,7 @@
       "commitRound": "65536",
       "commitEpoch": "2",
       "commitTimestamp": "1764094337",
+      "previousHash": "788f256d104d45975e25e1ac662ac918f81aae6e0d924e2d0ffda2015b78ae56",
       "hash": "d18f2743f11c7ed2261afa42839f2445084502a7115806f5e19c575ce5301a56"
      },
      "indices": [
@@ -2753,6 +3848,7 @@
       "commitRound": "65536",
       "commitEpoch": "2",
       "commitTimestamp": "1764094337",
+      "previousHash": "788f256d104d45975e25e1ac662ac918f81aae6e0d924e2d0ffda2015b78ae56",
       "hash": "d18f2743f11c7ed2261afa42839f2445084502a7115806f5e19c575ce5301a56"
      },
      "indices": [
@@ -2850,6 +3946,7 @@
       "commitRound": "65536",
       "commitEpoch": "2",
       "commitTimestamp": "1764094337",
+      "previousHash": "788f256d104d45975e25e1ac662ac918f81aae6e0d924e2d0ffda2015b78ae56",
       "hash": "d18f2743f11c7ed2261afa42839f2445084502a7115806f5e19c575ce5301a56"
      },
      "indices": [
@@ -2947,6 +4044,7 @@
       "commitRound": "65536",
       "commitEpoch": "2",
       "commitTimestamp": "1764094337",
+      "previousHash": "788f256d104d45975e25e1ac662ac918f81aae6e0d924e2d0ffda2015b78ae56",
       "hash": "d18f2743f11c7ed2261afa42839f2445084502a7115806f5e19c575ce5301a56"
      },
      "indices": [
@@ -3044,6 +4142,7 @@
       "commitRound": "65536",
       "commitEpoch": "2",
       "commitTimestamp": "1764094337",
+      "previousHash": "788f256d104d45975e25e1ac662ac918f81aae6e0d924e2d0ffda2015b78ae56",
       "hash": "d18f2743f11c7ed2261afa42839f2445084502a7115806f5e19c575ce5301a56"
      },
      "indices": [
@@ -3141,6 +4240,7 @@
       "commitRound": "65536",
       "commitEpoch": "2",
       "commitTimestamp": "1764094337",
+      "previousHash": "788f256d104d45975e25e1ac662ac918f81aae6e0d924e2d0ffda2015b78ae56",
       "hash": "d18f2743f11c7ed2261afa42839f2445084502a7115806f5e19c575ce5301a56"
      },
      "indices": [
@@ -3238,6 +4338,7 @@
       "commitRound": "65536",
       "commitEpoch": "2",
       "commitTimestamp": "1764094337",
+      "previousHash": "788f256d104d45975e25e1ac662ac918f81aae6e0d924e2d0ffda2015b78ae56",
       "hash": "d18f2743f11c7ed2261afa42839f2445084502a7115806f5e19c575ce5301a56"
      },
      "indices": [
@@ -3310,6 +4411,7 @@
       "commitRound": "65536",
       "commitEpoch": "2",
       "commitTimestamp": "1764094337",
+      "previousHash": "788f256d104d45975e25e1ac662ac918f81aae6e0d924e2d0ffda2015b78ae56",
       "hash": "d18f2743f11c7ed2261afa42839f2445084502a7115806f5e19c575ce5301a56"
      },
      "indices": [
@@ -3394,6 +4496,7 @@
       "commitRound": "65536",
       "commitEpoch": "2",
       "commitTimestamp": "1764094337",
+      "previousHash": "788f256d104d45975e25e1ac662ac918f81aae6e0d924e2d0ffda2015b78ae56",
       "hash": "d18f2743f11c7ed2261afa42839f2445084502a7115806f5e19c575ce5301a56"
      },
      "indices": [
@@ -3478,6 +4581,7 @@
       "commitRound": "65536",
       "commitEpoch": "2",
       "commitTimestamp": "1764094337",
+      "previousHash": "788f256d104d45975e25e1ac662ac918f81aae6e0d924e2d0ffda2015b78ae56",
       "hash": "d18f2743f11c7ed2261afa42839f2445084502a7115806f5e19c575ce5301a56"
      },
      "indices": [
@@ -3562,6 +4666,7 @@
       "commitRound": "65536",
       "commitEpoch": "2",
       "commitTimestamp": "1764094337",
+      "previousHash": "788f256d104d45975e25e1ac662ac918f81aae6e0d924e2d0ffda2015b78ae56",
       "hash": "d18f2743f11c7ed2261afa42839f2445084502a7115806f5e19c575ce5301a56"
      },
      "indices": [
@@ -3646,6 +4751,7 @@
       "commitRound": "65536",
       "commitEpoch": "2",
       "commitTimestamp": "1764094337",
+      "previousHash": "788f256d104d45975e25e1ac662ac918f81aae6e0d924e2d0ffda2015b78ae56",
       "hash": "d18f2743f11c7ed2261afa42839f2445084502a7115806f5e19c575ce5301a56"
      },
      "indices": [
@@ -3717,6 +4823,7 @@
       "commitRound": "65536",
       "commitEpoch": "2",
       "commitTimestamp": "1764094337",
+      "previousHash": "788f256d104d45975e25e1ac662ac918f81aae6e0d924e2d0ffda2015b78ae56",
       "hash": "d18f2743f11c7ed2261afa42839f2445084502a7115806f5e19c575ce5301a56"
      },
      "indices": [
@@ -3776,6 +4883,7 @@
       "commitRound": "65536",
       "commitEpoch": "2",
       "commitTimestamp": "1764094337",
+      "previousHash": "788f256d104d45975e25e1ac662ac918f81aae6e0d924e2d0ffda2015b78ae56",
       "hash": "d18f2743f11c7ed2261afa42839f2445084502a7115806f5e19c575ce5301a56"
      },
      "indices": [],
@@ -3808,6 +4916,7 @@
       "commitRound": "65536",
       "commitEpoch": "2",
       "commitTimestamp": "1764094337",
+      "previousHash": "788f256d104d45975e25e1ac662ac918f81aae6e0d924e2d0ffda2015b78ae56",
       "hash": "d18f2743f11c7ed2261afa42839f2445084502a7115806f5e19c575ce5301a56"
      },
      "indices": [
@@ -3869,7 +4978,7 @@
     },
     {
      "id": "no.wrong-genesis",
-     "description": "signatures over the statement under another root genesis (another VI, so another previousHash)",
+     "description": "signatures over the statement under another root genesis, presented with the opening under the installed G: the signed previousHash differs, the signatures fail (ok.foreign-genesis.opaque is the same seal with its own word)",
      "seal": "post.at-a",
      "statement": {
       "votingEpoch": "2",
@@ -3880,6 +4989,7 @@
       "commitRound": "65536",
       "commitEpoch": "2",
       "commitTimestamp": "1764094337",
+      "previousHash": "788f256d104d45975e25e1ac662ac918f81aae6e0d924e2d0ffda2015b78ae56",
       "hash": "d18f2743f11c7ed2261afa42839f2445084502a7115806f5e19c575ce5301a56"
      },
      "indices": [
@@ -3940,6 +5050,71 @@
      "offence": ""
     },
     {
+     "id": "ok.foreign-genesis.opaque",
+     "description": "the foreign.genesis seal with its own signed previousHash: N matches and e's quorum signed it, so the opaque rule charges it; only key isolation across root histories protects an honest signer (D5 section 2.1)",
+     "seal": "foreign.genesis",
+     "statement": {
+      "commitRound": "65536",
+      "commitEpoch": "2",
+      "commitTimestamp": "1764094337",
+      "previousHash": "ce782923966071afba980e69c95c1277ae9f9099dc41fa0a2168d2987f203995",
+      "hash": "d18f2743f11c7ed2261afa42839f2445084502a7115806f5e19c575ce5301a56"
+     },
+     "indices": [
+      1,
+      3,
+      4
+     ],
+     "signatures": [
+      {
+       "index": 1,
+       "nodeId": "r2",
+       "signer": "r2",
+       "mutation": "",
+       "signature": "e7b0a34888724a040c661df62a544385790d8f238091523f5ca7c75eb89a97a2071990495022426463e6b26e540ab6aaff36458b452ae8cdddc32c324325b19100",
+       "recoveredKey": "03cb029416b9907113979d8fac7e8058662897cc61083642d5bd4892dcb6fb28c3",
+       "ecrecover": "4a1072f0a4c94f357886e6a137a6ec7eff3fdfca",
+       "native": true,
+       "valid": true,
+       "reason": "ok"
+      },
+      {
+       "index": 3,
+       "nodeId": "r4",
+       "signer": "r4",
+       "mutation": "",
+       "signature": "81c7142a7a0296792b568c9956881bc852ecb41725ad3946126ac2c0666d7cb95d3c827ab5a47b650e18f5a072c3c3499e7ca9868ede785066ef9da8ebc65aa501",
+       "recoveredKey": "02d010428be6f3b780c73a79744fb2f2d741eb5e3efb81bcc1c7e60f0a2e12ed4f",
+       "ecrecover": "02bc056aaed762465cf74294216244809fe216cb",
+       "native": true,
+       "valid": true,
+       "reason": "ok"
+      },
+      {
+       "index": 4,
+       "nodeId": "r5",
+       "signer": "r5",
+       "mutation": "",
+       "signature": "35e218a231bfd56849249ca3bf8caaf6b48f227719e0ee78971757c398749ea73ba368237e6a2ce8030fffaf33c7eee19556299d1c5827cd85645d443b332aa101",
+       "recoveredKey": "03e698cdfec1cd7d9a9c22da661661b67c9c477aea2b1f65d7adaea8d5790254bc",
+       "ecrecover": "e276e3bcb3bd3792b00f6a53105069047d9409d3",
+       "native": true,
+       "valid": true,
+       "reason": "ok"
+      }
+     ],
+     "charged": 4,
+     "voteInfo": "",
+     "previousHash": "ce782923966071afba980e69c95c1277ae9f9099dc41fa0a2168d2987f203995",
+     "sigBytes": "d9985d8801051a00010000021a6925f1815820ce782923966071afba980e69c95c1277ae9f9099dc41fa0a2168d2987f2039955820d18f2743f11c7ed2261afa42839f2445084502a7115806f5e19c575ce5301a56f6",
+     "digest": "aa3a84f6f5d770f649d39aaf0366367999ce04d78afd18629171a952b5ada553",
+     "signedWeight": "11",
+     "accept": true,
+     "reason": "ok",
+     "failures": [],
+     "offence": "foreign.genesis/r5"
+    },
+    {
      "id": "no.rotated-key",
      "description": "r5 signs with its epoch e+1 key: the historical key is installed for e",
      "seal": "post.at-a",
@@ -3952,6 +5127,7 @@
       "commitRound": "65536",
       "commitEpoch": "2",
       "commitTimestamp": "1764094337",
+      "previousHash": "788f256d104d45975e25e1ac662ac918f81aae6e0d924e2d0ffda2015b78ae56",
       "hash": "d18f2743f11c7ed2261afa42839f2445084502a7115806f5e19c575ce5301a56"
      },
      "indices": [
@@ -4024,6 +5200,7 @@
       "commitRound": "65536",
       "commitEpoch": "3",
       "commitTimestamp": "1764094337",
+      "previousHash": "788f256d104d45975e25e1ac662ac918f81aae6e0d924e2d0ffda2015b78ae56",
       "hash": "d18f2743f11c7ed2261afa42839f2445084502a7115806f5e19c575ce5301a56"
      },
      "indices": [
@@ -4084,7 +5261,7 @@
     },
     {
      "id": "no.statement.voting-epoch",
-     "description": "votingEpoch e+1 (a successor statement)",
+     "description": "the opening altered to votingEpoch e+1: another previousHash, the signatures fail",
      "seal": "post.at-a",
      "statement": {
       "votingEpoch": "3",
@@ -4095,6 +5272,7 @@
       "commitRound": "65536",
       "commitEpoch": "2",
       "commitTimestamp": "1764094337",
+      "previousHash": "0f751a5cfcf1897db01184ca4201d13c7a9f87e87e74f7dc7c21b16b0418a3c8",
       "hash": "d18f2743f11c7ed2261afa42839f2445084502a7115806f5e19c575ce5301a56"
      },
      "indices": [
@@ -4109,11 +5287,11 @@
        "signer": "r2",
        "mutation": "",
        "signature": "557fd0a7e6416e17eda912570839b3db923318ad2eadce41fc0b013f3555768503f50581152a8f65ba310c5ca2c2f5d3a2ff081176e1c63b513b4b19a31c2cca01",
-       "recoveredKey": "03cb029416b9907113979d8fac7e8058662897cc61083642d5bd4892dcb6fb28c3",
-       "ecrecover": "4a1072f0a4c94f357886e6a137a6ec7eff3fdfca",
-       "native": true,
-       "valid": true,
-       "reason": "ok"
+       "recoveredKey": "03b99d1f41a226447ea9f3a8a7c4e1eaf6e5b3c703eb8784f63905e2763de42cdf",
+       "ecrecover": "5fde5b40838b310b11ac020c840f078fac436809",
+       "native": false,
+       "valid": false,
+       "reason": "key"
       },
       {
        "index": 3,
@@ -4121,11 +5299,11 @@
        "signer": "r4",
        "mutation": "",
        "signature": "65bf62dbd439ea07f5542998dca831ffddef8504f21449414ed0c2623c315de6768acc2f9179064d4c14c2d324a76a092e9cd448ebd79806947d3a7da832d5b600",
-       "recoveredKey": "02d010428be6f3b780c73a79744fb2f2d741eb5e3efb81bcc1c7e60f0a2e12ed4f",
-       "ecrecover": "02bc056aaed762465cf74294216244809fe216cb",
-       "native": true,
-       "valid": true,
-       "reason": "ok"
+       "recoveredKey": "029c03faf92248651712458969d780e256fc67af02bd67050f79e60f7f36526007",
+       "ecrecover": "86dfa5e6c549a18291aff1069276545549130ca9",
+       "native": false,
+       "valid": false,
+       "reason": "key"
       },
       {
        "index": 4,
@@ -4133,29 +5311,30 @@
        "signer": "r5",
        "mutation": "",
        "signature": "36dfe9bb8637e29f41fa778cd1d5496631afd68c439a6d633dbe16765cf133a41cfc54052d78e0c413e90c49c513f3fd51c572095a5254232b704e9f8badfdc201",
-       "recoveredKey": "03e698cdfec1cd7d9a9c22da661661b67c9c477aea2b1f65d7adaea8d5790254bc",
-       "ecrecover": "e276e3bcb3bd3792b00f6a53105069047d9409d3",
-       "native": true,
-       "valid": true,
-       "reason": "ok"
+       "recoveredKey": "02fcd8ecd3edb9a1a9aa47d84c3f1684ab0ab270760ea55f01e69a0d7a8c13cc77",
+       "ecrecover": "dfda918ab42b84572200b834606f7e41017990c3",
+       "native": false,
+       "valid": false,
+       "reason": "key"
       }
      ],
      "charged": 4,
-     "voteInfo": "",
-     "previousHash": "",
-     "sigBytes": "",
-     "digest": "",
-     "signedWeight": "11",
+     "voteInfo": "8705784a726f6f742d766f74652f39323234626135383862666366376439353465303061366631333932613966646637616335353633623161326466323438376436373732613132383262616638031a000100011a0001000058203c65c3403eaa79aa8d0ef29f43d5892ad1016f304782e8ce47d8565b4d5b5dc11a6925f181",
+     "previousHash": "0f751a5cfcf1897db01184ca4201d13c7a9f87e87e74f7dc7c21b16b0418a3c8",
+     "sigBytes": "d9985d8801051a00010000021a6925f18158200f751a5cfcf1897db01184ca4201d13c7a9f87e87e74f7dc7c21b16b0418a3c85820d18f2743f11c7ed2261afa42839f2445084502a7115806f5e19c575ce5301a56f6",
+     "digest": "a2210d22e028ed30319d20b04295bad0627fe101dabad8300273ee44658c2cec",
+     "signedWeight": "0",
      "accept": false,
-     "reason": "statement",
+     "reason": "signature",
      "failures": [
-      "statement"
+      "signature",
+      "below-threshold"
      ],
      "offence": ""
     },
     {
      "id": "no.statement.commit-round-not-below",
-     "description": "commitRound = votingRound",
+     "description": "commitRound altered to the voting round: other seal bytes, the signatures fail",
      "seal": "post.at-a",
      "statement": {
       "votingEpoch": "2",
@@ -4166,6 +5345,7 @@
       "commitRound": "65537",
       "commitEpoch": "2",
       "commitTimestamp": "1764094337",
+      "previousHash": "788f256d104d45975e25e1ac662ac918f81aae6e0d924e2d0ffda2015b78ae56",
       "hash": "d18f2743f11c7ed2261afa42839f2445084502a7115806f5e19c575ce5301a56"
      },
      "indices": [
@@ -4180,11 +5360,11 @@
        "signer": "r2",
        "mutation": "",
        "signature": "557fd0a7e6416e17eda912570839b3db923318ad2eadce41fc0b013f3555768503f50581152a8f65ba310c5ca2c2f5d3a2ff081176e1c63b513b4b19a31c2cca01",
-       "recoveredKey": "03cb029416b9907113979d8fac7e8058662897cc61083642d5bd4892dcb6fb28c3",
-       "ecrecover": "4a1072f0a4c94f357886e6a137a6ec7eff3fdfca",
-       "native": true,
-       "valid": true,
-       "reason": "ok"
+       "recoveredKey": "03b349ee8e3218dafe9429b0355bafbb7a1f26141a12a30287208dbb5e833c2df2",
+       "ecrecover": "992c4357831f3535ecaed49db70890de270239df",
+       "native": false,
+       "valid": false,
+       "reason": "key"
       },
       {
        "index": 3,
@@ -4192,11 +5372,11 @@
        "signer": "r4",
        "mutation": "",
        "signature": "65bf62dbd439ea07f5542998dca831ffddef8504f21449414ed0c2623c315de6768acc2f9179064d4c14c2d324a76a092e9cd448ebd79806947d3a7da832d5b600",
-       "recoveredKey": "02d010428be6f3b780c73a79744fb2f2d741eb5e3efb81bcc1c7e60f0a2e12ed4f",
-       "ecrecover": "02bc056aaed762465cf74294216244809fe216cb",
-       "native": true,
-       "valid": true,
-       "reason": "ok"
+       "recoveredKey": "021225872e83ea175ebd09fc273ed24da92575c20fad0c99c5857158cfdefa4554",
+       "ecrecover": "df71ee0731ffff90e8aca8cbb68efedf3804ec84",
+       "native": false,
+       "valid": false,
+       "reason": "key"
       },
       {
        "index": 4,
@@ -4204,29 +5384,30 @@
        "signer": "r5",
        "mutation": "",
        "signature": "36dfe9bb8637e29f41fa778cd1d5496631afd68c439a6d633dbe16765cf133a41cfc54052d78e0c413e90c49c513f3fd51c572095a5254232b704e9f8badfdc201",
-       "recoveredKey": "03e698cdfec1cd7d9a9c22da661661b67c9c477aea2b1f65d7adaea8d5790254bc",
-       "ecrecover": "e276e3bcb3bd3792b00f6a53105069047d9409d3",
-       "native": true,
-       "valid": true,
-       "reason": "ok"
+       "recoveredKey": "032327efaf9574d57318872cbc61bed8c1b2d67a6cb0c7fd6b5b05d1773d613489",
+       "ecrecover": "fcd7f04998cce682c0cb4d23fe68c0371decd60b",
+       "native": false,
+       "valid": false,
+       "reason": "key"
       }
      ],
      "charged": 4,
-     "voteInfo": "",
-     "previousHash": "",
-     "sigBytes": "",
-     "digest": "",
-     "signedWeight": "11",
+     "voteInfo": "8705784a726f6f742d766f74652f39323234626135383862666366376439353465303061366631333932613966646637616335353633623161326466323438376436373732613132383262616638021a000100011a0001000058203c65c3403eaa79aa8d0ef29f43d5892ad1016f304782e8ce47d8565b4d5b5dc11a6925f181",
+     "previousHash": "788f256d104d45975e25e1ac662ac918f81aae6e0d924e2d0ffda2015b78ae56",
+     "sigBytes": "d9985d8801051a00010001021a6925f1815820788f256d104d45975e25e1ac662ac918f81aae6e0d924e2d0ffda2015b78ae565820d18f2743f11c7ed2261afa42839f2445084502a7115806f5e19c575ce5301a56f6",
+     "digest": "7cebf4c851e2e38356882c82f759cd934dcb46df9e12f1d15a34099000ada8e7",
+     "signedWeight": "0",
      "accept": false,
-     "reason": "statement",
+     "reason": "signature",
      "failures": [
-      "statement"
+      "signature",
+      "below-threshold"
      ],
      "offence": ""
     },
     {
      "id": "no.statement.parent-not-below",
-     "description": "parent = votingRound",
+     "description": "the opening altered to parent = votingRound: another previousHash, the signatures fail",
      "seal": "post.at-a",
      "statement": {
       "votingEpoch": "2",
@@ -4237,6 +5418,7 @@
       "commitRound": "65536",
       "commitEpoch": "2",
       "commitTimestamp": "1764094337",
+      "previousHash": "7c50e81ed15a424a94297db77466634cb692378d521db5e3b5030a9caa27ee83",
       "hash": "d18f2743f11c7ed2261afa42839f2445084502a7115806f5e19c575ce5301a56"
      },
      "indices": [
@@ -4251,11 +5433,11 @@
        "signer": "r2",
        "mutation": "",
        "signature": "557fd0a7e6416e17eda912570839b3db923318ad2eadce41fc0b013f3555768503f50581152a8f65ba310c5ca2c2f5d3a2ff081176e1c63b513b4b19a31c2cca01",
-       "recoveredKey": "03cb029416b9907113979d8fac7e8058662897cc61083642d5bd4892dcb6fb28c3",
-       "ecrecover": "4a1072f0a4c94f357886e6a137a6ec7eff3fdfca",
-       "native": true,
-       "valid": true,
-       "reason": "ok"
+       "recoveredKey": "033222e26ea7ae59cccd5627677ebcd46fb5e28b6a8c5d020fd3e2bdca7be4a5bb",
+       "ecrecover": "dfa8ab3f32a1c259b90b51190507b537d46864ba",
+       "native": false,
+       "valid": false,
+       "reason": "key"
       },
       {
        "index": 3,
@@ -4263,11 +5445,11 @@
        "signer": "r4",
        "mutation": "",
        "signature": "65bf62dbd439ea07f5542998dca831ffddef8504f21449414ed0c2623c315de6768acc2f9179064d4c14c2d324a76a092e9cd448ebd79806947d3a7da832d5b600",
-       "recoveredKey": "02d010428be6f3b780c73a79744fb2f2d741eb5e3efb81bcc1c7e60f0a2e12ed4f",
-       "ecrecover": "02bc056aaed762465cf74294216244809fe216cb",
-       "native": true,
-       "valid": true,
-       "reason": "ok"
+       "recoveredKey": "02f1774236d6fac33a17248f55c9b235881f2010a225934ed176b3549b879fffdf",
+       "ecrecover": "c8661ada22bdce300b417cac2198479c3d97c641",
+       "native": false,
+       "valid": false,
+       "reason": "key"
       },
       {
        "index": 4,
@@ -4275,23 +5457,24 @@
        "signer": "r5",
        "mutation": "",
        "signature": "36dfe9bb8637e29f41fa778cd1d5496631afd68c439a6d633dbe16765cf133a41cfc54052d78e0c413e90c49c513f3fd51c572095a5254232b704e9f8badfdc201",
-       "recoveredKey": "03e698cdfec1cd7d9a9c22da661661b67c9c477aea2b1f65d7adaea8d5790254bc",
-       "ecrecover": "e276e3bcb3bd3792b00f6a53105069047d9409d3",
-       "native": true,
-       "valid": true,
-       "reason": "ok"
+       "recoveredKey": "0348e7a41eeef5053ad2760049d68c35bc43589358be49d4ab8d5ebea3358ecfb7",
+       "ecrecover": "4cd9e37c5544af75d7754d2ae658bc6accd19898",
+       "native": false,
+       "valid": false,
+       "reason": "key"
       }
      ],
      "charged": 4,
-     "voteInfo": "",
-     "previousHash": "",
-     "sigBytes": "",
-     "digest": "",
-     "signedWeight": "11",
+     "voteInfo": "8705784a726f6f742d766f74652f39323234626135383862666366376439353465303061366631333932613966646637616335353633623161326466323438376436373732613132383262616638021a000100011a0001000158203c65c3403eaa79aa8d0ef29f43d5892ad1016f304782e8ce47d8565b4d5b5dc11a6925f181",
+     "previousHash": "7c50e81ed15a424a94297db77466634cb692378d521db5e3b5030a9caa27ee83",
+     "sigBytes": "d9985d8801051a00010000021a6925f18158207c50e81ed15a424a94297db77466634cb692378d521db5e3b5030a9caa27ee835820d18f2743f11c7ed2261afa42839f2445084502a7115806f5e19c575ce5301a56f6",
+     "digest": "c36902728c450eff4286e2d8418ddb28dca3f32112a8a41da3fdf3412e70bdc7",
+     "signedWeight": "0",
      "accept": false,
-     "reason": "statement",
+     "reason": "signature",
      "failures": [
-      "statement"
+      "signature",
+      "below-threshold"
      ],
      "offence": ""
     },
@@ -4308,6 +5491,7 @@
       "commitRound": "0",
       "commitEpoch": "2",
       "commitTimestamp": "1764094337",
+      "previousHash": "788f256d104d45975e25e1ac662ac918f81aae6e0d924e2d0ffda2015b78ae56",
       "hash": "d18f2743f11c7ed2261afa42839f2445084502a7115806f5e19c575ce5301a56"
      },
      "indices": [
@@ -4364,6 +5548,273 @@
      "failures": [
       "statement",
       "not-post-term"
+     ],
+     "offence": ""
+    },
+    {
+     "id": "ok.opaque.random-prev",
+     "description": "a quorum on a seal whose previousHash has no opening: charged from the seal alone",
+     "seal": "opaque.random-prev",
+     "statement": {
+      "commitRound": "65536",
+      "commitEpoch": "2",
+      "commitTimestamp": "1682041620",
+      "previousHash": "8361872c8aa24aa6aee95516dca2717d7d9931467eb0a5873afa1f2c8cf513cc",
+      "hash": "26213fe8b6ca7cc4a00d324c0f62a53e4ddc94ec5cc3c6d08bb2c9bc8193f8b3"
+     },
+     "indices": [
+      1,
+      3,
+      4
+     ],
+     "signatures": [
+      {
+       "index": 1,
+       "nodeId": "r2",
+       "signer": "r2",
+       "mutation": "",
+       "signature": "faeda650e1fd20f43f6c1dd6d109f50e4ed73960eba9334367b101863d38a8823e4062445cd4d68d873e7f738c96a15ad736fce4891744877155965706f5306b00",
+       "recoveredKey": "03cb029416b9907113979d8fac7e8058662897cc61083642d5bd4892dcb6fb28c3",
+       "ecrecover": "4a1072f0a4c94f357886e6a137a6ec7eff3fdfca",
+       "native": true,
+       "valid": true,
+       "reason": "ok"
+      },
+      {
+       "index": 3,
+       "nodeId": "r4",
+       "signer": "r4",
+       "mutation": "",
+       "signature": "c3e5de92ad0932273c58898b2850cbc27f06e720098b938b0b40bd460ce3ab7d00040d2e3e0bbb27676a192a59fafb9f573fd9aa04ea99aab2bdc9698bcf518601",
+       "recoveredKey": "02d010428be6f3b780c73a79744fb2f2d741eb5e3efb81bcc1c7e60f0a2e12ed4f",
+       "ecrecover": "02bc056aaed762465cf74294216244809fe216cb",
+       "native": true,
+       "valid": true,
+       "reason": "ok"
+      },
+      {
+       "index": 4,
+       "nodeId": "r5",
+       "signer": "r5",
+       "mutation": "",
+       "signature": "eb453f098f7cf9668a36edcc4339e1e05e0f124b382c60461cedb6b6f8cbcdcd196b3a99b0bd826132b5dd23bbe876cea7a3b87301341a5a18d1a99c89db766e00",
+       "recoveredKey": "03e698cdfec1cd7d9a9c22da661661b67c9c477aea2b1f65d7adaea8d5790254bc",
+       "ecrecover": "e276e3bcb3bd3792b00f6a53105069047d9409d3",
+       "native": true,
+       "valid": true,
+       "reason": "ok"
+      }
+     ],
+     "charged": 4,
+     "voteInfo": "",
+     "previousHash": "8361872c8aa24aa6aee95516dca2717d7d9931467eb0a5873afa1f2c8cf513cc",
+     "sigBytes": "d9985d8801051a00010000021a6441eb1458208361872c8aa24aa6aee95516dca2717d7d9931467eb0a5873afa1f2c8cf513cc582026213fe8b6ca7cc4a00d324c0f62a53e4ddc94ec5cc3c6d08bb2c9bc8193f8b3f6",
+     "digest": "04dcf291063d7f02162e58f98d45315ba798164cbf418cb13ae5cfc294507e6c",
+     "signedWeight": "11",
+     "accept": true,
+     "reason": "ok",
+     "failures": [],
+     "offence": "opaque.random-prev/r5"
+    },
+    {
+     "id": "ok.opaque.random-prev.above",
+     "description": "another opaque seal, r4 charged",
+     "seal": "opaque.random-prev.above",
+     "statement": {
+      "commitRound": "65545",
+      "commitEpoch": "2",
+      "commitTimestamp": "1682041629",
+      "previousHash": "4c70fa94baf4f9f676448591b8f2c6c4b5b44bb9aa50bc3fb6f89207e9a75b93",
+      "hash": "0c3c999d9f67a9b18bc4166ac86ee8964aee63be1af5451ea8755c16e3c8dc03"
+     },
+     "indices": [
+      2,
+      3,
+      4
+     ],
+     "signatures": [
+      {
+       "index": 2,
+       "nodeId": "r3",
+       "signer": "r3",
+       "mutation": "",
+       "signature": "283fe31d64ba9fd849bb213da3b717ad97197ab355bca59c657e3806769d37e149ad780a31f45af9901afcadb203c89f35663608b9cf89d3766f819d8bc2fb8b01",
+       "recoveredKey": "03d10c4032ad2e51131280aa93d9da6d8e1c08fb6906a85da2c33c6d63506f9430",
+       "ecrecover": "ad1bc7700a524a352d49a488b6c1ea4ab0d3ad78",
+       "native": true,
+       "valid": true,
+       "reason": "ok"
+      },
+      {
+       "index": 3,
+       "nodeId": "r4",
+       "signer": "r4",
+       "mutation": "",
+       "signature": "6f2bf8fcf8b55cefcc197294772f401c30bf505134b93bc39d59b2bed76b115b31d00f93baeb8dd8bd254b88764f335fe0d61a8a52847381004398df71986a1b00",
+       "recoveredKey": "02d010428be6f3b780c73a79744fb2f2d741eb5e3efb81bcc1c7e60f0a2e12ed4f",
+       "ecrecover": "02bc056aaed762465cf74294216244809fe216cb",
+       "native": true,
+       "valid": true,
+       "reason": "ok"
+      },
+      {
+       "index": 4,
+       "nodeId": "r5",
+       "signer": "r5",
+       "mutation": "",
+       "signature": "212d978de3b70a350117d0e2e77fc54cc734cc9ba60508c78f9251a9477e17704c3b7c43f4d4b07dacf10048cb579745828037881ed669421377dd4ebbceb72501",
+       "recoveredKey": "03e698cdfec1cd7d9a9c22da661661b67c9c477aea2b1f65d7adaea8d5790254bc",
+       "ecrecover": "e276e3bcb3bd3792b00f6a53105069047d9409d3",
+       "native": true,
+       "valid": true,
+       "reason": "ok"
+      }
+     ],
+     "charged": 3,
+     "voteInfo": "",
+     "previousHash": "4c70fa94baf4f9f676448591b8f2c6c4b5b44bb9aa50bc3fb6f89207e9a75b93",
+     "sigBytes": "d9985d8801051a00010009021a6441eb1d58204c70fa94baf4f9f676448591b8f2c6c4b5b44bb9aa50bc3fb6f89207e9a75b9358200c3c999d9f67a9b18bc4166ac86ee8964aee63be1af5451ea8755c16e3c8dc03f6",
+     "digest": "2a9dced854eaa83de61893389f0948e3f72166dd97995f8504d0cc64e1cd5d47",
+     "signedWeight": "12",
+     "accept": true,
+     "reason": "ok",
+     "failures": [],
+     "offence": "opaque.random-prev.above/r4"
+    },
+    {
+     "id": "ok.opaque.vi-successor-epoch",
+     "description": "previousHash of a VoteInfo with voting epoch e+1: the seal is epoch e's, charged",
+     "seal": "opaque.vi-successor-epoch",
+     "statement": {
+      "votingEpoch": "3",
+      "votingRound": "65540",
+      "parent": "65539",
+      "exec": "3c65c3403eaa79aa8d0ef29f43d5892ad1016f304782e8ce47d8565b4d5b5dc1",
+      "voteTimestamp": "1764094340",
+      "commitRound": "65539",
+      "commitEpoch": "2",
+      "commitTimestamp": "1682041623",
+      "previousHash": "b8ea5682e3c860b2b7f865435dc15ab5b9469b41461a7c19ce5333de0e5dc52a",
+      "hash": "48806aedf042c78e6d5fac89ed7987df92c96cfa9d24c0953ad981d922386df8"
+     },
+     "indices": [
+      1,
+      3,
+      4
+     ],
+     "signatures": [
+      {
+       "index": 1,
+       "nodeId": "r2",
+       "signer": "r2",
+       "mutation": "",
+       "signature": "0e404bcce3bef5eb5d63f577f223fb7cfbcf0ded28a5a51e398ff6078d4e974967331f53d7a7126b6374745ff8ebbf31c9b194c5847eb7e531884ff6a6d97f7100",
+       "recoveredKey": "03cb029416b9907113979d8fac7e8058662897cc61083642d5bd4892dcb6fb28c3",
+       "ecrecover": "4a1072f0a4c94f357886e6a137a6ec7eff3fdfca",
+       "native": true,
+       "valid": true,
+       "reason": "ok"
+      },
+      {
+       "index": 3,
+       "nodeId": "r4",
+       "signer": "r4",
+       "mutation": "",
+       "signature": "173b453ff503585dffee2d4df79202854153c1910107cee8050a7c3f37bd189b1993498e6657754eb5e10eb65f460764debaf91fadc2fc9130a78b5ca596615f01",
+       "recoveredKey": "02d010428be6f3b780c73a79744fb2f2d741eb5e3efb81bcc1c7e60f0a2e12ed4f",
+       "ecrecover": "02bc056aaed762465cf74294216244809fe216cb",
+       "native": true,
+       "valid": true,
+       "reason": "ok"
+      },
+      {
+       "index": 4,
+       "nodeId": "r5",
+       "signer": "r5",
+       "mutation": "",
+       "signature": "b84c545d37a24041d0bc0ce3a072b69a4a4d0d0fe015fd55b70b71110e4d73ec0c423d8a12823d90aa975343b9ec6a4ae445a3c0e974c390cbe56c41a9ed861100",
+       "recoveredKey": "03e698cdfec1cd7d9a9c22da661661b67c9c477aea2b1f65d7adaea8d5790254bc",
+       "ecrecover": "e276e3bcb3bd3792b00f6a53105069047d9409d3",
+       "native": true,
+       "valid": true,
+       "reason": "ok"
+      }
+     ],
+     "charged": 4,
+     "voteInfo": "8705784a726f6f742d766f74652f39323234626135383862666366376439353465303061366631333932613966646637616335353633623161326466323438376436373732613132383262616638031a000100041a0001000358203c65c3403eaa79aa8d0ef29f43d5892ad1016f304782e8ce47d8565b4d5b5dc11a6925f184",
+     "previousHash": "b8ea5682e3c860b2b7f865435dc15ab5b9469b41461a7c19ce5333de0e5dc52a",
+     "sigBytes": "d9985d8801051a00010003021a6441eb175820b8ea5682e3c860b2b7f865435dc15ab5b9469b41461a7c19ce5333de0e5dc52a582048806aedf042c78e6d5fac89ed7987df92c96cfa9d24c0953ad981d922386df8f6",
+     "digest": "2421414bd99751359d26d5ca14a82162f16e35b926ceeb6f8d8fd391c719fe16",
+     "signedWeight": "11",
+     "accept": true,
+     "reason": "ok",
+     "failures": [],
+     "offence": "opaque.vi-successor-epoch/r5"
+    },
+    {
+     "id": "no.opaque.frozen-root",
+     "description": "the genuine frozen-root repeat with an opaque previousHash: exempt",
+     "seal": "opaque.frozen-root",
+     "statement": {
+      "commitRound": "65596",
+      "commitEpoch": "2",
+      "commitTimestamp": "1682041680",
+      "previousHash": "3af83750b817d8e3b92b5e0771730002b7672bdb1868cd0ca7bf75c89e6a559e",
+      "hash": "6a09af5e1513ff7c9a443bf6e02b90161444402c80940604ece408ba15209168"
+     },
+     "indices": [
+      1,
+      3,
+      4
+     ],
+     "signatures": [
+      {
+       "index": 1,
+       "nodeId": "r2",
+       "signer": "r2",
+       "mutation": "",
+       "signature": "428bf2e44c38720dbb94652cbd023ea439436f22efbd6bbde747f935dba2af6e5bda59b4f88d7f3ccb70d9b9f0cbf71ad99c2e4a51a62d73fa4d5a39b61dcb8c00",
+       "recoveredKey": "03cb029416b9907113979d8fac7e8058662897cc61083642d5bd4892dcb6fb28c3",
+       "ecrecover": "4a1072f0a4c94f357886e6a137a6ec7eff3fdfca",
+       "native": true,
+       "valid": true,
+       "reason": "ok"
+      },
+      {
+       "index": 3,
+       "nodeId": "r4",
+       "signer": "r4",
+       "mutation": "",
+       "signature": "4677b0c5aaf0826b80af469f20ad06f207a253041aa6cc9f3915dd80cf4936b0124c3c43cfd436fb81a9244daa62aa082b50f8fe9734696bd15a22bb504f0fb700",
+       "recoveredKey": "02d010428be6f3b780c73a79744fb2f2d741eb5e3efb81bcc1c7e60f0a2e12ed4f",
+       "ecrecover": "02bc056aaed762465cf74294216244809fe216cb",
+       "native": true,
+       "valid": true,
+       "reason": "ok"
+      },
+      {
+       "index": 4,
+       "nodeId": "r5",
+       "signer": "r5",
+       "mutation": "",
+       "signature": "07f55ca4070dc785fe9fd006f2ec63f228aa9ca7f4511162842db004fe9efde47a80c164cc78b465742f88df6f55109a07e0f21ad1c18c58d7b4ce2ee6162e6301",
+       "recoveredKey": "03e698cdfec1cd7d9a9c22da661661b67c9c477aea2b1f65d7adaea8d5790254bc",
+       "ecrecover": "e276e3bcb3bd3792b00f6a53105069047d9409d3",
+       "native": true,
+       "valid": true,
+       "reason": "ok"
+      }
+     ],
+     "charged": 4,
+     "voteInfo": "",
+     "previousHash": "3af83750b817d8e3b92b5e0771730002b7672bdb1868cd0ca7bf75c89e6a559e",
+     "sigBytes": "d9985d8801051a0001003c021a6441eb5058203af83750b817d8e3b92b5e0771730002b7672bdb1868cd0ca7bf75c89e6a559e58206a09af5e1513ff7c9a443bf6e02b90161444402c80940604ece408ba15209168f6",
+     "digest": "e6a39245fae03decebb62c338b5d5ca61006871dbbc9795c9e1df13136f5f174",
+     "signedWeight": "11",
+     "accept": false,
+     "reason": "exempt-terminal-root",
+     "failures": [
+      "exempt-terminal-root"
      ],
      "offence": ""
     }
@@ -4564,6 +6015,7 @@
       "commitRound": "4294967296",
       "commitEpoch": "7",
       "commitTimestamp": "6058996097",
+      "previousHash": "358f3b6caafe2acb8dfa9be2a64c4020827cff3ade090201a1be0b8c10cc171b",
       "hash": "a4b38a6f8acc56fd5991fc1e25cf434917b35d2e0f344ad7fb7a78953c19a92e"
      },
      "voteInfo": "8719ffff784a726f6f742d766f74652f39323234626135383862666366376439353465303061366631333932613966646637616335353633623161326466323438376436373732613132383262616638071b00000001000000011b00000001000000005820829e92765982b5af302f914a2206009491c1efc1dc66a7dcb0d7128a610c4ca71b000000016924f181",
@@ -4780,6 +6232,7 @@
       "commitRound": "4294967295",
       "commitEpoch": "7",
       "commitTimestamp": "6058996096",
+      "previousHash": "aa1a6419c0c09e00285b25d4e0c2220e74c5926aa4c3eb3132e469a4e85cb255",
       "hash": "a4b38a6f8acc56fd5991fc1e25cf434917b35d2e0f344ad7fb7a78953c19a92e"
      },
      "voteInfo": "8719ffff784a726f6f742d766f74652f39323234626135383862666366376439353465303061366631333932613966646637616335353633623161326466323438376436373732613132383262616638071b00000001000000001affffffff5820829e92765982b5af302f914a2206009491c1efc1dc66a7dcb0d7128a610c4ca71b000000016924f180",
@@ -4996,6 +6449,7 @@
       "commitRound": "4294967296",
       "commitEpoch": "7",
       "commitTimestamp": "6058996097",
+      "previousHash": "358f3b6caafe2acb8dfa9be2a64c4020827cff3ade090201a1be0b8c10cc171b",
       "hash": "a4b38a6f8acc56fd5991fc1e25cf434917b35d2e0f344ad7fb7a78953c19a92e"
      },
      "indices": [
@@ -5234,6 +6688,7 @@
       "commitRound": "4294967296",
       "commitEpoch": "7",
       "commitTimestamp": "6058996097",
+      "previousHash": "358f3b6caafe2acb8dfa9be2a64c4020827cff3ade090201a1be0b8c10cc171b",
       "hash": "a4b38a6f8acc56fd5991fc1e25cf434917b35d2e0f344ad7fb7a78953c19a92e"
      },
      "indices": [
@@ -5407,6 +6862,7 @@
       "commitRound": "4294967296",
       "commitEpoch": "7",
       "commitTimestamp": "6058996097",
+      "previousHash": "358f3b6caafe2acb8dfa9be2a64c4020827cff3ade090201a1be0b8c10cc171b",
       "hash": "a4b38a6f8acc56fd5991fc1e25cf434917b35d2e0f344ad7fb7a78953c19a92e"
      },
      "indices": [
@@ -5569,6 +7025,7 @@
       "commitRound": "4294967296",
       "commitEpoch": "7",
       "commitTimestamp": "6058996097",
+      "previousHash": "358f3b6caafe2acb8dfa9be2a64c4020827cff3ade090201a1be0b8c10cc171b",
       "hash": "a4b38a6f8acc56fd5991fc1e25cf434917b35d2e0f344ad7fb7a78953c19a92e"
      },
      "indices": [
@@ -5822,6 +7279,7 @@
       "commitRound": "4294967295",
       "commitEpoch": "7",
       "commitTimestamp": "6058996096",
+      "previousHash": "aa1a6419c0c09e00285b25d4e0c2220e74c5926aa4c3eb3132e469a4e85cb255",
       "hash": "a4b38a6f8acc56fd5991fc1e25cf434917b35d2e0f344ad7fb7a78953c19a92e"
      },
      "indices": [

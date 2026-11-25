@@ -9,11 +9,14 @@ import (
 	"math/big"
 	"slices"
 	"sort"
+	"strings"
 
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
 
+	"github.com/unicitynetwork/bft-core/b1ref"
+	"github.com/unicitynetwork/bft-core/b1ref/b1gen"
 	"github.com/unicitynetwork/bft-core/b1state"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
 )
@@ -22,8 +25,9 @@ import (
 const PostTermCorpusFormat = "p85-post-term-seal/1"
 
 // The post-term seal corpus (#1297) is what the P85 Evidence contract's post-term verifier must reproduce: a predecessor committee of epoch e and
-// its successor e+1 with start[e+1] = A*, the Closure facts (H round o, H RecordID, terminal root R_H), native scheme 2 seals of epoch e with their
-// VoteInfo openings and real member signatures, and submissions (a seal statement, a strictly increasing subset of predecessor member indices, one
+// its successor e+1 with start[e+1] = A*, the Closure facts (H round o, H RecordID, terminal root R_H), native scheme 2 seals of epoch e with real
+// member signatures (PreviousHash an opaque signed word; the VoteInfo opening, where one exists, informational), seals an open-tip consumer
+// (b1ref with e as the installed open tip) accepts, and submissions (a seal statement, a strictly increasing subset of predecessor member indices, one
 // signature per index, a charged index) with the verdict of the P85 rule.
 //
 // Unlike the S1 vectors, every byte here is produced by the native code paths on purpose: votesig builds VI, bft-go-base types.UnicitySeal
@@ -62,17 +66,31 @@ type PTClosure struct {
 	TerminalRoot string `json:"terminalRoot"`
 }
 
-// PTStatement is the typed seal statement a reporter supplies: the VoteInfo opening behind PreviousHash and the native seal fields.
+// PTStatement is the typed seal statement a reporter supplies: the native seal fields, with PreviousHash an opaque signed word (astra's option
+// (a): no VoteInfo opening is required). The VoteInfo fields are informational: present when the opening behind PreviousHash is known
+// (PreviousHash = sha256(VI) under the installed N and G), empty for a seal whose PreviousHash has no known opening.
 type PTStatement struct {
-	VotingEpoch     string `json:"votingEpoch"`
-	VotingRound     string `json:"votingRound"`
-	Parent          string `json:"parent"`
-	Exec            string `json:"exec"`
-	VoteTimestamp   string `json:"voteTimestamp"` // "0": omitted from VI
-	CommitRound     string `json:"commitRound"`   // the seal's RootChainRoundNumber
+	VotingEpoch     string `json:"votingEpoch,omitempty"`
+	VotingRound     string `json:"votingRound,omitempty"`
+	Parent          string `json:"parent,omitempty"`
+	Exec            string `json:"exec,omitempty"`
+	VoteTimestamp   string `json:"voteTimestamp,omitempty"` // "0": omitted from VI
+	CommitRound     string `json:"commitRound"`             // the seal's RootChainRoundNumber
 	CommitEpoch     string `json:"commitEpoch"`
 	CommitTimestamp string `json:"commitTimestamp"`
+	PreviousHash    string `json:"previousHash"`
 	Hash            string `json:"hash"`
+}
+
+// PTOpenTip is the open-tip consumer's acceptance of a seal: a CERT_BATCH_V2 request certifying a UC under the seal, and the registry words in
+// which epoch e is the installed, usable and open tip (no successor installed). bft-core's b1ref verifier accepts it (the generator and the
+// replay test both run it); ureth's 0x0100 is the same relation.
+type PTOpenTip struct {
+	Request                 string           `json:"request"`
+	Storage                 []b1gen.SlotWord `json:"storage"`
+	PinnedGenesisCommitment string           `json:"pinnedGenesisCommitment"`
+	PinnedProfileHash       string           `json:"pinnedProfileHash"`
+	Accepted                bool             `json:"accepted"`
 }
 
 // PTSignature is one signature with its recovery facts against a digest (the seal's own, or for a submission the digest the installed context
@@ -98,11 +116,12 @@ type PTSeal struct {
 	SignedNetwork uint64        `json:"signedNetwork"`
 	SignedGenesis string        `json:"signedGenesis"`
 	Statement     PTStatement   `json:"statement"`
-	VoteInfo      string        `json:"voteInfo"`     // VI under the signed network and genesis
-	PreviousHash  string        `json:"previousHash"` // VH = sha256(VI)
+	VoteInfo      string        `json:"voteInfo"`     // VI under the signed network and genesis; "" when PreviousHash has no known opening
+	PreviousHash  string        `json:"previousHash"` // the signed word (sha256(VI) when VI is known)
 	SigBytes      string        `json:"sigBytes"`     // tag 39005 [1, N, commitRound, commitEpoch, commitTimestamp, VH, Hash, null]
 	SealDigest    string        `json:"sealDigest"`   // sha256(SigBytes), the signed digest
 	Signatures    []PTSignature `json:"signatures"`   // every member's own native signature
+	OpenTip       *PTOpenTip    `json:"openTip,omitempty"`
 }
 
 // PTSubmission is one evidence submission and its verdict.
@@ -114,7 +133,8 @@ type PTSubmission struct {
 	Indices     []int         `json:"indices"`
 	Signatures  []PTSignature `json:"signatures"` // aligned with Indices
 	Charged     int           `json:"charged"`
-	// What a verifier holding the installed N and G rebuilds; empty when the statement shape is refused before any encoding.
+	// What a verifier holding the installed N rebuilds from the statement (sigBytes, digest); empty when the statement is refused before any
+	// encoding. voteInfo is informational (the opening under the installed N and G, when the statement has one).
 	VoteInfo     string   `json:"voteInfo"`
 	PreviousHash string   `json:"previousHash"`
 	SigBytes     string   `json:"sigBytes"`
@@ -156,7 +176,7 @@ const PostTermMaxSubset = b1state.MaxMembers
 
 // The failure conditions, in evaluation order.
 const (
-	ptStatement = "statement"             // scheme 2 committing shape, votingEpoch == commitEpoch == e
+	ptStatement = "statement"             // commitEpoch == e and commitRound > 0
 	ptIndices   = "indices"               // 1..16 strictly increasing member indices, one signature each
 	ptSignature = "signature"             // every supplied signature valid for its member under the P85 rule
 	ptWeight    = "below-threshold"       // distinct signed weight >= floor(2W/3)+1
@@ -169,6 +189,7 @@ const (
 
 type ptKey struct {
 	label  string
+	priv   [32]byte
 	signer *crypto.InMemorySecp256K1Signer
 	pub    []byte // compressed
 	addr   [20]byte
@@ -184,7 +205,7 @@ func newPTKey(seed, label string) ptKey {
 	must(err)
 	ep, err := ethcrypto.DecompressPubkey(pub)
 	must(err)
-	return ptKey{label: label, signer: s, pub: pub, addr: ethcrypto.PubkeyToAddress(*ep)}
+	return ptKey{label: label, priv: priv, signer: s, pub: pub, addr: ethcrypto.PubkeyToAddress(*ep)}
 }
 
 func must(err error) {
@@ -201,31 +222,65 @@ type ptStmt struct {
 	vts            uint64
 	cr, ce, cts    uint64
 	hash           [32]byte
+	opaque         *[32]byte // the signed PreviousHash when it has no known VoteInfo opening; nil: sha256(VI)
 }
 
-func (s ptStmt) json() PTStatement {
-	return PTStatement{VotingEpoch: dec(s.ve), VotingRound: dec(s.vr), Parent: dec(s.parent), Exec: hx(s.exec[:]), VoteTimestamp: dec(s.vts),
-		CommitRound: dec(s.cr), CommitEpoch: dec(s.ce), CommitTimestamp: dec(s.cts), Hash: hx(s.hash[:])}
+// vi is VI under network net and genesis g in the generator's own CBOR writer (any field values; nil for an opaque statement).
+func (s ptStmt) vi(net uint64, g [32]byte) []byte {
+	if s.opaque != nil {
+		return nil
+	}
+	items := [][]byte{cUint(net), cText(dv(g)), cUint(s.ve), cUint(s.vr), cUint(s.parent), cBytes(s.exec[:])}
+	if s.vts != 0 {
+		items = append(items, cUint(s.vts))
+	}
+	return cArr(items...)
 }
 
-// shapeOK is the scheme 2 committing shape of an epoch-e seal: 0 < commitRound < votingRound, parent < votingRound, votingEpoch = commitEpoch = e.
-func (s ptStmt) shapeOK(e uint64) bool {
-	return s.vr > 0 && s.parent < s.vr && s.cr > 0 && s.cr < s.vr && s.ve == e && s.ce == e
+// prevHash is the seal's PreviousHash: the opaque word, or sha256(VI).
+func (s ptStmt) prevHash(net uint64, g [32]byte) [32]byte {
+	if s.opaque != nil {
+		return *s.opaque
+	}
+	return sha256.Sum256(s.vi(net, g))
 }
 
-// build encodes VI with votesig and the seal with types.UnicitySeal under network net and genesis g.
-func (s ptStmt) build(net uint64, g [32]byte) (vi []byte, vh [32]byte, seal types.UnicitySeal) {
+func (s ptStmt) json(net uint64, g [32]byte) PTStatement {
+	pv := s.prevHash(net, g)
+	out := PTStatement{CommitRound: dec(s.cr), CommitEpoch: dec(s.ce), CommitTimestamp: dec(s.cts), PreviousHash: hx(pv[:]), Hash: hx(s.hash[:])}
+	if s.opaque == nil {
+		out.VotingEpoch, out.VotingRound, out.Parent, out.Exec, out.VoteTimestamp = dec(s.ve), dec(s.vr), dec(s.parent), hx(s.exec[:]), dec(s.vts)
+	}
+	return out
+}
+
+// shapeOK is what the opaque statement can be checked for: a seal of epoch e (commitEpoch = e) at a real root round. The VoteInfo opening is not
+// part of the evidence (astra's option (a)), so its shape is not a condition: a wrong opening changes PreviousHash and fails the signatures.
+func (s ptStmt) shapeOK(e uint64) bool { return s.ce == e && s.cr > 0 }
+
+// sealOf is the native seal (types.UnicitySeal) of the statement under network net, PreviousHash taken under genesis g.
+func (s ptStmt) sealOf(net uint64, g [32]byte) types.UnicitySeal {
+	pv := s.prevHash(net, g)
+	return types.UnicitySeal{Version: 1, NetworkID: types.NetworkID(net), RootChainRoundNumber: s.cr, Epoch: s.ce, Timestamp: s.cts,
+		PreviousHash: pv[:], Hash: s.hash[:]}
+}
+
+// nativeVI encodes a signed statement's VI with votesig (refusing an invalid scheme 2 shape) and checks the generator's own encoding against it.
+func (s ptStmt) nativeVI(net uint64, g [32]byte) []byte {
+	if s.opaque != nil {
+		return nil
+	}
 	cfg := votesig.Config{Scheme: votesig.SchemeDomainBound, Network: net, Genesis: g}
 	info := votesig.VoteInfo{Epoch: s.ve, Round: s.vr, Parent: s.parent, Exec: s.exec, Timestamp: s.vts}
 	vi, err := cfg.VoteInfoBytes(info)
 	must(err)
-	vh = sha256.Sum256(vi)
 	// the commit side is checked by the vote preimage encoder (a commit round below the voting round)
 	_, err = cfg.VotePreimage(info, votesig.Commit{Hash: s.hash[:], Round: s.cr})
 	must(err)
-	seal = types.UnicitySeal{Version: 1, NetworkID: types.NetworkID(net), RootChainRoundNumber: s.cr, Epoch: s.ce, Timestamp: s.cts,
-		PreviousHash: vh[:], Hash: s.hash[:]}
-	return vi, vh, seal
+	if !bytes.Equal(vi, s.vi(net, g)) {
+		panic("votesig and the generator encode VI differently")
+	}
+	return vi
 }
 
 func sigBytesOf(seal types.UnicitySeal) []byte {
@@ -434,15 +489,16 @@ func (sc *ptScn) class(s ptStmt) string {
 
 // seal signs stmt under (net, g) by every member of c and records it.
 func (sc *ptScn) seal(id, desc string, s ptStmt, net uint64, g [32]byte, c *ptCommittee) *ptSealRec {
-	vi, vh, seal := s.build(net, g)
+	vi := s.nativeVI(net, g)
+	seal := s.sealOf(net, g)
 	rec := &ptSealRec{stmt: s, sigs: map[string][]byte{}}
 	for _, d := range c.members {
 		must(seal.Sign(d.id, c.keys[d.id].signer))
 	}
 	sb := sigBytesOf(seal)
 	dg := sha256.Sum256(sb)
-	rec.json = PTSeal{ID: id, Description: desc, Class: sc.class(s), SignedNetwork: net, SignedGenesis: hx32(g), Statement: s.json(),
-		VoteInfo: hx(vi), PreviousHash: hx(vh[:]), SigBytes: hx(sb), SealDigest: hx(dg[:])}
+	rec.json = PTSeal{ID: id, Description: desc, Class: sc.class(s), SignedNetwork: net, SignedGenesis: hx32(g), Statement: s.json(net, g),
+		VoteInfo: hx(vi), PreviousHash: hx(seal.PreviousHash), SigBytes: hx(sb), SealDigest: hx(dg[:])}
 	for i, d := range c.members {
 		sig := seal.Signatures[d.id]
 		if err := votesig.CheckSignatureShape(sig); err != nil {
@@ -461,6 +517,71 @@ func (sc *ptScn) seal(id, desc string, s ptStmt, net uint64, g [32]byte, c *ptCo
 	return rec
 }
 
+// openTipSeal records a seal of the predecessor signed by every member, certifying a UC of `variant` (its Hash is that UC's tree root and its
+// timestamp the generator's), and checks that the open-tip consumer accepts it: bft-core's b1ref verifier with epoch e as the installed, usable
+// and open tip. terminal: the seal's Hash is R_H (the scenario's terminal root becomes that tree root).
+func (sc *ptScn) openTipSeal(id, desc string, s ptStmt, variant string, terminal bool) *ptSealRec {
+	p := sc.pred
+	var members []b1gen.OpenTipMember
+	var signers []string
+	for _, d := range p.members {
+		members = append(members, b1gen.OpenTipMember{ID: d.id, Priv: p.keys[d.id].priv, Weight: d.weight})
+		signers = append(signers, d.id)
+	}
+	ot := b1gen.OpenTip(sc.seed, uint16(sc.net), p.epoch, p.start, s.cr, s.prevHash(sc.net, sc.g), variant, members, signers)
+	s.hash, s.cts = ot.Root, ot.Timestamp
+	if terminal {
+		sc.rH = s.hash
+		sc.out.Closure.TerminalRoot = hx32(sc.rH)
+	}
+	st, pins := openTipState(ot.Pre)
+	v, err := b1ref.Cert(ot.Request, st, pins)
+	must(err)
+	if !v.Valid {
+		panic(fmt.Sprintf("%s: the open-tip consumer refuses the seal: %v", id, v.Why))
+	}
+	seal := s.sealOf(sc.net, sc.g)
+	sb := sigBytesOf(seal)
+	if !bytes.Equal(sb, ot.SigBytes) {
+		panic(id + ": the certificate's seal bytes are not types.UnicitySeal's")
+	}
+	dg := sha256.Sum256(sb)
+	rec := &ptSealRec{stmt: s, sigs: map[string][]byte{}}
+	rec.json = PTSeal{ID: id, Description: desc, Class: sc.class(s), SignedNetwork: sc.net, SignedGenesis: hx32(sc.g), Statement: s.json(sc.net, sc.g),
+		VoteInfo: hx(s.nativeVI(sc.net, sc.g)), PreviousHash: hx(seal.PreviousHash), SigBytes: hx(sb), SealDigest: hx(dg[:]),
+		OpenTip: &PTOpenTip{Request: hx(ot.Request), Storage: ot.Pre.Storage, PinnedGenesisCommitment: ot.Pre.PinnedGenesisCommitment,
+			PinnedProfileHash: ot.Pre.PinnedProfileHash, Accepted: true}}
+	for i, d := range p.members {
+		sig := ot.Signatures[d.id]
+		rec.sigs[d.id] = sig
+		v := ptVerdict(sig, sb, p.keys[d.id].pub)
+		v.Index, v.NodeID, v.Signer = i, d.id, d.id
+		if !v.Valid || !v.Native {
+			panic(fmt.Sprintf("%s: signature of %s refused: %s", id, d.id, v.Reason))
+		}
+		rec.json.Signatures = append(rec.json.Signatures, v)
+	}
+	sc.seals[id] = rec
+	sc.out.Seals = append(sc.out.Seals, rec.json)
+	return rec
+}
+
+// openTipState is the registry words and pins of a rendered b1gen PreState.
+func openTipState(p b1gen.PreState) (b1ref.Words, b1ref.Pins) {
+	w := b1ref.Words{}
+	word := func(s string) [32]byte {
+		b, err := hex.DecodeString(strings.TrimPrefix(s, "0x"))
+		must(err)
+		var out [32]byte
+		copy(out[32-len(b):], b)
+		return out
+	}
+	for _, sw := range p.Storage {
+		w[word(sw.Slot)] = word(sw.Value)
+	}
+	return w, b1ref.Pins{GenesisCommitment: word(p.PinnedGenesisCommitment), ProfileHash: word(p.PinnedProfileHash)}
+}
+
 // ptSig names one supplied signature: index, the seal and member that made it, and a mutation.
 type ptSig struct {
 	index    int
@@ -477,7 +598,7 @@ func (sc *ptScn) sig(index int) ptSig {
 // submit evaluates a submission, checks it against the declared verdict and records it.
 func (sc *ptScn) submit(id, desc, sealID string, stmt ptStmt, sigs []ptSig, indices []int, charged int, reason, offence string) {
 	p := sc.pred
-	sub := PTSubmission{ID: id, Description: desc, Seal: sealID, Statement: stmt.json(), Indices: indices, Charged: charged, Reason: reason}
+	sub := PTSubmission{ID: id, Description: desc, Seal: sealID, Statement: stmt.json(sc.net, sc.g), Indices: indices, Charged: charged, Reason: reason}
 	if sub.Indices == nil {
 		sub.Indices = []int{}
 	}
@@ -487,10 +608,10 @@ func (sc *ptScn) submit(id, desc, sealID string, stmt ptStmt, sigs []ptSig, indi
 	if !shape {
 		fail = append(fail, ptStatement)
 	} else {
-		vi, vh, seal := stmt.build(sc.net, sc.g)
+		seal := stmt.sealOf(sc.net, sc.g)
 		sb = sigBytesOf(seal)
 		dg := sha256.Sum256(sb)
-		sub.VoteInfo, sub.PreviousHash, sub.SigBytes, sub.Digest = hx(vi), hx(vh[:]), hx(sb), hx(dg[:])
+		sub.VoteInfo, sub.PreviousHash, sub.SigBytes, sub.Digest = hx(stmt.vi(sc.net, sc.g)), hx(seal.PreviousHash), hx(sb), hx(dg[:])
 	}
 	// every supplied signature, verdict against the rebuilt digest (or the seal's own bytes when the statement is refused)
 	verdictBytes := sb
@@ -505,7 +626,7 @@ func (sc *ptScn) submit(id, desc, sealID string, stmt ptStmt, sigs []ptSig, indi
 		var raw []byte
 		if s.foreignC != nil {
 			rec := sc.seals[src]
-			_, _, seal := rec.stmt.build(sc.net, sc.g)
+			seal := rec.stmt.sealOf(sc.net, sc.g)
 			must(seal.Sign(s.signer, s.foreignC.keys[s.signer].signer))
 			raw = seal.Signatures[s.signer]
 		} else {
@@ -634,7 +755,9 @@ func BuildPostTermCorpus(seed string) *PostTermCorpus {
 		Curve: map[string]string{"n": curveN.Text(16), "halfN": halfN.Text(16), "p": secpP.Text(16)},
 		Notes: []string{
 			"Offence (#1297): a quorum of epoch e's installed committee signed a native scheme 2 seal with commitEpoch e, commitRound >= A* = start[e+1] = end[e] and Hash != R_H, the terminal root of epoch e's applied Closure. commitRound is the seal's RootChainRoundNumber; the VoteInfo round is never compared with A*, so commitRound A*-1 is in term even when votingRound >= A*. Every seal with Hash == R_H is exempt (H's own late commit and honest empty-suffix repeats), whatever VoteInfo.exec says.",
-			"Statement: VI = C([N, Dv, votingEpoch, votingRound, parent, exec(, voteTimestamp if non-zero)]) with Dv = \"root-vote/\"+hex(G); previousHash = sha256(VI); sigBytes = C(tag 39005 [1, N, commitRound, commitEpoch, commitTimestamp, previousHash, Hash, null]); the members sign sha256(sigBytes). N and G are the verifier's installed values: a submission's voteInfo, previousHash, sigBytes and digest are what that verifier rebuilds from the typed statement, never bytes the reporter supplies. Shape: 0 < commitRound < votingRound, parent < votingRound, votingEpoch = commitEpoch = e. A statement type with one epoch field cannot express votingEpoch != commitEpoch: such a verifier skips no.statement.commit-epoch and reads no.statement.voting-epoch as a statement of epoch e+1.",
+			"Statement (astra's option (a)): the reporter supplies the native seal fields with PreviousHash as an opaque signed word; no VoteInfo opening is required or checked. sigBytes = C(tag 39005 [1, N, commitRound, commitEpoch, commitTimestamp, previousHash, Hash, null]) under the verifier's installed N; the members sign sha256(sigBytes). A submission's sigBytes and digest are what that verifier rebuilds from the typed statement, never bytes the reporter supplies. The only statement conditions are commitEpoch = e and commitRound > 0. The VoteInfo fields are informational: where the opening is known, previousHash = sha256(VI) with VI = C([N, Dv, votingEpoch, votingRound, parent, exec(, voteTimestamp if non-zero)]) and Dv = \"root-vote/\"+hex(G); an altered opening changes previousHash and so fails the signatures (the no.statement.* cases that alter VoteInfo fields).",
+			"Open-tip consumers: the opaque.* seals certify a real UC (their Hash is its unicity tree root) and carry openTip: a CERT_BATCH_V2 request and the registry words in which epoch e is the installed, usable and open tip. bft-core's b1ref verifier accepts each one (as a wallet or B1 caller that has not installed the successor would), while the post-term rule charges the random-previousHash and successor-epoch-VoteInfo seals and exempts the frozen-root repeat (Hash = R_H; R_H is that repeat's tree root here).",
+			"Root genesis: N is signed, G is not (only inside a VoteInfo opening). ok.foreign-genesis.opaque is a seal signed by e's keys for another root history sharing N, presented with its own previousHash: the opaque rule charges it. Honest signers are protected only by key isolation: fresh, genesis-specific consensus keys for every validator in every root history (D5 section 2.1).",
 			"Signature rule (P85, both offences): exactly 65 bytes r||s||v, 1 <= r < n, 1 <= s <= n/2, v in {0,1}, one recovery with that parity (ecrecover with v+27) equal to the member's installed key. v 2 and 3 are ineligible (the native signer emits only 0 and 1; 2/3 need r+n < p). A 64-byte compact signature, a high s (whose parity-flipped twin ecrecover still maps to the signer: the 'ecrecover' field shows it) and a v of 27/28 are refused.",
 			"Quorum: one strictly increasing subset of 1..16 distinct predecessor member indices, one signature per index; every supplied signature must be valid (an invalid, unknown or repeated extra refuses the whole submission); the distinct signed weight must reach floor(2W/3)+1 (the registry's W - floor((W-1)/3)); the charged index must be in the subset.",
 			"Failure order: statement, indices, signature, below-threshold, charged-not-in-subset, not-post-term, exempt-terminal-root. A verifier may check in another order; 'reason' is the condition a case is built to break and 'failures' lists every condition that fails. Accepted submissions with the same 'offence' label are one case (one signer, one statement): a different subset or reporter must not debit twice.",
@@ -652,6 +775,12 @@ func BuildPostTermCorpus(seed string) *PostTermCorpus {
 		y := label32(sc.seed, "conflicting state")
 		z := label32(sc.seed, "in-term state")
 		p := sc.pred
+		ptp := func(b [32]byte) *[32]byte { return &b }
+
+		// R_H is a real unicity tree root: the genuine frozen-root repeat certifies a UC under it with an opaque previous hash (built first: every
+		// exempt seal below commits R_H)
+		frozen := sc.openTipSeal("opaque.frozen-root", "a genuine frozen-root repeat at c' = A*+60 with an opaque previousHash: Hash = R_H, exempt; the open-tip consumer accepts it",
+			ptStmt{ce: e, cr: aStar + 60, opaque: ptp(label32(sc.seed, "opaque previous hash, frozen root"))}, "terminal", true)
 
 		at := sc.seal("post.at-a", "commitRound = A*, Hash != R_H: the offence at the boundary", commitStmt(e, aStar, x, y), sc.net, sc.g, p)
 		above := sc.seal("post.above", "commitRound = A*+7, Hash != R_H", commitStmt(e, aStar+7, x, y), sc.net, sc.g, p)
@@ -664,7 +793,16 @@ func BuildPostTermCorpus(seed string) *PostTermCorpus {
 		sfx := sc.seal("exempt.suffix", "a later empty-suffix repeat at c' = A*+40: Hash = exec = R_H", commitStmt(e, aStar+40, sc.rH, sc.rH), sc.net, sc.g, p)
 		sfx2 := sc.seal("exempt.suffix.exec-differs", "Hash = R_H with VoteInfo.exec != R_H: exempt, no exec test turns it into a charge", commitStmt(e, aStar+41, x, sc.rH), sc.net, sc.g, p)
 		fn := sc.seal("foreign.network", "the post.at-a statement signed under network N+1", at.stmt, sc.net+1, sc.g, p)
-		fg := sc.seal("foreign.genesis", "the post.at-a statement signed under another root genesis", at.stmt, sc.net, label32(seed, "other root genesis"), p)
+		otherG := label32(seed, "other root genesis")
+		fg := sc.seal("foreign.genesis", "the post.at-a statement signed under another root genesis (the same N)", at.stmt, sc.net, otherG, p)
+		op1 := sc.openTipSeal("opaque.random-prev", "commitRound = A*, previousHash random bytes (no VoteInfo opening): an offence; the open-tip consumer accepts the seal",
+			ptStmt{ce: e, cr: aStar, opaque: ptp(label32(sc.seed, "opaque previous hash 1"))}, "opaque-1", false)
+		op2 := sc.openTipSeal("opaque.random-prev.above", "commitRound = A*+9, previousHash random bytes: an offence; the open-tip consumer accepts the seal",
+			ptStmt{ce: e, cr: aStar + 9, opaque: ptp(label32(sc.seed, "opaque previous hash 2"))}, "opaque-2", false)
+		viNext := commitStmt(e, aStar+3, x, y)
+		viNext.ve = e + 1
+		opVI := sc.openTipSeal("opaque.vi-successor-epoch", "previousHash = sha256(VI) of a VoteInfo with voting epoch e+1, signed by e's quorum as an epoch-e seal at A*+3: an offence; the open-tip consumer accepts it",
+			viNext, "opaque-3", false)
 
 		sig := sc.sig
 		set := func(idx ...int) []ptSig {
@@ -729,22 +867,35 @@ func BuildPostTermCorpus(seed string) *PostTermCorpus {
 			for i := range s {
 				s[i].seal = fg.json.ID
 			}
-			sc.submit("no.wrong-genesis", "signatures over the statement under another root genesis (another VI, so another previousHash)", at.json.ID, at.stmt, s, q, 4, ptSignature, "")
+			sc.submit("no.wrong-genesis", "signatures over the statement under another root genesis, presented with the opening under the installed G: the signed previousHash differs, the signatures fail (ok.foreign-genesis.opaque is the same seal with its own word)", at.json.ID, at.stmt, s, q, 4, ptSignature, "")
+			fgOpaque := at.stmt
+			fgOpaque.opaque = ptp(fg.stmt.prevHash(sc.net, otherG))
+			s = set(q...)
+			for i := range s {
+				s[i].seal = fg.json.ID
+			}
+			sc.submit("ok.foreign-genesis.opaque", "the foreign.genesis seal with its own signed previousHash: N matches and e's quorum signed it, so the opaque rule charges it; only key isolation across root histories protects an honest signer (D5 section 2.1)", fg.json.ID, fgOpaque, s, q, 4, "ok", "foreign.genesis/r5")
 			s = set(q...)
 			s[2] = ptSig{index: 4, signer: "r5", foreignC: sc.succ}
 			sc.submit("no.rotated-key", "r5 signs with its epoch e+1 key: the historical key is installed for e", at.json.ID, at.stmt, s, q, 4, ptSignature, "")
 		}
 		{
-			bad := func(id, desc string, f func(*ptStmt)) {
+			bad := func(id, desc, reason string, f func(*ptStmt)) {
 				s := at.stmt
 				f(&s)
-				sc.submit(id, desc, at.json.ID, s, set(q...), q, 4, ptStatement, "")
+				sc.submit(id, desc, at.json.ID, s, set(q...), q, 4, reason, "")
 			}
-			bad("no.statement.commit-epoch", "commitEpoch e+1", func(s *ptStmt) { s.ce = e + 1 })
-			bad("no.statement.voting-epoch", "votingEpoch e+1 (a successor statement)", func(s *ptStmt) { s.ve = e + 1 })
-			bad("no.statement.commit-round-not-below", "commitRound = votingRound", func(s *ptStmt) { s.cr = s.vr })
-			bad("no.statement.parent-not-below", "parent = votingRound", func(s *ptStmt) { s.parent = s.vr })
-			bad("no.statement.commit-round-zero", "commitRound 0", func(s *ptStmt) { s.cr = 0 })
+			bad("no.statement.commit-epoch", "commitEpoch e+1", ptStatement, func(s *ptStmt) { s.ce = e + 1 })
+			bad("no.statement.voting-epoch", "the opening altered to votingEpoch e+1: another previousHash, the signatures fail", ptSignature, func(s *ptStmt) { s.ve = e + 1 })
+			bad("no.statement.commit-round-not-below", "commitRound altered to the voting round: other seal bytes, the signatures fail", ptSignature, func(s *ptStmt) { s.cr = s.vr })
+			bad("no.statement.parent-not-below", "the opening altered to parent = votingRound: another previousHash, the signatures fail", ptSignature, func(s *ptStmt) { s.parent = s.vr })
+			bad("no.statement.commit-round-zero", "commitRound 0", ptStatement, func(s *ptStmt) { s.cr = 0 })
+		}
+		{
+			sc.submit("ok.opaque.random-prev", "a quorum on a seal whose previousHash has no opening: charged from the seal alone", op1.json.ID, op1.stmt, set(q...), q, 4, "ok", "opaque.random-prev/r5")
+			sc.submit("ok.opaque.random-prev.above", "another opaque seal, r4 charged", op2.json.ID, op2.stmt, set(2, 3, 4), []int{2, 3, 4}, 3, "ok", "opaque.random-prev.above/r4")
+			sc.submit("ok.opaque.vi-successor-epoch", "previousHash of a VoteInfo with voting epoch e+1: the seal is epoch e's, charged", opVI.json.ID, opVI.stmt, set(q...), q, 4, "ok", "opaque.vi-successor-epoch/r5")
+			sc.submit("no.opaque.frozen-root", "the genuine frozen-root repeat with an opaque previousHash: exempt", frozen.json.ID, frozen.stmt, set(q...), q, 4, ptExempt, "")
 		}
 		c.Scenarios = append(c.Scenarios, sc.finish())
 	}

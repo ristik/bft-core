@@ -15,6 +15,9 @@ import (
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/decred/dcrd/dcrec/secp256k1/v4/ecdsa"
 	"github.com/unicitynetwork/bft-go-base/types"
+
+	"github.com/unicitynetwork/bft-core/b1ref"
+	"github.com/unicitynetwork/bft-core/b1ref/b1gen"
 )
 
 var update = flag.Bool("update", false, "rewrite the committed corpus files")
@@ -66,19 +69,25 @@ func ptNum(t *testing.T, s string) uint64 {
 	return n
 }
 
-// independent reconstruction: the generator's own CBOR writer, not votesig or types.UnicitySeal
-func ptRebuild(t *testing.T, s PTStatement, net uint64, g []byte) (vi, vh, sb []byte) {
-	var gg [32]byte
-	copy(gg[:], g)
-	items := [][]byte{cUint(net), cText(dv(gg)), cUint(ptNum(t, s.VotingEpoch)), cUint(ptNum(t, s.VotingRound)), cUint(ptNum(t, s.Parent)), cBytes(ptHex(t, s.Exec))}
-	if ts := ptNum(t, s.VoteTimestamp); ts != 0 {
-		items = append(items, cUint(ts))
+// independent reconstruction with the generator's own CBOR writer (not votesig or types.UnicitySeal): the seal bytes from the typed statement with
+// its opaque previousHash, and VI when the statement carries its (informational) opening, which must then hash to previousHash.
+func ptRebuild(t *testing.T, s PTStatement, net uint64, g []byte) (vi, sb []byte) {
+	t.Helper()
+	if s.VotingEpoch != "" {
+		var gg [32]byte
+		copy(gg[:], g)
+		items := [][]byte{cUint(net), cText(dv(gg)), cUint(ptNum(t, s.VotingEpoch)), cUint(ptNum(t, s.VotingRound)), cUint(ptNum(t, s.Parent)), cBytes(ptHex(t, s.Exec))}
+		if ts := ptNum(t, s.VoteTimestamp); ts != 0 {
+			items = append(items, cUint(ts))
+		}
+		vi = cArr(items...)
+		if h := sha256.Sum256(vi); hx(h[:]) != s.PreviousHash {
+			t.Fatalf("the statement's opening does not hash to its previousHash")
+		}
 	}
-	vi = cArr(items...)
-	h := sha256.Sum256(vi)
 	sb = cTag(tagSeal, cArr(cUint(1), cUint(net), cUint(ptNum(t, s.CommitRound)), cUint(ptNum(t, s.CommitEpoch)), cUint(ptNum(t, s.CommitTimestamp)),
-		cBytes(h[:]), cBytes(ptHex(t, s.Hash)), cNull))
-	return vi, h[:], sb
+		cBytes(ptHex(t, s.PreviousHash)), cBytes(ptHex(t, s.Hash)), cNull))
+	return vi, sb
 }
 
 // independent P85 signature rule with dcrd: 65 bytes, v in {0,1}, 1 <= r < n, 1 <= s <= n/2, one recovery with that parity.
@@ -110,7 +119,7 @@ func TestPostTermCorpusIndependentReplay(t *testing.T) {
 	if n.Cmp(secp256k1.S256().N) != 0 || c.MaxSubset != 16 {
 		t.Fatal("curve or bound")
 	}
-	accepted, rejected, sigs := 0, 0, 0
+	accepted, rejected, sigs, openTips := 0, 0, 0, 0
 	reasons := map[string]bool{}
 	for _, sc := range c.Scenarios {
 		g := ptHex(t, sc.Genesis)
@@ -174,9 +183,9 @@ func TestPostTermCorpusIndependentReplay(t *testing.T) {
 		seals := map[string]PTSeal{}
 		for _, s := range sc.Seals {
 			seals[s.ID] = s
-			vi, vh, sb := ptRebuild(t, s.Statement, s.SignedNetwork, ptHex(t, s.SignedGenesis))
+			vi, sb := ptRebuild(t, s.Statement, s.SignedNetwork, ptHex(t, s.SignedGenesis))
 			d := sha256.Sum256(sb)
-			if hx(vi) != s.VoteInfo || hx(vh) != s.PreviousHash || hx(sb) != s.SigBytes || hx(d[:]) != s.SealDigest {
+			if hx(vi) != s.VoteInfo || s.Statement.PreviousHash != s.PreviousHash || hx(sb) != s.SigBytes || hx(d[:]) != s.SealDigest {
 				t.Fatalf("%s/%s: VI, VH or seal bytes differ from the independent encoding", sc.ID, s.ID)
 			}
 			cr := ptNum(t, s.Statement.CommitRound)
@@ -198,14 +207,32 @@ func TestPostTermCorpusIndependentReplay(t *testing.T) {
 					t.Fatalf("%s/%s: %s's native signature", sc.ID, s.ID, v.NodeID)
 				}
 			}
+			if ot := s.OpenTip; ot != nil {
+				openTips++
+				// the open-tip consumer (b1ref, epoch e the installed open tip) accepts the certificate, and the certificate carries these signatures
+				st, pins := openTipState(b1gen.PreState{Storage: ot.Storage, PinnedGenesisCommitment: ot.PinnedGenesisCommitment, PinnedProfileHash: ot.PinnedProfileHash})
+				req := ptHex(t, ot.Request)
+				v, err := b1ref.Cert(req, st, pins)
+				if err != nil || !v.Valid || !ot.Accepted {
+					t.Fatalf("%s/%s: the open-tip consumer refuses the seal: %v %v", sc.ID, s.ID, err, v.Why)
+				}
+				for _, x := range s.Signatures {
+					if !bytes.Contains(req, ptHex(t, x.Signature)) {
+						t.Fatalf("%s/%s: the certificate does not carry %s's signature", sc.ID, s.ID, x.NodeID)
+					}
+				}
+				if !bytes.Contains(req, ptHex(t, s.Statement.PreviousHash)) || !bytes.Contains(req, ptHex(t, s.Statement.Hash)) {
+					t.Fatalf("%s/%s: the certificate's seal is another seal", sc.ID, s.ID)
+				}
+			}
 		}
 
 		offences := map[string]string{} // label -> digest|charged key
 		for _, sub := range sc.Submissions {
 			st := sub.Statement
 			e := ptNum(t, sc.Predecessor.Epoch)
-			vr, parent, cr := ptNum(t, st.VotingRound), ptNum(t, st.Parent), ptNum(t, st.CommitRound)
-			shape := vr > 0 && parent < vr && cr > 0 && cr < vr && ptNum(t, st.VotingEpoch) == e && ptNum(t, st.CommitEpoch) == e
+			cr := ptNum(t, st.CommitRound)
+			shape := cr > 0 && ptNum(t, st.CommitEpoch) == e
 			var fail []string
 			var digest []byte
 			if !shape {
@@ -215,10 +242,10 @@ func TestPostTermCorpusIndependentReplay(t *testing.T) {
 				}
 				digest = ptHex(t, seals[sub.Seal].SealDigest)
 			} else {
-				vi, vh, sb := ptRebuild(t, st, sc.Network, g)
+				vi, sb := ptRebuild(t, st, sc.Network, g)
 				d := sha256.Sum256(sb)
 				digest = d[:]
-				if hx(vi) != sub.VoteInfo || hx(vh) != sub.PreviousHash || hx(sb) != sub.SigBytes || hx(d[:]) != sub.Digest {
+				if hx(vi) != sub.VoteInfo || st.PreviousHash != sub.PreviousHash || hx(sb) != sub.SigBytes || hx(d[:]) != sub.Digest {
 					t.Fatalf("%s/%s: rebuilt bytes", sc.ID, sub.ID)
 				}
 			}
@@ -299,6 +326,9 @@ func TestPostTermCorpusIndependentReplay(t *testing.T) {
 		if !reasons[r] {
 			t.Fatalf("no case for %s", r)
 		}
+	}
+	if openTips < 4 {
+		t.Fatalf("%d open-tip seals", openTips)
 	}
 	if accepted < 8 || rejected < 35 || sigs < 200 {
 		t.Fatalf("corpus too small: %d accepted, %d rejected, %d signatures", accepted, rejected, sigs)
