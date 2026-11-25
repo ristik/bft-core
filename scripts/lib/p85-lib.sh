@@ -12,14 +12,15 @@
 
 P85_DIR=${P85_DIR:-test-nodes/p85}
 # manifest limits.vMax, limits.lMax, election nMax: the election price AND the records hook's per-record reservation are measured at exactly these. 16,1,6 is what
-# the 3,000,000 per record (P85_HOOK_RECORD_GAS) covers with the 1.25 margin: the RecoveryAck that applies a pending closure costs 2,281,165 cold for 6 members of
-# one lot, but 3,629,888 for 8 members of 2 lots (contracts docs/p85/HOOK_GAS.md). Until the owner decides between raising the limit and keeping lower caps (Q12),
+# the 3,500,000 per record (P85_HOOK_RECORD_GAS, the package's pos.py HOOK_RECORD_GAS) covers with the 1.25 margin: the cold recovery record for 6 members of one
+# lot costs 2,437,101 at contracts 3cbb999 (the #1297 term anchors; 2,281,165 before, when 3,000,000 sufficed), but 3,629,888 for 8 members of 2 lots
+# (contracts docs/p85/HOOK_GAS.md). Until the owner decides between raising the limit and keeping lower caps (Q12),
 # the lane declares caps its limit covers; `b1-profile --hook-measurement` refuses any pair it does not.
 P85_CAPS=${P85_CAPS:-16,1,6}
 P85_BOND_UNIT=${P85_BOND_UNIT:-100000000000000000000}   # 100 UCT in base units: one weight unit
 P85_GENESIS_UNITS=${P85_GENESIS_UNITS:-1}          # bond units per genesis identity (unit weights, like the PoA lanes)
 P85_H_RECORDS=${P85_H_RECORDS:-2}
-P85_HOOK_RECORD_GAS=${P85_HOOK_RECORD_GAS:-3000000}
+P85_HOOK_RECORD_GAS=${P85_HOOK_RECORD_GAS:-3500000}
 # the election is due this many ordinary rounds after the last acknowledged rotation, and the joiner must be admitted before that: the any-age and UTB
 # lanes run about 390 rounds of steps (the aggregator setup alone is ~200) before the onboarding, so the plain 400/300 fired in the middle of it and
 # froze a four-member result without the joiner (#750: 'node ... is not a successor validator'); they get twice the window
