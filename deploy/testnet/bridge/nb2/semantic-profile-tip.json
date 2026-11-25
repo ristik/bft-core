@@ -1,0 +1,8 @@
+{
+  "b1ExecutionRevision": 2,
+  "protocol": "NB2 flat continuation v1.1",
+  "specification": {
+    "docs/design/b1-imported-tip.md": "d2fbd03b7999ff5781955cb870d3ae627c4d91f5f637dbb3c50436b0c3a487e7",
+    "docs/design/nb2-continuation-v1.1.md": "487e7c0d33ec763730fed2196b920d7a4459e351e0360ad0a1a1356eaefdfbf7"
+  }
+}

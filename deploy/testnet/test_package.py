@@ -2495,6 +2495,29 @@ class NB2DriverKeys(unittest.TestCase):
         spec.loader.exec_module(module)
         return module
 
+    def test_nb2_deployment_binds_the_imported_tip_profile(self):
+        m = self.deploy_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            gen = Path(tmp)
+            (gen / 'public').mkdir()
+            (gen / 'network').mkdir()
+            pins = json.loads((m.REPO / 'deploy/testnet/pins.json').read_bytes())
+            manifest = {'utb': True, 'artifacts': {'sources': {'ureth': pins['ureth']},
+                                                  'binary_sha256': {}, 'images': {}}}
+            (gen / 'manifest.json').write_text(json.dumps(manifest))
+            hashes = m.descriptors(gen, manifest, 'bridge', gen)
+            cert = json.loads((gen / 'public/descriptors/cert-batch-v2.json').read_bytes())
+            profile = (gen / 'public/descriptors/semantic-profile.json').read_bytes()
+            self.assertEqual(cert['ureth'], pins['ureth'])
+            self.assertEqual(hashes['semantic-profile'], '0x' + hashlib.sha256(profile).hexdigest())
+            self.assertEqual(json.loads(profile)['b1ExecutionRevision'], 2)
+            for name, sha in json.loads(profile)['specification'].items():
+                self.assertEqual(hashlib.sha256((m.REPO / name).read_bytes()).hexdigest(), sha)
+            for revision in ({}, {'executionRevision': 1}):
+                (gen / 'network/b1-profile.json').write_text(json.dumps(revision))
+                with self.assertRaisesRegex(SystemExit, 'require B1 execution revision 2'):
+                    m.run_deployment(gen, gen / 'evidence', 1, gen / 'output')
+
     def test_graph_and_origin_readback_use_the_recorded_finalized_hash(self):
         m = self.deploy_module()
         roles = ['registry', 'receipts', 'lineage', 'ordinary', 'recovery', 'vault']

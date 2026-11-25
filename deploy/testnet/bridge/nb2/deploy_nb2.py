@@ -26,9 +26,9 @@ ETH = 'http://ureth1:8545'
 CONTRACTS = '/opt/bridge/contracts'
 NBP = '/opt/bridge/native-bridge-plugins'
 REPO = HERE.parents[3]
-# From the released ureth pin. The T7 certificate, membership and execution
-# rule sources are byte-identical at this commit. Only Cargo.lock changed.
-RELEASE_URETH = 'b61d3beebf9e08e900e3bb88f5e3b2d275bc1dec'
+# The package ships the imported-tip certificate relation. The T7 membership
+# and execution descriptor sources still match this ureth pin.
+RELEASE_URETH = '3df0d4012fb9057cb71d35b67095ec8b8c139c57'
 RELEASE_URETH_LOCK = 'b6417ee486ed2ffe5fdbe579a83b5f123f9ae96037200ce7566c6374a73c94cc'
 REGISTRY = '0xff00000000000000000000000000000000000002'
 NETWORK_ID, EVM_PARTITION, EVM_SHARD, AGG_PARTITION = 3, 8, '0x80', 7
@@ -130,13 +130,16 @@ def descriptors(gen, manifest, bridge, work):
     dest.mkdir(exist_ok=True)
     native = manifest['artifacts']
     hashes = {}
+    tip_descriptors = {'cert-batch-v2', 'semantic-profile'}
     for name in (*DESCRIPTORS, 'semantic-profile'):
-        if name == 'build-index':
+        if name in tip_descriptors:
+            data = (HERE / f'{name}-tip.json').read_bytes()
+        elif name == 'build-index':
             data = (json.dumps({'sources': native['sources'], 'binarySha256': native['binary_sha256'],
                                 'nodeImages': native['images'], 'bridgeImage': bridge}, sort_keys=True) + '\n').encode()
         else:
             data = (corpus / f'{name}.json').read_bytes()
-            if name in ('cert-batch-v2', 'rsmt-member-v1', 'execution'):
+            if name in ('rsmt-member-v1', 'execution'):
                 descriptor = json.loads(data)
                 descriptor['ureth'] = RELEASE_URETH
                 if name == 'execution':
@@ -302,6 +305,9 @@ def run_deployment(gen, evidence_bin, qmax, output):
         raise SystemExit('NB2 v1.1 requires a UTB generation')
     if manifest['artifacts']['sources']['ureth'] != RELEASE_URETH:
         raise SystemExit('generation ureth is outside the reviewed NB2 native descriptors')
+    profile = json.loads((gen / 'network/b1-profile.json').read_bytes())
+    if type(profile.get('executionRevision')) is not int or profile['executionRevision'] != 2:
+        raise SystemExit('NB2 imported-tip semantics require B1 execution revision 2')
     if not evidence_bin.is_file() or not os.access(evidence_bin, os.X_OK):
         raise SystemExit('nb2-evidence must be an executable file')
     if not 0 < qmax < 2 ** 144:

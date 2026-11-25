@@ -32,7 +32,7 @@ func TestExecutionRevisionMustBeExactlyTheCurrentOne(t *testing.T) {
 
 // The profile hash is under the V2 domain with the revision right after it. The preimage is rebuilt here by hand (header: array of 36, text
 // "UNICITY_B1_PROFILE_V2", uint 2) and compared to the production encoding's prefix, and the hash is frozen as a golden value.
-const goldenV2ProfileHash = "98aacc73f93a08e7569cac66736ed53d5678a169f73e3f9c8e32399692503e16"
+const goldenV2ProfileHash = "5be7072b5f0e925f62cbebe0761d5bddc378220206d783405f50601281970078"
 
 func TestProfileHashV2GoldenAndPreimage(t *testing.T) {
 	p := execRevProfile()
