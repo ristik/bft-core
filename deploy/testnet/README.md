@@ -309,9 +309,8 @@ described in [Sync from a seed](../../docs/operations/sync-seed.md).
 
 Keep the already-verified static release for `tn-public-20261122`. Its manifest
 predates the startup-file digests. Release re-export starts with the next
-generation, whose manifest must pin both files. The moving NB2 checkpoint at
-`/release/nb2-origin.json` is published independently of the static release
-and continues to refresh.
+generation, whose manifest must pin both files. Release the wallet with its
+UTB genesis pin and the published 15-minute freshness policy.
 
 For the on-host operator start `python3 deploy/testnet/validator_rpc.py` on
 loopback and use `http://127.0.0.1:18485` as the operator RPC. The wrapper

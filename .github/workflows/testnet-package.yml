@@ -42,7 +42,6 @@ jobs:
           TN_REQUIRE_COMPOSE: '1'
           TN_PINNED_BFT: ${{ github.workspace }}/pinned-bft
           TN_PINNED_URETH: ${{ github.workspace }}/pinned-ureth
-      - run: python3 -m unittest discover -s deploy/testnet -p test_nb2_origin.py -v
       - run: python3 -m unittest discover -s deploy/testnet -p test_public_relay.py -v
       - run: python3 -m unittest discover -s deploy/testnet -p test_handoff_drive.py -v
       - run: python3 -m unittest discover -s deploy/testnet -p test_remote_joiner.py -v

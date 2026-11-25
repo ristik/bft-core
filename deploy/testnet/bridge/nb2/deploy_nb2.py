@@ -273,32 +273,6 @@ def verify_graph(gen, record, head, target=ETH):
             same(f'{target} {role} {getter}', cast(gen, 'abi-decode', getter, raw), value)
 
 
-def origin_checkpoint(gen, target=ETH, *, head=None):
-    """Read both operator registry words at the supplied finalized checkpoint."""
-    def query(method, *params):
-        return rpc(gen, target, method, *params)
-
-    def hash_bytes(data):
-        return keccak(gen, data)
-
-    return read_origin(query, hash_bytes, head=head)
-
-
-def read_origin(query, hash_bytes, *, head=None):
-    if head is None:
-        head = query('eth_getBlockByNumber', 'finalized', False)
-    if not head:
-        raise SystemExit('execution client has no finalized NB2 checkpoint')
-    at = canonical_block(head['hash'])
-    slots = {'usableEpoch': 'origin.rootEpoch', 'rootRound': 'clock.rootRound'}
-    origin = {name: str(int(query('eth_getStorageAt', REGISTRY,
-                                hash_bytes(('unicity.seal-registry/' + slot).encode()), at), 16))
-              for name, slot in slots.items()}
-    if int(origin['usableEpoch']) == 0 or int(origin['rootRound']) == 0:
-        raise SystemExit('finalized seal registry has no usable origin')
-    return {**origin, 'blockHash': head['hash'], 'blockNumber': int(head['number'], 16), 'registry': REGISTRY}
-
-
 def run_deployment(gen, evidence_bin, qmax, output):
     manifest = json.loads((gen / 'manifest.json').read_text())
     if not manifest.get('utb'):
@@ -345,13 +319,11 @@ def run_deployment(gen, evidence_bin, qmax, output):
         verify_graph(gen, record, head, target)
         checkpoint = {'validator': i, 'blockHash': head['hash'], 'blockNumber': int(head['number'], 16)}
         checkpoints.append(checkpoint)
-        if i == 1:
-            origin = origin_checkpoint(gen, target, head=head)
         print(f'{target}: verified five contracts and native registry at finalized block '
               f'{checkpoint["blockNumber"]} ({checkpoint["blockHash"]})', flush=True)
     record['readbackCheckpoints'] = checkpoints
     write_json(record_path, record)
-    doc = release_nb2.build(gen, record, bridge, services, origin, limits=limits)
+    doc = release_nb2.build(gen, record, bridge, services, limits=limits)
     path = output / 'public/nb2-release.json'
     temp = path.with_suffix('.tmp')
     write_json(temp, doc)
@@ -365,21 +337,12 @@ def run_deployment(gen, evidence_bin, qmax, output):
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('generation', type=Path)
-    mode = p.add_mutually_exclusive_group(required=True)
-    mode.add_argument('--nb2-evidence', type=Path, help='build from this checkout with go build ./scripts/nb2-evidence')
-    mode.add_argument('--print-origin', action='store_true', help='print a new finalized checkpoint for the published release')
+    p.add_argument('--nb2-evidence', type=Path, required=True,
+                   help='build from this checkout with go build ./scripts/nb2-evidence')
     p.add_argument('--qmax', type=int, default=QMAX_DEFAULT)
     a = p.parse_args()
     gen = a.generation.resolve()
     output = gen / 'bridge/nb2'
-    if a.print_origin:
-        release = json.loads((output / 'public/nb2-release.json').read_text())
-        genesis = rpc(gen, ETH, 'eth_getBlockByNumber', '0x0', False)
-        same('checkpoint execution genesis', genesis['hash'], release['package']['genesisHash'])
-        same('checkpoint seal registry runtime', code_hash(gen, ETH, REGISTRY),
-             release['deployment']['contracts']['registry']['runtimeCodeHash'])
-        print(json.dumps(origin_checkpoint(gen)))
-        return
     (output / 'public').mkdir(parents=True, exist_ok=True)
     with (output / '.deploy.lock').open('a') as lock:
         try:
