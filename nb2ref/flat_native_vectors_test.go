@@ -2,13 +2,13 @@ package nb2ref
 
 import (
 	"bytes"
-	"fmt"
 	"math/big"
 	"testing"
 
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/b1ref"
+	"github.com/unicitynetwork/bft-core/b1state"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -92,7 +92,7 @@ func TestFlatSharedClaimsAndAuthorityVariants(t *testing.T) {
 	require.ErrorIs(t, err, ErrCDMismatch)
 }
 
-func TestFlatAuthenticatedOriginAndMissingAuthority(t *testing.T) {
+func TestFlatImportedTipAndMissingAuthority(t *testing.T) {
 	w, v, registry := flatFixtureVerifier(t)
 	raw, _ := flatFixtureEncode(t, flatFixtureLineage(t, w, v, 12, 0, false))
 	for _, tc := range []struct {
@@ -100,8 +100,22 @@ func TestFlatAuthenticatedOriginAndMissingAuthority(t *testing.T) {
 		edit func(b1ref.Words)
 		want error
 	}{
-		{"future-origin-round", func(r b1ref.Words) { r[b1ref.FixedSlot("clock.rootRound")] = u256u(1000) }, b1ref.ErrFuture},
-		{"missing-rotated-epoch", func(r b1ref.Words) { delete(r, b1ref.EntrySlot(2, 0)) }, b1ref.ErrRegistryMissingEpoch},
+		{"seal-ahead-of-observation", func(r b1ref.Words) {
+			r[b1ref.FixedSlot("clock.rootRound")] = u256u(1000)
+		}, nil},
+		{"epoch-ahead-of-imported-tip", func(r b1ref.Words) {
+			r[b1ref.FixedSlot("b1.importedTipEpoch")] = u256u(1)
+			delete(r, b1ref.EntrySlot(1, 5)) // end
+			delete(r, b1ref.EntrySlot(1, 6)) // hasEnd
+		}, b1ref.ErrEpochNotUsable},
+		{"missing-rotated-epoch", func(r b1ref.Words) {
+			for field := uint64(0); field < b1state.EntryWords; field++ {
+				delete(r, b1ref.EntrySlot(2, field))
+			}
+		}, b1ref.ErrRegistryMissingEpoch},
+		{"rotated-epoch-without-presence", func(r b1ref.Words) {
+			delete(r, b1ref.EntrySlot(2, 0))
+		}, b1ref.ErrRegistryInvalidEpoch},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			words := make(b1ref.Words, len(registry))
@@ -112,7 +126,7 @@ func TestFlatAuthenticatedOriginAndMissingAuthority(t *testing.T) {
 			check, err := NewFlatVerifier(w.Gamma, v.deployment, FlatAuthority{Registry: words, Pins: v.authority.Pins})
 			require.NoError(t, err)
 			_, err = check.VerifyFlatReturn(raw)
-			require.ErrorIs(t, err, tc.want, fmt.Sprintf("registry mutation %s", tc.name))
+			require.ErrorIs(t, err, tc.want)
 		})
 	}
 }
