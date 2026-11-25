@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/spf13/cobra"
 
@@ -393,12 +394,37 @@ goes to the address that received it (the withdrawal address); this command clai
 			}
 			var steps []step
 			maturing := generation.OpenLots != 0 && len(lots) > 0
+			var anchors []step
+			var matureStep step
 			if maturing {
+				// #1297/#1298: custody refuses mature while a closed term of the lots has no report anchors (TermAnchorPending). anchorTerm
+				// is permissionless (no keeper or relay): the exit sends it first, with the words of each term's Closure record.
+				terms, _, err := ch.vr.PendingTerms(ctx, custody, lots)
+				if err != nil {
+					return err
+				}
+				for _, t := range terms {
+					data, err := vrclient.PosCalldata(vrclient.CustodyTermsABI, "anchorTerm", t.AssignmentID, t.HRecordID, t.TerminalRoot)
+					if err != nil {
+						return err
+					}
+					anchors = append(anchors, step{what: fmt.Sprintf("anchor closed term %s (permissionless; the words of its Closure record)", hexutil.Encode(t.AssignmentID[:])),
+						tx: vrclient.Tx{To: custody, Data: data}})
+				}
 				data, err := vrclient.PosCalldata(vrclient.CustodyABI, "mature", lots)
 				if err != nil {
 					return err
 				}
-				steps = append(steps, step{what: fmt.Sprintf("mature identity %d's %d lot(s)", id, len(lots)), tx: vrclient.Tx{To: custody, Data: data}})
+				matureStep = step{what: fmt.Sprintf("mature identity %d's %d lot(s)", id, len(lots)), tx: vrclient.Tx{To: custody, Data: data}}
+				steps = append(steps, anchors...)
+				switch {
+				case len(anchors) == 0:
+					steps = append(steps, matureStep)
+				case f.DryRun:
+					pending := matureStep
+					pending.note = "it can be simulated once the term anchors are included"
+					steps = append(steps, pending)
+				}
 			}
 			if !maturing {
 				steps, err = claimStep(ctx, ch, custody, s)
@@ -407,7 +433,13 @@ goes to the address that received it (the withdrawal address); this command clai
 				}
 			}
 			after := func(i int, r *vrclient.Receipt) ([]step, error) {
-				if maturing && i == 0 {
+				if maturing && i < len(anchors)-1 {
+					return anchors[i+1:], nil // runSteps continues with what after returns: the remaining anchors
+				}
+				if maturing && i == len(anchors)-1 {
+					return []step{matureStep}, nil
+				}
+				if maturing && i == len(anchors) {
 					return claimStep(ctx, ch, custody, s)
 				}
 				amount, ok := vrclient.CustodyClaimedAmount(r, custody, s.From(), s.From())

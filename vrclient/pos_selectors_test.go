@@ -42,6 +42,7 @@ func TestThePoSABIsMatchTheCompiledSelectors(t *testing.T) {
 		{CustodyABI, "register", "703a60cd"},
 		{CustodyABI, "registerNonce", "c8e07834"},
 		{CustodyABI, "requestRetirement", "b9fbfe66"},
+		{CustodyTermsABI, "anchorTerm", "baed1b42"},
 	}
 	for _, c := range cases {
 		m, ok := c.a.Methods[c.method]
