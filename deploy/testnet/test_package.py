@@ -2064,7 +2064,7 @@ class NB2Release(unittest.TestCase):
     def build(self,gen,art,record,services=None):
         m=self.module()
         with patch.object(m,'ARTIFACTS',art):
-            return m.build(gen,record,self.IMAGE,services or self.services(),{'usableEpoch':'1','rootRound':'20'})
+            return m.build(gen,record,self.IMAGE,services or self.services())
     def test_the_pins_are_the_wallets_deployment_pins(self):
         with tempfile.TemporaryDirectory() as tmp:
             r=self.build(*self.generation(tmp))
@@ -2074,7 +2074,8 @@ class NB2Release(unittest.TestCase):
                                     'maxEncodedTxBytes':524288,'userGasLimit':'24000000','gasReserve':'500000',
                                     'returnReserveSegments':64,'deploymentBlock':12,'stateReadOnly':False})
         self.assertEqual(r['deployment']['firstBlock'],11)
-        self.assertEqual(r['trust']['origin'],{'usableEpoch':'1','rootRound':'20'})
+        self.assertEqual(r['trust']['freshnessMs'], 900000)
+        self.assertNotIn('origin', r['trust'])
         self.assertEqual(r['recovery']['address'],'0x'+'bb'*20)
         self.assertEqual(r['recovery']['pins'],'0x'+'a7'*32)
         self.assertEqual(r['recovery']['backlog'],r['peakWindowEnvelope']['backlog'])
@@ -2213,7 +2214,7 @@ class NB2Release(unittest.TestCase):
             gen,art,record=self.generation(tmp)
             m=self.module()
             with patch.object(m,'ARTIFACTS',art):
-                with self.assertRaisesRegex(SystemExit,'records'): m.build(gen,record,'sha256:'+'22'*32,self.services(),{'usableEpoch':'1','rootRound':'20'})
+                with self.assertRaisesRegex(SystemExit,'records'): m.build(gen,record,'sha256:'+'22'*32,self.services())
     def test_the_driver_runs_read_only_with_the_lane_directory_mounted(self):
         m=self.module()
         with patch('deploy_bridge.image',return_value=self.IMAGE),patch('deploy_bridge.validators_network',return_value='tn_validators'):
@@ -2571,7 +2572,7 @@ class NB2DriverKeys(unittest.TestCase):
                     self.assertEqual(json.loads(data), expected)
                     self.assertEqual(hashes[name], '0x' + hashlib.sha256(data).hexdigest())
 
-    def test_graph_and_origin_readback_use_the_recorded_finalized_hash(self):
+    def test_graph_readback_uses_the_recorded_finalized_hash(self):
         m = self.deploy_module()
         roles = ['registry', 'receipts', 'lineage', 'ordinary', 'recovery', 'vault']
         graph = {role: {'address': f'0x{i+1:040x}', 'runtimeCodeHash': f'0x{i+1:064x}'}
@@ -2607,11 +2608,8 @@ class NB2DriverKeys(unittest.TestCase):
                 self.assertIn(params[0], creation_hashes)
                 return {'hash': creation_hashes[params[0]]}
             self.assertEqual(params[-1], expected_selector)
-            if method == 'eth_call':
-                return want[params[0]['data']]
-            self.assertEqual(method, 'eth_getStorageAt')
-            self.assertEqual(params[0], m.REGISTRY)
-            return {'rootEpoch': '0x02', 'rootRound': '0x42'}[params[1]]
+            self.assertEqual(method, 'eth_call')
+            return want[params[0]['data']]
 
         def cast(gen, operation, *args):
             if operation == 'sig':
@@ -2621,14 +2619,9 @@ class NB2DriverKeys(unittest.TestCase):
 
         with patch.object(m, 'code_hash', side_effect=code_hash), \
              patch.object(m, 'rpc', side_effect=response) as call, \
-             patch.object(m, 'cast', side_effect=cast), \
-             patch.object(m, 'keccak', side_effect=lambda gen, data: data.decode().rsplit('.', 1)[-1]):
+             patch.object(m, 'cast', side_effect=cast):
             m.verify_graph(Path('/srv/g'), record, head)
-            self.assertEqual(m.origin_checkpoint(Path('/srv/g'), head=head), {
-                'usableEpoch': '2', 'rootRound': '66', 'blockHash': head['hash'],
-                'blockNumber': 32, 'registry': m.REGISTRY,
-            })
-            self.assertEqual(sum(c.args[2] == 'eth_getStorageAt' for c in call.call_args_list), 2)
+            self.assertFalse(any(c.args[2] == 'eth_getStorageAt' for c in call.call_args_list))
             self.assertFalse(any('latest' in c.args for c in call.call_args_list))
             want['RECOVERY_PINS()'] = '0x00'
             with self.assertRaisesRegex(SystemExit, 'vault RECOVERY_PINS'):
@@ -2636,25 +2629,6 @@ class NB2DriverKeys(unittest.TestCase):
             creation_hashes['0x1'] = latest['hash']
             with self.assertRaisesRegex(SystemExit, 'receipts canonical creation block'):
                 m.verify_graph(Path('/srv/g'), record, head)
-
-    def test_origin_defaults_to_one_finalized_block(self):
-        m = self.deploy_module()
-        block = '0x' + 'f1' * 32
-
-        def response(gen, endpoint, method, *params):
-            if method == 'eth_getBlockByNumber':
-                self.assertEqual(params, ('finalized', False))
-                return {'hash': block, 'number': '0x10'}
-            self.assertEqual(method, 'eth_getStorageAt')
-            self.assertEqual(params[0], m.REGISTRY)
-            self.assertEqual(params[2], {'blockHash': block, 'requireCanonical': True})
-            return {'rootEpoch': '0x02', 'rootRound': '0x42'}[params[1]]
-
-        with patch.object(m, 'rpc', side_effect=response), \
-             patch.object(m, 'keccak', side_effect=lambda gen, data: data.decode().rsplit('.',1)[-1]):
-            self.assertEqual(m.origin_checkpoint(Path('/srv/g')), {
-                'usableEpoch': '2', 'rootRound': '66', 'blockHash': block, 'blockNumber': 16, 'registry': m.REGISTRY,
-            })
 
     def test_a_failed_creation_reports_casts_own_reason(self):
         m = self.deploy_module()

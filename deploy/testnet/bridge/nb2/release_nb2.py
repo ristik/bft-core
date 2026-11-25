@@ -242,7 +242,7 @@ def envelopes():
     return fee, peak, ranges, ordinary
 
 
-def build(gen, record, image_id, services, origin, *, limits=None):
+def build(gen, record, image_id, services, *, limits=None):
     package = json.loads((gen / 'manifest.json').read_text())
     sources, profile_bytes, b1, pool, pool_gas, gw, validators = limits or admission(gen, package, image_id, services)
     vault, recovery = (record['contracts'][role] for role in ('vault', 'recovery'))
@@ -255,7 +255,7 @@ def build(gen, record, image_id, services, origin, *, limits=None):
         'bridge': {'image': image_id, 'sources': sources},
         'deployment': record,
         'profile': {'semanticProfileHash': record['descriptors']['semantic-profile'], 'b1ProfileSha256': hashlib.sha256(profile_bytes).hexdigest()},
-        'trust': {'bundle': 'trust-base.bundle.cbor', 'genesisEntryId': record['trustPin'], 'origin': origin,
+        'trust': {'bundle': 'trust-base.bundle.cbor', 'genesisEntryId': record['trustPin'], 'freshnessMs': 15 * 60_000,
                   'refresh': 'GET /api/v1/trustbases on the gateway'},
         'pins': {'gamma': record['gamma'], 'build': record['build'], 'vaultRuntimeCodeHash': vault['runtimeCodeHash'],
                  'maxEncodedTxBytes': L_MAX, 'userGasLimit': str(gas), 'gasReserve': str(GAS_RESERVE),
