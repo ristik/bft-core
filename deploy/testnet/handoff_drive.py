@@ -38,7 +38,7 @@ never been rehearsed on the package: the drive refuses it unless --allow-unrehea
 Unattended use (handoff_auto.py, a timer): --only-if-members 1,2,3,4 drives a result only when its elected committee is exactly those entities (exit 4,
 SKIPPED, before any step otherwise), so a join or a retirement stays an operator act. A drive holds <generation>/handoff/drive.lock for its whole run; a
 second drive started meanwhile exits 5 (BUSY) and changes nothing. --funder DIR (keystore.json, password) pays the owner's gas top-up from an operator
-account instead of the faucet account, whose nonces belong to the public faucet's signer.
+account instead of the generation's funder account (funder-secrets/). Never from the faucet account: its nonces belong to the public faucet's signer (bft-core#1287).
 """
 import argparse
 import concurrent.futures
@@ -307,17 +307,23 @@ class Drive(rehearse.Rehearsal):
         self.root_rpc, self.shard_rpc = operator_rpc.common_urls(handoff_ops.load_compose(self.gen))
         self.old, self.new = [], []   # entities of the committee being left / elected
 
+    def funder_dir(self):
+        """--funder, or else the generation's funder account (generate.py: funder-secrets/). Never the faucet account (bft-core#1287)."""
+        directory = self.funder or self.gen / 'funder-secrets'
+        if not (directory / 'keystore.json').is_file():
+            raise Refused(f'no funder account at {directory}: pass --funder DIR (the faucet account\'s nonces belong to the faucet signer alone)')
+        return directory
+
     def fund(self, to, wei):
-        """A value transfer from the --funder account (an operator keystore), or from the faucet account without one."""
-        if self.funder is None:
-            return self.faucet_send(to, wei)
-        sender = funder_address(self.funder)
+        """A value transfer from the --funder account (an operator keystore), or else from the generation's funder account."""
+        directory = self.funder_dir()
+        sender = funder_address(directory)
         nonce = int(self.call('eth_getTransactionCount', [sender, 'pending']), 16)
-        raw = self.cast_run('mktx', '--keystore', str(self.funder / 'keystore.json'), '--password-file', str(self.funder / 'password'), '--legacy', '--nonce', str(nonce),
+        raw = self.cast_run('mktx', '--keystore', str(directory / 'keystore.json'), '--password-file', str(directory / 'password'), '--legacy', '--nonce', str(nonce),
                             '--gas-price', str(int(self.call('eth_gasPrice'), 16)), '--gas-limit', '21000', '--chain', str(self.chain_id), '--value', str(wei), to)
         sent = self.call('eth_sendRawTransaction', [raw])
         receipt = self.wait(f'the funding of {to} is mined', lambda: self.call('eth_getTransactionReceipt', [sent]), 180)
-        self.expect(receipt['status'] == '0x1', f'{wei} wei reach {to} from the operator account {sender}', sent)
+        self.expect(receipt['status'] == '0x1', f'{wei} wei reach {to} from the funder account {sender}', sent)
 
     def evh(self):
         path = self.evidence / f'epoch{self.target}'
@@ -615,7 +621,7 @@ class Drive(rehearse.Rehearsal):
         if not self.published(result):
             identity = json.loads((self.net / 'pos-plan.json').read_text())['identities'][0]
             if self.balance(identity['owner']) < 10 ** 17:
-                self.say(f'  funding the owner of identity {identity["stakingId"]} with 1 UCT for gas ({"operator account" if self.funder else "faucet account"})')
+                self.say(f'  funding the owner of identity {identity["stakingId"]} with 1 UCT for gas ({"operator account" if self.funder else "funder account"})')
                 self.fund(identity['owner'], 10 ** 18)
             owner_key = self.gen / self.manifest['pos']['owner_keys'] / f'identity-{identity["stakingId"]}' / 'owner.key'
             subprocess.run(['chown', '-R', '10001:10001', str(self.work)], check=True)
@@ -1345,7 +1351,7 @@ def main(argv=None):
                    help='drive a result that leaves out a remote joiner prepared for this join (handoff/remote-joiners/*.json, state prepared): abandons that join')
     p.add_argument('--plan', action='store_true', help='print what the drive would do and the window, change nothing')
     p.add_argument('--only-if-members', type=parse_members, help='drive only when the elected committee is exactly these entities (e.g. 1,2,3,4); else exit 4 before any step')
-    p.add_argument('--funder', type=Path, help='a directory with keystore.json and password: the operator account that pays the owner\'s gas top-up (default: the faucet account)')
+    p.add_argument('--funder', type=Path, help='a directory with keystore.json and password: the operator account that pays the owner\'s gas top-up (default: the generation\'s funder-secrets/, never the faucet account)')
     a = p.parse_args(argv)
     if os.geteuid() != 0:
         p.error('run as root (sudo -E env PATH=$PATH ...): the generation directory is uid 10001, mode 0700')

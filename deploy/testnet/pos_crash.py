@@ -76,7 +76,7 @@ def scenario(r, tag, parts, epoch):
     """Kill the `parts` ('ureth', 'root', 'shard') of every entity in r.pods (one at a time), restart, check convergence. Writes evidence/pos-crash-<tag>.json."""
     transport = handoff_ops.DockerTransport(r.gen)
     deployment = json.loads((r.gen / 'network' / 'pos-deployment.json').read_text())
-    sender, to = r.manifest['faucet_address'], '0x' + '55' * 20
+    sender, to = r.funder_address(), '0x' + '55' * 20
     r.expect(all((head(r, j, transport) or (None,))[0] == epoch for j in range(1, r.n + 1)), f'precondition: every root certifies at epoch {epoch}')
     rows = []
     for i in r.pods:
@@ -168,7 +168,7 @@ def scenario(r, tag, parts, epoch):
 
         r.expect(r.wait('the custody has applied every root record', lambda: applied() is not None, 300), 'recordCursor equals recordCount after the crash', str(applied()))
         r.wait('the public gateway is healthy again', lambda: r.http(sys.modules[type(r).__module__].PUBLIC_RPC, 'GET', '/healthz')[0] == 200, 180)
-        gateway = json.loads(r.send_via_gateway(r.gen / 'faucet-secrets', '0x' + '66' * 20))
+        gateway = json.loads(r.send_via_gateway('0x' + '66' * 20))
         r.expect(gateway['status'] == '0x1', f'a transaction through the public gateway succeeds after entity {i} was crashed', gateway['transactionHash'])
         for j in range(1, r.n + 1):
             got = r.wait(f'validator {j} has it', lambda j=j: r.ureth(j, 'eth_getTransactionReceipt', [gateway['transactionHash']]), 120)

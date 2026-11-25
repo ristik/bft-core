@@ -11,7 +11,8 @@ go build -o /tmp/nb2-evidence ./scripts/nb2-evidence
 sudo python3 deploy/testnet/bridge/nb2/deploy_nb2.py "$GENERATION" --nb2-evidence /tmp/nb2-evidence
 ```
 
-Keep the faucet signer stopped while deploying. The deployer uses the generation's
+The deployer is the generation's funder account (`funder-secrets/`), never the
+faucet key, whose nonces belong to the faucet signer (bft-core#1287). It uses that
 keystore, validates the tool and node pins, and predicts the vault address before
 creating the recovery verifier. It deploys `FlatReceipts`, `FlatLineage`,
 `NativeBridgeVerifier11`, `NativeBridgeRecovery11` and `NativeBridgeVault11`.

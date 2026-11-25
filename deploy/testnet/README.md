@@ -178,8 +178,13 @@ generation before retrying a new name.
 
 Generator initializes and signs the trust base using ubft, enrolls independent
 signing authorities using existing CLI commands, finalizes the B1 genesis (verified against an independent `b1genesis --verify` regeneration before anything starts) and
-funds **only a random dedicated faucet account** with 1000 disposable UCT. Its V3
-keystore and random password stay in private files. It creates no known Hardhat
+funds **only two random dedicated accounts**: the faucet account (`--faucet-balance`,
+paid out only by the faucet signer) and the funder account (`--funder-balance`, default
+5,000 UCT, `funder-secrets/`, `funder_address` in the manifest), which signs every transfer
+the package's tools make (rehearsals, owner top-ups, joins, the bridge deployment). Never
+send from the faucet key outside the signer: the signer counts its nonce locally, and a
+foreign transaction leaves it stale (bft-core#1287). Their V3
+keystores and random passwords stay in private files. It creates no known Hardhat
 allocation. Engine JWTs and reset entropy are fresh. The printed block-zero hash
 is derived by ubft from the finalized genesis, not its file SHA-256. It writes that
 identity directly into the faucet config and public manifest. Verify every node's
@@ -470,8 +475,8 @@ the window. Unrelated no-change results that nobody drives keep being rejected i
 Unattended (Q35): `handoff_auto.py $G --members 1,2,3,4 --log DIR -- --ubft $UBFT [--funder DIR]` is one pass for a timer (its docstring has a
 `systemd-run --user --on-calendar` line). It runs the drive with `--only-if-members`: a result whose elected committee is anything else (a joiner, a retirement)
 is skipped before any step (exit 4) and stays an operator act. Every drive, manual or not, holds `$G/handoff/drive.lock`; one started meanwhile exits 5 and
-does nothing. `--funder` (a directory with `keystore.json` and `password`) pays the owner's gas top-up from an operator account, so the drive does not
-take nonces from the faucet account, which the public faucet's signer uses. Each pass appends a line to `DIR/auto.log` and keeps the output of a pass that drove,
+does nothing. The owner's gas top-up comes from the generation's funder account (`funder-secrets/`), or from an operator account given as `--funder` (a directory with
+`keystore.json` and `password`); never from the faucet account, whose nonces the public faucet's signer owns (bft-core#1287). Each pass appends a line to `DIR/auto.log` and keeps the output of a pass that drove,
 stopped or was refused in `DIR/drive-<time>.log`. A skip (exit 4, e.g. an operator's join drive that stopped half way) is an idle pass: one `auto.log` line per
 result per hour, no drive log, and the unit does not fail.
 
@@ -529,8 +534,8 @@ replacement. Its state only moves forward (`follower`, `registered`, `bonded`, `
 stale copy is refused. A drive reads it afresh for its guard and refuses when a record is unreadable. Nothing rolls a root store back: an install
 interrupted before its record prefix was fetched completes on the root's next start (bft-core#1028). The `root-pre-epoch-N` copy is forensic only.
 
-`join` funds the owner from the operator account given as `--funder DIR` (a directory on the host with `keystore.json` and `password`), or else from the faucet
-account (100 UCT and gas; the key stays on the host), and passes `--funder` on to its drives; it registers and bonds (the laptop signs), and then prepares only
+`join` funds the owner from the operator account given as `--funder DIR` (a directory on the host with `keystore.json` and `password`), or else from the
+generation's funder account (100 UCT and gas; the key stays on the host), and passes `--funder` on to its drives; it registers and bonds (the laptop signs), and then prepares only
 right after an acknowledgement, driving an open result that predates the joiner first: the trust base of E+1 over the committee and the joiner, the joiner's
 authority started at that scope, `admitDelegation`. While `$G/handoff/remote-joiners/5.json` says `prepared`, `handoff_drive.py` refuses a result that leaves the
 joiner out (it would move the epoch past the authority's scope) unless `--allow-excluding-joiner`; `--require-member ENTITY` makes the same refusal explicit.
