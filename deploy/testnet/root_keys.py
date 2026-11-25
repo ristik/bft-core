@@ -88,21 +88,32 @@ def generation_epoch(generation):
     return max(found + [1])
 
 
-def bind_to_generation(histories, generation):
-    """Refuse an inventory that is not the generation's own complete history: a history of another root genesis (a stale export of an earlier
-    reset), or one that ends before the generation's newest installed epoch (a truncated `utb-verify --url` read). Returns the error text, or None."""
+def generation_pin(generation):
+    """The trusted root-genesis pin of a generation: its network/utb-genesis.id, else its manifest's utb.genesis_id; None when neither names one."""
     gen = Path(generation)
     pin_file = gen / 'network' / 'utb-genesis.id'
-    pin = pin_file.read_text().strip().lower() if pin_file.is_file() else None
+    pin = pin_file.read_text().strip().lower() if pin_file.is_file() else ''
+    if not pin and (gen / 'manifest.json').is_file():
+        pin = str((json.loads((gen / 'manifest.json').read_text()).get('utb') or {}).get('genesis_id') or '').strip().lower()
+    return pin if re.fullmatch(r'0x[0-9a-f]{64}', pin) else None
+
+
+def bind_to_generation(histories, generation):
+    """Refuse an inventory that is not the generation's own complete history: no trusted root-genesis pin to bind it to, a history of another
+    root genesis (a stale export of an earlier reset), or one that ends before the generation's newest installed epoch (a truncated
+    `utb-verify --url` read). Returns the error text, or None."""
+    gen = Path(generation)
+    pin = generation_pin(gen)
+    if pin is None:
+        return (f'{gen.name} names no root-genesis pin (network/utb-genesis.id, or the manifest\'s utb.genesis_id): the history cannot be bound '
+                f'to it; nothing is deleted')
     want = generation_epoch(gen)
     for h in histories:
         gid, last = history_of(h)
-        if pin and gid == pin and last >= want:
+        if gid == pin and last >= want:
             return None
-    if pin:
-        return (f'no --prior-generation history is {gen.name}\'s own complete one: it needs genesisId {pin} and epochs through {want} '
-                f'(the newest trust base the generation holds); export it again from the running generation')
-    return None if any(history_of(h)[1] >= want for h in histories) else f'no --prior-generation history reaches {gen.name}\'s epoch {want}'
+    return (f'no --prior-generation history is {gen.name}\'s own complete one: it needs genesisId {pin} and epochs through {want} '
+            f'(the newest trust base the generation holds); export it again from the running generation')
 
 
 def load(source):

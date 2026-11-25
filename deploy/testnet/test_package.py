@@ -373,8 +373,20 @@ class UtbProfile(unittest.TestCase):
                 done=reset(*gen)
                 self.assertEqual(done.returncode,2,(why,done.stderr)); self.assertIn('--prior-generation',done.stderr,why)
                 self.assertFalse(spy.exists(),why+': docker must not be called')
+            # astra r3: without a trusted root-genesis pin nothing binds the history to the old generation: refused before any teardown
+            (old/'network/handoff').mkdir(parents=True)
+            done=reset('--no-utb','--images',str(integration),'--prior-generation',str(history))
+            self.assertEqual(done.returncode,2,done.stderr); self.assertIn('names no root-genesis pin',done.stderr)
+            self.assertFalse(spy.exists(),'no pin: docker must not be called')
+            # the manifest's utb.genesis_id is the pin when network/utb-genesis.id is absent: a foreign history is refused against it
+            (old/'manifest.json').write_text(json.dumps({'genesis_hash':'0x1','utb':{'genesis_id':'0x'+'ab'*32}}))
+            foreign=d/'foreign.json'; foreign.write_text(json.dumps({'format':root_keys.HISTORY_FORMAT,'genesisId':'0x'+'cd'*32,'epochs':[{'epoch':1,'keys':['0x02'+'11'*32]}]}))
+            done=reset('--no-utb','--images',str(integration),'--prior-generation',str(foreign))
+            self.assertEqual(done.returncode,2,done.stderr); self.assertIn('complete one',done.stderr)
+            self.assertFalse(spy.exists(),'a foreign history: docker must not be called')
+            self.assertEqual(root_keys.generation_pin(old),'0x'+'ab'*32)
             # review r2 P3-2: the history is bound to the generation it replaces: its own genesis, through its newest installed epoch
-            (old/'network/handoff').mkdir(parents=True); (old/'network/utb-genesis.id').write_text('0x'+'ab'*32+'\n')
+            (old/'network/utb-genesis.id').write_text('0x'+'ab'*32+'\n')
             (old/'network/handoff/trust-base-epoch3.json').write_text('{}')
             root_keys.write(old/'network',{root_keys.key_hash('0x03'+'99'*32)})
             def hist(name,gid,last):
