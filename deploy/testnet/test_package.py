@@ -1,3 +1,4 @@
+import hashlib
 import re
 import http.client
 import http.server
@@ -2511,6 +2512,64 @@ class NB2DriverKeys(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         return module
+
+    def test_nb2_deployment_binds_the_imported_tip_profile(self):
+        m = self.deploy_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            gen = Path(tmp)
+            (gen / 'public').mkdir()
+            (gen / 'network').mkdir()
+            pins = json.loads((m.REPO / 'deploy/testnet/pins.json').read_bytes())
+            manifest = {'utb': True, 'artifacts': {'sources': {'ureth': pins['ureth']},
+                                                  'binary_sha256': {}, 'images': {}}}
+            (gen / 'manifest.json').write_text(json.dumps(manifest))
+            hashes = m.descriptors(gen, manifest, 'bridge', gen)
+            cert = json.loads((gen / 'public/descriptors/cert-batch-v2.json').read_bytes())
+            profile = (gen / 'public/descriptors/semantic-profile.json').read_bytes()
+            self.assertEqual(cert['ureth'], pins['ureth'])
+            self.assertEqual(hashes['semantic-profile'], '0x' + hashlib.sha256(profile).hexdigest())
+            self.assertEqual(json.loads(profile)['b1ExecutionRevision'], 2)
+            for name, sha in json.loads(profile)['specification'].items():
+                self.assertEqual(hashlib.sha256((m.REPO / name).read_bytes()).hexdigest(), sha)
+            for revision in ({}, {'executionRevision': 1}):
+                (gen / 'network/b1-profile.json').write_text(json.dumps(revision))
+                with self.assertRaisesRegex(SystemExit, 'require B1 execution revision 2'):
+                    m.run_deployment(gen, gen / 'evidence', 1, gen / 'output')
+
+    @unittest.skipUnless(os.getenv('TN_PINNED_URETH'), 'requires the pinned ureth checkout')
+    def test_nb2_descriptors_match_paired_source_revisions(self):
+        m = self.deploy_module()
+        pins = json.loads((m.REPO / 'deploy/testnet/pins.json').read_bytes())
+        bft = (os.getenv('TN_PINNED_BFT', m.REPO), pins['bft'])
+        ureth = (os.environ['TN_PINNED_URETH'], pins['ureth'])
+        historical = m.REPO / 'testvectors/nb2-continuation-v1.1-supplement/descriptors'
+        manifest = {'artifacts': {'sources': {'bft': pins['bft'], 'ureth': pins['ureth']},
+                                  'binary_sha256': {}, 'images': {}}}
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            (work / 'public').mkdir()
+            hashes = m.descriptors(work, manifest, 'bridge', work)
+            release = m.HERE
+            for name, template, sections in (
+                ('cert-batch-v2', release / 'cert-batch-v2-tip.json', {'sources': ureth}),
+                ('rsmt-member-v1', historical / 'rsmt-member-v1.json', {'sources': ureth}),
+                ('execution', historical / 'execution.json', {'rules': ureth}),
+                ('primitive-vectors', historical / 'primitive-vectors.json', {'artifacts': bft}),
+                ('registry-layout', historical / 'registry-layout.json', {'sources': bft, 'native': ureth}),
+                ('semantic-profile', release / 'semantic-profile-tip.json', {'specification': bft}),
+            ):
+                with self.subTest(descriptor=name):
+                    expected = json.loads(template.read_bytes())
+                    if 'ureth' in expected:
+                        expected['ureth'] = pins['ureth']
+                    for section, (checkout, revision) in sections.items():
+                        for path in expected[section]:
+                            blob = subprocess.check_output(
+                                ['git', '-C', str(checkout), 'show', f'{revision}:{path}'])
+                            expected[section][path] = hashlib.sha256(blob).hexdigest()
+                    data = (work / 'public/descriptors' / f'{name}.json').read_bytes()
+                    self.assertEqual(json.loads(data), expected)
+                    self.assertEqual(hashes[name], '0x' + hashlib.sha256(data).hexdigest())
 
     def test_graph_and_origin_readback_use_the_recorded_finalized_hash(self):
         m = self.deploy_module()

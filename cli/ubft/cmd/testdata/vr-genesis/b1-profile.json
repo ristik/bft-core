@@ -2,7 +2,7 @@
   "network": 3,
   "rootGenesisId": "0xf89893f5b30b573b1a6bb4c5fdc559c8760a979433bbcb50737b7d8e92c33b71",
   "executionChainId": 3,
-  "executionRevision": 1,
+  "executionRevision": 2,
   "runtimeHash": "0xebbadc64b3f723741dbf79e3ffd7bf2ea31daf4e4a949a3e01e5656926f446ae",
   "compilerHash": "0x2f93eb970bd354a7878eaef2409b6a3466324740a616491c76fbba8ae4eed575",
   "maxEpochsPerUpdate": 2,

@@ -1,0 +1,13 @@
+{
+  "address": "0x0100",
+  "semantics": "CERT_BATCH_V2 imported registry tip (B1 execution revision 2)",
+  "sources": {
+    "crates/unicity/b1/src/batch.rs": "689cf4d0d8ebb88a69396005829eeded11359b2e5ce6798b30b47ee274d36292",
+    "crates/unicity/b1/src/cbor.rs": "0da394371d20be4f25c559bdca5b914465ea4d03c02957f2b233a6ff60478cd4",
+    "crates/unicity/b1/src/certificate.rs": "373186fd63e0b5cca2be7f471e52559af7ab9a6fa010740de9414ded7498e294",
+    "crates/unicity/b1/src/lib.rs": "f16def6a5f84e9939a228d36c73aca19784760785d1eb0308eac2c9cf6cc70c3",
+    "crates/unicity/b1/src/provider.rs": "a3a663645028fe04221255d978431bb83e359a7a7baba089e55817d39550b60a",
+    "crates/unicity/b1/src/registry.rs": "529b00711213a768cebf626c4c8dbf0a5dc866e18800d46898cd8dec162a33fd"
+  },
+  "ureth": "0e17a7172f89d8bbfeaf2b3688c16506c566f213"
+}

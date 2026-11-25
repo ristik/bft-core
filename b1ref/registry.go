@@ -64,17 +64,16 @@ func u64(w [32]byte) (uint64, bool) {
 	return binary.BigEndian.Uint64(w[24:]), true
 }
 
-// CommonSlots are the eleven words read once per call, in the contract's order (section 5).
+// CommonSlots are read once per call in the contract's order. The observation words
+// stay in the read set to preserve the precompile's EVM storage warming.
 var CommonSlots = []string{"genesisCommitment", "phase", "b1.initialized", "b1.network", "b1.profileHash", "b1.format",
 	"b1.genesisEpoch", "b1.importedTipEpoch", "b1.originReady", "clock.rootRound", "origin.rootEpoch"}
 
 // common is the validated common registry state of one call.
 type common struct {
-	phase     uint64
-	network   uint16
-	g, tip    uint64 // genesis epoch, imported tip I
-	ready     bool
-	origin, o uint64 // usable origin epoch U, its root round O
+	phase   uint64
+	network uint16
+	g, tip  uint64 // genesis epoch, imported tip I
 }
 
 // readCommon reads and validates the common words. Any impossible value is ErrRegistryCommon; a read failure is ErrHost.
@@ -87,30 +86,22 @@ func readCommon(st State, pins Pins) (*common, error) {
 		}
 		w[i] = v
 	}
-	// every word except genesisCommitment (0) and profileHash (4) is a u64
-	var vals [9]uint64
-	for i, idx := range []int{1, 2, 3, 5, 6, 7, 8, 9, 10} {
+	// Only the deployment and authority words participate in validation.
+	var vals [6]uint64
+	for i, idx := range []int{1, 2, 3, 5, 6, 7} {
 		v, ok := u64(w[idx])
 		if !ok {
 			return nil, ErrRegistryCommon
 		}
 		vals[i] = v
 	}
-	phase, initialized, network, format, g, tip, ready, o, origin := vals[0], vals[1], vals[2], vals[3], vals[4], vals[5], vals[6], vals[7], vals[8]
+	phase, initialized, network, format, g, tip := vals[0], vals[1], vals[2], vals[3], vals[4], vals[5]
 	switch {
 	case pins.GenesisCommitment == [32]byte{} || w[0] != pins.GenesisCommitment, phase != 1 && phase != 2, initialized != 1, network == 0 || network > 0xffff,
-		pins.ProfileHash == [32]byte{} || w[4] != pins.ProfileHash, format != RegistryFormat, ready > 1, g > tip:
+		pins.ProfileHash == [32]byte{} || w[4] != pins.ProfileHash, format != RegistryFormat, g > tip:
 		return nil, ErrRegistryCommon
 	}
-	// no preload (contract section 1): a ready registry's usable origin is its import tip
-	if ready == 1 && (origin < g || origin != tip) {
-		return nil, ErrRegistryCommon
-	}
-	if ready == 0 && (origin != 0 || o != 0) {
-		return nil, ErrRegistryCommon
-	}
-	c := common{phase: phase, network: uint16(network), g: g, tip: tip, ready: ready == 1, origin: origin, o: o}
-	return &c, nil
+	return &common{phase: phase, network: uint16(network), g: g, tip: tip}, nil
 }
 
 // epochAuth is one epoch's validated authority, read once per call.
@@ -120,7 +111,7 @@ type epochAuth struct {
 	threshold uint64
 }
 
-// loadEpoch reads epoch e (g <= e <= U) word by word, validates it as admitted state and parses its keys. A missing entry is
+// loadEpoch reads epoch e (g <= e <= I) word by word, validates it as admitted state and parses its keys. A missing entry is
 // ErrRegistryMissingEpoch; anything an admitted registry cannot hold is ErrRegistryInvalidEpoch.
 func loadEpoch(st State, c *common, e uint64) (*epochAuth, error) {
 	work("epoch-load")
@@ -139,7 +130,7 @@ func loadEpoch(st State, c *common, e uint64) (*epochAuth, error) {
 		}
 		m[f] = v
 	}
-	if present, ok := u64(m[0]); ok && present == 0 {
+	if m == ([b1state.EntryWords][32]byte{}) {
 		return nil, ErrRegistryMissingEpoch
 	}
 	ent := b1state.Entry{Epoch: e, BodyID: m[2], ActivationCommitID: m[3], SigningConfigHash: m[8]}
@@ -181,10 +172,8 @@ func loadEpoch(st State, c *common, e uint64) (*epochAuth, error) {
 	if sum, err := ent.TotalWeight(); err != nil || sum != total {
 		return nil, ErrRegistryInvalidEpoch
 	}
-	// interval invariants of admitted state at the usable origin (section 3): every epoch below U is closed by O, and the usable
-	// epoch, the import tip, is open
-	switch {
-	case ent.Start > c.o, e < c.origin && ent.End == nil, e < c.origin && *ent.End > c.o, e == c.origin && ent.End != nil:
+	// The writer closes each historical epoch at its immediate successor's start.
+	if (e < c.tip) != (ent.End != nil) {
 		return nil, ErrRegistryInvalidEpoch
 	}
 	threshold, err := b1state.Threshold(total)

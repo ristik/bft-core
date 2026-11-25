@@ -12,8 +12,9 @@ EVIDENCE_DIR=${T6_EVIDENCE_DIR:-$AGRE_ROOT/briefs/devnet-runs/t6-rehearsal-$(dat
 T6_BFT_COMMIT=${T6_BFT_COMMIT:-$(git -C "$SOURCE_ROOT" rev-parse HEAD)}
 T6_BFT_REMOTE=${T6_BFT_REMOTE:-$(git -C "$SOURCE_ROOT" remote get-url origin)}
 T6_BFT_REF=${T6_BFT_REF:-t6/rehearsal-harness}
-# the Ureth the run is pinned to: 6e59b68c (briefs/builds/ureth-6e59b68c/), the build the UTB lanes run and one that takes the --unicity.max-epochs-per-update flag the current b1genesis emits (47f5146b rejects it); an ATTESTED build of the pin is accepted (T6_URETH_ATTESTED)
-T6_URETH_COMMIT=${T6_URETH_COMMIT:-4f2913297982c6c0a99663d233e067e5f346e389}
+# Match the checkout product's execution client in scripts/ci/lane-pins.json.
+# T6_URETH_ATTESTED may supply a build at the same pin.
+T6_URETH_COMMIT=${T6_URETH_COMMIT:-0e17a7172f89d8bbfeaf2b3688c16506c566f213}
 T6_URETH_REMOTE=${T6_URETH_REMOTE:-https://github.com/ristik/ureth.git}
 T6_CONTRACTS_COMMIT=${T6_CONTRACTS_COMMIT:-e7eb3216549b772a9e1df2b1214976d7dd9e6e62}
 # The four allocation contracts are rebuilt from their e7eb3216 source commit. The registry is not: the fresh-B1 registry (layout 3) is generated in code

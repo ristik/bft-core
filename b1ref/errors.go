@@ -69,11 +69,9 @@ var (
 var (
 	ErrNetwork            = newSentinel(ErrInvalid, "network mismatch")
 	ErrEpochBeforeGenesis = newSentinel(ErrInvalid, "seal epoch is before the registry's genesis epoch")
-	ErrEpochNotUsable     = newSentinel(ErrInvalid, "seal epoch is after the usable origin epoch")
-	ErrOriginNotReady     = newSentinel(ErrInvalid, "the registry has no usable root origin yet")
+	ErrEpochNotUsable     = newSentinel(ErrInvalid, "seal epoch is after the imported registry tip")
 	ErrBeforeStart        = newSentinel(ErrInvalid, "root round before the interval start")
 	ErrAfterEnd           = newSentinel(ErrInvalid, "root round at or after the interval end")
-	ErrFuture             = newSentinel(ErrInvalid, "certificate root round is in the future")
 
 	ErrPartition     = newSentinel(ErrInvalid, "partition mismatch")
 	ErrShard         = newSentinel(ErrInvalid, "shard mismatch")

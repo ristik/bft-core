@@ -24,13 +24,24 @@ jobs:
           python3 - <<'E' >> "$GITHUB_OUTPUT"
           import json
           p = json.load(open('deploy/testnet/pins.json'))
-          for k in ('bft', 'aggregator-go', 'vr-contracts'):
+          for k in ('bft', 'ureth', 'aggregator-go', 'vr-contracts'):
               print(f"{k.replace('-', '_')}={p[k]}")
           E
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.pins.outputs.bft }}
+          path: pinned-bft
+      - uses: actions/checkout@v4
+        with:
+          repository: ristik/ureth
+          ref: ${{ steps.pins.outputs.ureth }}
+          path: pinned-ureth
       - run: docker compose version
       - run: python3 -m unittest discover -s deploy/testnet -p test_package.py -v
         env:
           TN_REQUIRE_COMPOSE: '1'
+          TN_PINNED_BFT: ${{ github.workspace }}/pinned-bft
+          TN_PINNED_URETH: ${{ github.workspace }}/pinned-ureth
       - run: python3 -m unittest discover -s deploy/testnet -p test_nb2_origin.py -v
       - run: python3 -m unittest discover -s deploy/testnet -p test_public_relay.py -v
       - run: python3 -m unittest discover -s deploy/testnet -p test_handoff_drive.py -v
@@ -39,10 +50,6 @@ jobs:
       - run: python3 -m unittest discover -s deploy/testnet -p test_vr_utb_committee.py -v
       - run: python3 -m unittest discover -s deploy/testnet -p test_validator_container.py -v
       - run: python3 -m unittest discover -s deploy/testnet/faucet -v
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ steps.pins.outputs.bft }}
-          path: pinned-bft
       - run: make -C pinned-bft build
       - run: go build -C pinned-bft -o /tmp/tn-b1genesis ./scripts/b1genesis
       - run: go build -o /tmp/tn-keygen ./deploy/testnet/keygen

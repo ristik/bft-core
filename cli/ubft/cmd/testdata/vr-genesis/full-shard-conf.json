@@ -13,7 +13,7 @@
     "chain_id": "3",
     "continuity_max_distance": "1/2",
     "proof_type": "exec",
-    "seal_registry_genesis": "52faf1b188bf288ce750d02c161f511af06123a624b5257f2f9de9de24427c78",
+    "seal_registry_genesis": "288cb3119738264c6615c2654fd8f7c38df496e5fef44d7bfe4899bbb148a857",
     "validator_coupling": "true",
     "validator_registry": "0xff00000000000000000000000000000000000003",
     "validator_registry_code_hash": "0x19094777cb74c783f82392439d1f6c79fe62b6b57c2915790f00a9e16ee490e9"
