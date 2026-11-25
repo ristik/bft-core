@@ -119,7 +119,8 @@ with tempfile.TemporaryDirectory(prefix='tnops-validation-',dir='/tmp') as tmp:
         release.mkdir()
         document = json.loads((generation/'manifest.json').read_text())
         vr_release.stage_network_files(generation/'network', release, document)
-        assert set(file.name for file in release.iterdir()) == set(vr_release.NETWORK_FILES)
+        # #1297: plus the retired root key list, which every generation made now pins (an empty one for --first-generation)
+        assert set(file.name for file in release.iterdir()) == {*vr_release.NETWORK_FILES, vr_release.root_keys.FILE}
         print(json.dumps({'vr_release_genesis_files':'PASS', 'utb_genesis_id':document['utb']['genesis_id']}))
     assert generations[0]['genesis_hash']!=generations[1]['genesis_hash']
     assert generations[0]['faucet_address']!=generations[1]['faucet_address']
