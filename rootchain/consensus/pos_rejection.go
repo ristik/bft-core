@@ -15,6 +15,24 @@ import (
 // valid rejection at a quiet proposal opportunity, before a fresh Prepare: otherwise the automatic handoff planner could keep starving it.
 // None of this is a validity rule; every voter judges the control by the full rule.
 
+// SetRejectionProposer attaches the RejectResult builder before consensus starts (a VR-mode root's, ristik/bft-core#1311; the P85
+// deployment path installs its own with its services).
+func (x *ConsensusManager) SetRejectionProposer(rp storage.RejectProposer) {
+	x.blockStore().PosServices().Rejections = rp
+}
+
+// RejectionProposer is the installed RejectResult builder, nil when there is none.
+func (x *ConsensusManager) RejectionProposer() storage.RejectProposer { return x.rejectionProposer() }
+
+// VRPresence is the readyBitmap of an expiry RejectResult v2 of the result: the successors whose verified possession proof this root's
+// VR handoff service holds for the current intent over it (presence only, never evidence). Zero without the VR handoff.
+func (x *ConsensusManager) VRPresence(resultID [32]byte) uint16 {
+	if x.vr == nil || x.vr.svc == nil {
+		return 0
+	}
+	return x.vr.svc.Presence(resultID)
+}
+
 // rejectionProposer is the RejectResult builder of this chain's P85 services, nil when it has none.
 func (x *ConsensusManager) rejectionProposer() storage.RejectProposer {
 	if svc := x.blockStore().PosServices(); svc != nil {

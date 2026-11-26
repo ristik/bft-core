@@ -539,6 +539,9 @@ func rootNodeRun(ctx context.Context, flags *rootNodeRunFlags) error {
 	if err = checkVRHandoffWired(cm.VRServices(), vrHandoffOn); err != nil {
 		return err
 	}
+	if err = checkVRRejectionWired(cm.VRServices(), cm.RejectionProposer()); err != nil {
+		return err
+	}
 	if err = host.BootstrapConnect(ctx, log); err != nil {
 		return err
 	}

@@ -13,6 +13,8 @@ import (
 	"github.com/unicitynetwork/bft-core/q3format"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
+	"github.com/unicitynetwork/bft-core/rootchain/evmstate"
+	"github.com/unicitynetwork/bft-core/rootchain/posreject"
 	"github.com/unicitynetwork/bft-core/rootchain/vrschedule"
 	"github.com/unicitynetwork/bft-core/rootchain/vrstate"
 	"github.com/unicitynetwork/bft-core/vradmit"
@@ -198,4 +200,17 @@ func TestTheVRHandoffWiringInRootNodeRun(t *testing.T) {
 	_, _, on, err = vrHandoffWiring(nil, "http://127.0.0.1:8545")
 	require.NoError(t, err)
 	require.ErrorIs(t, checkVRHandoffWired(reg, on), ErrVRHandoffCmd, "a VR-mode root whose root side is off does not start")
+}
+
+// A VR-mode root without its RejectResult v2 builder does not start (#1311): an abandoned output would freeze its root epochs for good.
+func TestAVRModeRootNeedsItsRejectionBuilder(t *testing.T) {
+	require.NoError(t, checkVRRejectionWired(nil, nil), "not a VR-mode root")
+	reg := &storage.VRServices{}
+	require.ErrorIs(t, checkVRRejectionWired(reg, nil), ErrVRHandoffCmd)
+	b, err := posreject.New(posreject.Config{VR: &vrstate.Pins{Registry: [20]byte{1}, SealRegistry: [20]byte{2}},
+		Proofs: func([32]byte) evmstate.ProofSource { return nil }})
+	require.NoError(t, err)
+	require.NoError(t, checkVRRejectionWired(reg, b))
+	_, err = posreject.New(posreject.Config{VR: &vrstate.Pins{Registry: [20]byte{1}}, Proofs: func([32]byte) evmstate.ProofSource { return nil }})
+	require.Error(t, err, "VR mode needs the pinned SealRegistry")
 }

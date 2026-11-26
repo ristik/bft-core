@@ -1260,3 +1260,23 @@ func (s *Service) kReadinessLocked(st *intentState) []vrschema.Readiness {
 	})
 	return out
 }
+
+// Presence is the readyBitmap of an expiry RejectResult of resultID (schema-v1 section 4.1, design 3.7.4): bit i set when this root holds
+// a verified possession proof of the i-th successor (the intent's identities, ascending by staking id, VR's member order) for the current
+// intent over resultID. It proves presence only, never absence: a clear bit is never evidence. Zero when the current intent is not of
+// resultID or names more than 16 successors.
+func (s *Service) Presence(resultID [32]byte) uint16 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	st := s.cur
+	if st == nil || !bytes.Equal(st.d.Intent.Source.ResultID, resultID[:]) || len(st.successors) > 16 {
+		return 0
+	}
+	var bm uint16
+	for i, m := range st.successors {
+		if _, ok := st.pops[m.EVMNodeID]; ok {
+			bm |= 1 << i
+		}
+	}
+	return bm
+}

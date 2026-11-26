@@ -23,6 +23,7 @@ import (
 	"github.com/unicitynetwork/bft-core/q3format"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus"
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
+	"github.com/unicitynetwork/bft-core/rootchain/posreject"
 	"github.com/unicitynetwork/bft-core/rootchain/posretire"
 	"github.com/unicitynetwork/bft-core/rootchain/vrschedule"
 	"github.com/unicitynetwork/bft-core/rootchain/vrstate"
@@ -112,6 +113,20 @@ func enableVRHandoff(ctx context.Context, cm *consensus.ConsensusManager, dep vr
 	}
 	cm.SetRetirementProposer(retirements)
 	go retirements.Run(ctx)
+	// RejectResult v2 (ristik/bft-core#1311): every root discovers VR's open output at each candidate parent's certified EVM state and,
+	// once the due table makes it due (Expired, Invalidated), orders the rejection itself; no keeper or relay. Each root builds its own
+	// (no signed submission): a leader orders what its own builder prepared, and every voter judges it by the full rule.
+	rejections, err := posreject.New(posreject.Config{
+		Deployment: storage.PosDeployment{RootNetwork: dep.RootNetwork,
+			Deployment: evmassign.Deployment{NetworkWord: dep.NetworkWord, ChainID: dep.ChainID, Custody: dep.Registry}},
+		VR:     &pins,
+		Proofs: posreject.Proofs(posretire.RPCProofs(client)),
+		Ready:  cm.VRPresence,
+	})
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrVRHandoffCmd, err)
+	}
+	cm.SetRejectionProposer(rejections)
 	if host != nil {
 		// the peer protocol: the installed root committee always, besides the current intent's members the service names
 		svc, queue := cm.VRService()
@@ -213,6 +228,15 @@ func vrHandoffWiring(reg *storage.VRServices, rpcURL string) (vradmit.Deployment
 func checkVRHandoffWired(reg *storage.VRServices, on bool) error {
 	if reg != nil && !on {
 		return fmt.Errorf("%w: the VR services were installed after the VR handoff root side was wired", ErrVRHandoffCmd)
+	}
+	return nil
+}
+
+// checkVRRejectionWired refuses a VR-mode root without its RejectResult v2 builder: an abandoned output would never be rejected, and the
+// root epochs would freeze for good (#1311).
+func checkVRRejectionWired(reg *storage.VRServices, rejections storage.RejectProposer) error {
+	if reg != nil && rejections == nil {
+		return fmt.Errorf("%w: a VR-mode root has no RejectResult builder", ErrVRHandoffCmd)
 	}
 	return nil
 }
