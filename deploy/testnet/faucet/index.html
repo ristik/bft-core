@@ -30,10 +30,24 @@ document.getElementById('claim').onclick = async () => {
   try {
     if (!window.ethereum) throw Error('Install or open an EVM wallet.');
     const [address] = await ethereum.request({method:'eth_requestAccounts'});
+    // Wallets remember a network per site, so ask the wallet to switch to this testnet,
+    // and to add it if the wallet does not know it yet (error 4902).
+    const chainHex = '0x' + network.chain_id.toString(16);
+    try {
+      await ethereum.request({method:'wallet_switchEthereumChain',params:[{chainId:chainHex}]});
+    } catch (error) {
+      if ((error.code !== 4902 && error.data?.originalError?.code !== 4902) || !network.rpc_url) throw error;
+      await ethereum.request({method:'wallet_addEthereumChain',params:[{chainId:chainHex,
+        chainName:'Unicity testnet',nativeCurrency:{name:'UCT',symbol:'UCT',decimals:18},
+        rpcUrls:[network.rpc_url]}]});
+    }
     const chain = await ethereum.request({method:'eth_chainId'});
     const genesis = await ethereum.request({method:'eth_getBlockByNumber',params:['0x0',false]});
-    if (Number(BigInt(chain)) !== network.chain_id || genesis.hash.toLowerCase() !== network.genesis_hash)
-      throw Error('Wrong network or reset genesis. Reconfigure your wallet before claiming.');
+    const seenChain = Number(BigInt(chain)), seenGenesis = (genesis?.hash || '').toLowerCase();
+    if (seenChain !== network.chain_id)
+      throw Error(`Wrong network: the wallet is on chain ID ${seenChain}, this testnet is ${network.chain_id}. Switch the wallet's network for this site and retry.`);
+    if (seenGenesis !== network.genesis_hash)
+      throw Error(`Reset genesis: the wallet's RPC reports block zero ${seenGenesis || 'unknown'}, this testnet's is ${network.genesis_hash}. Point the network's RPC URL at ${network.rpc_url} and retry.`);
     const response = await fetch('/api/claim', {method:'POST',headers:{'Content-Type':'application/json',
       'h-captcha-response':widget === undefined ? '' : hcaptcha.getResponse(widget)},
       body:JSON.stringify({address,chain_id:network.chain_id,genesis_hash:genesis.hash.toLowerCase()})});
