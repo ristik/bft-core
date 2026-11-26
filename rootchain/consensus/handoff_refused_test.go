@@ -5,8 +5,11 @@ import (
 	"context"
 	"crypto"
 	"errors"
+	"fmt"
+	"log/slog"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/require"
 	"github.com/unicitynetwork/bft-core/evmassign"
@@ -83,30 +86,83 @@ func TestLeaderLeavesOutARefusedFreezeAndDoesNotReproposeIt(t *testing.T) {
 	require.EqualValues(t, 1, refusedCount(t, cm, "freeze", handoffRefusedDeterministic), "logged and counted once")
 
 	// an epoch switch forgets it
-	cm.refused.reset()
+	cm.resetVolatile()
 	require.Empty(t, cm.HandoffRefusals())
+	require.Zero(t, cm.refused.len())
 }
 
+// A refusal that can clear by itself is retried every round and the record is ordered once it clears: an input this root lacks, and the two
+// admission items that read state ordinary blocks change while the EVM is frozen (review of #1307, P2-1): the shard acknowledgement gate
+// (another shard acknowledges its pending configuration in an ordinary block) and the activation gates (the committed support table).
 func TestLeaderRetriesAHandoffRecordRefusedForALocalReason(t *testing.T) {
-	refusal := errors.Join(storage.ErrHandoffRecord, storage.ErrVRUnavailable, errors.New("VR proof at the frozen parent"))
-	cm, trials, propose := refusingLeader(t, func() [][]byte { return refusedFreeze(0) }, &refusal)
+	for name, cause := range map[string]error{
+		"VR input unavailable":    errors.Join(storage.ErrVRUnavailable, errors.New("VR proof at the frozen parent")),
+		"acknowledgement gate":    errors.Join(storage.ErrVRFreeze, fmt.Errorf("%w: entry 0 (-1: the EVM shard)", vradmit.ErrAckGate)),
+		"activation gates":        errors.Join(storage.ErrVRFreeze, vradmit.ErrActivation, errors.New("support is not sufficient yet")),
+		"acknowledgement pending": storage.ErrAssignmentAckPending,
+		"an unclassified refusal": errors.New("invalid root handoff record"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			refusal := errors.Join(storage.ErrHandoffRecord, cause)
+			cm, trials, propose := refusingLeader(t, func() [][]byte { return refusedFreeze(0) }, &refusal)
 
-	p := propose()
-	require.Empty(t, p.Block.Payload.HandoffRecords, "a record this root cannot judge is left out of this round")
+			p := propose()
+			require.Empty(t, p.Block.Payload.HandoffRecords, "the refused record is left out of this round")
+			require.Contains(t, requestedPartitions(p.Block.Payload), refusedPartition)
+			require.Empty(t, cm.HandoffRefusals(), "a local refusal is not remembered")
+			require.EqualValues(t, 1, refusedCount(t, cm, "freeze", handoffRefusedLocal))
+
+			p = propose()
+			require.Equal(t, 2, *trials, "the next round tries it again")
+			require.Empty(t, p.Block.Payload.HandoffRecords)
+			require.EqualValues(t, 2, refusedCount(t, cm, "freeze", handoffRefusedLocal))
+
+			// once the cause clears (the gate holds, the input arrived), the record is ordered alone
+			refusal = nil
+			p = propose()
+			require.Equal(t, 3, *trials)
+			require.Len(t, p.Block.Payload.HandoffRecords, 2, "the admitted Freeze and its companion")
+			require.Empty(t, p.Block.Payload.Requests, "a record block carries no change request")
+		})
+	}
+}
+
+// The default trial is the block store's own execution (handoffTrial unset): a handoff record the real executor refuses is left out, and
+// the trial leaves the block store as it was.
+func TestLeaderTrialIsTheRealExecutorAndStoresNothing(t *testing.T) {
+	f := newPlanFixture(t)
+	cm := f.cm
+	cm.leaderSelector = constLeader{leader: cm.id}
+	cm.safety.storage = forgetfulProposals{cm.safety.storage}
+	sourced := 0
+	// a Freeze on an idle control state: every root's executor refuses it (no Prepare bound a frozen parent)
+	cm.handoffSource = func(uint64, *rctypes.QuorumCert) ([][]byte, error) { sourced++; return refusedFreeze(0), nil }
+	store := cm.blockStore()
+	highQC := store.GetHighQc()
+	committed := store.CommittedRound()
+	parent, err := store.Block(highQC.GetRound())
+	require.NoError(t, err)
+	parentHash := []byte(bytes.Clone(parent.RootHash))
+	cm.pacemaker.Reset(context.Background(), highQC.GetRound(), nil, nil)
+	t.Cleanup(cm.pacemaker.Stop)
+	round := cm.pacemaker.GetCurrentRound()
+
+	bufferRequest(cm, refusedPartition)
+	cm.processNewRoundEvent(context.Background())
+	p := f.mockNet.WaitRootProposal(t)
+	require.Equal(t, 1, sourced)
+	require.Empty(t, p.Block.Payload.HandoffRecords, "the real executor refuses the Freeze: it is left out")
 	require.Contains(t, requestedPartitions(p.Block.Payload), refusedPartition)
-	require.Empty(t, cm.HandoffRefusals(), "a local refusal is not remembered")
-	require.EqualValues(t, 1, refusedCount(t, cm, "freeze", handoffRefusedLocal))
+	require.EqualValues(t, 1, refusedCount(t, cm, "freeze", handoffRefusedLocal), "an ErrHandoffRecord-only refusal is local")
 
-	p = propose()
-	require.Equal(t, 2, *trials, "the next round tries it again")
-	require.Empty(t, p.Block.Payload.HandoffRecords)
-
-	// once this root can judge it and admits it, the record is ordered alone
-	refusal = nil
-	p = propose()
-	require.Equal(t, 3, *trials)
-	require.Len(t, p.Block.Payload.HandoffRecords, 2, "the admitted Freeze and its companion")
-	require.Empty(t, p.Block.Payload.Requests, "a record block carries no change request")
+	require.Same(t, store, cm.blockStore())
+	require.Equal(t, highQC, cm.blockStore().GetHighQc(), "the trial stores nothing: the high QC")
+	require.Equal(t, committed, cm.blockStore().CommittedRound(), "the committed round")
+	_, err = cm.blockStore().Block(round)
+	require.Error(t, err, "no block of the proposal round")
+	after, err := cm.blockStore().Block(highQC.GetRound())
+	require.NoError(t, err)
+	require.Equal(t, parentHash, []byte(after.RootHash), "the parent's state")
 }
 
 // forgetfulProposals forgets every proposal reservation, so a test leader can propose the same round again.
@@ -134,6 +190,13 @@ func TestHandoffRefusalClass(t *testing.T) {
 		{errors.Join(storage.ErrVRFreeze, storage.ErrVRUnavailable), handoffRefusedLocal},
 		{errors.Join(storage.ErrHandoffRecord, storage.ErrWitnessUnavailable), handoffRefusedLocal},
 		{storage.ErrAssignmentAckPending, handoffRefusedLocal},
+		// the admission items that read state ordinary blocks change (review of #1307, P2-1)
+		{errors.Join(storage.ErrHandoffRecord, storage.ErrVRFreeze, fmt.Errorf("%w: entry 2", vradmit.ErrAckGate)), handoffRefusedLocal},
+		{errors.Join(storage.ErrHandoffRecord, storage.ErrVRFreeze, vradmit.ErrActivation), handoffRefusedLocal},
+		// the items the Prepare fixes stay deterministic
+		{errors.Join(storage.ErrHandoffRecord, storage.ErrVRFreeze, vradmit.ErrCommit), handoffRefusedDeterministic},
+		{errors.Join(storage.ErrHandoffRecord, storage.ErrVRFreeze, vradmit.ErrVerdicts), handoffRefusedDeterministic},
+		{errors.Join(storage.ErrHandoffRecord, storage.ErrVRFreeze, vradmit.ErrInconsistent), handoffRefusedDeterministic},
 	} {
 		require.Equal(t, c.want, handoffRefusalClass(c.err), "%v", c.err)
 	}
@@ -166,6 +229,7 @@ func TestVRRecordsForRoundSkipsThePrepareOfARefusedCandidate(t *testing.T) {
 		},
 	}
 	x := vrManager(v)
+	x.handoffRefusedCnt = prometheus.NewCounterVec(prometheus.CounterOpts{Name: "t"}, []string{"kind", "class"})
 	parent := idleParent(plan.Epoch)
 	qc := &rctypes.QuorumCert{VoteInfo: &rctypes.RoundInfo{RoundNumber: 9}}
 
@@ -182,6 +246,9 @@ func TestVRRecordsForRoundSkipsThePrepareOfARefusedCandidate(t *testing.T) {
 	recs, _ = x.vrRecordsForRound(11, parent, qc)
 	require.Empty(t, recs)
 	require.Equal(t, 1, checks, "judged once per intent identity")
+	recs, _ = x.vrRecordsForRound(11, parent, qc)
+	require.Empty(t, recs)
+	require.EqualValues(t, 2, refusedCount(t, x, "prepare", handoffRefusedDeterministic), "every leader round that leaves it out counts, once")
 
 	// an input the check lacks does not hold the Prepare back: the Freeze judges the candidate in full, as before
 	x.refused.reset()
@@ -215,4 +282,37 @@ func TestHandoffRefusalsArePrunedWithTheirIntent(t *testing.T) {
 		note(1, uint64(10+i), 0)
 	}
 	require.Len(t, x.HandoffRefusals(), maxHandoffRefusals, "bounded")
+}
+
+// A remembered Freeze is neither returned nor announced as ordered (review of #1307, P2-2): vrRecordsForRound drops it before the
+// vr.handoff.ordering line.
+func TestVRRecordsForRoundDropsARememberedFreezeBeforeOrdering(t *testing.T) {
+	w := newVRWorld(t)
+	svc := w.planned()
+	plan, _ := svc.Plan()
+	records := refusedFreeze(plan.Attempt)
+	v := &vrHandoff{svc: svc,
+		leader: func(vrschedule.PreparePlan, *storage.ExecutedBlock, uint64, types.PartitionShardID, func(p, root [32]byte) ([]byte, error), crypto.Hash) (vrschedule.LeaderStep, error) {
+			return vrschedule.LeaderStep{Kind: "freeze", Records: records}, nil
+		}}
+	x := vrManager(v)
+	var logs bytes.Buffer
+	x.log = slog.New(slog.NewTextHandler(&logs, nil))
+	parent := idleParent(plan.Epoch)
+	parent.ShardState.Control.Phase = "prepared"
+
+	recs, err := x.vrRecordsForRound(10, parent, nil)
+	require.NoError(t, err)
+	require.Len(t, recs, 2, "not remembered: the Freeze is ordered")
+	require.Contains(t, logs.String(), "event=vr.handoff.ordering")
+
+	r, err := storage.DecodeOrderedHandoffRecord(records[0])
+	require.NoError(t, err)
+	require.True(t, x.refused.add(recordRefusalKey(r), HandoffRefused{Kind: "freeze", Epoch: r.Epoch, Attempt: r.Attempt, FirstRound: 10, LastRound: 10}))
+	logs.Reset()
+	recs, err = x.vrRecordsForRound(11, parent, nil)
+	require.NoError(t, err)
+	require.Empty(t, recs, "a remembered Freeze is not ordered again")
+	require.NotContains(t, logs.String(), "vr.handoff.ordering", "nor announced as ordering")
+	require.EqualValues(t, 11, x.HandoffRefusals()[0].LastRound)
 }

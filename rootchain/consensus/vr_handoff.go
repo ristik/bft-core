@@ -846,7 +846,7 @@ func (x *ConsensusManager) vrRecordsForRound(round uint64, parent *storage.Execu
 		// table while the EVM keeps certifying. Judged once per intent identity: a remembered refusal is not checked again.
 		id := plan.Body.Identity()
 		key := refusalKey(control.Network, control.Epoch, plan.Predecessor, plan.Attempt, id[:], "prepare")
-		if x.refused.seen(key, round) {
+		if x.skipRefused(key, round) {
 			return nil, nil
 		}
 		if err := x.vrCandidateCheck(parentQC.GetRound(), round, plan); err != nil {
@@ -856,6 +856,12 @@ func (x *ConsensusManager) vrRecordsForRound(round uint64, parent *storage.Execu
 			}
 			// an input this root lacks for the check: the Freeze judges the candidate in full, as before
 			x.log.Debug("VR handoff: the candidate check before the Prepare is unavailable", "round", round, "error", err)
+		}
+	}
+	// a step this leader's own executor refused for this identity is not ordered again (#1306): it is not announced as ordered either
+	if len(step.Records) != 0 && step.Kind != "prepare" {
+		if r, err := storage.DecodeOrderedHandoffRecord(step.Records[0]); err == nil && x.skipRefused(recordRefusalKey(r), round) {
+			return nil, nil
 		}
 	}
 	x.log.Info("VR handoff: ordering the "+step.Kind, "round", round, "attempt", plan.Attempt, "view", plan.Certificate.Assembly.Slot, monitoring.Event(monitoring.EvVRHandoffOrdering))

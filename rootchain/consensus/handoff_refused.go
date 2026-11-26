@@ -99,16 +99,17 @@ func (h *handoffRefusals) firstLocal(k handoffRefusalKey) bool {
 	return true
 }
 
-// seen reports whether the key is remembered, counting the round it is left out in.
-func (h *handoffRefusals) seen(k handoffRefusalKey, round uint64) bool {
+// seen reports whether the key is remembered, and whether round is a leader round it was not yet counted in (the round it is left out in).
+func (h *handoffRefusals) seen(k handoffRefusalKey, round uint64) (remembered, counted bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	e, ok := h.m[k]
 	if ok && round > e.LastRound {
 		e.LastRound = round
 		e.Count++
+		return true, true
 	}
-	return ok
+	return ok, false
 }
 
 // add remembers a refusal; false when it was already remembered.
@@ -172,13 +173,16 @@ func (h *handoffRefusals) list() []HandoffRefused {
 // HandoffRefusals are the handoff records this root's leader rounds leave out as refused (#1306): what the q3 status reports.
 func (x *ConsensusManager) HandoffRefusals() []HandoffRefused { return x.refused.list() }
 
-// handoffRefusalClass tells a refusal every honest root reaches on the same parent (registry-mode admission, a Freeze v5 that does not match
-// the derived intent, any other refusal of the record by the executor's rules) from one this root cannot judge yet: VR input or a witness it
-// lacks, an acknowledgement still pending. An error of no known kind is local: it costs one trial a round, never a memory.
+// handoffRefusalClass tells a refusal that stays for the handoff identity (registry-mode admission over what the Prepare froze, a Freeze v5
+// that does not match the derived intent) from one that can clear by itself (local): VR input or a witness this root lacks, an
+// acknowledgement still pending, and the two admission items that read state ordinary blocks change while the EVM is frozen: the shard
+// acknowledgement gate (the other shards keep certifying) and the activation gates (the committed support table and its evidence). An error
+// of no known kind is local too: it costs one trial a round, never a memory. Every V3, Commit and Abort refusal is therefore local, so
+// neither escape hatch of a frozen EVM (H, the old-set Abort) is ever held back by the memory.
 func handoffRefusalClass(err error) string {
 	switch {
 	case errors.Is(err, storage.ErrVRUnavailable), errors.Is(err, storage.ErrWitnessUnavailable), errors.Is(err, storage.ErrNoWitnessStore),
-		errors.Is(err, storage.ErrAssignmentAckPending):
+		errors.Is(err, storage.ErrAssignmentAckPending), errors.Is(err, vradmit.ErrAckGate), errors.Is(err, vradmit.ErrActivation):
 		return handoffRefusedLocal
 	case errors.Is(err, vradmit.ErrAdmission), errors.Is(err, storage.ErrVRFreeze):
 		return handoffRefusedDeterministic
@@ -195,7 +199,16 @@ func (x *ConsensusManager) refusedHandoff(records [][]byte, round uint64) bool {
 	if err != nil {
 		return false
 	}
-	return x.refused.seen(recordRefusalKey(r), round)
+	return x.skipRefused(recordRefusalKey(r), round)
+}
+
+// skipRefused reports whether the key is a remembered refusal, counting a leader round that leaves it out (once per round).
+func (x *ConsensusManager) skipRefused(key handoffRefusalKey, round uint64) bool {
+	remembered, counted := x.refused.seen(key, round)
+	if counted {
+		x.noteHandoffRefusedMetric(key.kind, handoffRefusedDeterministic)
+	}
+	return remembered
 }
 
 // admitOwnHandoff trial-executes the leader's block that orders handoff records, before it is signed, on the parent's state exactly as every
@@ -220,9 +233,10 @@ func (x *ConsensusManager) admitOwnHandoff(ctx context.Context, block *drctypes.
 	return false
 }
 
-// noteHandoffRefused logs, counts and (for a deterministic refusal) remembers that this leader leaves out the handoff step of the key. Either
-// is logged at warning level once per key (a Commit at error level: an endorsed Freeze has no lapse, the EVM stays frozen until an old-set
-// Abort), a repeated local one at debug level.
+// noteHandoffRefused logs, counts and (for a deterministic refusal) remembers that this leader leaves out the handoff step of the key. A
+// deterministic refusal is logged once per key as vr.handoff.refused. A local one is retried every round and logged at warning level the
+// first time per key (a Commit at error level: an endorsed Freeze has no lapse, the EVM stays frozen while every leader leaves its H out),
+// then at debug level.
 func (x *ConsensusManager) noteHandoffRefused(ctx context.Context, key handoffRefusalKey, kind string, epoch, attempt uint64, body []byte, round uint64, err error) {
 	class := handoffRefusalClass(err)
 	x.noteHandoffRefusedMetric(kind, class)
@@ -238,21 +252,21 @@ func (x *ConsensusManager) noteHandoffRefused(ctx context.Context, key handoffRe
 		attrs = append(attrs, "intent", fmt.Sprintf("%x", e.Intent[:8]), "result", fmt.Sprintf("%x", e.Result[:]))
 	}
 	attrs = append(attrs, logger.Error(err))
-	level := slog.LevelWarn
-	if kind == "commit" {
-		level = slog.LevelError
-	}
 	if class != handoffRefusedDeterministic {
+		level := slog.LevelWarn
+		if kind == "commit" {
+			level = slog.LevelError
+		}
 		if !x.refused.firstLocal(key) {
 			level = slog.LevelDebug
 		}
-		x.log.Log(ctx, level, "root handoff: the leader leaves out a record this root cannot judge yet, this round only", attrs...)
+		x.log.Log(ctx, level, "root handoff: the leader leaves out a "+kind+" its own executor refuses for now; retried every round", attrs...)
 		return
 	}
 	if !x.refused.add(key, e) {
 		return
 	}
-	x.log.With(attrs...).Log(ctx, level, "VR handoff: the leader leaves out a refused "+kind, monitoring.Event(monitoring.EvVRHandoffRefused))
+	x.log.With(attrs...).Log(ctx, slog.LevelWarn, "VR handoff: the leader leaves out a refused "+kind, monitoring.Event(monitoring.EvVRHandoffRefused))
 }
 
 func (x *ConsensusManager) noteHandoffRefusedMetric(kind, class string) {
