@@ -9,9 +9,9 @@ import { toHex } from '../../../packages/native-bridge-plugin/src/bytes.js';
 import { ascii } from '../../../packages/native-bridge-plugin/src/nb2/cbor.js';
 import { HE } from '../../../packages/native-bridge-plugin/src/nb2/crypto.js';
 import { LocalKeySigner } from '../../../packages/native-bridge-plugin/src/nb2/evm.js';
-import { EvmReader, HttpJsonRpc } from '../../../packages/native-bridge-plugin/src/nb2/rpc.js';
+import { EvmReader, HttpJsonRpc, type JsonRpc } from '../../../packages/native-bridge-plugin/src/nb2/rpc.js';
 import {
-  burn, GatewayAggregator, mint, planDeposit, planReturn, redeem, resumePayout, sendDeposit, split, transfer, Wallet,
+  burn, GatewayAggregator, mint, planDeposit, planReturn, redeem, resumePayout, sendDeposit, split, transfer, transportRetry, Wallet,
 } from '../../../wallet/core.js';
 import type { PayerPolicy } from '../../../wallet/recovery.js';
 
@@ -33,8 +33,21 @@ if (phase === 'key') {
   console.log(JSON.stringify(result, (_, value) => typeof value === 'bigint' ? String(value) : value));
 }
 
+/**
+ * The package gateway limits each client to 10 requests per second, and since native-bridge-plugins#93 the transport retries a 429 only
+ * briefly (three attempts within 5 s) and leaves the waiting to the caller: the plug-in's own `transportRetry`, for idempotent reads
+ * only. The smoke is that caller: every read is waited out, a send (`eth_sendRawTransaction`) never is.
+ */
+function patient(inner: JsonRpc): JsonRpc {
+  return {
+    call: <T>(method: string, params: unknown[]) => method === 'eth_sendRawTransaction'
+      ? inner.call<T>(method, params)
+      : transportRetry(() => inner.call<T>(method, params), (why) => console.error('rpc waiting:', why)),
+  };
+}
+
 async function walk(stage: string) {
-  const reader = new EvmReader(new HttpJsonRpc(rpc));
+  const reader = new EvmReader(patient(new HttpJsonRpc(rpc)));
   const operator = new HttpJsonRpc(authority);
   const genesis = await operator.call<{ hash: string }>('eth_getBlockByNumber', ['0x0', false]);
   assert.equal(genesis.hash.toLowerCase(), deployment.package.genesisHash.toLowerCase());
@@ -44,7 +57,7 @@ async function walk(stage: string) {
     release: releasePath, trustBundle: join(pub, 'trust-base.bundle.cbor'),
     trustPin: join(pub, 'trust-base.genesis.entryid'), rpc, aggregator,
   });
-  await wallet.open({ aggregator: gatewayAgg, trustFreshnessMs: deployment.trust.freshnessMs });
+  await wallet.open({ aggregator: gatewayAgg, trustFreshnessMs: deployment.trust.freshnessMs, wrapRpc: patient });
 
   const vault = wallet.bridge.cfg.vault;
   if (stage === 'mint') {
