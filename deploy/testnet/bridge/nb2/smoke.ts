@@ -9,7 +9,7 @@ import { toHex } from '../../../packages/native-bridge-plugin/src/bytes.js';
 import { ascii } from '../../../packages/native-bridge-plugin/src/nb2/cbor.js';
 import { HE } from '../../../packages/native-bridge-plugin/src/nb2/crypto.js';
 import { LocalKeySigner } from '../../../packages/native-bridge-plugin/src/nb2/evm.js';
-import { EvmReader, HttpJsonRpc, type JsonRpc } from '../../../packages/native-bridge-plugin/src/nb2/rpc.js';
+import { EvmReader, HttpJsonRpc, RpcError, type JsonRpc } from '../../../packages/native-bridge-plugin/src/nb2/rpc.js';
 import {
   burn, GatewayAggregator, mint, planDeposit, planReturn, redeem, resumePayout, sendDeposit, split, transfer, transportRetry, Wallet,
 } from '../../../wallet/core.js';
@@ -94,7 +94,16 @@ async function walk(stage: string) {
     } else {
       const record = await wallet.returnRecord(label);
       for (let attempt = 0; attempt < 120; ++attempt) {
-        paid = await resumePayout(wallet, record, policy, false, true);
+        try {
+          paid = await resumePayout(wallet, record, policy, false, true);
+        } catch (e) {
+          // the payer policy's archive readers are the plug-in's own transports (not the wallet's wrapped RPC), and a recovery step
+          // does not wait out a rate limit itself: the step is resumable from its journal, so it is simply run again (nbp#93)
+          if (!(e instanceof RpcError && e.retryable)) throw e;
+          console.error('payout waiting: RPC rate-limited');
+          await delay(3000);
+          continue;
+        }
         if (paid.state === 'paid') break;
         if (paid.state === 'checkpoint') checkpoints.add(hex(paid.txHash));
         else if (paid.state !== 'pending' && paid.state !== 'retry') break;
