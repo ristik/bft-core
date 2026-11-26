@@ -355,7 +355,7 @@ Severity: warning.
 
 **Confirm.** `unicity_vr_open_output_progress_left < 0`, `unicity_vr_open_output_state`, `ubft validator status` (next boundary), `event=vr.handoff.*`.
 
-**Fix.** The module re-reserves after expiry when it has work; check module health and record lag first. A Published output whose handoff does not commit: see `event=root.handoff.outcome` and `docs/operations/root-handoff-abort.md`.
+**Fix.** No operator step rejects it: every VR-mode root builds RejectResult v2 (Expired) from certified VR state once VR's progress reaches `expiresAtProgress`, and orders it at the next quiet proposal (root log `election result due for rejection` with `registry=true`; then VR's output state moves to Rejected and Closed once the EVM imports `OutputRejected` and `SessionClosed`). The module then re-reserves when it has work; check module health and record lag first. An output still open well past its expiry with no such root log is a root defect (bft-core#1311). A Published output whose handoff does not commit before its expiry: see `event=root.handoff.outcome` and `docs/operations/root-handoff-abort.md`.
 
 **Escalate when.** Escalate when no new output is reserved within an hour.
 
