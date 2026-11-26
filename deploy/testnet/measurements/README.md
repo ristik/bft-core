@@ -18,4 +18,4 @@ the independently recorded #1215 rerun from
 runs produced identical bytes. CI rechecks both against a newly generated
 four-member genesis and the pinned contracts build.
 
-bft-core#1303 re-measured both files for the parking adapter (contracts `93dcf48e`, fixtures regenerated at `6a78f404`: PosElectionAdapter `0x307acec9…`, from `script/vr-pos-genesis.sh` on the sample input). The ureth revision, the patch, the VR runtime (`0xbd919cb8…`) and `vr-hook-pos.json` (sha256 `0xe2273a50…`) are unchanged. The two runs are byte-identical, and every gas figure equals the #1286 measurement; only the module code hash moved.
+bft-core#1303 re-measured both files for the parking adapter (contracts main `d8ee941e`, the #102 merge with the tree of the PR head; fixtures regenerated at `6a78f404` and reproduced at `93dcf48e`: PosElectionAdapter `0x307acec9…`, from `script/vr-pos-genesis.sh` on the sample input). The ureth revision, the patch, the VR runtime (`0xbd919cb8…`) and `vr-hook-pos.json` (sha256 `0xe2273a50…`) are unchanged. The two runs are byte-identical, and every gas figure equals the #1286 measurement; only the module code hash moved.
