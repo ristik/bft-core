@@ -13,6 +13,7 @@ import (
 	"time"
 
 	ethcommon "github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/stretchr/testify/require"
 
@@ -162,6 +163,89 @@ func TestValidatorClaimAfterMaturingLots(t *testing.T) {
 	require.NoError(t, err, out)
 	require.Equal(t, 3, chain.Sends(), "a resumed withdrawal sends only the claim")
 	require.Contains(t, out, "claimed 60 base units to "+operator.Hex())
+}
+
+// #1297/#1298: custody refuses mature while a closed term of the lots has no report anchors. claim anchors the closed terms its own lots back,
+// with the words of each term's Closure record, previewing each: a term custody has not closed, has anchored, that backs no lot of the caller,
+// or that is not anchorable yet (its successor epoch is not installed) is not sent and does not stop the claim.
+func TestValidatorClaimAnchorsClosedTerms(t *testing.T) {
+	chain, url := fakeNetwork(t)
+	home := initHome(t, url)
+	_, keys := loadHome(t, home)
+	operator := ethcrypto.PubkeyToAddress(keys.Operator.PublicKey)
+	chain.Fund(operator, big.NewInt(1e18))
+	id := chain.AddMember(operator, vrclient.Registration{RootNodeID: "anchor-root", EvmNodeID: "anchor-evm"})
+	a, b, open, done, other, later := [32]byte{0xa1}, [32]byte{0xb2}, [32]byte{0xc3}, [32]byte{0xd4}, [32]byte{0xe5}, [32]byte{0xf6}
+	lot := big.NewInt(42)
+	chain.Mu.Lock()
+	chain.Tag = vrclient.ModuleTagPoS
+	chain.Custody = ethcommon.Address{0xc1}
+	chain.Election = ethcommon.Address{0xe1}
+	chain.ClaimLots = []*big.Int{lot}
+	chain.Terms = &vrfake.Terms{
+		Closures: [][3][32]byte{{a, {0x11}, {0x12}}, {b, {0x21}, {0x22}}, {open, {0x31}, {0x32}}, {done, {0x41}, {0x42}}, {other, {0x51}, {0x52}},
+			{later, {0x61}, {0x62}}, {a, {0x11}, {0x12}}},
+		Closed:     map[[32]byte]bool{a: true, b: true, done: true, other: true, later: true},
+		Anchored:   map[[32]byte]bool{done: true},
+		Unanchored: map[string]uint32{"42": 2},
+		Backs:      map[[32]byte][]*big.Int{a: {lot}, b: {lot}, open: {lot}, done: {lot}, later: {lot}, other: {big.NewInt(7)}},
+		NotReady:   map[[32]byte]bool{later: true, other: true},
+	}
+	chain.Mu.Unlock()
+
+	args := []string{"claim", "--id", fmt.Sprint(id)}
+	out, err := runValidator(t, home, append(args, "--dry-run")...)
+	require.NoError(t, err, out)
+	require.Zero(t, chain.Sends())
+	require.Contains(t, out, "[anchor] anchor closed term "+hexutil.Encode(a[:]))
+	require.Contains(t, out, "[anchor] anchor closed term "+hexutil.Encode(b[:]))
+	require.NotContains(t, out, hexutil.Encode(open[:]), "custody has not closed it")
+	require.NotContains(t, out, hexutil.Encode(done[:]), "anchored already")
+	require.NotContains(t, out, hexutil.Encode(other[:]), "it backs no lot of this identity")
+	require.Contains(t, out, "skip: anchor closed term "+hexutil.Encode(later[:]), "not anchorable yet: reported, not fatal")
+	require.Contains(t, out, "simulation: not run: it can be simulated once the term anchors are included")
+
+	out, err = runValidator(t, home, args...)
+	require.NoError(t, err, out)
+	require.Equal(t, 4, chain.Sends(), "two anchors, mature and claim: %s", out)
+	require.Equal(t, 2, chain.Terms.Anchors)
+	require.Contains(t, out, "claimed 100 base units to "+operator.Hex())
+}
+
+// review r3 P3: a compact-seat term (sixteen-seat custody: the lot is a seat's, no exposure lots) is anchored, and an anchor that loses to another
+// party's between the preview and the send is accepted (the term is anchored), so the claim matures and claims.
+func TestValidatorClaimAnchorsACompactSeatTermAndSurvivesALostRace(t *testing.T) {
+	chain, url := fakeNetwork(t)
+	home := initHome(t, url)
+	_, keys := loadHome(t, home)
+	operator := ethcrypto.PubkeyToAddress(keys.Operator.PublicKey)
+	chain.Fund(operator, big.NewInt(1e18))
+	id := chain.AddMember(operator, vrclient.Registration{RootNodeID: "seat-root", EvmNodeID: "seat-evm"})
+	seat, raced, foreign := [32]byte{0x5e}, [32]byte{0x7a}, [32]byte{0xf0}
+	lot := big.NewInt(9)
+	chain.Mu.Lock()
+	chain.Tag = vrclient.ModuleTagPoS
+	chain.Custody = ethcommon.Address{0xc1}
+	chain.Election = ethcommon.Address{0xe1}
+	chain.ClaimLots = []*big.Int{lot}
+	chain.Terms = &vrfake.Terms{
+		Closures:   [][3][32]byte{{seat, {0x01}, {0x02}}, {raced, {0x03}, {0x04}}, {foreign, {0x05}, {0x06}}},
+		Closed:     map[[32]byte]bool{seat: true, raced: true, foreign: true},
+		Anchored:   map[[32]byte]bool{},
+		Unanchored: map[string]uint32{"9": 2},
+		Seats:      map[[32]byte][]*big.Int{seat: {big.NewInt(3), lot}, raced: {lot}, foreign: {big.NewInt(4), big.NewInt(5)}},
+		Race:       map[[32]byte]bool{raced: true},
+	}
+	chain.Mu.Unlock()
+
+	out, err := runValidator(t, home, "claim", "--id", fmt.Sprint(id))
+	require.NoError(t, err, out)
+	require.Contains(t, out, "[anchor] anchor closed term "+hexutil.Encode(seat[:]), "the compact seat's lot is this identity's")
+	require.NotContains(t, out, hexutil.Encode(foreign[:]), "no seat of that term is this identity's lot")
+	require.Contains(t, out, "anchored meanwhile by another party")
+	require.Equal(t, 1, chain.Terms.Anchors, "the seat term by this claim; the raced one by the other party")
+	require.True(t, chain.Terms.Anchored[raced])
+	require.Contains(t, out, "claimed 100 base units to "+operator.Hex())
 }
 
 func TestValidatorApplyAdmitExit(t *testing.T) {

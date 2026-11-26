@@ -50,6 +50,7 @@ import handoff_ops        # noqa: E402  HELPER (the operator POST made inside th
 import joiner             # noqa: E402  joiner_services (the entity's services, cloned from the last genesis entity's)
 import operator_rpc       # noqa: E402
 import remote_entity      # noqa: E402  PORTS, the forwards
+import root_keys          # noqa: E402  the generation's retired root keys (#1297)
 import ureth_key          # noqa: E402  the execution client's node key (bft-core#1148)
 
 PORTS = remote_entity.PORTS
@@ -747,7 +748,9 @@ class Laptop:
             self.save()
         return out
 
-    CUSTODY_CALLS = {'requestRetirement(uint64)': 'owner', 'mature(uint256[])': 'owner', 'claim(uint256,address)': 'withdrawal'}
+    # anchorTerm (#1297/#1298) is permissionless: the owner key pays for it, as for mature
+    CUSTODY_CALLS = {'requestRetirement(uint64)': 'owner', 'mature(uint256[])': 'owner', 'claim(uint256,address)': 'withdrawal',
+                     'anchorTerm(bytes32,bytes32,bytes32)': 'owner'}
 
     # posrelayer/tx.go transientEstimate: the bound-execution node refuses an estimate whose block was built on a head that moved meanwhile (#1130)
     TRANSIENT_ESTIMATE = 'bound execution input rejected the block'
@@ -756,10 +759,10 @@ class Laptop:
 
     def op_custody_tx(self, signature, args):
         """A custody call signed HERE with this entity's owner or withdrawal key (cast in the node image, keys from the wallet volume, never printed): only
-        requestRetirement, mature and claim, only to the deployment's custody. Sent to every host execution client (their pools do not gossip)."""
+        requestRetirement, mature, claim and anchorTerm, only to the deployment's custody. Sent to every host execution client (their pools do not gossip)."""
         if signature not in self.CUSTODY_CALLS:
             raise Failure(f'{signature}: not a custody call this agent signs')
-        if not all(re.fullmatch(r'[0-9]+|0x[0-9a-fA-F]{40}|\[[0-9, ]*\]', str(a)) for a in args):
+        if not all(re.fullmatch(r'[0-9]+|0x[0-9a-fA-F]{40}|0x[0-9a-fA-F]{64}|\[[0-9, ]*\]', str(a)) for a in args):
             raise Failure('bad arguments')
         custody = json.loads(self.vol_read('network', 'pos-deployment.json'))['custody']
         signer = self.CUSTODY_CALLS[signature]
@@ -865,7 +868,7 @@ def init(host, generation, home, mac_host, allow_dirty=False):
             [f'{lap.vol(v)}:/v/{v}' for v in VOLUMES], user='0:0', entrypoint='sh')
     # the public network files (network/ is mounted read-only into every service, as on the host)
     listing = ' '.join(NETWORK_FILES)
-    tar = ssh(host, f'sudo sh -c {shlex.quote(f"cd {host_gen}/network && tar -cf - {listing} $(ls handoff/trust-base-epoch*.json handoff/shard-conf-*.json 2>/dev/null)")}', text=False).stdout
+    tar = ssh(host, f'sudo sh -c {shlex.quote(f"cd {host_gen}/network && tar -cf - {listing} $(ls {root_keys.FILE} handoff/trust-base-epoch*.json handoff/shard-conf-*.json 2>/dev/null)")}', text=False).stdout
     extract = 'import io,sys,tarfile;t=tarfile.open(fileobj=io.BytesIO(sys.stdin.buffer.read()));t.extractall("/network",filter="data")'
     lap.one(lap.rpc_image, ['-c', extract], [f'{lap.vol("network")}:/network'], entrypoint='python3', input=tar, text=False)
     lap.one(lap.node_image, ['-c', 'chmod -R a+rX /network'], [f'{lap.vol("network")}:/network'], entrypoint='sh')
@@ -885,6 +888,10 @@ def init(host, generation, home, mac_host, allow_dirty=False):
     root_id = lap.ubft(['node-id', '--home', '/state'], [f'{lap.vol("root")}:/state:ro']).strip().splitlines()[-1]
     evm_id = lap.ubft(['node-id', '--home', '/state'], [f'{lap.vol("evm")}:/state:ro']).strip().splitlines()[-1]
     node_info = json.loads(lap.vol_read('root', 'node-info.json'))
+    # #1297: the root key (made here, or kept in a volume from an earlier run) must not be one the generation lists as retired: a key signs one root
+    # history only. A generation made before the list existed publishes none.
+    retired = root_keys.read_list_text(lap.vol_read('network', root_keys.FILE), root_keys.FILE) if have('network', root_keys.FILE) else set()
+    root_keys.check_fresh([node_info['sigKey']], retired, f'entity {entity}')
     keys_py = (HERE / 'evm_keys.py').read_text()
     accounts = json.loads(lap.one(lap.rpc_image, ['-', 'wallet', '/wallet'], [f'{lap.vol("wallet")}:/wallet'], entrypoint='python3', input=keys_py).stdout)
     for out, extra in (('identity.json', []), ('identity-preadmit.json', ['--throwaway-evm'])):

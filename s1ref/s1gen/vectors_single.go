@@ -32,14 +32,14 @@ func (g *gen) single(seed string) {
 	base := w.sign(w.nc("v1", 160, 0x21))
 	sig := base.voteSig
 	form := func(s []byte) *ev { e := base.cp(); e.voteSig = s; return e }
-	g.yes("s2.sig.64.ok", fam, "64-byte r||s", c, v2, form(sig))
-	g.yes("s2.sig.65-v0.ok", fam, "65-byte r||s||v with v=0", c, v2, form(withV(sig, 0)))
-	g.yes("s2.sig.65-v1.ok", fam, "65-byte r||s||v with v=1: v is discarded, recovery parity is never matched", c, v2, form(withV(sig, 1)))
+	// the strict native rule (D5 section 2): 65 bytes, v in {0,1}, one recovery with that parity
+	g.yes("s2.sig.65.ok", fam, "65-byte r||s||v with the signer's recovery id", c, v2, form(sig))
+	g.bad("s2.sig.64.malformed", fam, "64-byte compact r||s is not a native signature", c, frame(v2.cbor(), form(sig[:64]).enc()), "ErrSigShape")
+	g.no("s2.sig.wrong-parity", fam, "the opposite recovery parity recovers another key", c, v2, "ErrSigInvalid", form(withV(sig, sig[64]^1)))
 	g.yes("s2.sig.alt-nonce.ok", fam, "a different valid low-s signature of the same statement (explicit nonce)", c, v2, form(v2sign(w, "v1", base.pv, "alt")))
 	cmv := w.sign(w.cm("v1", 160, 0x22, 159, 2, 0xc3))
-	both := cmv.cp()
-	both.voteSig, both.sealSig = withV(cmv.voteSig, 1), withV(cmv.sealSig, 0)
-	g.yes("s2.committing.sig65.ok", fam, "committing vote with 65-byte vote and seal signatures", c, v2, both)
+	g.yes("s2.committing.sig65.ok", fam, "committing vote with 65-byte vote and seal signatures", c, v2, cmv)
+	g.no("s2.committing.seal-wrong-parity", fam, "committing vote whose seal signature has the opposite parity", c, v2, "ErrSigInvalid", func() *ev { e := cmv.cp(); e.sealSig = withV(cmv.sealSig, cmv.sealSig[64]^1); return e }())
 
 	// Scheme 1.
 	l := w.sign(w.leg("v1", 50, 0x31))
@@ -51,7 +51,7 @@ func (g *gen) single(seed string) {
 	le.hash = []byte{}
 	le = w.sign(le)
 	g.yes("s1.noncommitting.hash-bstr0.ok", fam, "legacy vote with an empty (bstr0) commit hash: native seal bytes differ from the null form, so does the content digest", c, v1, le)
-	g.yes("s1.sig.65-v1.ok", fam, "legacy 65-byte signature with v=1", c, v1, func() *ev { e := l.cp(); e.voteSig = withV(l.voteSig, 1); return e }())
+	g.no("s1.sig.wrong-parity", fam, "legacy signature with the opposite recovery parity", c, v1, "ErrSigInvalid", func() *ev { e := l.cp(); e.voteSig = withV(l.voteSig, l.voteSig[64]^1); return e }())
 	g.yes("s1.replay-other-network.ok", fam, "scheme 1 replay on another network is accepted: N is the authenticated trust context, not a signed legacy binding", g.otherNetworkCtx(), g.otherNetworkView(), l)
 
 	// Legacy relation failures, each isolated.
@@ -85,7 +85,7 @@ func (g *gen) otherNetworkCtx() *ContextJSON {
 // v2sign signs msg with a validator of the world: label "" is RFC 6979, otherwise an explicit nonce.
 func v2sign(w *world, id string, msg []byte, label string) []byte {
 	if label == "" {
-		return w.vals[id].sign(msg)
+		return w.vals[id].signV(msg)
 	}
-	return w.vals[id].signNonce(msg, label)
+	return w.vals[id].recoverable(w.vals[id].signNonce(msg, label), msg)
 }

@@ -204,7 +204,8 @@ class Genesis:
         env = dict(clean_environ(), P85_NETWORK_WORD=network_word(self.generation), P85_CHAIN_ID=str(self.chain_id), P85_ROOTS=REGISTRY, P85_TREASURY=TREASURY,
                    P85_GOVERNANCE_AUTHORITY=GOVERNANCE_AUTHORITY, P85_REWARD_FUNDING=str(REWARD_FUNDING), P85_REWARD_RATE=str(REWARD_RATE),
                    P85_V_MAX=str(CAPS[0]), P85_L_MAX=str(CAPS[1]), P85_N_MAX=str(CAPS[2]), P85_CADENCE_ROUNDS=str(self.cadence[0]),
-                   P85_CADENCE_SECONDS=str(self.cadence[1]), P85_DIST_NUM=str(self.dist[0]), P85_DIST_DEN=str(self.dist[1]))
+                   P85_CADENCE_SECONDS=str(self.cadence[1]), P85_DIST_NUM=str(self.dist[0]), P85_DIST_DEN=str(self.dist[1]),
+                   P85_PROFILE='testnet')   # #1298: reportWindow 1,800 + settlementMargin 1,800 <= timeFloor 3,600 (older contracts ignore it)
         if self.contracts_take_root_identity():   # contracts#46 and later; an older pinned checkout does not know the variables
             env['P85_ROOT_NETWORK'], env['P85_ROOT_GENESIS'] = self.root_identity()
         self._run(self.contracts / 'script/p85-genesis.sh', self.dir / 'contracts-genesis.json', self.dir / 'genesis', env=env)
@@ -235,8 +236,12 @@ class Genesis:
 
     def alloc_code_hashes(self, genesis):
         """The code hashes the deployment file records must be those of the code the genesis carries (the keccak of the runtime code): custody, election, the
-        governed policy source and the reward pool. The reward pool must also hold exactly its recorded funding from block 0 (T8: allocated, not promised)."""
-        for module, key in (('custody', 'custody'), ('election', 'election'), ('policy', 'policy'), ('rewardPool', 'rewardPool')):
+        governed policy source, the reward pool and the election's publication implementation, which it delegatecalls for PoPs and finalization (a genesis
+        without it cannot publish a result). The reward pool must also hold exactly its recorded funding from block 0 (T8: allocated, not promised)."""
+        if 'electionPublication' not in self.deployment:
+            raise PosError('the deployment records no electionPublication: the contracts genesis script predates allocating it (unicity-pos-contracts P85Genesis)')
+        for module, key in (('custody', 'custody'), ('election', 'election'), ('policy', 'policy'), ('rewardPool', 'rewardPool'),
+                            ('electionPublication', 'electionPublication')):
             want = self.deployment[module + 'CodeHash']
             have = code_hash(genesis, self.deployment[key])
             if want.lower() != have:

@@ -1,8 +1,12 @@
 package cmd
 
 import (
+	"context"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"strings"
 
@@ -100,16 +104,35 @@ func trustBaseUTBImportCmd(base *baseFlags) *cobra.Command {
 
 // trustBaseUTBVerifyCmd is the offline verifier of an exported chain: it needs only the file and the pinned genesis identity.
 func trustBaseUTBVerifyCmd() *cobra.Command {
-	var in, genesisID string
+	var in, genesisID, keysOut, url, forwardedFor, saveBundle string
+	var from uint64
 	cmd := &cobra.Command{Use: "utb-verify", Short: "Verify an exported signed trust-base bundle offline against the pinned genesis EntryID",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			pin, err := parsePin(genesisID)
 			if err != nil {
 				return err
 			}
-			bundle, err := readBundle(in)
-			if err != nil {
-				return err
+			var bundle *types.TrustBaseBundle
+			switch {
+			case (in == "") == (url == ""):
+				return fmt.Errorf("give exactly one of --bundle and --url")
+			case url != "":
+				raw, err := fetchUTBHistory(cmd.Context(), url, forwardedFor, from)
+				if err != nil {
+					return err
+				}
+				if bundle, err = types.DecodeTrustBaseBundle(raw, types.TrustBaseLimits{MaxBytes: len(raw), MaxEntries: len(raw)/16 + 1}); err != nil {
+					return err
+				}
+				if saveBundle != "" {
+					if err := os.WriteFile(saveBundle, raw, 0o644); err != nil { // #nosec G306 -- the public signed history
+						return err
+					}
+				}
+			default:
+				if bundle, err = readBundle(in); err != nil {
+					return err
+				}
 			}
 			if err := types.VerifyTrustBaseBundle(bundle, pin); err != nil {
 				return err
@@ -118,14 +141,104 @@ func trustBaseUTBVerifyCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if keysOut != "" {
+				doc, err := utbRootKeys(bundle, pin, tipID)
+				if err != nil {
+					return err
+				}
+				if err := os.WriteFile(keysOut, doc, 0o644); err != nil { // #nosec G306 -- public signing keys
+					return err
+				}
+			}
 			_, err = fmt.Fprintf(cmd.OutOrStdout(), "ok: epochs %d..%d, tip 0x%x\n", bundle.Entries[0].Epoch, bundle.Tip().Epoch, tipID)
 			return err
 		}}
 	cmd.Flags().StringVar(&in, "bundle", "", "the bundle file")
+	cmd.Flags().StringVar(&url, "url", "", "instead of --bundle: the base URL of a served history (GET <url>/api/v1/trustbases, a root or the public gateway), read page by page "+
+		"from --from at one snapshot and assembled into one bundle")
+	cmd.Flags().Uint64Var(&from, "from", 1, "with --url: the genesis epoch of the history")
+	cmd.Flags().StringVar(&forwardedFor, "forwarded-for", "", "with --url: an X-Forwarded-For client address (a gateway that trusts its proxy)")
+	cmd.Flags().StringVar(&saveBundle, "save-bundle", "", "with --url: also write the assembled bundle file")
+	cmd.Flags().StringVar(&keysOut, "keys-out", "", "after verification, write every root signing key of every epoch of the history as JSON (unicity-utb-root-keys/1): the "+
+		"retired-key inventory a reset generation takes as --prior-generation (#1297: keys that joined or rotated after genesis included)")
 	cmd.Flags().StringVar(&genesisID, "utb-genesis-id", "", "the EntryID of the genesis entry (0x-prefixed SHA-256)")
-	_ = cmd.MarkFlagRequired("bundle")
 	_ = cmd.MarkFlagRequired("utb-genesis-id")
 	return cmd
+}
+
+// utbRootKeysFormat is the document `utb-verify --keys-out` writes: the public root signing keys of every epoch of a verified history.
+const utbRootKeysFormat = "unicity-utb-root-keys/1"
+
+// utbRootKeys renders the verified history's root signing keys, epoch by epoch (deploy/testnet/root_keys.py reads it).
+func utbRootKeys(bundle *types.TrustBaseBundle, pin, tip [types.TrustBaseV2IDLen]byte) ([]byte, error) {
+	type epochKeys struct {
+		Epoch uint64   `json:"epoch"`
+		Keys  []string `json:"keys"`
+	}
+	doc := struct {
+		Format    string      `json:"format"`
+		NetworkID uint64      `json:"networkId"`
+		GenesisID string      `json:"genesisId"`
+		TipID     string      `json:"tipId"`
+		Epochs    []epochKeys `json:"epochs"`
+	}{Format: utbRootKeysFormat, NetworkID: uint64(bundle.Entries[0].NetworkID), GenesisID: fmt.Sprintf("0x%x", pin), TipID: fmt.Sprintf("0x%x", tip)}
+	for _, e := range bundle.Entries {
+		ek := epochKeys{Epoch: e.Epoch, Keys: []string{}}
+		for _, m := range e.RootNodes {
+			ek.Keys = append(ek.Keys, fmt.Sprintf("0x%x", []byte(m.SigKey)))
+		}
+		doc.Epochs = append(doc.Epochs, ek)
+	}
+	out, err := json.MarshalIndent(doc, "", " ")
+	if err != nil {
+		return nil, err
+	}
+	return append(out, '\n'), nil
+}
+
+// fetchUTBHistory reads a served signed history page by page (GET /api/v1/trustbases) at the snapshot the first page names, and encodes the
+// entries as one bundle; the caller verifies it against the pin.
+func fetchUTBHistory(ctx context.Context, base, forwardedFor string, from uint64) ([]byte, error) {
+	var raw [][]byte
+	query := fmt.Sprintf("from=%d&maxEntries=%d", from, types.DefaultTrustBaseMaxEntries)
+	for pages := 0; ; pages++ {
+		if pages > 1<<16 {
+			return nil, fmt.Errorf("the served history did not end")
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimSuffix(base, "/")+"/api/v1/trustbases?"+query, nil)
+		if err != nil {
+			return nil, err
+		}
+		if forwardedFor != "" {
+			req.Header.Set("X-Forwarded-For", forwardedFor)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		body, err := io.ReadAll(io.LimitReader(resp.Body, int64(types.DefaultTrustBaseMaxResponse)+1))
+		_ = resp.Body.Close()
+		if err != nil {
+			return nil, err
+		}
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("GET trustbases: HTTP %d", resp.StatusCode)
+		}
+		page, _, err := types.DecodeTrustBaseResponse(body, types.TrustBasePageLimits)
+		if err != nil {
+			return nil, err
+		}
+		if page.Status != types.TrustBaseStatusOK {
+			return nil, fmt.Errorf("GET trustbases: status %s", page.Status)
+		}
+		for _, e := range page.Entries {
+			raw = append(raw, e)
+		}
+		if page.NextEpoch == nil {
+			return types.EncodeTrustBaseBundle(raw)
+		}
+		query = fmt.Sprintf("from=%d&maxEntries=%d&snapshotEnd=%d&snapshotEntryId=0x%x", *page.NextEpoch, types.DefaultTrustBaseMaxEntries, page.EffectiveEnd, page.EndEntryID)
+	}
 }
 
 func readBundle(path string) (*types.TrustBaseBundle, error) {

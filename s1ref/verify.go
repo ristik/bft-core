@@ -5,12 +5,10 @@ import (
 	"crypto"
 	"crypto/sha256"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"math/big"
 
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
-	abcrypto "github.com/unicitynetwork/bft-go-base/crypto"
 	"github.com/unicitynetwork/bft-go-base/types"
 
 	"github.com/unicitynetwork/bft-core/rootchain/consensus/votesig"
@@ -486,13 +484,15 @@ func domainBoundRelation(m *member, e *evidence, cfg votesig.Config, ctx *Contex
 var curveN = ethcrypto.S256().Params().N
 
 // checkSignature canonicalizes and verifies one signature against the named
-// member's key. The 64/65-byte shape and v in {0,1} were checked structurally,
-// and v is discarded: identity is never recovered from it and recovery parity
-// is never matched. Zero or out-of-range r, zero or high s and a wrong
-// signature are false. msg is the byte string the Go verifier hashes with
-// SHA-256 itself (the preimage, never a digest of it).
+// member's key under the strict native rule (D5 section 2, the rule P85
+// evidence uses for both offences): the 65-byte shape and v in {0,1} were
+// checked structurally; zero or out-of-range r and zero or high s are false;
+// then exactly one recovery with the supplied parity (the base library's
+// recoverable verifier) must give the member's key, so the opposite parity is
+// false and identity is never taken from the recovery. msg is the byte string
+// the Go verifier hashes with SHA-256 itself (the preimage, never a digest).
 func checkSignature(m *member, sig, msg []byte) error {
-	if len(sig) != 64 && len(sig) != 65 {
+	if len(sig) != 65 {
 		return ErrSigInvalid // absent or unshaped signature (only reachable with a disabled check)
 	}
 	r := new(big.Int).SetBytes(sig[:32])
@@ -505,7 +505,7 @@ func checkSignature(m *member, sig, msg []byte) error {
 		return ErrSigInvalid
 	}
 	work("signature")
-	if err := verifyCompact(m.ver, sig, msg); err != nil && !skipped("sig-invalid") {
+	if err := m.ver.VerifyBytes(sig, msg); err != nil && !skipped("sig-invalid") {
 		return ErrSigInvalid
 	}
 	return nil
@@ -537,18 +537,3 @@ func pair(ctx *Context, a, b *voteFacts) (*Offence, error) {
 	off.ContentA, off.ContentB = lo, hi
 	return off, nil
 }
-
-// verifyCompact is the frozen profile's signature rule, explicitly: the first 64 bytes (r||s) are verified against the member's key by the base
-// library's compact verifier, after the length, recovery-byte (0 or 1 when present, checked at decode in evidence.go) and range checks above. The recoverable verifier
-// (Verifier.VerifyBytes) takes only canonical 65-byte signatures with a recovery ID, which is the native message rule and not this profile's: the
-// profile's acceptance of 64-byte signatures and of recovery bytes 0 and 1 is part of what its Go, Rust and contract implementations agree on, and a
-// library bump must not change it silently.
-func verifyCompact(v abcrypto.Verifier, sig, msg []byte) error {
-	cv, ok := v.(abcrypto.CompactVerifier)
-	if !ok {
-		return errCompactUnsupported
-	}
-	return cv.VerifyCompactBytes(sig[:64], msg)
-}
-
-var errCompactUnsupported = errors.New("the member's verifier has no compact verification")

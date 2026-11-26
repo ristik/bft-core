@@ -204,6 +204,22 @@ x4p_exit_request_check() { # read-only: requested, imported, and a root logged t
   [ "$(x4p_exit_field "$X4_STEP_DIR/check-state.json" retirementRequested)" = true ] && [ "$(x4p_exit_field "$X4_STEP_DIR/check-state.json" imported)" = true ]
 }
 
+# #1297/#1298: custody refuses mature (TermAnchorPending) while a closed term of the exit's lots has no report anchors. anchorTerm is permissionless and there is
+# no keeper or relay: the exit anchors every term `exit_check.py terms` lists as ready, signed by the exiting identity's own key, with the words of the term's
+# authenticated Closure record. Idempotent: a term anchored meanwhile is no longer listed, and a send that loses that race is accepted once the term is anchored.
+x4p_exit_anchor() { # <id> <key file>
+  local id=$1 key=$2 terms="$X4_STEP_DIR/terms.json" a h r rows
+  x4p_exit terms "$id" --sender "$(x4p_address_of "$key")" >"$terms" || return 1
+  rows=$(jq -r '.terms[] | select(.ready) | "\(.assignmentID) \(.hRecordID) \(.terminalRoot)"' "$terms") || return 1
+  [ -n "$rows" ] || { jq -e '.terms == []' "$terms" >/dev/null || x4p_log "terms awaiting their anchors: $(jq -c .terms "$terms")"; return 0; }
+  x4p_ensure_gas "$key" || return 1
+  while read -r a h r; do
+    x4p_log "anchorTerm($a): the term's report anchors (permissionless)"
+    x4p_send_call "$key" "$(p85_custody)" 'anchorTerm(bytes32,bytes32,bytes32)' "$a" "$h" "$r" && continue
+    x4p_exit terms "$id" | jq -e --arg a "$a" 'all(.terms[]; .assignmentID != $a)' >/dev/null || x4p_die "anchorTerm($a) was not mined" || return 1
+  done <<<"$rows"
+}
+
 # exit-claim: before maturity `mature` refuses for a lawful early reason (never a missing Retirement), then matures exactly the lots' principal into the withdrawal
 # credit and claims it to a fresh recipient with exact balance deltas. args.expectReason (EvidenceHoldPending): an offender's exit stays refused (EvidenceHoldPending) while
 # its evidence is unsettled, and the step records that refusal before waiting.
@@ -215,6 +231,7 @@ x4p_exit_claim() {
   x4p_exit state "$id" >"$st" || return 1
   [ "$(x4p_exit_field "$st" imported)" = true ] || x4p_die "identity $id has no imported Retirement: run exit-request first" || return 1
   if [ "$(x4p_exit_field "$st" credit)" = 0 ] && ! python3 -c "import json,sys;sys.exit(0 if all(l['category']==4 for l in json.load(open('$st'))['lots']) else 1)"; then   # not yet matured
+    x4p_exit_anchor "$id" "$wkey" || return 1
     x4p_exit refusal "$id" --allow-success >"$out" || return 1   # a refusal must be lawful; a mature-now answer is allowed once the gates have passed
     x4p_log "mature before the gates: $(cat "$out")"
     expect=$(x4p_arg expectReason "")   # the held offender (S4): the first refusal must be the evidence hold, not a gate
@@ -224,6 +241,8 @@ x4p_exit_claim() {
     until x4p_exit refusal "$id" --allow-success 2>/dev/null | jq -e '.outcome=="mature-now"' >/dev/null; do
       [ $(( $(date +%s) - t0 )) -lt "$wait" ] || { x4p_exit refusal "$id" --allow-success >"$X4_STEP_DIR/refusal-last.json" 2>&1 || true; x4p_die "identity $id did not mature within ${wait}s: $(cat "$X4_STEP_DIR/refusal-last.json")"; return 1; }
       n=$((n + 1)); [ $((n % 10)) -ne 1 ] || x4p_log "waiting for identity $id to mature: $(x4p_exit refusal "$id" --allow-success 2>&1 | head -c 200) head=$(p_timeout 30 "$P85_CAST" block-number --rpc-url "$(p85_eth)" 2>&1) t=$(( $(date +%s) - t0 ))s"
+      # a term whose successor epoch was not installed at the first anchor attempt becomes anchorable later
+      ! x4p_exit refusal "$id" --allow-success 2>/dev/null | jq -e '.reason=="TermAnchorPending"' >/dev/null || x4p_exit_anchor "$id" "$wkey" || return 1
       x4p_tick
     done
     ids="[$(jq -r '[.lots[].id]|map(tostring)|join(",")' "$st")]"

@@ -32,11 +32,9 @@ func (g *gen) pairs() {
 	alt := A.cp()
 	alt.voteSig = v2sign(w, "v1", A.pv, "pair-alt")
 	g.no("pair.same-statement.alternate-signature", fam, "identical statement, independently generated low-s signature", c, v2, "ErrPairSameStatement", A, alt)
-	for _, v := range []byte{0, 1} {
-		x := A.cp()
-		x.voteSig = withV(A.voteSig, v)
-		g.no(fmt.Sprintf("pair.same-statement.recovery-%d", v), fam, "identical statement, signature with a recovery byte", c, v2, "ErrPairSameStatement", A, x)
-	}
+	wrongParity := A.cp()
+	wrongParity.voteSig = withV(A.voteSig, A.voteSig[64]^1)
+	g.no("pair.second-wrong-parity", fam, "identical statement, second signature with the opposite recovery parity: not a signature of the member", c, v2, "ErrSigInvalid", A, wrongParity)
 	g.no("pair.same-statement.identical-evidence", fam, "the same evidence twice", c, v2, "ErrPairSameStatement", A, A)
 	cm := w.sign(w.cm("v1", 150, 0x11, 149, 1, 0xc1))
 	cm2 := cm.cp()

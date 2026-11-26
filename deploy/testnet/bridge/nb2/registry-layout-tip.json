@@ -5,7 +5,7 @@
     "crates/unicity/b1/src/registry.rs": "529b00711213a768cebf626c4c8dbf0a5dc866e18800d46898cd8dec162a33fd"
   },
   "sources": {
-    "b1registry/seal-registry.json": "d43a8ffaa118c32c940391aef106541bb09b8e93610e93bc70da45d237dd89bb",
+    "b1registry/seal-registry.json": "2d8e066360e59a8795402709fd91981205d1df8563b63bff067bf2a505158f86",
     "b1state/storage_spec.go": "8f3f03538401950e4a85fba73bf37c8d98733bbfecfc5df1dffb05e19a20b712",
     "docs/design/f4a-seal-registry-contract.md": "01765b3573cb789dfcfad63e59f1cc5990caf62c6de9f55408f61566f1daacfd"
   }

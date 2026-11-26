@@ -17,6 +17,7 @@ import (
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 	"github.com/spf13/cobra"
 
@@ -393,12 +394,24 @@ goes to the address that received it (the withdrawal address); this command clai
 			}
 			var steps []step
 			maturing := generation.OpenLots != 0 && len(lots) > 0
+			anchoredInDryRun := false
 			if maturing {
+				// #1297/#1298: custody refuses mature while a closed term of the lots has no report anchors (TermAnchorPending). anchorTerm
+				// is permissionless (no keeper or relay): the exit sends it first for each closed term its own lots back, with the words of the
+				// term's Closure record. Each is previewed: one that is not anchorable yet (its successor epoch is not installed) or that
+				// another party anchors meanwhile is skipped, not an error.
+				if anchoredInDryRun, err = anchorTerms(ctx, w, ch, s, custody, lots, f.DryRun); err != nil {
+					return err
+				}
 				data, err := vrclient.PosCalldata(vrclient.CustodyABI, "mature", lots)
 				if err != nil {
 					return err
 				}
-				steps = append(steps, step{what: fmt.Sprintf("mature identity %d's %d lot(s)", id, len(lots)), tx: vrclient.Tx{To: custody, Data: data}})
+				ms := step{what: fmt.Sprintf("mature identity %d's %d lot(s)", id, len(lots)), tx: vrclient.Tx{To: custody, Data: data}}
+				if anchoredInDryRun {
+					ms.note = "it can be simulated once the term anchors are included"
+				}
+				steps = append(steps, ms)
 			}
 			if !maturing {
 				steps, err = claimStep(ctx, ch, custody, s)
@@ -422,6 +435,47 @@ goes to the address that received it (the withdrawal address); this command clai
 	}
 	f.add(cmd)
 	return cmd
+}
+
+// anchorTerms previews and (unless dry) sends a permissionless anchorTerm for every closed, unanchored term the lots back. A term whose preview
+// reverts (not anchorable yet, or anchored meanwhile) is reported and skipped; a send that fails is accepted when the term turns out anchored
+// (a concurrent anchor). planned reports, for a dry run, whether any anchor was planned (mature cannot be simulated before it lands).
+func anchorTerms(ctx context.Context, w io.Writer, ch *validatorChain, s vrclient.Sender, custody common.Address, lots []*big.Int, dry bool) (planned bool, err error) {
+	terms, _, err := ch.vr.PendingTerms(ctx, custody, lots)
+	if err != nil {
+		return false, err
+	}
+	for _, t := range terms {
+		data, err := vrclient.PosCalldata(vrclient.CustodyTermsABI, "anchorTerm", t.AssignmentID, t.HRecordID, t.TerminalRoot)
+		if err != nil {
+			return false, err
+		}
+		what := fmt.Sprintf("anchor closed term %s (permissionless; the words of its Closure record)", hexutil.Encode(t.AssignmentID[:]))
+		p, err := s.Plan(ctx, vrclient.Tx{To: custody, Data: data})
+		if err != nil {
+			return false, fmt.Errorf("%w: %s: %w", ErrValidator, what, err)
+		}
+		if p.SimErr != nil {
+			fmt.Fprintf(w, "skip: %s: not anchorable now (%v); it may be anchored already, or its successor epoch is not installed yet: claim again later\n", what, p.SimErr)
+			continue
+		}
+		fmt.Fprintf(w, "[anchor] %s\n", what)
+		fmt.Fprint(w, p.String())
+		if dry {
+			planned = true
+			continue
+		}
+		h, r, err := s.Send(ctx, p)
+		if err != nil {
+			if done, cerr := ch.vr.TermAnchored(ctx, custody, t.AssignmentID); cerr == nil && done {
+				fmt.Fprintf(w, "  anchored meanwhile by another party\n")
+				continue
+			}
+			return false, fmt.Errorf("%w: %s: %w", ErrValidator, what, err)
+		}
+		fmt.Fprintf(w, "  sent: %s, included in block %d (gas used %d)\n", h.Hex(), r.BlockNumber, r.GasUsed)
+	}
+	return planned, nil
 }
 
 func claimStep(ctx context.Context, ch *validatorChain, custody common.Address, s vrclient.Sender) ([]step, error) {

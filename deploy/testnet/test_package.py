@@ -25,6 +25,7 @@ import handoff
 import observe
 import joiner
 import pos_join
+import root_keys
 import pos_sample
 import pos_crash
 
@@ -338,6 +339,28 @@ class UtbProfile(unittest.TestCase):
             r=R(); r.manifest=manifest
             self.assertEqual(rehearse.Rehearsal.reset_utb_args(r),want)
         self.assertIn('*self.reset_utb_args()',(Path(generate.__file__).with_name('rehearse.py')).read_text(),'the reset stage passes them to reset.py')
+    def test_the_rehearsal_reset_supplies_its_own_inventory_or_is_disposable(self):
+        import rehearse
+        class R:
+            def __init__(self, manifest, ev): self.manifest, self.ev, self.calls = manifest, ev, []
+            def evh(self): return self.ev
+            def expect(self, ok, what, detail=''):
+                if not ok: raise AssertionError(what + ' ' + str(detail))
+            def utb_history(self, label, pin, snapshot=None):
+                self.calls.append((label, pin)); b = self.ev / 'h.cbor'; b.write_bytes(b'x'); return 5, '0x' + 'aa' * 32, b
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            self.assertEqual(rehearse.Rehearsal.reset_inventory_args(R({}, d), {'ubft': 'x'}), (['--disposable'], []), 'a --no-utb rehearsal is disposable')
+            ubft = d / 'ubft'
+            ubft.write_text('#!/bin/sh\nwhile [ $# -gt 0 ]; do [ "$1" = --keys-out ] && echo {} > "$2"; shift; done\n'); ubft.chmod(0o755)
+            r = R({'utb': {'genesis_id': '0x' + 'ab' * 32}}, d)
+            flags, gen = rehearse.Rehearsal.reset_inventory_args(r, {'ubft': str(ubft)})
+            self.assertEqual(flags, [])
+            self.assertEqual(gen, ['--prior-generation', str(d / 'utb-history-reset-inventory-keys.json')], 'a UTB generation supplies its own served history')
+            self.assertEqual(r.calls, [('reset-inventory', '0x' + 'ab' * 32)])
+        source = (Path(generate.__file__).with_name('rehearse.py')).read_text()
+        self.assertIn("'--lose-all-assets', *reset_flags", source)
+        self.assertIn("'--', '--out', str(new), *inventory", source)
     def test_image_records_must_match_the_aggregator_variant_before_a_reset_tears_anything_down(self):
         integration={'sources':dict(generate.PINS)}
         upstream={'sources':{**generate.PINS,'aggregator-go':generate.PINS['aggregator-go-upstream']}}
@@ -365,8 +388,54 @@ class UtbProfile(unittest.TestCase):
                 self.assertEqual(done.returncode,2,(why,done.stderr))
                 self.assertFalse(spy.exists(),why+': docker must not be called')
                 self.assertTrue(old.exists(),why+': the old generation stays')
-            done=reset('--no-utb','--images',str(integration))   # accepted by the preflight: it reaches the teardown (the spy) and fails later in generate
+            # #1297: the old generation's UTB history keys are required before the teardown; --first-generation is not a reset
+            history=d/'old-utb-keys.json'; history.write_text(json.dumps({'format':root_keys.HISTORY_FORMAT,'epochs':[{'epoch':1,'keys':['0x02'+'11'*32]}]}))
+            for gen,why in ((('--no-utb','--images',str(integration)),'no prior history'),
+                            (('--no-utb','--images',str(integration),'--first-generation','--prior-generation',str(history)),'a reset is not a first generation')):
+                done=reset(*gen)
+                self.assertEqual(done.returncode,2,(why,done.stderr)); self.assertIn('--prior-generation',done.stderr,why)
+                self.assertFalse(spy.exists(),why+': docker must not be called')
+            # a disposable --no-utb generation (no pin anywhere) resets without a history; --disposable never applies to one with a pin
+            def reset_disposable(*gen):
+                return subprocess.run([sys.executable,str(here/'reset.py'),'--old',str(old),'--lose-all-assets','--disposable','--','--out',str(d/'tn-new'),*gen],
+                                      env={**os.environ,'PATH':str(bin)+os.pathsep+os.environ['PATH']},capture_output=True,text=True)
+            done=reset_disposable('--no-utb','--images',str(integration),'--prior-generation',str(history))
+            self.assertEqual(done.returncode,2,done.stderr); self.assertIn('fresh inventory',done.stderr); self.assertFalse(spy.exists())
+            disposable=d/'tn-disposable'; shutil.copytree(old,disposable)
+            done=subprocess.run([sys.executable,str(here/'reset.py'),'--old',str(disposable),'--lose-all-assets','--disposable','--','--out',str(d/'tn-new'),'--no-utb','--images',str(integration)],
+                                env={**os.environ,'PATH':str(bin)+os.pathsep+os.environ['PATH']},capture_output=True,text=True)
+            self.assertTrue(spy.exists(),'a disposable --no-utb generation reaches the teardown without a history'); spy.unlink()
+            # astra r3: without a trusted root-genesis pin nothing binds the history to the old generation: refused before any teardown
+            (old/'network/handoff').mkdir(parents=True)
+            done=reset('--no-utb','--images',str(integration),'--prior-generation',str(history))
+            self.assertEqual(done.returncode,2,done.stderr); self.assertIn('names no root-genesis pin',done.stderr)
+            self.assertFalse(spy.exists(),'no pin: docker must not be called')
+            # the manifest's utb.genesis_id is the pin when network/utb-genesis.id is absent: a foreign history is refused against it
+            (old/'manifest.json').write_text(json.dumps({'genesis_hash':'0x1','utb':{'genesis_id':'0x'+'ab'*32}}))
+            foreign=d/'foreign.json'; foreign.write_text(json.dumps({'format':root_keys.HISTORY_FORMAT,'genesisId':'0x'+'cd'*32,'epochs':[{'epoch':1,'keys':['0x02'+'11'*32]}]}))
+            done=reset('--no-utb','--images',str(integration),'--prior-generation',str(foreign))
+            self.assertEqual(done.returncode,2,done.stderr); self.assertIn('complete one',done.stderr)
+            self.assertFalse(spy.exists(),'a foreign history: docker must not be called')
+            self.assertEqual(root_keys.generation_pin(old),'0x'+'ab'*32)
+            done=reset_disposable('--no-utb','--images',str(integration))
+            self.assertEqual(done.returncode,2,done.stderr); self.assertIn('only for a generation without a signed history',done.stderr)
+            self.assertFalse(spy.exists(),'--disposable is refused for a generation with a pin')
+            # review r2 P3-2: the history is bound to the generation it replaces: its own genesis, through its newest installed epoch
+            (old/'network/utb-genesis.id').write_text('0x'+'ab'*32+'\n')
+            (old/'network/handoff/trust-base-epoch3.json').write_text('{}')
+            root_keys.write(old/'network',{root_keys.key_hash('0x03'+'99'*32)})
+            def hist(name,gid,last):
+                h=d/name; h.write_text(json.dumps({'format':root_keys.HISTORY_FORMAT,'genesisId':gid,'epochs':[{'epoch':e,'keys':['0x02'+'11'*32]} for e in range(1,last+1)]}))
+                return h
+            for h,why in ((hist('stale.json','0x'+'cd'*32,5),'another root genesis (a stale export)'),(hist('short.json','0x'+'ab'*32,2),'truncated before epoch 3')):
+                done=reset('--no-utb','--images',str(integration),'--prior-generation',str(h))
+                self.assertEqual(done.returncode,2,(why,done.stderr)); self.assertIn('complete one',done.stderr,why)
+                self.assertFalse(spy.exists(),why+': docker must not be called')
+            done=reset('--no-utb','--images',str(integration),'--prior-generation',str(hist('own.json','0x'+'ab'*32,3)))   # accepted by the preflight: it reaches the teardown (the spy) and fails later in generate
             self.assertTrue(spy.exists(),'a matching profile proceeds to the teardown')
+            kept=old.with_suffix('.retired-root-keys.json')
+            self.assertTrue(kept.is_file(),'the old generation\'s own retired list is kept beside it and passed on')
+            self.assertEqual(root_keys.read_list(kept),{root_keys.key_hash('0x03'+'99'*32)})
     def test_the_signed_history_is_on_by_default_and_no_utb_is_the_escape_hatch(self):
         source=(Path(generate.__file__)).read_text()
         self.assertRegex(source,r"add_argument\('--utb',action=argparse\.BooleanOptionalAction,default=True",'--utb defaults on; argparse adds --no-utb')
@@ -1157,7 +1226,7 @@ class ProofOfStake(unittest.TestCase):
         self.assertGreater(3_629_888*125//100,pos.HOOK_RECORD_GAS)
     def test_pos_refuses_more_validators_than_the_caps_cover_before_any_key(self):
         done=subprocess.run([sys.executable,str(Path(__file__).parent/'generate.py'),'--out','/nonexistent/tn-x','--validators',str(pos.CAPS[2]+1),'--ubft','x','--keygen','x','--b1genesis','x',
-            '--images','x','--captcha-sitekey','a','--captcha-secret-file','x','--pos','--pos-contracts','x'],text=True,capture_output=True)
+            '--images','x','--captcha-sitekey','a','--captcha-secret-file','x','--first-generation','--pos','--pos-contracts','x'],text=True,capture_output=True)
         self.assertEqual(done.returncode,2);self.assertIn('cover at most %d genesis identities'%pos.CAPS[2],done.stderr)
     def test_genesis_weights_default_to_one_and_nothing_else_is_buildable(self):
         self.assertEqual(pos.genesis_weights(4),[1,1,1,1]);self.assertEqual(pos.genesis_weights(3,['1','1','1']),[1,1,1])
@@ -1315,15 +1384,15 @@ class ProofOfStake(unittest.TestCase):
             self.assertEqual(pos.code_hash(genesis,'0xaa'),'0xabcd');self.assertEqual(run.call_args[0][0],['cast','keccak','0x6001'])
         for address in ('0xbb','0xcc'):
             with self.assertRaisesRegex(pos.PosError,'no code'): pos.code_hash(genesis,address)
-        d=pos.Genesis.__new__(pos.Genesis);d.deployment={'custody':'0xaa','custodyCodeHash':'0xdead','election':'0xaa','electionCodeHash':'0xabcd'}
+        d=pos.Genesis.__new__(pos.Genesis);d.deployment={'custody':'0xaa','custodyCodeHash':'0xdead','election':'0xaa','electionCodeHash':'0xabcd','electionPublication':'0xaa'}
         with patch('pos.subprocess.run',return_value=R):
             with self.assertRaisesRegex(pos.PosError,'custody code'): d.alloc_code_hashes(genesis)
     def test_the_reward_pool_code_and_funding_are_checked_against_the_genesis_state(self):
         class R: returncode=0;stdout='0xABCD\n';stderr=''
         dep={'custody':'0xaa','custodyCodeHash':'0xabcd','election':'0xaa','electionCodeHash':'0xabcd','policy':'0xaa','policyCodeHash':'0xabcd',
-             'rewardPool':'0xcc','rewardPoolCodeHash':'0xabcd','rewardFunding':'1000'}
-        def genesis(balance):
-            return {'alloc':{'0xAA':{'code':'0x6001'},'0xCC':{'code':'0x6001','balance':balance}}}
+             'rewardPool':'0xcc','rewardPoolCodeHash':'0xabcd','rewardFunding':'1000','electionPublication':'0xdd','electionPublicationCodeHash':'0xabcd'}
+        def genesis(balance, publication=True):
+            return {'alloc':{'0xAA':{'code':'0x6001'},'0xCC':{'code':'0x6001','balance':balance},**({'0xDD':{'code':'0x6001'}} if publication else {})}}
         d=pos.Genesis.__new__(pos.Genesis);d.deployment=dep
         with patch('pos.subprocess.run',return_value=R):
             d.alloc_code_hashes(genesis(hex(1000)))
@@ -1333,6 +1402,13 @@ class ProofOfStake(unittest.TestCase):
             with self.assertRaisesRegex(pos.PosError,'rewardPool code'): d.alloc_code_hashes(genesis(hex(1000)))
             d.deployment=dict(dep,policyCodeHash='0xdead')
             with self.assertRaisesRegex(pos.PosError,'policy code'): d.alloc_code_hashes(genesis(hex(1000)))
+            # the election's publication implementation (PoPs, finalization): recorded, allocated and the recorded code (contracts P85Genesis)
+            d.deployment=dict(dep,electionPublicationCodeHash='0xdead')
+            with self.assertRaisesRegex(pos.PosError,'electionPublication code'): d.alloc_code_hashes(genesis(hex(1000)))
+            d.deployment=dep
+            with self.assertRaisesRegex(pos.PosError,'no code at 0xdd'): d.alloc_code_hashes(genesis(hex(1000),publication=False))
+            d.deployment={k:v for k,v in dep.items() if not k.startswith('electionPublication')}
+            with self.assertRaisesRegex(pos.PosError,'records no electionPublication'): d.alloc_code_hashes(genesis(hex(1000)))
 
 class EntityNamespace(unittest.TestCase):
     def cfg(self,n=4):
@@ -1391,7 +1467,7 @@ class EntityNamespace(unittest.TestCase):
     def test_the_generator_refuses_a_non_loopback_bind_before_any_key(self):
         for bad in ('0.0.0.0','10.1.2.3','example.org'):
             done=subprocess.run([sys.executable,str(Path(__file__).parent/'generate.py'),'--out','/nonexistent/tn-x','--validators','4','--ubft','x','--keygen','x','--b1genesis','x',
-                '--images','x','--captcha-sitekey','a','--captcha-secret-file','x','--rpc-bind',bad],text=True,capture_output=True)
+                '--images','x','--captcha-sitekey','a','--captcha-secret-file','x','--first-generation','--rpc-bind',bad],text=True,capture_output=True)
             self.assertEqual(done.returncode,2,bad);self.assertIn('--rpc-bind',done.stderr)
     def test_every_root_must_carry_the_same_operator_address(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1410,7 +1486,7 @@ class EntityNamespace(unittest.TestCase):
     def test_the_validator_count_is_capped_at_the_registry_ceiling_with_the_reason(self):
         for n,ok in ((2,False),(3,True),(16,True),(17,False),(32,False)):
             done=subprocess.run([sys.executable,str(Path(__file__).parent/'generate.py'),'--out','/nonexistent/tn-x','--validators',str(n),'--ubft','/nonexistent/ubft','--keygen','x','--b1genesis','x',
-                '--images','x','--captcha-sitekey','a','--captcha-secret-file','x'],text=True,capture_output=True)
+                '--images','x','--captcha-sitekey','a','--captcha-secret-file','x','--first-generation'],text=True,capture_output=True)
             if ok: self.assertNotIn('validators must be 3..16',done.stderr,n)
             else:
                 self.assertEqual(done.returncode,2,n);self.assertIn('validators must be 3..16, got %d'%n,done.stderr);self.assertIn('at most 16 committee members',done.stderr)
@@ -2964,9 +3040,14 @@ class Joiner(unittest.TestCase):
             gen=Path(d)/'gen';gen.mkdir();(gen/'compose.yaml').write_text(json.dumps(self.topology(4)))
             fake=Path(d)/'ubft'   # the three commands prepare runs: init (makes the home), credential (a file), node-id (prints one)
             fake.write_text("#!/usr/bin/env python3\nimport sys,os\na=sys.argv[1:]\n"
-                            "if a[1]=='init': os.makedirs(a[a.index('--home')+1])\n"
+                            "if a[1]=='init': h=a[a.index('--home')+1]; os.makedirs(h); open(h+'/node-info.json','w').write('{\"sigKey\":\"0x02'+'ab'*32+'\"}')\n"
                             "elif a[0]=='signing-authority': open(a[a.index('--out')+1],'w').write('c')\n"
                             "elif a[0]=='node-id': print('id-'+os.path.basename(a[a.index('--home')+1]))\n");fake.chmod(0o755)
+            # #1297: a root key on the generation's retired list is refused, and the half-made entity is removed
+            (gen/'network').mkdir();root_keys.write(gen/'network',{root_keys.key_hash('0x02'+'ab'*32)})
+            with self.assertRaises(root_keys.RetiredKeyError): joiner.prepare(gen,fake)
+            self.assertFalse((gen/'validator5').exists())
+            root_keys.write(gen/'network',set())
             old=os.umask(0o022)   # a permissive caller: prepare must not inherit it
             try: out=joiner.prepare(gen,fake)
             finally: os.umask(old)
@@ -3407,6 +3488,19 @@ class StagingKnobs(unittest.TestCase):
             good = Path(tmp) / 'verified'
             good.mkdir()
             vr_release.stage_network_files(net, good, manifest)
+            self.assertFalse((good / root_keys.FILE).exists(), 'a generation that pins no retired-key list ships none')
+            # #1297: the pinned retired-root-keys list ships with the release, checked against its digest
+            listed = b'{"format":"unicity-retired-root-keys/1","keyHashes":[]}\n'
+            (net / root_keys.FILE).write_bytes(listed)
+            manifest['config_sha256'][root_keys.FILE] = sha(listed)
+            shipped = Path(tmp) / 'shipped'
+            shipped.mkdir()
+            vr_release.stage_network_files(net, shipped, manifest)
+            self.assertEqual((shipped / root_keys.FILE).read_bytes(), listed)
+            (net / root_keys.FILE).write_bytes(b'{}')
+            with tempfile.TemporaryDirectory() as out, self.assertRaisesRegex(ValueError, root_keys.FILE):
+                vr_release.stage_network_files(net, Path(out), manifest)
+            (net / root_keys.FILE).write_bytes(listed)
             for name, stale in (
                 ('utb-genesis.id', b'stale'),
                 ('utb-genesis.cbor', b'stale'),
@@ -3450,7 +3544,7 @@ class StagingKnobs(unittest.TestCase):
         with patch.object(generate.subprocess,'check_output',side_effect=['a b\n',json.dumps([{'Name':'x','IPAM':{'Config':[{'Subnet':'172.30.88.0/24','Gateway':'172.30.88.1'}]}},{'Name':'host','IPAM':{'Config':None}}])]):
             self.assertEqual(generate.docker_subnets(),{'x':['172.30.88.0/24'],'host':[]})
     def test_the_generator_refuses_bad_faucet_and_subnet_options_before_any_key(self):
-        base=[sys.executable,str(Path(__file__).parent/'generate.py'),'--out','/nonexistent/tn-x','--validators','4','--ubft','x','--keygen','x','--b1genesis','x','--images','x','--captcha-sitekey','a','--captcha-secret-file','x']
+        base=[sys.executable,str(Path(__file__).parent/'generate.py'),'--out','/nonexistent/tn-x','--validators','4','--ubft','x','--keygen','x','--b1genesis','x','--images','x','--captcha-sitekey','a','--captcha-secret-file','x','--first-generation']
         for extra,want in ((['--faucet-payout','0'],'--faucet-payout'),(['--faucet-balance','100'],'--faucet-balance'),(['--funder-balance','0'],'--funder-balance'),(['--funder-balance','1e3'],'--funder-balance'),(['--faucet-subnet','172.30.89.0/24'],'overlap'),(['--edge-subnet','8.8.8.0/24'],'--edge-subnet')):
             done=subprocess.run(base+extra,text=True,capture_output=True)
             self.assertEqual(done.returncode,2,extra); self.assertIn(want,done.stderr)
@@ -3572,7 +3666,7 @@ class RootCpus(unittest.TestCase):
     def test_the_generator_refuses_an_out_of_range_quota_before_any_key(self):
         for bad in ('0.1','9'):
             done=subprocess.run([sys.executable,str(Path(__file__).parent/'generate.py'),'--out','/nonexistent/tn-x','--validators','4','--ubft','x','--keygen','x','--b1genesis','x',
-                '--images','x','--captcha-sitekey','a','--captcha-secret-file','x','--root-cpus',bad],text=True,capture_output=True)
+                '--images','x','--captcha-sitekey','a','--captcha-secret-file','x','--first-generation','--root-cpus',bad],text=True,capture_output=True)
             self.assertEqual(done.returncode,2,bad); self.assertIn('--root-cpus',done.stderr)
 
 
@@ -3708,5 +3802,106 @@ class PosTooLateAfterAnInProcessSwitch(unittest.TestCase):
             with self.assertRaises(rehearse.Failure, msg=name) as raised:
                 self.run_too_late({1: list(answers), 2: self.published}, {1: None, 2: None})
             self.assertIn('reports its switch into epoch 2 published', str(raised.exception), name)
+
+
+class RootKeyIsolation(unittest.TestCase):
+    """#1297 (astra): a root key signs one root history only. A generation records its root keys and publishes the retired ones of the earlier
+    histories it was generated against; generation, joiners, enrollment and rotation refuse a retired key."""
+    K1 = '0x02' + '11' * 32
+    K2 = '0x03' + '22' * 32
+    K3 = '0x02' + '33' * 32
+
+    def generation(self, tmp, name, keys, published=()):
+        g = Path(tmp) / name
+        (g / 'network').mkdir(parents=True)
+        (g / 'manifest.json').write_text(json.dumps({'generation': name, 'root_signing_keys': root_keys.manifest_entries([f'n{i}' for i in range(len(keys))], keys)}))
+        root_keys.write(g / 'network', set(published))
+        return g
+
+    def test_the_key_hash_is_custody_s_root_key_hash(self):
+        import evm_keys
+        self.assertEqual(root_keys.key_hash(self.K1), '0x' + evm_keys.keccak256(bytes.fromhex(self.K1[2:])).hex())
+        with self.assertRaises(ValueError):
+            root_keys.key_hash('0x04' + '11' * 32)
+
+    def test_prior_generations_name_their_keys_and_their_published_lists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old = self.generation(tmp, 'tn-1', [self.K1], published=[root_keys.key_hash(self.K3)])
+            want = {root_keys.key_hash(self.K1), root_keys.key_hash(self.K3)}
+            self.assertEqual(root_keys.load(old), want)
+            self.assertEqual(root_keys.load(old / 'manifest.json'), want)
+            self.assertEqual(root_keys.load(old / 'network' / root_keys.FILE), {root_keys.key_hash(self.K3)})
+            root_keys.check_fresh([self.K2], want, 'generate')
+            with self.assertRaises(root_keys.RetiredKeyError) as e:
+                root_keys.check_fresh([self.K2, self.K3], want, 'generate')
+            self.assertIn(root_keys.key_hash(self.K3), str(e.exception))
+            # a manifest from before the list (no root keys) is refused, never read as "nothing retired"
+            keyless = Path(tmp) / 'keyless.json'
+            keyless.write_text(json.dumps({'generation': 'tn-0'}))
+            with self.assertRaises(root_keys.RetiredKeyError):
+                root_keys.load(keyless)
+
+    def test_joiners_refuse_a_retired_or_genesis_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gen = self.generation(tmp, 'tn-2', [self.K2], published=[root_keys.key_hash(self.K1)])
+            root_keys.check_generation(gen, self.K3, 'joiner')
+            for key in (self.K1, self.K2):
+                with self.assertRaises(root_keys.RetiredKeyError):
+                    root_keys.check_generation(gen, key, 'joiner')
+            self.assertEqual(root_keys.published(Path(tmp) / 'none'), set())
+
+    def history(self, tmp, epochs):
+        h = Path(tmp) / 'prior-utb-keys.json'
+        h.write_text(json.dumps({'format': root_keys.HISTORY_FORMAT, 'networkId': 3, 'genesisId': '0x' + '00' * 32, 'tipId': '0x' + '00' * 32,
+                                 'epochs': [{'epoch': e, 'keys': keys} for e, keys in epochs]}))
+        return h
+
+    def test_keys_that_joined_or_rotated_during_the_prior_generation_are_retired_by_default(self):
+        """Generation k: genesis K1, K2; epoch 3 rotates K1 to K3; epoch 4 a joiner with K4. Its manifest names only K1, K2. Generation k+1 is generated
+        against k's verified UTB history: K3 and K4 are refused by generate, by the joiner tooling, and land in the shipped list `ubft validator`
+        apply/rotate read by default."""
+        K4 = '0x03' + '44' * 32
+        with tempfile.TemporaryDirectory() as tmp:
+            prior = self.generation(tmp, 'tn-k', [self.K1, self.K2])
+            hist = self.history(tmp, [(1, [self.K1, self.K2]), (2, [self.K1, self.K2]), (3, [self.K3, self.K2]), (4, [self.K3, self.K2, K4])])
+            self.assertTrue(root_keys.is_history(hist))
+            self.assertFalse(root_keys.is_history(prior / 'manifest.json'))
+            self.assertEqual(root_keys.load(prior), {root_keys.key_hash(self.K1), root_keys.key_hash(self.K2)}, 'the manifest alone misses later keys')
+            retired = root_keys.load(hist) | root_keys.load(prior)
+            for key in (self.K3, K4):
+                with self.assertRaises(root_keys.RetiredKeyError):
+                    root_keys.check_fresh([key], retired, 'generate')
+            nxt = self.generation(tmp, 'tn-k1', ['0x02' + '55' * 32], published=retired)
+            for key in (self.K3, K4):
+                with self.assertRaises(root_keys.RetiredKeyError):
+                    root_keys.check_generation(nxt, key, 'joiner')
+            # the release ships network/retired-root-keys.json as release/retired-root-keys.json: the list `ubft validator` reads by default
+            self.assertTrue({root_keys.key_hash(self.K3), root_keys.key_hash(K4)} <= root_keys.read_list(nxt / 'network' / root_keys.FILE))
+            with self.assertRaises(root_keys.RetiredKeyError):
+                root_keys.load(self.history(tmp, [(1, [])]))
+
+    def test_generate_needs_the_prior_history_or_an_explicit_first_generation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = [sys.executable, str(generate.HERE / 'generate.py'), '--out', '/nonexistent/tn-x', '--validators', '4', '--ubft', 'x', '--keygen', 'x',
+                    '--b1genesis', 'x', '--images', str(Path(tmp) / 'no-images.json'), '--captcha-sitekey', 'a', '--captcha-secret-file', 'x']
+            prior = self.generation(tmp, 'tn-k', [self.K1])
+            hist = self.history(tmp, [(1, [self.K1])])
+            for extra, want in (([], 'needs the prior generation'), (['--prior-generation', str(prior)], 'needs the prior generation'),
+                                (['--first-generation', '--prior-generation', str(hist)], 'contradict')):
+                done = subprocess.run(base + extra, text=True, capture_output=True)
+                self.assertEqual(done.returncode, 2, extra)
+                self.assertIn(want, done.stderr, extra)
+            for extra in (['--first-generation'], ['--prior-generation', str(hist), '--prior-generation', str(prior)]):
+                done = subprocess.run(base + extra, text=True, capture_output=True)
+                self.assertNotIn('prior generation', done.stderr, extra)   # past the inventory check (it fails later, on the missing image records)
+
+    def test_the_generator_reads_the_prior_histories_before_any_key_and_records_and_publishes(self):
+        source = (generate.HERE / 'generate.py').read_text().split('def main')[1]
+        self.assertLess(source.index('retired|=root_keys.load(prior)'), source.index("'init','--home'"))
+        self.assertLess(source.index("root_keys.check_fresh(root_signing,retired,'generate')"), source.index("cli('trust-base','generate'"))
+        self.assertIn("root_keys.write(out/'network',retired)", source)
+        self.assertIn("'root_signing_keys':root_keys.manifest_entries(roots,root_signing)", source)
+        for name in ('joiner.py', 'pos_join.py', 'remote_joiner.py'):
+            self.assertIn('root_keys.check_', (generate.HERE / name).read_text(), name)
 
 if __name__=='__main__': unittest.main()

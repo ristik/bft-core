@@ -326,6 +326,11 @@ func (s Sender) Send(ctx context.Context, to [20]byte, value *big.Int, data []by
 	est := map[string]any{"from": from, "to": toAddr, "data": hexutil.Bytes(data), "value": (*hexutil.Big)(value)}
 	gas, err := s.estimateGas(ctx, est)
 	if err != nil {
+		// the revert data (the contract's custom error) is what tells a revert apart from another: keep it in the message
+		var de rpc.DataError
+		if errors.As(err, &de) && de.ErrorData() != nil {
+			return ethcommon.Hash{}, fmt.Errorf("the transaction would revert or run out of gas: %w (data %v)", err, de.ErrorData())
+		}
 		return ethcommon.Hash{}, fmt.Errorf("the transaction would revert or run out of gas: %w", err)
 	}
 	tx, err := types.SignNewTx(s.Key, types.LatestSignerForChainID(s.ChainID), &types.DynamicFeeTx{ChainID: s.ChainID, Nonce: uint64(nonce),

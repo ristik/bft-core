@@ -17,6 +17,7 @@ import time
 
 import operator_rpc
 import pos
+import root_keys
 import ureth_key
 import vr_genesis
 
@@ -409,6 +410,13 @@ def main():
     p.add_argument('--utb',action=argparse.BooleanOptionalAction,default=True,help='the signed trust-base entry (UTB) profile, ON by default: the roots produce and serve the signed history, shard nodes and the aggregator verify it from the genesis entry pinned in the manifest. --no-utb is the escape hatch for the package without it (old tests)')
     p.add_argument('--utb-aggregator',choices=UTB_AGGREGATORS,default='integration',help='with --utb: which aggregator the images carry (build-images.py --aggregator-variant): the integration aggregator (genesis entry file, own store) or the upstream-facing one (one-entry bundle, expected network, history in its MongoDB)')
     p.add_argument('--port-offset',type=int,default=0,help='added to every host-published port (RPC 8545, faucet 8088, Prometheus 9090) so a second generation can run on the same host; default 0: unchanged. Lane slot N uses 1000*N (scripts/lane-slot.sh); tooling then needs TN_PUBLIC_RPC and TN_FAUCET set to the shifted ports')
+    p.add_argument('--prior-generation',action='append',default=[],type=Path,metavar='PATH',
+                   help='an earlier root history this generation must not share a root key with (#1297, D5 section 2.1), repeatable: the verified UTB '
+                        'history keys of the prior generation (`ubft trust-base utb-verify --keys-out`, every epoch, joins and rotations included; '
+                        'required), and its published retired-root-keys.json or generation directory/manifest. The new keys are checked against them '
+                        'and the union is published as network/retired-root-keys.json, which joiner, enrollment and rotation tooling refuses')
+    p.add_argument('--first-generation',action='store_true',help='there is no earlier root history: start the retired-key inventory empty (otherwise '
+                   '--prior-generation with the prior generation\'s UTB history keys is required)')
     p.add_argument('--captcha-sitekey',required=True)
     p.add_argument('--captcha-secret-file',required=True,type=Path)
     p.add_argument('--public-p2p-ip', type=ipaddress.IPv4Address,
@@ -465,6 +473,18 @@ def main():
     out=a.out.resolve()
     if not re.fullmatch(r'tn-[a-z0-9][a-z0-9_-]*',out.name): p.error('generation directory name must be tn- followed by lowercase letters/digits/dashes')
     if out.exists(): p.error('output exists: choose a new generation directory')
+    # the earlier root histories, read before any key exists (an unreadable or keyless prior manifest is refused, never skipped)
+    retired=set()
+    if a.first_generation and a.prior_generation:
+        p.error('--first-generation and --prior-generation contradict each other')
+    if not a.first_generation and not any(root_keys.is_history(prior) for prior in a.prior_generation):
+        p.error('the retired-key inventory needs the prior generation\'s signed UTB history: --prior-generation <utb-verify --keys-out file> '
+                '(plus its published retired-root-keys.json), or --first-generation when there is no earlier root history')
+    try:
+        for prior in a.prior_generation:
+            retired|=root_keys.load(prior)
+    except (OSError,ValueError,KeyError,root_keys.RetiredKeyError) as error:
+        p.error(f'--prior-generation: {error}')
     records=json.loads(a.images.read_text())
     if a.utb_aggregator != 'integration' and not a.utb: p.error('--utb-aggregator needs --utb')
     if image_sources_error(records, a.utb_aggregator): p.error(image_sources_error(records, a.utb_aggregator))
@@ -507,6 +527,12 @@ def main():
                     cli('root-node' if kind=='root' else 'shard-node','init','--home',home/f'{kind}{i}','--generate')
                 roots += [cli('node-id','--home',home/f'root{i}').strip().splitlines()[-1]]
                 evms += [cli('node-id','--home',home/f'evm{i}').strip().splitlines()[-1]]
+            # fresh root keys, never a reused home: refuse any key of an earlier root history (#1297: the seal bytes bind N, not the root genesis)
+            root_signing=[root_keys.node_info_key(home/f'root{i}/node-info.json') for i in range(1,a.validators+1)]
+            try:
+                root_keys.check_fresh(root_signing,retired,'generate')
+            except root_keys.RetiredKeyError as error:
+                p.error(str(error))
             cli('trust-base','generate','--home',home,'--epoch','1','--epoch-start','1','--network-id','3',
                 *sum((['--node-info',home/f'root{i}/node-info.json'] for i in range(1,a.validators+1)),[]))
             for i in range(1,a.validators+1):
@@ -514,6 +540,7 @@ def main():
             out.mkdir(parents=True)
             (out/'network').mkdir()
             shutil.copy2(home/'trust-base.json',out/'network/trust-base.json')
+            root_keys.write(out/'network',retired)
             utb_pin=None
             if a.utb:
                 # The pin is the EntryID of the genesis entry derived from THIS trust base at generation time, recorded in the manifest and passed to every process as its own
@@ -745,6 +772,7 @@ def main():
             'pos':vr_info or ({'genesis_assignment':genesis.assignment,'first_pass_assignment':genesis.first,'custody':genesis.deployment['custody'],'election':genesis.deployment['election'],
                     'contracts':PINS['contracts'],'owner_keys':'pos-owner-keys','cadence_rounds':a.pos_cadence_rounds,'cadence_seconds':a.pos_cadence_seconds} if genesis else None),
             'authority_status':{str(i):json.loads(authority(i,'status','--operator-socket',out/f'validator{i}/auth/operator.sock','--operator-credential',out/f'validator{i}/auth/operator.cred')) for i in range(1,a.validators+1)} if not a.offline_validation else {},
+            'root_signing_keys':root_keys.manifest_entries(roots,root_signing),
             'config_sha256':{f.name:hashlib.sha256(f.read_bytes()).hexdigest() for f in network_files}}
         write(out/'manifest.json',manifest)
         print(json.dumps(manifest,indent=2))

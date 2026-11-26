@@ -42,6 +42,18 @@ func TestThePoSABIsMatchTheCompiledSelectors(t *testing.T) {
 		{CustodyABI, "register", "703a60cd"},
 		{CustodyABI, "registerNonce", "c8e07834"},
 		{CustodyABI, "requestRetirement", "b9fbfe66"},
+		// the final contracts (unicity-pos-contracts e2b995b): forge's method identifiers of StakeCustody and SealRegistry
+		{CustodyTermsABI, "anchorTerm", "baed1b42"},
+		{CustodyTermsABI, "assignments", "82c2901c"},
+		{CustodyTermsABI, "lotUnanchoredTerms", "304ab606"},
+		{CustodyTermsABI, "roots", "393fe1cd"},
+		{CustodyTermsABI, "termAnchors", "895915f0"},
+		{CustodyTermsABI, "assignmentExposures", "b40fe7d4"},
+		{CustodyTermsABI, "exposureLots", "c03e0a67"},
+		{CustodyTermsABI, "assignmentSeatCount", "1543ae1d"},
+		{CustodyTermsABI, "assignmentSeat", "d6b00661"},
+		{SealRecordsABI, "recordAt", "b2cee303"},
+		{SealRecordsABI, "recordCount", "900407bc"},
 	}
 	for _, c := range cases {
 		m, ok := c.a.Methods[c.method]

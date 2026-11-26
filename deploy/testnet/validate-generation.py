@@ -54,7 +54,7 @@ with tempfile.TemporaryDirectory(prefix='tnops-validation-',dir='/tmp') as tmp:
         generation=base/f'tn-ceremony-{i}'
         subprocess.run([sys.executable,str(HERE/'generate.py'),'--out',str(generation),'--validators','3',
             '--ubft',str(a.ubft.resolve()),'--keygen',str(a.keygen.resolve()),'--b1genesis',str(a.b1genesis.resolve()),'--images',str(images),
-            '--offline-validation','--captcha-sitekey','fixture','--captcha-secret-file',str(base/'captcha'),'--block-interval-ms','0','--no-utb'],check=True,stdout=subprocess.DEVNULL)
+            '--offline-validation','--first-generation','--captcha-sitekey','fixture','--captcha-secret-file',str(base/'captcha'),'--block-interval-ms','0','--no-utb'],check=True,stdout=subprocess.DEVNULL)
         subprocess.run(['docker','compose','-f',str(generation/'compose.yaml'),'--profile','OFFLINE-VALIDATION-DO-NOT-START','config','--quiet'],check=True)
         flags_ok(generation)
         if a.check_prometheus:
@@ -112,7 +112,7 @@ with tempfile.TemporaryDirectory(prefix='tnops-validation-',dir='/tmp') as tmp:
         generation=base/'tn-ceremony-pos'
         subprocess.run([sys.executable,str(HERE/'generate.py'),'--out',str(generation),'--validators','4',
             '--ubft',str(a.ubft.resolve()),'--keygen',str(a.keygen.resolve()),'--b1genesis',str(a.b1genesis.resolve()),'--images',str(images),
-            '--offline-validation','--captcha-sitekey','fixture','--captcha-secret-file',str(base/'captcha'),'--block-interval-ms','10000',
+            '--offline-validation','--first-generation','--captcha-sitekey','fixture','--captcha-secret-file',str(base/'captcha'),'--block-interval-ms','10000',
             '--vr-pos','--utb','--pos-contracts',str(a.pos_contracts.resolve()),'--vr-fresh-measurement',str(a.vr_fresh_measurement.resolve())],
             check=True,stdout=subprocess.DEVNULL)
         subprocess.run(['docker','compose','-f',str(generation/'compose.yaml'),'--profile','OFFLINE-VALIDATION-DO-NOT-START','config','--quiet'],check=True)
@@ -125,7 +125,8 @@ with tempfile.TemporaryDirectory(prefix='tnops-validation-',dir='/tmp') as tmp:
         release.mkdir()
         document = json.loads((generation/'manifest.json').read_text())
         vr_release.stage_network_files(generation/'network', release, document)
-        assert set(file.name for file in release.iterdir()) == set(vr_release.NETWORK_FILES)
+        # #1297: plus the retired root key list, which every generation made now pins (an empty one for --first-generation)
+        assert set(file.name for file in release.iterdir()) == {*vr_release.NETWORK_FILES, vr_release.root_keys.FILE}
         print(json.dumps({'vr_release_genesis_files':'PASS', 'utb_genesis_id':document['utb']['genesis_id']}))
     assert generations[0]['genesis_hash']!=generations[1]['genesis_hash']
     assert generations[0]['faucet_address']!=generations[1]['faucet_address']

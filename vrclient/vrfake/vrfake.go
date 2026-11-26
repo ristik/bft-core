@@ -49,6 +49,8 @@ type Chain struct {
 	// ClaimLots and ClaimCredit model a single withdrawal in the custody test fixture.
 	ClaimLots   []*big.Int
 	ClaimCredit *big.Int
+	// Terms models custody's report anchors (#1297/#1298); nil: contracts that predate them (no anchor views).
+	Terms *Terms
 	// Governor is the FoundationMultisig, Signers its five signers (ascending) and MsigNonce its approval nonce.
 	Governor     ethcommon.Address
 	Signers      [5]ethcommon.Address
@@ -333,6 +335,117 @@ func revert(a abi.ABI, name string, args ...any) *rpcError {
 	return &rpcError{Code: 3, Message: "execution reverted", Data: hexutil.Encode(append(append([]byte(nil), e.ID[:4]...), data...))}
 }
 
+// Terms is the anchor state: the SealRegistry's Closure records, the terms custody closed and anchored, and the lots still waiting.
+type Terms struct {
+	Closures   [][3][32]byte // assignmentID, hRecordID, terminalRoot, as the Closure records carry them
+	Closed     map[[32]byte]bool
+	Anchored   map[[32]byte]bool
+	Unanchored map[string]uint32 // by lot id (decimal)
+	Anchors    int               // anchorTerm transactions applied
+	// Backs names the lots each term's assignment references (one exposure per term, its id the assignment id); NotReady terms refuse
+	// anchorTerm (their successor epoch is not installed).
+	Backs    map[[32]byte][]*big.Int
+	NotReady map[[32]byte]bool
+	// Seats are compact-seat lots per term (assignmentSeat), instead of Backs' legacy exposure; Race terms are anchored by another party
+	// between the caller's preview and its transaction (the caller's send reverts).
+	Seats map[[32]byte][]*big.Int
+	Race  map[[32]byte]bool
+}
+
+type seatBinding struct {
+	Id, Generation                             uint64
+	RootNode, RootKeyHash, EvmNode, EvmKeyHash [32]byte
+	Payee                                      ethcommon.Address
+}
+
+type assignmentSeat struct {
+	Binding                               seatBinding
+	Weight, RawWeight                     uint64
+	BindingHash, ExposureID, MemberDigest [32]byte
+	LotID                                 *big.Int
+}
+
+func (t *Terms) record(i uint64) vrclient.RootRecord {
+	c := t.Closures[i]
+	data := make([]byte, 6*32)
+	copy(data[0:32], c[0][:])
+	copy(data[64:96], c[1][:])
+	copy(data[96:128], c[2][:])
+	return vrclient.RootRecord{Index: i, Kind: vrclient.RecordKindClosure, Data: data}
+}
+
+func (c *Chain) terms(from ethcommon.Address, data []byte, write bool) ([]byte, *rpcError) {
+	a := vrclient.CustodyTermsABI
+	m, err := a.MethodById(data[:4])
+	if err != nil || c.Terms == nil {
+		return nil, nil
+	}
+	in, err := m.Inputs.Unpack(data[4:])
+	if err != nil {
+		return nil, &rpcError{Code: 3, Message: "execution reverted"}
+	}
+	t := c.Terms
+	switch m.Name {
+	case "roots":
+		return pack(a, "roots", c.Seal), nil
+	case "lotUnanchoredTerms":
+		return pack(a, "lotUnanchoredTerms", t.Unanchored[in[0].(*big.Int).String()]), nil
+	case "termAnchors":
+		return pack(a, "termAnchors", [32]byte{}, [32]byte{}, uint64(0), uint64(0), t.Anchored[in[0].([32]byte)]), nil
+	case "assignments":
+		return pack(a, "assignments", uint8(2), [32]byte{}, uint64(0), uint64(0), uint64(0), uint64(0), false, false, uint64(0), t.Closed[in[0].([32]byte)],
+			uint64(0), uint64(0), [32]byte{}, [32]byte{}, [32]byte{}, uint32(0)), nil
+	case "assignmentSeatCount":
+		return pack(a, "assignmentSeatCount", big.NewInt(int64(len(t.Seats[in[0].([32]byte)])))), nil
+	case "assignmentSeat":
+		seats, i := t.Seats[in[0].([32]byte)], in[1].(*big.Int)
+		if !i.IsInt64() || i.Int64() >= int64(len(seats)) {
+			return nil, &rpcError{Code: 3, Message: "execution reverted"}
+		}
+		return pack(a, "assignmentSeat", assignmentSeat{LotID: seats[i.Int64()]}), nil
+	case "assignmentExposures":
+		aid := in[0].([32]byte)
+		if len(t.Backs[aid]) == 0 {
+			return pack(a, "assignmentExposures", [][32]byte{}), nil
+		}
+		return pack(a, "assignmentExposures", [][32]byte{aid}), nil
+	case "exposureLots":
+		lots := t.Backs[in[0].([32]byte)]
+		if lots == nil {
+			lots = []*big.Int{}
+		}
+		return pack(a, "exposureLots", lots), nil
+	case "anchorTerm":
+		aid := in[0].([32]byte)
+		if !t.Closed[aid] || t.Anchored[aid] {
+			return nil, &rpcError{Code: 3, Message: "execution reverted: TermNotPending"}
+		}
+		if t.NotReady[aid] {
+			return nil, &rpcError{Code: 3, Message: "execution reverted: SuccessorNotInstalled"}
+		}
+		if write && t.Race[aid] {
+			// another party's anchor lands first: the term is anchored, this transaction reverts
+			t.Anchored[aid] = true
+			for _, lot := range append(append([]*big.Int{}, t.Backs[aid]...), t.Seats[aid]...) {
+				if n := t.Unanchored[lot.String()]; n > 0 {
+					t.Unanchored[lot.String()] = n - 1
+				}
+			}
+			return nil, &rpcError{Code: 3, Message: "execution reverted: TermNotPending"}
+		}
+		if write {
+			t.Anchored[aid] = true
+			t.Anchors++
+			for _, lot := range append(append([]*big.Int{}, t.Backs[aid]...), t.Seats[aid]...) {
+				if n := t.Unanchored[lot.String()]; n > 0 {
+					t.Unanchored[lot.String()] = n - 1
+				}
+			}
+		}
+	}
+	return nil, nil
+}
+
 func pack(a abi.ABI, method string, vals ...any) []byte {
 	b, err := a.Methods[method].Outputs.Pack(vals...)
 	if err != nil {
@@ -363,7 +476,16 @@ func (c *Chain) exec(from, to ethcommon.Address, data []byte, write bool) ([]byt
 		case bytes.Equal(data[:4], ethcrypto.Keccak256([]byte("ucTime()"))[:4]):
 			return u64word(c.UcTime), nil
 		case bytes.Equal(data[:4], ethcrypto.Keccak256([]byte("recordCount()"))[:4]):
+			if c.Terms != nil {
+				return u64word(uint64(len(c.Terms.Closures))), nil
+			}
 			return u64word(c.RecordCount), nil
+		case c.Terms != nil && bytes.Equal(data[:4], vrclient.SealRecordsABI.Methods["recordAt"].ID):
+			in, err := vrclient.SealRecordsABI.Methods["recordAt"].Inputs.Unpack(data[4:])
+			if err != nil || in[0].(uint64) >= uint64(len(c.Terms.Closures)) {
+				return nil, &rpcError{Code: 3, Message: "execution reverted"}
+			}
+			return pack(vrclient.SealRecordsABI, "recordAt", c.Terms.record(in[0].(uint64))), nil
 		}
 		return nil, &rpcError{Code: 3, Message: "execution reverted"}
 	case c.Custody:
@@ -397,7 +519,7 @@ func (c *Chain) custody(from ethcommon.Address, data []byte, write bool) ([]byte
 	a := vrclient.CustodyABI
 	m, err := a.MethodById(data[:4])
 	if err != nil {
-		return nil, nil
+		return c.terms(from, data, write)
 	}
 	in, err := m.Inputs.Unpack(data[4:])
 	if err != nil {
@@ -422,6 +544,13 @@ func (c *Chain) custody(from ethcommon.Address, data []byte, write bool) ([]byte
 		}
 		return pack(a, "credit", credit), nil
 	case "mature":
+		if c.Terms != nil {
+			for _, lot := range c.ClaimLots {
+				if c.Terms.Unanchored[lot.String()] != 0 {
+					return nil, &rpcError{Code: 3, Message: "execution reverted: TermAnchorPending"}
+				}
+			}
+		}
 		if write {
 			c.ClaimLots = nil
 			c.ClaimCredit = big.NewInt(100)

@@ -125,6 +125,19 @@ func pad32(n *big.Int) []byte {
 	return append(make([]byte, 32-len(b)), b...)
 }
 
+// recoverable appends to a 64-byte low-s signature of msg the recovery id that
+// recovers v's key: the strict native 65-byte form.
+func (v validator) recoverable(sig64, msg []byte) []byte {
+	digest := sha256.Sum256(msg)
+	for id := byte(0); id <= 1; id++ {
+		compact := append([]byte{27 + 4 + id}, sig64[:64]...)
+		if pub, _, err := ecdsa.RecoverCompact(compact, digest[:]); err == nil && pub.IsEqual(v.key.PubKey()) {
+			return withV(sig64, id)
+		}
+	}
+	panic("s1gen: no recovery id recovers the signer")
+}
+
 // withV returns the 64-byte signature with a recovery byte appended.
 func withV(sig []byte, v byte) []byte { return append(append([]byte{}, sig[:64]...), v) }
 

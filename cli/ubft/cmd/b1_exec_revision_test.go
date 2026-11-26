@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-core/b1registry"
 	"github.com/unicitynetwork/bft-core/b1state"
 )
 
@@ -114,7 +115,11 @@ func TestTheGenerationsCannotBeMixedInVRVerify(t *testing.T) {
 		require.ErrorIs(t, err, ErrB1Profile)
 	})
 	t.Run("the current revision added by hand to the legacy profile, with the legacy genesis and PDR", func(t *testing.T) {
-		p := writeProfileEdit(t, legacyTestdata("b1-profile.json"), func(m map[string]any) { m["executionRevision"] = b1state.CurrentExecutionRevision })
+		// the legacy profile names the registry runtime of its time; the current pin is set too, so the refusal is the V1 profile hash alone
+		p := writeProfileEdit(t, legacyTestdata("b1-profile.json"), func(m map[string]any) {
+			m["executionRevision"] = b1state.CurrentExecutionRevision
+			m["runtimeHash"] = b1registry.CodeHashHex
+		})
 		profile, file, err := readB1ProfileFile(p)
 		require.NoError(t, err)
 		v := vrFixtureInput(t)

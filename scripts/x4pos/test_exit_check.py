@@ -40,6 +40,23 @@ elif sig.startswith("lots"):
     print("\n".join(str(x) for x in [l["id"], 1, l["initial"], l["remaining"], l["penalized"], l["category"], 500, l["refCount"], 2000, 3600, l["holdUntil"], l["evidenceUntil"], l["timeUntil"]]))
 elif sig.startswith("liveExposures"): print(W["liveExposures"])
 elif sig.startswith("credit"): print(W["credit"])
+elif sig.startswith("lotUnanchoredTerms"):
+    if "unanchored" not in W: sys.stderr.write("Error: execution reverted\n"); sys.exit(1)
+    print(W["unanchored"].get(params[0], 0))
+elif sig.startswith("roots"): print("0xROOTS")
+elif sig.startswith("recordCount"): print(len(W["records"]))
+elif sig.startswith("recordAt"):
+    k, data = W["records"][int(params[0])]
+    print("(%s, 0x%s, 0x%s, %d, 10 [1e1], 1700000000 [1.7e9], 0x%s)" % (params[0], "11" * 32, "22" * 32, k, data))
+elif sig.startswith("termAnchors"):
+    print("\n".join(["0x" + "00" * 32, "0x" + "00" * 32, "0", "0", "true" if params[0] in W["anchored"] else "false"]))
+elif sig.startswith("assignments"):
+    print("\n".join(["2", "0x" + "00" * 32] + ["0"] * 7 + ["true" if params[0] in W["closed"] else "false"] + ["0", "0"] + ["0x" + "00" * 32] * 3 + ["1"]))
+elif sig.startswith("anchorTerm"):
+    W.setdefault("previews", [])
+    r = W["anchor"].get(params[0], "ok")
+    if r == "ok": print("0x"); sys.exit(0)
+    sys.stderr.write("Error: server returned an error response: execution reverted, data: \"" + r + "\"\n"); sys.exit(1)
 elif sig.startswith("mature"):
     if W["mature"] == "ok": print("0x"); sys.exit(0)
     sys.stderr.write("Error: server returned an error response: execution reverted, data: \"" + W["mature"] + "\"\n"); sys.exit(1)
@@ -120,6 +137,46 @@ class ExitCheck(unittest.TestCase):
         self.assertEqual(self.run_cli(ok, *args).returncode, 0)
         self.assertEqual(self.run_cli(self.world(credit=0, balances={"0xRCPT": 1013}), *args).returncode, 1)
         self.assertEqual(self.run_cli(self.world(credit=1, balances={"0xRCPT": 1014}), *args).returncode, 1)
+
+    def closure(self, aid, h, t):
+        return "".join(x[2:] if x.startswith("0x") else x for x in (aid, "%064x" % 7, h, t, "33" * 32, "44" * 32))
+
+    def test_terms_lists_the_closed_unanchored_terms_with_their_closure_words(self):
+        A, B, C = "0x" + "a1" * 32, "0x" + "b2" * 32, "0x" + "c3" * 32
+        H, T = "0x" + "d4" * 32, "0x" + "e5" * 32
+        w = self.world(unanchored={"4": 1}, anchored=[B], closed=[A, B], anchor={},
+                       records=[[2, "00" * 32], [4, self.closure(A, H, T)], [4, self.closure(B, H, T)], [4, self.closure(C, H, T)], [4, self.closure(A, H, T)]])
+        r = self.run_cli(w, "terms")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        out = json.loads(r.stdout)
+        # B is anchored, C's Closure is not applied by custody yet: only A, with the words of its Closure record
+        self.assertEqual(out, {"supported": True, "blockedLots": [4], "terms": [{"assignmentID": A, "hRecordID": H, "terminalRoot": T, "ready": True, "reason": None}]})
+        w["anchor"] = {A: sel("SuccessorNotInstalled")}
+        out = json.loads(self.run_cli(w, "terms").stdout)
+        self.assertEqual([(t["ready"], t["reason"]) for t in out["terms"]], [(False, "SuccessorNotInstalled")])
+        w["anchor"] = {A: sel("TermNotPending")}   # anchored between the two reads: nothing left to send
+        self.assertEqual(json.loads(self.run_cli(w, "terms").stdout)["terms"], [])
+        w["anchor"] = {A: "0xdeadbeef"}
+        self.assertEqual(self.run_cli(w, "terms").returncode, 1)
+
+    def test_terms_has_nothing_to_do_without_a_waiting_lot_or_on_older_contracts(self):
+        w = self.world(unanchored={}, anchored=[], closed=[], anchor={}, records=[])
+        self.assertEqual(json.loads(self.run_cli(w, "terms").stdout), {"supported": True, "blockedLots": [], "terms": []})
+        self.assertEqual(json.loads(self.run_cli(self.world(), "terms").stdout), {"supported": False, "blockedLots": [], "terms": []})
+
+    def test_a_pending_anchor_is_a_lawful_early_refusal(self):
+        r = self.run_cli(self.world(mature=sel("TermAnchorPending")), "refusal")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout)["reason"], "TermAnchorPending")
+
+    def test_the_anchor_calls_are_the_final_contracts_selectors(self):
+        # forge's method identifiers of StakeCustody and SealRegistry at unicity-pos-contracts e2b995b (#1297)
+        final = {"anchorTerm(bytes32,bytes32,bytes32)": "baed1b42", "termAnchors(bytes32)": "895915f0", "lotUnanchoredTerms(uint256)": "304ab606",
+                 "roots()": "393fe1cd", "assignments(bytes32)": "82c2901c", "recordAt(uint64)": "b2cee303", "recordCount()": "900407bc"}
+        sources = [(HERE / "exit_check.py").read_text(), (HERE / "lib.sh").read_text()]   # deploy/testnet's copy: test_remote_joiner.TermAnchors
+        for sig, want in final.items():
+            self.assertEqual(keccak256(sig.encode()).hex()[:8], want, sig)
+            self.assertTrue(any(sig in src for src in sources), sig)
 
     def test_the_checks_survive_python_optimize(self):
         import ast

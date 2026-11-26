@@ -99,12 +99,20 @@ type txFlags struct {
 	validatorFlags
 	DryRun bool
 	Wait   time.Duration
+	// RetiredRootKeys is the release's published list of earlier root histories' root key hashes (#1297): a configured root key on it is refused.
+	// enrollsRootKey (apply, rotate) reads the release's shipped list by default (release/retired-root-keys.json under the validator home) when
+	// RetiredRootKeys is empty; NoRetiredRootKeys opts out of that default.
+	RetiredRootKeys   string
+	NoRetiredRootKeys bool
+	enrollsRootKey    bool
 }
 
 func (f *txFlags) add(cmd *cobra.Command) {
 	f.validatorFlags.add(cmd)
 	cmd.Flags().BoolVar(&f.DryRun, "dry-run", false, "build, decode and simulate the transactions, send nothing")
 	cmd.Flags().DurationVar(&f.Wait, "wait", 2*time.Minute, "how long to wait for each receipt")
+	cmd.Flags().StringVar(&f.RetiredRootKeys, "retired-root-keys", "", "the release's published retired-root-keys.json: refuse a root signing key of an earlier root history (a root key signs one root history only, #1297); apply and rotate default to "+releaseRetiredRootKeys+" under the validator home when it exists")
+	cmd.Flags().BoolVar(&f.NoRetiredRootKeys, "no-retired-root-keys", false, "apply and rotate: do not read the release's shipped retired-root-keys list (an explicit --retired-root-keys is still checked)")
 }
 
 // step is one transaction of a command, with its plan built lazily (the second transaction of apply depends on the first's id).
@@ -179,6 +187,16 @@ func openTx(cmd *cobra.Command, f *txFlags) (*loadedValidator, *validatorKeys, *
 	if err != nil {
 		return nil, nil, nil, vrclient.Sender{}, err
 	}
+	// enrollment and rotation use the configured root key: never one of an earlier root history
+	if list := f.retiredRootKeys(v); list != "" {
+		root, err := nodeKeys(keys.Root)
+		if err != nil {
+			return nil, nil, nil, vrclient.Sender{}, err
+		}
+		if err := checkRetiredRootKey(list, root.Public()); err != nil {
+			return nil, nil, nil, vrclient.Sender{}, err
+		}
+	}
 	ch, err := v.dial(cmd.Context())
 	if err != nil {
 		return nil, nil, nil, vrclient.Sender{}, err
@@ -248,7 +266,7 @@ func registration(v *loadedValidator, keys *validatorKeys, nonce uint64) (vrclie
 // ---- apply ---------------------------------------------------------------------------------------------------------------------------
 
 func validatorApplyCmd(base *baseFlags) *cobra.Command {
-	f := &txFlags{validatorFlags: validatorFlags{baseFlags: base}}
+	f := &txFlags{validatorFlags: validatorFlags{baseFlags: base}, enrollsRootKey: true}
 	pf := &posFlags{}
 	cmd := &cobra.Command{
 		Use:   "apply",
@@ -497,7 +515,7 @@ func viaAuthority(k *validatorKeys) string {
 }
 
 func validatorRotateCmd(base *baseFlags) *cobra.Command {
-	f := &rotateFlags{txFlags: txFlags{validatorFlags: validatorFlags{baseFlags: base}}}
+	f := &rotateFlags{txFlags: txFlags{validatorFlags: validatorFlags{baseFlags: base}, enrollsRootKey: true}}
 	cmd := &cobra.Command{
 		Use:   "rotate",
 		Short: "Stage new node keys or a new payee for the identity (VR.proposeBinding), effective at the next boundary",
@@ -547,6 +565,16 @@ func validatorRotate(cmd *cobra.Command, f *rotateFlags) error {
 	if f.RootKeys != "" {
 		if next.Root, err = readKeyConf(f.RootKeys); err != nil {
 			return fmt.Errorf("%w: new root keys: %w", ErrValidator, err)
+		}
+		// #1297: the key rotated to must not be one of an earlier root history (the same list and opt-out as the configured key in openTx)
+		if list := f.retiredRootKeys(v); list != "" {
+			nk, err := nodeKeys(next.Root)
+			if err != nil {
+				return fmt.Errorf("%w: new root keys: %w", ErrValidator, err)
+			}
+			if err := checkRetiredRootKey(list, nk.Public()); err != nil {
+				return err
+			}
 		}
 	}
 	if f.EVMKeys != "" {

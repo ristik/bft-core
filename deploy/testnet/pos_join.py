@@ -19,6 +19,7 @@ from pathlib import Path
 
 import handoff_ops
 import joiner as joiner_lib
+import root_keys
 
 BOND_UNIT = 100 * 10 ** 18
 
@@ -178,6 +179,7 @@ def pos_join_heavy(r):
     home.mkdir(mode=0o700, exist_ok=True)
     for kind, group in (('root', 'root-node'), ('evm', 'shard-node')):
         r.host_ubft(group, 'init', '--home', home / kind, '--generate')
+    root_keys.check_generation(r.gen, root_keys.node_info_key(home / 'root' / 'node-info.json'), 'the heavy joiner')   # #1297: never a retired root key
     r.rescan()   # the new key files below are secrets from here on
     keys = {kind: json.loads((home / kind / 'keys.json').read_text())['sigKey']['privateKey'] for kind in ('root', 'evm')}
     node = {kind: r.host_ubft('node-id', '--home', home / kind).strip().splitlines()[-1] for kind in ('root', 'evm')}

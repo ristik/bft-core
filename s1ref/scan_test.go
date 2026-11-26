@@ -144,10 +144,10 @@ func TestSignatureShape(t *testing.T) {
 			t.Errorf("%s: want ErrSigShape, got %v", what, err)
 		}
 	}
-	for n, ok := range map[int]bool{0: false, 1: false, 63: false, 64: true, 65: true, 66: false, 128: false} {
+	for n, ok := range map[int]bool{0: false, 1: false, 63: false, 64: false, 65: true, 66: false, 128: false} {
 		check(fmt.Sprintf("length %d", n), sigShape(make([]byte, n)), ok)
 	}
-	for v, ok := range map[byte]bool{0: true, 1: true, 2: false, 27: false, 255: false} {
+	for v, ok := range map[byte]bool{0: true, 1: true, 2: false, 3: false, 27: false, 255: false} {
 		sig := make([]byte, 65)
 		sig[64] = v
 		check(fmt.Sprintf("v=%d", v), sigShape(sig), ok)
