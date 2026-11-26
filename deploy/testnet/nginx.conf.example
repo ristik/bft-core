@@ -9,7 +9,7 @@ server {
     ssl_certificate_key /etc/letsencrypt/live/rpc.testnet.example/privkey.pem;
     client_max_body_size 16k;
     client_body_timeout 5s;
-    limit_conn tn_conn 16;
+    limit_conn tn_conn 32;   # a wallet page's parallel reads (the generated /rpc route's)
     limit_req zone=tn_rpc burst=60 nodelay;
     limit_req_status 429;
     location = / {

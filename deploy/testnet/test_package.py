@@ -3663,6 +3663,13 @@ class StagingKnobs(unittest.TestCase):
             self.assertIn('alias /var/www/pos-staging/release/;\n    autoindex off;\n    disable_symlinks on;',routes)
             self.assertNotIn('lockproof',routes+zones); self.assertNotIn('/bridge/',routes); self.assertFalse((gen/'public/bridge').exists())
             self.assertEqual(routes.count('{'),routes.count('}'))
+            # a wallet page's parallel burst (2026-11-26): /rpc 32 open and burst 60, the other routes on the shared zones 16 and burst 60
+            def location(name): return routes[routes.index(name):].split('\n}\n',1)[0]
+            self.assertIn('limit_conn tn_conn 32;\n    limit_req zone=tn_rpc burst=60 nodelay;',location('location = /rpc '))
+            for loc in ('location = /aggregator ','location = /api/v1/trustbases ','location /release/ '):
+                self.assertIn('limit_conn tn_conn 16;\n    limit_req zone=tn_agg burst=60 nodelay;',location(loc),loc)
+            self.assertEqual(routes.count('limit_conn tn_conn'),4)
+            self.assertIn('zone=tn_rpc:10m rate=20r/s;',zones); self.assertIn('zone=tn_agg:10m rate=20r/s;',zones)
             for zone in set(re.findall(r'zone=(\w+)',routes))|set(re.findall(r'limit_conn (\w+)',routes)):
                 self.assertIn(f'zone={zone}:',zones)
             with self.assertRaises(SystemExit), patch('sys.stderr'): public_routes.main([str(gen),'--hostname','pos.staging.unicity.network'])   # never overwrites

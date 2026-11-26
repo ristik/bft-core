@@ -37,9 +37,10 @@ import tempfile
 from pathlib import Path, PurePosixPath
 
 # A wallet page fires its reads in parallel (a plan's return: about fifteen eth_getCode at once, then eth_getBlockByNumber; the aggregator and
-# trust-base calls likewise), so the routes admit a burst of 60 and 16 requests at once from one address, as the gateway does (gateway.RPC_LIMIT,
-# AGG_LIMIT). tn_conn counts an address's open requests on every route that names it, and a zone's excess is shared by its routes, so every
-# route on tn_conn and tn_agg (the RPC, aggregator, trust-base and release routes) allows the same 16 and burst 60.
+# trust-base calls likewise), so the routes admit a burst of 60 from one address, as the gateway does (gateway.RPC_LIMIT, AGG_LIMIT), and many
+# requests at once: /rpc 32 (20 parallel calls from one page all pass; the gateway holds gateway.SOCKETS), the other routes on tn_conn 16.
+# tn_conn counts an address's open requests on every route that names it, so the aggregator, trust-base and release routes refuse while
+# that address has 16 or more open anywhere; a zone's excess is shared by its routes, so every route on tn_agg has burst 60.
 ZONES = """# Rate-limit zones of the public routes (public_routes.py); nginx http context, once per host.
 limit_req_zone $binary_remote_addr zone=tn_rpc:10m rate=20r/s;
 limit_req_zone $binary_remote_addr zone=tn_agg:10m rate=20r/s;
@@ -75,7 +76,7 @@ def routes(ports, web_root, generation):
            f"""# RPC: the gateway takes JSON-RPC POSTs at its "/". POST only, on purpose: no OPTIONS, so no CORS preflight; the clients are same-origin (/demo/) or not browsers.
 location = /rpc {{
     limit_except POST {{ deny all; }}
-    limit_conn tn_conn 16;
+    limit_conn tn_conn 32;
     limit_req zone=tn_rpc burst=60 nodelay;
     # the gateway allows 16 KiB per method except eth_sendRawTransaction, eth_call and eth_estimateGas (4.5 MiB); it checks the method itself
     client_max_body_size 5m;
