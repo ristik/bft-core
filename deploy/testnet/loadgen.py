@@ -91,7 +91,7 @@ def run(client, sender, sign, rate, duration, ips, ip_prefix, recipients, receip
     drained = clock() - start - sent_span
     # the receipts' own deadline: fetching them takes time in proportion to the run, and a long run must not report the ones it had no time to ask about as not mined
     deadline = clock() + receipt_wait + 2 * len(accepted) / min(8 * max(ips, 1), 80)
-    per_second = min(8 * max(ips, 1), 80)   # under the gateway's 100/s overall limit as well as 10/s per address (13 addresses at 8/s was 104/s: the 100/s run on the host died on a 429)
+    per_second = min(8 * max(ips, 1), 80)   # under 10/s per address and 100/s overall, the gateway's limits until 2026-11-26 (now 20/s per address, burst 60, 400/s overall; 13 addresses at 8/s was 104/s: the 100/s run on the host died on a 429)
     receipt_limited, asked = 0, 0
     for k, h in enumerate(accepted):
         if clock() >= deadline:
@@ -134,7 +134,7 @@ def main(argv=None):
     p.add_argument('--keystore', required=True)
     p.add_argument('--password-file', required=True)
     p.add_argument('--cast', default='cast')
-    p.add_argument('--rate', type=float, default=8, help='transfers per second in total (gateway limits: 10/s per client address, 100/s overall)')
+    p.add_argument('--rate', type=float, default=8, help='transfers per second in total (gateway limits: 20/s per client address with a burst of 60, 400/s overall)')
     p.add_argument('--duration', type=float, default=30, help='seconds')
     p.add_argument('--ips', type=int, default=0, help='spread over this many client addresses via X-Forwarded-For (only behind a trusted proxy peer)')
     p.add_argument('--ip-prefix', default='203.0.113.')
