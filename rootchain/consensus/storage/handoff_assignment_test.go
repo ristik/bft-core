@@ -71,6 +71,8 @@ type assignmentFixture struct {
 	current0   *types.PartitionDescriptionRecord // installed configuration the candidate replaces; nil means f.current
 	// recovery, when set, makes candidate() the recovery of the committed primary: exactly K, derived, no fresh proofs.
 	recovery *recoveryPlan
+	// rebind keeps the root committee and only rebinds the last entity (old-d) from ev-d to replacementEVM (#1286).
+	rebind bool
 }
 
 // recoveryPlan is evmassign.DeriveRecovery's output for the fixture.
@@ -164,6 +166,9 @@ func (f *assignmentFixture) successorRoot() []evmassign.RootMember {
 	if f.baseCommittee != nil {
 		out = append([]evmassign.RootMember(nil), f.baseCommittee...)
 	}
+	if f.rebind {
+		return out
+	}
 	at := len(out) - 1
 	for i, m := range out {
 		if m.NodeID == f.replacedRoot {
@@ -185,7 +190,7 @@ func (f *assignmentFixture) bindings() []evmassign.Binding {
 	for i, m := range root {
 		// every entity keeps its delegated EVM validator ("old-x" -> "ev-x"); the replacing entity takes the new one
 		out[i] = evmassign.Binding{RootNodeID: m.NodeID, EVMNodeID: "ev-" + m.NodeID[len(m.NodeID)-1:]}
-		if m.NodeID == f.nextRootKey.id {
+		if m.NodeID == f.nextRootKey.id || (f.rebind && i == len(root)-1) {
 			out[i].EVMNodeID = f.replacementEVM
 		}
 	}

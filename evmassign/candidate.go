@@ -479,6 +479,47 @@ func VerifyInstalled(c Candidate, succ, current *types.PartitionDescriptionRecor
 	return VerifyInstalledWith(UnitRules, c, succ, current, currentRoot)
 }
 
+// RecoversK reports whether c is a recovery that reinstalls exactly its authorized incumbent K over a committed, unacknowledged
+// primary (#1286, review P1-1: after a rebinding primary J the committee is unchanged and only the EVM set differs, now from J to K;
+// astra: "a subsequent committed recovery may reinstall the exact authorized K"). The identities are exactly K, the root entities are
+// K's (node id, key, weight; order-independent), every binding is K's own and the successor EVM set is exactly K's EVM set (node id,
+// key, weight). The lineage (the head's authorization, the replaced assignment, the allowance) is VerifyLifecycle's.
+func RecoversK(c Candidate, succ *types.PartitionDescriptionRecord) bool {
+	a := c.Authorization
+	if c.Kind != KindRecovery || a == nil || succ == nil || len(a.K) == 0 || len(succ.Validators) != len(a.K) || len(c.Bindings) != len(a.K) {
+		return false
+	}
+	kd, err1 := IdentitiesDigest(a.K)
+	cd, err2 := IdentitiesDigest(c.Identities)
+	if err1 != nil || err2 != nil || kd != cd {
+		return false
+	}
+	kRoot := make([]RootMember, len(a.K))
+	byRoot := make(map[string]Identity, len(a.K))
+	for i, k := range a.K {
+		kRoot[i] = RootMember{NodeID: k.RootNodeID, Key: k.RootKey, Weight: k.Weight}
+		byRoot[k.RootNodeID] = k
+	}
+	if !sameCommittee(kRoot, c.RootMembers) || ValidateCoupling(c.RootMembers, succ, c.Bindings) != nil {
+		return false
+	}
+	next := make(map[string]*types.NodeInfo, len(succ.Validators))
+	for _, v := range succ.Validators {
+		if v == nil {
+			return false
+		}
+		next[v.NodeID] = v
+	}
+	for _, b := range c.Bindings {
+		k, ok := byRoot[b.RootNodeID]
+		v := next[b.EVMNodeID]
+		if !ok || v == nil || b.EVMNodeID != k.EVMNodeID || !bytes.Equal(v.SigKey, k.EVMKey) || v.Stake != k.Weight {
+			return false
+		}
+	}
+	return true
+}
+
 // swapsAuthorizedBindings reports whether the candidate's root entities are K's and some binding names another EVM node than the
 // entity's authorized one in K (an unchanged EVM set whose delegates moved between entities).
 func swapsAuthorizedBindings(c Candidate) bool {
@@ -507,7 +548,7 @@ func VerifyInstalledWith(r Rules, c Candidate, succ, current *types.PartitionDes
 	}
 	if currentRoot != nil && sameCommittee(c.RootMembers, currentRoot) {
 		if !sameValidators(succ.Validators, current.Validators) {
-			if !RebindingOnly(c, succ, current) {
+			if !RebindingOnly(c, succ, current) && !RecoversK(c, succ) {
 				return ErrEVMOnly
 			}
 		} else if c.Authorization != nil && swapsAuthorizedBindings(c) {

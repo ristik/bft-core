@@ -85,9 +85,17 @@ reconcile any submitted registration, delegation or bond transactions.
   never reused. The root key, root node, payee and bond stay. The bond stays in
   its lots at custody's current generation, so nothing unbonds. Preserve the
   old volume and marker: recover requires the marker in the old volume
-  (`--old-authority-home`) and refuses a new authority inside it. An
-  unreachable authority alone is not evidence of key loss, and recover
+  (`--old-authority-home`) and refuses a new authority inside it, and it
   refuses a configured authority that still answers and holds its key.
+  These checks do not prove the key is lost (every authority volume
+  carries the marker from its first start): confirm that the old
+  authority process is gone before you run `recover`.
+- In-place recovery replaces one committee member's EVM binding, and the
+  next election must pass the committee continuity check (removed = added =
+  1, membership budget 2). A committee of three equal members, or an
+  identity holding more than a third of the committee weight, cannot pass
+  it, so the rotation never installs and the dead key stays in the
+  committee. Such an identity takes the exit path below.
 
 `recover` reads the certified (finalized) state first and refuses unless
 the custody owner is the operator, the identity has open lots, has not
@@ -143,7 +151,7 @@ run. If another election activates before the one that carries the new key,
 prepares slot 3. `status` shows `authorityDirectory`, `shardHome` and the
 recovery phase.
 
-## Rehearsal shell## Rehearsal shell
+## Rehearsal shell
 
 For VT-13, use the dedicated `vt13operator` account on the rehearsal host. Generate a new SSH key on your workstation and submit **only the public key** in `briefs/vt13-operator-log.md` for the rehearsal maintainer to install. Use the host address from the public RPC URL in the rehearsal inputs.
 

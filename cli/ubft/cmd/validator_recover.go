@@ -424,8 +424,10 @@ func validatorRecoverCmd(base *baseFlags) *cobra.Command {
 		Long: `For a bonded PoS identity whose EVM key is gone with its signing authority (#1286). The root key, root node and payee stay; only
 the EVM node and key change: a new EVM key is a new EVM node identity (a fresh shard node key, a fresh authority volume, an empty
 shard data directory) that joins through the joiner path, at custody's current generation, so the bond stays in its lots. Preflight from the certified (finalized)
-state: the custody owner is the operator, the identity has open lots, no retirement request and no exclusion. The old authority's
-fail-stop marker must be present in its preserved volume (--old-authority-home): an unreachable authority alone is not evidence of loss.
+state: the custody owner is the operator, the identity has open lots, no retirement request and no exclusion. --old-authority-home
+names the old authority's preserved volume: it must carry the fail-stop marker (written before that authority first started, so the
+volume never runs an authority again), and the new authority may not live inside it. A configured authority that still answers and
+holds its key is refused. These checks do not prove the key is lost: confirm the old authority process is gone before recovering.
 Then ElectionPolicy.admitDelegation of the new EVM key, confirmed, fences the old key from later snapshots, and VR.proposeBinding stages
 the identical words for the next election. A re-run skips what is done. A staged binding that an open result froze is not replaced.
 Root-key loss is refused: take the exit path. Start the node on the new authority, then follow the election and the boundary.`,
@@ -436,14 +438,14 @@ Root-key loss is refused: take the exit path. Start the node on the new authorit
 	cmd.Flags().StringVar(&f.EVMAuthoritySocket, "new-evm-authority-socket", "", "the fresh signing authority holding the new EVM key: its operator socket, relative to the validator home (needs --new-evm-authority-credential and --new-evm-node-info)")
 	cmd.Flags().StringVar(&f.EVMAuthorityCredential, "new-evm-authority-credential", "", "the operator credential of the fresh authority")
 	cmd.Flags().StringVar(&f.EVMNodeInfo, "new-evm-node-info", "", "the node info of the fresh authority (`signing-authority node-info`)")
-	cmd.Flags().StringVar(&f.OldAuthorityHome, "old-authority-home", "", "the preserved volume of the lost authority, holding its fail-stop marker (required; relative to the validator home)")
+	cmd.Flags().StringVar(&f.OldAuthorityHome, "old-authority-home", "", "the old authority's preserved volume, holding its fail-stop marker (required; relative to the validator home); it is never reused")
 	return cmd
 }
 
 // checkFailStop requires the lost authority's fail-stop marker in its preserved volume, and refuses a new authority inside that volume.
 func checkFailStop(oldHome, newSocket string) error {
 	if oldHome == "" {
-		return fmt.Errorf("%w: --old-authority-home is required: the lost authority's volume with its fail-stop marker (an unreachable authority alone is not evidence of key loss)", ErrValidator)
+		return fmt.Errorf("%w: --old-authority-home is required: the old authority's preserved volume with its fail-stop marker", ErrValidator)
 	}
 	raw, err := os.ReadFile(filepath.Join(oldHome, authorityLifetimeMarker)) // #nosec G304 -- operator supplied local directory
 	if err != nil || !strings.HasPrefix(string(raw), "fail-stop") {

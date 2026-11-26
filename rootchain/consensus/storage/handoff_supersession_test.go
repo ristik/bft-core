@@ -105,6 +105,15 @@ func (p pendingAssignment) supersedeWith(t *testing.T, binding *evmassign.Supers
 	return supersession{p: p, built: built, preimage: built.preimage}
 }
 
+// supersedeWithPlan rebuilds the recovery with a given (possibly tampered) plan on the same pending chain.
+func (p pendingAssignment) supersedeWithPlan(t *testing.T, plan *recoveryPlan) supersession {
+	t.Helper()
+	f := p.f
+	f.recovery = plan
+	built := f.build(t, f.candidate(t))
+	return supersession{p: p, built: built, preimage: built.preimage}
+}
+
 func (s *supersession) addEpoch2(t *testing.T, store *BlockStore, round uint64, records ...[]byte) (*ExecutedBlock, error) {
 	t.Helper()
 	parent := mustBlock(t, store, round-1)

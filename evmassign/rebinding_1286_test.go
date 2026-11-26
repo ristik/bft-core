@@ -91,10 +91,11 @@ func TestABindingReplacementOfARetainedRootEntityIsAllowed(t *testing.T) {
 	require.True(t, RebindingOnly(c, r.succ, r.cur))
 	require.NoError(t, VerifyInstalled(c, r.succ, r.cur, r.root))
 	require.NoError(t, r.verify(t, c), "the whole binding path (digest, context, every successor key's PoP, coupling, installed)")
-	// the retired key is not in the successor set: it carries no signing weight in s+1 and cannot count toward the successor's ack
+	// the retired node and key are not in the successor set (that they count nothing in s+1 is the storage test
+	// TestTheRetiredEVMKeyOfARebindingCountsNothingInTheNextShardEpoch)
 	for _, v := range r.succ.Validators {
 		require.NotEqual(t, "b", v.NodeID)
-		require.False(t, bytes.Equal(r.signers["e"].info.SigKey, r.cur.Validators[1].SigKey))
+		require.False(t, bytes.Equal(v.SigKey, r.cur.Validators[1].SigKey))
 	}
 }
 
@@ -186,5 +187,76 @@ func TestABindingReplacementNeedsFreshAttemptBoundProofs(t *testing.T) {
 		c := r.candidate(t, r.pops(t, r.ctx))
 		c.PoPs = r.pops(t, earlier)
 		require.ErrorIs(t, r.verify(t, c), ErrPoP)
+	})
+}
+
+// rebindingPrimaryWorld is the review's P1-1 world: K binds r1..r4 to a..d; the committed primary J keeps the committee and rebinds r4
+// to the fresh e; J is installed (activated) and unacknowledged.
+func rebindingPrimaryWorld(t *testing.T) *lifecycleWorld {
+	t.Helper()
+	w := &lifecycleWorld{keys: map[string]keyed{}, policy: testPolicy, body: [32]byte{1}}
+	old := []keyed{newKey(t, "a"), newKey(t, "b"), newKey(t, "c"), newKey(t, "d")}
+	infos := make([]*types.NodeInfo, len(old))
+	for i, k := range old {
+		infos[i] = k.info
+		w.keys[k.id] = k
+	}
+	cur, _ := currentPDR(t)
+	cur.Validators = infos
+	w.current = cur
+	w.kRoot = []RootMember{{NodeID: "r1"}, {NodeID: "r2"}, {NodeID: "r3"}, {NodeID: "r4"}}
+	for i := range w.kRoot {
+		w.kRoot[i].Key, w.kRoot[i].Weight = bytes.Repeat([]byte{byte(10 + i)}, 33), 1
+	}
+	w.k = identitiesFor(w.kRoot, cur, []Binding{bind("r1", "a"), bind("r2", "b"), bind("r3", "c"), bind("r4", "d")}, "")
+	w.baseHash = mustAssignment(t, cur, w.k)
+	w.auth = authFor(5, w.body[:], w.baseHash, w.k)
+	e := newKey(t, "e")
+	w.keys["e"] = e
+	w.jRoot, w.jBindings = w.kRoot, []Binding{bind("r1", "a"), bind("r2", "b"), bind("r3", "c"), bind("r4", "e")}
+	succ, err := NewSuccessor(cur, []*types.NodeInfo{old[0].info, old[1].info, old[2].info, e.info})
+	require.NoError(t, err)
+	w.jSucc, w.jIDs = succ, identitiesFor(w.jRoot, succ, w.jBindings, "")
+	w.j = w.primary(t, w.jIDs, w.jRoot, w.jBindings, succ, w.auth, 0)
+	require.NoError(t, VerifyInstalled(w.j, succ, cur, w.kRoot))
+	require.NoError(t, VerifyLifecycle(w.j, w.ctx(0, 0, false)))
+	w.installed, err = Activate(succ, 40)
+	require.NoError(t, err)
+	return w
+}
+
+// Review P1-1: the recovery of a committed rebinding primary J reinstalls exactly K (the committee is unchanged, only the EVM set moves
+// back from J to K) and is admitted; a recovery that is not exactly K stays refused.
+func TestTheRecoveryOfARebindingPrimaryReinstallsK(t *testing.T) {
+	w := rebindingPrimaryWorld(t)
+	rec, rsucc := w.recovery(t)
+	require.NoError(t, VerifyLifecycle(rec, w.ctx(1, 0, true)))
+	require.True(t, RecoversK(rec, rsucc))
+	require.NoError(t, VerifyInstalled(rec, rsucc, w.installed, w.kRoot))
+
+	t.Run("a recovery whose bindings swap K's delegates", func(t *testing.T) {
+		bad := rec
+		bad.Bindings = append([]Binding(nil), rec.Bindings...)
+		bad.Bindings[0].EVMNodeID, bad.Bindings[1].EVMNodeID = bad.Bindings[1].EVMNodeID, bad.Bindings[0].EVMNodeID
+		require.False(t, RecoversK(bad, rsucc))
+		require.ErrorIs(t, VerifyInstalled(bad, rsucc, w.installed, w.kRoot), ErrEVMOnly)
+	})
+	t.Run("a recovery whose EVM set is not K's", func(t *testing.T) {
+		other := clonePDR(t, rsucc)
+		other.Validators[0].SigKey = newKey(t, other.Validators[0].NodeID).info.SigKey
+		require.False(t, RecoversK(rec, other))
+	})
+	t.Run("a recovery whose identities are not K", func(t *testing.T) {
+		bad := rec
+		bad.Identities = append([]Identity(nil), rec.Identities...)
+		bad.Identities[0].OperatorPayee = append([]byte(nil), bad.Identities[0].OperatorPayee...)
+		bad.Identities[0].OperatorPayee[0] ^= 1
+		require.False(t, RecoversK(bad, rsucc))
+		require.ErrorIs(t, VerifyInstalled(bad, rsucc, w.installed, w.kRoot), ErrEVMOnly)
+	})
+	t.Run("a primary is never a recovery", func(t *testing.T) {
+		p := rec
+		p.Kind = KindPrimary
+		require.False(t, RecoversK(p, rsucc))
 	})
 }
