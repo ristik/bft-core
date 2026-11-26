@@ -1245,6 +1245,7 @@ func (x *ConsensusManager) handoffRecordsForRound(round uint64, parentQC *rctype
 	}
 	control := parent.ShardState.Control
 	x.retireIntent(control)
+	x.pruneHandoffRefusals(control)
 	if control.Phase == "committed" {
 		return nil, nil
 	}

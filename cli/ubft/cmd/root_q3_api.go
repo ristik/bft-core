@@ -154,6 +154,24 @@ type q3StatusResponse struct {
 	// Switch is the in-process epoch switch (#1086), present when this root switches in process: the drive waits for it instead of
 	// restarting the root
 	Switch *q3SwitchResponse `json:"switch,omitempty"`
+	// HandoffRefused are the handoff records this root's leader leaves out because its own executor refuses them, the way every root
+	// would (#1306): a refused Prepare or Freeze leaves the election result to expire through RejectResult
+	HandoffRefused []q3HandoffRefusedResponse `json:"handoffRefused,omitempty"`
+}
+
+// q3HandoffRefusedResponse is one refused handoff record: its kind, epoch, attempt and successor body, the VR intent and result when known,
+// the executor's reason, and the leader rounds that left it out.
+type q3HandoffRefusedResponse struct {
+	Kind       string `json:"kind"`
+	Epoch      uint64 `json:"epoch"`
+	Attempt    uint64 `json:"attempt"`
+	Body       string `json:"body"`
+	Intent     string `json:"intent,omitempty"`
+	Result     string `json:"result,omitempty"`
+	Reason     string `json:"reason"`
+	FirstRound uint64 `json:"firstRound"`
+	LastRound  uint64 `json:"lastRound"`
+	Count      uint64 `json:"count"`
 }
 
 // q3SwitchResponse is the in-process epoch switch's state: running, switching, following or faulted, the epoch of the published context
@@ -182,6 +200,14 @@ func (a rootQ3API) statusResponse() (q3StatusResponse, error) {
 		out.Switch = &q3SwitchResponse{Phase: st.Switch.Phase.String(), Epoch: st.Switch.Epoch, Target: st.Switch.Target,
 			TookMs: st.Switch.Took.Milliseconds(), Error: st.Switch.Err, Declined: st.Switch.Declined, DeclinedReason: st.Switch.DeclinedReason,
 			Acquires: st.AcquiresActivations}
+	}
+	for _, r := range st.HandoffRefused {
+		e := q3HandoffRefusedResponse{Kind: r.Kind, Epoch: r.Epoch, Attempt: r.Attempt, Body: hex.EncodeToString(r.Body[:]), Reason: r.Reason,
+			FirstRound: r.FirstRound, LastRound: r.LastRound, Count: r.Count}
+		if r.Intent != ([32]byte{}) {
+			e.Intent, e.Result = hex.EncodeToString(r.Intent[:]), hex.EncodeToString(r.Result[:])
+		}
+		out.HandoffRefused = append(out.HandoffRefused, e)
 	}
 	if st.Staged != nil {
 		out.Staged = &q3StagedResponse{CandidateDigest: hex.EncodeToString(st.Staged.CandidateDigest[:]),

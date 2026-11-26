@@ -24,6 +24,7 @@ const (
 	EvVRHandoffCertified  = "vr.handoff.certified"    // a complete verified certificate is held
 	EvVRHandoffOrdering   = "vr.handoff.ordering"     // the leader orders a handoff step
 	EvVRHandoffShardStage = "vr.handoff.shard_staged" // the paired shard node holds the staged successor
+	EvVRHandoffRefused    = "vr.handoff.refused"      // the leader leaves out a handoff record every root refuses (#1306)
 	EvVROutputPublished   = "vr.output.published"     // VR's open output was published and its source recorded
 	EvVRRecoveryOrdered   = "vr.recovery.ordered"     // the leader orders the exact recovery
 	EvVRRecoveryFollowed  = "vr.recovery.followed"    // the leader follows the exact recovery
@@ -83,6 +84,7 @@ var Events = []EventInfo{
 	{EvVRHandoffCertified, "VR handoff: a complete verified certificate is held (I-RET)", "rootchain/vrschedule/service.go", ""},
 	{EvVRHandoffOrdering, "VR handoff: ordering the ", "rootchain/consensus/vr_handoff.go", ""},
 	{EvVRHandoffShardStage, "VR handoff: the paired shard node holds the staged successor", "rootchain/consensus/vr_handoff.go", ""},
+	{EvVRHandoffRefused, "VR handoff: the leader leaves out a refused ", "rootchain/consensus/handoff_refused.go", ""},
 	{EvVROutputPublished, "VR output published: source recorded", "rootchain/vrschedule/observe.go", ""},
 	{EvVRRecoveryOrdered, "VR recovery: the leader orders the Prepare of the exact recovery", "rootchain/consensus/vr_recovery.go", ""},
 	{EvVRRecoveryFollowed, "VR recovery: the leader follows the exact recovery", "rootchain/consensus/vr_recovery.go", ""},
