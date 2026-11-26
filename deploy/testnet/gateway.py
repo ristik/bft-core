@@ -52,6 +52,7 @@ AGG_MAX_BODY = 65536        # a 256-state get_inclusion_proofs.v1 batch is about
 AGG_URL = os.environ.get('AGG_URL', 'http://aggregator:8080')
 AGG_TIMEOUT = 30            # the SDK's batch proof call may wait (waitMs) for its states
 SOCKETS = 64                # the accepted connections the gateway holds at once (being served or queued); one more is closed unanswered
+QUEUE_WAIT = 30             # a request that waited longer for a worker is closed unanswered: nginx (proxy_read_timeout 45 s) is about to give up on it
 
 
 def _quantity(v):
@@ -204,11 +205,12 @@ class Server(http.server.HTTPServer):
         if not self.slots.acquire(blocking=False):
             self.shutdown_request(sock)
             return
-        self.pool.submit(self.worker, sock, address)
+        self.pool.submit(self.worker, sock, address, time.monotonic())
 
-    def worker(self, sock, address):
+    def worker(self, sock, address, accepted=None):
         try:
-            self.finish_request(sock, address)
+            if accepted is None or time.monotonic() - accepted <= QUEUE_WAIT:
+                self.finish_request(sock, address)
         except Exception:
             pass
         finally:

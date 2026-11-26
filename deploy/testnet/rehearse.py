@@ -10,6 +10,7 @@ refuses before the signer are sent. A real dispense is host-only. Needs docker c
 (host root on Linux, the files belong to UID 10001).
 """
 import argparse
+import concurrent.futures
 import datetime
 import hashlib
 import http.client
@@ -461,9 +462,10 @@ class Rehearsal:
         s, _ = self.http(PUBLIC_RPC, 'POST', '/', json.dumps(ok).encode())
         self.expect(s == 400, 'a request without the proxy-set client address is refused', f'status {s}')
         burst = PROXY_IPS[0] + '30'
-        statuses = []   # the bucket admits a burst of 60 and then 20/s: sequential requests outrun the refill, so the 429 comes within a few hundred
-        while len(statuses) < 400 and 429 not in statuses:
-            statuses.append(self.rpc(ok, burst)[0])
+        # the bucket admits a burst of 60 and then 20/s: 100 requests at once (16 threads, the gateway's 8 workers) end in about 100 d / 8 for a
+        # round trip d, 0.6 s at 45 ms (a dozen tokens of refill); only a round trip above about 160 ms would leave none of them refused
+        with concurrent.futures.ThreadPoolExecutor(16) as pool:
+            statuses = list(pool.map(lambda _: self.rpc(ok, burst)[0], range(100)))
         self.expect(429 in statuses and statuses.count(200) >= 60, 'a burst from one client address is served up to its bucket, then rate limited (burst 60, 20/s per address)',
                     f'{statuses.count(200)}x200 {statuses.count(429)}x429')
         s, _ = self.rpc(ok, PROXY_IPS[1] + '31')

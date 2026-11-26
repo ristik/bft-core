@@ -249,6 +249,12 @@ class PublicRelayTest(unittest.TestCase):
         """A plan's return in the demo wallet fires about fifteen eth_getCode at once, then eth_getBlockByNumber (2026-11-26: nginx's 503 and 429,
         then the gateway's fixed 10/s window). With the shipped limits every one is served, through the relay and a validator's execution guard,
         which sees all of them (and the relay's identity checks) from the one gateway address; the deploy check sends 20."""
+        # The gateway, the guard and the node share this process (and its GIL), and a read costs about nine HTTP round trips: a slow runner can
+        # take longer than the 1 s identity probe, which would mark the one validator down and answer 503 (CI run 45858969422). The probe's
+        # deadline is not what this test is about; the limits and the sockets are.
+        probe = patch('public_relay.PROBE_TIMEOUT', 8)
+        probe.start()
+        self.addCleanup(probe.stop)
         node = Node(answers={'eth_getCode': {'result': '0x6001'}})
         self.gateway(self.guard(node))
         for n in (15, 20):

@@ -1766,10 +1766,13 @@ class TokenBucket(unittest.TestCase):
         for i in range(gateway.CLIENTS+500): big.allowed(i)
         self.assertEqual(len(big.clients),gateway.CLIENTS)
     def test_the_limiter_is_thread_safe(self):
-        lim=gateway.Limiter(1,500,10**6,10**6)   # real clock: at most a token or two refill while the threads run
-        with concurrent.futures.ThreadPoolExecutor(8) as pool:
-            served=sum(pool.map(lambda _: lim.allowed('a'),range(2000)))
-        self.assertGreaterEqual(served,500); self.assertLess(served,520)
+        # a frozen clock: every bucket is exact, so one lost update under 16 threads that switch as often as possible would show
+        interval=sys.getswitchinterval(); sys.setswitchinterval(1e-6); self.addCleanup(sys.setswitchinterval,interval)
+        one=self.limiter(1,500,10**9,10**9)
+        total=gateway.Limiter(1,500,700,700)
+        with concurrent.futures.ThreadPoolExecutor(16) as pool:
+            self.assertEqual(sum(pool.map(lambda _: one.allowed('a'),range(4000))),500,'one address: its burst')
+            self.assertEqual(sum(pool.map(lambda i: total.allowed(i),range(4000))),700,'4000 addresses: the total')
     def test_the_defaults(self):
         self.assertEqual((gateway.HEAVY_LIMIT,gateway.AGG_LIMIT),((4,20,40,80),(20,60,200,200)))
         server=gateway.Server(('127.0.0.1',0),gateway.Handler,FakeRelay())
@@ -2023,6 +2026,14 @@ class PublicRPC(unittest.TestCase):
             self.server.rpc_limit=gateway.Limiter(*gateway.RPC_LIMIT)
             for _ in range(60): self.assertEqual(self.rpc('eth_chainId')[0],200)
             self.assertEqual(self.rpc('eth_chainId')[0],429)
+    def test_a_request_that_waited_past_the_queue_bound_is_closed_unanswered(self):
+        sock=unittest.mock.Mock()
+        with patch.object(self.server,'finish_request') as finish, patch.object(self.server,'shutdown_request') as shut:
+            self.server.slots.acquire(); self.server.worker(sock,('127.0.0.1',1),time.monotonic()-gateway.QUEUE_WAIT-1)
+            finish.assert_not_called(); shut.assert_called_once_with(sock)
+            self.server.slots.acquire(); self.server.worker(sock,('127.0.0.1',1),time.monotonic())
+            finish.assert_called_once()
+        self.assertLess(gateway.QUEUE_WAIT,45,'under nginx proxy_read_timeout')
     def test_fifteen_parallel_reads_from_one_address_are_all_served(self):
         # a plan's return in the demo wallet: about fifteen eth_getCode at once, then eth_getBlockByNumber (2026-11-26, nginx 503 then gateway 429)
         start=threading.Barrier(15)

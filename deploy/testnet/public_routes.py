@@ -38,7 +38,8 @@ from pathlib import Path, PurePosixPath
 
 # A wallet page fires its reads in parallel (a plan's return: about fifteen eth_getCode at once, then eth_getBlockByNumber; the aggregator and
 # trust-base calls likewise), so the routes admit a burst of 60 and 16 requests at once from one address, as the gateway does (gateway.RPC_LIMIT,
-# AGG_LIMIT). tn_conn counts an address's open requests on every route that names it, so the RPC and aggregator routes allow the same 16.
+# AGG_LIMIT). tn_conn counts an address's open requests on every route that names it, and a zone's excess is shared by its routes, so every
+# route on tn_conn and tn_agg (the RPC, aggregator, trust-base and release routes) allows the same 16 and burst 60.
 ZONES = """# Rate-limit zones of the public routes (public_routes.py); nginx http context, once per host.
 limit_req_zone $binary_remote_addr zone=tn_rpc:10m rate=20r/s;
 limit_req_zone $binary_remote_addr zone=tn_agg:10m rate=20r/s;
@@ -137,8 +138,8 @@ location /demo/ {{
 location = /release {{ return 301 /release/; }}
 location /release/ {{
     limit_except GET {{ deny all; }}
-    limit_conn tn_conn 4;
-    limit_req zone=tn_agg burst=20 nodelay;
+    limit_conn tn_conn 16;
+    limit_req zone=tn_agg burst=60 nodelay;
     alias {web_root}/release/;
     autoindex off;
     disable_symlinks on;

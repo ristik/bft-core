@@ -170,8 +170,8 @@ class Relay:
                 last_error = exc
         raise Unavailable('no usable validator address') from last_error
 
-    def rpc(self, url, body, deadline, max_bytes=CONTROL_BYTES, timeout=PROBE_TIMEOUT):
-        deadline = min(deadline, time.monotonic() + timeout)
+    def rpc(self, url, body, deadline, max_bytes=CONTROL_BYTES, timeout=None):
+        deadline = min(deadline, time.monotonic() + (PROBE_TIMEOUT if timeout is None else timeout))
         target = urlsplit(url)
         connect = HTTPSConnection if target.scheme == 'https' else HTTPConnection
         try:
