@@ -199,9 +199,12 @@ func TestJoinerFromTheEpochOneSeedCatchesUpAcrossTwoRootHandoffsAndAfterARestart
 
 	// restart: the replayed activations install epochs 2 and 3 before the journal opens. The restore completed, so the command starts
 	// the node as `shard-node run` does (checkRestorePaths), never replaying the epoch-1 pin under epoch 3 again.
-	checkpoint, complete, err := configuredprogress.ReadArchiveRestoreState(path)
+	checkpoint, anchor, err := configuredprogress.ReadArchiveRestoreState(path)
 	require.NoError(t, err)
-	require.True(t, complete, "the restore installed its tip and anchor")
+	require.NotNil(t, anchor, "the restore installed its tip and anchor")
+	require.Equal(t, [32]byte(seed.Candidate.Hash), anchor.Hash, "the anchor is the pinned block")
+	require.True(t, checkpoint.Finalizing && checkpoint.Target == anchor.Hash && checkpoint.VerifiedHeight == anchor.Height,
+		"the checkpoint names the installed anchor (what the restore command requires before it starts the node as `run`)")
 	pin, err := RestorePinID(seed.ResultingUC, seed.ResultingTR, [32]byte{})
 	require.NoError(t, err)
 	require.Equal(t, pin, checkpoint.Pin, "the completed checkpoint is still the seed pin's")

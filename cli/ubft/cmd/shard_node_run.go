@@ -516,22 +516,18 @@ protocol and docs/engine-api-adapter-plan.md for how this command's pieces fit t
 
 // A fresh invocation may create stores only in fresh paths. Only a journal
 // bearing this exact request's checkpoint can reopen existing restore paths.
-// complete reports a journal whose archive restore has already finished (its
-// replayed tip and recovery anchor are installed): its stores are an ordinary
-// node's from then on, so the command starts it as `shard-node run` would
-// (bft-core#1309). A supervisor that repeats the restore command on every start
-// (the validator container does, until its node is active) must not replay
-// the pin again: the node has moved past it, possibly into later root epochs.
-func checkRestorePaths(flags *shardNodeRunFlags) (checkpoint configuredprogress.RestoreCheckpoint, complete bool, err error) {
-	checkpoint, complete, err = configuredprogress.ReadArchiveRestoreState(flags.ExecutionJournal)
+// anchor is the recovery anchor of a journal whose archive restore has already
+// completed (nil otherwise); restoreStartup decides what such a journal starts as.
+func checkRestorePaths(flags *shardNodeRunFlags) (checkpoint configuredprogress.RestoreCheckpoint, anchor *configuredprogress.RestoreAnchor, err error) {
+	checkpoint, anchor, err = configuredprogress.ReadArchiveRestoreState(flags.ExecutionJournal)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 	case err != nil:
-		return checkpoint, false, fmt.Errorf("restore requires a fresh BFT data directory or a matching checkpoint at %s: %w", flags.ExecutionJournal, err)
-	case complete:
-		return checkpoint, true, nil
+		return checkpoint, nil, fmt.Errorf("restore requires a fresh BFT data directory or a matching checkpoint at %s: %w", flags.ExecutionJournal, err)
+	case anchor != nil:
+		return checkpoint, anchor, nil
 	case checkpoint == (configuredprogress.RestoreCheckpoint{}):
-		return checkpoint, false, fmt.Errorf("restore requires a fresh BFT data directory or a matching checkpoint: %s already exists", flags.ExecutionJournal)
+		return checkpoint, nil, fmt.Errorf("restore requires a fresh BFT data directory or a matching checkpoint: %s already exists", flags.ExecutionJournal)
 	}
 	paths := []string{flags.PathWithDefault(flags.LUCStoreFile, lucStoreFileName)}
 	if checkpoint == (configuredprogress.RestoreCheckpoint{}) {
@@ -542,24 +538,82 @@ func checkRestorePaths(flags *shardNodeRunFlags) (checkpoint configuredprogress.
 	}
 	for _, path := range paths {
 		if _, err := os.Lstat(path); err == nil {
-			return checkpoint, false, fmt.Errorf("restore requires a fresh BFT data directory: %s already exists", path)
+			return checkpoint, nil, fmt.Errorf("restore requires a fresh BFT data directory: %s already exists", path)
 		} else if !errors.Is(err, fs.ErrNotExist) {
-			return checkpoint, false, fmt.Errorf("checking fresh BFT path %s: %w", path, err)
+			return checkpoint, nil, fmt.Errorf("checking fresh BFT path %s: %w", path, err)
 		}
 	}
 	if checkpoint != (configuredprogress.RestoreCheckpoint{}) {
-		return checkpoint, false, nil
+		return checkpoint, nil, nil
 	}
 	entries, err := os.ReadDir(flags.ArchiveStore)
 	if err == nil && len(entries) != 0 {
-		return checkpoint, false, fmt.Errorf("restore archive directory %s is not empty; supply a fresh directory", flags.ArchiveStore)
+		return checkpoint, nil, fmt.Errorf("restore archive directory %s is not empty; supply a fresh directory", flags.ArchiveStore)
 	}
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return checkpoint, false, fmt.Errorf("checking restore archive directory: %w", err)
+		return checkpoint, nil, fmt.Errorf("checking restore archive directory: %w", err)
 	}
-	return checkpoint, false, nil
+	return checkpoint, nil, nil
 }
 
+// restoreStart is how `shard-node restore` starts. A fresh or interrupted restore restores from the pin (the effective flags are the
+// caller's). A journal whose restore has completed under THIS pin (its checkpoint's pin ID covers the UC, the TR, the trust BodyID and the
+// paths, and the checkpoint names the installed anchor) starts as `shard-node run` (effective flags with Restore false, no pin): its
+// stores have been an ordinary node's since, possibly into later root epochs, and replaying the old pin would authenticate it under the
+// node's current epoch (the restart of bft-core#1309: "certificate root epoch 1, current 3"). A supervisor may therefore repeat the same
+// restore command on every start, as the validator container does until its node is active. Anything else is refused: a completed
+// restore without a checkpoint (its pin was later than the genesis epoch, so nothing recorded which pin it was) cannot be matched to this
+// pin and is started with `shard-node run` by the operator.
+type restoreStartup struct {
+	flags      *shardNodeRunFlags
+	checkpoint configuredprogress.RestoreCheckpoint
+	uc         *types.UnicityCertificate
+	tr         *certification.TechnicalRecord
+	scope      [32]byte
+	completed  bool
+}
+
+func restoreStart(flags *shardNodeRunFlags) (restoreStartup, error) {
+	out := restoreStartup{flags: flags}
+	if flags.Executor != "engine-api" || flags.ExecutionJournal == "" || flags.ArchiveStore == "" || !flags.ArchivePrune ||
+		flags.SigningAuthoritySocket == "" || flags.RestoreTipUC == "" || flags.RestoreTipTR == "" || flags.RestoreTrustBodyID == "" {
+		return out, errors.New("restore requires --executor engine-api, --execution-journal, --archive-store, --archive-prune, a surviving --signing-authority-socket, --tip-uc, --tip-tr and --trust-body-id; local-key restore is refused")
+	}
+	checkpoint, anchor, err := checkRestorePaths(flags)
+	if err != nil {
+		return out, err
+	}
+	if anchor != nil {
+		if checkpoint == (configuredprogress.RestoreCheckpoint{}) {
+			return out, fmt.Errorf("the archive restore of %s completed without a restore checkpoint (its pin is later than the genesis epoch), "+
+				"so this pin cannot be matched to it: start the node with `shard-node run`", flags.ExecutionJournal)
+		}
+		if !checkpoint.Finalizing || checkpoint.Target != anchor.Hash || checkpoint.VerifiedHeight != anchor.Height {
+			return out, fmt.Errorf("the restore checkpoint of %s does not name its installed restore anchor", flags.ExecutionJournal)
+		}
+	}
+	if checkpoint != (configuredprogress.RestoreCheckpoint{}) {
+		uc, tr, err := loadRestorePin(flags.RestoreTipUC, flags.RestoreTipTR)
+		if err != nil {
+			return out, err
+		}
+		scope, err := restoreResumeScope(flags)
+		if err != nil {
+			return out, err
+		}
+		pin, err := archivewiring.RestorePinID(uc, tr, scope)
+		if err != nil || pin != checkpoint.Pin {
+			return out, fmt.Errorf("existing BFT restore checkpoint belongs to another pin or restore path")
+		}
+		out.checkpoint, out.uc, out.tr, out.scope = checkpoint, uc, tr, scope
+	}
+	if anchor != nil {
+		run := *flags
+		run.Restore = false
+		return restoreStartup{flags: &run, completed: true}, nil
+	}
+	return out, nil
+}
 func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(string) bool) error {
 	operatorLog := slog.Default() // (a unit test drives this function with no base flags)
 	if flags.baseFlags != nil {
@@ -583,41 +637,15 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 	var restoreTR *certification.TechnicalRecord
 	var readOperatorStatus func(context.Context) (archivewiring.OperatorStatus, error)
 	if flags.Restore {
-		if flags.Executor != "engine-api" || flags.ExecutionJournal == "" || flags.ArchiveStore == "" || !flags.ArchivePrune ||
-			flags.SigningAuthoritySocket == "" || flags.RestoreTipUC == "" || flags.RestoreTipTR == "" || flags.RestoreTrustBodyID == "" {
-			return errors.New("restore requires --executor engine-api, --execution-journal, --archive-store, --archive-prune, a surviving --signing-authority-socket, --tip-uc, --tip-tr and --trust-body-id; local-key restore is refused")
-		}
-		var completed bool
-		var err error
-		restoreCheckpoint, completed, err = checkRestorePaths(flags)
+		start, err := restoreStart(flags)
 		if err != nil {
 			return err
 		}
-		if restoreCheckpoint != (configuredprogress.RestoreCheckpoint{}) {
-			restoreUC, restoreTR, err = loadRestorePin(flags.RestoreTipUC, flags.RestoreTipTR)
-			if err != nil {
-				return err
-			}
-			restoreScope, err = restoreResumeScope(flags)
-			if err != nil {
-				return err
-			}
-			pin, err := archivewiring.RestorePinID(restoreUC, restoreTR, restoreScope)
-			if err != nil || pin != restoreCheckpoint.Pin {
-				return fmt.Errorf("existing BFT restore checkpoint belongs to another pin or restore path")
-			}
-		}
-		if completed {
-			// The pin was replayed, verified and installed before; the stores have been an ordinary node's since. Replaying the pin again
-			// would authenticate an old tip under the node's current root epoch (the restart of bft-core#1309: "certificate root epoch 1,
-			// current 3"). Start exactly as `shard-node run` does: the persisted verified history is replayed from the pinned genesis.
+		if start.completed {
 			operatorLog.Info("the archive restore of this BFT data directory is complete: starting it as `shard-node run`",
 				"executionJournal", flags.ExecutionJournal)
-			run := *flags
-			run.Restore = false
-			flags = &run
-			restoreCheckpoint, restoreUC, restoreTR, restoreScope = configuredprogress.RestoreCheckpoint{}, nil, nil, [32]byte{}
 		}
+		flags, restoreCheckpoint, restoreUC, restoreTR, restoreScope = start.flags, start.checkpoint, start.uc, start.tr, start.scope
 	}
 	if flags.TrustHistoryProfile2 && flags.ExecutionJournal == "" {
 		return errors.New("--trust-history-profile-2 requires --execution-journal")
@@ -1697,7 +1725,9 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 		// `shard-node restore` (D-M2-1) is unchanged and independent of it.
 		freshness := &configuredadmission.Freshness{Opener: peer, TrustBase: trustBases[0], Logger: flags.observe.Logger()}
 		freshness.Signing = freshnessSigning(q3rt, flags.UTBGenesisFile != "", trustBases[0])
-		if follower.enabled {
+		// a node that follows the archive heads while non-active asks no root quorum for a bootstrap receipt then either
+		archiveFollower := followsArchiveHeads(follower.enabled, q3rt != nil, archiveLocal != nil)
+		if follower.enabled || archiveFollower {
 			freshness.RootFree = func() bool { return !role.active() }
 		}
 		coordinator := &configuredadmission.ExecutionRecovery{Freshness: freshness, Store: journalStore, Context: journalCtx, JournalLimits: limits, Executor: recoveryExecutor, Gate: node.FinalityGate(), Log: flags.observe.Logger(), Genesis: genesis, Limits: configuredadmission.DefaultRecoveryLimits()}
@@ -1716,8 +1746,17 @@ func shardNodeRun(ctx context.Context, flags *shardNodeRunFlags, changed func(st
 				Replicas: archiveReplicas, Policy: replicaPolicy, Limits: archiveTransportLimits, MaxBlocks: configuredadmission.DefaultRecoveryLimits().Blocks, Log: flags.observe.Logger()}
 			if follower.enabled {
 				source.Followed = func() []libp2ppeer.ID { return follower.nonRoot(followSourceIDs(followSources)) }
+			} else if archiveFollower {
+				// the blocks of a followed head come from the same non-root set the heads do (the installed validators after the replicas),
+				// while this node is not active; an active node's recovery reads the replicas as before
+				source.Followed = func() []libp2ppeer.ID {
+					if role.active() {
+						return nil
+					}
+					return follower.nonRoot(activePeers.Peers())
+				}
 			}
-			if follower.enabled || q3rt != nil {
+			if archiveFollower {
 				// the root-free certificate source: the newest verified archive head, offered while this node is not active. A Q3 node
 				// that is not active never subscribes to the roots (its role lease makes it a follower), with or without --follow-source:
 				// a joiner restored from a seed pin, or a validator the installed assignment no longer names, takes its certificates from
