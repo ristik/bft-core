@@ -17,6 +17,7 @@ newest verified UC of the new epoch carries that root's individual signature; th
 are unchanged and mounted by no container.
 """
 import base64
+import datetime
 import hashlib
 import json
 import os
@@ -32,6 +33,11 @@ import operator_rpc
 
 OPERATOR = ['--operator-socket', '/authority/operator.sock', '--operator-credential', '/authority/operator.cred']
 NODE_PARTS = ('auth', 'evm', 'archive', 'ureth')
+REFUSAL = ('VR Freeze refused', 'EVM-only validator change', 'registry output refused')
+
+
+def utc():
+    return datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 
 
 def b64int(value):
@@ -257,6 +263,8 @@ class Recovery:
     # --- the stage ----------------------------------------------------------------------------------------------------------------
     def run(self):
         r, gen, i = self.r, self.gen, self.i
+        self.since = utc()
+        times = self.times = {'start': self.since}
         r.expect(r.ubft is not None, 'vr-pos-recover has the pinned ubft (--ubft): it makes the fresh shard node key and credentials')
         members = r.members()
         r.expect(i in members and len(members) >= 4, f'validator {i} is an active member of a committee of at least four', str(members))
@@ -286,6 +294,7 @@ class Recovery:
         subprocess.run(['docker', 'rm', '-f', name], check=True, capture_output=True)
         r.expect(self.container(f'authority{i}') is None, f'only {name} was removed; its directory and marker stay', str(old_auth))
         lost = time.monotonic()
+        times['loss'] = utc()
         # the committee certifies on n-1 signers again (the fault transition) before the owner's transactions are sent
         first = int(r.call('eth_blockNumber'), 16)
         resumed = r.wait('the chain makes progress without the lost signer', lambda: (lambda b: b if b >= first + 2 else None)(int(r.call('eth_blockNumber'), 16)), 900)
@@ -352,6 +361,7 @@ class Recovery:
                         '--new-evm-node-info', 'authority-new/node-info.json', '--wait', '10m', mounts=mounts)
         r.keep_redacted(self.ev / 'recover.log', done.stdout + done.stderr)
         r.say(f'  recover confirmed {time.monotonic() - lost:.0f} s after the loss')
+        times['recoverConfirmed'] = utc()
         r.expect('confirmed: VR stages identity' in done.stdout, 'recover: the delegation, then the identical VR binding, confirmed', r.scrub(done.stdout.strip()[-400:]))
         again = self.cli(live, home, 'validator', 'recover', '--old-authority-home', 'authority', '--new-evm-authority-socket',
                          'authority-new/operator.sock', '--new-evm-authority-credential', 'authority-new/operator.cred',
@@ -367,11 +377,28 @@ class Recovery:
         r.expect(f'shard{i}' in running, f'the fresh shard node shard{i} stays up as a staging-only joiner')
 
         # 5. the next election: every frozen member proves possession itself, anyone publishes; the roots activate the next epoch
-        target = self.participate_until(epoch, {i: home}, {i: live})
+        target = self.participate_until(epoch, {i: home}, {i: live}, watch=live)
+        times['activated'] = utc()
+        # the roots admitted the recovered committee's Freeze: the epoch activated, and no root logged a refusal since the stage started
+        handoff = ''.join(self.logs(f'root{m}') for m in members)
+        r.keep_redacted(self.ev / 'root-handoff.log', '\n'.join(l for l in handoff.splitlines() if 'VR handoff' in l or any(x in l for x in REFUSAL)))
+        refused = [l for l in handoff.splitlines() if any(x in l for x in REFUSAL)]
+        r.expect(not refused, f'the roots admitted the recovered committee\'s Freeze and activated root epoch {target} (no refusal logged)',
+                 f'{sum("ordering the" in l for l in handoff.splitlines())} ordering lines; root-handoff.log')
+        ack = r.wait(f'the first certified block of shard epoch {shard_epoch} (the acknowledgement)', lambda: (lambda u: u if u and u['shardEpoch'] == shard_epoch else None)(
+            self.newest_uc(live, epoch=target)), 600, every=2)
+        times['ackObserved'] = utc()
+        ack['block'] = self.block(ack['blockHash'])
+        (self.ev / 'ack-uc.json').write_text(json.dumps(ack, indent=1) + '\n')
+        r.expect(True, f'a verified UC of shard epoch {shard_epoch} certifies the successor\'s first observed block',
+                 f'block {ack["block"]["number"]} with {len(ack["block"]["transactions"])} transaction(s), shard round {ack["shardRound"]}')
         conf = json.loads(self.fetch(f'root{i}', 'q3', 'shard-conf', '--root-rpc', self.root_rpc, '--epoch', str(shard_epoch)))
         named = [v for v in conf['validators'] if v['nodeId'] == new_evm]
         r.expect(named and named[0]['sigKey'].lower() == info['sigKey'].lower() and old_evm not in [v['nodeId'] for v in conf['validators']],
                  f'shard epoch {shard_epoch} names the new EVM node with the fresh key and not the old node', f'root epoch {target}')
+        retired = json.loads((old_auth / 'node-info.json').read_text())['sigKey'].lower()
+        r.expect(retired not in [v['sigKey'].lower() for v in conf['validators']], f'the retired EVM key is not in shard epoch {shard_epoch}', retired)
+        (self.ev / f'shard-conf-{shard_epoch}.json').write_text(json.dumps(conf, indent=1) + '\n')
         (auth / 'activated-shard.json').write_text(json.dumps(conf))
         chown(auth / 'activated-shard.json')
 
@@ -406,7 +433,26 @@ class Recovery:
             r.say(f'  advancing authorities {lagging} to root epoch {target}')
             vr_advance.advance(gen, target, self.ev / 'advance', only=lagging)
 
-        # 7. the assertions
+        # 7. a user block in the new shard epoch: a plain value transfer through the gateway, mined and certified, the fresh authority signing
+        times['advanced'] = utc()
+        before_user = self.auth_status(i)
+        receipt = self.transfer()
+        times['userMined'] = utc()
+        mined = int(receipt['blockNumber'], 16)
+        user = r.wait(f'a verified UC of shard epoch {shard_epoch} certifies the user block {mined}', lambda: (lambda u: u if u and u['shardEpoch'] >= shard_epoch
+            and int(self.block(u['blockHash'])['number'], 16) >= mined else None)(self.newest_uc(live)), 600, every=3)
+        times['userCertified'] = utc()
+        user['block'] = self.block(user['blockHash'])
+        user['transfer'] = receipt['transactionHash']
+        (self.ev / 'user-block-uc.json').write_text(json.dumps(user, indent=1) + '\n')
+        r.expect(receipt['status'] == '0x1', f'the transfer is mined in block {mined} and certified in shard epoch {user["shardEpoch"]}',
+                 f'{receipt["transactionHash"]}, UC shard round {user["shardRound"]}')
+        rose = r.wait('the fresh authority\'s reserved round rises across the user block',
+                      lambda: (lambda s: s if s['reservedRound'] > before_user['reservedRound'] else None)(self.auth_status(i)), 300)
+        r.expect(True, 'the fresh authority signs in the new shard epoch', f'reserved round {before_user["reservedRound"]} -> {rose["reservedRound"]}')
+        r.keep_redacted(self.ev / f'shard{i}-recovered.log', self.logs(f'shard{i}'))
+
+        # 8. the assertions
         after = r.wait('validator status shows the identity a member on the new EVM node',
                        lambda: (lambda s: s if s.get('member') and s.get('evmNodeId') == new_evm else None)(self.status(live, home, auth)), 600)
         (self.ev / 'status-after.json').write_text(json.dumps(after, indent=1) + '\n')
@@ -436,9 +482,35 @@ class Recovery:
                  'no container mounts the old authority directory, the old shard home or the old execution data')
         (self.ev / 'summary.json').write_text(json.dumps({'validator': i, 'identity': ident, 'oldEvmNode': old_evm, 'newEvmNode': new_evm,
             'slot': f'recover-{k}', 'rootEpoch': target, 'shardEpoch': shard_epoch, 'generation': after.get('generation'),
-            'oldFingerprint': old_status['signingKeyFingerprint'], 'newFingerprint': signed['signingKeyFingerprint']}, indent=1) + '\n')
+            'oldFingerprint': old_status['signingKeyFingerprint'], 'newFingerprint': signed['signingKeyFingerprint'],
+            'ackBlock': ack['block']['number'], 'userBlock': mined, 'times': times}, indent=1) + '\n')
+        r.say('  timings: ' + ', '.join(f'{k} {v}' for k, v in times.items()))
 
-    def participate_until(self, epoch, homes=None, pods=None, seconds=3600):
+    def logs(self, service):
+        return self.dc('logs', '--no-color', '--timestamps', '--since', self.since, service, check=False).stdout
+
+    def newest_uc(self, pod, epoch=None, signer=None):
+        """`validator last-signed-uc` in root<pod>: the newest UC its local root and execution verify (None when there is none yet)."""
+        args = ['--epoch', str(epoch)] if epoch else []
+        args += ['--signer', signer] if signer else []
+        done = self.exec(f'root{pod}', 'ubft', 'validator', 'last-signed-uc', '--execution', 'http://127.0.0.1:8545', '--root-rpc', self.root_rpc,
+                         *args, check=False)
+        return json.loads(done.stdout) if done.returncode == 0 and done.stdout.strip() else None
+
+    def block(self, block_hash):
+        b = self.r.call('eth_getBlockByHash', [block_hash, False])
+        return {'number': b['number'], 'hash': b['hash'], 'parentHash': b['parentHash'], 'transactions': b['transactions']}
+
+    def transfer(self):
+        """A plain value transfer from the funder through the public gateway; its receipt."""
+        r = self.r
+        sender = r.funder_address()
+        nonce = int(r.call('eth_getTransactionCount', [sender, 'latest']), 16)
+        to = '0x' + uuid.uuid4().hex[:20] + '0' * 20
+        sent = r.call('eth_sendRawTransaction', [r.raw_tx(to, nonce, int(r.call('eth_gasPrice'), 16), 1)])
+        return r.wait('the transfer is mined', lambda: r.call('eth_getTransactionReceipt', [sent]), 600)
+
+    def participate_until(self, epoch, homes=None, pods=None, seconds=3600, watch=None):
         """Until the roots activate an epoch after `epoch`: every genesis member's own `pos-publish --participate` on the open result (its
         possession proof from its own authority, then anyone's publication), each in its own pod unless `pods` names another (a member
         whose own shard node does not sign yet sends through a live one). Returns the activated epoch."""
@@ -450,6 +522,12 @@ class Recovery:
         election = self.deployment['election']
 
         def participate():
+            if watch is not None:
+                # stop early when the roots refuse the Freeze (each leader would re-propose it, and rounds end by timeout)
+                refused = [l for l in self.logs(f'root{watch}').splitlines() if any(x in l for x in REFUSAL)]
+                if refused:
+                    r.keep_redacted(self.ev / 'root-refusal.log', '\n'.join(refused[-200:]))
+                    return f'the roots refuse the Freeze ({len(refused)} lines, root-refusal.log): ' + r.scrub(refused[-1][-400:])
             result = r.view_text(election, 'openResult()(bytes32)').strip()
             if int(result, 16):
                 for m in members:
@@ -460,7 +538,10 @@ class Recovery:
             view = self.root_view(self.i)
             switching = view.get('switch') and view['switch']['phase'] not in ('running', 'following')
             return view['activeEpoch'] if view['activeEpoch'] > epoch and not switching else None
-        return r.wait(f'the roots activate an epoch after {epoch}', participate, seconds, every=10)
+        got = r.wait(f'the roots activate an epoch after {epoch}', participate, seconds, every=10)   # r.wait takes a raising probe as "not yet"
+        if isinstance(got, str):
+            raise RuntimeError(got)
+        return got
 
     def follows(self, m):
         entry = handoff_ops.load_compose(self.gen)['services'][f'authority{m}']['entrypoint']
