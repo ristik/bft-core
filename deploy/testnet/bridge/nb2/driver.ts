@@ -155,8 +155,9 @@ const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms
 const retrying = (what: string) => (reason: string): void => log(`  ${what}: ${reason}, retrying`);
 const retry = <T>(what: string, f: () => Promise<T>): Promise<T> => walletRetry(f, retrying(what));
 
-const rpc = new HttpJsonRpc(lane.rpc, { retries: 20, timeoutMs: 120_000 });
-const direct = new HttpJsonRpc(lane.direct, { retries: 5, timeoutMs: 120_000 });
+// native-bridge-plugins#93 caps the waiting of one call at maxWaitMs (default 5 s); the lane's own readers keep their long retries
+const rpc = new HttpJsonRpc(lane.rpc, { retries: 20, maxWaitMs: 100_000, timeoutMs: 120_000 });
+const direct = new HttpJsonRpc(lane.direct, { retries: 5, maxWaitMs: 30_000, timeoutMs: 120_000 });
 
 /** The rule name of revert data (the vault's or the verifier's), with VerifierRefused's inner rule. */
 function ruleOf(data: Uint8Array | null): string {

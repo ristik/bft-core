@@ -11,7 +11,7 @@ import { HE } from '../../../packages/native-bridge-plugin/src/nb2/crypto.js';
 import { LocalKeySigner } from '../../../packages/native-bridge-plugin/src/nb2/evm.js';
 import { EvmReader, HttpJsonRpc } from '../../../packages/native-bridge-plugin/src/nb2/rpc.js';
 import {
-  burn, GatewayAggregator, mint, planDeposit, planReturn, redeem, resumePayout, sendDeposit, split, transfer, Wallet,
+  burn, GatewayAggregator, mint, planDeposit, planReturn, redeem, resumePayout, sendDeposit, split, transfer, readRetrying, Wallet,
 } from '../../../wallet/core.js';
 import type { PayerPolicy } from '../../../wallet/recovery.js';
 
@@ -33,8 +33,13 @@ if (phase === 'key') {
   console.log(JSON.stringify(result, (_, value) => typeof value === 'bigint' ? String(value) : value));
 }
 
+/**
+ * The package gateway rate-limits each client, and since native-bridge-plugins#93 the transport retries a 429 only briefly. The wallet
+ * waits out its own reads (nbp#97 `readRetrying`, also on the payer policy's archive readers) and never repeats a send. The smoke's own
+ * reader is wrapped the same way; the wallet's RPC is not wrapped again here.
+ */
 async function walk(stage: string) {
-  const reader = new EvmReader(new HttpJsonRpc(rpc));
+  const reader = new EvmReader(readRetrying(new HttpJsonRpc(rpc), (why) => console.error('rpc waiting:', why)));
   const operator = new HttpJsonRpc(authority);
   const genesis = await operator.call<{ hash: string }>('eth_getBlockByNumber', ['0x0', false]);
   assert.equal(genesis.hash.toLowerCase(), deployment.package.genesisHash.toLowerCase());

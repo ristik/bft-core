@@ -67,7 +67,7 @@ separate recipient, one by ordinary redemption and one by recovery. It checks tw
 remaining custody liability. For the PoS handoff workflow, use `--phase mint`
 before handoff and `--phase return` after handoff against the same wallet.
 Keep the wallet's private journal under the disposable generation.
-[Reference wallet guide](https://github.com/ristik/native-bridge-plugins/blob/f0e037a9c5df73b027d11cb3b1b1da55b5af7971/docs/nb2-wallet-guide.md)
+[Reference wallet guide](https://github.com/ristik/native-bridge-plugins/blob/ab816019a96774dceeb3c39e3071fe9519930d23/docs/nb2-wallet-guide.md)
 
 ## Shared files
 
