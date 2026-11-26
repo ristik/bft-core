@@ -1,3 +1,4 @@
+import concurrent.futures
 import hashlib
 import re
 import http.client
@@ -1714,6 +1715,72 @@ class HandoffDryForm(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError,'lacks --c'): dry.check_cli(fake,{'known cmd':['a','c']})
             with self.assertRaisesRegex(AssertionError,'does not exist'): dry.check_cli(fake,{'other cmd':['a']})
 
+class TokenBucket(unittest.TestCase):
+    """gateway.Limiter: a token bucket per address under a total bucket, on a controlled clock."""
+    def limiter(self, *args, **kw):
+        self.now=1000.0
+        clock=patch('gateway.time.monotonic',side_effect=lambda: self.now); clock.start(); self.addCleanup(clock.stop)
+        return gateway.Limiter(*args, **kw)
+    def test_a_burst_of_sixty_passes_and_the_sixty_first_in_the_same_instant_is_refused(self):
+        lim=self.limiter(*gateway.RPC_LIMIT)
+        self.assertEqual(gateway.RPC_LIMIT,(20,60,400,400))
+        self.assertEqual([lim.allowed('a') for _ in range(61)],[True]*60+[False])
+        self.assertTrue(lim.allowed('b'),'another address has its own bucket')
+    def test_the_bucket_refills_at_its_rate_up_to_its_burst(self):
+        lim=self.limiter(20,60,400,400)
+        for _ in range(60): lim.allowed('a')
+        self.assertFalse(lim.allowed('a'))
+        self.now+=0.049; self.assertFalse(lim.allowed('a'),'under one token after 49 ms at 20/s')
+        self.now+=0.002; self.assertTrue(lim.allowed('a'),'one token after 50 ms'); self.assertFalse(lim.allowed('a'))
+        self.now+=1.0; self.assertEqual(sum(lim.allowed('a') for _ in range(30)),20,'20 tokens a second')
+        self.now+=3600; self.assertEqual(sum(lim.allowed('a') for _ in range(100)),60,'never more than the burst')
+    def test_refused_requests_take_nothing_and_sustained_traffic_gets_the_rate(self):
+        lim=self.limiter(20,60,400,400)
+        served=0
+        for _ in range(100):           # ten seconds of 100 requests a second, most of them refused
+            served+=sum(lim.allowed('a') for _ in range(100)); self.now+=1.0
+        self.assertEqual(served,60+20*99)
+    def test_the_total_holds_and_one_address_cannot_take_more_of_it_than_its_bucket(self):
+        lim=self.limiter(20,60,400,400)
+        self.assertEqual(sum(lim.allowed('greedy') for _ in range(10000)),60)
+        # the greedy address's refused requests cost the total nothing: other addresses still get the rest of it
+        self.assertEqual(sum(lim.allowed(f'10.0.{i//60}.{i%60}') for i in range(400)),340)
+        self.assertFalse(lim.allowed('fresh'),'the total is spent: a fresh address is refused too')
+        self.now+=0.5
+        self.assertEqual(sum(lim.allowed(f'192.0.2.{i}') for i in range(250)),200,'the total refills at 400/s')
+        self.now+=1.0
+        self.assertEqual(sum(lim.allowed('greedy') for _ in range(100)),30,'and the greedy address only its own 20/s: 1.5 s of tokens')
+    def test_the_total_refusal_does_not_spend_the_address_bucket(self):
+        lim=self.limiter(5,5,3,3)
+        self.assertEqual([lim.allowed('a') for _ in range(4)],[True,True,True,False])
+        self.now+=1.0   # three more total tokens; the address has two left and gains five
+        self.assertEqual(sum(lim.allowed('a') for _ in range(10)),3)
+    def test_the_client_table_is_bounded_least_recently_seen_first(self):
+        lim=self.limiter(1,1,10**9,10**9,clients=3)
+        for ip in 'abc': self.assertTrue(lim.allowed(ip))
+        self.assertFalse(lim.allowed('a'))   # a is now the most recent
+        self.assertTrue(lim.allowed('d'))    # drops b
+        self.assertEqual(list(lim.clients),['c','a','d'])
+        self.assertEqual(len(gateway.Limiter(*gateway.RPC_LIMIT).clients),0); self.assertEqual(gateway.CLIENTS,10000)
+        big=self.limiter(1,1,10**9,10**9)
+        for i in range(gateway.CLIENTS+500): big.allowed(i)
+        self.assertEqual(len(big.clients),gateway.CLIENTS)
+    def test_the_limiter_is_thread_safe(self):
+        lim=gateway.Limiter(1,500,10**6,10**6)   # real clock: at most a token or two refill while the threads run
+        with concurrent.futures.ThreadPoolExecutor(8) as pool:
+            served=sum(pool.map(lambda _: lim.allowed('a'),range(2000)))
+        self.assertGreaterEqual(served,500); self.assertLess(served,520)
+    def test_the_defaults(self):
+        self.assertEqual((gateway.HEAVY_LIMIT,gateway.AGG_LIMIT),((4,20,40,80),(20,60,200,200)))
+        server=gateway.Server(('127.0.0.1',0),gateway.Handler,FakeRelay())
+        self.addCleanup(server.server_close); self.addCleanup(server.pool.shutdown)
+        for lim,want in ((server.rpc_limit,gateway.RPC_LIMIT),(server.heavy_limit,gateway.HEAVY_LIMIT),(server.agg_limit,gateway.AGG_LIMIT)):
+            self.assertEqual((lim.rate,lim.burst,lim.total,lim.total_burst),want)
+        gateway.guard_limits(server)
+        self.assertEqual(server.rpc_limit.rate,4*gateway.RPC_LIMIT[2],'the guard sees all public reads as one address, each up to four calls')
+        self.assertEqual(server.heavy_limit.total,2*gateway.HEAVY_LIMIT[2])
+        self.assertEqual(gateway.Server.request_queue_size,gateway.SOCKETS)
+
 class PublicRPC(unittest.TestCase):
     def setUp(self):
         self.relay=FakeRelay()
@@ -1753,7 +1820,7 @@ class PublicRPC(unittest.TestCase):
             self.assertEqual(self.call(method,params,9)[0],200,method)
             self.assertEqual(self.relay.calls[-1],(method,params))
     def test_log_queries_name_one_address_and_a_bounded_window(self):
-        self.server.rpc_limit=self.server.heavy_limit=gateway.Limiter(1000,1000)   # this test is about the filter, not the limit
+        self.server.rpc_limit=self.server.heavy_limit=gateway.Limiter(1000,1000,1000)   # this test is about the filter, not the limit
         vault='0x'+'aB'*20
         topics=[['0x'+'06'*32],['0x'+'00'*31+'05','0x'+'00'*31+'06']]
         ok=[{'address':vault,'fromBlock':'0x0','toBlock':hex(gateway.LOG_BLOCK_RANGE-1),'topics':topics},
@@ -1787,7 +1854,7 @@ class PublicRPC(unittest.TestCase):
             self.assertEqual(self.send(body)[0],status,case)
         self.assertEqual(len(self.relay.calls),sent,'a refused request reached the upstream')
     def test_evidence_reads_take_exactly_their_params(self):
-        self.server.rpc_limit=self.server.heavy_limit=gateway.Limiter(1000,1000)
+        self.server.rpc_limit=self.server.heavy_limit=gateway.Limiter(1000,1000,1000)
         h='0x'+'ab'*32
         for case in [('eth_getBlockByHash',[h,False]),('eth_getBlockReceipts',[h]),('eth_getBlockReceipts',['0x1f']),
                      ('unicity_getSealCompanionV1',[h]),('unicity_sealCompanionHorizonV1',[])]:
@@ -1819,7 +1886,7 @@ class PublicRPC(unittest.TestCase):
         ])
 
     def test_log_filter_edges_are_refused_before_any_upstream_call(self):
-        self.server.rpc_limit=self.server.heavy_limit=gateway.Limiter(1000,1000)
+        self.server.rpc_limit=self.server.heavy_limit=gateway.Limiter(1000,1000,1000)
         vault='0x'+'cd'*20; h='0x'+'11'*32
         self.refused([json.dumps([{'jsonrpc':'2.0','id':1,'method':'eth_getLogs','params':[{'address':vault,'blockHash':h}]}]),   # a batch
                       ('eth_getLogs',[{'address':vault,'fromBlock':'10','toBlock':'0x20'}]),        # decimal
@@ -1844,15 +1911,15 @@ class PublicRPC(unittest.TestCase):
         self.assertEqual(self.call('eth_getLogs',[ok])[0],200)
     def test_heavy_reads_have_their_own_rate_limit(self):
         h='0x'+'ab'*32
-        self.server.rpc_limit=gateway.Limiter(1000,1000)
-        self.server.heavy_limit=gateway.Limiter(2,20)
-        with patch('gateway.time.monotonic',return_value=self.server.heavy_limit.window):
+        self.server.rpc_limit=gateway.Limiter(1000,1000,1000)
+        with patch('gateway.time.monotonic',return_value=1000.0):
+            self.server.heavy_limit=gateway.Limiter(2,2,20)
             self.assertEqual([self.call('eth_getBlockReceipts',[h])[0] for _ in range(3)],[200,200,429])
             self.assertEqual(self.call('eth_getLogs',[{'address':'0x'+'cd'*20,'blockHash':h}])[0],429)
             self.assertEqual(self.call('unicity_getSealCompanionV1',[h])[0],200,'the light reads keep the general limit')
         self.assertEqual(sum(1 for m,_ in self.relay.calls if m in gateway.HEAVY_METHODS),2)
     def test_an_answer_above_the_size_cap_is_refused_with_413(self):
-        self.server.rpc_limit=self.server.heavy_limit=gateway.Limiter(1000,1000)
+        self.server.rpc_limit=self.server.heavy_limit=gateway.Limiter(1000,1000,1000)
         h='0x'+'ab'*32
         self.relay.too_large=True
         status,result=self.call('eth_getBlockReceipts',[h])
@@ -1917,7 +1984,7 @@ class PublicRPC(unittest.TestCase):
         finally:
             for _ in range(gateway.LARGE_SLOTS): self.server.large.release()
     def test_the_aggregator_route_forwards_the_sdk_methods_only(self):
-        self.server.agg_limit=gateway.Limiter(1000,1000)   # this test is about routing, not the limit
+        self.server.agg_limit=gateway.Limiter(1000,1000,1000)   # this test is about routing, not the limit
         seen=[]
         def fake(url, payload=None, content_type='application/json'):
             seen.append((url,payload)); return 200,'application/json',b'{"jsonrpc":"2.0","id":1,"result":{"blockNumber":"7"}}'
@@ -1942,17 +2009,31 @@ class PublicRPC(unittest.TestCase):
     def test_the_aggregator_route_has_its_own_rate_limit_and_answers_unavailable(self):
         body=json.dumps({'jsonrpc':'2.0','id':1,'method':'get_block_height','params':{}})
         with patch('gateway.upstream',return_value=(200,'application/json',b'{"result":1}')):
-            with patch('gateway.time.monotonic',return_value=self.server.agg_limit.window):
-                for _ in range(10): self.assertEqual(self.send(body,'/aggregator')[0],200)
+            with patch('gateway.time.monotonic',return_value=1000.0):
+                self.server.agg_limit=gateway.Limiter(*gateway.AGG_LIMIT)
+                for _ in range(60): self.assertEqual(self.send(body,'/aggregator')[0],200)
                 self.assertEqual(self.send(body,'/aggregator')[0],429)
+                self.assertEqual(self.get('/api/v1/trustbases')[0],429,'the trust-base pages share the aggregator route\'s bucket')
                 self.assertEqual(self.rpc('eth_chainId')[0],200)   # the execution route's limit is separate
-        self.server.agg_limit=gateway.Limiter(10,50)
+        self.server.agg_limit=gateway.Limiter(*gateway.AGG_LIMIT)
         with patch('gateway.upstream',side_effect=OSError('down')):
             self.assertEqual(self.send(body,'/aggregator')[0],503)
     def test_rate_limit(self):
-        with patch('gateway.time.monotonic',return_value=self.server.rpc_limit.window):
-            for _ in range(10): self.assertEqual(self.rpc('eth_chainId')[0],200)
+        with patch('gateway.time.monotonic',return_value=1000.0):
+            self.server.rpc_limit=gateway.Limiter(*gateway.RPC_LIMIT)
+            for _ in range(60): self.assertEqual(self.rpc('eth_chainId')[0],200)
             self.assertEqual(self.rpc('eth_chainId')[0],429)
+    def test_fifteen_parallel_reads_from_one_address_are_all_served(self):
+        # a plan's return in the demo wallet: about fifteen eth_getCode at once, then eth_getBlockByNumber (2026-11-26, nginx 503 then gateway 429)
+        start=threading.Barrier(15)
+        def code(i):
+            start.wait(3)
+            return self.send(json.dumps({'jsonrpc':'2.0','id':i,'method':'eth_getCode','params':['0x'+'%040x'%i,'latest']}))
+        with concurrent.futures.ThreadPoolExecutor(15) as clients:
+            answers=list(clients.map(code,range(15)))
+        self.assertEqual([(s,r['id']) for s,r in answers],[(200,i) for i in range(15)])
+        self.assertEqual(self.rpc('eth_getBlockByNumber')[0],200)
+        self.assertEqual(sum(1 for m,_ in self.relay.calls if m=='eth_getCode'),15)
     def test_partial_broadcast_is_not_retried(self):
         with patch.object(self.relay,'call',side_effect=ValueError('partial')) as call:
             self.assertEqual(self.rpc('eth_sendRawTransaction')[0],503)

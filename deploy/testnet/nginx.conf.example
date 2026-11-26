@@ -1,6 +1,6 @@
 # Host nginx HTTP context. Replace hostnames and TLS paths before nginx -t.
-limit_req_zone $binary_remote_addr zone=tn_rpc:10m rate=5r/s;
-limit_req_zone $binary_remote_addr zone=tn_agg:10m rate=10r/s;   # the aggregator route's own (the gateway's 10/s per address); a location's limit_req replaces the server's
+limit_req_zone $binary_remote_addr zone=tn_rpc:10m rate=20r/s;   # a wallet page's parallel reads: a burst of 60 (the gateway's 20/s per address, burst 60)
+limit_req_zone $binary_remote_addr zone=tn_agg:10m rate=20r/s;   # the aggregator route's own (the gateway's 20/s per address, burst 60); a location's limit_req replaces the server's
 limit_conn_zone $binary_remote_addr zone=tn_conn:10m;
 server {
     listen 443 ssl;
@@ -9,8 +9,8 @@ server {
     ssl_certificate_key /etc/letsencrypt/live/rpc.testnet.example/privkey.pem;
     client_max_body_size 16k;
     client_body_timeout 5s;
-    limit_conn tn_conn 4;
-    limit_req zone=tn_rpc burst=10 nodelay;
+    limit_conn tn_conn 16;
+    limit_req zone=tn_rpc burst=60 nodelay;
     limit_req_status 429;
     location = / {
         limit_except POST { deny all; }
@@ -28,7 +28,7 @@ server {
     # the aggregator (the gateway's /aggregator route: the SDK's JSON-RPC methods only, 64 KiB, its own rate limit) and its trust-base pages
     location = /aggregator {
         limit_except POST { deny all; }
-        limit_req zone=tn_agg burst=20 nodelay;
+        limit_req zone=tn_agg burst=60 nodelay;
         client_max_body_size 64k;
         proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header Host $host;
@@ -39,7 +39,7 @@ server {
     }
     location = /api/v1/trustbases {
         limit_except GET { deny all; }
-        limit_req zone=tn_agg burst=20 nodelay;
+        limit_req zone=tn_agg burst=60 nodelay;
         proxy_set_header X-Forwarded-For $remote_addr;
         proxy_set_header Host $host;
         proxy_connect_timeout 2s;

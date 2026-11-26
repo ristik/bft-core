@@ -51,6 +51,7 @@ AGG_METHODS = frozenset('certification_request get_inclusion_proof.v2 get_inclus
 AGG_MAX_BODY = 65536        # a 256-state get_inclusion_proofs.v1 batch is about 17 KB
 AGG_URL = os.environ.get('AGG_URL', 'http://aggregator:8080')
 AGG_TIMEOUT = 30            # the SDK's batch proof call may wait (waitMs) for its states
+SOCKETS = 64                # the accepted connections the gateway holds at once (being served or queued); one more is closed unanswered
 
 
 def _quantity(v):
@@ -126,28 +127,51 @@ def check_log_filter(params):
         raise ValueError('log filter range')
 
 
+# The rate limits: (per-address rate a second, per-address burst, total rate a second, total burst). A wallet's page fires its reads in parallel
+# (a plan's return about fifteen eth_getCode at once, then eth_getBlockByNumber), so an address may burst well above its sustained rate.
+RPC_LIMIT = (20, 60, 400, 400)
+HEAVY_LIMIT = (4, 20, 40, 80)      # HEAVY_METHODS, in addition to RPC_LIMIT
+AGG_LIMIT = (20, 60, 200, 200)     # the aggregator route and the trust-base pages
+# A validator's execution guard sees the public gateway as one address, and one public read costs up to four guard calls (the relay's identity
+# and coverage checks, then the read): the whole public budget, four times over.
+GUARD_RPC_LIMIT = (4 * RPC_LIMIT[2],) * 4
+GUARD_HEAVY_LIMIT = (2 * HEAVY_LIMIT[2], 2 * HEAVY_LIMIT[3]) * 2
+CLIENTS = 10000                    # the addresses a limiter keeps; the least recently seen is dropped first (it starts again with a full bucket)
+
+
 class Limiter:
-    """At most PER_IP requests a second from one address and TOTAL from all."""
-    def __init__(self, per_ip, total):
-        self.per_ip, self.total = per_ip, total
+    """Token buckets: one address RATE requests a second and up to BURST at once, all addresses together TOTAL a second and up to TOTAL_BURST.
+    A request takes a token from the total only when its address's bucket admits it, so one address never takes more of the total than its own
+    bucket holds, and a refused request costs nothing. O(1) under one lock; at most CLIENTS addresses are kept."""
+    def __init__(self, rate, burst, total, total_burst=None, clients=CLIENTS):
+        self.rate, self.burst, self.total = float(rate), float(burst), float(total)
+        self.total_burst = float(total if total_burst is None else total_burst)
+        self.max_clients = clients
         self.lock = threading.Lock()
-        self.clients = collections.OrderedDict()
-        self.window = time.monotonic()
-        self.budget = total
+        self.clients = collections.OrderedDict()   # address -> (tokens, when they were counted)
+        self.stamp = time.monotonic()
+        self.budget = self.total_burst
 
     def allowed(self, ip):
         with self.lock:
             now = time.monotonic()
-            if now - self.window >= 1:
-                self.budget, self.window = self.total, now
-            stamp, count = self.clients.pop(ip, (now, 0))
-            if now - stamp >= 1:
-                stamp, count = now, 0
-            self.clients[ip] = (stamp, count + 1)
-            if len(self.clients) > 10000:
+            self.budget = min(self.total_burst, self.budget + max(0.0, now - self.stamp) * self.total)
+            self.stamp = now
+            tokens, stamp = self.clients.pop(ip, (self.burst, now))
+            tokens = min(self.burst, tokens + max(0.0, now - stamp) * self.rate)
+            ok = tokens >= 1 and self.budget >= 1
+            if ok:
+                tokens -= 1
+                self.budget -= 1
+            self.clients[ip] = (tokens, now)
+            if len(self.clients) > self.max_clients:
                 self.clients.popitem(last=False)
-            self.budget -= 1
-            return count < self.per_ip and self.budget >= 0
+            return ok
+
+
+def guard_limits(server):
+    """A validator's execution guard: the limits of GUARD_RPC_LIMIT and GUARD_HEAVY_LIMIT."""
+    server.rpc_limit, server.heavy_limit = Limiter(*GUARD_RPC_LIMIT), Limiter(*GUARD_HEAVY_LIMIT)
 
 
 def upstream(url, payload=None, content_type='application/json'):
@@ -160,19 +184,19 @@ def upstream(url, payload=None, content_type='application/json'):
         return e.code, e.headers.get('Content-Type', 'application/json'), e.read()
 
 class Server(http.server.HTTPServer):
-    # The NB2 wallet checks nine graph fields concurrently. Keep the eight
-    # workers and admit one additional batch of sockets to their bounded queue.
-    request_queue_size = 16
+    # The NB2 wallet checks nine graph fields concurrently and a plan's return fires about fifteen reads at once, while other wallets do the
+    # same: eight workers, and up to SOCKETS accepted sockets waiting in their bounded queue (each a complete request: nginx buffers bodies).
+    request_queue_size = SOCKETS
 
     def __init__(self, address, handler, relay):
         super().__init__(address, handler)
         self.relay = relay
         self.pool = concurrent.futures.ThreadPoolExecutor(max_workers=8)
-        self.slots = threading.BoundedSemaphore(16)
+        self.slots = threading.BoundedSemaphore(SOCKETS)
         self.large = threading.BoundedSemaphore(LARGE_SLOTS)
-        self.rpc_limit = Limiter(10, 100)
-        self.heavy_limit = Limiter(2, 20)   # HEAVY_METHODS, in addition to rpc_limit
-        self.agg_limit = Limiter(10, 50)
+        self.rpc_limit = Limiter(*RPC_LIMIT)
+        self.heavy_limit = Limiter(*HEAVY_LIMIT)   # HEAVY_METHODS, in addition to rpc_limit
+        self.agg_limit = Limiter(*AGG_LIMIT)
         self.requests = self.errors = self.agg_requests = self.agg_errors = 0
 
     def process_request(self, sock, address):
@@ -371,8 +395,7 @@ if __name__ == '__main__':
         server = Server((bind, 8545), ExecutionHandler, Relay(cfg, small_body_limit=MAX_BODY))
         # The public edge already limits individual clients. This listener
         # sees the edge's single internal address for all forwarded calls.
-        server.rpc_limit = Limiter(100, 100)
-        server.heavy_limit = Limiter(20, 20)
+        guard_limits(server)
     else:
         server = Server(('0.0.0.0', 8545), Handler, Relay(cfg, small_body_limit=MAX_BODY))
         metrics = http.server.HTTPServer(('0.0.0.0', 9090), Metrics)
