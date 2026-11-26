@@ -337,6 +337,11 @@ class Recovery:
         r.expect(new_status['signingKeyFingerprint'] != old_status['signingKeyFingerprint'], 'the fresh authority holds a new key',
                  new_status['signingKeyFingerprint'])
         mounts = [(old_auth, '/home/authority:ro'), (auth, '/home/authority-new')]
+        # A result that is open now froze the old, dead key: it never publishes and ends only by RejectResult after its reservation
+        # lifetime (the incumbents continue meanwhile). Recovery fences later snapshots only, so the rehearsal needs none open here.
+        open_before = r.view_text(self.deployment['election'], 'openResult()(bytes32)').strip()
+        r.expect(int(open_before, 16) == 0, 'no election result is open before the delegation (an open one froze the old key and only '
+                 'RejectResult ends it: rehearse with an election cadence longer than the recovery)', open_before)
         refused = self.cli(live, home, 'validator', 'recover', '--old-authority-home', 'authority-new', '--new-evm-authority-socket',
                            'authority-new/operator.sock', '--new-evm-authority-credential', 'authority-new/operator.cred',
                            '--new-evm-node-info', 'authority-new/node-info.json', mounts=mounts, check=False)
@@ -346,6 +351,7 @@ class Recovery:
                         'authority-new/operator.sock', '--new-evm-authority-credential', 'authority-new/operator.cred',
                         '--new-evm-node-info', 'authority-new/node-info.json', '--wait', '10m', mounts=mounts)
         r.keep_redacted(self.ev / 'recover.log', done.stdout + done.stderr)
+        r.say(f'  recover confirmed {time.monotonic() - lost:.0f} s after the loss')
         r.expect('confirmed: VR stages identity' in done.stdout, 'recover: the delegation, then the identical VR binding, confirmed', r.scrub(done.stdout.strip()[-400:]))
         again = self.cli(live, home, 'validator', 'recover', '--old-authority-home', 'authority', '--new-evm-authority-socket',
                          'authority-new/operator.sock', '--new-evm-authority-credential', 'authority-new/operator.cred',
