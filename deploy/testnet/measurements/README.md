@@ -17,3 +17,5 @@ the independently recorded #1215 rerun from
 `~/evidence/1215/vr-hook-measurement-pos16-fresh.json` on the dev host. The two
 runs produced identical bytes. CI rechecks both against a newly generated
 four-member genesis and the pinned contracts build.
+
+bft-core#1303 re-measured both files for the parking adapter (contracts `93dcf48e`, fixtures regenerated at `6a78f404`: PosElectionAdapter `0x307acec9…`, from `script/vr-pos-genesis.sh` on the sample input). The ureth revision, the patch, the VR runtime (`0xbd919cb8…`) and `vr-hook-pos.json` (sha256 `0xe2273a50…`) are unchanged. The two runs are byte-identical, and every gas figure equals the #1286 measurement; only the module code hash moved.
