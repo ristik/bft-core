@@ -91,16 +91,28 @@ def vr_late_joiner(r):
     r.rescan()
     (ev / 'shard-entrypoint.json').write_text(json.dumps(services[f'shard{j}']['entrypoint'], indent=1) + '\n')
 
+    rpc_image = rec.compose['services']['rpc']['image']
+    transport = handoff_ops.DockerTransport(gen)   # with the joiner override written: its pod is a service of every call
+
+    def head(i):
+        """eth_blockNumber of entity i's execution client, which serves its RPC on its pod's loopback only: asked from inside that pod."""
+        code = ('import json,urllib.request as u;r=u.Request("http://127.0.0.1:8545",json.dumps({"jsonrpc":"2.0","id":1,"method":"eth_blockNumber",'
+                '"params":[]}).encode(),{"Content-Type":"application/json"});print(int(json.load(u.urlopen(r,timeout=10))["result"],16))')
+        done = subprocess.run(['docker', 'run', '--rm', '--network', f'container:{transport.holder(i)}', '--read-only', '--cap-drop', 'ALL',
+                               '--security-opt', 'no-new-privileges', '--entrypoint', 'python3', rpc_image, '-c', code],
+                              text=True, capture_output=True, timeout=60)
+        return int(done.stdout.strip()) if done.returncode == 0 and done.stdout.strip() else None
+
     rec.dc('up', '-d', '--no-deps', f'pod{j}', f'ureth{j}')
-    r.wait(f'the joiner\'s execution client {j} answers', lambda: r.ureth(j, 'eth_blockNumber') is not None, 180)
+    r.wait(f'the joiner\'s execution client {j} answers', lambda: head(j) is not None, 180)
     rec.dc('up', '-d', '--no-deps', f'authority{j}')
     r.wait('the joiner\'s authority answers', lambda: rec.auth_status(j), 60)
 
     def caught_up(floor):
         def probe():
-            mine, head = int(r.ureth(j, 'eth_blockNumber'), 16), int(r.ureth(1, 'eth_blockNumber'), 16)
-            r.say(f'  joiner {j}: execution head {mine}, validator 1 {head}')
-            return mine if mine >= floor and mine + 3 >= head else None
+            mine, tip = head(j), head(1)
+            r.say(f'  joiner {j}: execution head {mine}, validator 1 {tip}')
+            return mine if mine is not None and tip is not None and mine >= floor and mine + 3 >= tip else None
         return probe
 
     def shard_log():
