@@ -1,7 +1,10 @@
 package storage_test
 
 import (
+	"bytes"
 	"crypto/sha256"
+	"fmt"
+	"log/slog"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -18,6 +21,10 @@ import (
 // The VR-mode RejectResult v2 builder (#1311) over the fixture's certified VR state: the root's own posreject in VR mode, as
 // enableVRHandoff wires it.
 func (f *vxFixture) rejectBuilder(t *testing.T, ready uint16) *posreject.Service {
+	return f.rejectBuilderLog(t, ready, nil)
+}
+
+func (f *vxFixture) rejectBuilderLog(t *testing.T, ready uint16, log *slog.Logger) *posreject.Service {
 	t.Helper()
 	pins := f.pins
 	svc, err := posreject.New(posreject.Config{
@@ -26,6 +33,7 @@ func (f *vxFixture) rejectBuilder(t *testing.T, ready uint16) *posreject.Service
 		VR:     &pins,
 		Proofs: func([32]byte) evmstate.ProofSource { return f.world },
 		Ready:  func([32]byte) uint16 { return ready },
+		Log:    log,
 	})
 	require.NoError(t, err)
 	return svc
@@ -89,6 +97,20 @@ func TestVRRejectBuilderDueIsBuiltAndExecuted(t *testing.T) {
 	b.Resolved([32]byte(f.r))
 	_, ok = b.Ready(f.rejectionContext(0))
 	require.False(t, ok, "a resolved result is offered no more")
+}
+
+// #1303: the root that builds an expiry rejection logs the ready bitmap it built with the result id.
+func TestVRRejectBuilderLogsTheBitmapItBuilt(t *testing.T) {
+	f := newVXFixture(t)
+	f.progress = 100 + vrschema.Lifetime
+	f.attempt = 1
+	f.build()
+	var buf bytes.Buffer
+	b := f.rejectBuilderLog(t, 0b0101, slog.New(slog.NewTextHandler(&buf, nil)))
+	_, ok := f.built(t, b, f.rejectionContext(0), 11)
+	require.True(t, ok)
+	require.Contains(t, buf.String(), "result="+fmt.Sprintf("%x", f.r[:]))
+	require.Contains(t, buf.String(), "registry=true reason=1 readyBitmap=0x0005")
 }
 
 // An output one progress unit before its expiry is not built; neither is anything when VR has no open output.

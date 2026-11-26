@@ -20,6 +20,8 @@ type Pos struct {
 	Delegations map[[2]uint64]*Delegated
 	OpenResult  [32]byte
 	Frozen      []vrclient.FrozenMember
+	// ParkedUntil is ElectionPolicy.parkedUntil per identity (#1303).
+	ParkedUntil map[uint64]uint64
 	// Admitted counts the accepted admitDelegation transactions.
 	Admitted int
 }
@@ -83,6 +85,8 @@ func (c *Chain) election(from ethcommon.Address, data []byte, write bool) ([]byt
 		switch m.Name {
 		case "openResult":
 			return pack(vrclient.PosPublishABI, "openResult", c.Pos.OpenResult), nil
+		case "parkedUntil":
+			return pack(vrclient.PosPublishABI, "parkedUntil", c.Pos.ParkedUntil[in[0].(uint64)]), nil
 		case "frozenMembers":
 			if in[0].([32]byte) != c.Pos.OpenResult {
 				return pack(vrclient.PosPublishABI, "frozenMembers", []vrclient.FrozenMember{}), nil

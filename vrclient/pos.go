@@ -55,9 +55,11 @@ var PosElectionABI = mustABI(`[
  {"type":"function","name":"delegation","stateMutability":"view","inputs":[{"name":"id","type":"uint64"},{"name":"generation","type":"uint64"}],"outputs":[{"name":"binding","type":"tuple","components":[{"name":"rootNodeID","type":"bytes32"},{"name":"rootKey","type":"bytes"},{"name":"evmNodeID","type":"bytes32"},{"name":"evmKey","type":"bytes"},{"name":"operatorPayee","type":"address"}]},{"name":"bindingHash","type":"bytes32"},{"name":"nextNonce","type":"uint64"}]}]`)
 
 // PosPublishABI is the election's publication path: the result a hook reserved, its frozen members, the possession proofs and
-// finalizeCandidate. The proofs are permissionless to relay; a lane relayer that holds the members' EVM keys submits them all.
+// finalizeCandidate. The proofs are permissionless to relay; a lane relayer that holds the members' EVM keys submits them all. It also
+// carries parkedUntil (#1303): the root progress until which an expired result's non-prover is not eligible.
 var PosPublishABI = mustABI(`[
  {"type":"function","name":"openResult","stateMutability":"view","inputs":[],"outputs":[{"name":"","type":"bytes32"}]},
+ {"type":"function","name":"parkedUntil","stateMutability":"view","inputs":[{"name":"id","type":"uint64"}],"outputs":[{"name":"","type":"uint64"}]},
  {"type":"function","name":"publication","stateMutability":"view","inputs":[{"name":"resultID","type":"bytes32"}],"outputs":[{"name":"","type":"tuple","components":[{"name":"primaryHash","type":"bytes32"},{"name":"kCommit","type":"bytes32"},{"name":"incumbent","type":"bytes32"},{"name":"incumbentExposureDigest","type":"bytes32"},{"name":"incumbentKeyDigest","type":"bytes32"},{"name":"policyDigest","type":"bytes32"},{"name":"contractsDigest","type":"bytes32"},{"name":"snapshotDigest","type":"bytes32"},{"name":"assignmentID","type":"bytes32"},{"name":"popSetDigest","type":"bytes32"},{"name":"published","type":"bool"},{"name":"popCount","type":"uint32"},{"name":"attempt","type":"uint64"},{"name":"lost","type":"bool"}]}]},
  {"type":"function","name":"result","stateMutability":"view","inputs":[{"name":"resultID","type":"bytes32"}],"outputs":[{"name":"","type":"tuple","components":[{"name":"state","type":"uint8"},{"name":"reason","type":"uint8"},{"name":"attempt","type":"uint64"},{"name":"progress","type":"uint64"},{"name":"ucTime","type":"uint64"},{"name":"policyID","type":"uint32"},{"name":"origin","type":"bytes32"},{"name":"predecessor","type":"bytes32"},{"name":"assignmentID","type":"bytes32"},{"name":"snapshotDigest","type":"bytes32"}]}]},
  {"type":"function","name":"popDigest","stateMutability":"view","inputs":[{"name":"resultID","type":"bytes32"},{"name":"id","type":"uint64"},{"name":"evmKeyHash","type":"bytes32"}],"outputs":[{"name":"","type":"bytes32"}]},
@@ -164,6 +166,12 @@ func (c *Client) CallPosMulti(ctx context.Context, to ethcommon.Address, a abi.A
 // OpenResult is the election's unresolved result, zero when none; FrozenMembers its members; PopDigest what a member's EVM key signs.
 func (c *Client) OpenResult(ctx context.Context, election ethcommon.Address) (rid [32]byte, err error) {
 	return rid, c.posPublishCall(ctx, election, "openResult", &rid)
+}
+
+// ParkedUntil is the root progress until which the election skips the identity (ElectionPolicy.parkedUntil, #1303): zero when it was
+// never parked; it is eligible again once the SealRegistry's progress reaches it.
+func (c *Client) ParkedUntil(ctx context.Context, election ethcommon.Address, id uint64) (until uint64, err error) {
+	return until, c.posPublishCall(ctx, election, "parkedUntil", &until, id)
 }
 
 func (c *Client) FrozenMembers(ctx context.Context, election ethcommon.Address, rid [32]byte) (out []FrozenMember, err error) {

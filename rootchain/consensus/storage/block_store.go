@@ -602,6 +602,7 @@ func (x *BlockStore) ProcessQc(qc *rctypes.QuorumCert) ([]*certification.Certifi
 		return nil, fmt.Errorf("committing new root block: %w", err)
 	}
 	x.logHandoffOutcome(x.tree().Root())
+	x.logCommittedRejections(committed)
 	x.lock.RLock()
 	observe := x.onCommit
 	x.lock.RUnlock()
