@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""vr-reject (bft-core#1311): an elected joiner that never produces its handoff PoP; its output expires and the roots reject it themselves.
+"""vr-reject (bft-core#1311, #1303): an elected joiner that never produces its handoff PoP; its output expires, the roots reject it
+themselves, and the joiner is parked (design 3.7.4 on the PoS stack): the next election excludes it although it stays bonded.
 
 On the public candidate a joiner registered and bonded, was elected into a 5-member output and never started a node that could send its
 handoff possession proof. The output stayed Published past its expiry, because no VR-mode root built RejectResult v2, and the root epochs froze.
@@ -10,15 +11,19 @@ This stage replays that on a Compose VR/P85 generation (run it after vr-pos-publ
    start; a fresh owner wallet funded by the funder;
 2. `ubft validator apply` (VR.register, custody bond, the delegation admission), as the validator container's `join` runs it;
 3. the next election names the joiner: every member, the joiner included, sends its P85 possession proof (`validator pos-publish --participate`),
-   so the output is Published, as on the candidate; the joiner requests its exit (`validator exit`, custody.requestRetirement) so that the
-   next election excludes it;
+   so the output is Published, as on the candidate; the joiner does NOT request its exit (#1303);
 4. no operator step: the output stays Published while VR's progress is below expiresAtProgress, then the roots order RejectResult v2
-   (Expired): VR marks it Rejected, then Closed; every root that built it logged "election result due for rejection" (registry=true);
-5. the next election names the incumbents only, they publish it, and the roots activate the next root epoch.
+   (Expired): VR marks it Rejected, then Closed; every root that built it logged "election result due for rejection" (registry=true) with
+   the ready bitmap it built;
+5. the ordered OutputRejected record (SealRegistry kind 7) is Expired and its ready bitmap lacks the joiner's bit; ElectionPolicy parked
+   the joiner (parkedUntil = the record's progress + 2 x LIFETIME) and no incumbent;
+6. the next election names the incumbents only while the joiner is still bonded, not retiring and in the live index; they publish it and
+   the roots activate the next root epoch.
 
 The joiner's authority, pod and execution client stay up until the end of the stage, then only its own services are removed.
 """
 import json
+import re
 import subprocess
 import time
 
@@ -28,6 +33,8 @@ import pos_join
 import vr_recover
 
 LIFETIME = 16384   # vrschema.Lifetime: expiresAtProgress = reservedProgress + LIFETIME
+PARK_PERIOD = 2 * LIFETIME   # ElectionPolicy PARK_PERIOD (#1303)
+REC_OUTPUT_REJECTED, REJ_EXPIRED = 7, 1
 OUT_RESERVED, OUT_PUBLISHED, OUT_REJECTED, OUT_CLOSED = 1, 2, 4, 7
 ZERO = '0x' + '00' * 32
 SAY_EVERY = 300    # seconds between progress lines while the output ages
@@ -45,6 +52,30 @@ def decode_output(raw):
     m = t + w[t + 16] // 32
     return {'state': w[t], 'attempt': w[t + 1], 'reserved': w[t + 2], 'expires': w[t + 3],
             'members': [w[m + 1 + k * 10] for k in range(w[m])]}
+
+
+def decode_record(raw):
+    """SealRegistry.recordAt(i)'s tuple (index, recordID, predecessor, kind, progress, ucTime, data): kind, progress and the data words."""
+    w = words(raw)
+    t = w[0] // 32
+    d = t + w[t + 6] // 32
+    n = w[d] // 32
+    return {'index': w[t], 'kind': w[t + 3], 'progress': w[t + 4], 'data': w[d + 1:d + 1 + n]}
+
+
+def find_rejection(record_at, count, rid, back=64):
+    """The newest OutputRejected record of `rid` among the last `back` records, decoded: (index, reason, readyBitmap, progress), or None."""
+    want = int(rid, 16)
+    for i in range(count - 1, max(-1, count - 1 - back), -1):
+        rec = record_at(i)
+        if rec['kind'] == REC_OUTPUT_REJECTED and len(rec['data']) == 4 and rec['data'][0] == want:
+            return {'index': i, 'reason': rec['data'][1], 'bitmap': rec['data'][3], 'progress': rec['progress']}
+    return None
+
+
+def frozen_ids(text):
+    """The member ids of cast's decoding of ElectionPolicy.frozenMembers: '[(id, generation, weight, raw, bindingHash), ...]'."""
+    return [int(m) for m in re.findall(r'\((\d+),', text)]
 
 
 def vr_reject(r):
@@ -196,10 +227,8 @@ def vr_reject(r):
     r.expect(o['expires'] == o['reserved'] + LIFETIME, 'expiresAtProgress is reservedProgress + LIFETIME', str(o))
     r.expect(state == OUT_PUBLISHED, 'the 5-member output is Published (as on the candidate)', str(state))
     times['published'] = vr_recover.utc()
-    out = cli('validator', 'exit', '--wait', '5m')
-    r.keep_redacted(ev / 'exit.log', out.stdout + out.stderr)
-    r.expect('requestRetirement' in out.stdout + out.stderr, 'the joiner requested its exit (custody.requestRetirement)',
-             r.scrub(out.stdout.strip()[-200:]))
+    # #1303: the joiner does not request its exit; only parking can keep it out of the next election
+    bit = o['members'].index(ident)
 
     # 4. the output ages with no handoff (the joiner's root never sends its PoP), then the roots reject it themselves
     last, premature = 0.0, []
@@ -232,25 +261,50 @@ def vr_reject(r):
         r.keep_redacted(ev / f'root{m}.log', log)
         lines = [l for l in log.splitlines() if 'election result due for rejection' in l]
         built[m] = len(lines)
+        if lines:
+            r.say(f'  root{m}: ' + r.scrub(lines[-1][-260:]))
     r.say(f'  rejection built by roots: {built}; first seen at progress {seen}')
     r.expect(any(built.values()), 'the roots built the RejectResult v2 themselves (no keeper or relay)', str(built))
     refused = [l for m in incumbents for l in (ev / f'root{m}.log').read_text().splitlines() if 'rejection left out of this proposal' in l]
     r.say(f'  rejection trial refusals: {len(refused)}' + (': ' + r.scrub(refused[-1][-300:]) if refused else ''))
 
-    # 5. the next election names the incumbents only; they publish it and the roots activate the next root epoch
+    # 5. the ordered record and the parking
+    def record_at(i):
+        return decode_record(r.call('eth_call', [{'to': r.REGISTRY, 'data': r.cast_run('calldata', 'recordAt(uint64)', str(i))}, 'latest']))
+    count = r.view(r.REGISTRY, 'recordCount()(uint64)')[0]
+    rej = find_rejection(record_at, count, rid)
+    r.expect(rej is not None, 'the SealRegistry holds the ordered OutputRejected of the result', str(count))
+    r.say(f'  ordered OutputRejected: record {rej["index"]}, reason {rej["reason"]}, readyBitmap {rej["bitmap"]:#06x}, progress {rej["progress"]}')
+    r.expect(rej['reason'] == REJ_EXPIRED, 'the ordered rejection is Expired', str(rej))
+    r.expect(not (rej['bitmap'] >> bit) & 1, f'the ordered ready bitmap lacks the joiner (bit {bit})', f'{rej["bitmap"]:#06x}')
+    parked = {m: r.view(election, 'parkedUntil(uint64)(uint64)', str(m))[0] for m in [*ids.values(), ident]}
+    r.say(f'  parkedUntil: {parked}')
+    r.expect(parked[ident] == rej['progress'] + PARK_PERIOD, 'the joiner is parked for 2 x LIFETIME from the record', str(parked[ident]))
+    r.expect(not any(parked[i] for i in ids.values()), 'no incumbent is parked, whatever its bit', str(parked))
+
+    # 6. the next election names the incumbents only; they publish it and the roots activate the next root epoch
     def next_output():
         nrid = open_result()
         return (nrid, output(nrid)) if nrid and nrid != rid else None
     nrid = r.wait('the election reserves the next result', lambda: (lambda x: x if x and x != rid else None)(open_result()), 1800, every=15)
+    frozen = frozen_ids(r.view_text(election, 'frozenMembers(bytes32)((uint64,uint64,uint64,uint64,bytes32)[])', nrid))
+    r.say(f'  next result {nrid}: P85 froze {frozen}')
+    r.expect(ident not in frozen and sorted(frozen) == sorted(ids.values()), 'P85 froze the incumbents only (the joiner is parked)', str(frozen))
     target = rec.participate_until(epoch)
     times['activated'] = vr_recover.utc()
     no = output(nrid)
     r.say(f'  next result {nrid}: members {no["members"]}, state {no["state"]}')
     r.expect(ident not in no['members'] and sorted(no['members']) == sorted(ids.values()),
-             'the next election named the incumbents only (the joiner requested its exit)', str(no['members']))
+             'the next election named the incumbents only (the joiner is parked)', str(no['members']))
+    pos = rec.position(ident).splitlines()
+    r.say(f'  joiner position: open lots {pos[6]}, retirement requested {pos[8]}')
+    r.expect(int(pos[6].split()[0]) > 0 and pos[8].strip() == 'false', 'the parked joiner is still bonded and not retiring', str(pos))
+    r.expect(r.view_text(election, 'isIndexed(uint64)(bool)', str(ident)).strip() == 'true', 'the parked joiner is still in the live index')
+    r.expect(r.view(election, 'parkedUntil(uint64)(uint64)', str(ident))[0] > progress(), 'the joiner is still parked')
     r.expect(target > epoch, f'the incumbents\' handoff completed after the rejection: root epoch {epoch} -> {target}', str(target))
     (ev / 'result.json').write_text(json.dumps({'result': rid, 'members': o['members'], 'joiner': ident, 'reservedAt': o['reserved'],
         'expiresAt': o['expires'], 'expiredSeenAt': at, 'statesSeenAt': seen, 'builtBy': built, 'trialRefusals': len(refused),
+        'rejection': rej, 'parkedUntil': {str(k): v for k, v in parked.items()},
         'next': nrid, 'nextMembers': no['members'], 'rootEpoch': [epoch, target], 'times': times}, indent=1) + '\n')
 
     # the joiner's own services only

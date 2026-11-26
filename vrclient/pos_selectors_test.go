@@ -25,6 +25,7 @@ func TestThePoSABIsMatchTheCompiledSelectors(t *testing.T) {
 		{PosPublishABI, "finalizeCandidate", "ce48313e"},
 		{PosPublishABI, "frozenMembers", "046b9998"},
 		{PosPublishABI, "openResult", "5552dcb8"},
+		{PosPublishABI, "parkedUntil", "cb22f153"}, // #1303
 		{PosPublishABI, "popDigest", "d9d6b15a"},
 		{PosPublishABI, "submitAssignmentPoPs", "ac7931b4"},
 		{PosPublishABI, "publish", "8b2e6dcf"},

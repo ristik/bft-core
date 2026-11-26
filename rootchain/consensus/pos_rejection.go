@@ -139,6 +139,7 @@ func (x *ConsensusManager) addRejection(ctx context.Context, block *drctypes.Blo
 			continue
 		}
 		block.Payload = trial.Payload
+		x.log.InfoContext(ctx, "a RejectResult is ordered in this proposal", append([]any{"round", block.Round}, storage.RejectionLogAttrs(c)...)...)
 		return true
 	}
 	return false

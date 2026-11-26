@@ -75,7 +75,7 @@ rule) and *measured*.
 | committee ceiling | 16 | rule |
 | `MIN_EPOCH_GAP` | 100 | rule |
 | `FORCE_DEADLINE`, stall deadline | `maxElectionInterval + 2·LIFETIME` | rule |
-| `PARK_PERIOD` | `2·LIFETIME` = 32,768 | rule |
+| `PARK_PERIOD` | `2·LIFETIME` = 32,768 (PoA §3.7.4; P85 PoS too, #1303) | rule |
 | composer pool / trials | 6 / 64 | rule |
 | `MAX_HOLDERS` / P85 custody holder index | 8 / 0 | rule |
 | `MAX_ACTIVATIONS` | 64 | rule |
@@ -425,6 +425,16 @@ performs it; ModuleAction never binds. Vectors: `change.binding`, `change.scope`
   bit i of `rejectedBitmap` (LSB = entry 0) is the i-th `RegistryChanges` entry; `installedShardEpoch` is K's on recovery, else J's.
 - **OutputRejected:** `reason ∈ 1..3`; `memberId ≠ 0` only with Invalid (the member the admission failure names, else 0);
   `readyBitmap ≠ 0` only with Expired (bit i: the i-th successor by ascending id was ready).
+  The bitmap is shape-checked, never judged. A module may still act on it for future eligibility only: PoA parks the output's joiners
+  whose bit is clear (§3.7.4), and the P85 PoS adapter does the same (#1303, below). A clear bit never removes or penalizes anyone.
+- **P85 PoS parking (#1303).** `PosElectionAdapter.onRecords` scans VR's own segment, not custody's cursor, and hands each Expired
+  `OutputRejected` to `ElectionPolicy.parkExpired`. Each result is applied once. The committed predecessor's members (the incumbents)
+  are exempt. Of the other frozen members, a P85-published result parks those whose bit is clear (bit i = the i-th frozen member,
+  which is VR's member order), and an unpublished one parks those without a stored assignment PoP. A parked identity is not eligible
+  until root progress reaches the record's progress + `PARK_PERIOD`. The period is fixed, never escalates, and has no owner `rejoin`.
+  Retirement and claims are untouched. Root consensus and this schema are unchanged; root logs carry the bitmap a root built
+  (`election result due for rejection`), ordered (`a RejectResult is ordered in this proposal`) and committed
+  (`election result rejection committed`).
 - **Gas pricing inputs** (ureth `records.rs`): the admission charge stays `2000 + 16·bytes + 1000·entries`, the companion cap 16,384
   bytes and 32 entries, and `IMPORT_EXECUTION_GAS` (measured on nine-word records) still bounds the SealRegistry part, because kinds 6–8
   are at most seven words. VR's per-record work is `HookRecordGas` (design §3.3.4), measured by VT-02.

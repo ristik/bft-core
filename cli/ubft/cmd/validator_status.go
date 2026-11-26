@@ -53,8 +53,11 @@ type validatorStatusReport struct {
 	} `json:"staged,omitempty"`
 	LocalKeys string `json:"localKeys,omitempty"` // "current", "staged", "other" or empty when the keys are not readable
 
-	PoaState     string            `json:"poaState,omitempty"`
-	PoaSince     uint64            `json:"poaSinceProgress,omitempty"`
+	PoaState string `json:"poaState,omitempty"`
+	PoaSince uint64 `json:"poaSinceProgress,omitempty"`
+	// ParkedUntil is the P85 PoS election's parkedUntil of the identity (#1303), when it is past the current progress: an expired result
+	// it did not prove for parked it, and elections skip it until the SealRegistry's progress reaches this value.
+	ParkedUntil  uint64            `json:"parkedUntilProgress,omitempty"`
 	Member       bool              `json:"member"`
 	Pending      []string          `json:"pendingGovernance,omitempty"`
 	Module       string            `json:"module"`
@@ -317,6 +320,9 @@ func validatorStatus(ctx context.Context, f *validatorStatusFlags) (*validatorSt
 	}
 	r.Progress, r.UcTime, r.RecordCursor, r.RecordCount = clock.Progress, clock.UcTime, clock.RecordCursor, clock.RecordCount
 	r.HealthCode, r.EarliestBoundaryProgress = ch.module.Health, ch.cfg.EpochStartProgress+vrclient.MinEpochGap
+	if id != 0 && ch.module.Meta.ModuleTag == vrclient.ModuleTagPoS {
+		r.readParked(ctx, vr, ch.module, id)
+	}
 	r.readCounters(ctx, f, vr)
 
 	// governance in flight that names this identity
@@ -441,6 +447,21 @@ func validatorStatus(ctx context.Context, f *validatorStatusFlags) (*validatorSt
 	return r, nil
 }
 
+// readParked reads the identity's park on a PoS generation (#1303). A failed read is reported as unknown, never as "not parked".
+func (r *validatorStatusReport) readParked(ctx context.Context, vr *vrclient.Client, m vrclient.ModuleView, id uint64) {
+	_, election, err := vr.PosContracts(ctx, m)
+	if err == nil {
+		var until uint64
+		if until, err = vr.ParkedUntil(ctx, election, id); err == nil {
+			if until > r.Progress {
+				r.ParkedUntil = until
+			}
+			return
+		}
+	}
+	r.Unknown = append(r.Unknown, "parked: "+err.Error())
+}
+
 func (r *validatorStatusReport) readActivations(ctx context.Context, vr *vrclient.Client) {
 	acts, err := vr.Activations(ctx)
 	if err != nil {
@@ -516,6 +537,10 @@ func (r *validatorStatusReport) text(w io.Writer) {
 		}
 		if r.PoaState != "" {
 			fmt.Fprintf(w, "  PoA state   %s (since progress %d)\n", r.PoaState, r.PoaSince)
+		}
+		if r.ParkedUntil != 0 {
+			fmt.Fprintf(w, "  parked      until progress %d (%d rounds left): an expired result it did not prove for; elections skip it until then\n",
+				r.ParkedUntil, r.ParkedUntil-r.Progress)
 		}
 		fmt.Fprintf(w, "  member      %v\n", r.Member)
 		for _, p := range r.Pending {

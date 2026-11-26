@@ -355,7 +355,7 @@ Severity: warning.
 
 **Confirm.** `unicity_vr_open_output_progress_left < 0`, `unicity_vr_open_output_state`, `ubft validator status` (next boundary), `event=vr.handoff.*`.
 
-**Fix.** No operator step rejects it: every VR-mode root builds RejectResult v2 (Expired) from certified VR state once VR's progress reaches `expiresAtProgress`, and orders it at the next quiet proposal (root log `election result due for rejection` with `registry=true`; then VR's output state moves to Rejected and Closed once the EVM imports `OutputRejected` and `SessionClosed`). The module then re-reserves when it has work; check module health and record lag first. An output still open well past its expiry with no such root log is a root defect (bft-core#1311). A Published output whose handoff does not commit before its expiry: see `event=root.handoff.outcome` and `docs/operations/root-handoff-abort.md`.
+**Fix.** No operator step rejects it: every VR-mode root builds RejectResult v2 (Expired) from certified VR state once VR's progress reaches `expiresAtProgress`, and orders it at the next quiet proposal (root log `election result due for rejection` with `registry=true`; then VR's output state moves to Rejected and Closed once the EVM imports `OutputRejected` and `SessionClosed`). The log line carries the `readyBitmap` the root built; every root also logs `election result rejection committed` with the bitmap the leader ordered. On the P85 PoS stack an Expired rejection parks the result's non-incumbent members that did not prove (a clear bit when published, a missing assignment PoP when not) for `2 × LIFETIME`, so the next election excludes them (#1303; `ElectionPolicy.parkedUntil(id)`). The module then re-reserves when it has work; check module health and record lag first. An incumbent that withholds its proof is not parked and makes every output expire: a known testnet limit (handbook, "Parking after an expired result"). An output still open well past its expiry with no such root log is a root defect (bft-core#1311). A Published output whose handoff does not commit before its expiry: see `event=root.handoff.outcome` and `docs/operations/root-handoff-abort.md`.
 
 **Escalate when.** Escalate when no new output is reserved within an hour.
 
@@ -367,7 +367,7 @@ Severity: warning.
 
 **Confirm.** `unicity_vr_identity_state == 9`; `event=vr.identity.parked`; `ubft validator status`.
 
-**Fix.** The owner or the governance unparks it (see the validator lifecycle in the handbook). Check why it was parked (missed duties, key problems) before unparking.
+**Fix.** On PoA, the owner (`rejoin`) or the governance unparks it (see the validator lifecycle in the handbook). Check why it was parked (missed duties, key problems) before unparking. On the P85 PoS stack there is no unpark: fix the node, and the identity is electable again once root progress reaches `ElectionPolicy.parkedUntil(id)` (#1303).
 
 **Escalate when.** Escalate to the governance signers if you did not cause it.
 
