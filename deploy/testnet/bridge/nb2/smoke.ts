@@ -9,9 +9,9 @@ import { toHex } from '../../../packages/native-bridge-plugin/src/bytes.js';
 import { ascii } from '../../../packages/native-bridge-plugin/src/nb2/cbor.js';
 import { HE } from '../../../packages/native-bridge-plugin/src/nb2/crypto.js';
 import { LocalKeySigner } from '../../../packages/native-bridge-plugin/src/nb2/evm.js';
-import { EvmReader, HttpJsonRpc, RpcError, type JsonRpc } from '../../../packages/native-bridge-plugin/src/nb2/rpc.js';
+import { EvmReader, HttpJsonRpc } from '../../../packages/native-bridge-plugin/src/nb2/rpc.js';
 import {
-  burn, GatewayAggregator, mint, planDeposit, planReturn, redeem, resumePayout, sendDeposit, split, transfer, transportRetry, Wallet,
+  burn, GatewayAggregator, mint, planDeposit, planReturn, redeem, resumePayout, sendDeposit, split, transfer, readRetrying, Wallet,
 } from '../../../wallet/core.js';
 import type { PayerPolicy } from '../../../wallet/recovery.js';
 
@@ -34,20 +34,12 @@ if (phase === 'key') {
 }
 
 /**
- * The package gateway limits each client to 10 requests per second, and since native-bridge-plugins#93 the transport retries a 429 only
- * briefly (three attempts within 5 s) and leaves the waiting to the caller: the plug-in's own `transportRetry`, for idempotent reads
- * only. The smoke is that caller: every read is waited out, a send (`eth_sendRawTransaction`) never is.
+ * The package gateway rate-limits each client, and since native-bridge-plugins#93 the transport retries a 429 only briefly. The wallet
+ * waits out its own reads (nbp#97 `readRetrying`, also on the payer policy's archive readers) and never repeats a send. The smoke's own
+ * reader is wrapped the same way; the wallet's RPC is not wrapped again here.
  */
-function patient(inner: JsonRpc): JsonRpc {
-  return {
-    call: <T>(method: string, params: unknown[]) => method === 'eth_sendRawTransaction'
-      ? inner.call<T>(method, params)
-      : transportRetry(() => inner.call<T>(method, params), (why) => console.error('rpc waiting:', why)),
-  };
-}
-
 async function walk(stage: string) {
-  const reader = new EvmReader(patient(new HttpJsonRpc(rpc)));
+  const reader = new EvmReader(readRetrying(new HttpJsonRpc(rpc), (why) => console.error('rpc waiting:', why)));
   const operator = new HttpJsonRpc(authority);
   const genesis = await operator.call<{ hash: string }>('eth_getBlockByNumber', ['0x0', false]);
   assert.equal(genesis.hash.toLowerCase(), deployment.package.genesisHash.toLowerCase());
@@ -57,7 +49,7 @@ async function walk(stage: string) {
     release: releasePath, trustBundle: join(pub, 'trust-base.bundle.cbor'),
     trustPin: join(pub, 'trust-base.genesis.entryid'), rpc, aggregator,
   });
-  await wallet.open({ aggregator: gatewayAgg, trustFreshnessMs: deployment.trust.freshnessMs, wrapRpc: patient });
+  await wallet.open({ aggregator: gatewayAgg, trustFreshnessMs: deployment.trust.freshnessMs });
 
   const vault = wallet.bridge.cfg.vault;
   if (stage === 'mint') {
@@ -94,16 +86,7 @@ async function walk(stage: string) {
     } else {
       const record = await wallet.returnRecord(label);
       for (let attempt = 0; attempt < 120; ++attempt) {
-        try {
-          paid = await resumePayout(wallet, record, policy, false, true);
-        } catch (e) {
-          // the payer policy's archive readers are the plug-in's own transports (not the wallet's wrapped RPC), and a recovery step
-          // does not wait out a rate limit itself: the step is resumable from its journal, so it is simply run again (nbp#93)
-          if (!(e instanceof RpcError && e.retryable)) throw e;
-          console.error('payout waiting: RPC rate-limited');
-          await delay(3000);
-          continue;
-        }
+        paid = await resumePayout(wallet, record, policy, false, true);
         if (paid.state === 'paid') break;
         if (paid.state === 'checkpoint') checkpoints.add(hex(paid.txHash));
         else if (paid.state !== 'pending' && paid.state !== 'retry') break;
