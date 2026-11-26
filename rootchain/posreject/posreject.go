@@ -18,6 +18,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"fmt"
 	"log/slog"
 	"slices"
 	"sync"
@@ -213,7 +214,7 @@ func (s *Service) collect(ctx storage.RejectionContext, fetchAt [32]byte) {
 	e := &entry{ctx: ctx, prepared: prepared, submitted: s.cfg.Now()}
 	s.cache = append(s.cache, e)
 	s.mu.Unlock()
-	s.log.Info("election result due for rejection", "result", prepared.ResultID, "attempt", ctx.Attempt, "registry", s.cfg.VR != nil)
+	s.log.Info("election result due for rejection", "result", fmt.Sprintf("%x", prepared.ResultID), "attempt", ctx.Attempt, "registry", s.cfg.VR != nil)
 	s.submit(prepared)
 }
 
