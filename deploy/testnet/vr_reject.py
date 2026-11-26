@@ -132,7 +132,8 @@ def vr_reject(r):
     # only the joiner's pod, execution client and authority: its root (the handoff PoP) and shard node never start
     rec.dc('up', '-d', '--no-deps', f'pod{j}', f'ureth{j}', f'authority{j}')
     r.wait('the joiner\'s authority answers', lambda: rec.auth_status(j), 120)
-    rec.exec(f'authority{j}', 'ubft', 'signing-authority', 'node-info', *vr_recover.OPERATOR, '--out', '/authority/node-info.json')
+    if not (auth / 'node-info.json').exists():
+        rec.exec(f'authority{j}', 'ubft', 'signing-authority', 'node-info', *vr_recover.OPERATOR, '--out', '/authority/node-info.json')
     mounts = [(auth, '/home/authority')]
 
     def cli(*args, check=True):
