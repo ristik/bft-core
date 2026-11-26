@@ -66,6 +66,35 @@ func TestTheRootStatusReportsTheChainAndTheStagedCandidate(t *testing.T) {
 	require.Equal(t, http.StatusUnprocessableEntity, callQ3(t, a, "/api/v1/q3/status", "127.0.0.1:1", struct{}{}).Code)
 }
 
+// #1306: the handoff records this root's leader leaves out as refused are reported, with the VR intent and result when known.
+func TestTheRootStatusReportsRefusedHandoffRecords(t *testing.T) {
+	refused := []consensus.HandoffRefused{{Kind: "freeze", Epoch: 1, Attempt: 2, Body: [32]byte{3}, Intent: [32]byte{4}, Result: [32]byte{5},
+		Reason: "vradmit: registry output refused: (5) H3 candidate checks", FirstRound: 10, LastRound: 12, Count: 3}, {Kind: "commit", Epoch: 1}}
+	a := rootQ3API{Status: func() (consensus.Q3Status, error) {
+		return consensus.Q3Status{Network: 5, HandoffRefused: refused}, nil
+	}}
+	rec := callQ3(t, a, "/api/v1/q3/status", "127.0.0.1:1", struct{}{})
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got q3StatusResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.Len(t, got.HandoffRefused, 2)
+	r := got.HandoffRefused[0]
+	require.Equal(t, "freeze", r.Kind)
+	require.EqualValues(t, 2, r.Attempt)
+	require.Equal(t, hex.EncodeToString(refused[0].Body[:]), r.Body)
+	require.Equal(t, hex.EncodeToString(refused[0].Intent[:]), r.Intent)
+	require.Equal(t, hex.EncodeToString(refused[0].Result[:]), r.Result)
+	require.Contains(t, r.Reason, "H3")
+	require.EqualValues(t, 10, r.FirstRound)
+	require.EqualValues(t, 12, r.LastRound)
+	require.EqualValues(t, 3, r.Count)
+	require.Empty(t, got.HandoffRefused[1].Intent, "no VR intent known: none reported")
+
+	a.Status = func() (consensus.Q3Status, error) { return consensus.Q3Status{Network: 5}, nil }
+	rec = callQ3(t, a, "/api/v1/q3/status", "127.0.0.1:1", struct{}{})
+	require.NotContains(t, rec.Body.String(), "handoffRefused", "nothing refused: the field is absent")
+}
+
 func TestTheRootSignersAreTheCommittedCertificatesSignersWithTheirEpochsWeights(t *testing.T) {
 	tb := &types.RootTrustBaseV1{Epoch: 2, QuorumThreshold: 7, RootNodes: []*types.NodeInfo{
 		{NodeID: "heavy", Stake: 6}, {NodeID: "l1", Stake: 1}, {NodeID: "l2", Stake: 1}, {NodeID: "l3", Stake: 1}}}

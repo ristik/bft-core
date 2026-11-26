@@ -131,13 +131,15 @@ type (
 		// multiple times (votes are buffered for single round only)
 		voteBuffer map[string]*abdrc.VoteMsg
 		// the unicity_* metrics (VT-12, docs/operations/monitoring/metrics-catalogue.md); nil-safe
-		mon              *monitoring.Registry
-		votesMissed      *prometheus.CounterVec
-		proposals        prometheus.Counter
-		roundTimeout     prometheus.Counter
-		memberOverride   func() bool // test seam for the committee membership
-		lastTimeoutRound uint64      // the round of the last counted local timeout (a round counts once); owned by the manager loop
-		missedRun        int         // consecutive rounds this member ended without any vote; owned by the manager loop
+		mon          *monitoring.Registry
+		votesMissed  *prometheus.CounterVec
+		proposals    prometheus.Counter
+		roundTimeout prometheus.Counter
+		// handoffRefusedCnt counts the leader rounds that left out a refused handoff record (unicity_root_handoff_refused_total, #1306)
+		handoffRefusedCnt *prometheus.CounterVec
+		memberOverride    func() bool // test seam for the committee membership
+		lastTimeoutRound  uint64      // the round of the last counted local timeout (a round counts once); owned by the manager loop
+		missedRun         int         // consecutive rounds this member ended without any vote; owned by the manager loop
 		// whether the CM is in recovery mode, trying to get into the same state as other CMs
 		recovery         *recoveryState
 		frontier         *frontierSampler
@@ -149,6 +151,12 @@ type (
 		recoveryHistory  *trusthistorystore.Store
 		// stageRecovery, when set (tests), replaces the staged validation of a recovery state
 		stageRecovery func(*abdrc.StateMsg) error
+		// refused is the leader's memory of the handoff records its own executor refused deterministically (#1306); volatile
+		refused handoffRefusals
+		// handoffTrial, when set (tests), replaces the trial execution of a proposal that orders handoff records
+		handoffTrial func(*drctypes.BlockData) error
+		// handoffSource, when set (tests), replaces handoffRecordsForRound as the source of the proposal's handoff records
+		handoffSource func(round uint64, parentQC *drctypes.QuorumCert) ([][]byte, error)
 		// proposalRequestCheck, when set (tests), replaces the verification requestStillValid applies
 		proposalRequestCheck func(round, parentRound uint64, r *drctypes.IRChangeReq) error
 		posPrefetching       atomic.Int32
@@ -2044,52 +2052,14 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 	parentQC := x.blockStore().GetHighQc()
 	var handoffRecords [][]byte
 	if profile == storage.ProfileHandoff && !oldSuffix {
-		handoffRecords, err = x.handoffRecordsForRound(round, parentQC)
+		source := x.handoffRecordsForRound
+		if x.handoffSource != nil {
+			source = x.handoffSource
+		}
+		handoffRecords, err = source(round, parentQC)
 		if err != nil {
 			x.log.WarnContext(ctx, "cannot propose root handoff record", logger.Error(err))
 			return
-		}
-	}
-	if len(handoffRecords) != 0 {
-		payload.HandoffRecords = handoffRecords
-	} else if !oldSuffix {
-		if resolver := x.resolver(); resolver != nil {
-			var perr error
-			if payload, perr = x.irReqBuffer.GeneratePayloadView(round, timedOutShards, inProgress, resolver, x.irReqVerifier); perr != nil {
-				x.log.WarnContext(ctx, "cannot resolve the request views of the proposal", logger.Error(perr))
-				return
-			}
-		} else {
-			payload = x.irReqBuffer.GeneratePayload(round, timedOutShards, inProgress)
-			// buffered requests were verified against the state at the time they arrived, a commit since then can have made them
-			// stale - leave out the requests the validators (this node included) would reject
-			payload.Requests = slices.DeleteFunc(payload.Requests, func(r *drctypes.IRChangeReq) bool {
-				if err := x.requestStillValid(round, branch, r); err != nil {
-					x.log.WarnContext(ctx, "change request left out of the proposal", logger.Shard(r.Partition, r.Shard), logger.Error(err))
-					return true
-				}
-				return false
-			})
-		}
-		if profile == storage.ProfileHandoff {
-			payload.Version = profile
-			if parentQC != nil {
-				frozen, active, err := x.blockStore().FrozenShardForBlock(parentQC.GetRound(), round)
-				if err != nil {
-					x.log.WarnContext(ctx, "cannot establish frozen EVM shard", logger.Error(err))
-					return
-				}
-				if active {
-					kept := payload.Requests[:0]
-					for _, req := range payload.Requests {
-						if req != nil && frozen == (types.PartitionShardID{PartitionID: req.Partition, ShardID: req.Shard.Key()}) {
-							continue
-						}
-						kept = append(kept, req)
-					}
-					payload.Requests = kept
-				}
-			}
 		}
 	}
 	var parentAnchor *drctypes.EpochAnchor
@@ -2104,14 +2074,14 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 	case parentQC != nil:
 		parentRound = parentQC.GetRound()
 	}
+	var closures []drctypes.PosControl
 	if profile == storage.ProfileHandoff && !oldSuffix && (parentQC != nil || parentAnchor != nil) {
 		// a closed epoch's CloseLiability is mandatory in the first ordinary block after its freeze, and in every block until it is in
-		closures, err := x.blockStore().ClosureControls(parentRound, x.trustBase.Load().Epoch, round)
+		closures, err = x.blockStore().ClosureControls(parentRound, x.trustBase.Load().Epoch, round)
 		if err != nil {
 			x.log.WarnContext(ctx, "cannot build the mandatory closure of the proposal", logger.Error(err))
 			return
 		}
-		payload.PosControls = append(closures, payload.PosControls...)
 	}
 	parent, err := x.blockStore().Block(parentRound)
 	if err != nil {
@@ -2128,6 +2098,24 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 		Payload:   payload,
 		Qc:        parentQC,
 		Anchor:    parentAnchor,
+	}
+	if len(handoffRecords) != 0 {
+		// A handoff record is ordered only if this root's own executor admits the block (#1306): every root refuses a block whose record its
+		// rules refuse, so re-proposing it would time out every round. A refused record is left out and the block is an ordinary one.
+		payload.HandoffRecords = handoffRecords
+		payload.PosControls = slices.Clone(closures)
+		if x.refusedHandoff(handoffRecords, round) || !x.admitOwnHandoff(ctx, block) {
+			payload.HandoffRecords, payload.PosControls = nil, nil
+			handoffRecords = nil
+		}
+	}
+	if len(handoffRecords) == 0 && !oldSuffix {
+		var ok bool
+		if payload, ok = x.ordinaryPayload(ctx, round, branch, timedOutShards, inProgress, profile, parentQC); !ok {
+			return
+		}
+		payload.PosControls = append(slices.Clone(closures), payload.PosControls...)
+		block.Payload = payload
 	}
 	proposalMsg := &abdrc.ProposalMsg{
 		Block:       block,
@@ -2185,6 +2173,52 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 	for _, cr := range proposalMsg.Block.Payload.Requests {
 		x.proposedCR.Add(ctx, 1, observability.Shard(cr.Partition, cr.Shard, attribute.String("reason", cr.CertReason.String())))
 	}
+}
+
+// ordinaryPayload is the payload of a proposal that orders no handoff record: the buffered change requests and the T2 timeouts, without
+// the stale ones and, while the EVM is frozen, without the EVM shard's. False when it cannot be built (logged).
+func (x *ConsensusManager) ordinaryPayload(ctx context.Context, round, branch uint64, timedOutShards []*types.UnicityCertificate,
+	inProgress func(types.PartitionID, types.ShardID) *types.InputRecord, profile uint64, parentQC *drctypes.QuorumCert) (*drctypes.Payload, bool) {
+	var payload *drctypes.Payload
+	if resolver := x.resolver(); resolver != nil {
+		var perr error
+		if payload, perr = x.irReqBuffer.GeneratePayloadView(round, timedOutShards, inProgress, resolver, x.irReqVerifier); perr != nil {
+			x.log.WarnContext(ctx, "cannot resolve the request views of the proposal", logger.Error(perr))
+			return nil, false
+		}
+	} else {
+		payload = x.irReqBuffer.GeneratePayload(round, timedOutShards, inProgress)
+		// buffered requests were verified against the state at the time they arrived, a commit since then can have made them
+		// stale - leave out the requests the validators (this node included) would reject
+		payload.Requests = slices.DeleteFunc(payload.Requests, func(r *drctypes.IRChangeReq) bool {
+			if err := x.requestStillValid(round, branch, r); err != nil {
+				x.log.WarnContext(ctx, "change request left out of the proposal", logger.Shard(r.Partition, r.Shard), logger.Error(err))
+				return true
+			}
+			return false
+		})
+	}
+	if profile == storage.ProfileHandoff {
+		payload.Version = profile
+		if parentQC != nil {
+			frozen, active, err := x.blockStore().FrozenShardForBlock(parentQC.GetRound(), round)
+			if err != nil {
+				x.log.WarnContext(ctx, "cannot establish frozen EVM shard", logger.Error(err))
+				return nil, false
+			}
+			if active {
+				kept := payload.Requests[:0]
+				for _, req := range payload.Requests {
+					if req != nil && frozen == (types.PartitionShardID{PartitionID: req.Partition, ShardID: req.Shard.Key()}) {
+						continue
+					}
+					kept = append(kept, req)
+				}
+				payload.Requests = kept
+			}
+		}
+	}
+	return payload, true
 }
 
 func (x *ConsensusManager) onStateReq(ctx context.Context, req *abdrc.StateRequestMsg) error {

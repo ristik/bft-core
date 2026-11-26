@@ -173,6 +173,8 @@ type Q3Status struct {
 	// AcquiresActivations says the switch also installs, in process, an activation this root does not hold the commit of itself, from a
 	// root peer (#1086, PR 2): a joiner, a follower and a lagging member switch too.
 	AcquiresActivations bool
+	// HandoffRefused are the handoff records this root's leader rounds leave out because its own executor refuses them (#1306)
+	HandoffRefused []HandoffRefused
 }
 
 // Q3Status reports the chain this node's verified history is rooted in, the staged candidate and the installed epoch.
@@ -190,7 +192,7 @@ func (x *ConsensusManager) Q3Status() (Q3Status, error) {
 		follower = x.safety.member(installed) != nil
 	}
 	return Q3Status{Network: cfg.Network, Genesis: cfg.Genesis, Staged: x.q3Staged.Load(), ActiveEpoch: installed, Follower: follower,
-		Switch: x.SwitchState(), InProcessSwitch: x.switcher != nil, AcquiresActivations: x.acquirer() != nil}, nil
+		Switch: x.SwitchState(), InProcessSwitch: x.switcher != nil, AcquiresActivations: x.acquirer() != nil, HandoffRefused: x.HandoffRefusals()}, nil
 }
 
 // ErrV3CandidateSuperseded is returned when the candidate the members signed readiness for is not the one this validator would derive any

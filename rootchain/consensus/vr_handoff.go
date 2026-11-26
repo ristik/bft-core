@@ -154,6 +154,9 @@ type vrHandoff struct {
 	retained func(bodyID []byte) ([]byte, error)
 	// resolved says whether the branch ending at the round has resolved (closed or acknowledged) the result (the block store's when nil; replaced in tests)
 	resolved func(parentRound uint64, result [32]byte) bool
+	// candidateCheck is registry-mode admission item (5) of a plan's candidate over the parent a Prepare at round would extend (the block
+	// store's VRCandidateCheck when nil; replaced in tests)
+	candidateCheck func(parentRound, round uint64, plan vrschedule.PreparePlan) error
 }
 
 // vrOperator is the sender identity of the loopback operator endpoints.
@@ -838,9 +841,37 @@ func (x *ConsensusManager) vrRecordsForRound(round uint64, parent *storage.Execu
 		if v.reject(context.Background(), parentQC.GetRound(), round, parentQC) {
 			return nil, nil
 		}
+		// a candidate that item (5) of admission refuses would have every root refuse its Freeze, with the EVM frozen from the Prepare on
+		// and every attempt re-assembling the same candidate (#1306): no Prepare is ordered, and R expires through the RejectResult due
+		// table while the EVM keeps certifying. Judged once per intent identity: a remembered refusal is not checked again.
+		id := plan.Body.Identity()
+		key := refusalKey(control.Network, control.Epoch, plan.Predecessor, plan.Attempt, id[:], "prepare")
+		if x.refused.seen(key, round) {
+			return nil, nil
+		}
+		if err := x.vrCandidateCheck(parentQC.GetRound(), round, plan); err != nil {
+			if handoffRefusalClass(err) == handoffRefusedDeterministic {
+				x.noteHandoffRefused(context.Background(), key, "prepare", control.Epoch, plan.Attempt, id[:], round, err)
+				return nil, nil
+			}
+			// an input this root lacks for the check: the Freeze judges the candidate in full, as before
+			x.log.Debug("VR handoff: the candidate check before the Prepare is unavailable", "round", round, "error", err)
+		}
 	}
 	x.log.Info("VR handoff: ordering the "+step.Kind, "round", round, "attempt", plan.Attempt, "view", plan.Certificate.Assembly.Slot, monitoring.Event(monitoring.EvVRHandoffOrdering))
 	return step.Records, nil
+}
+
+// vrCandidateCheck is registry-mode admission item (5) of the plan's certified candidate over the parent block (#1306).
+func (x *ConsensusManager) vrCandidateCheck(parentRound, round uint64, plan vrschedule.PreparePlan) error {
+	if x.vr.candidateCheck != nil {
+		return x.vr.candidateCheck(parentRound, round, plan)
+	}
+	store := x.blockStore()
+	if store == nil {
+		return storage.ErrVRUnavailable
+	}
+	return store.VRCandidateCheck(parentRound, round, plan.Certificate.Assembly.Candidate, plan.Body, plan.Attempt, plan.Predecessor)
 }
 
 // witnessAt is the Freeze witness at the frozen parent, from the cache only: the proposal path never waits on the execution client. A miss
