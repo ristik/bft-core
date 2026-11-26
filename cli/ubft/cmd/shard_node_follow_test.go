@@ -55,3 +55,14 @@ func TestRootFreeRoleDropsRootsFromMirrorLists(t *testing.T) {
 	require.Equal(t, []libp2ppeer.ID{mirror}, r.mirrorPeers(), "an active node's mirrors are still non-root sources")
 	require.Equal(t, []libp2ppeer.ID{mirror}, r.nonRoot([]libp2ppeer.ID{epochRoot, mirror}))
 }
+
+// bft-core#1309: a Q3-lane node with an archive runs the archive head follower without --follow-source (a joiner restored from a seed pin
+// takes no root certificate while it is not active, so this is its only certificate source); a root-free follower runs it as before, and a
+// node without an archive has nothing to follow it with.
+func TestQ3NodesWithAnArchiveFollowArchiveHeadsWithoutFollowSource(t *testing.T) {
+	require.True(t, followsArchiveHeads(false, true, true), "a Q3 joiner without --follow-source")
+	require.True(t, followsArchiveHeads(true, true, true))
+	require.True(t, followsArchiveHeads(true, false, true), "a root-free follower")
+	require.False(t, followsArchiveHeads(false, false, true), "no role lease: the node subscribes to the roots")
+	require.False(t, followsArchiveHeads(true, true, false), "no archive")
+}

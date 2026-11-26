@@ -173,11 +173,11 @@ func TestRunRefusesMissingInputWithNamedErrors(t *testing.T) {
 				t.Fatal("a refused run wrote a pin")
 			}
 			// naming another epoch's identity does not help; naming this epoch's does, and the pin is written
-			other := func(string) string { return "3=" + strings.Repeat("ab", 32) }
+			other := bodyIDs("3=" + strings.Repeat("ab", 32))
 			if err := run([]string{archive, trustBase, prefix}, other, &out); !errors.Is(err, errNoTrustBodyID) {
 				t.Fatalf("an identity named for another epoch: %v", err)
 			}
-			named := func(string) string { return "2=" + strings.Repeat("ab", 32) }
+			named := bodyIDs("2=" + strings.Repeat("ab", 32))
 			if err := run([]string{archive, trustBase, prefix}, named, &out); err != nil {
 				t.Fatalf("named identity: %v", err)
 			}
@@ -188,5 +188,42 @@ func TestRunRefusesMissingInputWithNamedErrors(t *testing.T) {
 				t.Fatalf("the pin was not written: %v", statErr)
 			}
 		})
+	}
+}
+
+// H4_RESTORE_MAX_EPOCH pins only records of that root epoch or earlier (bft-core#1309: a joiner restored from an epoch-1 pin after later handoffs);
+// an archive with none is the ordinary "no certified block pin", and a value that is no epoch is refused.
+func TestRunPinsNoRecordAboveTheMaximumEpoch(t *testing.T) {
+	archive, trustBase, prefix := pinFixture(t, 2, false)
+	var out strings.Builder
+	env := func(max string) func(string) string {
+		return func(name string) string {
+			switch name {
+			case "H4_RESTORE_MAX_EPOCH":
+				return max
+			case "H4_RESTORE_BODY_IDS":
+				return "2=" + strings.Repeat("ab", 32)
+			}
+			return ""
+		}
+	}
+	if err := run([]string{archive, trustBase, prefix}, env("1"), &out); !errors.Is(err, errNoCertifiedPin) {
+		t.Fatalf("only an epoch-2 record, maximum epoch 1: %v", err)
+	}
+	if err := run([]string{archive, trustBase, prefix}, env("zero"), &out); err == nil || !strings.Contains(err.Error(), "H4_RESTORE_MAX_EPOCH") {
+		t.Fatalf("an invalid maximum: %v", err)
+	}
+	if err := run([]string{archive, trustBase, prefix}, env("2"), &out); err != nil {
+		t.Fatalf("maximum epoch 2: %v", err)
+	}
+}
+
+// bodyIDs is a getenv that names only H4_RESTORE_BODY_IDS.
+func bodyIDs(spec string) func(string) string {
+	return func(name string) string {
+		if name == "H4_RESTORE_BODY_IDS" {
+			return spec
+		}
+		return ""
 	}
 }
