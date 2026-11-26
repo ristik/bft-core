@@ -49,6 +49,10 @@ type Chain struct {
 	// ClaimLots and ClaimCredit model a single withdrawal in the custody test fixture.
 	ClaimLots   []*big.Int
 	ClaimCredit *big.Int
+	// Evidence is the evidence contract custody names (#1286); Pos models custody's positions, the exclusions and the election's
+	// delegations and open result (nil: the claim fixture's fixed positions and no election views).
+	Evidence ethcommon.Address
+	Pos      *Pos
 	// Terms models custody's report anchors (#1297/#1298); nil: contracts that predate them (no anchor views).
 	Terms *Terms
 	// Governor is the FoundationMultisig, Signers its five signers (ascending) and MsigNonce its approval nonce.
@@ -229,7 +233,8 @@ func (c *Chain) dispatch(req request) (any, *rpcError) {
 		}
 		return false, nil
 	case "eth_getBlockByNumber":
-		return map[string]any{"number": hexutil.Uint64(c.Head), "timestamp": hexutil.Uint64(c.HeadTime), "baseFeePerGas": (*hexutil.Big)(c.BaseFee)}, nil
+		return map[string]any{"number": hexutil.Uint64(c.Head), "hash": ethcommon.BigToHash(new(big.Int).SetUint64(c.Head + 1)),
+			"timestamp": hexutil.Uint64(c.HeadTime), "baseFeePerGas": (*hexutil.Big)(c.BaseFee)}, nil
 	case "eth_getCode":
 		return hexutil.Bytes{}, nil
 	case "eth_getBalance":
@@ -493,7 +498,15 @@ func (c *Chain) exec(from, to ethcommon.Address, data []byte, write bool) ([]byt
 			return nil, nil
 		}
 		return c.custody(from, data, write)
+	case c.Evidence:
+		if c.Evidence == (ethcommon.Address{}) || c.Pos == nil {
+			return nil, nil
+		}
+		return c.evidence(data)
 	case c.Election:
+		if c.Election != (ethcommon.Address{}) && c.Pos != nil {
+			return c.election(from, data, write)
+		}
 		if c.Election != (ethcommon.Address{}) && bytes.Equal(data[:4], vrclient.PosPublishABI.Methods["openResult"].ID) {
 			return pack(vrclient.PosPublishABI, "openResult", [32]byte{}), nil
 		}
@@ -528,7 +541,18 @@ func (c *Chain) custody(from ethcommon.Address, data []byte, write bool) ([]byte
 	switch m.Name {
 	case "election":
 		return pack(a, "election", c.Election), nil
+	case "evidence":
+		return pack(a, "evidence", c.Evidence), nil
+	case "network":
+		return pack(a, "network", c.Network), nil
+	case "bondUnit":
+		return pack(a, "bondUnit", big.NewInt(1e18)), nil
+	case "registerNonce":
+		return pack(a, "registerNonce", uint64(0)), nil
 	case "positions":
+		if c.Pos != nil {
+			return c.position(in[0].(uint64)), nil
+		}
 		identity := c.Identities[in[0].(uint64)]
 		if identity == nil {
 			identity = &Identity{}

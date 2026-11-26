@@ -522,7 +522,10 @@ func validatorRotateCmd(base *baseFlags) *cobra.Command {
 		Long: `Owner key rotation without multisig approval (design 3.1, 14): VR stages the new binding, and the next output that captures it
 installs it at its boundary. Each new key signs a proof of possession. A new proposal replaces a staged one. Keys are tombstoned for
 good: a key another identity or role ever used is refused. Pass the new key files (made with root-node init / shard-node init in a
-new directory) and/or a new payee; what is not passed stays. Run the nodes with the new keys once status shows the binding installed.`,
+new directory) and/or a new payee; what is not passed stays. Run the nodes with the new keys once status shows the binding installed.
+On the PoS adapter (#1286) the key change is two transactions at custody's current generation: ElectionPolicy.admitDelegation of the new
+words first (confirmed), then VR.proposeBinding of the identical words; a re-run skips what is done, a staged binding an open result
+froze is not replaced, and a root-key change is refused (exit path). After an authority loss use ` + "`validator recover`" + `.`,
 		RunE: func(cmd *cobra.Command, _ []string) error { return validatorRotate(cmd, f) },
 	}
 	f.txFlags.add(cmd)
@@ -550,6 +553,9 @@ func validatorRotate(cmd *cobra.Command, f *rotateFlags) error {
 		return err
 	}
 	defer ch.close()
+	if ch.isPoS() && f.RootKeys != "" {
+		return fmt.Errorf("%w: on the PoS adapter the root key is custody's and is not rotated here: root-key loss or change takes the exit path (`validator exit`, claim, then a fresh identity)", ErrValidator)
+	}
 	id, have, err := findID(ctx, v, ch, s.From())
 	if err != nil {
 		return err
@@ -595,6 +601,10 @@ func validatorRotate(cmd *cobra.Command, f *rotateFlags) error {
 	nv := *v
 	if f.Payee != "" {
 		nv.cfg.Payee = f.Payee
+	}
+	if ch.isPoS() {
+		// #1286: on PoS the delegation and VR's binding move together, delegation first, at custody's generation
+		return runPosKeyChange(ctx, w, &nv, &next, ch, s, f.DryRun, false)
 	}
 	r, root, evm, err := registration(&nv, &next, idn.BindingNonce)
 	if err != nil {

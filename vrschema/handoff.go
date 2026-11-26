@@ -115,17 +115,18 @@ type SupportCommitment struct {
 	StakingID     []byte   `json:"stakingId"` // 32-byte big-endian VR id
 	Generation    uint64   `json:"generation"`
 	RootKeyHash   []byte   `json:"rootKeyHash"` // keccak256(rootKey), the member word
+	BindingRef    []byte   `json:"bindingRef"`  // the registry binding ref of the signing member (root and EVM bindings and payee)
 	RuleID        []byte   `json:"ruleId"`
 	ReleaseDigest []byte   `json:"releaseDigest"`
 	Sig           []byte   `json:"sig"`
 }
 
-// SignedBytes is CBOR(["UNICITY_VR_RULE_SUPPORT", 1, network, stakingID, generation, rootKeyHash, ruleId, releaseDigest]).
+// SignedBytes is CBOR(["UNICITY_VR_RULE_SUPPORT", 2, network, stakingID, generation, rootKeyHash, bindingRef, ruleId, releaseDigest]).
 func (c SupportCommitment) SignedBytes() ([]byte, error) {
-	if !len32(c.StakingID, c.RootKeyHash, c.RuleID, c.ReleaseDigest) {
+	if !len32(c.StakingID, c.RootKeyHash, c.BindingRef, c.RuleID, c.ReleaseDigest) {
 		return nil, fmt.Errorf("%w: commitment shape", ErrHandoff)
 	}
-	return types.Cbor.Marshal([]any{RuleSupportDomain, uint64(1), c.Network, c.StakingID, c.Generation, c.RootKeyHash, c.RuleID, c.ReleaseDigest})
+	return types.Cbor.Marshal([]any{RuleSupportDomain, uint64(2), c.Network, c.StakingID, c.Generation, c.RootKeyHash, c.BindingRef, c.RuleID, c.ReleaseDigest})
 }
 
 // Digest is SHA-256 of the commitment's full CBOR (signature included): the reference a Freeze carries for a committed table entry.

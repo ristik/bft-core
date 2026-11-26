@@ -41,14 +41,15 @@ type PosControl struct {
 	View     *ViewContext
 }
 
-// SupportCommitment is one rule-support commitment of a RuleSupport control: [network, stakingID, generation, rootKeyHash, ruleId,
-// releaseDigest, sig], field for field vrschema.SupportCommitment.
+// SupportCommitment is one rule-support commitment of a RuleSupport control: [network, stakingID, generation, rootKeyHash, bindingRef,
+// ruleId, releaseDigest, sig], field for field vrschema.SupportCommitment.
 type SupportCommitment struct {
 	_             struct{} `cbor:",toarray"`
 	Network       uint64
 	StakingID     []byte
 	Generation    uint64
 	RootKeyHash   []byte
+	BindingRef    []byte
 	RuleID        []byte
 	ReleaseDigest []byte
 	Sig           []byte
@@ -173,7 +174,7 @@ func (c PosControl) vrContextValue() ([]any, error) {
 			return nil, fmt.Errorf("%w: %d rule-support commitments", ErrPosControl, len(c.Support))
 		}
 		for i, x := range c.Support {
-			if len(x.StakingID) != 32 || len(x.RootKeyHash) != 32 || len(x.RuleID) != 32 || len(x.ReleaseDigest) != 32 || len(x.Sig) != 65 {
+			if len(x.StakingID) != 32 || len(x.RootKeyHash) != 32 || len(x.BindingRef) != 32 || len(x.RuleID) != 32 || len(x.ReleaseDigest) != 32 || len(x.Sig) != 65 {
 				return nil, fmt.Errorf("%w: rule-support commitment %d shape", ErrPosControl, i)
 			}
 			if i > 0 {

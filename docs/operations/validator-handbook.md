@@ -65,23 +65,91 @@ for validating the resulting committee and certification evidence.
 
 ## Authority loss
 
-Keep the authority volume and its fail-stop marker intact. Determine the
-identity's registration and bond state from certified chain data and reconcile
-any submitted registration, delegation or bond transactions.
+Keep the authority volume and its fail-stop marker intact. The marker is
+the `lifetime` file the container writes before the authority first
+starts; a volume that carries it never runs an authority again. Never
+restore an authority from a backup or copy its volume. Determine the
+identity's registration and bond state from certified chain data and
+reconcile any submitted registration, delegation or bond transactions.
 
 - If the identity is unregistered, unbonded and has no unresolved submissions,
   keep the original volume for diagnosis. Initialize a new identity in a
   separately named volume and fund its new payee before joining.
-- If the identity is registered, bonded, or its state is uncertain, stop the
-  join or rotation and contact the Foundation testnet maintainers through
-  the testnet operator channel. Preserve the original volume, authority
-  marker, root and shard data, join journal, receipts and relevant container
-  logs. Share only the validator ID and generation, transaction hashes,
-  last verified UC and authority fingerprint. Keep private keys and
-  credentials local. Ask the maintainers to confirm a supported recovery or
-  retirement path for the recorded state before sending another transaction.
-  The current VR binding and custody delegation can land in different
-  generations. [Bonded-identity rotation defect](https://github.com/ristik/bft-core/issues/1286)
+- If the identity is registered and bonded, recover it in place with
+  `ubft validator recover` (container: `ubft-validator recover`, below). A
+  new EVM key is a new EVM node identity: create a fresh shard node key (a
+  new EVM node id), a new authority in a fresh volume and an empty shard
+  data directory. The new shard node joins through the joiner path: it
+  syncs, stays staging-only and activates at the boundary. The old node and
+  authority stay stopped; their volumes and the marker are preserved and
+  never reused. The root key, root node, payee and bond stay. The bond stays in
+  its lots at custody's current generation, so nothing unbonds. Preserve the
+  old volume and marker: recover requires the marker in the old volume
+  (`--old-authority-home`) and refuses a new authority inside it, and it
+  refuses a configured authority that still answers and holds its key.
+  These checks do not prove the key is lost (every authority volume
+  carries the marker from its first start): confirm that the old
+  authority process is gone before you run `recover`.
+- In-place recovery replaces one committee member's EVM binding, and the
+  next election must pass the committee continuity check (removed = added =
+  1, membership budget 2). A committee of three equal members, or an
+  identity holding more than a third of the committee weight, cannot pass
+  it, so the rotation never installs and the dead key stays in the
+  committee. Such an identity takes the exit path below.
+
+`recover` reads the certified (finalized) state first and refuses unless
+the custody owner is the operator, the identity has open lots, has not
+requested retirement and is not excluded. Then it sends two transactions,
+each confirmed and re-read before the next:
+
+1. `ElectionPolicy.admitDelegation` of the new EVM key at custody's current
+   generation. It fences the old key: no later election snapshot selects the
+   identity with the old key.
+2. `VR.proposeBinding` of the identical words. The next election freezes the
+   new key, the new authority proves possession, and the boundary installs
+   the binding at the same generation.
+
+A re-run compares the exact words and skips the steps already done, so an
+interrupted recovery is resumed with the same command. While an open
+election result has frozen the identity's staged binding, recover refuses to
+replace it; wait until that result is published and acknowledged, rejected
+or recovered. A result that froze the old, dead key cannot publish; it ends
+by rejection after its reservation lifetime and the incumbents continue. An
+identity still in the active committee keeps signing on n-1 until the next
+boundary, where the new authority activates through the join path.
+
+Refused states take the exit path with the owner wallet: root-key loss (the
+root key never changes in place), a requested retirement, an exclusion, or
+a lost operator key. Run `validator exit`, wait for the closure and the
+holder retirement, `validator claim`, then join a fresh identity with new
+keys (or re-bond and `apply` at the next generation).
+
+For the container, the old authority container has already stopped (it is
+fail-stop). Keep `unicity-node` running and its volume mounted:
+
+```bash
+# 1: checks the marker and that the authority is gone; prepares authority-2 and evm-2 (a fresh shard node key)
+docker exec unicity-node ubft-validator recover --yes
+# keep the lost container for its logs; never start it again
+docker rename unicity-authority unicity-authority-lost
+docker run -d --name unicity-authority-2 --restart=no --network host \
+  -v unicity-validator:/data "$IMAGE" authority
+# 2: sends the delegation, then the binding; relinks; waits for the boundary, enrolls and advances
+docker exec unicity-node ubft-validator recover --yes
+docker exec unicity-node ubft-validator status
+```
+
+Each recovery slot has its own authority directory, shard home and
+activation journal (`authority-k/`, `evm-k/`, `shard-active-k.json`;
+`/data/node-slot` names the current one), and a marked slot is never
+reused. The node restarts itself on the new slot, and its fresh shard joins
+staging-only from the verified seed until the boundary. Step 2 resumes from
+`/data/recover.json`; if it is interrupted, run it again. A replaced
+`unicity-node` starts even while its authority is lost, so `recover` can
+run. If another election activates before the one that carries the new key,
+`recover` says so: remove `unicity-authority-2` and repeat the steps, which
+prepares slot 3. `status` shows `authorityDirectory`, `shardHome` and the
+recovery phase.
 
 ## Rehearsal shell
 
@@ -107,7 +175,7 @@ Start or attach the rehearsal's persistent terminal before starting any services
 tmux new-session -A -s vt13-validator
 ```
 
-The authority's enrolled key lives in the authority process. Keep its tmux window and the host running through the acknowledged exclusion. If the authority process exits before exclusion, record the failure and coordinate binding recovery with the Foundation before starting a replacement. After exclusion and closure, the incumbents can finish processing your confirmed retirement request independently of your authority. Keep your wallet available for the maturity and claim steps.
+The authority's enrolled key lives in the authority process. Keep its tmux window and the host running through the acknowledged exclusion. If the authority process exits before exclusion, record the failure and preserve its volume and fail-stop marker. Do not start a replacement: a retiring identity cannot be recovered in place (`validator recover` refuses it), and the remaining incumbents carry the shard until the exclusion. After exclusion and closure, the incumbents can finish processing your confirmed retirement request independently of your authority. Keep your wallet available for the maturity and claim steps.
 
 ## 1. Install the release
 
@@ -617,7 +685,7 @@ ubft validator status --custody "$CUSTODY" --sample 0 | grep '^clock'
 
 If the application has sent no registration, confirm a new window, stop only the pending authority using its saved `AUTHORITY_PID`, and start an authority for the confirmed successor using the existing registration policy and credentials. Write its node info to a fresh filename and select it with `validator init --force`. Keep the wallet, root key, shard peer identity and payee.
 
-If PoS registration already committed, keep the authority running and contact the Foundation before staging a replacement binding or delegation. Share the identity, committed receipts, confirmed target epoch and whether the bond committed. Ask the Foundation to check custody's generation, the current and staged VR bindings, and whether an open or published result can still select the existing key. For a bonded identity, `validator rotate` stages a binding at generation `g+1` while `validator apply` writes the delegation at the open custody generation `g`. Both transactions can succeed and still leave the identity ineligible at the P85 snapshot. This release has no verified self-service recovery for that state. Preserve the authority and bond while the Foundation confirms a supported path. If the authority has already stopped, follow [Authority loss](#authority-loss).
+If PoS registration already committed, keep the authority running. While it runs and holds its key, change keys only with `validator rotate`: on the PoS adapter it sends `admitDelegation` of the new words at custody's current generation first, then `VR.proposeBinding` of the identical words, and a re-run resumes. `validator apply` on a bonded identity refuses a delegation that is not VR's current or staged binding and points to `rotate`. Rotate refuses a root-key change, and it refuses to replace a staged binding that an open election result froze. If the authority has already stopped, follow [Authority loss](#authority-loss): preserve the old volume and marker and run `recover`.
 
 ## Troubleshooting
 

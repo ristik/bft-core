@@ -1,20 +1,17 @@
+diff --git a/crates/unicity/execution/tests/vr_hook.rs b/crates/unicity/execution/tests/vr_hook.rs
+index e0ef9ba2b5..e5e1083e54 100644
 --- a/crates/unicity/execution/tests/vr_hook.rs
 +++ b/crates/unicity/execution/tests/vr_hook.rs
-@@ -80,11 +80,11 @@
- /// SHA-256 of `testdata/vr-hook-pos.json`, the copy of `test/vr/fixtures/vr-hook-pos.json` (the
- /// generator under `VR_BUILD=pos`: the PoS-capable VR build, H = 16).
- const FIXTURE_SHA256_POS: B256 =
--    alloy_primitives::b256!("dadd3f0be855a6a6c9d6c7b111f8be5ed0be6e7c0fe9d7bb6d3603915be57a76");
-+    alloy_primitives::b256!("2f948690477a47296d0161be9e1af98b5b6a66a7d9e2b00033126b6b9e027be7");
- /// The unicity-pos-contracts commit the fixture was copied from.
- const FIXTURE_SOURCE: &str = "vt14/genesis (ristik/unicity-pos-contracts, VT-14 combined fixtures)";
+@@ -85,7 +85,7 @@ const FIXTURE_SHA256_POS: B256 =
+ const FIXTURE_SOURCE: &str =
+     "unicity-pos-contracts e2b995b with the origin of the bft-core#1297 registry genesis (VRHookState ORIGIN)";
  const FIXTURE_SOURCE_POS: &str =
--    "vt04b/hook-pins (ristik/unicity-pos-contracts, the PoS-capable build, H = 16)";
+-    "unicity-pos-contracts f0e569c2 (bft-core#1286 package pin; byte-identical since 7e64c0c: ElectionPolicy, PosElectionAdapter, the PoS-capable build, H = 16)";
 +    "#1215 PoS compact, H = 16, cap-bounded hook fixture";
  /// Every scenario the generator (`test/vr/VRHookState.t.sol`) dumps, exactly.
  const SCENARIOS: [&str; 36] = [
      "attach-revert",
-@@ -298,10 +298,10 @@
+@@ -299,11 +299,11 @@ const POS: Build = Build {
      fixture_sha256: FIXTURE_SHA256_POS,
      fixture_source: FIXTURE_SOURCE_POS,
      h: 16,
@@ -23,7 +20,9 @@
      cap_output: 1_500_000,
      cap_record: 2_500_000,
 -    elect_requirement: 9_596_639,
+-    record_requirement: 19_926_554,
 +    elect_requirement: 16_000_000,
-     record_requirement: 19_926_554,
++    record_requirement: 19_926_696,
      batch_requirement: 43_320_364,
      retire_requirement: 43_605_367,
+     expected_hook_record_gas: 4_963_432,

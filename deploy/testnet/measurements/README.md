@@ -1,6 +1,6 @@
 # Sixteen-seat PoS hook measurement
 
-Use a private ureth worktree at `b61d3beebf9e08e900e3bb88f5e3b2d275bc1dec`. Apply `ureth-pos16.patch` there and copy `test/vr/fixtures/vr-hook-pos.json` from the matching unicity-pos-contracts revision to `crates/unicity/execution/testdata/vr-hook-pos.json`.
+Use a private ureth worktree at `dc6763ae195a5d1faf1959a45f5a5ec185130e4d` (ristik/ureth#112: unicity/main with the #1286 contracts fixtures; the registry genesis origin of #1297 is in the fixtures, so an older ureth revision does not elect under them). Apply `ureth-pos16.patch` there and copy `test/vr/fixtures/vr-hook-pos.json` from the matching unicity-pos-contracts revision to `crates/unicity/execution/testdata/vr-hook-pos.json`.
 
 Run from the ureth worktree. Set `MODULE_CODE_HASH` to the compiled PoS adapter hash from the verified genesis deployment and use an absolute path for the fresh measurement.
 

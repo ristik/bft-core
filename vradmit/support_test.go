@@ -144,3 +144,45 @@ func TestRuleSupportControl(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, tbl.Entries[0].Sig, back.Entries[0].Sig)
 }
+
+// An EVM-key-only rotation keeps the staking id, generation, root key and payee, but it is a new binding: a commitment made under the old
+// binding must not count for it (#1286), while a fresh commitment by the same root key does.
+func TestCommitmentDoesNotSurviveEVMOnlyRotation(t *testing.T) {
+	w := newWorld(t)
+	rule := vrschema.RuleID("fork-a")
+	sched := []vrschema.Activation{{RuleID: rule, RootEpoch: 9, State: vrschema.ActActive, ChangeID: 1}}
+	old := w.k[0]
+	rotated := old
+	rotated.EVMNodeID = old.EVMNodeID + "-rotated"
+	rotated.EVMKey = w.identity(5).EVMKey
+	require.NotEqual(t, old.BindingRef(), rotated.BindingRef())
+	require.Equal(t, old.RootKey, rotated.RootKey)
+
+	c := w.commitment(old, rule)
+	require.NoError(t, VerifyCommitment(c, old))
+	require.ErrorIs(t, VerifyCommitment(c, rotated), ErrSupport, "old-binding commitment against the rotated binding")
+
+	members := append([]evmassign.Identity{rotated}, w.k[1:]...)
+	_, err := ApplyRuleSupport(SupportTable{}, fxNetwork, []vrschema.SupportCommitment{c}, members, sched)
+	require.ErrorIs(t, err, ErrSupport, "ApplyRuleSupport refuses the old-binding commitment")
+
+	tbl, err := ApplyRuleSupport(SupportTable{}, fxNetwork, []vrschema.SupportCommitment{c}, w.k, sched)
+	require.NoError(t, err)
+	require.Len(t, tbl.Entries, 1)
+	require.Empty(t, tbl.Prune(members).Entries, "prune drops the old-binding entry")
+	require.Len(t, tbl.Prune(w.k).Entries, 1, "prune keeps it for the unchanged binding")
+
+	fresh := w.commitment(rotated, rule)
+	require.NoError(t, VerifyCommitment(fresh, rotated))
+	tbl, err = ApplyRuleSupport(SupportTable{}, fxNetwork, []vrschema.SupportCommitment{fresh}, members, sched)
+	require.NoError(t, err)
+	require.Len(t, tbl.Entries, 1)
+
+	// the binding ref is signed: rewriting it to the new binding invalidates the signature
+	forged := c
+	forged.BindingRef = fresh.BindingRef
+	require.ErrorIs(t, VerifyCommitment(forged, rotated), ErrSupport, "replayed signature under a rewritten binding ref")
+	short := c
+	short.BindingRef = short.BindingRef[:31]
+	require.ErrorIs(t, VerifyCommitment(short, old), ErrSupport, "shape")
+}

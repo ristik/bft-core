@@ -10,9 +10,11 @@ import uuid
 
 import handoff_ops
 import operator_rpc
+import vr_recover
 
 
-def advance(generation, epoch, evidence):
+def advance(generation, epoch, evidence, only=None):
+    """Advance the authorities of `only` (default: every validator) to `epoch` and restart their shard nodes."""
     manifest = json.loads((generation / 'manifest.json').read_text())
     if (manifest.get('pos') or {}).get('profile') != 'vr-pos16' or epoch < 2:
         raise ValueError('a VR/P85 Compose generation and an activated epoch of at least two are required')
@@ -37,7 +39,8 @@ def advance(generation, epoch, evidence):
         bundles.append((name, payload))
 
     def one(i):
-        credentials = generation / f'validator{i}/auth'
+        # the directory the authority runs in now: a recovered entity's is its node slot's (compose.recover.json, vr_recover.py)
+        credentials = vr_recover.authority_dir(generation, compose, i)
         proofs = []
         with tempfile.TemporaryDirectory(prefix='advance-', dir=credentials) as tmp:
             work = Path(tmp)
@@ -57,8 +60,9 @@ def advance(generation, epoch, evidence):
 
     # Every incumbent advances from the same proof. Restart only the shard
     # clients so they load the new sessions. The authority lifetimes survive.
-    with ThreadPoolExecutor(max_workers=manifest['validators']) as pool:
-        shards = list(pool.map(one, range(1, manifest['validators'] + 1)))
+    chosen = list(only or range(1, manifest['validators'] + 1))
+    with ThreadPoolExecutor(max_workers=len(chosen)) as pool:
+        shards = list(pool.map(one, chosen))
     subprocess.run([*cmd, 'restart', *shards], check=True)
 
 

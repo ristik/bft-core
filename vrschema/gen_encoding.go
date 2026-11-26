@@ -538,7 +538,9 @@ func abiJSON(vals []any) []any {
 func fxSupport(id uint64, rule, release Word) SupportCommitment {
 	sid := U64(id)
 	kh := keccak(pubOf(genKey(int(2 * id))))
-	c := SupportCommitment{Network: fxRootNetwork, StakingID: sid[:], Generation: 1, RootKeyHash: kh[:], RuleID: rule[:], ReleaseDigest: release[:]}
+	ref := Member{ID: id, Generation: 1, RootNodeWord: keccak([]byte(fmt.Sprintf("root-%d", id))), RootKeyHash: kh, EVMNodeWord: keccak([]byte(fmt.Sprintf("evm-%d", id))),
+		EVMKeyHash: keccak(pubOf(genKey(int(2*id + 1)))), Payee: [20]byte{byte(id)}}.BindingRef()
+	c := SupportCommitment{Network: fxRootNetwork, StakingID: sid[:], Generation: 1, RootKeyHash: kh[:], BindingRef: ref[:], RuleID: rule[:], ReleaseDigest: release[:]}
 	msg, err := c.SignedBytes()
 	if err != nil {
 		panic(err)

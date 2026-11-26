@@ -13,7 +13,7 @@ import (
 )
 
 // Rule support (design section 7.3, schema section 10.4). A commitment is signed by one binding's root key; it counts only for that exact
-// binding (stakingID, generation, rootKeyHash), so a binding replacement invalidates it. The committed table is part of the control
+// binding (stakingID, generation, rootKeyHash, bindingRef), so a binding replacement invalidates it. The committed table is part of the control
 // state digest and holds at most 16 members x 64 rules.
 
 var (
@@ -23,11 +23,19 @@ var (
 	ErrSupportWait = fmt.Errorf("%w: support is not sufficient yet", ErrSupport)
 )
 
-// VerifyCommitment checks that c is m's exact binding's commitment: the staking id and generation are m's, rootKeyHash is
-// keccak256(m.RootKey), and the signature verifies by m.RootKey over the commitment's signed bytes.
+// BindsTo reports whether c names exactly m's binding: the staking id and generation are m's, rootKeyHash is keccak256(m.RootKey), and
+// bindingRef is m's registry binding ref (root and EVM node ids and keys and payee), so a commitment made under an earlier binding of
+// the same identity (for example before an EVM-key-only rotation) never counts for the current one.
+func BindsTo(c vrschema.SupportCommitment, m evmassign.Identity) bool {
+	ref := m.BindingRef()
+	return bytes.Equal(c.StakingID, m.StakingID) && c.Generation == m.Generation && bytes.Equal(c.RootKeyHash, ethcrypto.Keccak256(m.RootKey)) &&
+		bytes.Equal(c.BindingRef, ref[:])
+}
+
+// VerifyCommitment checks that c is m's exact binding's commitment (BindsTo), and that the signature verifies by m.RootKey over the
+// commitment's signed bytes.
 func VerifyCommitment(c vrschema.SupportCommitment, m evmassign.Identity) error {
-	kh := ethcrypto.Keccak256(m.RootKey)
-	if !bytes.Equal(c.StakingID, m.StakingID) || c.Generation != m.Generation || !bytes.Equal(c.RootKeyHash, kh) {
+	if !BindsTo(c, m) {
 		return fmt.Errorf("%w: commitment is not by the current binding of %x", ErrSupport, m.StakingID)
 	}
 	msg, err := c.SignedBytes()
@@ -142,12 +150,12 @@ func (t SupportTable) Add(cs ...vrschema.SupportCommitment) (SupportTable, error
 }
 
 // Prune drops the entries of every binding outside keep: the acknowledged committee and any pending K (design section 7.3). An entry of a
-// kept staking id whose generation or key is no longer that binding's is dropped too, because it can never count again.
+// kept staking id whose generation, key or binding ref is no longer that binding's is dropped too, because it can never count again.
 func (t SupportTable) Prune(keep []evmassign.Identity) SupportTable {
 	var out []vrschema.SupportCommitment
 	for _, e := range t.Entries {
 		for _, m := range keep {
-			if bytes.Equal(e.StakingID, m.StakingID) && e.Generation == m.Generation && bytes.Equal(e.RootKeyHash, ethcrypto.Keccak256(m.RootKey)) {
+			if BindsTo(e, m) {
 				out = append(out, e)
 				break
 			}
@@ -350,9 +358,8 @@ func VerifyRuleSupport(in SupportInput) error {
 }
 
 func covers(cs []vrschema.SupportCommitment, m evmassign.Identity, rule vrschema.Word, network uint64) bool {
-	kh := ethcrypto.Keccak256(m.RootKey)
 	for _, c := range cs {
-		if bytes.Equal(c.StakingID, m.StakingID) && c.Generation == m.Generation && bytes.Equal(c.RootKeyHash, kh) &&
+		if BindsTo(c, m) &&
 			bytes.Equal(c.RuleID, rule[:]) && c.Network == network {
 			return true
 		}
@@ -397,7 +404,7 @@ func MaterializeJ(t SupportTable, readiness []vrschema.Readiness, keep []evmassi
 	var cs []vrschema.SupportCommitment
 	for _, r := range readiness {
 		for _, c := range r.Commitments {
-			if m, ok := memberByID(keep, c.StakingID); ok && m.Generation == c.Generation && bytes.Equal(c.RootKeyHash, ethcrypto.Keccak256(m.RootKey)) {
+			if m, ok := memberByID(keep, c.StakingID); ok && BindsTo(c, m) {
 				cs = append(cs, c)
 			}
 		}
@@ -438,7 +445,7 @@ func KEvidenceSupport(in SupportInput) (SupportTable, error) {
 	var cs []vrschema.SupportCommitment
 	exactK := func(c vrschema.SupportCommitment) bool {
 		m, ok := memberByID(in.K, c.StakingID)
-		return ok && m.Generation == c.Generation && bytes.Equal(c.RootKeyHash, ethcrypto.Keccak256(m.RootKey)) && c.Network == in.Network
+		return ok && BindsTo(c, m) && c.Network == in.Network
 	}
 	for _, c := range in.Evidence.Fresh {
 		if exactK(c) {

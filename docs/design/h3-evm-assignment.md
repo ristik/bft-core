@@ -21,6 +21,26 @@ candidate gains an optional EVM assignment. There is no separate shard-handoff p
   key (co-hosted processes never share keys). Root members and the assignment change together in one handoff
   (`evmassign.ErrCombined` is removed). An EVM validator change with an unchanged committee is refused
   (`ErrEVMOnly`); an identical committee and identical EVM validators (a configuration-only boundary) is allowed.
+  **Binding replacement (#1286, astra).** One exception: with the root committee identical (node id, signing key and weight,
+  order-independent), a retained root entity may replace its delegated EVM node id and key in an authenticated assignment
+  handoff (`evmassign.RebindingOnly`, the one predicate every verifier runs: admission, endorsement, block validation and
+  recovery, replay included). Each binding is checked against that entity's own binding in the frozen incumbent K (the
+  candidate's authorization, bound to the installed configuration by its assignment hash): it is either kept exactly or
+  replaced by a node id and key the installed set does not hold, at the same weight. A swap of delegates between entities
+  (also with an unchanged EVM set), an EVM validator added or removed without its root entity, a weight or count change and a
+  key change under a kept node id stay refused, and a candidate without the frozen authorization (the legacy path) stays
+  fenced. Everything else is the handoff's as for any other: every successor key's possession proof over its node id,
+  the assignment hash (which carries the successor identities digest), network and shard, predecessor root BodyID and attempt
+  (a retry needs fresh attempt-bound proofs). The frozen parent P is deliberately not in the possession context
+  (`evmassign.PoPContext`): the root binds P at the Prepare record, after the proofs are collected, and the Freeze's FrozenID
+  commits to it, so the same attempt and predecessor name one candidate; the old root quorum's endorsement; the root epoch `e → e+1` even with identical root keys and the shard epoch
+  `s → s+1`; the continuity budget and the membership, weight and non-membership configuration checks. The fresh node verifies
+  and restores the frozen parent P before signing, and the successor's first block is the acknowledgement-only child of P under
+  the new shard trust base; the retired key is not in it and gains no signing weight in `s+1`.
+  The recovery of a committed, unacknowledged rebinding primary reinstalls exactly the authorized K (`evmassign.RecoversK`: the
+  identities are K, the bindings K's own, the EVM set K's; its lineage is `VerifyLifecycle`'s). A rebinding is one replaced member
+  for the continuity check (removed = added = 1, M = 2): with three equal-weight members, or a member above a third of the weight,
+  no such election passes (`ErrTurnover`, overlap not above 2/3), and that identity takes the exit path.
   Where the EVM shard configuration carries `validator_coupling=true` (set at genesis, hashed with the configuration),
   the legacy root-only freeze companion may not change the committee either: block validation in every root
   validator refuses it (`ErrCoupling`), so no path adds a root entity without its EVM binding. The binding is

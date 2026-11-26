@@ -118,7 +118,7 @@ func TestProposalControlRoom(t *testing.T) {
 	for i := range commitments {
 		id := make([]byte, 32)
 		id[0], id[1] = byte(i>>8), byte(i)
-		commitments[i] = drctypes.SupportCommitment{Network: 1<<64 - 1, StakingID: id, Generation: 1<<64 - 1, RootKeyHash: make([]byte, 32),
+		commitments[i] = drctypes.SupportCommitment{Network: 1<<64 - 1, StakingID: id, Generation: 1<<64 - 1, RootKeyHash: make([]byte, 32), BindingRef: make([]byte, 32),
 			RuleID: make([]byte, 32), ReleaseDigest: make([]byte, 32), Sig: make([]byte, 65)}
 	}
 	controls := make([]drctypes.PosControl, drctypes.MaxPosControls)

@@ -70,6 +70,7 @@ class HandoffLapsed(HandoffError):
 
 JOINER_OVERRIDE = 'compose.joiner.json'
 RESTORE_OVERRIDE = 'compose.joiner-restore.json'   # exists only while the joiner's shard node is being restored
+RECOVER_OVERRIDE = 'compose.recover.json'   # vr_recover.py (#1286): a recovered entity's authority, root and shard node on its fresh node slot
 
 
 def compose_files(generation):
@@ -77,7 +78,7 @@ def compose_files(generation):
     authority and execution client are then entities of every operation like the genesis ones)."""
     generation = Path(generation)
     files = ['-f', str(generation / 'compose.yaml')]
-    for name in (JOINER_OVERRIDE, RESTORE_OVERRIDE):
+    for name in (JOINER_OVERRIDE, RESTORE_OVERRIDE, RECOVER_OVERRIDE):
         if (generation / name).is_file():
             files += ['-f', str(generation / name)]
     return files
@@ -89,9 +90,10 @@ def load_compose(generation):
     compose = json.loads((generation / 'compose.yaml').read_text())
     if (generation / JOINER_OVERRIDE).is_file():
         compose['services'] = {**compose['services'], **json.loads((generation / JOINER_OVERRIDE).read_text())['services']}
-    if (generation / RESTORE_OVERRIDE).is_file():
-        for name, change in json.loads((generation / RESTORE_OVERRIDE).read_text())['services'].items():
-            compose['services'][name] = {**compose['services'][name], **change}
+    for override in (RESTORE_OVERRIDE, RECOVER_OVERRIDE):
+        if (generation / override).is_file():
+            for name, change in json.loads((generation / override).read_text())['services'].items():
+                compose['services'][name] = {**compose['services'][name], **change}
     return compose
 
 

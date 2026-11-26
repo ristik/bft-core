@@ -236,7 +236,7 @@ func (w *world) readiness(i evmassign.Identity, slot uint64, candidate []byte, c
 func (w *world) commitment(i evmassign.Identity, rule vrschema.Word) vrschema.SupportCommitment {
 	kh := ethcrypto.Keccak256(i.RootKey)
 	rel := vrschema.Keccak([]byte("release"))
-	c := vrschema.SupportCommitment{Network: fxNetwork, StakingID: i.StakingID, Generation: i.Generation, RootKeyHash: kh, RuleID: rule[:], ReleaseDigest: rel[:]}
+	c := vrschema.SupportCommitment{Network: fxNetwork, StakingID: i.StakingID, Generation: i.Generation, RootKeyHash: kh, BindingRef: refOf(i), RuleID: rule[:], ReleaseDigest: rel[:]}
 	msg, err := c.SignedBytes()
 	require.NoError(w.t, err)
 	c.Sig, err = w.signer(i.StakingID).signer.SignBytes(msg)
@@ -294,3 +294,6 @@ func (w *world) admission() Admission {
 }
 
 type evmassignIdentity = evmassign.Identity
+
+// refOf is i's registry binding ref as a commitment field.
+func refOf(i evmassign.Identity) []byte { r := i.BindingRef(); return r[:] }

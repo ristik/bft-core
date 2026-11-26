@@ -32,6 +32,7 @@ var CustodyABI = mustABI(`[
  {"type":"function","name":"mature","stateMutability":"nonpayable","inputs":[{"name":"lotIDs","type":"uint256[]"}],"outputs":[]},
  {"type":"function","name":"claim","stateMutability":"nonpayable","inputs":[{"name":"amount","type":"uint256"},{"name":"to","type":"address"}],"outputs":[]},
  {"type":"function","name":"election","stateMutability":"view","inputs":[],"outputs":[{"name":"","type":"address"}]},
+ {"type":"function","name":"evidence","stateMutability":"view","inputs":[],"outputs":[{"name":"","type":"address"}]},
  {"type":"function","name":"network","stateMutability":"view","inputs":[],"outputs":[{"name":"","type":"bytes32"}]},
  {"type":"function","name":"registerNonce","stateMutability":"view","inputs":[{"name":"","type":"address"}],"outputs":[{"name":"","type":"uint64"}]},
  {"type":"function","name":"bondUnit","stateMutability":"view","inputs":[],"outputs":[{"name":"","type":"uint128"}]},
@@ -40,6 +41,10 @@ var CustodyABI = mustABI(`[
  {"type":"function","name":"positions","stateMutability":"view","inputs":[{"name":"","type":"uint64"}],"outputs":[{"name":"owner","type":"address"},{"name":"withdrawal","type":"address"},{"name":"rootKeyHash","type":"bytes32"},{"name":"stagedRootKeyHash","type":"bytes32"},{"name":"generation","type":"uint64"},{"name":"roleNonce","type":"uint64"},{"name":"openLots","type":"uint32"},{"name":"lotCount","type":"uint32"},{"name":"retirementRequested","type":"bool"}]},
  {"type":"event","name":"CreditClaimed","anonymous":false,"inputs":[{"name":"creditor","type":"address","indexed":true},{"name":"to","type":"address","indexed":true},{"name":"amount","type":"uint256","indexed":false}]},
  {"type":"event","name":"Registered","anonymous":false,"inputs":[{"name":"id","type":"uint64","indexed":true},{"name":"owner","type":"address","indexed":true},{"name":"rootKeyHash","type":"bytes32","indexed":false},{"name":"withdrawal","type":"address","indexed":false}]}]`)
+
+// EvidenceABI is the Evidence view a key change reads (#1286): an identity excluded by evidence takes the exit path.
+var EvidenceABI = mustABI(`[
+ {"type":"function","name":"excluded","stateMutability":"view","inputs":[{"name":"id","type":"uint64"}],"outputs":[{"name":"","type":"bool"}]}]`)
 
 // PosElectionABI is ElectionPolicy's admitDelegation and the views the CLI reads.
 var PosElectionABI = mustABI(`[

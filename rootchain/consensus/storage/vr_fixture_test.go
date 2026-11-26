@@ -338,7 +338,7 @@ func (f *vxFixture) readiness(i evmassign.Identity, slot uint64, cs []vrschema.S
 func (f *vxFixture) commitment(i evmassign.Identity, rule vrschema.Word) vrschema.SupportCommitment {
 	kh := ethcrypto.Keccak256(i.RootKey)
 	rel := vrschema.Keccak([]byte("release"))
-	c := vrschema.SupportCommitment{Network: vxNetwork, StakingID: i.StakingID, Generation: i.Generation, RootKeyHash: kh, RuleID: rule[:], ReleaseDigest: rel[:]}
+	c := vrschema.SupportCommitment{Network: vxNetwork, StakingID: i.StakingID, Generation: i.Generation, RootKeyHash: kh, BindingRef: refOf(i), RuleID: rule[:], ReleaseDigest: rel[:]}
 	msg, err := c.SignedBytes()
 	require.NoError(f.t, err)
 	c.Sig, err = f.signer(i.StakingID).signer.SignBytes(msg)
@@ -456,3 +456,6 @@ func (f *vxFixture) v5Bytes() []byte {
 	require.NoError(f.t, err)
 	return raw
 }
+
+// refOf is i's registry binding ref as a commitment field.
+func refOf(i evmassign.Identity) []byte { r := i.BindingRef(); return r[:] }
