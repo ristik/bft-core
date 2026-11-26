@@ -38,9 +38,9 @@
   "elect": 11660689,
   "h": 16,
   "invariant": "vr-v1-single-live-output",
-  "moduleCodeHash": "0x307acec9fb72fd6f7b1b1166295790daecb49be4fad00103f550d92164a9e231",
+  "moduleCodeHash": "0x64e35cd3b0ab61ca73a86a072b63a2a9a9455a2efc97652f30f592f7297538e2",
   "records": 43606278,
   "registry": "0xff00000000000000000000000000000000000003",
   "registryCodeHash": "0xbd919cb812ebf204a45fce24526dd06460f93fa53a1a212d4501c8e02e8233ff",
-  "source": "ureth tests/vr_hook.rs over testdata/vr-hook-pos.json sha256 0xe2273a50e21bb557289c46fbb84e3e555a3bab64f1f5cb53cf1dbf0a90058493 (#1215 PoS compact, H = 16, cap-bounded hook fixture); module code hash 0x307acec9fb72fd6f7b1b1166295790daecb49be4fad00103f550d92164a9e231 supplied by VR_HOOK_MODULE_CODE_HASH (cap-bounded module paths)"
+  "source": "ureth tests/vr_hook.rs over testdata/vr-hook-pos.json sha256 0xe2273a50e21bb557289c46fbb84e3e555a3bab64f1f5cb53cf1dbf0a90058493 (#1215 PoS compact, H = 16, cap-bounded hook fixture); module code hash 0x64e35cd3b0ab61ca73a86a072b63a2a9a9455a2efc97652f30f592f7297538e2 supplied by VR_HOOK_MODULE_CODE_HASH (cap-bounded module paths)"
 }

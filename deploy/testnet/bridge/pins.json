@@ -1,7 +1,7 @@
 {
   "comment": "Testnet bridge tools source pins. dnb-tool is built from the node image bft pin in ../pins.json. The contracts and wallet commits include NB2 v1.1; a deployment records and verifies its own runtime and release limits.",
-  "contracts": "d8ee941e7fef38504a2b39a9a623fb4390ce4cb2",
-  "native-bridge-plugins": "f0e037a9c5df73b027d11cb3b1b1da55b5af7971",
+  "contracts": "d86eb106dab30a5e9f84d38f7d774b6d5bf7890e",
+  "native-bridge-plugins": "14974d0ce275b61abc3620c021130896197978f1",
   "node": "node:22.23.4-bookworm-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d",
   "go": "golang:1.25.14-bookworm@sha256:3b4a11519ad929d1e1d261a12cff056f0c85b735253d7d861346b9c6f8b36437",
   "foundry": {
