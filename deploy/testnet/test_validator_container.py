@@ -47,6 +47,61 @@ class ValidatorContainer(unittest.TestCase):
                 validator.bootstrap(settings, {'sha256sums':hashlib.sha256(b'expected').hexdigest()})
             tool.assert_not_called()
 
+    def test_the_release_ships_the_retired_root_keys_to_the_home_apply_reads(self):
+        """#1297/#1309: a release that lists retired-root-keys.json gets it into /data/release, where `ubft validator apply` and `rotate`
+        read it by default (release/retired-root-keys.json under the validator home), as on a host install; a volume bootstrapped
+        without it fetches the same authenticated file on its next start; a release without the list still bootstraps."""
+        def release(with_list):
+            files = {name: f'{name} bytes'.encode() for name in validator.FILES}
+            files['seed/manifest.json'] = b'{}'
+            if with_list:
+                files['retired-root-keys.json'] = b'{"format":"unicity-retired-root-keys/1","keyHashes":[]}'
+            files['utb-genesis.id'] = b'0xpin\n'
+            return files
+
+        def run(files, home, bins):
+            served = dict(files)
+            sums = ''.join(f'{hashlib.sha256(data).hexdigest()}  {name}\n' for name, data in sorted({**served, **bins}.items())).encode()
+            served['SHA256SUMS'] = sums
+
+            def download(url, _limit):
+                return served[url.split('/release/', 1)[1]]
+
+            def tool(*args, **_):
+                if args[:2] == ('seed', 'restore-pin'):
+                    prefix = Path(args[args.index('--out') + 1])
+                    for name in ('seed-pin.uc.cbor', 'seed-pin.tr.cbor'):
+                        (prefix.parent/name).write_bytes(b'pin')
+                    return SimpleNamespace(stdout='epoch=1 bodyID=0x' + 'ab'*32)
+                return SimpleNamespace(stdout='')
+
+            paths = {}
+            for name, data in bins.items():
+                paths[name] = home.parent/name
+                paths[name].write_bytes(data)
+            with patch.object(validator, 'HOME', home), patch.object(validator, 'RELEASE', home/'release'), \
+                    patch.object(validator, 'BINARIES', {k: str(v) for k, v in paths.items()}), \
+                    patch.object(validator, 'download', side_effect=download), patch.object(validator, 'ubft', side_effect=tool):
+                validator.bootstrap(SimpleNamespace(release_url='http://127.0.0.1:1/release'),
+                                    {'sha256sums': hashlib.sha256(sums).hexdigest(), 'utb_genesis_id': '0xpin'})
+
+        bins = {'ubft': b'ubft', 'unicity-reth': b'reth'}
+        with tempfile.TemporaryDirectory() as path:
+            home = Path(path)/'data'
+            home.mkdir()
+            files = release(True)
+            run(files, home, bins)
+            self.assertEqual((home/'release'/'retired-root-keys.json').read_bytes(), files['retired-root-keys.json'])
+            (home/'release'/'retired-root-keys.json').unlink()   # a volume from an image that did not fetch it
+            run(files, home, bins)
+            self.assertEqual((home/'release'/'retired-root-keys.json').read_bytes(), files['retired-root-keys.json'])
+        with tempfile.TemporaryDirectory() as path:
+            home = Path(path)/'data'
+            home.mkdir()
+            run(release(False), home, bins)
+            self.assertFalse((home/'release'/'retired-root-keys.json').exists())
+            self.assertTrue((home/'bootstrap.json').exists())
+
     def test_lost_authority_lifetime_cannot_generate_a_replacement(self):
         with tempfile.TemporaryDirectory() as path:
             home = Path(path)
@@ -361,3 +416,21 @@ class VRRecoverStage(unittest.TestCase):
         names = [n for n, _ in rehearse.VR_STAGES]
         self.assertEqual(names[:3], ['vr-pos-publish', 'vr-pos-advance', 'vr-pos-recover'])
         self.assertTrue(hasattr(rehearse.Rehearsal, 'vr_pos_recover'))
+
+    def test_the_late_joiner_runs_after_two_handoffs_with_the_containers_shard_command(self):
+        """#1309: vr-late-joiner follows vr-pos-recover (root epoch 3) and starts the joiner as the validator container does: `restore` from
+        the pin, without --follow-source and without a paired root."""
+        import rehearse
+        import vr_late_joiner
+        names = [n for n, _ in rehearse.VR_STAGES]
+        self.assertEqual(names[names.index('vr-pos-recover') + 1], 'vr-late-joiner')
+        self.assertTrue(hasattr(rehearse.Rehearsal, 'vr_late_joiner'))
+        entry = ['ubft', 'shard-node', 'run', '--home', '/state', '--follow-source', '/dns4/shard1/tcp/9000/p2p/x',
+                 '--paired-activation-rpc', 'http://127.0.0.1:1', '--q3-lane']
+        out = vr_late_joiner.restore_entry(entry, '0x' + 'ab'*32)
+        self.assertEqual(out[:3], ['ubft', 'shard-node', 'restore'])
+        self.assertNotIn('--follow-source', out)
+        self.assertNotIn('--paired-activation-rpc', out)
+        self.assertEqual(out[-6:], ['--tip-uc', '/state/tip.uc.cbor', '--tip-tr', '/state/tip.tr.cbor', '--trust-body-id', '0x' + 'ab'*32])
+        self.assertIn('--q3-lane', out)
+        self.assertEqual(entry[2], 'run', 'the cloned entry is not changed in place')

@@ -563,6 +563,11 @@ class Rehearsal:
         import vr_recover
         vr_recover.vr_pos_publish(self)
 
+    def vr_late_joiner(self):
+        """#1309: a joiner's shard node restored from an epoch-1 pin after two root handoffs, as the validator container starts it, then restarted (vr_late_joiner.py)."""
+        import vr_late_joiner
+        vr_late_joiner.vr_late_joiner(self)
+
     def vr_pos_recover(self):
         """#1286: one genesis validator's authority is lost; the identity recovers in place on a fresh EVM node identity (vr_recover.py)."""
         import vr_recover
@@ -1973,7 +1978,7 @@ POS_STAGES = (('pos-smoke', 'pos_smoke'), ('pos-observe', 'pos_observe'), ('pos-
 POS_STAGE_NAMES = frozenset(n for n, _ in POS_STAGES)
 # Stages of the package built with --utb (the signed trust-base history, either aggregator): not in the hosted-runner rehearsal, whose package is the one without it. They run after the PoS stages.
 UTB_STAGES = (('utb-live', 'utb_live'),)
-VR_STAGES = (('vr-pos-publish', 'vr_pos_publish'), ('vr-pos-advance', 'vr_pos_advance'), ('vr-pos-recover', 'vr_pos_recover'))
+VR_STAGES = (('vr-pos-publish', 'vr_pos_publish'), ('vr-pos-advance', 'vr_pos_advance'), ('vr-pos-recover', 'vr_pos_recover'), ('vr-late-joiner', 'vr_late_joiner'))
 
 
 def main():

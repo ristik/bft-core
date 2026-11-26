@@ -42,6 +42,10 @@ FILES = frozenset({
     'full-shard-conf.json', 'b1-profile.json', 'trust-base.json', 'utb-genesis.cbor', 'utb-genesis.id',
     'ureth-flags.txt', 'fee-collector.txt', 'aggregator-conf.json', 'root-peers.txt', 'shard-peers.txt',
 })
+# #1297/#1309: shipped by a release made after the retired-root-key list existed (vr_release.py, root_keys.FILE). `ubft validator apply` and
+# `rotate` read release/retired-root-keys.json under the validator home (/data) by default, as the host package's do; a release without it
+# checks nothing.
+OPTIONAL_FILES = frozenset({'retired-root-keys.json'})
 BINARIES = {'ubft': '/usr/local/bin/ubft', 'unicity-reth': '/usr/local/bin/unicity-reth'}
 
 
@@ -172,7 +176,7 @@ def bootstrap(a, pins):
         if name in entries or any(part in ('.', '..') for part in name.split('/')):
             raise ValueError('duplicate or invalid release path')
         entries[name] = sha
-    release_files = FILES | {name for name in entries if name.startswith('seed/')}
+    release_files = FILES | (OPTIONAL_FILES & entries.keys()) | {name for name in entries if name.startswith('seed/')}
     if not (release_files | BINARIES.keys()) <= entries.keys() or 'seed/manifest.json' not in release_files:
         raise ValueError('release is missing a required file')
     for name, path in BINARIES.items():
@@ -180,6 +184,12 @@ def bootstrap(a, pins):
             raise ValueError(f'{name} differs from the authenticated release')
     if RELEASE.exists():
         for name in release_files:
+            if name in OPTIONAL_FILES and not (RELEASE/name).exists():
+                # a volume bootstrapped by an image that did not fetch it yet: the same authenticated release, so fetch it now
+                data = download(a.release_url + '/' + name, MAX_RELEASE_FILE)
+                if digest(data) != entries[name]:
+                    raise ValueError(f'release checksum mismatch: {name}')
+                write(RELEASE/name, data)
             if file_digest(RELEASE/name) != entries[name]:
                 raise ValueError(f'cached release file differs: {name}')
     else:

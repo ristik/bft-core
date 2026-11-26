@@ -55,24 +55,37 @@ func readRestoreCheckpoint(b *bolt.Bucket) (RestoreCheckpoint, error) {
 // ReadRestoreCheckpoint checks an existing file without initializing or
 // modifying it. The restore command uses this before it opens any BFT stores.
 func ReadRestoreCheckpoint(path string) (RestoreCheckpoint, error) {
+	c, _, err := ReadArchiveRestoreState(path)
+	return c, err
+}
+
+// ReadArchiveRestoreState is ReadRestoreCheckpoint that also reports whether an
+// archive restore into the file has completed: its replayed tip and recovery
+// anchor are installed (InstallReplayedTip, InstallSameEpochReplayedTip). The
+// stores of a completed restore are ordinary node stores from then on
+// (CheckArchiveRestoreComplete admits them), whatever the node has done since.
+func ReadArchiveRestoreState(path string) (RestoreCheckpoint, bool, error) {
 	fi, err := os.Lstat(path)
 	if err != nil {
-		return RestoreCheckpoint{}, err
+		return RestoreCheckpoint{}, false, err
 	}
 	if !fi.Mode().IsRegular() {
-		return RestoreCheckpoint{}, ErrSettings
+		return RestoreCheckpoint{}, false, ErrSettings
 	}
 	db, err := bolt.Open(path, 0o600, &bolt.Options{ReadOnly: true, Timeout: 3 * time.Second})
 	if err != nil {
-		return RestoreCheckpoint{}, err
+		return RestoreCheckpoint{}, false, err
 	}
 	defer db.Close()
 	var c RestoreCheckpoint
+	var complete bool
 	err = db.View(func(tx *bolt.Tx) error {
-		c, err = readRestoreCheckpoint(tx.Bucket(bucketName))
+		b := tx.Bucket(bucketName)
+		c, err = readRestoreCheckpoint(b)
+		complete = b != nil && b.Get(restoreAnchorKey) != nil
 		return err
 	})
-	return c, err
+	return c, complete, err
 }
 
 func (s *Store) RestoreCheckpoint() (RestoreCheckpoint, error) {
