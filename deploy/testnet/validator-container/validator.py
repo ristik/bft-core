@@ -22,9 +22,11 @@ import urllib.request
 HOME = Path('/data')
 RELEASE = HOME / 'release'
 CONFIG = HOME / 'validator.json'
-# #1286: the node slot names the authority, shard home and activation journal the node runs on. Slot 1 is the original layout
-# (authority/, evm/, shard-active.json). `recover` adds slot k >= 2 (authority-k/, evm-k/, shard-active-k.json): a fresh authority,
-# a fresh shard node key and an empty shard data directory. A slot's directories are never reused once its authority lifetime started.
+# #1286: the node slot names the authority, shard home, execution data and activation journal the node runs on. Slot 1 is the original
+# layout (authority/, evm/, ureth/, shard-active.json). `recover` adds slot k >= 2 (authority-k/, evm-k/, ureth-k/, shard-active-k.json):
+# a fresh authority, a fresh shard node key, an empty shard data directory and an empty execution data directory (a fresh shard node
+# cannot admit an execution head certified in an epoch its own verified history does not hold yet: it syncs the execution from genesis,
+# as a joiner does). A slot's directories are never reused once its authority lifetime started.
 SLOT, RECOVERY = 'node-slot', 'recover.json'   # under HOME
 RECOVERING = ('authority', 'transactions', 'linking', 'electing', 'activation')
 LOCK = '/opt/validator/release-lock.json'
@@ -76,6 +78,11 @@ def evm_name(k):
 
 def evm_dir(k=None):
     return HOME/evm_name(slot() if k is None else k)
+
+
+def ureth_dir(k=None):
+    k = slot() if k is None else k
+    return HOME/('ureth' if k == 1 else f'ureth-{k}')
 
 
 def active_file(k=None):
@@ -506,7 +513,7 @@ def node(a, pins):
         private_rpc = ['--allow-private-http'] if pins.get('private_rehearsal') else []
         start('rpc', ['python3', '/opt/validator/validator_rpc.py', '--upstream', n['rpc'], '--listen-port', 18485,
                       *private_rpc])
-        start('ureth', ['unicity-reth', 'node', '--chain', RELEASE/'genesis.json', '--datadir', HOME/'ureth',
+        start('ureth', ['unicity-reth', 'node', '--chain', RELEASE/'genesis.json', '--datadir', ureth_dir(k),
               '--p2p-secret-key', HOME/'ureth-key/p2p-secret', '--disable-discovery', '--addr', '127.0.0.1', '--port', n['ports'][2],
               '--ipcdisable', '--http', '--http.addr', '127.0.0.1', '--http.port', 18552, '--http.api', 'eth,net,debug',
               '--unicity.archive-state-proofs', '--authrpc.addr', '127.0.0.1', '--authrpc.port', 18553,
@@ -742,7 +749,7 @@ def next_slot():
     """A slot no directory or journal of this volume has used: above every existing one, so a marked slot is never reused."""
     used = [1, slot()]
     for path in HOME.iterdir():
-        found = re.fullmatch(r'(?:authority|evm|seed|shard-active)-([1-9][0-9]{0,3})(?:\.json)?', path.name)
+        found = re.fullmatch(r'(?:authority|evm|ureth|seed|shard-active)-([1-9][0-9]{0,3})(?:\.json)?', path.name)
         if found:
             used.append(int(found[1]))
     return max(used) + 1
@@ -806,7 +813,8 @@ def recover(a, pins):
             with lock('.tx.lock', wait=True):
                 ubft('validator', 'recover', '--old-authority-home', auth_name(old),
                      '--new-evm-authority-socket', f'{d.name}/operator.sock',
-                     '--new-evm-authority-credential', f'{d.name}/operator.cred', '--new-evm-node-info', f'{d.name}/node-info.json')
+                     '--new-evm-authority-credential', f'{d.name}/operator.cred', '--new-evm-node-info', f'{d.name}/node-info.json',
+                     '--wait', '10m', timeout=1800)   # the committee certifies on n-1 signers; a re-run resumes either way
             journal(HOME/RECOVERY, 'linking', **{k: rec[k] for k in ('id', 'old', 'new', 'scope')})
         if read(HOME/RECOVERY)['phase'] == 'linking':
             configure_authority(new)

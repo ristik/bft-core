@@ -3,7 +3,8 @@
 
 A new EVM key is a new EVM node identity. The stage kills only validator i's authority container (by its exact name), keeps that authority's
 directory and fail-stop marker, and builds a fresh node slot beside it, validator<i>/recover-<k>/: a fresh authority directory (auth/), a fresh
-shard node key in an empty shard home (evm/) and an empty archive. `ubft validator recover` (the owner's key, the unchanged root key) admits the
+shard node key in an empty shard home (evm/), an empty archive and an empty execution data directory (ureth/: a fresh shard node cannot
+admit an execution head certified in an epoch its own verified history does not hold yet, so it syncs the execution from genesis, as a joiner). `ubft validator recover` (the owner's key, the unchanged root key) admits the
 delegation of the new EVM node and key at custody's generation, then stages the identical VR binding. compose.recover.json points the
 entity's authority, root (possession-proof endpoint) and shard node at the slot; the shard node starts as a staging-only joiner that follows
 the other shard nodes. Every frozen member then submits its own possession proof (the stage runs each member's `pos-publish --participate`)
@@ -30,7 +31,7 @@ import handoff_ops
 import operator_rpc
 
 OPERATOR = ['--operator-socket', '/authority/operator.sock', '--operator-credential', '/authority/operator.cred']
-NODE_PARTS = ('auth', 'evm', 'archive')
+NODE_PARTS = ('auth', 'evm', 'archive', 'ureth')
 
 
 def b64int(value):
@@ -123,7 +124,8 @@ def authority_entrypoint(entry, evm_node, root_epoch, shard_epoch, trust, genesi
 
 
 def recover_services(compose, i, slot, evm_node, root_epoch, shard_epoch, trust, genesis_hash):
-    """compose.recover.json's services for entity i on node slot `slot` (validator<i>/recover-<slot>/): its authority, root and shard node."""
+    """compose.recover.json's services for entity i on node slot `slot` (validator<i>/recover-<slot>/): its authority, root, execution client
+    and shard node."""
     base = f'./validator{i}/recover-{slot}'
     svc = compose['services']
     authority = dict(svc[f'authority{i}'])
@@ -142,7 +144,9 @@ def recover_services(compose, i, slot, evm_node, root_epoch, shard_epoch, trust,
         others = [b for b in entry[entry.index('--bootnodes') + 1].split(',') if '/dns4/shard' in b]
         entry += ['--follow-source', ','.join(others)]
     shard['entrypoint'] = entry
-    return {f'authority{i}': authority, f'root{i}': root, f'shard{i}': shard}
+    ureth = dict(svc[f'ureth{i}'])
+    ureth['volumes'] = replace_volume(ureth['volumes'], '/state', f'{base}/ureth')
+    return {f'authority{i}': authority, f'root{i}': root, f'shard{i}': shard, f'ureth{i}': ureth}
 
 
 def operator_config(manifest, deployment, payee, ident):
@@ -260,6 +264,7 @@ class Recovery:
         ident, payee, root_node, old_evm = genesis_identity(gen, i)
         old_auth = authority_dir(gen, self.compose, i)
         old_evm_dir = (gen / mount_source(self.compose['services'][f'shard{i}'], '/state')).resolve()
+        old_ureth_dir = (gen / mount_source(self.compose['services'][f'ureth{i}'], '/state')).resolve()
         r.say(f'  validator {i}: identity {ident}, root {root_node}, EVM node {old_evm}; transactions through pod{live}')
         home = self.home(i, f'recover-operator')
         before = self.status(live, home, old_auth)
@@ -280,13 +285,19 @@ class Recovery:
         r.expect(bool(name) and name.startswith(self.project + '-'), f'authority{i} runs as a container of this generation', str(name))
         subprocess.run(['docker', 'rm', '-f', name], check=True, capture_output=True)
         r.expect(self.container(f'authority{i}') is None, f'only {name} was removed; its directory and marker stay', str(old_auth))
+        lost = time.monotonic()
+        # the committee certifies on n-1 signers again (the fault transition) before the owner's transactions are sent
+        first = int(r.call('eth_blockNumber'), 16)
+        resumed = r.wait('the chain makes progress without the lost signer', lambda: (lambda b: b if b >= first + 2 else None)(int(r.call('eth_blockNumber'), 16)), 900)
+        r.say(f'  blocks {first} -> {resumed}, {time.monotonic() - lost:.0f} s after the loss')
 
-        # 2. the fresh slot: authority directory, shard node key, empty shard data and archive
+        # 2. the fresh slot: authority directory, shard node key, empty shard data, archive and execution data
         k = next_slot(gen, i)
         slot = gen / f'validator{i}/recover-{k}'
         auth = slot / 'auth'
         (auth / 'pop').mkdir(parents=True, mode=0o700)
-        (slot / 'archive').mkdir(mode=0o700)
+        for part in ('archive', 'ureth'):
+            (slot / part).mkdir(mode=0o700)
         subprocess.run([str(r.ubft), 'shard-node', 'init', '--home', str(slot / 'evm'), '--generate'], check=True, capture_output=True)
         new_evm = subprocess.run([str(r.ubft), 'node-id', '--home', str(slot / 'evm')], check=True, capture_output=True, text=True).stdout.strip().splitlines()[-1]
         r.expect(new_evm != old_evm, 'the fresh shard node key is a new EVM node identity', new_evm)
@@ -326,6 +337,11 @@ class Recovery:
         r.expect(new_status['signingKeyFingerprint'] != old_status['signingKeyFingerprint'], 'the fresh authority holds a new key',
                  new_status['signingKeyFingerprint'])
         mounts = [(old_auth, '/home/authority:ro'), (auth, '/home/authority-new')]
+        # A result that is open now froze the old, dead key: it never publishes and ends only by RejectResult after its reservation
+        # lifetime (the incumbents continue meanwhile). Recovery fences later snapshots only, so the rehearsal needs none open here.
+        open_before = r.view_text(self.deployment['election'], 'openResult()(bytes32)').strip()
+        r.expect(int(open_before, 16) == 0, 'no election result is open before the delegation (an open one froze the old key and only '
+                 'RejectResult ends it: rehearse with an election cadence longer than the recovery)', open_before)
         refused = self.cli(live, home, 'validator', 'recover', '--old-authority-home', 'authority-new', '--new-evm-authority-socket',
                            'authority-new/operator.sock', '--new-evm-authority-credential', 'authority-new/operator.cred',
                            '--new-evm-node-info', 'authority-new/node-info.json', mounts=mounts, check=False)
@@ -333,37 +349,25 @@ class Recovery:
                  r.scrub(refused.stderr.strip()[-200:]))
         done = self.cli(live, home, 'validator', 'recover', '--old-authority-home', 'authority', '--new-evm-authority-socket',
                         'authority-new/operator.sock', '--new-evm-authority-credential', 'authority-new/operator.cred',
-                        '--new-evm-node-info', 'authority-new/node-info.json', mounts=mounts)
+                        '--new-evm-node-info', 'authority-new/node-info.json', '--wait', '10m', mounts=mounts)
         r.keep_redacted(self.ev / 'recover.log', done.stdout + done.stderr)
+        r.say(f'  recover confirmed {time.monotonic() - lost:.0f} s after the loss')
         r.expect('confirmed: VR stages identity' in done.stdout, 'recover: the delegation, then the identical VR binding, confirmed', r.scrub(done.stdout.strip()[-400:]))
         again = self.cli(live, home, 'validator', 'recover', '--old-authority-home', 'authority', '--new-evm-authority-socket',
                          'authority-new/operator.sock', '--new-evm-authority-credential', 'authority-new/operator.cred',
                          '--new-evm-node-info', 'authority-new/node-info.json', mounts=mounts)
         r.expect('nothing to do' in again.stdout, 'a re-run of recover sends nothing', r.scrub(again.stdout.strip()[-200:]))
 
-        # 4. the entity's root and shard node on the slot: the root's possession-proof endpoint, a staging-only joiner shard node
-        self.dc('up', '-d', '--no-deps', f'root{i}', f'shard{i}')
+        # 4. the entity's execution client, root and shard node on the slot: an empty execution data directory, the root's possession-proof
+        # endpoint, a staging-only joiner shard node that drives the execution from genesis
+        self.dc('up', '-d', '--no-deps', f'ureth{i}', f'root{i}', f'shard{i}')
         r.wait(f'root{i} answers again', lambda: self.root_view(i), 180)
         time.sleep(15)
         running = self.dc('ps', '--status', 'running', '--services').stdout.split()
         r.expect(f'shard{i}' in running, f'the fresh shard node shard{i} stays up as a staging-only joiner')
 
         # 5. the next election: every frozen member proves possession itself, anyone publishes; the roots activate the next epoch
-        homes = {m: (self.home(m, 'recover-participant') if m != i else home) for m in members}
-        auths = {m: authority_dir(gen, handoff_ops.load_compose(gen), m) for m in members}
-        ids = {m: genesis_identity(gen, m)[0] for m in members}
-        election = self.deployment['election']
-
-        def participate():
-            result = r.view_text(election, 'openResult()(bytes32)').strip()
-            if int(result, 16):
-                for m in members:
-                    done = self.cli(m if m != i else live, homes[m], 'validator', 'pos-publish', '--participate', '--result', result,
-                                    '--proof-member', str(ids[m]), mounts=[(auths[m], '/home/authority')], check=False)
-                    r.say(f'  member {ids[m]} on result {result[:18]}: exit {done.returncode}: ' + r.scrub(' | '.join(done.stdout.strip().splitlines()[-2:])[-240:]))
-            view = self.root_view(i)
-            return view['activeEpoch'] if view['activeEpoch'] > epoch and not (view.get('switch') and view['switch']['phase'] not in ('running', 'following')) else None
-        target = r.wait(f'the roots activate an epoch after {epoch}', participate, 3600, every=10)
+        target = self.participate_until(epoch, {i: home}, {i: live})
         conf = json.loads(self.fetch(f'root{i}', 'q3', 'shard-conf', '--root-rpc', self.root_rpc, '--epoch', str(shard_epoch)))
         named = [v for v in conf['validators'] if v['nodeId'] == new_evm]
         r.expect(named and named[0]['sigKey'].lower() == info['sigKey'].lower() and old_evm not in [v['nodeId'] for v in conf['validators']],
@@ -424,15 +428,39 @@ class Recovery:
         r.expect(marker.read_text() == 'fail-stop\n' and tree(old_auth) == old_tree, 'the old authority directory and its fail-stop marker are unchanged', str(old_auth))
         r.expect(sorted(p.name for p in old_evm_dir.iterdir()) == old_evm_tree, 'the old shard home is kept', str(old_evm_dir))
         used = set()
-        for service in (f'authority{i}', f'root{i}', f'shard{i}'):
+        for service in (f'authority{i}', f'root{i}', f'shard{i}', f'ureth{i}'):
             cid = self.dc('ps', '-q', service).stdout.strip()
             mounts_json = subprocess.run(['docker', 'inspect', '--format', '{{json .Mounts}}', cid], check=True, text=True, capture_output=True).stdout
             used |= {Path(m['Source']).resolve() for m in json.loads(mounts_json)}
-        r.expect(old_auth not in used and (old_auth / 'pop') not in used and old_evm_dir not in used,
-                 'no container mounts the old authority directory or the old shard home')
+        r.expect(old_auth not in used and (old_auth / 'pop') not in used and old_evm_dir not in used and old_ureth_dir not in used,
+                 'no container mounts the old authority directory, the old shard home or the old execution data')
         (self.ev / 'summary.json').write_text(json.dumps({'validator': i, 'identity': ident, 'oldEvmNode': old_evm, 'newEvmNode': new_evm,
             'slot': f'recover-{k}', 'rootEpoch': target, 'shardEpoch': shard_epoch, 'generation': after.get('generation'),
             'oldFingerprint': old_status['signingKeyFingerprint'], 'newFingerprint': signed['signingKeyFingerprint']}, indent=1) + '\n')
+
+    def participate_until(self, epoch, homes=None, pods=None, seconds=3600):
+        """Until the roots activate an epoch after `epoch`: every genesis member's own `pos-publish --participate` on the open result (its
+        possession proof from its own authority, then anyone's publication), each in its own pod unless `pods` names another (a member
+        whose own shard node does not sign yet sends through a live one). Returns the activated epoch."""
+        r, gen = self.r, self.gen
+        members = r.members()
+        homes = {m: (homes or {}).get(m) or self.home(m, 'recover-participant') for m in members}
+        auths = {m: authority_dir(gen, handoff_ops.load_compose(gen), m) for m in members}
+        ids = {m: genesis_identity(gen, m)[0] for m in members}
+        election = self.deployment['election']
+
+        def participate():
+            result = r.view_text(election, 'openResult()(bytes32)').strip()
+            if int(result, 16):
+                for m in members:
+                    done = self.cli((pods or {}).get(m, m), homes[m], 'validator', 'pos-publish', '--participate', '--result', result,
+                                    '--proof-member', str(ids[m]), mounts=[(auths[m], '/home/authority')], check=False)
+                    r.say(f'  member {ids[m]} on result {result[:18]}: exit {done.returncode}: ' +
+                          r.scrub(' | '.join((done.stdout + done.stderr).strip().splitlines()[-2:])[-240:]))
+            view = self.root_view(self.i)
+            switching = view.get('switch') and view['switch']['phase'] not in ('running', 'following')
+            return view['activeEpoch'] if view['activeEpoch'] > epoch and not switching else None
+        return r.wait(f'the roots activate an epoch after {epoch}', participate, seconds, every=10)
 
     def follows(self, m):
         entry = handoff_ops.load_compose(self.gen)['services'][f'authority{m}']['entrypoint']
@@ -441,6 +469,17 @@ class Recovery:
     def position(self, ident):
         """custody.positions(id) as text: owner, withdrawal, root key hash, staged root key hash, generation, role nonce, open lots, lots, retirement."""
         return self.r.view_text(self.deployment['custody'], 'positions(uint64)(address,address,bytes32,bytes32,uint64,uint64,uint32,uint32,bool)', str(ident))
+
+
+def vr_pos_publish(r):
+    """The next election after the current epoch, published by the genesis members' own proofs (no relay): for a Compose VR generation that
+    runs no participant containers, before vr-pos-advance."""
+    if (r.manifest.get('pos') or {}).get('profile') != 'vr-pos16':
+        raise ValueError('vr-pos-publish needs a VR/P85 Compose generation')
+    rec = Recovery(r, r.n)
+    epoch = rec.root_view(r.n)['activeEpoch']
+    target = rec.participate_until(epoch)
+    r.expect(target > epoch, f'the members published the election after root epoch {epoch} and the roots activated it', str(target))
 
 
 def vr_pos_recover(r):
