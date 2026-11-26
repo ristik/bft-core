@@ -304,3 +304,23 @@ func TestPlanPosKeyChangeRefusesANewKeyUnderTheOldNodeID(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, posKeyChange{Admit: true, Stage: true}, p)
 }
+
+// #1303: status shows a PoS identity's park while it lasts, and nothing once root progress has reached its end.
+func TestValidatorStatusShowsAPoSPark(t *testing.T) {
+	f := newRecoverFixture(t)
+	f.chain.With(func(c *vrfake.Chain) {
+		c.Progress = 1_000
+		c.Pos.ParkedUntil = map[uint64]uint64{f.id: 33_768}
+	})
+	out, err := runValidator(t, f.home, "status", "--id", fmt.Sprint(f.id))
+	require.NoError(t, err, out)
+	require.Contains(t, out, "parked      until progress 33768 (32768 rounds left)")
+	out, err = runValidator(t, f.home, "status", "--id", fmt.Sprint(f.id), "--json")
+	require.NoError(t, err, out)
+	require.Contains(t, out, `"parkedUntilProgress": 33768`)
+
+	f.chain.With(func(c *vrfake.Chain) { c.Progress = 33_768 })
+	out, err = runValidator(t, f.home, "status", "--id", fmt.Sprint(f.id))
+	require.NoError(t, err, out)
+	require.NotContains(t, out, "parked ")
+}

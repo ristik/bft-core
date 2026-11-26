@@ -214,7 +214,14 @@ func (s *Service) collect(ctx storage.RejectionContext, fetchAt [32]byte) {
 	e := &entry{ctx: ctx, prepared: prepared, submitted: s.cfg.Now()}
 	s.cache = append(s.cache, e)
 	s.mu.Unlock()
-	s.log.Info("election result due for rejection", "result", fmt.Sprintf("%x", prepared.ResultID), "attempt", ctx.Attempt, "registry", s.cfg.VR != nil)
+	attrs := []any{"result", fmt.Sprintf("%x", prepared.ResultID), "attempt", ctx.Attempt, "registry", s.cfg.VR != nil}
+	if s.cfg.VR != nil {
+		// the reason and the ready bitmap this root built (#1303: an Expired rejection parks the joiners whose bit is clear)
+		if d, err := vrschema.DecodeOutputRejected(prepared.Control.Data); err == nil {
+			attrs = append(attrs, "reason", d.Reason, "readyBitmap", fmt.Sprintf("0x%04x", d.ReadyBitmap))
+		}
+	}
+	s.log.Info("election result due for rejection", attrs...)
 	s.submit(prepared)
 }
 

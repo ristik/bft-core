@@ -443,6 +443,17 @@ On PoS, apply registers the keys in VR and P85 custody, bonds the stake and admi
 
 Wait for a P85 election to reserve a result naming your identity. With the release that includes the per-validator proof command, submit your own assignment possession proof. Each frozen member submits one through its own authority. The relayer can then finalize P85 and publish in VR. A member with an unavailable authority can hold up that result until it expires. Keep the nodes running and follow the next attempt.
 
+**Parking after an expired result (PoS, #1303).** When the roots reject an expired result, ElectionPolicy parks the elected joiners that did not prove. For a published result, these are the joiners whose bit in the ordered ready bitmap is clear: the roots did not hold their handoff possession proof. For an unpublished result, these are the joiners without an on-chain assignment proof. The incumbents, the members of the committee in force, are never parked. A parked identity is skipped by elections for `2 × LIFETIME` (32,768 rounds of root progress, about 4.5 hours at the testnet's pace) from the rejection record, and is eligible again when that period ends. Nothing else changes: the identity stays bonded and delegated, and it can still request retirement and claim. There is no `rejoin` on PoS and no override. Fix the node and wait. Read `parkedUntil` and compare it with the SealRegistry's progress:
+
+```bash
+cast call "$ELECTION" 'parkedUntil(uint64)(uint64)' "$STAKING_ID" --rpc-url "$RPC"
+cast call 0xff00000000000000000000000000000000000002 'progress()(uint64)' --rpc-url "$RPC"
+```
+
+The roots log the bitmap they built (`election result due for rejection`), the leader logs the one it ordered (`a RejectResult is ordered in this proposal`), and every root logs the committed one (`election result rejection committed`). Bit i is the i-th member of the result, by ascending staking id. The bitmap is one leader's local view and is never judged. A faulty leader can park an honest co-joiner, or spare a non-prover, for one park period per genuine expiry.
+
+**Known limit: incumbent withholding (testnet only).** Parking never applies to incumbents, so it cannot help when a member of the committee in force withholds its successor proof. Every output then expires and continuity keeps reselecting that member, so rotations and the exits waiting on them can stall indefinitely, at one lifetime per attempt, while the current committee keeps producing blocks. This is accepted on the resettable testnet and tracked under bft-core#1303. A remedy is required before real value is at stake. A clear bit alone is never grounds to remove an incumbent.
+
 ```bash
 ubft validator pos-publish --own-proof
 ```
@@ -607,7 +618,7 @@ check_exit_receipts() (
 check_exit_receipts
 ```
 
-On PoA, exit withdraws an unadmitted application or requests the exit of an active member. The Foundation confirms an active member's exit. Keep serving until the acknowledged boundary and `Exited` status. For Admitted, Joining or Parked PoA states, ask the Foundation for the appropriate removal.
+On PoA, exit withdraws an unadmitted application or requests the exit of an active member. The Foundation confirms an active member's exit. Keep serving until the acknowledged boundary and `Exited` status. For Admitted, Joining or Parked PoA states, ask the Foundation for the appropriate removal. A parked PoS identity exits as usual: parking does not block `validator exit`, retirement or claims.
 
 ### Check PoS retirement and maturity
 
