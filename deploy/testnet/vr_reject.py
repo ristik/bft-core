@@ -80,12 +80,11 @@ def vr_reject(r):
     epoch = epoch_now()
 
     # 1. the joiner: keys, an authority at the current scope, a funded owner wallet, an operator home
+    certified = r.wait(f'a verified UC of root epoch {epoch} names the certified shard epoch', lambda: rec.newest_uc(live, epoch), 600, every=10)
     info = joiner_lib.prepare(gen, r.ubft)
     j, val = info['index'], gen / f'validator{info["index"]}'
     wallet = pos_join.new_wallet(r)
     owner = wallet['address']
-    certified = json.loads(rec.exec(f'root{live}', 'ubft', 'validator', 'last-signed-uc', '--execution', 'http://127.0.0.1:8545',
-                                    '--root-rpc', rec.root_rpc, '--epoch', str(epoch)).stdout)
     auth = val / 'auth'
     (auth / 'pop').mkdir(mode=0o700, exist_ok=True)
     subprocess.run([str(r.ubft), 'signing-authority', 'credential', '--out', str(auth / 'pop' / 'pop.cred')], check=True, capture_output=True)
