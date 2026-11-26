@@ -439,6 +439,7 @@ func (x *ConsensusManager) resetVolatile() {
 	x.switchCheckedRound = 0
 	x.missedRun, x.lastTimeoutRound = 0, 0 // the successor counts its own streaks, as after a restart
 	x.posQueue.reset()
+	x.refused.reset() // the refusals of the old epoch's intents (#1306)
 	x.primaryCache.dropParked()
 	x.v3Planned.Store(nil)
 	x.q3Staged.Store(nil)

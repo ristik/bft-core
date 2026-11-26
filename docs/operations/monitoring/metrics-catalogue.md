@@ -27,6 +27,8 @@ Labels `instance`, `job` and `validator` come from Prometheus' scrape configurat
 | `unicity_root_committee_size` | gauge | | root nodes in the epoch's committee |
 | `unicity_root_proposals_total` | counter | | proposals this root signed and sent as leader |
 | `unicity_root_votes_missed_total` | counter | `reason` = `no_vote`, `timeout_only` | rounds a committee member ended without voting: `no_vote` signed nothing, `timeout_only` signed only a timeout vote |
+| `unicity_root_handoff_refused_total` | counter | `kind` = `prepare`, `freeze`, `commit`, `abort` (`unknown`: an undecodable record); `class` = `deterministic`, `local` | leader rounds that left a handoff record out of the proposal because this root's own executor refuses it: `deterministic` the refusal stays for that handoff identity (logged once as `vr.handoff.refused`; every later leader round that skips it counts too), `local` it can clear by itself (input this root lacks, a pending acknowledgement, the acknowledgement or activation gates) or is a Commit, Abort or V3 refusal: retried every round |
+| `unicity_root_handoff_refused_open` | gauge | | handoff records this leader holds as deterministically refused (volatile, pruned when the intent dies); listed in the q3 status `handoffRefused` |
 | `unicity_root_round_timeouts_total` | counter | | rounds in which the local round timer fired, counted once per round; a follower root times out every round |
 | `unicity_root_records_projected` | gauge | | records the committed root chain has projected (the root target of the catch-up counters); absent while the record store cannot be read |
 | `unicity_peers_connected` | gauge | `network` | connected peers of the network (`root`, `shard`), this node excluded |

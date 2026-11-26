@@ -181,6 +181,46 @@ func V5Of(c vrschema.CandidateV6) evmassign.Candidate {
 		Supersedes: c.Supersedes, Bindings: c.Bindings, Identities: c.Identities, Authorization: c.Authorization, ReplacedAssignment: c.ReplacedAssignment}
 }
 
+// VerifyCandidateRules is item (5) of registry-mode admission (VerifyRegistryOutput calls it, so the two cannot drift): the supersession
+// rule and the H3/#85 candidate checks of the primary candidate c under the H3 context vc (Digest is filled here) and the lifecycle
+// context lctx. It reads only the candidate, the installed configuration, the current and successor root and (Network, Attempt), none of
+// which change between a Prepare and its Freeze, so a leader runs it before it orders a Prepare (#1306): a candidate it refuses would
+// make every root refuse the Freeze.
+func VerifyCandidateRules(c vrschema.CandidateV6, vc evmassign.VerifyContext, lctx evmassign.LifecycleContext) error {
+	if c.Authorization == nil {
+		return fmt.Errorf("%w: not a primary registry candidate", ErrH3)
+	}
+	auth := c.Authorization
+	// (5) a supersession carries no root-side change (design section 6.3): the superseded H's changes are already installed and never
+	// replayed, and an Accepted one here would have to be installed after the Commit. The carried verdicts are checked against the fold
+	// in item 6, so judging them here refuses exactly what that admission would install.
+	if err := supersessionChanges(c); err != nil {
+		return err
+	}
+	// (5) the H3/#85 checks, unchanged: coupling, identities, quantization, continuity O->J and J->K, span and supersession, the
+	// root-context PoP of every successor key (readiness of every member is item 9)
+	v5 := V5Of(c)
+	raw, err := v5.Encode()
+	if err != nil {
+		return errors.Join(ErrH3, err)
+	}
+	d := sha256.Sum256(raw)
+	vc.Digest = d[:]
+	if _, _, err := evmassign.Verify(raw, vc); err != nil {
+		return errors.Join(ErrH3, err)
+	}
+	if err := errors.Join(evmassign.CheckQuantized(c.Identities), evmassign.CheckQuantized(auth.K)); err != nil {
+		return errors.Join(ErrH3, err)
+	}
+	if err := evmassign.VerifyLifecycle(v5, lctx); err != nil {
+		return errors.Join(ErrH3, err)
+	}
+	if _, err := continuity.Check(evmassign.Members(c.Identities), evmassign.Members(auth.K), lctx.Policy); err != nil {
+		return errors.Join(ErrH3, evmassign.ErrContinuity, fmt.Errorf("J->K: %w", err))
+	}
+	return nil
+}
+
 // supersessionChanges is the supersession rule of item 5: a supersession carries no Accepted kind 6, 7 or 8 change (a rejected one
 // installs nothing and is allowed). It reads the carried verdicts; item 6 requires them to equal the fold's, so a change that is
 // actually Accepted cannot pass by being labelled rejected.
@@ -256,34 +296,11 @@ func VerifyRegistryOutput(a Admission) (Verified, error) {
 	if n < 1 || n > vrschema.MaxCommittee || (!o.Native && !LimitsSatisfied(s.Limits, len(auth.K), n)) {
 		return out, fmt.Errorf("%w: %d members under %+v from %d", ErrLimits, n, s.Limits, len(auth.K))
 	}
-	// (5) a supersession carries no root-side change (design section 6.3): the superseded H's changes are already installed and never
-	// replayed, and an Accepted one here would have to be installed after the Commit. The carried verdicts are checked against the fold
-	// in item 6, so judging them here refuses exactly what that admission would install.
-	if err := supersessionChanges(c); err != nil {
+	// (5)
+	if err := VerifyCandidateRules(c, a.Verify, a.Lifecycle); err != nil {
 		return out, err
 	}
-	// (5) the H3/#85 checks, unchanged: coupling, identities, quantization, continuity O->J and J->K, span and supersession, the
-	// root-context PoP of every successor key (readiness of every member is item 9)
 	v5 := V5Of(c)
-	raw, err := v5.Encode()
-	if err != nil {
-		return out, errors.Join(ErrH3, err)
-	}
-	vc := a.Verify
-	d := sha256.Sum256(raw)
-	vc.Digest = d[:]
-	if _, _, err := evmassign.Verify(raw, vc); err != nil {
-		return out, errors.Join(ErrH3, err)
-	}
-	if err := errors.Join(evmassign.CheckQuantized(c.Identities), evmassign.CheckQuantized(auth.K)); err != nil {
-		return out, errors.Join(ErrH3, err)
-	}
-	if err := evmassign.VerifyLifecycle(v5, a.Lifecycle); err != nil {
-		return out, errors.Join(ErrH3, err)
-	}
-	if _, err := continuity.Check(evmassign.Members(c.Identities), evmassign.Members(auth.K), a.Lifecycle.Policy); err != nil {
-		return out, errors.Join(ErrH3, evmassign.ErrContinuity, fmt.Errorf("J->K: %w", err))
-	}
 	// (6)
 	verdicts, err := vrschema.FoldVerdicts(a.Fold, c.RegistryChanges)
 	if err != nil {

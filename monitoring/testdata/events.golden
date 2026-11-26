@@ -21,6 +21,7 @@ upgrade.required
 vr.handoff.assembled
 vr.handoff.certified
 vr.handoff.ordering
+vr.handoff.refused
 vr.handoff.shard_staged
 vr.identity.active
 vr.identity.admitted

@@ -16,6 +16,7 @@ import (
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/network/protocol/abdrc"
 	"github.com/unicitynetwork/bft-core/network/protocol/certification"
+	"github.com/unicitynetwork/bft-core/q3format"
 	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
@@ -445,6 +446,16 @@ func (x *BlockStore) TrialExecute(block *rctypes.BlockData, verifier IRChangeReq
 	x.lock.RUnlock()
 	_, err = parent.extendWithAuthority(block, verifier, x.orchestration, x.hash, x.log, x.handoffAuth, x, svc, x.leaders)
 	return err
+}
+
+// VRCandidateCheck is ExecutedBlock.VRCandidateCheck over the block of parentRound with this store's orchestration and handoff authority:
+// item (5) of the candidate a Prepare at round would freeze the EVM for (#1306). Nothing is stored.
+func (x *BlockStore) VRCandidateCheck(parentRound, round uint64, candidate []byte, body q3format.BodyV3, attempt uint64, predecessor []byte) error {
+	parent, err := x.tree().FindBlock(parentRound)
+	if err != nil {
+		return errors.Join(ErrVRUnavailable, err)
+	}
+	return parent.VRCandidateCheck(x.orchestration, x.handoffAuth, round, candidate, body, attempt, predecessor)
 }
 
 // ControlCut is the retained control cut of the committed root block of the round: its control state and the path of its leaf in that

@@ -62,6 +62,16 @@ func ExtendForTest(parent *ExecutedBlock, block *rctypes.BlockData, orch Orchest
 	return parent.extendWithAuthority(block, nil, orch, crypto.SHA256, slog.New(slog.DiscardHandler), auth, candidates, svc, nil)
 }
 
+// ExtendVerifiedForTest is ExtendForTest with the change requests judged by verifier.
+func ExtendVerifiedForTest(parent *ExecutedBlock, block *rctypes.BlockData, orch Orchestration, a *TestVRAuthority,
+	candidates interface{ HandoffCandidate([]byte) ([]byte, error) }, svc *PosServices, verifier IRChangeReqVerifier) (*ExecutedBlock, error) {
+	var auth handoffAuthority
+	if a != nil {
+		auth = a
+	}
+	return parent.extendWithAuthority(block, verifier, orch, crypto.SHA256, slog.New(slog.DiscardHandler), auth, candidates, svc, nil)
+}
+
 // VRRetainedForTest is what an executed block retains for an admitted Freeze v5.
 func VRRetainedForTest(b *ExecutedBlock) (body, receipts, v5, v6 []byte, ok bool) {
 	if b.vrFrozen == nil {

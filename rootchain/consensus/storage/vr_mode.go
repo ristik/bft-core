@@ -396,14 +396,7 @@ func (x *ExecutedBlock) admitV5(v *vrStep, pos *posStep, svc *VRServices, r evmr
 	if b := v.state.Backoff; bytes.Equal(b.Intent, in.Digest[:]) {
 		committedView = b.LastView
 	}
-	var successorRoot []evmassign.RootMember
-	for _, m := range in.Body.Members {
-		successorRoot = append(successorRoot, evmassign.RootMember{NodeID: m.NodeID, Key: m.ConsensusKey, Weight: m.Weight})
-	}
-	vc := evmassign.VerifyContext{BindingContext: evmassign.BindingContext{ControlPartition: evmroot.D4ControlPartition, SuccessorRoot: successorRoot,
-		PoPContext: evmassign.PoPContext{Network: r.Network, Attempt: r.Attempt}, Rules: weightvalidation.EVMRules(weightvalidation.ModeWeighted)},
-		Current: installed, CurrentRoot: current}
-	copy(vc.Predecessor[:], r.PredecessorBodyID)
+	vc := vrH3Context(r.Network, r.Attempt, r.PredecessorBodyID, in.Body, installed, current)
 	verified, err := vradmit.VerifyRegistryOutput(vradmit.Admission{
 		Deployment: svc.Deployment, Candidate: cand, State: state, Acknowledged: v.state.Acknowledged, Resolved: pos.state.IsResolved(result),
 		Verify: vc, Lifecycle: lctx,
@@ -465,6 +458,60 @@ func (x *ExecutedBlock) admitV5(v *vrStep, pos *posStep, svc *VRServices, r evmr
 	}
 	v.frozen = &vrRetention{Body: in.Body.Encode(), Receipts: rs, V5: v5, V6: bytes.Clone(fv.Candidate)}
 	return nil
+}
+
+// vrH3Context is the H3 context of registry-mode admission item (5) for a candidate of the attempt over the successor body: its PoP
+// context, the successor root members, the control partition and weight rules, and the installed EVM configuration with the current root
+// committee. admitV5 and VRCandidateCheck both build it here.
+func vrH3Context(network, attempt uint64, predecessor []byte, body q3format.BodyV3, installed *types.PartitionDescriptionRecord,
+	current []evmassign.RootMember) evmassign.VerifyContext {
+	var successorRoot []evmassign.RootMember
+	for _, m := range body.Members {
+		successorRoot = append(successorRoot, evmassign.RootMember{NodeID: m.NodeID, Key: m.ConsensusKey, Weight: m.Weight})
+	}
+	vc := evmassign.VerifyContext{BindingContext: evmassign.BindingContext{ControlPartition: evmroot.D4ControlPartition, SuccessorRoot: successorRoot,
+		PoPContext: evmassign.PoPContext{Network: network, Attempt: attempt}, Rules: weightvalidation.EVMRules(weightvalidation.ModeWeighted)},
+		Current: installed, CurrentRoot: current}
+	copy(vc.Predecessor[:], predecessor)
+	return vc
+}
+
+// VRCandidateCheck is registry-mode admission item (5) (vradmit.VerifyCandidateRules) of the primary candidate v6 a Prepare of the attempt
+// over this block would freeze the EVM for, with the H3 and lifecycle contexts admitV5 builds at the Freeze: the EVM shard certified here
+// (the Prepare binds it, and it does not change until the Freeze), its configuration in effect at round, and the current root. A leader
+// runs it before it orders the Prepare (#1306): a refusal (vradmit.ErrAdmission) is the Freeze refusal every root would reach, so the
+// Prepare is not ordered and the result expires through the existing RejectResult. An input this root lacks is ErrVRUnavailable. Leader-
+// local proposal hygiene only: block validity is unchanged.
+func (x *ExecutedBlock) VRCandidateCheck(orchestration Orchestration, authority handoffAuthority, round uint64, candidate []byte, body q3format.BodyV3,
+	attempt uint64, predecessor []byte) error {
+	if x == nil || x.ShardState.Control == nil || orchestration == nil || authority == nil {
+		return fmt.Errorf("%w: no parent control state or authority", ErrVRUnavailable)
+	}
+	cand, err := vrschema.DecodeCandidateV6(candidate)
+	if err != nil {
+		return errors.Join(vradmit.ErrH3, err)
+	}
+	if cand.Kind != evmassign.KindPrimary || len(cand.SourceRef) != 32 {
+		return fmt.Errorf("%w: not a primary registry candidate", vradmit.ErrH3)
+	}
+	confs, err := orchestration.ShardConfigs(round)
+	if err != nil {
+		return errors.Join(ErrVRUnavailable, err)
+	}
+	key, found, err := frozenEVMShard(x.ShardState, confs)
+	if err != nil || !found {
+		return errors.Join(ErrVRUnavailable, errors.New("no designated EVM shard"), err)
+	}
+	evm, installed := x.ShardState.States[key], confs[key]
+	if evm == nil || evm.IR == nil || installed == nil {
+		return fmt.Errorf("%w: the EVM shard is not certified", ErrVRUnavailable)
+	}
+	lctx, err := LifecycleFor(orchestration, evm.PartitionID, evm.ShardID, evm.IR.Epoch, installed)
+	if err != nil {
+		return errors.Join(ErrVRUnavailable, err)
+	}
+	vc := vrH3Context(x.ShardState.Control.Network, attempt, predecessor, body, installed, authority.CurrentRoot())
+	return vradmit.VerifyCandidateRules(cand, vc, lctx)
 }
 
 // abortVR projects a committed Abort on a VR chain from the branch's own state (design section 4.3 item 4, S2a): the Abort of the attempt
