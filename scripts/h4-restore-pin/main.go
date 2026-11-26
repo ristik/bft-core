@@ -9,8 +9,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	gethtypes "github.com/ethereum/go-ethereum/core/types"
@@ -41,6 +43,16 @@ func run(args []string, getenv func(string) string, out io.Writer) error {
 		return errUsage
 	}
 	archiveDir, trustPath, prefix := args[0], args[1], args[2]
+	// H4_RESTORE_MAX_EPOCH=<n> pins the newest certified record of root epoch n or earlier: a joiner that starts from an old pin (the shipped
+	// epoch-1 seed) after later handoffs (bft-core#1309). Unset: the newest record of any epoch.
+	maxEpoch := uint64(math.MaxUint64)
+	if v := getenv("H4_RESTORE_MAX_EPOCH"); v != "" {
+		n, err := strconv.ParseUint(v, 10, 64)
+		if err != nil || n == 0 {
+			return fmt.Errorf("H4_RESTORE_MAX_EPOCH %q is not a root epoch", v)
+		}
+		maxEpoch = n
+	}
 	var bestUC, bestTR, bestHeader []byte
 	var bestRound uint64
 	var bestEpoch uint64
@@ -57,6 +69,9 @@ func run(args []string, getenv func(string) string, out io.Writer) error {
 			var uc types.UnicityCertificate
 			var header gethtypes.Header
 			if types.Cbor.Unmarshal(rec.ResultingUC, &uc) != nil || uc.InputRecord == nil || len(uc.InputRecord.BlockHash) != 32 || len(rec.ResultingTR) == 0 || rlp.DecodeBytes(rec.Header, &header) != nil || header.Number == nil {
+				continue
+			}
+			if uc.GetRootEpoch() > maxEpoch {
 				continue
 			}
 			isV2 := archive.HasReceiptList(rec)

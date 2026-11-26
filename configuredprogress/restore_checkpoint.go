@@ -55,24 +55,70 @@ func readRestoreCheckpoint(b *bolt.Bucket) (RestoreCheckpoint, error) {
 // ReadRestoreCheckpoint checks an existing file without initializing or
 // modifying it. The restore command uses this before it opens any BFT stores.
 func ReadRestoreCheckpoint(path string) (RestoreCheckpoint, error) {
+	c, _, err := ReadArchiveRestoreState(path)
+	return c, err
+}
+
+// ReadArchiveRestoreState is ReadRestoreCheckpoint that also returns the
+// recovery anchor of an archive restore that completed into the file (nil
+// while none did). The anchor is written in the same transaction as the
+// replayed tip (InstallReplayedTip, InstallSameEpochReplayedTip), so a present
+// anchor is a completed restore; it is decoded here, and a malformed one is an
+// error, never "complete". Its binding to the journal's certified body is
+// checked when the journal is loaded.
+func ReadArchiveRestoreState(path string) (RestoreCheckpoint, *RestoreAnchor, error) {
 	fi, err := os.Lstat(path)
 	if err != nil {
-		return RestoreCheckpoint{}, err
+		return RestoreCheckpoint{}, nil, err
 	}
 	if !fi.Mode().IsRegular() {
-		return RestoreCheckpoint{}, ErrSettings
+		return RestoreCheckpoint{}, nil, ErrSettings
 	}
 	db, err := bolt.Open(path, 0o600, &bolt.Options{ReadOnly: true, Timeout: 3 * time.Second})
 	if err != nil {
-		return RestoreCheckpoint{}, err
+		return RestoreCheckpoint{}, nil, err
 	}
 	defer db.Close()
 	var c RestoreCheckpoint
+	var anchor *RestoreAnchor
 	err = db.View(func(tx *bolt.Tx) error {
-		c, err = readRestoreCheckpoint(tx.Bucket(bucketName))
+		b := tx.Bucket(bucketName)
+		if c, err = readRestoreCheckpoint(b); err != nil {
+			return err
+		}
+		if b == nil {
+			return nil
+		}
+		anchor, err = decodeRestoreAnchor(b.Get(restoreAnchorKey))
 		return err
 	})
-	return c, err
+	if err != nil {
+		return RestoreCheckpoint{}, nil, err
+	}
+	return c, anchor, nil
+}
+
+// decodeRestoreAnchor decodes a stored recovery anchor's shape (nil for none). readRestoreAnchor also binds it to the journal descriptor
+// and its certified body.
+func decodeRestoreAnchor(raw []byte) (*RestoreAnchor, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	payload, err := decodeEnvelope(raw, restoreAnchorKind, 4096)
+	if err != nil {
+		return nil, err
+	}
+	var w restoreAnchorWire
+	if err := decodePayload(payload, &w); err != nil {
+		return nil, err
+	}
+	if w.Version != journalVersion || w.Height == 0 || w.RootRound == 0 || len(w.Hash) != 32 || len(w.StateRoot) != 32 {
+		return nil, fmt.Errorf("%w: malformed restore anchor", ErrUntrusted)
+	}
+	out := &RestoreAnchor{Height: w.Height, RootRound: w.RootRound}
+	copy(out.Hash[:], w.Hash)
+	copy(out.StateRoot[:], w.StateRoot)
+	return out, nil
 }
 
 func (s *Store) RestoreCheckpoint() (RestoreCheckpoint, error) {

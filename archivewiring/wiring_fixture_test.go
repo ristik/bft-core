@@ -9,6 +9,7 @@ import (
 	"math/big"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -43,6 +44,8 @@ type wiringFixture struct {
 	subject archive.Context
 	entries []configuredprogress.JournalEntry
 	chain   *certifiedchain.Chain
+	// epoch is the installed root epoch of a multi-epoch fixture (wiringOpts.epochs); nil otherwise. It ends at the last block's epoch.
+	epoch *fixtureEpoch
 }
 
 func signWiring(t *testing.T, chain *certifiedchain.Chain, ir *types.InputRecord, assigned, rootRound uint64) (*types.UnicityCertificate, *certification.TechnicalRecord) {
@@ -123,6 +126,42 @@ type wiringOpts struct {
 	timeouts   bool
 	chain      *certifiedchain.Chain
 	associated map[int]uint64
+	// epochs, when set, is the root epoch that certifies each block (1-based height; non-decreasing, starting at 1, each step at most
+	// one epoch). The fixture then has one trust base per epoch and a settable epoch authority (wiringFixture.epoch), and at each root
+	// handoff the new committee repeats the last certified input record in its own epoch before it certifies the next block, as the roots
+	// do: that repeat authorizes the first block of the epoch.
+	epochs func(height int) uint64
+}
+
+// fixtureEpoch is a settable installed root epoch (the verified history's current epoch).
+type fixtureEpoch struct{ epoch atomic.Uint64 }
+
+func (e *fixtureEpoch) CurrentRootEpoch() (uint64, bool) { return e.epoch.Load(), true }
+
+// fixtureEpochTrust serves one trust base per root epoch; an epoch it does not hold has none.
+type fixtureEpochTrust map[uint64]*types.RootTrustBaseV1
+
+func (t fixtureEpochTrust) GetByEpoch(_ context.Context, epoch uint64) (*types.RootTrustBaseV1, error) {
+	if tb, ok := t[epoch]; ok {
+		return tb, nil
+	}
+	return nil, fmt.Errorf("no trust base for root epoch %d", epoch)
+}
+
+// signWiringEpoch is signWiring with the seal in root epoch `epoch`.
+func signWiringEpoch(t *testing.T, chain *certifiedchain.Chain, ir *types.InputRecord, assigned, rootRound, epoch uint64) (*types.UnicityCertificate, *certification.TechnicalRecord) {
+	t.Helper()
+	uc, tr := signWiring(t, chain, ir, assigned, rootRound)
+	if epoch == 1 {
+		return uc, tr
+	}
+	uc.UnicitySeal.Epoch = epoch
+	signers := uc.UnicitySeal.Signatures
+	uc.UnicitySeal.Signatures = nil
+	for signer := range signers {
+		require.NoError(t, uc.UnicitySeal.Sign(signer, chain.Signer))
+	}
+	return uc, tr
 }
 
 func newWiringFixtureOpts(t *testing.T, o wiringOpts) *wiringFixture {
@@ -155,6 +194,19 @@ func newWiringFixtureOpts(t *testing.T, o wiringOpts) *wiringFixture {
 		Observation: rootinput.ObservationContextV2{NetworkID: 3, PartitionID: 8, ShardID: types.ShardID{}, ShardConfHash: origin.FullShardConfHash().Bytes(), RootEpoch: 1, TrustBases: trust},
 		Record:      certifiedstore.Context{NetworkID: 3, PartitionID: 8, ShardID: types.ShardID{}, FullShardConfHash: origin.FullShardConfHash().Bytes(), Registry: origin.ProofContext(), TrustBases: trust},
 	}
+	var epoch *fixtureEpoch
+	if o.epochs != nil {
+		epoch = &fixtureEpoch{}
+		epoch.epoch.Store(1)
+		bases := fixtureEpochTrust{1: chain.TrustBase}
+		for e := o.epochs(blocks); e > 1; e-- {
+			next := *chain.TrustBase
+			next.Epoch, next.Signatures = e, nil
+			bases[e] = &next
+		}
+		c.Observation.TrustBases, c.Record.TrustBases = bases, bases
+		c.Observation.EpochAuthority, c.Record.EpochAuthority = epoch, epoch
+	}
 	path := t.TempDir() + "/journal.db"
 	store, err := configuredprogress.OpenConfiguredV2(path, configuredprogress.Settings{Retain: 16})
 	require.NoError(t, err)
@@ -174,7 +226,21 @@ func newWiringFixtureOpts(t *testing.T, o wiringOpts) *wiringFixture {
 	admit(parentUC, parentTR)
 	parentHash := [32]byte(chain.Blocks[0].Hash)
 	parentState := [32]byte(chain.Blocks[0].StateRoot)
+	var parentIR *types.InputRecord
+	var handoffs uint64 // root rounds the repeats of the handoffs took
 	for number := 1; number <= blocks; number++ {
+		certifying := uint64(1)
+		if o.epochs != nil {
+			certifying = o.epochs(number)
+			if current := epoch.epoch.Load(); certifying != current {
+				require.True(t, number > 1 && certifying == current+1, "block %d: the fixture's epochs start at 1 and advance one at a time", number)
+				// the root handoff: the new epoch is installed and its committee repeats the last certified input record
+				epoch.epoch.Store(certifying)
+				parentUC, parentTR = signWiringEpoch(t, chain, parentIR, uint64(number), parentUC.GetRootRoundNumber()+1, certifying)
+				admit(parentUC, parentTR)
+				handoffs++
+			}
+		}
 		var state [32]byte
 		state[0], state[31] = byte(number), byte(number+17)
 		hash, raw, size := wiringBlock(t, parentHash, state, uint64(number), parentUC.GetRootRoundNumber(), parentUC, parentTR)
@@ -186,11 +252,11 @@ func newWiringFixtureOpts(t *testing.T, o wiringOpts) *wiringFixture {
 		if number > 1 {
 			ir.PreviousHash = bytes.Clone(parentState[:])
 		}
-		rootRound := uint64(4 + number)
+		rootRound := uint64(4+number) + handoffs
 		if timeouts {
 			rootRound += uint64(number - 1)
 		}
-		resultUC, resultTR := signWiring(t, chain, ir, uint64(number+1), rootRound)
+		resultUC, resultTR := signWiringEpoch(t, chain, ir, uint64(number+1), rootRound, certifying)
 		if shift, ok := o.associated[number]; ok {
 			other, otherTR := signWiring(t, chain, ir, uint64(number+1), rootRound+shift)
 			admit(other, otherTR) // this journal's first association for the block: the other valid certificate
@@ -204,13 +270,13 @@ func newWiringFixtureOpts(t *testing.T, o wiringOpts) *wiringFixture {
 			parentUC, parentTR = signWiring(t, chain, ir, uint64(number+1), rootRound+1)
 			admit(parentUC, parentTR)
 		}
-		parentHash, parentState = hash, state
+		parentHash, parentState, parentIR = hash, state, ir
 	}
 	subject, err := ContextFrom(c, identity)
 	require.NoError(t, err)
 	image, err := store.LoadJournal(context.Background(), c, limits)
 	require.NoError(t, err)
-	return &wiringFixture{store: store, path: path, context: c, limits: limits, subject: subject, entries: image.Candidates, chain: chain}
+	return &wiringFixture{store: store, path: path, context: c, limits: limits, subject: subject, entries: image.Candidates, chain: chain, epoch: epoch}
 }
 
 func (f *wiringFixture) record(t *testing.T, index int) (archive.Request, *archive.Record) {

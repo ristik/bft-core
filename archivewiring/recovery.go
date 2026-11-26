@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 
 	"github.com/ethereum/go-ethereum/common"
 	gethtypes "github.com/ethereum/go-ethereum/core/types"
@@ -201,7 +202,13 @@ func (s *RecoverySource) readable() []peer.ID {
 		replicas = s.Policy.Snapshot().Readable()
 	}
 	if s.Followed != nil {
-		replicas = append(append([]peer.ID(nil), replicas...), s.Followed()...)
+		out := append([]peer.ID(nil), replicas...)
+		for _, id := range s.Followed() {
+			if !slices.Contains(out, id) { // a replica that is also a followed source is asked once
+				out = append(out, id)
+			}
+		}
+		replicas = out
 	}
 	return replicas
 }

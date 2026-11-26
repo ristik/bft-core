@@ -141,6 +141,16 @@ func (r *rootFreeRole) deny(id libp2ppeer.ID) bool {
 	return root
 }
 
+// followsArchiveHeads reports whether the node runs the archive head follower: its root-free certificate source while it is not an active
+// validator. A root-free follower (--follow-source) does, and so does every Q3-lane node with an archive: a Q3 node that is not active never
+// subscribes to the roots (its role lease makes its client a follower), so without the head follower a joiner restored from a seed pin, or a
+// validator the installed assignment no longer names, takes no certificate but the terminal certificate of each handoff it installs
+// (bft-core#1309: the joiner stopped at the last block of the previous root epoch). Every offered head is verified against the node's own
+// history from its pin.
+func followsArchiveHeads(rootFreeFollower, q3Lane, archive bool) bool {
+	return archive && (rootFreeFollower || q3Lane)
+}
+
 func followSourceIDs(sources []libp2ppeer.AddrInfo) []libp2ppeer.ID {
 	out := make([]libp2ppeer.ID, 0, len(sources))
 	for _, s := range sources {
