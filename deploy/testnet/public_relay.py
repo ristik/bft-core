@@ -18,6 +18,7 @@ DUPLICATE_RESERVE = 3
 PROBE_TIMEOUT = 1
 METHOD_TIMEOUT = 8
 READ_SLOTS = 8
+READ_SLOT_WAIT = 1          # the longest a read waits for a slot: a finished read frees its slot only after its caller is woken, and that caller's worker may already be asking again
 SEND_GROUPS = 4
 SEND_WIDTH = 4
 LARGE_SEND_GROUPS = 2
@@ -169,8 +170,8 @@ class Relay:
                 last_error = exc
         raise Unavailable('no usable validator address') from last_error
 
-    def rpc(self, url, body, deadline, max_bytes=CONTROL_BYTES, timeout=PROBE_TIMEOUT):
-        deadline = min(deadline, time.monotonic() + timeout)
+    def rpc(self, url, body, deadline, max_bytes=CONTROL_BYTES, timeout=None):
+        deadline = min(deadline, time.monotonic() + (PROBE_TIMEOUT if timeout is None else timeout))
         target = urlsplit(url)
         connect = HTTPSConnection if target.scheme == 'https' else HTTPConnection
         try:
@@ -470,7 +471,7 @@ class Relay:
         deadline = time.monotonic() + REQUEST_TIMEOUT
         if method == 'eth_sendRawTransaction':
             return self.send(params, deadline)
-        if not self.read_slots.acquire(blocking=False):
+        if not self.read_slots.acquire(timeout=min(READ_SLOT_WAIT, remaining(deadline))):
             raise Unavailable('all read slots occupied')
         try:
             job = self.read_pool.submit(self.read, method, params, max_bytes, deadline)

@@ -10,6 +10,7 @@ refuses before the signer are sent. A real dispense is host-only. Needs docker c
 (host root on Linux, the files belong to UID 10001).
 """
 import argparse
+import concurrent.futures
 import datetime
 import hashlib
 import http.client
@@ -347,7 +348,7 @@ class Rehearsal:
             status, text = self.rpc({'jsonrpc': '2.0', 'id': 1, 'method': method, 'params': list(params)}, ip)
             if status != 429 or attempt == 5:
                 break
-            self.say(f'  {method}: 429 from the per-client limit (10 requests/s), waiting 1 s ({attempt + 1}/5)')   # the limit is the package's; a driver that bursts waits for it
+            self.say(f'  {method}: 429 from the per-client limit (20 requests/s, burst 60), waiting 1 s ({attempt + 1}/5)')   # the limit is the package's; a driver that bursts waits for it
             time.sleep(1)
         if status != 200:
             raise Failure(f'{method} through the public gateway: {status} {text}')
@@ -461,8 +462,12 @@ class Rehearsal:
         s, _ = self.http(PUBLIC_RPC, 'POST', '/', json.dumps(ok).encode())
         self.expect(s == 400, 'a request without the proxy-set client address is refused', f'status {s}')
         burst = PROXY_IPS[0] + '30'
-        statuses = [self.rpc(ok, burst)[0] for _ in range(40)]
-        self.expect(429 in statuses, 'a burst from one client address is rate limited (10/s per address)', f'{statuses.count(200)}x200 {statuses.count(429)}x429')
+        # the bucket admits a burst of 60 and then 20/s: 100 requests at once (16 threads, the gateway's 8 workers) end in about 100 d / 8 for a
+        # round trip d, 0.6 s at 45 ms (a dozen tokens of refill); only a round trip above about 160 ms would leave none of them refused
+        with concurrent.futures.ThreadPoolExecutor(16) as pool:
+            statuses = list(pool.map(lambda _: self.rpc(ok, burst)[0], range(100)))
+        self.expect(429 in statuses and statuses.count(200) >= 60, 'a burst from one client address is served up to its bucket, then rate limited (burst 60, 20/s per address)',
+                    f'{statuses.count(200)}x200 {statuses.count(429)}x429')
         s, _ = self.rpc(ok, PROXY_IPS[1] + '31')
         self.expect(s == 200, 'ordinary requests from other clients are still served during the burst window')
         time.sleep(1.2)
@@ -500,7 +505,7 @@ class Rehearsal:
 
     def load(self):
         """Sustained load at the gateway's limits (loadgen.py, the tool the host runs too): 20 signed transfers a second for 20 s from four client addresses (5/s
-        each, under the 10/s per-address limit), every accepted transfer must be mined successfully and every validator must agree on the sender's nonce after."""
+        each, under the 20/s per-address limit), every accepted transfer must be mined successfully and every validator must agree on the sender's nonce after."""
         (secrets, sender), summary = self.funder_keys(), self.evidence / 'load.json'
         out = subprocess.run([sys.executable, str(Path(__file__).with_name('loadgen.py')), '--rpc', 'http://' + PUBLIC_RPC + '/', '--chain-id', str(self.chain_id),
                               '--sender', sender, '--keystore', str(secrets / 'keystore.json'), '--password-file', str(secrets / 'password'),

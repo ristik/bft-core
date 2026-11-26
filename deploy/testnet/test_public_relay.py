@@ -15,7 +15,7 @@ import urllib.error
 import urllib.request
 
 from faucet import gateway as faucet_gateway, relay as faucet_relay
-from gateway import ExecutionHandler, Handler, Limiter, MAX_BODY, Relay, Server
+from gateway import ExecutionHandler, Handler, Limiter, MAX_BODY, Relay, Server, guard_limits
 
 GENESIS = '0x' + 'aa' * 32
 TX = '0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347'
@@ -188,7 +188,7 @@ class PublicRelayTest(unittest.TestCase):
         relay = Relay(dict(validator_rpc_urls=[self.serve(ThreadingHTTPServer(('127.0.0.1', 0), node.handler()))], chain_id=70, genesis_hash=GENESIS),
                       small_body_limit=MAX_BODY)
         server = Server(('127.0.0.1', 0), ExecutionHandler, relay)
-        server.rpc_limit, server.heavy_limit = Limiter(100, 100), Limiter(20, 20)
+        guard_limits(server)
         self.stack.callback(relay.close)
         self.stack.callback(server.pool.shutdown)
         return self.serve(server)
@@ -244,6 +244,31 @@ class PublicRelayTest(unittest.TestCase):
                 release.set()
             for future in futures:
                 self.assertEqual(future.result(), (200, {'jsonrpc': '2.0', 'id': 'caller', 'result': '0x46'}))
+
+    def test_a_wallet_burst_from_one_address_is_served_through_the_guards(self):
+        """A plan's return in the demo wallet fires about fifteen eth_getCode at once, then eth_getBlockByNumber (2026-11-26: nginx's 503 and 429,
+        then the gateway's fixed 10/s window). With the shipped limits every one is served, through the relay and a validator's execution guard,
+        which sees all of them (and the relay's identity checks) from the one gateway address; the deploy check sends 20."""
+        # The gateway, the guard and the node share this process (and its GIL), and a read costs about nine HTTP round trips: a slow runner can
+        # take longer than the 1 s identity probe, which would mark the one validator down and answer 503 (CI run 45858969422). The probe's
+        # deadline is not what this test is about; the limits and the sockets are.
+        probe = patch('public_relay.PROBE_TIMEOUT', 8)
+        probe.start()
+        self.addCleanup(probe.stop)
+        node = Node(answers={'eth_getCode': {'result': '0x6001'}})
+        self.gateway(self.guard(node))
+        for n in (15, 20):
+            start = threading.Barrier(n)
+
+            def code(i):
+                start.wait(5)
+                return self.rpc('eth_getCode', ['0x%040x' % i, 'latest'])
+
+            with ThreadPoolExecutor(max_workers=n) as clients:
+                answers = list(clients.map(code, range(n)))
+            self.assertEqual(answers, [(200, dict(jsonrpc='2.0', id='caller', result='0x6001'))] * n, n)
+            self.assert_result('eth_getBlockByNumber', ['0x0', False], {'hash': GENESIS})
+        self.assertEqual(sum(1 for m, _ in node.calls if m == 'eth_getCode'), 35)
 
     def test_read_when_validator_is_down(self):
         self.gateway(None, Node())
@@ -469,7 +494,7 @@ class PublicRelayTest(unittest.TestCase):
         definitely (its reservation released), and the next claim must succeed: the refusal reaches the signer, which refreshes its nonce."""
         reth = FakeReth()
         self.gateway(reth.node(), reth.node())   # two validators of one chain (they share the fake chain state)
-        self.server.rpc_limit = Limiter(1000, 1000)
+        self.server.rpc_limit = Limiter(1000, 1000, 1000)
         account = '0x' + '34' * 20
         cfg = dict(chain_id=70, genesis_hash=GENESIS, funding_address=account, rpc_url=self.url, backend_url=None, captcha_sitekey='',
                    dev_only=True, daily_claims=10, minimum_balance_wei=1, payout='200', validator_rpc_urls=[self.url])

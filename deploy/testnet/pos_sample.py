@@ -32,7 +32,7 @@ SELECTORS = {
 ZERO_WORD = '00' * 32
 
 
-GAP = 0.12        # seconds between two gateway calls: the gateway answers 429 above 10 requests per second per client address (a sample makes a dozen)
+GAP = 0.12        # seconds between two gateway calls: the gateway answered 429 above 10 requests per second per client address (now 20/s, burst 60; a sample makes a dozen)
 RETRIES = 5
 _last = [0.0]
 
