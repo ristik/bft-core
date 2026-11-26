@@ -34,7 +34,8 @@ var (
 	// changes are always coupled, one root committee member to one delegated EVM key with the same weight.
 	ErrCoupling = errors.New("evmassign: root entities and EVM participants are not a coupled set")
 	// ErrEVMOnly refuses an EVM validator-set change while the root committee is unchanged. A configuration-only boundary
-	// that keeps both halves identical stays valid.
+	// that keeps both halves identical stays valid, and so does a successor that only replaces the EVM bindings of retained root
+	// members (RebindingOnly, #1286).
 	ErrEVMOnly = errors.New("evmassign: EVM-only validator change is unsupported; root and EVM change together")
 	ErrContext = errors.New("evmassign: candidate context mismatch")
 )

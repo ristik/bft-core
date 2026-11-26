@@ -577,15 +577,18 @@ func TestRootOnlyCommitteeChangeWithoutEVMBindingIsRefusedAtBlockValidation(t *t
 	})
 }
 
-// A validator-set change is never EVM-only: the EVM set changes only together with the committee.
-func TestEVMOnlyAssignmentChangeIsRefusedAtBlockValidation(t *testing.T) {
-	t.Run("the committee listed in the installed order", func(t *testing.T) { evmOnlyRefusedAtBlockValidation(t, false, evmassign.ErrEVMOnly) })
+// An EVM-only validator-set change is refused at block validation unless it only replaces the EVM binding of a retained root entity
+// (#1286): the committee is unchanged and K's entity o4 moves from ev-d to the fresh ev-e. A swap of delegates between entities stays
+// refused.
+func TestEVMOnlyAssignmentChangeAtBlockValidation(t *testing.T) {
+	t.Run("a binding replacement of a retained root entity is admitted", func(t *testing.T) { evmOnlyAtBlockValidation(t, false, false, nil) })
+	t.Run("a swapped binding is refused", func(t *testing.T) { evmOnlyAtBlockValidation(t, false, true, evmassign.ErrEVMOnly) })
 	// the block path binds the candidate's members to the freeze's successor committee exactly (listed order included), so a reordered
 	// list never reaches the EVM-only rule: it is refused as a context mismatch (the rule itself compares sets, see evmassign's tests)
-	t.Run("the committee listed in another order", func(t *testing.T) { evmOnlyRefusedAtBlockValidation(t, true, evmassign.ErrContext) })
+	t.Run("the committee listed in another order", func(t *testing.T) { evmOnlyAtBlockValidation(t, true, false, evmassign.ErrContext) })
 }
 
-func evmOnlyRefusedAtBlockValidation(t *testing.T, reordered bool, want error) {
+func evmOnlyAtBlockValidation(t *testing.T, reordered, swapped bool, want error) {
 	f := newAssignmentFixture(t)
 	c := f.candidate(t)
 	c.RootMembers = f.rootMembers() // the committee is unchanged; bindings must still pair the (old) committee
@@ -597,6 +600,10 @@ func evmOnlyRefusedAtBlockValidation(t *testing.T, reordered bool, want error) {
 	c.Bindings = make([]evmassign.Binding, len(root))
 	for i, m := range root {
 		c.Bindings[i] = evmassign.Binding{RootNodeID: m.NodeID, EVMNodeID: f.succ.Validators[i].NodeID}
+	}
+	if swapped {
+		// the first two entities exchange their kept delegates
+		c.Bindings[0].EVMNodeID, c.Bindings[1].EVMNodeID = c.Bindings[1].EVMNodeID, c.Bindings[0].EVMNodeID
 	}
 	// the identity records and proofs follow the unchanged committee, so only the EVM-only rule can refuse
 	c.Identities = identityfix.Identities(root, f.succ, c.Bindings)
@@ -610,6 +617,10 @@ func evmOnlyRefusedAtBlockValidation(t *testing.T, reordered bool, want error) {
 			body.Members = append(body.Members, evmroot.Member{StakingID: m.NodeID, NodeID: m.NodeID, ConsensusKey: m.Key, Weight: 1})
 		}
 	}))
+	if want == nil {
+		require.NoError(t, err)
+		return
+	}
 	require.ErrorIs(t, err, ErrHandoffRecord)
 	require.ErrorIs(t, err, want)
 	if want != evmassign.ErrEVMOnly {

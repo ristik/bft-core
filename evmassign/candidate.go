@@ -397,12 +397,107 @@ func VerifyBinding(data []byte, v BindingContext) (Candidate, *types.PartitionDe
 	return c, succ, nil
 }
 
+// RebindingOnly reports whether the successor EVM set differs from the installed one only by binding replacements of retained root
+// members (#1286, astra: an EVM-key recovery is a new EVM node identity for an unchanged root entity). Each binding is checked against
+// that root entity's own authorized binding in the frozen incumbent K (the candidate's Authorization, bound here to the installed
+// configuration by its assignment hash): either kept exactly (node id, key, weight) or replaced by a node id and key the installed set
+// does not hold, at the same weight. K's root entities are the candidate's (node id, key, weight; order-independent), the successor is
+// coupled one to one (ValidateCoupling) and at least one binding is replaced. A swap of delegates between entities, an EVM validator
+// added or removed without its root entity, a weight or count change and a key change under a kept node id are refused. Possession
+// proofs of every successor key are VerifyBinding's; endorsement, root epoch advance and continuity are the handoff's as for any other.
+func RebindingOnly(c Candidate, succ, current *types.PartitionDescriptionRecord) bool {
+	replaced, ok := checkRebinding(c, succ, current)
+	return ok && replaced > 0
+}
+
+// checkRebinding is RebindingOnly's per-entity check; it returns the number of replaced bindings.
+func checkRebinding(c Candidate, succ, current *types.PartitionDescriptionRecord) (int, bool) {
+	a := c.Authorization
+	if a == nil || succ == nil || current == nil || len(a.K) != len(c.RootMembers) || len(succ.Validators) != len(current.Validators) ||
+		len(current.Validators) != len(a.K) || ValidateCoupling(c.RootMembers, succ, c.Bindings) != nil {
+		return 0, false
+	}
+	kd, err := IdentitiesDigest(a.K)
+	if err != nil {
+		return 0, false
+	}
+	if h, err := AssignmentHash(current, kd); err != nil || !bytes.Equal(h[:], a.BaseAssignmentHash) {
+		return 0, false
+	}
+	kRoot := make([]RootMember, len(a.K))
+	byRoot := make(map[string]Identity, len(a.K))
+	for i, k := range a.K {
+		kRoot[i] = RootMember{NodeID: k.RootNodeID, Key: k.RootKey, Weight: k.Weight}
+		byRoot[k.RootNodeID] = k
+	}
+	if !sameCommittee(kRoot, c.RootMembers) {
+		return 0, false
+	}
+	installed := make(map[string]*types.NodeInfo, len(current.Validators))
+	keys := make(map[string]bool, len(current.Validators))
+	for _, v := range current.Validators {
+		if v == nil {
+			return 0, false
+		}
+		installed[v.NodeID] = v
+		keys[string(v.SigKey)] = true
+	}
+	next := make(map[string]*types.NodeInfo, len(succ.Validators))
+	for _, v := range succ.Validators {
+		if v == nil {
+			return 0, false
+		}
+		next[v.NodeID] = v
+	}
+	replaced := 0
+	for _, b := range c.Bindings {
+		k, ok := byRoot[b.RootNodeID]
+		v := next[b.EVMNodeID]
+		old := installed[k.EVMNodeID]
+		if !ok || v == nil || old == nil || !bytes.Equal(old.SigKey, k.EVMKey) {
+			return 0, false
+		}
+		if v.NodeID == k.EVMNodeID {
+			if !bytes.Equal(v.SigKey, old.SigKey) || v.Stake != old.Stake {
+				return 0, false // a key or weight change under the entity's kept node id
+			}
+			continue
+		}
+		if installed[v.NodeID] != nil || keys[string(v.SigKey)] || v.Stake != old.Stake {
+			return 0, false // another entity's delegate (a swap), a reused key, or a weight change
+		}
+		replaced++
+	}
+	return replaced, true
+}
+
 // VerifyInstalled checks a bound candidate against the authenticated installed
 // configuration it replaces. currentRoot is the old root committee: an EVM validator change while it is unchanged is
-// refused (ErrEVMOnly). A caller that has only the installed configuration (re-derivation at activation, after the
+// refused (ErrEVMOnly) unless it is only binding replacements of retained root members (RebindingOnly). A caller that has only the installed configuration (re-derivation at activation, after the
 // freeze already enforced this) passes nil.
 func VerifyInstalled(c Candidate, succ, current *types.PartitionDescriptionRecord, currentRoot []RootMember) error {
 	return VerifyInstalledWith(UnitRules, c, succ, current, currentRoot)
+}
+
+// swapsAuthorizedBindings reports whether the candidate's root entities are K's and some binding names another EVM node than the
+// entity's authorized one in K (an unchanged EVM set whose delegates moved between entities).
+func swapsAuthorizedBindings(c Candidate) bool {
+	a := c.Authorization
+	kRoot := make([]RootMember, len(a.K))
+	byRoot := make(map[string]string, len(a.K))
+	for i, k := range a.K {
+		kRoot[i] = RootMember{NodeID: k.RootNodeID, Key: k.RootKey, Weight: k.Weight}
+		byRoot[k.RootNodeID] = k.EVMNodeID
+	}
+	if !sameCommittee(kRoot, c.RootMembers) {
+		return false
+	}
+	for _, b := range c.Bindings {
+		if byRoot[b.RootNodeID] != b.EVMNodeID {
+			return true
+		}
+	}
+	return false
 }
 
 // VerifyInstalledWith is VerifyInstalled under the rules r.
@@ -410,8 +505,14 @@ func VerifyInstalledWith(r Rules, c Candidate, succ, current *types.PartitionDes
 	if err := ValidateSuccessorWith(r, current, succ); err != nil {
 		return err
 	}
-	if currentRoot != nil && sameCommittee(c.RootMembers, currentRoot) && !sameValidators(succ.Validators, current.Validators) {
-		return ErrEVMOnly
+	if currentRoot != nil && sameCommittee(c.RootMembers, currentRoot) {
+		if !sameValidators(succ.Validators, current.Validators) {
+			if !RebindingOnly(c, succ, current) {
+				return ErrEVMOnly
+			}
+		} else if c.Authorization != nil && swapsAuthorizedBindings(c) {
+			return ErrEVMOnly // the same EVM set with delegates swapped between the authorized root entities
+		}
 	}
 	old, err := PDRHash(current)
 	if err != nil {

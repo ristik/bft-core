@@ -115,7 +115,14 @@
     },
     {
       "name": "evmOnly",
-      "mutates": "EVM validators changed with the root committee unchanged",
+      "mutates": "EVM validators added, removed or reweighted with the root committee unchanged (a binding replacement of a retained root entity against its K binding is allowed, #1286)",
+      "refusal": "ErrEVMOnly",
+      "firstCheck": "VerifyInstalled",
+      "isolation": "assignment valid"
+    },
+    {
+      "name": "swappedBinding",
+      "mutates": "root committee unchanged; a retained entity bound to another entity's kept delegate",
       "refusal": "ErrEVMOnly",
       "firstCheck": "VerifyInstalled",
       "isolation": "assignment valid"
