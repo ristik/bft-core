@@ -51,8 +51,6 @@ def vr_reject(r):
     if (r.manifest.get('pos') or {}).get('profile') != 'vr-pos16':
         raise ValueError('vr-reject needs a VR/P85 Compose generation')
     r.expect(r.ubft is not None, 'vr-reject has the pinned ubft (--ubft): it makes the joiner\'s keys and credentials')
-    r.expect(not (r.gen / handoff_ops.JOINER_OVERRIDE).exists(), 'no other joiner in this generation (vr-reject writes its own joiner override; '
-             'run it without vr-late-joiner)')
     rec = vr_recover.Recovery(r, 1)
     rec.since = vr_recover.utc()
     ev = r.evidence / 'reject'
@@ -79,45 +77,58 @@ def vr_reject(r):
 
     epoch = epoch_now()
 
-    # 1. the joiner: keys, an authority at the current scope, a funded owner wallet, an operator home
-    certified = r.wait(f'a verified UC of root epoch {epoch} names the certified shard epoch', lambda: rec.newest_uc(live, epoch), 600, every=10)
-    info = joiner_lib.prepare(gen, r.ubft)
-    j, val = info['index'], gen / f'validator{info["index"]}'
-    wallet = pos_join.new_wallet(r)
-    owner = wallet['address']
-    auth = val / 'auth'
-    (auth / 'pop').mkdir(mode=0o700, exist_ok=True)
-    subprocess.run([str(r.ubft), 'signing-authority', 'credential', '--out', str(auth / 'pop' / 'pop.cred')], check=True, capture_output=True)
-    trust = '/network/trust-base.json'
-    if epoch > 1:
-        (auth / 'current-trust.json').write_bytes(rec.fetch(f'root{live}', 'q3', 'trust-base', '--root-rpc', rec.root_rpc, '--epoch', str(epoch)))
-        trust = '/authority/current-trust.json'
-    root_info = json.loads((val / 'root' / 'node-info.json').read_text())
-    vrdep = json.loads((gen / 'network' / 'vr-deployment.json').read_text())
-    (auth / 'registration.json').write_text(json.dumps({'network': vrdep['networkWord'], 'chainId': r.manifest['chain_id'], 'registry': vr_addr,
-        'authorized': [{'action': 'register', 'owner': owner, 'payee': owner, 'rootNodeId': root_info['nodeId'], 'rootKey': root_info['sigKey']}]}) + '\n')
-    (auth / 'lifetime').write_text('fail-stop\n')
+    # 1. the joiner: keys, an authority at the current scope, a funded owner wallet, an operator home. A joiner this stage made earlier
+    # (an interrupted run: its identity is registered and may be elected already) is resumed as it is; any other joiner is refused.
     override_path = gen / handoff_ops.JOINER_OVERRIDE
-    override = json.loads(override_path.read_text())
-    services = override['services']
-    services[f'authority{j}']['entrypoint'] = vr_recover.authority_entrypoint(services[f'authority{j}']['entrypoint'], info['evm'], epoch,
-        certified['shardEpoch'] + 1, trust, r.manifest['genesis_hash'])
-    override_path.write_text(json.dumps(override, indent=1, sort_keys=True) + '\n')
+    resumed = None
+    if override_path.exists():
+        names = json.loads(override_path.read_text())['services']
+        j = min(int(n[len('authority'):]) for n in names if n.startswith('authority'))
+        val = gen / f'validator{j}'
+        cfg = val / 'operator-home' / 'validator.json'
+        r.expect(cfg.exists() and json.loads(cfg.read_text()).get('id'), 'the generation\'s only joiner is an earlier vr-reject joiner '
+                 '(vr-reject writes its own joiner override; run it without vr-late-joiner)', str(override_path))
+        resumed = json.loads(cfg.read_text())['id']
+        r.say(f'  resuming the vr-reject joiner {j} (identity {resumed})')
+    vrdep = json.loads((gen / 'network' / 'vr-deployment.json').read_text())
+    if resumed is None:
+        certified = r.wait(f'a verified UC of root epoch {epoch} names the certified shard epoch', lambda: rec.newest_uc(live, epoch), 600, every=10)
+        info = joiner_lib.prepare(gen, r.ubft)
+        j, val = info['index'], gen / f'validator{info["index"]}'
+        wallet = pos_join.new_wallet(r)
+        owner = wallet['address']
+        auth = val / 'auth'
+        (auth / 'pop').mkdir(mode=0o700, exist_ok=True)
+        subprocess.run([str(r.ubft), 'signing-authority', 'credential', '--out', str(auth / 'pop' / 'pop.cred')], check=True, capture_output=True)
+        trust = '/network/trust-base.json'
+        if epoch > 1:
+            (auth / 'current-trust.json').write_bytes(rec.fetch(f'root{live}', 'q3', 'trust-base', '--root-rpc', rec.root_rpc, '--epoch', str(epoch)))
+            trust = '/authority/current-trust.json'
+        root_info = json.loads((val / 'root' / 'node-info.json').read_text())
+        (auth / 'registration.json').write_text(json.dumps({'network': vrdep['networkWord'], 'chainId': r.manifest['chain_id'], 'registry': vr_addr,
+            'authorized': [{'action': 'register', 'owner': owner, 'payee': owner, 'rootNodeId': root_info['nodeId'], 'rootKey': root_info['sigKey']}]}) + '\n')
+        (auth / 'lifetime').write_text('fail-stop\n')
+        override = json.loads(override_path.read_text())
+        services = override['services']
+        services[f'authority{j}']['entrypoint'] = vr_recover.authority_entrypoint(services[f'authority{j}']['entrypoint'], info['evm'], epoch,
+            certified['shardEpoch'] + 1, trust, r.manifest['genesis_hash'])
+        override_path.write_text(json.dumps(override, indent=1, sort_keys=True) + '\n')
 
-    home = val / 'operator-home'
-    home.mkdir(mode=0o700)
-    for rel in ('root/keys.json', 'root/node-info.json', 'jwt/jwt.hex', 'ureth-key/p2p-secret'):
-        (home / rel).parent.mkdir(mode=0o700, exist_ok=True)
-        (home / rel).write_bytes((val / rel).read_bytes())
-    (home / 'operator').mkdir(mode=0o700)
-    (home / 'operator' / 'owner.key').write_text(wallet['private_key'] + '\n')
-    (home / 'authority').mkdir(mode=0o700)
-    (home / 'validator.json').write_text(json.dumps(vr_recover.operator_config(r.manifest, dep, owner, 0)) + '\n')
-    vr_recover.chown(val)
-    r.rescan()
-    r.funder_send(owner, FUNDING)
-    r.say(f'  joiner {j}: root {info["root"]}, EVM node {info["evm"]}, owner {owner}; root epoch {epoch}')
+        home = val / 'operator-home'
+        home.mkdir(mode=0o700)
+        for rel in ('root/keys.json', 'root/node-info.json', 'jwt/jwt.hex', 'ureth-key/p2p-secret'):
+            (home / rel).parent.mkdir(mode=0o700, exist_ok=True)
+            (home / rel).write_bytes((val / rel).read_bytes())
+        (home / 'operator').mkdir(mode=0o700)
+        (home / 'operator' / 'owner.key').write_text(wallet['private_key'] + '\n')
+        (home / 'authority').mkdir(mode=0o700)
+        (home / 'validator.json').write_text(json.dumps(vr_recover.operator_config(r.manifest, dep, owner, 0)) + '\n')
+        vr_recover.chown(val)
+        r.rescan()
+        r.funder_send(owner, FUNDING)
+        r.say(f'  joiner {j}: root {info["root"]}, EVM node {info["evm"]}, owner {owner}; root epoch {epoch}')
 
+    auth, home = val / 'auth', val / 'operator-home'
     # only the joiner's pod, execution client and authority: its root (the handoff PoP) and shard node never start
     rec.dc('up', '-d', '--no-deps', f'pod{j}', f'ureth{j}', f'authority{j}')
     r.wait('the joiner\'s authority answers', lambda: rec.auth_status(j), 120)
@@ -134,53 +145,54 @@ def vr_reject(r):
         rec.exec(f'authority{j}', 'ubft', 'signing-authority', 'pos-policy', *vr_recover.OPERATOR, '--policy', '/authority/pos-policy.json')
 
     # 2. apply: register, bond, admit (the container's join: a first apply refused for the PoS policy provisions it and applies again)
-    first = cli('validator', 'apply', '--wait', '5m', check=False)
-    r.keep_redacted(ev / 'apply-1.log', first.stdout + first.stderr)
-    ident = json.loads((home / 'validator.json').read_text()).get('id')
-    r.expect(bool(ident), 'apply registered the joiner in VR', r.scrub((first.stdout + first.stderr).strip()[-300:]))
-    provision_policy(ident)
-    if first.returncode:
-        r.expect('signing-pos-policy-refused' in first.stdout + first.stderr, 'the first apply stopped only for the PoS policy',
-                 r.scrub((first.stdout + first.stderr).strip()[-300:]))
-        second = cli('validator', 'apply', '--wait', '5m')
-        r.keep_redacted(ev / 'apply-2.log', second.stdout + second.stderr)
+    if resumed is None:
+        first = cli('validator', 'apply', '--wait', '5m', check=False)
+        r.keep_redacted(ev / 'apply-1.log', first.stdout + first.stderr)
+        ident = json.loads((home / 'validator.json').read_text()).get('id')
+        r.expect(bool(ident), 'apply registered the joiner in VR', r.scrub((first.stdout + first.stderr).strip()[-300:]))
+        provision_policy(ident)
+        if first.returncode:
+            r.expect('signing-pos-policy-refused' in first.stdout + first.stderr, 'the first apply stopped only for the PoS policy',
+                     r.scrub((first.stdout + first.stderr).strip()[-300:]))
+            second = cli('validator', 'apply', '--wait', '5m')
+            r.keep_redacted(ev / 'apply-2.log', second.stdout + second.stderr)
+    else:
+        ident = resumed
     times['applied'] = vr_recover.utc()
     r.say(f'  joiner {j} is identity {ident}')
 
-    # 3. the next election names the joiner; outputs of the incumbents alone opened before the admission are handed off first
-    def joiner_output():
-        rid = open_result()
-        if rid is None:
+    # 3. the next election names the joiner. A Reserved output names no members in VR yet: every member, the joiner included, sends its P85
+    # possession proof and anyone publishes; an output that turns out to be of the incumbents alone (reserved before the admission) is then
+    # handed off first.
+    members = {**ids, j: ident}
+
+    def publish(rid):
+        def probe():
+            cur = output(rid)
+            if cur['state'] != OUT_RESERVED:
+                return cur['state']
+            for m, who in members.items():
+                mount = mounts if m == j else [(vr_recover.authority_dir(gen, rec.compose, m), '/home/authority')]
+                mhome = home if m == j else rec.home(m, 'recover-participant')
+                done = rec.cli(live, mhome, 'validator', 'pos-publish', '--participate', '--result', rid, '--proof-member', str(who),
+                               mounts=mount, check=False)
+                r.say(f'  member {who}: exit {done.returncode}: ' + r.scrub(' | '.join((done.stdout + done.stderr).strip().splitlines()[-2:])[-240:]))
             return None
-        o = output(rid)
-        return (rid, o) if ident in o['members'] else 'incumbents'
+        return r.wait(f'every elected member proves possession and {rid[:18]} is published', probe, 1800, every=20)
 
     deadline = time.monotonic() + 5400
     while True:
-        got = r.wait('an election result is open', lambda: joiner_output(), 3600, every=15)
-        if got != 'incumbents':
+        rid = r.wait('an election result is open', open_result, 3600, every=15)
+        state = publish(rid)
+        o = output(rid)
+        if ident in o['members']:
             break
         r.expect(time.monotonic() < deadline, 'the joiner is elected within 90 minutes', str(epoch))
-        r.say(f'  an output of the incumbents opened before the admission: handed off first (root epoch {epoch})')
+        r.say(f'  result {rid[:18]} (state {state}) names the incumbents only {o["members"]}: handed off first (root epoch {epoch})')
         epoch = rec.participate_until(epoch)
-    rid, o = got
     times['reserved'] = vr_recover.utc()
     r.say(f'  result {rid}: members {o["members"]}, reserved at progress {o["reserved"]}, expires at {o["expires"]}')
     r.expect(o['expires'] == o['reserved'] + LIFETIME, 'expiresAtProgress is reservedProgress + LIFETIME', str(o))
-    members = {**ids, j: ident}
-
-    def publish():
-        cur = output(rid)
-        if cur['state'] != OUT_RESERVED:
-            return cur['state']
-        for m, who in members.items():
-            mount = mounts if m == j else [(vr_recover.authority_dir(gen, rec.compose, m), '/home/authority')]
-            mhome = home if m == j else rec.home(m, 'recover-participant')
-            done = rec.cli(live, mhome, 'validator', 'pos-publish', '--participate', '--result', rid, '--proof-member', str(who),
-                           mounts=mount, check=False)
-            r.say(f'  member {who}: exit {done.returncode}: ' + r.scrub(' | '.join((done.stdout + done.stderr).strip().splitlines()[-2:])[-240:]))
-        return None
-    state = r.wait('every member, the joiner included, proves possession and the output is published', publish, 1800, every=20)
     r.expect(state == OUT_PUBLISHED, 'the 5-member output is Published (as on the candidate)', str(state))
     times['published'] = vr_recover.utc()
     out = cli('validator', 'exit', '--wait', '5m')
@@ -228,12 +240,13 @@ def vr_reject(r):
     def next_output():
         nrid = open_result()
         return (nrid, output(nrid)) if nrid and nrid != rid else None
-    nrid, no = r.wait('the election reserves the next result', next_output, 1800, every=15)
-    r.say(f'  next result {nrid}: members {no["members"]}')
-    r.expect(ident not in no['members'] and sorted(no['members']) == sorted(ids.values()),
-             'the next election names the incumbents only (the joiner requested its exit)', str(no['members']))
+    nrid = r.wait('the election reserves the next result', lambda: (lambda x: x if x and x != rid else None)(open_result()), 1800, every=15)
     target = rec.participate_until(epoch)
     times['activated'] = vr_recover.utc()
+    no = output(nrid)
+    r.say(f'  next result {nrid}: members {no["members"]}, state {no["state"]}')
+    r.expect(ident not in no['members'] and sorted(no['members']) == sorted(ids.values()),
+             'the next election named the incumbents only (the joiner requested its exit)', str(no['members']))
     r.expect(target > epoch, f'the incumbents\' handoff completed after the rejection: root epoch {epoch} -> {target}', str(target))
     (ev / 'result.json').write_text(json.dumps({'result': rid, 'members': o['members'], 'joiner': ident, 'reservedAt': o['reserved'],
         'expiresAt': o['expires'], 'expiredSeenAt': at, 'statesSeenAt': seen, 'builtBy': built, 'trialRefusals': len(refused),
