@@ -37,7 +37,7 @@ func TestRollingRestartOneCertifiedBlockAfterTheStop(t *testing.T) {
 	c := newPhaseLockLive(t, twoStageT(t))
 	lag := 4*uint64(len(c.nodes)) + 4
 	// R = 8 rounds: one round lands in the run's own tail, and a real shard is not that fast
-	twoStageRun(t, c, "c", "b", lag+2, 8)
+	twoStageRun(t, c, "c", "b", lag+2, 8, nil)
 }
 
 // The outcome no short warm-up reaches: the first live run commits the repeat, and stage two then waits about 255 rounds for the next recovery run. With X
@@ -53,7 +53,7 @@ func TestRollingRestartStageTwoWaitsForTheNextRun(t *testing.T) {
 	lag := 4*uint64(len(c.nodes)) + 4
 	names := c.all()
 	slices.SortFunc(names, func(a, b string) int { return strings.Compare(c.id(a).String(), c.id(b).String()) }) // the selector's member order
-	got := twoStageRun(t, c, names[0], names[1], 1+lag+3*leader.RecoverySpacing+128, 1)
+	got := twoStageRun(t, c, names[0], names[1], 1+lag+3*leader.RecoverySpacing+128, 1, nil)
 	require.GreaterOrEqual(t, got.stageTwo, uint64(254), "the enumeration's outcome for this order and head is 255 rounds")
 	require.LessOrEqual(t, got.stageTwo, uint64(256), "the enumeration's outcome for this order and head is 255 rounds")
 }
@@ -74,7 +74,7 @@ func TestRollingRestartStageTwoTraversesADeadRun(t *testing.T) {
 	names := c.all()
 	slices.SortFunc(names, func(a, b string) int { return strings.Compare(c.id(a).String(), c.id(b).String()) }) // the selector's member order
 	// D first in id order: it owns the run of the fifth period, right after the fourth member's; X second owns the sixth
-	got := twoStageRun(t, c, names[1], names[0], 1+lag+3*leader.RecoverySpacing+128, max(1, uint64(traceEnvInt(t, "BFT_TRACE_R_ROUNDS", 1))))
+	got := twoStageRun(t, c, names[1], names[0], 1+lag+3*leader.RecoverySpacing+128, max(1, uint64(traceEnvInt(t, "BFT_TRACE_R_ROUNDS", 1))), nil)
 	require.GreaterOrEqual(t, got.stageTwo, uint64(2*leader.RecoverySpacing-8), "stage two waits through D's run for X's")
 	require.Equal(t, []string{"live", "D", "X"}, got.ownersAfterHead(3), "the runs: the first live one commits the repeat, then D's, then X's, runs %v", got.runs)
 }
@@ -106,7 +106,7 @@ func (r twoStageResult) ownersAfterHead(k int) (out []string) {
 
 // twoStageRun warms the cluster with X down to warm rounds past the anchor, then runs the shape; hold is R in root rounds after the commit.
 // It logs every wall time against its own origin, by UTC time: X's return, the request held, the repeat's commit, the fresh request, the certificate.
-func twoStageRun(t *testing.T, c *q4bLive, x, d string, warm, hold uint64) twoStageResult {
+func twoStageRun(t *testing.T, c *q4bLive, x, d string, warm, hold uint64, transport *liveTransport) twoStageResult {
 	t.Helper()
 	const noDeadRun, withDeadRun, joint = 281, 541, 822
 	n := uint64(len(c.nodes))
@@ -115,8 +115,7 @@ func twoStageRun(t *testing.T, c *q4bLive, x, d string, warm, hold uint64) twoSt
 	var target atomic.Uint64
 	var repeatMu sync.Mutex
 	repeats := map[uint64]bool{} // every round the filter saw a T2 repeat proposed in, whichever block ends up certified
-	base := c.net.filter
-	c.net.filter = func(from, to peer.ID, msg any) bool {
+	intercept := func(from peer.ID, msg any) bool {
 		if p, ok := msg.(*abdrc.ProposalMsg); ok && p.Block.Payload != nil {
 			for _, req := range p.Block.Payload.Requests {
 				if req.CertReason == drctypes.T2Timeout {
@@ -130,9 +129,17 @@ func twoStageRun(t *testing.T, c *q4bLive, x, d string, warm, hold uint64) twoSt
 		if v, ok := msg.(*abdrc.VoteMsg); ok && withhold.Load() && from == c.id(x) && v.VoteInfo.RoundNumber != target.Load() && v.VoteInfo.RoundNumber <= target.Load()+lag {
 			return true
 		}
-		return base(from, to, msg)
+		return false
+	}
+	base := c.net.filter
+	c.net.filter = func(from, to peer.ID, msg any) bool {
+		return intercept(from, msg) || base(from, to, msg)
 	}
 	first := c.except(x)
+	if transport != nil {
+		transport.drop = intercept
+		transport.up(c, first...)
+	}
 	c.start(first...)
 	anchor := c.nodes[0].r.manager.epochAnchor.Slot
 	require.Eventually(t, func() bool {
@@ -155,7 +162,12 @@ func twoStageRun(t *testing.T, c *q4bLive, x, d string, warm, hold uint64) twoSt
 	}
 	target.Store(1 << 62)
 	withhold.Store(true)
+	clock := startRoundClock(m(ingress))
+	defer func() { reportTwoStageClock(t, clock.halt()) }()
 	c.stop(d)
+	if transport != nil {
+		transport.down(c, d)
+	}
 	// the shape starts from where the survivors' commits stopped: blocks in flight at the stop can still commit (at T = 10 s the repeat of the round
 	// after the head committed before the request was held, run 1 on the host), so read the head and the shard's certificate only once the
 	// committed head has stood still for a while
@@ -186,6 +198,9 @@ func twoStageRun(t *testing.T, c *q4bLive, x, d string, warm, hold uint64) twoSt
 	}
 	require.NotZero(t, r, "a live pair among the covered rounds")
 	target.Store(r)
+	if transport != nil {
+		transport.up(c, x)
+	}
 	c.start(x)
 	returned := time.Now()
 	start, startUC := c.state(ingress).Round, lastUC()
@@ -337,16 +352,18 @@ func twoStageRun(t *testing.T, c *q4bLive, x, d string, warm, hold uint64) twoSt
 		return noDeadRun
 	}
 	t.Logf("T=%s, R held for %d rounds and at least %s after the commit was seen", c.nodes[0].r.manager.params.LocalTimeout, hold, holdFor)
-	t.Logf("fresh request at round %d after R=%d rounds, certified by %d: stage one %d rounds, stage two %d, total %d of %d, %d sends", freshAt, hold, end, stageOne, stageTwo, stageOne+stageTwo, joint, sends)
+	t.Logf("fresh request at round %d after R=%d rounds, certified by %d: stage one %d rounds, stage two %d, total %d, %d sends", freshAt, hold, end, stageOne, stageTwo, stageOne+stageTwo, sends)
 	utc := func(at time.Time) string { return at.UTC().Format("15:04:05.000") }
 	t.Logf("wall clock, UTC: X returned %s, request held %s, repeat committed %s, fresh request %s, certified %s", utc(returned), utc(heldAt), utc(committedAt), utc(freshSent), utc(certifiedAt))
 	t.Logf("wall clock, each from its own origin: X returned to certified %s; request held to certified %s; held to repeat committed %s; R (commit seen to fresh request) %s; fresh request to certified %s",
 		certifiedAt.Sub(returned).Round(time.Millisecond), certifiedAt.Sub(heldAt).Round(time.Millisecond), committedAt.Sub(heldAt).Round(time.Millisecond), freshSent.Sub(committedAt).Round(time.Millisecond), certifiedAt.Sub(freshSent).Round(time.Millisecond))
 	t.Logf("recovery runs %v; rounds by class, stage one %+v, stage two %+v", runs, classes[1], classes[2])
-	require.LessOrEqual(t, deadIn[1]+deadIn[2], 1, "a dead run in each stage: %v", runs)
-	require.LessOrEqual(t, stageOne, limit(deadIn[1]), "stage one, runs %v", runs)
-	require.LessOrEqual(t, stageTwo, limit(deadIn[2]), "stage two, runs %v", runs)
-	require.LessOrEqual(t, stageOne+stageTwo, uint64(joint), "the joint allowance")
+	if n == 4 {
+		require.LessOrEqual(t, deadIn[1]+deadIn[2], 1, "a dead run in each stage: %v", runs)
+		require.LessOrEqual(t, stageOne, limit(deadIn[1]), "stage one, runs %v", runs)
+		require.LessOrEqual(t, stageTwo, limit(deadIn[2]), "stage two, runs %v", runs)
+		require.LessOrEqual(t, stageOne+stageTwo, uint64(joint), "the joint allowance")
+	}
 	for _, name := range survivors {
 		require.False(t, m(name).recovery.InRecovery(), "%s entered state recovery with no missing certified state", name)
 	}
