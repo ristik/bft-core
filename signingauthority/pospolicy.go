@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/unicitynetwork/bft-core/evmassign"
-	"github.com/unicitynetwork/bft-core/vrschema"
 	"github.com/unicitynetwork/bft-go-base/types"
 )
 
@@ -27,9 +26,8 @@ import (
 // The pin is verified, not taken (#1222). The deployment fields are derived from the authority's own execution client, under the pins its
 // activation fence already relies on: the execution genesis hash and VR's runtime hash from the b1 profile. The client's EVM chain id
 // must equal the chain id of the enrolled shard configuration, or before the enrollment is complete the trusted b1 profile's
-// ExecutionChainID. Every id must be a VR identity whose current or staged binding names this node with this key (PosSource), or, for a
-// key change or recovery (its P85 delegation precedes the VR binding), one whose binding to this key the registration policy authorizes
-// for the identity's VR owner. A field the
+// ExecutionChainID. Every id must be a VR identity whose current or staged binding names this node with this key (PosSource): a key
+// change or recovery stages VR's binding first and pins after it confirms. A field the
 // pin supplies must equal the derived one. A startup pin (WithPosPolicy) and a late one (SetPosPolicy, the operator channel) go through
 // the same check. The first verified pin is final for the authority's lifetime: the same pin again succeeds and another is
 // ErrPosPolicyConflict. Until a pin is verified, the three signing operations are refused; a source that cannot be read leaves the pin
@@ -75,7 +73,8 @@ type PosDeploymentView struct {
 	Network  [32]byte
 	ChainID  [32]byte
 	Election [20]byte
-	// Unbound are the queried ids whose VR bindings (current or staged) do not name this node with this key, with each one's VR owner.
+	// Unbound are the queried ids whose VR bindings (current or staged) do not name this node with this key, with each one's VR owner:
+	// a pin listing one is refused.
 	Unbound map[uint64][20]byte
 }
 
@@ -328,33 +327,14 @@ func (a *Authority) verifyPos(ctx context.Context, src PosSource, chain uint64, 
 	case p.Election != [20]byte{} && p.Election != view.Election:
 		return PosPolicy{}, fmt.Errorf("%w: the pin names election %x, VR's PoS adapter names %x", ErrPosPolicy, p.Election, view.Election)
 	}
-	for id, owner := range view.Unbound {
-		if !slices.Contains(p.IDs, id) {
-			continue
-		}
-		if !a.bindingAuthorized(id, owner) {
-			return PosPolicy{}, fmt.Errorf("%w: VR identity %d binds neither in its current nor in its staged binding this node with this key, and the "+
-				"registration policy authorizes no binding of it to this key for its owner %x", ErrPosPolicy, id, owner)
+	for _, id := range p.IDs {
+		if _, unbound := view.Unbound[id]; unbound {
+			// a key change or recovery stages VR's binding first (#1222, astra's REORDER): the pin follows the confirmed binding
+			return PosPolicy{}, fmt.Errorf("%w: VR identity %d binds neither in its current nor in its staged binding this node with this key "+
+				"(a key change stages VR's binding first, then pins)", ErrPosPolicy, id)
 		}
 	}
 	return PosPolicy{Network: view.Network, ChainID: want, Election: view.Election, IDs: slices.Clone(p.IDs)}, nil
-}
-
-// bindingAuthorized reports whether the registration policy authorizes this authority to sign the VR binding proposal of identity id for
-// its VR owner: a key change or recovery, whose P85 delegation is signed before the VR binding exists. The pin is then no wider than the
-// binding the authority may already sign for this key.
-func (a *Authority) bindingAuthorized(id uint64, owner [20]byte) bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.registration == nil {
-		return false
-	}
-	for _, x := range a.registration.Authorized {
-		if x.Domain == vrschema.BindingDomainText && x.ID == id && x.Owner == owner {
-			return true
-		}
-	}
-	return false
 }
 
 // noteConfLocked records the chain id of a shard configuration the authority installs (its enrollment's or an advance's). One that

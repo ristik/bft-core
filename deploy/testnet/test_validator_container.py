@@ -234,6 +234,10 @@ class ValidatorContainer(unittest.TestCase):
             rec, = [c for c in calls if c[:2] == ['validator', 'recover']]
             self.assertEqual(rec[rec.index('--old-authority-home') + 1], 'authority')
             self.assertEqual(rec[rec.index('--new-evm-authority-socket') + 1], 'authority-2/operator.sock')
+            # #1222: recover pins the fresh authority after VR's binding confirms; nothing pins it before
+            template = Path(rec[rec.index('--pin-pos-policy') + 1])
+            self.assertEqual(json.loads(template.read_text()), {'network':'0x' + '00'*32, 'chainId':7, 'election':'0x' + '22'*20})
+            self.assertFalse(any(c[:2] == ['signing-authority', 'pos-policy'] for c in calls), 'recover pins the authority itself')
             init, = [c for c in calls if c[:2] == ['validator', 'init']]
             self.assertEqual(init[init.index('--evm-authority-socket') + 1], 'authority-2/operator.sock')
             self.assertEqual(init[init.index('--id') + 1], '3')

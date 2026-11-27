@@ -110,15 +110,28 @@ the custody owner is the operator, the identity has open lots, has not
 requested retirement and is not excluded. Then it sends two transactions,
 each confirmed and re-read before the next:
 
-1. `ElectionPolicy.admitDelegation` of the new EVM key at custody's current
-   generation. It fences the old key: no later election snapshot selects the
-   identity with the old key.
-2. `VR.proposeBinding` of the identical words. The next election freezes the
-   new key, the new authority proves possession, and the boundary installs
-   the binding at the same generation.
+1. `VR.proposeBinding` of the new words, with the surviving root key's and
+   the fresh EVM key's proofs over VR's binding digest. The fresh authority
+   gives its proof under its registration policy (a `binding` entry for the
+   identity) while its P85 signing is still refused. VR needs no delegation
+   for it.
+2. After it confirms, `--pin-pos-policy` (a pin file without ids, as for
+   `apply`) pins the fresh authority to the identity. The authority verifies
+   the pin against its own execution client: VR's confirmed binding must name
+   its node and key. Only then does it sign the delegation possession, and
+   `ElectionPolicy.admitDelegation` of the identical words lands at
+   custody's current generation and nonces. It fences the old key: no later
+   election snapshot selects the identity with the old key. The next
+   election freezes the new key, the new authority proves possession, and
+   the boundary installs the binding at the same generation.
 
-A re-run compares the exact words and skips the steps already done, so an
-interrupted recovery is resumed with the same command. While an open
+Until the delegation confirms, an election can still freeze the old key
+against the current binding. Keep the old authority stopped; a result
+frozen with the dead key follows the normal expiry or recovery. The
+container passes the pin template itself.
+
+A re-run re-reads both contracts, compares the exact words and skips each
+confirmed step, so an interrupted recovery is resumed with the same command. While an open
 election result has frozen the identity's staged binding, recover refuses to
 replace it; wait until that result is published and acknowledged, rejected
 or recovered. A result that froze the old, dead key cannot publish; it ends
@@ -142,7 +155,7 @@ docker exec unicity-node ubft-validator recover --yes
 docker rename unicity-authority unicity-authority-lost
 docker run -d --name unicity-authority-2 --restart=no --network host \
   -v unicity-validator:/data "$IMAGE" authority
-# 2: sends the delegation, then the binding; relinks; waits for the boundary, enrolls and advances
+# 2: sends VR's binding, pins the fresh authority, sends the delegation; relinks; waits for the boundary, enrolls and advances
 docker exec unicity-node ubft-validator recover --yes
 docker exec unicity-node ubft-validator status
 ```
@@ -702,7 +715,7 @@ ubft validator status --custody "$CUSTODY" --sample 0 | grep '^clock'
 
 If the application has sent no registration, confirm a new window, stop only the pending authority using its saved `AUTHORITY_PID`, and start an authority for the confirmed successor using the existing registration policy and credentials. Write its node info to a fresh filename and select it with `validator init --force`. Keep the wallet, root key, shard peer identity and payee.
 
-If PoS registration already committed, keep the authority running. While it runs and holds its key, change keys only with `validator rotate`: on the PoS adapter it sends `admitDelegation` of the new words at custody's current generation first, then `VR.proposeBinding` of the identical words, and a re-run resumes. `validator apply` on a bonded identity refuses a delegation that is not VR's current or staged binding and points to `rotate`. Rotate refuses a root-key change, and it refuses to replace a staged binding that an open election result froze. If the authority has already stopped, follow [Authority loss](#authority-loss): preserve the old volume and marker and run `recover`.
+If PoS registration already committed, keep the authority running. While it runs and holds its key, change keys only with `validator rotate`: on the PoS adapter it sends `VR.proposeBinding` of the new words first, then, once that confirms, `admitDelegation` of the identical words at custody's current generation (with a new authority-held key, give `--pin-pos-policy` so the new authority is pinned between the two), and a re-run resumes. `validator apply` on a bonded identity refuses a delegation that is not VR's current or staged binding and points to `rotate`. Rotate refuses a root-key change, and it refuses to replace a staged binding that an open election result froze. If the authority has already stopped, follow [Authority loss](#authority-loss): preserve the old volume and marker and run `recover`.
 
 ## Troubleshooting
 

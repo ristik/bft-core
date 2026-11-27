@@ -439,34 +439,17 @@ func TestStartupPosPolicyConflictAndReuse(t *testing.T) {
 	require.NotSame(t, &a.pos.IDs[0], &b.pos.IDs[0])
 }
 
-// A key change or recovery signs the P85 delegation before VR stages the new binding, so VR does not bind the new key yet: the pin is
-// accepted when the registration policy authorizes this authority's binding of that identity for its VR owner, and refused otherwise.
-func TestPosPolicyRekeyNeedsTheBindingAuthorization(t *testing.T) {
-	policy := func(owner [20]byte, id uint64, domain string) Option {
-		return WithRegistrationPolicy(RegistrationPolicy{Deployment: RegistrationDeployment{Network: [32]byte{1}, ChainID: [32]byte{31: posChain}, Registry: [20]byte{3}},
-			Authorized: []RegistrationAuthorization{{Domain: domain, Owner: owner, ID: id, RootNodeID: "root", RootKey: testRootKey(t), Payee: owner}}})
-	}
-	rekey := PosPolicy{IDs: []uint64{9}}
-	for name, c := range map[string]struct {
-		opt Option
-		ok  bool
-	}{
-		"authorized binding":        {policy([20]byte{0x0a}, 9, vrschema.BindingDomainText), true},
-		"another owner":             {policy([20]byte{0x0b}, 9, vrschema.BindingDomainText), false},
-		"another identity":          {policy([20]byte{0x0a}, 8, vrschema.BindingDomainText), false},
-		"a registration, not a key": {policy([20]byte{0x0a}, 0, vrschema.RegisterDomainText), false},
-	} {
-		t.Run(name, func(t *testing.T) {
-			a := newPosAuthority(t, newFakePos(), c.opt)
-			err := a.SetPosPolicy(context.Background(), rekey)
-			if c.ok {
-				require.NoError(t, err)
-				return
-			}
-			require.ErrorIs(t, err, ErrPosPolicy)
-		})
-	}
-	require.ErrorIs(t, newPosAuthority(t, newFakePos()).SetPosPolicy(context.Background(), rekey), ErrPosPolicy, "no registration policy")
+// #1222 (astra's REORDER): no configuration stands in for VR's binding. A key change or recovery stages VR's binding first; until it
+// confirms the pin is refused, even when the registration policy authorizes this authority's binding of the identity.
+func TestPosPolicyUnboundIdentityIsRefusedWhateverTheRegistrationPolicy(t *testing.T) {
+	owner := [20]byte{0x0a}
+	reg := WithRegistrationPolicy(RegistrationPolicy{Deployment: RegistrationDeployment{Network: [32]byte{1}, ChainID: [32]byte{31: posChain}, Registry: [20]byte{3}},
+		Authorized: []RegistrationAuthorization{{Domain: vrschema.BindingDomainText, Owner: owner, ID: 9, RootNodeID: "root", RootKey: testRootKey(t), Payee: owner}}})
+	src := newFakePos()
+	a := newPosAuthority(t, src, reg)
+	require.ErrorIs(t, a.SetPosPolicy(context.Background(), PosPolicy{IDs: []uint64{9}}), ErrPosPolicy)
+	src.bound[9] = true // VR's binding of identity 9 now names this node and key: the same pin is verified
+	require.NoError(t, a.SetPosPolicy(context.Background(), PosPolicy{IDs: []uint64{9}}))
 }
 
 func testRootKey(t *testing.T) []byte {

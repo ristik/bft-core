@@ -807,12 +807,6 @@ def pos_policy(*ids):
     return {**policy, 'ids':list(ids)} if ids else policy
 
 
-def provision_pos_policy(d, ident):
-    """The authority's PoS policy for this identity: it signs the election's delegation possession (admitDelegation) only for it."""
-    write(d/'pos-policy.json', json.dumps(pos_policy(ident)).encode())
-    authority('pos-policy', '--policy', d/'pos-policy.json', home=d)
-
-
 def names_node(conf, info):
     """Whether a shard configuration names this EVM node with this authority's key."""
     named = [v for v in conf.get('validators') or [] if v.get('nodeId') == info['nodeId']]
@@ -897,14 +891,15 @@ def recover(a, pins):
             wait_for(f'the fresh authority in {d} (start the authority container)', lambda: authority_status(d), limit=300)
             stamp_authority(d)
             authority('node-info', '--out', d/'node-info.json', home=d)
-            provision_pos_policy(d, ident)
+            # #1222: recover pins the fresh authority to the identity after VR's binding names its key, then signs the delegation
+            write(d/'pos-policy-template.json', json.dumps(pos_policy()).encode())
             journal(HOME/RECOVERY, 'transactions', **{k: rec[k] for k in ('id', 'old', 'new', 'scope')})
         if read(HOME/RECOVERY)['phase'] == 'transactions':
             with lock('.tx.lock', wait=True):
                 ubft('validator', 'recover', '--old-authority-home', auth_name(old),
                      '--new-evm-authority-socket', f'{d.name}/operator.sock',
                      '--new-evm-authority-credential', f'{d.name}/operator.cred', '--new-evm-node-info', f'{d.name}/node-info.json',
-                     '--wait', '10m', timeout=1800)   # the committee certifies on n-1 signers; a re-run resumes either way
+                     '--pin-pos-policy', d/'pos-policy-template.json', '--wait', '10m', timeout=1800)   # the committee certifies on n-1 signers; a re-run resumes either way
             journal(HOME/RECOVERY, 'linking', **{k: rec[k] for k in ('id', 'old', 'new', 'scope')})
         if read(HOME/RECOVERY)['phase'] == 'linking':
             configure_authority(new)
