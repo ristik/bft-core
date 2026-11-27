@@ -83,9 +83,9 @@ reconcile any submitted registration, delegation or bond transactions.
 - If the identity is unregistered, unbonded and has no unresolved submissions,
   keep the original volume for diagnosis. Initialize a new identity in a
   separately named volume and fund its new payee before joining.
-- If the identity is registered and bonded, recover it in place with
-  `ubft validator recover` (container: `ubft-validator recover`, below). A
-  new EVM key is a new EVM node identity: create a fresh shard node key (a
+- If the identity is registered and bonded, recover it in place with the
+  verified `handoff-ubft validator recover` or the container's
+  `ubft-validator recover`. A new EVM key is a new EVM node identity: create a fresh shard node key (a
   new EVM node id), a new authority in a fresh volume and an empty shard
   data directory. The new shard node joins through the joiner path: it
   syncs, stays staging-only and activates at the boundary. The old node and
@@ -234,13 +234,39 @@ install_release
 
 Continue after all manifest entries verify. The commands below use free local ports 26652 (root), 28152 (shard), 30303 (ureth devp2p), 8545 (Ethereum RPC), 8551 (Engine), 25852 (root status) and 28352 (shard status). Adapt the ports together if these are in use.
 
+Install the host signing CLI from the validator bundle published for this release. Obtain its URL, SHA256SUMS digest and reviewed revision from the authenticated operator announcement. Use the release's `ubft` for the root and shard and the bundle's `handoff-ubft` for authority, join and recovery operations.
+
+```bash
+read -rp 'Validator bundle URL: ' VALIDATOR_BUNDLE_URL
+read -rp 'Validator bundle SHA256SUMS digest: ' VALIDATOR_BUNDLE_DIGEST
+read -rp 'Reviewed handoff-ubft commit SHA: ' HANDOFF_REVISION
+HANDOFF_UBFT="$HOME/.local/bin/handoff-ubft"
+install_handoff_ubft() (
+  set -eo pipefail
+  work=$(mktemp -d "$UBFT_HOME/handoff-cli.XXXXXXXX")
+  trap 'rm -rf -- "$work"' EXIT
+  cd "$work"
+  for name in SHA256SUMS manifest.json handoff-ubft; do
+    curl -fsS "${VALIDATOR_BUNDLE_URL%/}/$name" -o "$name"
+  done
+  printf '%s  SHA256SUMS\n' "$VALIDATOR_BUNDLE_DIGEST" | sha256sum -c -
+  awk '$2 == "manifest.json" || $2 == "handoff-ubft"' SHA256SUMS | sha256sum -c -
+  digest=$(jq -er --arg rev "$HANDOFF_REVISION" --arg release "$RELEASE_DIGEST" '
+    select(.handoffUbftRevision == $rev and .sourceReleaseSha256 == $release) | .handoffUbftSha256 | select(test("^[a-f0-9]{64}$"))
+  ' manifest.json)
+  printf '%s  handoff-ubft\n' "$digest" | sha256sum -c -
+  install -m 755 handoff-ubft "$HANDOFF_UBFT"
+)
+install_handoff_ubft
+```
+
 ## 2. Create the operator identity and start the authority
 
 The single-account commands in Sections 2–4 are for the isolated rehearsal. For an external deployment, put the authority and its operator socket, administrative credential and wallet in an administrative security boundary. Run root, shard and ureth as separate unprivileged services. Keep their homes, credentials and backups separate from the administrative files. Restrict the root to the PoP socket and `pop.cred`, and the shard to the certification socket and current `client.cred`. Ureth needs neither endpoint.
 
 For separate Linux accounts, place the authority's operator, PoP and certification sockets in three distinct directories. The authority creates each socket owner-only and restricts its directory on startup. After the listeners are ready, have the supervisor grant the paired root UID traversal and connect access to the PoP directory and socket, and the paired shard UID those rights to the certification directory and socket, for example with per-user filesystem ACLs. Reapply the grants after each authority startup. Keep the operator socket and credential in an admin-only location. Deliver each service's own credential to its private directory and update the shard's copy when a session is replaced. Before starting services, verify from each service account that it can reach its own endpoint and read its own credential, and that access to the administrative credential and the other service's credential is denied. [Authority credential model](../design/f6c-signing-state-contract.md#the-authority-process-boundary-before-step-4)
 
-Before creating the authority, have the Foundation confirm the next election is still open to applications and give you its successor shard epoch and application cutoff. For the rehearsal, use the maintainer's admission-window entry in the operator log. The current root epoch alone cannot establish this scope.
+Before creating the authority, get the confirmed successor shard epoch from the Foundation or the rehearsal operator log. The current root epoch alone cannot establish the shard epoch.
 
 `validator init` creates the root key, the shard's local key file for peer identity, the ureth devp2p secret, the Engine JWT and the operator transaction key. The authority generates its own shard signing key in memory. It starts pending, with signing sessions disabled until enrollment. Create and hold the authority outside the shard's backup and restart scope. If its process is lost, its signing identity is lost. Arrange a new binding and enrollment before returning to service.
 
@@ -256,35 +282,43 @@ ROOT_EPOCH=$(ubft validator status --sample 0 --json | jq -er '.rootEpoch | sele
 read -rp 'Confirmed successor shard epoch: ' NEXT_SHARD_EPOCH
 SHARD_NODE=$(ubft node-id --home "$UBFT_HOME/evm" | tail -n1)
 install -d -m 700 authority
-ubft signing-authority credential --out authority/operator.cred
-ubft signing-authority credential --out authority/pop.cred
+"$HANDOFF_UBFT" signing-authority credential --out authority/operator.cred
+"$HANDOFF_UBFT" signing-authority credential --out authority/pop.cred
 jq -n --arg network "$NETWORK_WORD" --argjson chainId "$CHAIN_ID" \
   --arg registry "$REGISTRY" --arg owner "$OPERATOR" \
   --slurpfile root root/node-info.json \
   '{network:$network,chainId:$chainId,registry:$registry,authorized:[
     {action:"register",owner:$owner,payee:$owner,rootNodeId:$root[0].nodeId,rootKey:$root[0].sigKey}
   ]}' > authority/registration.json
-ubft signing-authority run --home "$UBFT_HOME/authority" --authority-id "$SHARD_NODE" --network-id 3 --partition-id 8 \
+start_pending_authority() (
+  set -eo pipefail
+  "$HANDOFF_UBFT" signing-authority run --help | grep -F -- --pending-join-scope >/dev/null
+  "$HANDOFF_UBFT" validator apply --help | grep -F -- --pin-pos-policy >/dev/null
+  "$HANDOFF_UBFT" validator recover --help | grep -F -- --pin-pos-policy >/dev/null
+  "$HANDOFF_UBFT" signing-authority advance-with-proof --help | grep -F -- --scope-only >/dev/null
+  exec "$HANDOFF_UBFT" signing-authority run --home "$UBFT_HOME/authority" --authority-id "$SHARD_NODE" --network-id 3 --partition-id 8 \
   --shard-id 0x80 --shard-epoch "$NEXT_SHARD_EPOCH" --root-epoch 1 --node-id "$SHARD_NODE" \
   --trust-base "$UBFT_HOME/release/trust-base.json" \
   --client-socket "$UBFT_HOME/authority/client.sock" \
   --operator-socket "$UBFT_HOME/authority/operator.sock" --operator-credential "$UBFT_HOME/authority/operator.cred" \
   --pop-socket "$UBFT_HOME/authority/pop.sock" --pop-credential "$UBFT_HOME/authority/pop.cred" \
   --registration-policy "$UBFT_HOME/authority/registration.json" --require-pos-policy \
-  --lineage-genesis-trust-base "$UBFT_HOME/release/trust-base.json" --lineage-utb-genesis \
+  --pending-join-scope --lineage-genesis-trust-base "$UBFT_HOME/release/trust-base.json" --lineage-utb-genesis \
   --b1-profile "$UBFT_HOME/release/b1-profile.json" --activation-source-url http://127.0.0.1:8545 \
   --execution-genesis-hash "$(jq -er '.genesis_hash' release/manifest.json)" \
-  --metrics-address 127.0.0.1:29352 >logs/authority.log 2>&1 &
+  --metrics-address 127.0.0.1:29352
+)
+start_pending_authority >logs/authority.log 2>&1 &
 AUTHORITY_PID=$!
 ```
 
-The registration policy makes this a VR generation's authority, so its activation fence is mandatory: it verifies its root activations from the release's genesis trust base, and reads VR from your own ureth (`--activation-source-url`, started in Section 3) under the release's b1 profile and execution genesis hash. The same execution client is what the P85 pin below is verified against. These are the validator container's flags for the same joiner path. A pending authority is scoped to the shard epoch that will first name it. Save the confirmed cutoff, successor shard epoch and current root epoch with your service configuration.
+The authority verifies root activations from the release's genesis trust base and reads VR from the local ureth instance started in Section 3. It verifies VR against the release's B1 profile and execution genesis hash. The authority starts with the observed successor shard epoch. Verified activations can refresh that target until the authority gives a shard-bound possession proof. Save the confirmed cutoff and epochs with your service configuration.
 
 VR assigns the identity id at application, so the authority's P85 pin (the ids its key may sign possession proofs for) is installed then, on the operator channel. The authority verifies it before it signs anything P85: it derives the network word and the election from its execution client (VR's network word and active PoS module, under the execution genesis hash and the b1 profile's VR code hash), requires the client's chain id to be the b1 profile's (the enrolled shard configuration's once enrollment is complete), and requires every id to be a VR identity bound to this node and key. A wrong field in the pin file is refused. With a provisioned identity, give the pin at startup with `--pos-policy`; it is verified the same way. Wait for `signing authority running` in `logs/authority.log`, then select the authority in the validator config.
 
 ```bash
 AUTH=(--operator-socket "$UBFT_HOME/authority/operator.sock" --operator-credential "$UBFT_HOME/authority/operator.cred")
-ubft signing-authority node-info "${AUTH[@]}" --out authority/node-info.json
+"$HANDOFF_UBFT" signing-authority node-info "${AUTH[@]}" --out authority/node-info.json
 ubft validator init --force --rpc "$RPC_URL" --chain-id "$CHAIN_ID" --ports 26652,28152,30303 \
   --evm-authority-socket authority/operator.sock --evm-authority-credential authority/operator.cred \
   --evm-authority-node-info authority/node-info.json
@@ -315,8 +349,6 @@ backup_validator
 ```
 
 The check decrypts into a pipe and compares the archive's entry list before publishing the encrypted backup. Keep the JWT and authority credentials private. Start only one instance per identity. Always pass the same `--p2p-secret-key` to ureth so its enode survives a datadir rebuild.
-
-Before applying, check that `validator status --sample 0 --json` still reports the recorded `ROOT_EPOCH` and that your confirmed election cutoff has passed neither in certified time nor progress. Confirm a new window if the cutoff elapsed or an intervening handoff closed it. See [Missed admission](#missed-admission) for the binding recovery.
 
 ## 3. Verify the seed and start as a follower
 
@@ -455,13 +487,50 @@ Check the PoS committee profile in the authenticated release announcement. A six
 Use a fresh root signing key for every root history. Never bring a root key from an earlier generation or reset, whether you enroll now, join later or rotate. Post-term evidence charges a quorum seal from its signed bytes, and those bytes bind the network but not the root genesis. A seal your old key signed in another history that shares the network would therefore be chargeable here ([D5 §2.1](../design/d5-accountability-retirement-inbox.md#21-post-term-seal-offence-1297)). The release ships the retired root key hashes as `retired-root-keys.json`. `apply` and `rotate` read `release/retired-root-keys.json` under the validator home by default and refuse a configured root key on the list. A release of a first generation has no list, and then there is nothing to check. `--retired-root-keys FILE` names another list, and `--no-retired-root-keys` skips the shipped one.
 
 ```bash
-ubft validator apply --dry-run
+"$HANDOFF_UBFT" validator apply --dry-run
 jq -n --arg network "$NETWORK_WORD" --argjson chainId "$CHAIN_ID" --arg election "$ELECTION" \
   '{network:$network,chainId:$chainId,election:$election}' > authority/pos-policy-template.json
-ubft validator apply --pin-pos-policy authority/pos-policy-template.json
+"$HANDOFF_UBFT" validator apply --pin-pos-policy authority/pos-policy-template.json
 ```
 
-On PoS, apply registers the keys in VR and P85 custody, admits the delegation and bonds the stake, all in one run. VR assigns the identity id at registration, and `--pin-pos-policy` pins the authority's P85 policy to that id just before the delegation possession. The delegation comes before the first bond, because the bond makes the identity eligible. An election reserved after the authority's scope was fixed but before the bond activates that shard epoch without you, and the authority then needs replacing (see [Authority loss](#authority-loss)). So start the authority and apply promptly, without a long gap, for example for funding. A retry pins the same policy again, which is a no-op. The template must name the release's election; apply refuses another before it sends anything. The default is one bond unit. To choose the amount or recipient, supply `--bond` in decimal base units and `--withdrawal` on the initial application. Keep the same settings on retries. A dry run previews the next transaction against the state currently visible. Read the receipts before treating an application as complete.
+On PoS, apply registers the keys in VR and P85 custody, admits the delegation and bonds the stake, all in one run. VR assigns the identity id at registration, and `--pin-pos-policy` pins the authority's P85 policy to that id just before the delegation possession. The delegation comes before the first bond, because the bond makes the identity eligible. A result reserved before the bond can pass over you. Keep the authority running and follow the scope refresh below after that result activates. A retry pins the same policy again, which is a no-op. The template must name the release's election; apply refuses another before it sends anything. The default is one bond unit. To choose the amount or recipient, supply `--bond` in decimal base units and `--withdrawal` on the initial application. Keep the same settings on retries. A dry run previews the next transaction against the state currently visible. Read the receipts before treating an application as complete.
+
+After retirement, a new bond opens the next custody generation before its delegation can be admitted. An election reserved between those two receipts can pass over the identity.
+
+For an activation that excludes your pending authority, first make sure your local root has [installed the missed epoch](#bring-a-lagging-root-to-an-activated-epoch). Refresh through that root epoch before the next handoff asks for possession. The authority verifies each bundle from its pinned genesis, adopts the new root trust and moves the pending shard target past the excluded configuration. Get bundles from the same loopback root used for shard configuration. Repeat when a later activation also excludes this node and key. When an activation names your key, continue to first enrollment below.
+
+```bash
+advance_authority_from_local_root() (
+  set -eo pipefail
+  local target=$1 mode=$2 tip epoch work path
+  local -a proofs=() args=()
+  [[ "$target" =~ ^[1-9][0-9]*$ ]] || return 1
+  if [[ "$mode" == pending && "$target" == 1 ]]; then
+    return 0 # genesis is already pinned; there is no activation bundle for it
+  fi
+  (( target >= 2 )) || return 1
+  tip=$("$HANDOFF_UBFT" signing-authority status "${AUTH[@]}" | jq -er '.lineageEpoch')
+  work=$(mktemp -d "$UBFT_HOME/activation.XXXXXXXX")
+  trap 'rm -rf -- "$work"' EXIT
+  if [[ "$mode" == pending ]]; then
+    (( tip < target )) || return 0
+    args=(--scope-only)
+  else
+    args=(--client-socket "$UBFT_HOME/authority/client.sock" --out "$UBFT_HOME/authority/client.cred")
+    # Replaying the target repairs a credential write interrupted after verification.
+    (( tip < target )) || tip=$((target - 1))
+  fi
+  for ((epoch=tip+1; epoch<=target; epoch++)); do
+    path="$work/activation-$epoch.cbor"
+    ubft q3 proof-envelope --root-rpc http://127.0.0.1:25852 --epoch "$epoch" --out "$path"
+    proofs+=(--proof "$path")
+  done
+  "$HANDOFF_UBFT" signing-authority advance-with-proof "${AUTH[@]}" "${args[@]}" "${proofs[@]}"
+)
+# Use the locally installed root epoch that excluded this authority.
+read -rp 'Installed root epoch that excluded this node: ' MISSED_ROOT_EPOCH
+advance_authority_from_local_root "$MISSED_ROOT_EPOCH" pending
+```
 
 Wait for a P85 election to reserve a result naming your identity. With the release that includes the per-validator proof command, submit your own assignment possession proof. Each frozen member submits one through its own authority. Any member can then finalize P85 and publish in VR. `pos-publish --participate` does it in a fixed order: the lowest frozen identity finalizes and publishes at once, and the member of rank k only k × 180 s of chain time after the block that accepted the last proof (at most 4 steps), if nobody has by then. The step covers the finalizer's two receipts and its node's lag behind the head. So one member pays for the two transactions, and the others take over only when it is down. A member with an unavailable authority can hold up that result until it expires. Keep the nodes running and follow the next attempt.
 
@@ -474,12 +543,12 @@ cast call 0xff00000000000000000000000000000000000002 'progress()(uint64)' --rpc-
 
 The roots log the bitmap they built (`election result due for rejection`), the leader logs the one it ordered (`a RejectResult is ordered in this proposal`), and every root logs the committed one (`election result rejection committed`). Bit i is the i-th member of the result, by ascending staking id. The bitmap is one leader's local view and is never judged. A faulty leader can park an honest co-joiner, or spare a non-prover, for one park period per genuine expiry.
 
-**Certified miss: an incumbent that withholds its proof (PoS, #1319).** A clear bit alone never parks an incumbent, but a certified miss does. When an intent is derivable, the roots commit a handoff PoP request (control op 6) that binds the network, the predecessor, the result, the attempt and the frozen roster, with a cutoff `POP_WINDOW` (4,096 rounds of root progress, about 34 minutes at the testnet's pace) after it. Send your proof to any old root; the roots relay it. At the cutoff each old root signs a domain-separated statement for every requested member whose proof it lacked, but only a root that held the intent from the request's block on and saw no verified assembly of it: a root restarted inside the window states nothing. When the result then expires, the leader attaches every member's certificate whose signers reach the ordinary commit quorum by weight of the whole predecessor committee, and the roots commit those members in a `PoPMissed` record (kind 9). ElectionPolicy parks them, incumbents included, for `2 × LIFETIME` from that record, exactly as above: the next election runs against the full committee in force without them, and at the four-member floor it needs an eligible replacement or records `NoCandidate` and keeps the old committee. Parking still removes nothing else: a parked incumbent keeps signing for the committee in force and keeps its stake, exit and claim rights. It is not slashing: the certificate attests that a quorum did not receive the proof by the cutoff, and network delay can certify an honest member, so keep your root reachable by the old roots during the window. Every root logs `PoP misses stated at the request's cutoff` with the members it stated. 
+**Certified miss: an incumbent that withholds its proof (PoS, #1319).** A clear bit alone never parks an incumbent, but a certified miss does. When an intent is derivable, the roots commit a handoff PoP request (control op 6) that binds the network, the predecessor, the result, the attempt and the frozen roster, with a cutoff `POP_WINDOW` (4,096 rounds of root progress, about 34 minutes at the testnet's pace) after it. Send your proof to any old root; the roots relay it. At the cutoff each old root signs a domain-separated statement for every requested member whose proof it lacked, but only a root that held the intent from the request's block on and saw no verified assembly of it: a root restarted inside the window states nothing. When the result then expires, the leader attaches every member's certificate whose signers reach the ordinary commit quorum by weight of the whole predecessor committee, and the roots commit those members in a `PoPMissed` record (kind 9). ElectionPolicy parks them, incumbents included, for `2 × LIFETIME` from that record, exactly as above: the next election runs against the full committee in force without them, and at the four-member floor it needs an eligible replacement or records `NoCandidate` and keeps the old committee. Parking still removes nothing else: a parked incumbent keeps signing for the committee in force and keeps its stake, exit and claim rights. It is not slashing: the certificate attests that a quorum did not receive the proof by the cutoff, and network delay can certify an honest member, so keep your root reachable by the old roots during the window. Every root logs `PoP misses stated at the request's cutoff` with the members it stated.
 
 **Known limits of the certified miss (#1319).** (1) A faulty leader can leave the certificates out of the rejection it orders: voters do not require them, so that expiry parks nobody and the stall costs one more lifetime. (2) Only the handoff possession proof is attested. An incumbent that sends its proof but withholds its readiness (stage 4 of the handoff view protocol) still makes the output expire without a certified miss, and continuity keeps reselecting it. Both are accepted for now and documented; neither can park an honest member that delivered.
 
 ```bash
-ubft validator pos-publish --own-proof
+"$HANDOFF_UBFT" validator pos-publish --own-proof
 ```
 
 Once the result is published, the roots derive the intent and the nodes collect readiness. Watch for Prepare, Freeze, the committed handoff and activation. Wait for your own root to install the first activated epoch that names you. Read its certified configuration and trust base over its loopback operator RPC. Use the root epoch and successor shard epoch confirmed for that handoff. Immediately after a root switch, round-info can still show the shard epoch of the last certificate. That early sample cannot distinguish a root-only change from a coupled assignment. Check that the verified shard configuration for the confirmed epoch is available before changing the authority's scope.
@@ -494,45 +563,45 @@ install_authority_scope() (
   [[ "$HANDOFF_MODE" == enroll || "$HANDOFF_MODE" == advance ]]
   activation=$(mktemp -d "$UBFT_HOME/activation-root-${ACTIVATED_ROOT_EPOCH}-shard-${ACTIVATED_SHARD_EPOCH}.XXXXXXXX")
   shard_conf="$activation/shard-conf.json"
-  trust_base="$activation/trust-base.json"
   ubft q3 shard-conf --root-rpc http://127.0.0.1:25852 --epoch "$ACTIVATED_SHARD_EPOCH" --out "$shard_conf"
-  ubft q3 trust-base --root-rpc http://127.0.0.1:25852 --epoch "$ACTIVATED_ROOT_EPOCH" --out "$trust_base"
   jq -e --arg epoch "$ACTIVATED_SHARD_EPOCH" '(.epoch | tostring) == $epoch' "$shard_conf" > /dev/null
-  jq -e --arg epoch "$ACTIVATED_ROOT_EPOCH" '(.epoch | tostring) == $epoch' "$trust_base" > /dev/null
   if [[ "$HANDOFF_MODE" == enroll ]]; then
-    ubft signing-authority complete-enrollment "${AUTH[@]}" --shard-conf "$shard_conf"
+    # Verify the predecessor history without a session before completing the successor enrollment.
+    if (( ACTIVATED_ROOT_EPOCH > 1 )); then
+      advance_authority_from_local_root "$((ACTIVATED_ROOT_EPOCH - 1))" pending
+    fi
+    "$HANDOFF_UBFT" signing-authority complete-enrollment "${AUTH[@]}" --shard-conf "$shard_conf"
   fi
-  ubft signing-authority advance-epoch "${AUTH[@]}" --shard-conf "$shard_conf" --trust-base "$trust_base"
-  ubft signing-authority replace-session "${AUTH[@]}" --out "$UBFT_HOME/authority/client.cred"
+  advance_authority_from_local_root "$ACTIVATED_ROOT_EPOCH" enrolled
 )
 install_authority_scope
 ```
 
-Use `enroll` only for the first enrollment. For each later handoff, use `advance` with the confirmed pair. If a lookup fails or the epochs disagree, wait for the paired root to serve the confirmed configuration, then check the authority before retrying. Each attempt fetches into a fresh directory. If you previously advanced using a stale shard epoch, use `advance` with the same verified root epoch and the confirmed higher shard epoch. For an authority already equipped with a lineage pin and an installed configuration, use `signing-authority advance-with-proof` and the verified activation bundles in epoch order. Keep its certification session private.
+Use `enroll` only for the first enrollment. For each later handoff, use `advance` with the confirmed pair. If a lookup fails or the epochs disagree, wait for the paired root to serve the confirmed configuration, then check the authority before retrying. Each attempt fetches into a fresh directory. Keep its certification session private.
 
 #### Resume an interrupted authority handoff
 
 Keep the authority running. Keep the intended epoch pair from the verified lookups and read the authority's current status before retrying a command.
 
 ```bash
-ubft signing-authority status "${AUTH[@]}" |
+"$HANDOFF_UBFT" signing-authority status "${AUTH[@]}" |
   jq '{enrollmentComplete, rootEpoch, shardEpoch, sessionIssued, generation, retired, faulted, keyLost}'
 ```
 
 - If `enrollmentComplete` is false, resume with `enroll`. If it is true and the scope still needs to move to the verified pair, resume the main block with `advance`. Check with the Foundation if the reported scope is ahead of, or inconsistent with, the intended pair, or if the authority reports a fault, retirement or lost key.
 - If both epochs match the verified pair and `sessionIssued` is false, run only the block below. A scope advance fences the old client credential.
-- If both epochs match and `sessionIssued` is true, the authority already issued a session for that scope. If the replacement wrote `client.cred`, continue with the shard reload and confirm that the shard accepts the credential and resumes signing. An issued session does not prove the file was written. If the command reported a write failure, the credential is missing, or the shard reports that the credential is fenced, run only `ubft signing-authority replace-session "${AUTH[@]}" --out "$UBFT_HOME/authority/client.cred"` to recover the credential. A timeout or an unavailable shard alone does not establish that the file is stale.
+- If both epochs match and `sessionIssued` is true, the authority already issued a session for that scope. If the replacement wrote `client.cred`, continue with the shard reload and confirm that the shard accepts the credential and resumes signing. An issued session does not prove the file was written. If the command reported a write failure, the credential is missing, or the shard reports that the credential is fenced, run only `"$HANDOFF_UBFT" signing-authority replace-session "${AUTH[@]}" --out "$UBFT_HOME/authority/client.cred"` to recover the credential. A timeout or an unavailable shard alone does not establish that the file is stale.
 
 ```bash
 resume_authority_session() (
   set -eo pipefail
-  ubft signing-authority status "${AUTH[@]}" |
+  "$HANDOFF_UBFT" signing-authority status "${AUTH[@]}" |
     jq -e --arg root "$ACTIVATED_ROOT_EPOCH" --arg shard "$ACTIVATED_SHARD_EPOCH" '
       .enrollmentComplete and (.rootEpoch | tostring) == $root and
       (.shardEpoch | tostring) == $shard and (.sessionIssued == false) and
       (.retired == false) and (.faulted == false) and (.keyLost == false)
     ' >/dev/null
-  ubft signing-authority replace-session "${AUTH[@]}" --out "$UBFT_HOME/authority/client.cred"
+  "$HANDOFF_UBFT" signing-authority replace-session "${AUTH[@]}" --out "$UBFT_HOME/authority/client.cred"
 )
 resume_authority_session
 ```
@@ -718,7 +787,7 @@ ubft validator status --custody "$CUSTODY" --sample 0 | grep '^clock'
 
 ## Missed admission
 
-If the application has sent no registration, confirm a new window, stop only the pending authority using its saved `AUTHORITY_PID`, and start an authority for the confirmed successor using the existing registration policy and credentials. Write its node info to a fresh filename and select it with `validator init --force`. Keep the wallet, root key, shard peer identity and payee.
+If an earlier election was reserved before your bond, keep the pending authority and [refresh its scope from the missed activation](#4-apply-stake-and-join). An authority started with the older fixed-scope mode needs a fresh lifetime. If it has sent no registration, start a fresh authority and give its node info a fresh filename before selecting it with `validator init --force`. Keep the wallet, root key, shard peer identity and payee.
 
 If PoS registration already committed, keep the authority running. While it runs and holds its key, change keys only with `validator rotate`: on the PoS adapter it sends `VR.proposeBinding` of the new words first, then, once that confirms, `admitDelegation` of the identical words at custody's current generation (with a new authority-held key, give `--pin-pos-policy` so the new authority is pinned between the two), and a re-run resumes. `validator apply` on a bonded identity refuses a delegation that is not VR's current or staged binding and points to `rotate`. Rotate refuses a root-key change, and it refuses to replace a staged binding that an open election result froze. If the authority has already stopped, follow [Authority loss](#authority-loss): preserve the old volume and marker and run `recover`.
 

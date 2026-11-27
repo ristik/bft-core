@@ -107,13 +107,14 @@ type signingAuthorityRunFlags struct {
 	// RequirePosPolicy refuses every P85 possession signature until a pin is verified
 	RequirePosPolicy bool
 
-	AuthorityID string
-	NodeID      string
-	NetworkID   uint16
-	PartitionID uint32
-	ShardID     string
-	ShardEpoch  uint64
-	RootEpoch   uint64
+	AuthorityID      string
+	NodeID           string
+	NetworkID        uint16
+	PartitionID      uint32
+	ShardID          string
+	ShardEpoch       uint64
+	PendingJoinScope bool
+	RootEpoch        uint64
 
 	// the lineage pin of the proof-verified advance (#1085)
 	LineageGenesis   string
@@ -126,9 +127,9 @@ func signingAuthorityRunCmd(baseFlags *baseFlags) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "run",
 		Short: "Run a signing authority: generate its key and serve the client and operator sockets",
-		Long: `Start an authority for one validator. The enrollment named by the flags is fixed for the
-process lifetime, except the shard configuration, which cannot name the authority's key until the
-key exists: the authority starts pending and admits no client until complete-enrollment.`,
+		Long: `Start an authority for one validator. It starts pending and admits no client until
+complete-enrollment states the shard configuration that names its key. A fresh joiner can use
+--pending-join-scope to follow verified activations before first enrollment.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return signingAuthorityRun(cmd.Context(), flags)
 		},
@@ -162,6 +163,7 @@ key exists: the authority starts pending and admits no client until complete-enr
 	cmd.Flags().Uint32Var(&flags.PartitionID, "partition-id", 0, "partition identifier")
 	cmd.Flags().StringVar(&flags.ShardID, "shard-id", "0x80", "the shard id in hex format with 0x prefix")
 	cmd.Flags().Uint64Var(&flags.ShardEpoch, "shard-epoch", 0, "the shard configuration epoch this authority signs for; a later epoch is refused, not followed")
+	cmd.Flags().BoolVar(&flags.PendingJoinScope, "pending-join-scope", false, "allow verified activations to refresh the shard epoch before first enrollment")
 	cmd.Flags().Uint64Var(&flags.RootEpoch, "root-epoch", 0, "the root trust epoch this authority signs for; a later epoch is refused, not followed")
 	cmd.Flags().StringVar(&flags.LineageGenesis, "lineage-genesis-trust-base", "", "the deployment's genesis root trust base (epoch 1): the pin this "+
 		"authority verifies every activation from (advance-with-proof). Without it the authority advances only by the operator-trusted advance-epoch")
@@ -223,6 +225,9 @@ func signingAuthorityRun(ctx context.Context, flags *signingAuthorityRunFlags) e
 	if err != nil {
 		return err
 	}
+	if flags.PendingJoinScope {
+		opts = append(opts, signingauthority.WithPendingJoinScope())
+	}
 	var policyNetwork *[32]byte // the VR network word the registration policy pins: the generation this authority belongs to
 	if flags.RegistrationPolicy != "" {
 		policy, err := readRegistrationPolicy(flags.RegistrationPolicy)
@@ -250,13 +255,16 @@ func signingAuthorityRun(ctx context.Context, flags *signingAuthorityRunFlags) e
 	// the VR hook measurement (as the shard node's does), or the authority is given a VR registration policy (not a P85 --pos-policy). On a VR generation the
 	// fence is mandatory and the authority refuses to start without its activation source and generation pins. --vr-generation can only add
 	// to that (it cannot disable it).
-	fenceGen := vrFence{VR: flags.VRGeneration || flags.RegistrationPolicy != ""} // never from --pos-policy: that also pins the standalone P85 election of a pre-VR generation
+	fenceGen := vrFence{VR: flags.VRGeneration || flags.RegistrationPolicy != ""}
 	if flags.B1Profile != "" {
-		prof, pf, perr := readB1ProfileFile(flags.B1Profile)
+		profile, pf, perr := readB1ProfileFile(flags.B1Profile)
 		if perr != nil {
 			return fmt.Errorf("loading the b1 profile: %w", perr)
 		}
-		fenceGen.B1Chain = prof.ExecutionChainID
+		fenceGen.B1Chain = profile.ExecutionChainID
+		if flags.PendingJoinScope {
+			opts = append(opts, signingauthority.WithPendingJoinChainID(profile.ExecutionChainID))
+		}
 		if pf.VRHookMeasurement != nil {
 			fenceGen.VR = true
 			fenceGen.CodeHash = &pf.VRHookMeasurement.RegistryCodeHash
@@ -645,16 +653,31 @@ same bundles repairs a missing credential after a crash. An admitted alternate s
 func signingAuthorityAdvanceWithProofCmd(baseFlags *baseFlags) *cobra.Command {
 	flags := &signingAuthorityOperatorFlags{baseFlags: baseFlags}
 	var proofs []string
+	var scopeOnly bool
 	var out, clientSocket string
 	cmd := &cobra.Command{
 		Use:   "advance-with-proof",
 		Short: "Advance the authority by root activation bundles it verifies itself, then issue the next client credential",
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if !scopeOnly {
+				for _, name := range []string{"client-socket", "out"} {
+					if !cmd.Flags().Changed(name) {
+						return fmt.Errorf("required flag %q not set", name)
+					}
+				}
+			}
 			operator, err := flags.operator()
 			if err != nil {
 				return err
 			}
 			defer func() { _ = operator.Close() }()
+			if scopeOnly {
+				report, err := advanceWithProof(cmd.Context(), operator, proofs, nil)
+				if err != nil {
+					return err
+				}
+				return json.NewEncoder(cmd.OutOrStdout()).Encode(report)
+			}
 			destination, target, err := sessionPublicationTarget(flags.OperatorSocket, out)
 			if err != nil {
 				return err
@@ -687,8 +710,9 @@ func signingAuthorityAdvanceWithProofCmd(baseFlags *baseFlags) *cobra.Command {
 	cmd.Flags().StringVar(&clientSocket, "client-socket", "", "the authority's client socket: a session already issued is checked with the credential in --out, "+
 		"and replaced when that credential is fenced or missing (a lost replacement answer, or a crash before the credential was written)")
 	_ = cmd.MarkFlagRequired("proof")
-	_ = cmd.MarkFlagRequired("client-socket")
-	_ = cmd.MarkFlagRequired("out")
+	cmd.Flags().BoolVar(&scopeOnly, "scope-only", false, "verify and apply activations without issuing a client credential")
+	cmd.MarkFlagsMutuallyExclusive("scope-only", "out")
+	cmd.MarkFlagsMutuallyExclusive("scope-only", "client-socket")
 	return cmd
 }
 
@@ -755,6 +779,9 @@ func advanceWithProof(ctx context.Context, operator advanceOperator, proofs []st
 		return report, err
 	}
 	report.Retired, report.RootEpoch, report.ShardEpoch, report.LineageEpoch = status.Retired, status.RootEpoch, status.ShardEpoch, status.LineageEpoch
+	if publish == nil {
+		return report, nil
+	}
 	publication, err := publish(ctx, status)
 	report.SessionIssued, report.ActiveAlternate = publication.Issued, publication.ActiveAlternate
 	return report, err

@@ -64,6 +64,11 @@ type Authority struct {
 	rec          record
 	scopeVersion uint64
 
+	// A fresh joiner may follow verified exclusions until its first shard-bound possession proof.
+	pendingJoinScope bool
+	joinChainID      uint64
+	joinScopeProved  bool
+
 	// While a successor assignment's acknowledgement is pending, the certificate an authority is asked to extend carries the new
 	// configuration and technical-record epoch but its INPUT RECORD is still at an earlier epoch: that is exactly the request that
 	// certifies the acknowledgement. An input-record epoch is therefore admitted when it is the enrolled epoch or, until an
@@ -174,6 +179,25 @@ func WithAdvanceHook(hook func()) Option {
 // Option configures an authority at New.
 type Option func(*Authority) error
 
+// WithPendingJoinScope enables proof-verified scope refresh before first enrollment.
+func WithPendingJoinScope() Option {
+	return func(a *Authority) error {
+		if a.enroll.complete() {
+			return errors.New("pending join scope requires an incomplete enrollment")
+		}
+		a.pendingJoinScope = true
+		return nil
+	}
+}
+
+// WithPendingJoinChainID binds the joiner's shard configuration to the startup B1 execution profile.
+func WithPendingJoinChainID(chainID uint64) Option {
+	return func(a *Authority) error {
+		a.joinChainID = chainID
+		return nil
+	}
+}
+
 // WithLineage pins the authority's root lineage to the deployment's genesis root trust base (utb: the chain is a UTB chain). The
 // authority then advances by AdvanceWithProof, verifying every activation itself from this pin.
 func WithLineage(genesis *types.RootTrustBaseV1, utb bool) Option {
@@ -249,8 +273,8 @@ func (s Session) Generation() uint64 { return s.generation }
 //
 // An enrollment without a ShardConfHash is pending, and that is how a deployment starts one: the
 // configuration that names this key cannot exist before the key does. The public key is available
-// at once, the configuration is stated afterwards with CompleteEnrollment, and every other field is
-// fixed here.
+// at once and the configuration is stated afterwards with CompleteEnrollment. For a fresh joiner
+// using WithPendingJoinScope, verified activations can first move the root and shard epochs.
 func New(enroll Enrollment, trust TrustBases, opts ...Option) (*Authority, error) {
 	if len(enroll.SigningKeyFingerprint) != 0 {
 		return nil, errors.New("signingauthority: enrollment names a signing key, and this profile has no key-import path: it generates a key per authority lifetime")
@@ -281,6 +305,9 @@ func New(enroll Enrollment, trust TrustBases, opts ...Option) (*Authority, error
 		if err := opt(a); err != nil {
 			return nil, fmt.Errorf("signingauthority: %w", err)
 		}
+	}
+	if a.pendingJoinScope && (a.lineage == nil || a.uncheckedAdvance) {
+		return nil, errors.New("pending join scope requires a lineage pin and proof-verified advance")
 	}
 	return a, nil
 }
@@ -376,8 +403,8 @@ New has returned. This is the step that closes that gap, and it is deliberately 
     enrolled ShardConfHash. From then on it is immutable like every other enrollment field.
 
 Nothing is admitted before this succeeds: ReplaceSession and Authenticate refuse with
-ErrEnrollmentIncomplete. A refused completion changes nothing, so the operator can correct the
-configuration and try again.
+ErrEnrollmentIncomplete. A valid configuration naming this authority on a chain that contradicts
+its verified P85 pin latches a fault.
 */
 func (a *Authority) CompleteEnrollment(conf *types.PartitionDescriptionRecord) error {
 	a.mu.Lock()
@@ -428,6 +455,11 @@ func (a *Authority) CompleteEnrollment(conf *types.PartitionDescriptionRecord) e
 	if !bytes.Equal(named.SigKey, pub) {
 		given, own := sha256.Sum256(named.SigKey), sha256.Sum256(pub)
 		return fmt.Errorf("%w: shard configuration names node %s with signing key %x, this authority's key is %x", ErrContextMismatch, enroll.NodeID, given, own)
+	}
+	if a.pendingJoinScope {
+		if err := a.checkJoinChainIDLocked(conf); err != nil {
+			return err
+		}
 	}
 	hash, err := conf.Hash(gocrypto.SHA256)
 	if err != nil {
