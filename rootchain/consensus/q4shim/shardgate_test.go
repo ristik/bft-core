@@ -118,6 +118,20 @@ func TestShardGate(t *testing.T) {
 		g.apply(ShardControl{Gen: 2, Rules: []ShardRule{{Name: "req", Direction: In, Partition: 8, Types: []string{"request"}, Action: Hold}}, Releases: []Release{{ID: "r1", Rule: "req", Order: FIFO}}})
 		require.Equal(t, request(8, "n1", 4), g.next())
 	})
+	t.Run("an old attempt stays dropped while the next round passes", func(t *testing.T) {
+		g := newGateFixture(t)
+		g.apply(ShardControl{Gen: 1, Rules: []ShardRule{{
+			Name: "lost-round", Direction: In, Partition: 8, Round: 4, Types: []string{"request"}, Action: Drop,
+		}}})
+		old, fresh := request(8, "n1", 4), request(8, "n1", 5)
+		old.InputRecord.BlockHash = []byte{0xab}
+		g.inner.in <- old
+		g.inner.in <- fresh
+		require.Equal(t, fresh, g.next())
+		require.Equal(t, []string{"in", "drop", "in"}, g.kinds())
+		require.Equal(t, "ab", g.events()[1].BlockHash)
+		require.Empty(t, g.gate.Status().Held)
+	})
 	t.Run("an unknown message type is refused", func(t *testing.T) {
 		require.ErrorIs(t, validateShard(ShardControl{Rules: []ShardRule{{Name: "x", Direction: In, Types: []string{"vote"}, Action: Hold}}}), ErrBadControl)
 	})
