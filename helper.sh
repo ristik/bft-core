@@ -106,8 +106,7 @@ function start_root_nodes() {
   local bootNode=""
   local p2pPort=$rootPortStart
   local rpcPort=$((25866+LANE_PORT_OFFSET))
-  local rpcHost=localhost
-  if [ "${M2_PROFILE2:-0}" = 1 ]; then rpcHost=127.0.0.1; fi
+  local rpcHost=127.0.0.1
 
   bootNode=$(boot_node test-nodes/root1 "$rootPortStart")
 
@@ -276,8 +275,7 @@ function init_evm_authorities() {
       vrArgs+=(--lineage-genesis-trust-base "$trustBase" --fence-provision-file "$home/fence.json")
       [ "${UTB_LANE:-0}" != 1 ] || vrArgs+=(--lineage-utb-genesis)
     fi
-    # the PoS lane pins the election after the genesis (DEVELOPMENT opt-in; production gives --pos-policy at startup and --require-pos-policy)
-    [ "${VR_POS:-0}" != 1 ] || vrArgs+=(--dev-allow-late-pos-policy)
+    # the PoS lane pins the election after the genesis (vr_pos_pin_authority): the authority verifies the pin against its execution client (#1222)
     # MONITORING=1 (VT-12): the authority serves its read-only status gauges (unicity_authority_*) on loopback, port MON_AUTH_PORT_BASE+i-1
     [ "${MONITORING:-0}" != 1 ] || vrArgs+=(--metrics-address "127.0.0.1:$(( ${MON_AUTH_PORT_BASE:-29301} + i - 1 ))")
     build/ubft signing-authority run --home "$home" ${vrArgs[@]+"${vrArgs[@]}"} \

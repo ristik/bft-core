@@ -14,6 +14,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	gethtypes "github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/trie"
 
 	"github.com/unicitynetwork/bft-go-base/types"
@@ -849,6 +850,13 @@ func (a *Adapter) Seal(ctx context.Context, id shardnode.BuildID) (shardnode.Blo
 			slog.Int("userTransactions", len(resp.ExecutionPayload.Transactions)),
 			slog.String("rootInput", fmt.Sprintf("%x", resp.SealCompanion.RootInput)),
 			slog.String("commitment", fmt.Sprintf("%x", resp.ExecutionPayload.ExtraData)))
+		if a.log.Enabled(ctx, slog.LevelDebug) {
+			for _, tx := range resp.ExecutionPayload.Transactions {
+				a.log.DebugContext(ctx, "sealed execution transaction",
+					slog.String("blockHash", fmt.Sprintf("%x", resp.ExecutionPayload.BlockHash)),
+					slog.String("transactionHash", crypto.Keccak256Hash(tx).Hex()))
+			}
+		}
 	}
 	return EncodeBlockWithSealCompanion(resp.ExecutionPayload, &SealCompanion{
 		B1Update:    resp.SealCompanion.B1Update,

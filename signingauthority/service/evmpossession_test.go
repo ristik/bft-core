@@ -2,7 +2,9 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"testing"
+	"time"
 
 	ethcommon "github.com/ethereum/go-ethereum/common"
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
@@ -136,7 +138,10 @@ func foreignKey(t *testing.T) []byte {
 // The pinned P85 possession: the operator channel pins once, signs the pinned election's digest and refuses the rest; the client channel
 // never reaches either operation.
 func TestTheOperatorChannelSignsThePinnedPosPoP(t *testing.T) {
-	f := newFixture(t)
+	src := &posSource{view: signingauthority.PosDeploymentView{Network: [32]byte{7}, ChainID: [32]byte{31: 0x7a}, Election: [20]byte{0xF6}}}
+	f := newFixtureWith(t, nil, func(*types.RootTrustBaseV1) []signingauthority.Option {
+		return []signingauthority.Option{signingauthority.WithPosSource(src, 0x7a)}
+	})
 	ctx := context.Background()
 	_, key, err := f.operator.Enrollment(ctx)
 	require.NoError(t, err)
@@ -150,6 +155,7 @@ func TestTheOperatorChannelSignsThePinnedPosPoP(t *testing.T) {
 	other := pin
 	other.Election = [20]byte{0xF7}
 	require.ErrorIs(t, f.operator.SetPosPolicy(ctx, other), signingauthority.ErrPosPolicyConflict)
+	require.NoError(t, f.operator.SetPosPolicy(ctx, signingauthority.PosPolicy{IDs: []uint64{5}}), "the deployment fields are derived")
 
 	pop, err := f.operator.SignPosPoP(ctx, req)
 	require.NoError(t, err)
@@ -166,4 +172,69 @@ func TestTheOperatorChannelSignsThePinnedPosPoP(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, errWrongEndpoint.Error(), answer.Refusal, "%v", o)
 	}
+}
+
+// posSource is the execution client's view of the P85 deployment; err, when set, is the answer instead.
+type posSource struct {
+	view signingauthority.PosDeploymentView
+	err  error
+}
+
+func (p *posSource) ReadPosDeployment(context.Context, signingauthority.PosQuery) (signingauthority.PosDeploymentView, error) {
+	return p.view, p.err
+}
+
+// #1222: the operator channel's pin is verified, and the refusals cross the wire by name: a wrong field is refused, a source that does
+// not answer is pending.
+func TestTheOperatorChannelPinIsVerified(t *testing.T) {
+	src := &posSource{view: signingauthority.PosDeploymentView{Network: [32]byte{7}, ChainID: [32]byte{31: 0x7a}, Election: [20]byte{0xF6}}}
+	f := newFixtureWith(t, nil, func(*types.RootTrustBaseV1) []signingauthority.Option {
+		return []signingauthority.Option{signingauthority.WithPosSource(src, 0x7a)}
+	})
+	ctx := context.Background()
+	wrong := signingauthority.PosPolicy{Network: [32]byte{8}, IDs: []uint64{5}}
+	require.ErrorIs(t, f.operator.SetPosPolicy(ctx, wrong), signingauthority.ErrPosPolicy)
+	src.err = fmt.Errorf("%w: down", signingauthority.ErrPosPending)
+	require.ErrorIs(t, f.operator.SetPosPolicy(ctx, signingauthority.PosPolicy{IDs: []uint64{5}}), signingauthority.ErrPosPending)
+	src.err = nil
+	require.NoError(t, f.operator.SetPosPolicy(ctx, signingauthority.PosPolicy{IDs: []uint64{5}}))
+}
+
+// hungSource answers no read until released, whatever the read's context: an endpoint that connects and never answers.
+type hungSource struct {
+	view    signingauthority.PosDeploymentView
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (h *hungSource) ReadPosDeployment(context.Context, signingauthority.PosQuery) (signingauthority.PosDeploymentView, error) {
+	h.entered <- struct{}{}
+	<-h.release
+	return h.view, nil
+}
+
+// sol's round 2 on #1328: across the wire a pin that waited out another verification is busy (nothing kept), distinct from a pending pin
+// (kept), and it answers within the server's pin bound, before the operator client's deadline.
+func TestTheOperatorChannelTellsABusyPinFromAPendingOne(t *testing.T) {
+	src := &hungSource{view: signingauthority.PosDeploymentView{Network: [32]byte{7}, ChainID: [32]byte{31: 0x7a}, Election: [20]byte{0xF6}},
+		entered: make(chan struct{}, 4), release: make(chan struct{})}
+	f := newConfiguredFixture(t, nil, func(*types.RootTrustBaseV1) []signingauthority.Option {
+		return []signingauthority.Option{signingauthority.WithPosSource(src, 0x7a)}
+	}, ManagedSession{}, Config{PinTimeout: 300 * time.Millisecond})
+	ctx := context.Background()
+	// two operator connections: one connection answers its requests in order
+	other, err := NewOperatorClient(ClientConfig{Dial: f.operatorDial, Credential: f.operatorCredential, Timeout: 10 * time.Second})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = other.Close() })
+	first := make(chan error, 1)
+	go func() { first <- other.SetPosPolicy(ctx, signingauthority.PosPolicy{IDs: []uint64{6}}) }()
+	<-src.entered
+	err = f.operator.SetPosPolicy(ctx, signingauthority.PosPolicy{IDs: []uint64{5}})
+	require.ErrorIs(t, err, signingauthority.ErrPosBusy, "the second pin waited out the first's verification")
+	require.NotErrorIs(t, err, signingauthority.ErrPosPending, "and is not reported as kept")
+	close(src.release)
+	<-first // the first pin's answer was due long ago (its client may have given up); the authority finishes verifying it
+	require.NoError(t, f.operator.SetPosPolicy(ctx, signingauthority.PosPolicy{IDs: []uint64{6}}), "identity 6 is the verified pin")
+	require.ErrorIs(t, f.operator.SetPosPolicy(ctx, signingauthority.PosPolicy{IDs: []uint64{5}}), signingauthority.ErrPosPolicyConflict,
+		"the busy request for identity 5 was neither kept nor merged")
 }

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/unicitynetwork/bft-core/vrrules"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -100,20 +101,20 @@ type signingAuthorityRunFlags struct {
 
 	// the registrations this authority may sign (VT-10); empty: none
 	RegistrationPolicy string
-	// the P85 election this authority may sign possession proofs for (#1216); empty: pinned later by `signing-authority pos-policy`, or never
+	// the P85 election this authority may sign possession proofs for (#1216); empty: pinned later by `signing-authority pos-policy`, or never.
+	// Either way the pin is verified against the authority's execution client before anything is signed (#1222)
 	PosPolicies []string
-	// RequirePosPolicy refuses every P85 possession signature until the pin is set (the production profile: give --pos-policy at startup)
+	// RequirePosPolicy refuses every P85 possession signature until a pin is verified
 	RequirePosPolicy bool
-	// LatePosPolicy lets `signing-authority pos-policy` pin the election on the running authority: development only
-	LatePosPolicy bool
 
-	AuthorityID string
-	NodeID      string
-	NetworkID   uint16
-	PartitionID uint32
-	ShardID     string
-	ShardEpoch  uint64
-	RootEpoch   uint64
+	AuthorityID      string
+	NodeID           string
+	NetworkID        uint16
+	PartitionID      uint32
+	ShardID          string
+	ShardEpoch       uint64
+	PendingJoinScope bool
+	RootEpoch        uint64
 
 	// the lineage pin of the proof-verified advance (#1085)
 	LineageGenesis   string
@@ -126,9 +127,9 @@ func signingAuthorityRunCmd(baseFlags *baseFlags) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "run",
 		Short: "Run a signing authority: generate its key and serve the client and operator sockets",
-		Long: `Start an authority for one validator. The enrollment named by the flags is fixed for the
-process lifetime, except the shard configuration, which cannot name the authority's key until the
-key exists: the authority starts pending and admits no client until complete-enrollment.`,
+		Long: `Start an authority for one validator. It starts pending and admits no client until
+complete-enrollment states the shard configuration that names its key. A fresh joiner can use
+--pending-join-scope to follow verified activations before first enrollment.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return signingAuthorityRun(cmd.Context(), flags)
 		},
@@ -143,9 +144,12 @@ key exists: the authority starts pending and admits no client until complete-enr
 	cmd.Flags().StringVar(&flags.PoPCredential, "pop-credential", "", "path to the member's credential (see `signing-authority credential`); a credential of its own, not the operator's. The root process must run as the authority's uid to reach the socket (its directory is 0700), so keep the operator credential file unreadable by the root process: the member credential is then the only thing it can use")
 	cmd.Flags().StringVar(&flags.MetricsAddress, "metrics-address", "", "serve the authority's read-only status (enrolled, faulted, retired, session, signatures, epochs) as Prometheus metrics (unicity_authority_*) on this loopback host:port; no key, request or response bytes are in it. Off by default")
 	cmd.Flags().StringVar(&flags.RegistrationPolicy, "registration-policy", "", "JSON file pinning the VR deployment and listing the registrations this authority may sign for its EVM key (VT-10): without it the authority signs none. Fixed for the authority's lifetime")
-	cmd.Flags().StringArrayVar(&flags.PosPolicies, "pos-policy", nil, "JSON file pinning the P85 election (network word, chain id, ElectionPolicy address) and the identity ids this authority's EVM key may sign possession proofs for (#1216): without a pin the authority signs no P85 assignment possession. Fixed for the authority's lifetime; `signing-authority pos-policy` pins it once on a running authority")
-	cmd.Flags().BoolVar(&flags.RequirePosPolicy, "require-pos-policy", false, "refuse every P85 possession signature (election, delegation, assignment) until the P85 pin is set; with --pos-policy the pin is fixed from startup")
-	cmd.Flags().BoolVar(&flags.LatePosPolicy, "dev-allow-late-pos-policy", false, "DEVELOPMENT ONLY: let `signing-authority pos-policy` pin the P85 election on this running authority. The pin then comes from the operator credential that also asks for signatures, so it restricts nothing against a compromised credential; production gives --pos-policy at startup")
+	cmd.Flags().StringArrayVar(&flags.PosPolicies, "pos-policy", nil, "JSON file pinning the identity ids this authority's EVM key may sign P85 possession proofs for (#1216), "+
+		"optionally with the election's network word, chain id and ElectionPolicy address. The authority derives those from its execution client (--activation-source-url, under the "+
+		"execution genesis hash and the b1 profile's VR code hash) and its enrolled chain, and checks every id is a VR identity bound to this node and key; a supplied field must match. "+
+		"Nothing P85 is signed before the pin is verified (#1222). Fixed for the authority's lifetime; without it `signing-authority pos-policy` pins it once on the running authority, checked the same way")
+	cmd.Flags().BoolVar(&flags.RequirePosPolicy, "require-pos-policy", false, "refuse every P85 possession signature (election, delegation, assignment) until a P85 pin is verified "+
+		"(an authority with a pin or an execution source refuses them so anyway)")
 	cmd.Flags().StringVar(&flags.ActivationSourceURL, "activation-source-url", "", activationSourceUsage)
 	cmd.Flags().BoolVar(&flags.VRGeneration, "vr-generation", false, "force the VR-generation requirements (it cannot disable them): a b1 profile with the VR measurement, or a VR registration/P85 policy, already requires --activation-source-url and the generation pins, and the authority refuses to start without them")
 	cmd.Flags().StringVar(&flags.FenceProvisionFile, "fence-provision-file", "", "on a VR generation whose fence inputs are not known at start (the authority is started first to provide its key): start in the pre-genesis enrollment mode, signing and advancing nothing, and enable signing when this JSON file {b1Profile, activationSourceUrl, executionGenesisHash} appears. Provision the genesis hash from the generation's own genesis artifacts, not from the endpoint it checks")
@@ -159,6 +163,7 @@ key exists: the authority starts pending and admits no client until complete-enr
 	cmd.Flags().Uint32Var(&flags.PartitionID, "partition-id", 0, "partition identifier")
 	cmd.Flags().StringVar(&flags.ShardID, "shard-id", "0x80", "the shard id in hex format with 0x prefix")
 	cmd.Flags().Uint64Var(&flags.ShardEpoch, "shard-epoch", 0, "the shard configuration epoch this authority signs for; a later epoch is refused, not followed")
+	cmd.Flags().BoolVar(&flags.PendingJoinScope, "pending-join-scope", false, "allow verified activations to refresh the shard epoch before first enrollment")
 	cmd.Flags().Uint64Var(&flags.RootEpoch, "root-epoch", 0, "the root trust epoch this authority signs for; a later epoch is refused, not followed")
 	cmd.Flags().StringVar(&flags.LineageGenesis, "lineage-genesis-trust-base", "", "the deployment's genesis root trust base (epoch 1): the pin this "+
 		"authority verifies every activation from (advance-with-proof). Without it the authority advances only by the operator-trusted advance-epoch")
@@ -220,6 +225,9 @@ func signingAuthorityRun(ctx context.Context, flags *signingAuthorityRunFlags) e
 	if err != nil {
 		return err
 	}
+	if flags.PendingJoinScope {
+		opts = append(opts, signingauthority.WithPendingJoinScope())
+	}
 	var policyNetwork *[32]byte // the VR network word the registration policy pins: the generation this authority belongs to
 	if flags.RegistrationPolicy != "" {
 		policy, err := readRegistrationPolicy(flags.RegistrationPolicy)
@@ -240,9 +248,6 @@ func signingAuthorityRun(ctx context.Context, flags *signingAuthorityRunFlags) e
 		}
 		opts = append(opts, signingauthority.WithPosPolicy(pin))
 	}
-	if flags.LatePosPolicy {
-		opts = append(opts, signingauthority.WithLatePosPolicy())
-	}
 	if flags.RequirePosPolicy {
 		opts = append(opts, signingauthority.WithRequirePosPolicy())
 	}
@@ -250,11 +255,15 @@ func signingAuthorityRun(ctx context.Context, flags *signingAuthorityRunFlags) e
 	// the VR hook measurement (as the shard node's does), or the authority is given a VR registration policy (not a P85 --pos-policy). On a VR generation the
 	// fence is mandatory and the authority refuses to start without its activation source and generation pins. --vr-generation can only add
 	// to that (it cannot disable it).
-	fenceGen := vrFence{VR: flags.VRGeneration || flags.RegistrationPolicy != ""} // never from --pos-policy: that also pins the standalone P85 election of a pre-VR generation
+	fenceGen := vrFence{VR: flags.VRGeneration || flags.RegistrationPolicy != ""}
 	if flags.B1Profile != "" {
-		_, pf, perr := readB1ProfileFile(flags.B1Profile)
+		profile, pf, perr := readB1ProfileFile(flags.B1Profile)
 		if perr != nil {
 			return fmt.Errorf("loading the b1 profile: %w", perr)
+		}
+		fenceGen.B1Chain = profile.ExecutionChainID
+		if flags.PendingJoinScope {
+			opts = append(opts, signingauthority.WithPendingJoinChainID(profile.ExecutionChainID))
 		}
 		if pf.VRHookMeasurement != nil {
 			fenceGen.VR = true
@@ -262,9 +271,21 @@ func signingAuthorityRun(ctx context.Context, flags *signingAuthorityRunFlags) e
 		}
 	}
 	if flags.VRRegistryCodeHash != "" {
-		if fenceGen.CodeHash, err = parseCodeHash(flags.VRRegistryCodeHash); err != nil {
+		h, err := parseCodeHash(flags.VRRegistryCodeHash)
+		if err != nil {
 			return err
 		}
+		// as the deferred path (mergePins): two stated VR code hashes must agree, so the P85 reader and the fence check the b1 profile's
+		if fenceGen.CodeHash != nil && *fenceGen.CodeHash != *h {
+			return fmt.Errorf("%w: --vr-registry-code-hash %x is not the b1 profile's VR measurement %x", errVRFenceRequired, h[:], fenceGen.CodeHash[:])
+		}
+		fenceGen.CodeHash = h
+	}
+	if (len(flags.PosPolicies) > 0 || flags.RequirePosPolicy) && !fenceGen.VR {
+		// #1222: a P85 pin is verified against the VR generation's deployment (VR's active PoS module and its election) through the
+		// execution client; a standalone P85 election without VR has no such verifier, so its pin could never be verified
+		return fmt.Errorf("%w: --pos-policy and --require-pos-policy need a VR generation (a b1 profile with the VR measurement, a registration "+
+			"policy or --vr-generation): a standalone P85 election without VR has no verifier for its pin", errVRFenceRequired)
 	}
 	if flags.ExecutionGenesisHash != "" {
 		if fenceGen.GenesisHash, err = parseCodeHash(flags.ExecutionGenesisHash); err != nil {
@@ -300,6 +321,14 @@ func signingAuthorityRun(ctx context.Context, flags *signingAuthorityRunFlags) e
 			return gerr
 		}
 		defer closeGate()
+		posSource, closePos, perr := newPosSource(ctx, flags.ActivationSourceURL, fenceGen)
+		if perr != nil {
+			return perr
+		}
+		defer closePos()
+		if posSource != nil {
+			opts = append(opts, signingauthority.WithPosSource(posSource, fenceGen.B1Chain))
+		}
 		if activationGate != nil {
 			opts = append(opts, signingauthority.WithFence(activationGate))
 			if err := activationGate.RegisterMetric(flags.observe.Meter("signingauthority")); err != nil {
@@ -416,6 +445,7 @@ func signingAuthorityRun(ctx context.Context, flags *signingAuthorityRunFlags) e
 	if popListener != nil {
 		g.Go(func() error { return server.Serve(popListener, service.PoPEndpoint) })
 	}
+	g.Go(func() error { watchPosPolicy(gctx, log, authority); return nil })
 	if flags.MetricsAddress != "" {
 		if err := checkAuthorityMetricsAddress(flags.MetricsAddress); err != nil {
 			return err
@@ -623,16 +653,31 @@ same bundles repairs a missing credential after a crash. An admitted alternate s
 func signingAuthorityAdvanceWithProofCmd(baseFlags *baseFlags) *cobra.Command {
 	flags := &signingAuthorityOperatorFlags{baseFlags: baseFlags}
 	var proofs []string
+	var scopeOnly bool
 	var out, clientSocket string
 	cmd := &cobra.Command{
 		Use:   "advance-with-proof",
 		Short: "Advance the authority by root activation bundles it verifies itself, then issue the next client credential",
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if !scopeOnly {
+				for _, name := range []string{"client-socket", "out"} {
+					if !cmd.Flags().Changed(name) {
+						return fmt.Errorf("required flag %q not set", name)
+					}
+				}
+			}
 			operator, err := flags.operator()
 			if err != nil {
 				return err
 			}
 			defer func() { _ = operator.Close() }()
+			if scopeOnly {
+				report, err := advanceWithProof(cmd.Context(), operator, proofs, nil)
+				if err != nil {
+					return err
+				}
+				return json.NewEncoder(cmd.OutOrStdout()).Encode(report)
+			}
 			destination, target, err := sessionPublicationTarget(flags.OperatorSocket, out)
 			if err != nil {
 				return err
@@ -665,8 +710,9 @@ func signingAuthorityAdvanceWithProofCmd(baseFlags *baseFlags) *cobra.Command {
 	cmd.Flags().StringVar(&clientSocket, "client-socket", "", "the authority's client socket: a session already issued is checked with the credential in --out, "+
 		"and replaced when that credential is fenced or missing (a lost replacement answer, or a crash before the credential was written)")
 	_ = cmd.MarkFlagRequired("proof")
-	_ = cmd.MarkFlagRequired("client-socket")
-	_ = cmd.MarkFlagRequired("out")
+	cmd.Flags().BoolVar(&scopeOnly, "scope-only", false, "verify and apply activations without issuing a client credential")
+	cmd.MarkFlagsMutuallyExclusive("scope-only", "out")
+	cmd.MarkFlagsMutuallyExclusive("scope-only", "client-socket")
 	return cmd
 }
 
@@ -733,6 +779,9 @@ func advanceWithProof(ctx context.Context, operator advanceOperator, proofs []st
 		return report, err
 	}
 	report.Retired, report.RootEpoch, report.ShardEpoch, report.LineageEpoch = status.Retired, status.RootEpoch, status.ShardEpoch, status.LineageEpoch
+	if publish == nil {
+		return report, nil
+	}
 	publication, err := publish(ctx, status)
 	report.SessionIssued, report.ActiveAlternate = publication.Issued, publication.ActiveAlternate
 	return report, err
@@ -989,10 +1038,44 @@ must equal the authority's pin (a policy for another deployment is refused), and
 
 // posPolicyFile is the JSON of `signing-authority run --pos-policy` and `signing-authority pos-policy`.
 type posPolicyFile struct {
-	Network  string   `json:"network"`
-	ChainID  uint64   `json:"chainId"`
-	Election string   `json:"election"`
+	Network  string   `json:"network,omitempty"`
+	ChainID  uint64   `json:"chainId,omitempty"`
+	Election string   `json:"election,omitempty"`
 	IDs      []uint64 `json:"ids"`
+}
+
+// posPolicyRetry is how often a pin that could not be verified yet (signingauthority.ErrPosPending) is tried again.
+const posPolicyRetry = 2 * time.Second
+
+// watchPosPolicy verifies a pending P85 pin (the startup one, or a late one whose source did not answer) as soon as the execution source
+// answers. A signing request would verify it too; this says when it happened, or why it cannot.
+func watchPosPolicy(ctx context.Context, log *slog.Logger, a *signingauthority.Authority) {
+	last := ""
+	for {
+		// each attempt is bounded: a source that connects and never answers must not hold the authority's verification for its lifetime
+		actx, cancel := context.WithTimeout(ctx, signingauthority.PosVerifyTimeout)
+		installed, err := a.VerifyPosPolicy(actx)
+		cancel()
+		switch {
+		case installed:
+			log.Info("the P85 pin is verified against the execution client")
+			last = ""
+		case errors.Is(err, signingauthority.ErrPosBusy):
+			// another verification (a late pin) is running: try again next round
+		case err != nil && err.Error() != last:
+			last = err.Error()
+			if errors.Is(err, signingauthority.ErrPosPending) {
+				log.Warn("the P85 pin is not verified yet: this authority signs no P85 possession until it is", "error", err)
+			} else {
+				log.Error("the P85 pin is refused: this authority signs no P85 possession", "error", err)
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(posPolicyRetry):
+		}
+	}
 }
 
 func readPosPolicy(path string) (signingauthority.PosPolicy, error) {
@@ -1010,13 +1093,23 @@ func readPosPolicy(path string) (signingauthority.PosPolicy, error) {
 	if dec.More() {
 		return p, fmt.Errorf("P85 pin %s: trailing data after the pin object", path)
 	}
-	nw, err := hexutil.Decode(f.Network)
-	if err != nil || len(nw) != 32 || !common.IsHexAddress(f.Election) || f.ChainID == 0 {
-		return p, fmt.Errorf("P85 pin %s: network is 32 bytes of 0x-hex, chainId nonzero and election an address", path)
+	// the deployment fields are optional: the authority derives them, and checks a supplied one against what it derived (#1222)
+	if f.Network != "" {
+		nw, err := hexutil.Decode(f.Network)
+		if err != nil || len(nw) != 32 {
+			return p, fmt.Errorf("P85 pin %s: network is 32 bytes of 0x-hex", path)
+		}
+		copy(p.Network[:], nw)
 	}
-	copy(p.Network[:], nw)
-	p.ChainID = vrschema.U64(f.ChainID)
-	p.Election = common.HexToAddress(f.Election)
+	if f.Election != "" {
+		if !common.IsHexAddress(f.Election) {
+			return p, fmt.Errorf("P85 pin %s: election is an address", path)
+		}
+		p.Election = common.HexToAddress(f.Election)
+	}
+	if f.ChainID != 0 {
+		p.ChainID = vrschema.U64(f.ChainID)
+	}
 	p.IDs = f.IDs
 	return p, nil
 }
@@ -1024,13 +1117,21 @@ func readPosPolicy(path string) (signingauthority.PosPolicy, error) {
 func signingAuthorityPosPolicyCmd(baseFlags *baseFlags) *cobra.Command {
 	flags := &signingAuthorityOperatorFlags{baseFlags: baseFlags}
 	var file string
+	var wait time.Duration
+	var requireVerified bool
 	cmd := &cobra.Command{
 		Use:   "pos-policy",
 		Short: "Pin the P85 election a running authority may sign possession proofs for (#1216)",
-		Long: `Pin, once, the scope of the P85 possession signatures of the running authority: the election's network word, the chain id, the
-ElectionPolicy address and the identity ids its EVM key may prove for. The election is deployed in the generation's genesis, after the
-authority started, so the operator states it here on the operator channel. The pin cannot be changed in the authority's lifetime: the same
-pin again is a no-op, another is refused. Until pinned, the authority signs no P85 assignment possession.`,
+		Long: `Pin, once, the scope of the P85 possession signatures of the running authority: the identity ids its EVM key may prove for, in
+the election of its generation. The election is deployed in the genesis, and a joiner's id is assigned at registration, both after the
+authority started, so the operator states the ids here. The authority verifies the pin before it installs it (#1222): it derives the
+network word and the ElectionPolicy address from its execution client (VR's network word and active PoS module, at one canonical block,
+under the execution genesis hash and VR code hash it was started with), requires the client's chain id to be its enrolled chain (the b1
+profile's before the enrollment is complete), and requires every id to be a VR identity whose current or staged binding names this node
+with this key. A network, chainId or election the file supplies must equal the derived one. The pin cannot be changed in the authority's
+lifetime: the same pin again is a no-op, another is refused. A pin that cannot be verified yet (the source does not answer, or an id is not
+registered at the block read) is retried until --wait, and then kept pending: the authority verifies it when its source answers (a later
+pin replaces a pending one). Until a pin is verified, the authority signs no P85 possession.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			pin, err := readPosPolicy(file)
 			if err != nil {
@@ -1041,17 +1142,41 @@ pin again is a no-op, another is refused. Until pinned, the authority signs no P
 				return err
 			}
 			defer func() { _ = operator.Close() }()
-			ctx, cancel := context.WithTimeout(cmd.Context(), flags.Timeout)
-			defer cancel()
-			if err := operator.SetPosPolicy(ctx, pin); err != nil {
+			deadline := time.Now().Add(wait)
+			for {
+				ctx, cancel := context.WithTimeout(cmd.Context(), flags.Timeout)
+				err = operator.SetPosPolicy(ctx, pin)
+				cancel()
+				retry := errors.Is(err, signingauthority.ErrPosPending) || errors.Is(err, signingauthority.ErrPosBusy)
+				if err == nil || !retry || time.Now().Add(posPolicyRetry).After(deadline) {
+					break
+				}
+				fmt.Fprintf(cmd.ErrOrStderr(), "the pin is not verified yet, retrying: %v\n", err)
+				select {
+				case <-cmd.Context().Done():
+					return err
+				case <-time.After(posPolicyRetry):
+				}
+			}
+			switch {
+			case errors.Is(err, signingauthority.ErrPosBusy):
+				// nothing was kept: the authority was verifying another pin for the whole wait
+				return fmt.Errorf("the authority is busy verifying another P85 pin and did not keep this one: send it again (or give a longer --wait): %w", err)
+			case errors.Is(err, signingauthority.ErrPosPending) && !requireVerified:
+				fmt.Fprintf(cmd.OutOrStdout(), "P85 pin for identities %v kept pending: the authority verifies it once its execution source answers, "+
+					"and signs no P85 possession before (%v)\n", pin.IDs, err)
+				return nil
+			case err != nil:
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "P85 election pinned: %s, identities %v\n", common.Address(pin.Election).Hex(), pin.IDs)
+			fmt.Fprintf(cmd.OutOrStdout(), "P85 election pinned and verified: identities %v\n", pin.IDs)
 			return nil
 		},
 	}
 	flags.addOperatorFlags(cmd)
-	cmd.Flags().StringVar(&file, "policy", "", "the P85 pin file: {\"network\":\"0x..\",\"chainId\":N,\"election\":\"0x..\",\"ids\":[..]}")
+	cmd.Flags().StringVar(&file, "policy", "", "the P85 pin file: {\"ids\":[..]}, optionally with \"network\":\"0x..\", \"chainId\":N and \"election\":\"0x..\" (checked against the derived ones)")
+	cmd.Flags().DurationVar(&wait, "wait", 0, "retry a pin the authority cannot verify yet (its execution source does not answer, or an id is not registered at the block it reads) for this long")
+	cmd.Flags().BoolVar(&requireVerified, "require-verified", false, "fail when the pin is still pending after --wait (by default a pending pin is kept, and verified by the authority later)")
 	if err := cmd.MarkFlagRequired("policy"); err != nil {
 		panic(err)
 	}

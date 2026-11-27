@@ -29,6 +29,8 @@ var refusalsByName = map[string]error{
 	signingauthority.ErrPoPDomain.Error():                signingauthority.ErrPoPDomain,
 	signingauthority.ErrPosPolicy.Error():                signingauthority.ErrPosPolicy,
 	signingauthority.ErrPosPolicyConflict.Error():        signingauthority.ErrPosPolicyConflict,
+	signingauthority.ErrPosPending.Error():               signingauthority.ErrPosPending,
+	signingauthority.ErrPosBusy.Error():                  signingauthority.ErrPosBusy,
 	signingauthority.ErrRegistrationDeployment.Error():   signingauthority.ErrRegistrationDeployment,
 	signingauthority.ErrRegistrationDomain.Error():       signingauthority.ErrRegistrationDomain,
 	signingauthority.ErrRegistrationUnauthorized.Error(): signingauthority.ErrRegistrationUnauthorized,

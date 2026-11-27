@@ -5,6 +5,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	ethcommon "github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	ethcrypto "github.com/ethereum/go-ethereum/crypto"
 
 	"github.com/unicitynetwork/bft-core/evmassign"
@@ -31,10 +32,12 @@ type Pos struct {
 // Position is custody's position of one identity; the owner is the VR identity's unless Owner is set.
 type Position struct {
 	Owner               ethcommon.Address
+	Withdrawal          ethcommon.Address
 	RootKeyHash         [32]byte
 	Generation          uint64
 	RoleNonce           uint64
 	OpenLots            uint32
+	LotCount            uint32
 	RetirementRequested bool
 	Excluded            bool
 }
@@ -60,7 +63,12 @@ func (c *Chain) position(id uint64) []byte {
 	if p.Owner != (ethcommon.Address{}) {
 		owner = p.Owner
 	}
-	return pack(vrclient.CustodyABI, "positions", owner, owner, p.RootKeyHash, [32]byte{}, p.Generation, p.RoleNonce, p.OpenLots, p.OpenLots,
+	withdrawal := p.Withdrawal
+	if withdrawal == (ethcommon.Address{}) {
+		withdrawal = owner
+	}
+	lotCount := max(p.LotCount, p.OpenLots) // older fixtures only set OpenLots
+	return pack(vrclient.CustodyABI, "positions", owner, withdrawal, p.RootKeyHash, [32]byte{}, p.Generation, p.RoleNonce, p.OpenLots, lotCount,
 		p.RetirementRequested)
 }
 
@@ -108,7 +116,11 @@ func (c *Chain) election(from ethcommon.Address, data []byte, write bool) ([]byt
 	}
 	switch m.Name {
 	case "delegation":
-		d := c.Pos.Delegations[[2]uint64{in[0].(uint64), in[1].(uint64)}]
+		delegations := c.Pos.Delegations
+		if c.atFinalized {
+			delegations = c.FinalizedDelegations
+		}
+		d := delegations[[2]uint64{in[0].(uint64), in[1].(uint64)}]
 		if d == nil {
 			d = &Delegated{Binding: vrclient.Delegation{RootKey: []byte{}, EvmKey: []byte{}}}
 		}
@@ -200,4 +212,32 @@ func recoverAddr(digest [32]byte, sig []byte) (ethcommon.Address, bool) {
 		return ethcommon.Address{}, false
 	}
 	return ethcrypto.PubkeyToAddress(*pub), true
+}
+
+// registerCustody models the first registration of an identity already registered in VR.
+func (c *Chain) registerCustody(from ethcommon.Address, in []any, write bool) ([]byte, *rpcError) {
+	a := vrclient.CustodyABI
+	rootKey, withdrawal := in[0].([]byte), in[2].(ethcommon.Address)
+	hash := ethcrypto.Keccak256Hash(rootKey)
+	id := c.KeyOwner[hash]
+	identity := c.Identities[id]
+	if identity == nil || identity.Owner != from || c.Pos.Positions[id] != nil ||
+		!bytes.Equal(identity.Current.RootKey, rootKey) || withdrawal == (ethcommon.Address{}) {
+		return nil, &rpcError{Code: 3, Message: "execution reverted: custody registration refused"}
+	}
+	digest, err := vrclient.CustodyRegisterDigest(c.Network, c.ChainID, c.Custody, from, withdrawal, rootKey, 0)
+	if err != nil || !verifyPoP(rootKey, digest, in[1].([]byte)) {
+		return nil, &rpcError{Code: 3, Message: "execution reverted: custody root possession refused"}
+	}
+	if write {
+		c.Pos.Positions[id] = &Position{Owner: from, Withdrawal: withdrawal, RootKeyHash: hash, Generation: 1}
+		event := a.Events["Registered"]
+		data, err := event.Inputs.NonIndexed().Pack([32]byte(hash), withdrawal)
+		if err != nil {
+			panic(err)
+		}
+		c.Logs = append(c.Logs, map[string]any{"address": c.Custody,
+			"topics": []ethcommon.Hash{event.ID, idTopic(id), ethcommon.BytesToHash(from.Bytes())}, "data": hexutil.Bytes(data)})
+	}
+	return pack(a, "register", id), nil
 }

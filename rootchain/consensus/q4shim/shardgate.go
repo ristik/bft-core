@@ -3,6 +3,7 @@ package q4shim
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -56,6 +57,7 @@ type ShardRule struct {
 	Direction string            `json:"direction"`
 	Partition types.PartitionID `json:"partition,omitempty"`
 	Nodes     []string          `json:"nodes,omitempty"`
+	Round     uint64            `json:"round,omitempty"` // zero matches every round
 	Types     []string          `json:"types,omitempty"`
 	Action    Action            `json:"action"`
 	Require   bool              `json:"require,omitempty"`
@@ -88,6 +90,9 @@ type ShardEvent struct {
 	Partition uint32    `json:"partition,omitempty"`
 	Node      string    `json:"node,omitempty"`
 	Round     uint64    `json:"round,omitempty"` // the request's IR round, or the response's UC IR round
+	BlockHash string    `json:"blockHash,omitempty"`
+	RootRound uint64    `json:"rootRound,omitempty"`
+	NextRound uint64    `json:"nextRound,omitempty"`
 	Error     string    `json:"error,omitempty"`
 }
 
@@ -110,6 +115,9 @@ type shardMsg struct {
 	partition types.PartitionID
 	node      string
 	round     uint64
+	blockHash []byte
+	rootRound uint64
+	nextRound uint64
 }
 
 // NewShardGate wraps the root's partition network. trace is optional.
@@ -123,16 +131,20 @@ func describeShard(msg any) (shardMsg, bool) {
 		d := shardMsg{typ: "request", partition: v.PartitionID, node: v.NodeID}
 		if v.InputRecord != nil {
 			d.round = v.InputRecord.RoundNumber
+			d.blockHash = v.InputRecord.BlockHash
 		}
 		return d, true
 	case *handshake.Handshake:
 		return shardMsg{typ: "handshake", partition: v.PartitionID, node: v.NodeID}, true
 	case *certification.CertificationResponse:
-		d := shardMsg{typ: "response", partition: v.Partition}
+		d := shardMsg{typ: "response", partition: v.Partition, rootRound: v.UC.GetRootRoundNumber(), nextRound: v.Technical.Round}
 		if v.UC.InputRecord != nil {
 			d.round = v.UC.InputRecord.RoundNumber
+			d.blockHash = v.UC.InputRecord.BlockHash
 		}
 		return d, true
+	case *certification.CertificationResponseV2:
+		return describeShard(&v.Response)
 	case *certification.CertificationResponseV3:
 		return describeShard(&v.Response) // the combined response is a response, with its entries and view
 	}
@@ -144,6 +156,8 @@ func (r *shardRuleState) matches(dir string, d shardMsg, node string) bool {
 	case r.retired, r.Direction != dir:
 		return false
 	case r.Partition != 0 && r.Partition != d.partition:
+		return false
+	case r.Round != 0 && r.Round != d.round:
 		return false
 	case len(r.Nodes) > 0 && !slices.Contains(r.Nodes, node):
 		return false
@@ -158,6 +172,7 @@ func (g *ShardGate) record(ev ShardEvent, d shardMsg) {
 	g.seq++
 	ev.Seq, ev.Time = g.seq, g.clock()
 	ev.Type, ev.Partition, ev.Round = d.typ, uint32(d.partition), d.round
+	ev.BlockHash, ev.RootRound, ev.NextRound = hex.EncodeToString(d.blockHash), d.rootRound, d.nextRound
 	if ev.Node == "" {
 		ev.Node = d.node
 	}

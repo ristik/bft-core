@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto"
 	"crypto/sha256"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -65,6 +66,64 @@ func certifiedParentState(t *testing.T, f *planFixture) *abdrc.StateMsg {
 	require.NoError(t, err)
 	state.CommittedHead.ShardInfo = []abdrc.ShardInfo{{Partition: 8, IR: &types.InputRecord{BlockHash: f.parentHash}}}
 	return state
+}
+
+func TestConcurrentV3IntentAndEndorseDuringFirstPrepare(t *testing.T) {
+	f := newPlanFixtureOpts(t, true)
+	cm := f.cm
+	next := f.weightedNext()
+	state := certifiedParentState(t, f)
+	candidate, err := cm.v3CandidateFromState(&next, state, nil)
+	require.NoError(t, err)
+	plan, err := cm.buildHandoffPlanV3FromState(&next, state, nil, f.receiptsFor(t, candidate))
+	require.NoError(t, err)
+	require.NoError(t, cm.AcceptHandoffIntent(plan))
+
+	cm.leaderSelector = constLeader{leader: cm.id}
+	cm.pacemaker.Reset(t.Context(), cm.blockStore().GetHighQc().GetRound(), nil, nil)
+	t.Cleanup(cm.pacemaker.Stop)
+	// Give the idle fixture an EVM tip for the real proposal trial to bind.
+	parent, err := cm.blockStore().Block(cm.blockStore().GetHighQc().GetRound())
+	require.NoError(t, err)
+	conf, err := cm.orchestration.ShardConfig(8, types.ShardID{}, parent.GetRound())
+	require.NoError(t, err)
+	shard, err := storage.NewShardInfo(conf, crypto.SHA256)
+	require.NoError(t, err)
+	shard.IR.BlockHash = bytes.Clone(f.parentHash)
+	parent.ShardState.States[types.PartitionShardID{PartitionID: conf.PartitionID, ShardID: conf.ShardID.Key()}] = shard
+
+	start := make(chan struct{})
+	var group sync.WaitGroup
+	intents, endorsements := make(chan error, 16), make(chan error, 16)
+	group.Add(2*cap(intents) + 1)
+	for range cap(intents) {
+		go func() {
+			defer group.Done()
+			<-start
+			intents <- cm.AcceptHandoffIntent(plan)
+		}()
+		go func() {
+			defer group.Done()
+			<-start
+			endorsements <- cm.EndorseHandoff(t.Context(), plan)
+		}()
+	}
+	go func() {
+		defer group.Done()
+		<-start
+		cm.processNewRoundEvent(t.Context())
+	}()
+	close(start)
+	group.Wait()
+	for range cap(intents) {
+		require.NoError(t, <-intents)
+		require.ErrorIs(t, <-endorsements, ErrEndorseBeforePrepare)
+	}
+	proposal := f.mockNet.WaitRootProposal(t)
+	require.Len(t, proposal.Block.Payload.HandoffRecords, 1)
+	record, err := storage.DecodeOrderedHandoffRecord(proposal.Block.Payload.HandoffRecords[0])
+	require.NoError(t, err)
+	require.Equal(t, "prepare", record.Kind)
 }
 
 // A V3 plan is the next committee with its exact weights and the readiness receipts of every member: each refusal below differs from the

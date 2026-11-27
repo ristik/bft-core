@@ -54,6 +54,12 @@ fi
 
 validators=${1:-4}
 rounds=${2:-10}
+if [ "${INGRESS_LOSS_LANE:-0}" = 1 ]; then
+  [ "$validators" -eq 5 ] && [ "${M2_PROFILE2:-0}:${Q3_B1:-0}:${F8_MIXED_LANE:-0}" = 1:1:0 ] &&
+    [ -x "${Q4_ROOT_BIN:-}" ] && [ -n "${Q4_SHIM_DIR:-}" ] && [ -x "${INGRESS_LOSS_LOAD_BIN:-}" ] ||
+    { echo "ingress-loss lane requires five validators, the shard gate and the f8batch load generator" >&2; exit 2; }
+  source scripts/ingress-loss-window.sh
+fi
 postM2aMode=${POST_M2A_MODE:-}
 postM2aChainID=${POST_M2A_CHAIN_ID:-31337}
 # The any-age final lane (scripts/anyage-lane.sh, briefs/anyage-final-lane-plan.md): the P85 genesis AND the aggregator in one devnet. ANYAGE_LANE=1 adds
@@ -91,7 +97,7 @@ if [ "${VR_POS16:-0}" = 1 ]; then
     { echo "VR_POS16=1 needs the PoS VR lane, 15 incumbents plus a joiner, authority signing and UTB" >&2; exit 2; }
   export VR_POS_LIMITS=15,16,16 VR_INCUMBENTS="$validators"
 fi
-if [ "${M2_PROFILE2:-0}" = 1 ] && [ "$validators" -ne 4 ] && [ "${VR_POS16:-0}" != 1 ]; then
+if [ "${M2_PROFILE2:-0}" = 1 ] && [ "$validators" -ne 4 ] && [ "${VR_POS16:-0}" != 1 ] && [ "${INGRESS_LOSS_LANE:-0}" != 1 ]; then
   echo "profile-2 handoff lane requires four validators" >&2
   exit 2
 fi
@@ -201,15 +207,18 @@ fi
 # from leaving them holding their ports and datadirs.
 negativeReths="reth-wrong reth-wrongchain reth-othergenesis reth-laterfork"
 
+# Allow more than the lane's normal 10-second consensus round timeout. Zero disables dumps.
+laneStallDumpSecs=${LANE_STALL_DUMP_SECS:-15}
+
 # Everything here is ownership-scoped (helper.sh, "ownership"): stop-evm.sh -a stops this checkout's
 # nodes only, and a reth is stopped by its pid file only if that pid is still a `reth node` running
 # from this checkout. This runs nested inside scripts/reth-smoke.sh, whose own teardown cannot undo
 # anything a machine-wide sweep here had already killed.
-# At teardown, dump roots whose logs have been quiet for LANE_STALL_DUMP_SECS (default 5; 0 disables dumps). After an H6
+# At teardown, dump roots whose logs have been quiet for LANE_STALL_DUMP_SECS. After an H6
 # timeout, dump the whole owned committee: a wedged consensus goroutine can coexist with active RPC or network logs (#1063).
 # SIGQUIT writes the Go stacks to debug.log (m2_start_root) and exits. The lane copies the logs into its evidence.
 dump_stalled_roots() {
-  local secs=${LANE_STALL_DUMP_SECS:-5} now p home log age reason dumped=()
+  local secs=$laneStallDumpSecs now p home log age reason dumped=()
   [ "$secs" -gt 0 ] 2>/dev/null || return 0
   now=$(date +%s)
   for p in $(owned_pids 'ubft root-node run'); do
@@ -235,8 +244,15 @@ dump_stalled_roots() {
 
 H6_ROOT_DUMP_REASON=
 nb2DriverPid=
+rootStallWatchPid=
 cleanup() {
+  if [ "${INGRESS_LOSS_LANE:-0}" = 1 ]; then loss_load_stop; fi
   if [ "${NB2_T7_LANE:-0}" = 1 ]; then trap '' TERM HUP INT; fi
+  if declare -F vrb_poa_resume_on_exit >/dev/null; then vrb_poa_resume_on_exit; fi
+  if [ -n "${rootStallWatchPid:-}" ]; then
+    kill -TERM "$rootStallWatchPid" 2>/dev/null || true
+    wait "$rootStallWatchPid" 2>/dev/null || true
+  fi
   if [ -n "$nb2DriverPid" ]; then kill -TERM "$nb2DriverPid" 2>/dev/null || true; wait "$nb2DriverPid" || true; fi
   dump_stalled_roots
   if [ "${F8_MIXED_LANE:-0}" = 1 ]; then f8_stop; fi
@@ -358,7 +374,7 @@ fi
 echo "=== 1. generate the shard topology and chain spec ==="
 rootValidators=3
 if [ "${M2_PROFILE2:-0}" = 1 ]; then rootValidators=4; fi
-if [ "${VR_POS16:-0}" = 1 ]; then rootValidators=$validators; fi
+if [ "${VR_POS16:-0}" = 1 ] || [ "${INGRESS_LOSS_LANE:-0}" = 1 ]; then rootValidators=$validators; fi
 ./setup-evm-nodes.sh -r "$rootValidators" -v "$validators" -c "$postM2aChainID" >/dev/null || { echo "setup failed" >&2; exit 1; }
 registry_layout_require || exit 1
 # VR_LANE=1 (VT-14, scripts/lib/vr-lib.sh): a validator-registry generation. The EVM shard configuration pins VR before the profile and the
@@ -931,6 +947,9 @@ echo "=== 4. configure the checked v2 origin and seed the block-1 transaction ==
 # only now, after the startup negatives above have used it.
 cp "$fullShardConf" "test-nodes/shard-conf-${partitionID}_0.json"
 if [ "${F8_MIXED_LANE:-0}" = 1 ]; then f8_prepare; fi
+if [ "${INGRESS_LOSS_LANE:-0}" = 1 ]; then
+  loss_load_prepare && q3_prepare_genesis_identities "$validators" || exit 1
+fi
 # Both the standalone H4 probe and the M2a final lane need persistent archive
 # publication before they stop validator 1; M2a restores it after Handoff 2.
 if [ "${H3_ASSIGNMENT_LANE:-0}" = 1 ] || [ "${P85_LANE:-0}" = 1 ]; then   # the P85 joiner restores from a retained validator's archive (as the H3 joiner)
@@ -1003,7 +1022,18 @@ echo "=== 5. the v2 bootstrap certifies a real EVM block 1 ==="
 preflightFailures=$failures
 # the roots register every test-nodes/shard-conf-* file when they start: the aggregator partition's configurations must exist before
 if [ "${ANYAGE_LANE:-0}" = 1 ]; then agg_prepare_confs || { echo "aggregator shard configuration failed" >&2; exit 1; }; fi
-./start-evm.sh -r -a -e engine-api -v "$validators" >test-nodes/start-evm.log 2>&1
+# All paired rehearsal lanes use this root launcher, including restarts and joiners.
+if [ "$laneStallDumpSecs" -gt 0 ] 2>/dev/null; then
+  export UBFT_LANE_ROOT_DEBUG=1
+  python3 scripts/root-stall-watch.py test-nodes "$(lane_port 25866)" "$laneStallDumpSecs" &
+  rootStallWatchPid=$!
+fi
+./start-evm.sh -r -a -e engine-api -v "$validators" >test-nodes/start-evm.log 2>&1 || {
+  if [ "${INGRESS_LOSS_LANE:-0}" = 1 ]; then
+    tail -20 test-nodes/start-evm.log >&2
+    exit 1
+  fi
+}
 if [ "${ANYAGE_LANE:-0}" = 1 ]; then root_alive && start_aggs || { echo "aggregator-go did not start (see test-nodes/agg*/stdout.log)" >&2; exit 1; }; fi
 
 echo "waiting for block 1 and a certificate (up to 180s) ..."
@@ -1035,6 +1065,11 @@ else
   fail "v2 bootstrap did not produce a certified transaction block within 180s (mined=$mined certified=$certified)"
   echo "--- evm1 tail ---"; tail -25 test-nodes/evm1/debug.log 2>/dev/null
   echo "--- reth1 tail ---"; tail -15 test-nodes/reth1/reth.log 2>/dev/null
+fi
+if [ "${INGRESS_LOSS_LANE:-0}" = 1 ]; then
+  $mined && $certified && [ "$failures" = "$preflightFailures" ] || exit 1
+  loss_run || exit 1
+  exit "$failures"
 fi
 if [ "${NB2_T7_LANE:-0}" = 1 ]; then
   $mined && $certified && [ "$failures" = "$preflightFailures" ] || exit 1
