@@ -11,7 +11,7 @@ import { SdkAggregator } from './sdk/nb2/aggregator.js';
 import { ascii, u16, u256 } from './sdk/nb2/cbor.js';
 import { ASSET_UCT, decodeConfig, deriveCoin, deriveType, domainOf, encodeConfig, PRODUCTION_PARAMS, type Config } from './sdk/nb2/config.js';
 import { HE, HU } from './sdk/nb2/crypto.js';
-import { decodeDepositProof, depositSalt, depositedData, encodeReceiptBacking, firstOwnerOf, rhoOf, TOPIC, verifyReceiptLog } from './sdk/nb2/deposit.js';
+import { decodeDepositProof, decodeReceiptBacking, depositSalt, depositedData, encodeReceiptBacking, firstOwnerOf, rhoOf, TOPIC, verifyReceiptLog } from './sdk/nb2/deposit.js';
 import { Nb2Error, WalletError } from './sdk/nb2/errors.js';
 import { LocalKeySigner, signTx } from './sdk/nb2/evm.js';
 import { RecoveryAuthority, RecoverySession } from './sdk/nb2/recovery.js';
@@ -625,7 +625,9 @@ async function runQualificationCosts() {
 }
 
 function tokenUcs(token: Uint8Array) {
-  return lineageOf(decodeToken(token)).flatMap(l => [l.mintProof.uc, ...l.proofs.map(p => p.uc)]);
+  const levels = lineageOf(decodeToken(token));
+  const backing = decodeReceiptBacking(levels[0].mint.justification!);
+  return [backing.proof.uc, ...levels.flatMap(l => [l.mintProof.uc, ...l.proofs.map(p => p.uc)])];
 }
 
 async function createLoadClaims(label: string, count: number, recipient: Uint8Array, minIndex: bigint,
@@ -991,7 +993,7 @@ async function sealOfflineArchive() {
         }
         batchOffers.push({ atMs: first, calls: batch.length, dispatchedMs: Date.now() - first, endpoint: number });
         for (const [i, tx] of txs.entries()) {
-          let receipt: Awaited<ReturnType<EvmReader['receipt']>>;
+          let receipt: Awaited<ReturnType<EvmReader['receipt']>> = null;
           for (let attempt = 0; attempt < 120; ++attempt) {
             receipt = await reader.receipt(tx.hash);
             if (receipt) break;
