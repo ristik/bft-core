@@ -248,7 +248,7 @@ rootStallWatchPid=
 cleanup() {
   if [ "${INGRESS_LOSS_LANE:-0}" = 1 ]; then loss_load_stop; fi
   if [ "${NB2_T7_LANE:-0}" = 1 ]; then trap '' TERM HUP INT; fi
-  if declare -F vrb_poa_resume >/dev/null; then vrb_poa_resume || true; fi
+  if declare -F vrb_poa_resume_on_exit >/dev/null; then vrb_poa_resume_on_exit; fi
   if [ -n "${rootStallWatchPid:-}" ]; then
     kill -TERM "$rootStallWatchPid" 2>/dev/null || true
     wait "$rootStallWatchPid" 2>/dev/null || true
