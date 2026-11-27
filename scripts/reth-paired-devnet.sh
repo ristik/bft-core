@@ -235,8 +235,13 @@ dump_stalled_roots() {
 
 H6_ROOT_DUMP_REASON=
 nb2DriverPid=
+rootStallWatchPid=
 cleanup() {
   if [ "${NB2_T7_LANE:-0}" = 1 ]; then trap '' TERM HUP INT; fi
+  if [ -n "${rootStallWatchPid:-}" ]; then
+    kill -TERM "$rootStallWatchPid" 2>/dev/null || true
+    wait "$rootStallWatchPid" 2>/dev/null || true
+  fi
   if [ -n "$nb2DriverPid" ]; then kill -TERM "$nb2DriverPid" 2>/dev/null || true; wait "$nb2DriverPid" || true; fi
   dump_stalled_roots
   if [ "${F8_MIXED_LANE:-0}" = 1 ]; then f8_stop; fi
@@ -1003,6 +1008,12 @@ echo "=== 5. the v2 bootstrap certifies a real EVM block 1 ==="
 preflightFailures=$failures
 # the roots register every test-nodes/shard-conf-* file when they start: the aggregator partition's configurations must exist before
 if [ "${ANYAGE_LANE:-0}" = 1 ]; then agg_prepare_confs || { echo "aggregator shard configuration failed" >&2; exit 1; }; fi
+# All paired rehearsal lanes use this root launcher, including restarts and joiners.
+if [ "${LANE_STALL_DUMP_SECS:-5}" -gt 0 ] 2>/dev/null; then
+  export UBFT_LANE_ROOT_DEBUG=1
+  python3 scripts/root-stall-watch.py test-nodes "$(lane_port 25866)" "${LANE_STALL_DUMP_SECS:-5}" &
+  rootStallWatchPid=$!
+fi
 ./start-evm.sh -r -a -e engine-api -v "$validators" >test-nodes/start-evm.log 2>&1
 if [ "${ANYAGE_LANE:-0}" = 1 ]; then root_alive && start_aggs || { echo "aggregator-go did not start (see test-nodes/agg*/stdout.log)" >&2; exit 1; }; fi
 
