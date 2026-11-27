@@ -14,7 +14,7 @@ import time
 def read_root(port, pid, path, timeout):
     connection = HTTPConnection("127.0.0.1", port, timeout=timeout)
     try:
-        connection.request("GET", path)
+        connection.request("GET", path, headers={"X-Root-Pid": str(pid)})
         with connection.getresponse() as reply:
             if reply.status == 200 and reply.getheader("X-Root-Pid") == str(pid):
                 return reply.read()
@@ -33,24 +33,32 @@ class Root:
     progressed: float
     round_number: int | None = None
     dumped: bool = False
+    last_attempt: float | None = None
 
     def sample(self, threshold):
         current = read_root(self.port, self.pid, "/debug/consensus/round", 0.5)
+        if current is None or not current.strip().isdigit():
+            return
         now = time.monotonic()
-        if current is not None and current.strip().isdigit():
-            round_number = int(current)
-            if self.round_number != round_number:
-                self.round_number = round_number
-                self.progressed = now
-                self.dumped = False
+        round_number = int(current)
+        if self.round_number != round_number:
+            self.round_number = round_number
+            self.progressed = now
+            self.dumped = False
         elapsed = now - self.progressed
         if self.dumped or elapsed < threshold:
             return
-        stacks = read_root(self.port, self.pid, "/debug/pprof/goroutine?debug=2", 2)
-        if not stacks:
+        if self.last_attempt is not None and now - self.last_attempt < threshold:
             return
+        self.last_attempt = now
         try:
-            if int((self.home / "pid").read_text()) != self.pid:
+            pidfile = self.home / "pid"
+            if int(pidfile.read_text()) != self.pid:
+                return
+            stacks = read_root(self.port, self.pid, "/debug/pprof/goroutine?debug=2", 2)
+            if not stacks:
+                return
+            if int(pidfile.read_text()) != self.pid:
                 return  # The lane has replaced this root since we began sampling it.
             stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
             reason = f"{elapsed:.1f}s without round progress (round {self.round_number}, pid {self.pid})"

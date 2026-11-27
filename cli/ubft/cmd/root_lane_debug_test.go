@@ -17,7 +17,10 @@ func TestRootLaneDebugRequiresOptInAndLoopbackBind(t *testing.T) {
 	}{
 		{"default", "", "127.0.0.1:25866", false},
 		{"wildcard", "1", "0.0.0.0:25866", false},
+		{"hostname", "1", "localhost:25866", false},
+		{"non-loopback", "1", "192.0.2.1:25866", false},
 		{"loopback", "1", "127.0.0.1:25866", true},
+		{"IPv6 loopback", "1", "[::1]:25866", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("UBFT_LANE_ROOT_DEBUG", tc.env)
@@ -28,7 +31,9 @@ func TestRootLaneDebugRequiresOptInAndLoopbackBind(t *testing.T) {
 				"/debug/pprof/goroutine?debug=2": "goroutine ",
 			} {
 				res := httptest.NewRecorder()
-				mux.ServeHTTP(res, httptest.NewRequest(http.MethodGet, path, nil))
+				req := httptest.NewRequest(http.MethodGet, path, nil)
+				req.Header.Set("X-Root-Pid", strconv.Itoa(os.Getpid()))
+				mux.ServeHTTP(res, req)
 				if !tc.enabled {
 					require.Equal(t, http.StatusNotFound, res.Code)
 					continue
@@ -38,5 +43,21 @@ func TestRootLaneDebugRequiresOptInAndLoopbackBind(t *testing.T) {
 				require.Contains(t, res.Body.String(), expected)
 			}
 		})
+	}
+}
+
+func TestRootLaneDebugStackCaptureRequiresMatchingPID(t *testing.T) {
+	t.Setenv("UBFT_LANE_ROOT_DEBUG", "1")
+	mux := http.NewServeMux()
+	registerRootLaneDebug(mux, "127.0.0.1:25866", func() uint64 { return 52 })
+	for _, pid := range []string{"", strconv.Itoa(os.Getpid() + 1)} {
+		res := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodGet, "/debug/pprof/goroutine?debug=2", nil)
+		if pid != "" {
+			req.Header.Set("X-Root-Pid", pid)
+		}
+		mux.ServeHTTP(res, req)
+		require.Equal(t, http.StatusConflict, res.Code)
+		require.NotContains(t, res.Body.String(), "goroutine ")
 	}
 }
