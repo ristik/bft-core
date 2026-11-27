@@ -241,6 +241,7 @@ nb2DriverPid=
 rootStallWatchPid=
 cleanup() {
   if [ "${NB2_T7_LANE:-0}" = 1 ]; then trap '' TERM HUP INT; fi
+  if declare -F vrb_poa_resume >/dev/null; then vrb_poa_resume || true; fi
   if [ -n "${rootStallWatchPid:-}" ]; then
     kill -TERM "$rootStallWatchPid" 2>/dev/null || true
     wait "$rootStallWatchPid" 2>/dev/null || true
