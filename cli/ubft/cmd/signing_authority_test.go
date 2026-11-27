@@ -466,16 +466,37 @@ func TestSigningAuthorityRefusesToStartOnAVRGenerationWithoutTheFence(t *testing
 	require.NoFileExists(t, clientSocket)
 }
 
-// A P85 --pos-policy alone pins the standalone election of a pre-VR generation, which has no VR registry: it is not evidence of a VR
-// generation, so that authority starts without any fence input.
-func TestSigningAuthorityWithAP85PolicyAloneIsNotAVRGeneration(t *testing.T) {
+// A P85 --pos-policy alone is not evidence of a VR generation, and since #1222 a pin is verified only against a VR generation's
+// deployment: a standalone P85 pin without VR could never be verified, so the authority refuses to start with one (and says why).
+func TestSigningAuthorityRefusesAP85PolicyWithoutAVRGeneration(t *testing.T) {
+	run, base, home := authorityRunFixture(t)
+	pin := filepath.Join(home, "pos.json")
+	require.NoError(t, os.WriteFile(pin, []byte(`{"network":"0x`+strings.Repeat("22", 32)+`","chainId":3,"election":"0x00000000000000000000000000000000000000aa","ids":[1]}`), 0o600))
+	err := run(append(base, "--pos-policy", pin)...)
+	require.ErrorIs(t, err, errVRFenceRequired)
+	require.ErrorContains(t, err, "standalone P85 election without VR has no verifier")
+	require.ErrorIs(t, run(append(base, "--require-pos-policy")...), errVRFenceRequired, "--require-pos-policy alone too")
+}
+
+// sol's review of #1328: on the immediate path, a --vr-registry-code-hash other than the b1 profile's VR measurement is refused (as the
+// deferred path's mergePins does), so the fence and the P85 reader check the b1 profile's VR runtime hash.
+func TestSigningAuthorityRefusesAVRCodeHashOtherThanTheB1Profiles(t *testing.T) {
+	run, base, _ := authorityRunFixture(t)
+	err := run(append(base, "--b1-profile", vrTestdata(t, "b1-profile.json"), "--vr-registry-code-hash", "0x"+strings.Repeat("11", 32))...)
+	require.ErrorIs(t, err, errVRFenceRequired)
+	require.ErrorContains(t, err, "is not the b1 profile's VR measurement")
+}
+
+// authorityRunFixture is `signing-authority run` with the required flags of a non-VR enrollment: run executes it (bounded), base the flags.
+func authorityRunFixture(t *testing.T) (run func(args ...string) error, base []string, home string) {
+	t.Helper()
 	logF := testobserve.NewFactory(t)
 	sockets := authoritySocketDir(t)
-	home := t.TempDir()
+	home = t.TempDir()
 	clientSocket := filepath.Join(sockets, "client", "client.sock")
 	operatorSocket := filepath.Join(sockets, "operator", "operator.sock")
 	operatorCredential := filepath.Join(home, "operator.cred")
-	run := func(ctx context.Context, args ...string) error {
+	exec := func(ctx context.Context, args ...string) error {
 		c := New(logF)
 		c.baseCmd.SetOut(io.Discard)
 		c.baseCmd.SetArgs(args)
@@ -491,17 +512,17 @@ func TestSigningAuthorityWithAP85PolicyAloneIsNotAVRGeneration(t *testing.T) {
 	require.True(t, ok)
 	trustBasePath := filepath.Join(home, "trust-base.json")
 	require.NoError(t, util.WriteJsonFile(trustBasePath, tb))
-	require.NoError(t, run(context.Background(), "signing-authority", "credential", "--out", operatorCredential))
-	pin := filepath.Join(home, "pos.json")
-	require.NoError(t, os.WriteFile(pin, []byte(`{"network":"0x`+strings.Repeat("22", 32)+`","chainId":3,"election":"0x00000000000000000000000000000000000000aa","ids":[1]}`), 0o600))
-
-	ctx, stop := context.WithTimeout(context.Background(), 3*time.Second)
-	defer stop()
-	err = run(ctx, "signing-authority", "run", "--home", home,
+	require.NoError(t, exec(context.Background(), "signing-authority", "credential", "--out", operatorCredential))
+	base = []string{"signing-authority", "run", "--home", home,
 		"--client-socket", clientSocket, "--operator-socket", operatorSocket, "--operator-credential", operatorCredential,
 		"--trust-base", trustBasePath, "--authority-id", "authority-1", "--node-id", nodeID.String(),
-		"--network-id", "5", "--partition-id", "7", "--shard-epoch", "0", "--root-epoch", strconv.FormatUint(tb.GetEpoch(), 10),
-		"--pos-policy", pin)
-	require.NotErrorIs(t, err, errVRFenceRequired)
-	require.NoError(t, err, "it started (and stopped with its context) with no VR fence input")
+		"--network-id", "5", "--partition-id", "7", "--shard-epoch", "0", "--root-epoch", strconv.FormatUint(tb.GetEpoch(), 10)}
+	run = func(args ...string) error {
+		ctx, stop := context.WithTimeout(context.Background(), 3*time.Second)
+		defer stop()
+		err := exec(ctx, args...)
+		require.NoFileExists(t, clientSocket, "refused before it serves anything")
+		return err
+	}
+	return run, base, home
 }
