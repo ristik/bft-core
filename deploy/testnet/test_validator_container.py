@@ -660,7 +660,7 @@ class LeavingValidator(unittest.TestCase):
 
 
 class JoinInOneRun(unittest.TestCase):
-    """#1323: `join` registers, bonds and delegates in one `validator apply`, and says so when an election passed its authority over."""
+    """Join applies once and refreshes a pending authority if an earlier result excluded it."""
 
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
@@ -709,18 +709,54 @@ class JoinInOneRun(unittest.TestCase):
         self.assertEqual(json.loads((self.home/'join.json').read_text()), {'phase': 'electing', 'id': 5})
         self.assertFalse(any(c[:2] == ('signing-authority', 'pos-policy') for c in calls), 'apply pins the policy itself')
 
-    def test_a_scope_activated_without_this_node_names_recover(self):
+    def test_join_refreshes_the_same_authority_after_a_missed_activation(self):
+        path = self.home/'join.json'
+        path.write_text(json.dumps({'phase': 'electing', 'id': 5}))
+        config = self.home/'validator.json'
+        config.write_text(json.dumps({**json.loads(config.read_text()), 'id': 5}))
+        state = {'rootEpoch': 3, 'shardEpoch': 4, 'lineageEpoch': 3, 'enrollmentComplete': False}
+        calls = []
+
         def ubft(*args, **kw):
+            calls.append(args)
             out = Path(args[args.index('--out') + 1])
-            out.write_text(json.dumps({'epoch': 4, 'validators': [{'nodeId': 'other', 'sigKey': '0xcd'}]}))
+            epoch = args[args.index('--epoch') + 1]
+            if args[:2] == ('q3', 'proof-envelope'):
+                self.assertEqual(epoch, 4)
+                out.write_bytes(b'activation four')
+            else:
+                names = [{'nodeId': 'other', 'sigKey': '0xcd'}]
+                if epoch == 5:
+                    names.append({'nodeId': 'evm-node', 'sigKey': '0xAB'})
+                out.write_text(json.dumps({'epoch': epoch, 'validators': names}))
             return SimpleNamespace(returncode=0, stdout='', stderr='')
-        info = {'nodeId': 'evm-node', 'sigKey': '0xAB'}
-        with patch.object(validator, 'ubft', ubft):
-            with self.assertRaises(RuntimeError) as raised:
-                validator.missed_scope(4, info)
-        self.assertIn('shard epoch 4', str(raised.exception))
-        self.assertIn('recover --yes', str(raised.exception))
-        self.assertTrue(validator.names_node({'validators': [{'nodeId': 'evm-node', 'sigKey': '0xab'}]}, info))
-        self.assertFalse(validator.names_node({'validators': [{'nodeId': 'evm-node', 'sigKey': '0xcd'}]}, info))
-        with patch.object(validator, 'ubft', return_value=SimpleNamespace(returncode=1, stdout='', stderr='unknown epoch')):
-            validator.missed_scope(4, info)   # not activated yet: nothing to say
+
+        def authority(*args, **kw):
+            calls.append(args)
+            if args[0] == 'advance-with-proof':
+                self.assertEqual(args[1:3], ('--scope-only', '--proof'))
+                self.assertEqual(args[3].read_bytes(), b'activation four')
+                state.update(rootEpoch=4, shardEpoch=5, lineageEpoch=4)
+                return SimpleNamespace(returncode=0, stdout=json.dumps(state), stderr='')
+            self.assertEqual(args[0], 'complete-enrollment')
+            self.assertEqual(json.loads(args[2].read_text())['epoch'], 5)
+            state['enrollmentComplete'] = True
+
+        def wait_for(description, probe, **kw):
+            if description == 'activated root epoch naming this authority':
+                self.assertIsNone(probe(), 'the previously expected shard epoch names only incumbents')
+                return probe()
+            self.assertEqual(description, 'committee membership')
+            return probe()
+
+        with patch.object(validator, 'ubft', ubft), patch.object(validator, 'authority', authority), \
+                patch.object(validator, 'authority_status', side_effect=lambda: dict(state)), \
+                patch.object(validator, 'root_status', side_effect=[{'activeEpoch': 4, 'follower': True},
+                                                                    {'activeEpoch': 5, 'follower': False}]), \
+                patch.object(validator, 'wait_for', wait_for), patch.object(validator, 'advance') as advance, \
+                patch.object(validator, 'local_status', return_value=SimpleNamespace(stdout='{"member":true}')), \
+                patch.object(validator, 'show_status'):
+            self.assertEqual(validator.join(SimpleNamespace(yes=True), {}), 0)
+        advance.assert_called_once_with(5)
+        self.assertEqual(json.loads(path.read_text()), {'phase': 'activated', 'id': 5, 'rootEpoch': 5})
+        self.assertEqual([c[0] for c in calls], ['q3', 'q3', 'advance-with-proof', 'q3', 'complete-enrollment'])

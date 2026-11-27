@@ -64,6 +64,10 @@ type Authority struct {
 	rec          record
 	scopeVersion uint64
 
+	// A fresh joiner may follow verified exclusions until its first shard-bound possession proof.
+	pendingJoinScope bool
+	joinScopeProved  bool
+
 	// While a successor assignment's acknowledgement is pending, the certificate an authority is asked to extend carries the new
 	// configuration and technical-record epoch but its INPUT RECORD is still at an earlier epoch: that is exactly the request that
 	// certifies the acknowledgement. An input-record epoch is therefore admitted when it is the enrolled epoch or, until an
@@ -161,6 +165,17 @@ func WithAdvanceHook(hook func()) Option {
 
 // Option configures an authority at New.
 type Option func(*Authority) error
+
+// WithPendingJoinScope enables proof-verified scope refresh before first enrollment.
+func WithPendingJoinScope() Option {
+	return func(a *Authority) error {
+		if a.enroll.complete() {
+			return errors.New("pending join scope requires an incomplete enrollment")
+		}
+		a.pendingJoinScope = true
+		return nil
+	}
+}
 
 // WithLineage pins the authority's root lineage to the deployment's genesis root trust base (utb: the chain is a UTB chain). The
 // authority then advances by AdvanceWithProof, verifying every activation itself from this pin.
@@ -269,6 +284,9 @@ func New(enroll Enrollment, trust TrustBases, opts ...Option) (*Authority, error
 		if err := opt(a); err != nil {
 			return nil, fmt.Errorf("signingauthority: %w", err)
 		}
+	}
+	if a.pendingJoinScope && (a.lineage == nil || a.uncheckedAdvance) {
+		return nil, errors.New("pending join scope requires a lineage pin and proof-verified advance")
 	}
 	return a, nil
 }

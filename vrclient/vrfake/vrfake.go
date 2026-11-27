@@ -559,15 +559,26 @@ func (c *Chain) custody(from ethcommon.Address, data []byte, write bool) ([]byte
 		}
 		return pack(a, "positions", identity.Owner, identity.Owner, [32]byte{}, [32]byte{}, identity.Generation,
 			uint64(0), uint32(len(c.ClaimLots)), uint32(len(c.ClaimLots)), true), nil
+	case "register":
+		if c.Pos != nil {
+			return c.registerCustody(from, in, write)
+		}
 	case "bond":
-		// custody.bond: a retired generation with no open lots opens the next one (StakeCustody.bond); the first bond keeps generation 1
-		if p := c.posOf(in[0].(uint64)); p != nil && write {
-			if p.RetirementRequested {
-				p.Generation++
-				p.RetirementRequested = false
+		// A retired generation opens the next one only after every old lot is closed.
+		if p := c.posOf(in[0].(uint64)); p != nil {
+			if p.RetirementRequested && p.OpenLots != 0 {
+				return nil, revert(vrclient.PosErrorsABI, "GenerationClosing")
 			}
-			p.OpenLots++
-			c.Pos.Order = append(c.Pos.Order, "bond")
+			if write {
+				if p.RetirementRequested {
+					p.Generation++
+					p.RetirementRequested = false
+					p.LotCount = 0
+				}
+				p.LotCount = max(p.LotCount, p.OpenLots) + 1
+				p.OpenLots++
+				c.Pos.Order = append(c.Pos.Order, "bond")
+			}
 		}
 	case "generationLots":
 		return pack(a, "generationLots", c.ClaimLots), nil

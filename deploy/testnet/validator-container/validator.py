@@ -364,6 +364,8 @@ def authority_process(a, pins):
                 '--lineage-genesis-trust-base', RELEASE/'trust-base.json', '--lineage-utb-genesis',
                 '--b1-profile', RELEASE/'b1-profile.json', '--activation-source-url', EXECUTION,
                 '--execution-genesis-hash', read(RELEASE/'manifest.json')['genesis_hash']]
+        if rec is None:
+            args += ['--pending-join-scope']
         proc = subprocess.Popen([str(x) for x in args], cwd=HOME)
         signal.signal(signal.SIGTERM, lambda *_: proc.terminate())
         raise SystemExit(proc.wait())
@@ -772,25 +774,31 @@ def join(a, pins):
             ubft('validator', 'apply', '--pin-pos-policy', template, timeout=900)
             journal(progress, 'electing', id=read(CONFIG)['id'])
         ident = read(CONFIG)['id']
-        status = authority_status()
-        scope = HOME/'authority-scope.json'
-        base = read(scope if scope.exists() else HOME/'network.json')
-        shard = base['shardEpoch']
         info = read(auth_dir()/'node-info.json')
-        checked = [0.0]
+        conf = auth_dir()/'activated-shard.json'
 
         def elected():
-            if time.monotonic() - checked[0] >= 30:
-                checked[0] = time.monotonic()
-                missed_scope(shard, info)
-            return active_member_epoch(root_status(), base['rootEpoch'])
-        target = wait_for('activated root epoch', elected)
+            view = root_status()
+            if not view:
+                return None
+            status = authority_status()
+            target, shard = view['activeEpoch'], status['shardEpoch']
+            if (target < status['rootEpoch'] or
+                    (target == status['rootEpoch'] and not status['enrollmentComplete'])):
+                return None
+            done = ubft('q3', 'shard-conf', '--root-rpc', ROOT, '--epoch', shard, '--out', conf,
+                        output=True, check=False, timeout=30)
+            if done.returncode == 0 and names_node(read(conf), info):
+                if not view.get('follower', False):
+                    return target
+                return None
+            if not status['enrollmentComplete']:
+                refresh_join_scope(status, target)
+            return None
+
+        target = wait_for('activated root epoch naming this authority', elected)
         journal(progress, 'activation', id=ident, rootEpoch=target)
-        conf = auth_dir()/'activated-shard.json'
-        ubft('q3', 'shard-conf', '--root-rpc', ROOT, '--epoch', shard, '--out', conf)
-        if not names_node(read(conf), info):
-            raise RuntimeError(missed_scope_text(shard))
-        if not status['enrollmentComplete']:
+        if not authority_status()['enrollmentComplete']:
             authority('complete-enrollment', '--shard-conf', conf)
         advance(target)
         journal(progress, 'activated', id=ident, rootEpoch=target)
@@ -819,20 +827,25 @@ def names_node(conf, info):
     return bool(named) and str(named[0].get('sigKey', '')).lower() == str(info['sigKey']).lower()
 
 
-def missed_scope_text(shard):
-    return (f'shard epoch {shard}, the epoch this authority was started for, activated without this node: an election was held '
-            'before the delegation was admitted, and the authority cannot sign for a later epoch. The identity is registered, bonded '
-            'and delegated. Stop the authority container (keep the volume), then run `ubft-validator recover --yes` and follow the '
-            'steps it prints (Authority loss in the validator handbook): the fresh authority joins at the next election.')
-
-
-def missed_scope(shard, info):
-    """#1323: raise (RuntimeError, which wait_for passes on) once the authority's shard epoch has activated without this node."""
-    with tempfile.TemporaryDirectory(prefix='.scope-', dir=HOME) as temp:
-        path = Path(temp)/'shard.json'
-        done = ubft('q3', 'shard-conf', '--root-rpc', ROOT, '--epoch', shard, '--out', path, output=True, check=False, timeout=30)
-        if done.returncode == 0 and not names_node(read(path), info):
-            raise RuntimeError(missed_scope_text(shard))
+def refresh_join_scope(status, target):
+    """Verify the next activation in the authority's lineage, without opening a signing session."""
+    epoch = max(2, status['lineageEpoch'] + 1)
+    if epoch > target:
+        return
+    with tempfile.TemporaryDirectory(prefix='.join-scope-', dir=HOME) as temp:
+        proof = Path(temp)/f'activation-{epoch}.cbor'
+        ubft('q3', 'proof-envelope', '--root-rpc', ROOT, '--epoch', epoch, '--out', proof, timeout=30)
+        done = authority('advance-with-proof', '--scope-only', '--proof', proof, output=True, check=False, timeout=30)
+        if done.returncode:
+            text = (done.stdout + done.stderr).strip()
+            if 'signing-enrollment-incomplete' in text:
+                raise RuntimeError('This authority started with a fixed shard scope. Stop the authority container (keep the volume), '
+                                   'then run `ubft-validator recover --yes` and follow the steps it prints.')
+            raise RuntimeError(text or f'the authority refused the activation proof for root epoch {epoch}')
+        observed = json.loads(done.stdout)
+        if observed['shardEpoch'] > status['shardEpoch']:
+            print(f"validator: shard epoch {status['shardEpoch']} activated without this node; "
+                  f"waiting for shard epoch {observed['shardEpoch']} with the same authority", flush=True)
 
 
 def next_slot():
