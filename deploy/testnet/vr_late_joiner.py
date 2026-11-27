@@ -229,20 +229,30 @@ def join_committee(r, rec, ev, j, val, auth, owner, owner_key, epoch, shard_epoc
     rec.dc('up', '-d', '--no-deps', f'root{j}')
     r.wait(f'the joiner\'s root {j} answers', lambda: rec.root_view(j), 300)
 
-    # `validator apply`, as the container's join: a first run the authority refuses for want of a PoS policy names the identity id
+    # `validator apply`, as the container's join. The authority signs the delegation possession only for the identity its PoS policy names,
+    # and VR assigns ids in order: the policy names the next id before the first run, so register, bond and delegation land together. A
+    # bonded identity without its delegation is election work: an election reserved in that gap names only the incumbents, and its
+    # handoff moves the shard epoch the joiner's authority was started for (the first lane run met it while the container's two-step
+    # apply was emulated with a minute between the steps).
     mounts = [(auth, '/home/authority')]
+
+    def provision(ident):
+        (auth / 'pos-policy.json').write_text(json.dumps({'network': json.loads((gen / 'network/vr-deployment.json').read_text())['networkWord'],
+            'chainId': r.manifest['chain_id'], 'election': rec.deployment['election'], 'ids': [ident]}) + '\n')
+        vr_recover.chown(auth)
+        rec.exec(f'authority{j}', 'ubft', 'signing-authority', 'pos-policy', *vr_recover.OPERATOR, '--policy', '/authority/pos-policy.json')
+    predicted = next_identity(r, rec.deployment['registry'])
+    provision(predicted)
     first = rec.cli(live, home, 'validator', 'apply', '--wait', '5m', mounts=mounts, check=False)
     r.keep_redacted(ev / 'apply-1.log', first.stdout + first.stderr)
     text = first.stdout + first.stderr
-    r.expect(first.returncode == 0 or 'signing-pos-policy-refused' in text, 'validator apply registers and bonds the joiner',
-             r.scrub(text.strip()[-400:]))
     ident = json.loads((home / 'validator.json').read_text()).get('id')
-    r.expect(bool(ident), 'validator apply recorded the joiner\'s identity id', str(ident))
-    (auth / 'pos-policy.json').write_text(json.dumps({'network': json.loads((gen / 'network/vr-deployment.json').read_text())['networkWord'],
-        'chainId': r.manifest['chain_id'], 'election': rec.deployment['election'], 'ids': [ident]}) + '\n')
-    vr_recover.chown(auth)
-    rec.exec(f'authority{j}', 'ubft', 'signing-authority', 'pos-policy', *vr_recover.OPERATOR, '--policy', '/authority/pos-policy.json')
-    if first.returncode:
+    r.expect(bool(ident), 'validator apply registered the joiner and recorded its identity id', f'{ident} (predicted {predicted}); ' +
+             r.scrub(text.strip()[-300:]))
+    if first.returncode or ident != predicted:
+        r.expect(ident != predicted and 'signing-pos-policy-refused' in text, 'the only refusal is the PoS policy of a mispredicted id',
+                 r.scrub(text.strip()[-300:]))
+        provision(ident)
         again = rec.cli(live, home, 'validator', 'apply', '--wait', '5m', mounts=mounts)
         r.keep_redacted(ev / 'apply-2.log', again.stdout + again.stderr)
     r.say(f'  joiner {j}: identity {ident}, owner {owner}: registered, bonded and delegated')
@@ -322,6 +332,19 @@ def advance_members(r, rec, target, ev):
         import vr_advance
         r.say(f'  advancing authorities {lagging} to root epoch {target}')
         vr_advance.advance(r.gen, target, ev / f'advance-{target}', only=lagging)
+
+
+def next_identity(r, registry):
+    """The id VR assigns to the next registration: identityCount + 1, read as the first id with no owner."""
+    k = 1
+    while True:
+        try:
+            owner = r.view_text(registry, 'ownerOf(uint64)(address)', str(k)).strip()
+        except Exception:   # an unknown id reverts
+            return k
+        if int(owner, 16) == 0:
+            return k
+        k += 1
 
 
 def tx_selectors(r):
