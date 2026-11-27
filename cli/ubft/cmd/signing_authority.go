@@ -127,9 +127,9 @@ func signingAuthorityRunCmd(baseFlags *baseFlags) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "run",
 		Short: "Run a signing authority: generate its key and serve the client and operator sockets",
-		Long: `Start an authority for one validator. The enrollment named by the flags is fixed for the
-process lifetime, except the shard configuration, which cannot name the authority's key until the
-key exists: the authority starts pending and admits no client until complete-enrollment.`,
+		Long: `Start an authority for one validator. It starts pending and admits no client until
+complete-enrollment states the shard configuration that names its key. A fresh joiner can use
+--pending-join-scope to follow verified activations before first enrollment.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return signingAuthorityRun(cmd.Context(), flags)
 		},

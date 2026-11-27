@@ -252,8 +252,8 @@ func (s Session) Generation() uint64 { return s.generation }
 //
 // An enrollment without a ShardConfHash is pending, and that is how a deployment starts one: the
 // configuration that names this key cannot exist before the key does. The public key is available
-// at once, the configuration is stated afterwards with CompleteEnrollment, and every other field is
-// fixed here.
+// at once and the configuration is stated afterwards with CompleteEnrollment. For a fresh joiner
+// using WithPendingJoinScope, verified activations can first move the root and shard epochs.
 func New(enroll Enrollment, trust TrustBases, opts ...Option) (*Authority, error) {
 	if len(enroll.SigningKeyFingerprint) != 0 {
 		return nil, errors.New("signingauthority: enrollment names a signing key, and this profile has no key-import path: it generates a key per authority lifetime")
