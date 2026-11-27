@@ -327,7 +327,10 @@ def install_joiner_root(rec, j, override_path, epoch, *, probe=False):
 def probe_unavailable_activation(r, rec, j, override_path, previous, target, ev):
     service = f'root{j}'
     others = [f'{name}{j}' for name in ('shard', 'ureth', 'authority')]
-    before = [rec.container(name) for name in others]
+    def running():
+        return [rec.dc('ps', '-q', name).stdout.strip() for name in others]
+
+    before = running()
     r.expect(all(before), 'the joiner’s shard, execution and authority are running before the failed install')
     install_joiner_root(rec, j, override_path, target, probe=True)
     r.wait('the follower exits when the activation proof cannot be fetched',
@@ -337,7 +340,7 @@ def probe_unavailable_activation(r, rec, j, override_path, previous, target, ev)
     view = r.wait('the follower reopens the old database after the failed install',
                   lambda: rec.root_view(j), 60)
     r.expect(view['activeEpoch'] == previous and view.get('follower') and
-             before == [rec.container(name) for name in others],
+             before == running(),
              'a failed hinted install leaves the shard, execution and authority running and the follower restarts at its old epoch', view)
     # Match the supervisor's backoff before trying the real installation again.
     time.sleep(60)
