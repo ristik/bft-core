@@ -11,7 +11,7 @@ One command produces every artifact of the generation and refuses any mismatch b
   vr/alloc.json     VR + facets, PoaElection, PoaComposerEngine (first, checked), FoundationMultisig (contracts script/vr-genesis.sh)
   genesis.json      the EVM genesis with the SealRegistry and the VR accounts; full-shard-conf.json (engine-api genesis)
   vr-deployment.json the roots' --vr-deployment, written by `ubft vr-genesis verify` only when everything agrees
-  ureth-flags.txt   the paired ureth's --unicity.* flags (the profile's, plus the genesis commitment)
+  ureth-flags.txt   the paired ureth's --unicity.* flags (the profile's, plus the genesis commitment), its builder gas limit and persistence threshold
 
 The recorded measurement (--measurement) is ureth's complete-path measurement the profile is pinned from; its VR and module code hashes are
 what the PDR pins before anything is deployed. The fresh measurement is a generation step: with --ureth the plan runs the paired ureth's
@@ -54,6 +54,39 @@ POS_REWARD_FUNDING = 10_000 * 10**18
 POS_REWARD_RATE = 10**18
 POS_CADENCE = (400, 300)
 POS_LIMITS = '4,5,5'   # nMin,nTarget,nMax: nTarget 5 so the fifth identity (the joiner) is elected
+
+
+# #1321: the execution client's arguments beyond the certified --unicity.* vector that every validator of a generation runs with. The
+# builder's gas limit is the profile's maxGas: ureth refuses to build any other next-block gas limit, so a validator without it has every
+# round it leads time out. The persistence threshold is the genesis ureths'.
+PERSISTENCE_THRESHOLD = 64
+
+
+def ureth_runtime_flags(flags, max_gas):
+    """The one source of the chain-bound ureth vector: what ureth-flags.txt ships (the validator container and the host package read it) and
+    what generate.py starts the genesis ureths with. `flags` is the profile's vector with the genesis commitment, as tokens."""
+    return [*flags, f'--unicity.fee-collector={FEE_COLLECTOR}', f'--builder.gaslimit={int(max_gas)}',
+            f'--engine.persistence-threshold={PERSISTENCE_THRESHOLD}']
+
+
+RUNTIME_FLAGS = ('--builder.gaslimit', '--engine.persistence-threshold')
+
+
+def certified_vector(line):
+    """The vector `ubft vr-genesis verify --ureth-flags` certifies: the shipped line without the two runtime flags ureth_runtime_flags adds
+    (in either spelling). A pinned ubft from before #1321 knows only the --unicity.* and --txpool.* flags; the gas limit is the profile's
+    maxGas by construction here."""
+    out, skip = [], False
+    for tok in line.split():
+        if skip:
+            skip = False
+            continue
+        name = tok.split('=', 1)[0]
+        if name in RUNTIME_FLAGS:
+            skip = '=' not in tok
+            continue
+        out.append(tok)
+    return ' '.join(out)
 
 
 class VRGenesisError(RuntimeError):
@@ -259,7 +292,8 @@ def compose_pos_genesis(a, *, ubft, home, network, generation, roots, evms, fund
         raise VRGenesisError('the contracts allocation changed the full shard configuration')
     fresh, provenance = fresh_measurement(a, network)
     flags = [*flags, '--unicity.genesis-commitment=' + genesis_commitment(json.loads((home / 'genesis.json').read_text()))]
-    (network / 'ureth-flags.txt').write_text(' '.join(flags) + f' --unicity.fee-collector={FEE_COLLECTOR}\n')
+    max_gas = int(json.loads(profile.read_text())['maxGas'])
+    (network / 'ureth-flags.txt').write_text(' '.join(ureth_runtime_flags(flags, max_gas)) + '\n')
     (network / 'fee-collector.txt').write_text(FEE_COLLECTOR + '\n')
     print(verify_compose_pos(ubft, network, generation, home))
     deployment = json.loads((network / 'deployment.json').read_text())
@@ -274,7 +308,7 @@ def verify_compose_pos(ubft, net, generation, configs=None, *, output=None):
     return run(ubft, 'vr-genesis', 'verify', '--input', net / 'vr-input.json', '--deployment', net / 'deployment.json',
         '--genesis', cfg / 'genesis.json', '--shard-conf', cfg / 'full-shard-conf.json', '--trust-base', cfg / 'trust-base.json',
         '--b1-profile', cfg / 'b1-profile.json', '--genesis-identities', cfg / 'genesis-identities.json',
-        '--vr-hook-measurement', net / 'vr-hook-measurement-fresh.json', '--ureth-flags', (net / 'ureth-flags.txt').read_text().strip(),
+        '--vr-hook-measurement', net / 'vr-hook-measurement-fresh.json', '--ureth-flags', certified_vector((net / 'ureth-flags.txt').read_text()),
         '--fee-collector', (net / 'fee-collector.txt').read_text().strip(), '--out-root-deployment', output or net / 'vr-deployment.json',
         '--utb-genesis', net / 'utb-genesis.cbor', '--utb-genesis-id', net / 'utb-genesis.id',
         '--funded-accounts', net / 'funded-accounts.json', '--dev-generation', generation)
@@ -391,14 +425,14 @@ def plan(a):
         raise VRGenesisError('the full shard configuration changed after the genesis assignment was fixed (the contracts accounts moved seal_registry_genesis?)')
     fresh, provenance = fresh_measurement(a, out, pos_hash)
     provenance['sha256'] = hashlib.sha256(fresh.read_bytes()).hexdigest()
-    ureth = flags[0] + f' --unicity.genesis-commitment={genesis_commitment(genesis)} --unicity.fee-collector={FEE_COLLECTOR}'
+    ureth = ' '.join(ureth_runtime_flags([*flags[0].split(), f'--unicity.genesis-commitment={genesis_commitment(genesis)}'], profile['maxGas']))
     (out / 'ureth-flags.txt').write_text(ureth + '\n')
     shutil.copy2(trust, out / 'trust-base.json')
 
     verified = run(ubft, 'vr-genesis', 'verify', '--input', out / 'vr/input.json', '--deployment', out / 'vr/deployment.json', '--genesis', out / 'genesis.json',
                    '--shard-conf', out / 'full-shard-conf.json', '--trust-base', trust, '--b1-profile', out / 'b1-profile.json',
                    '--genesis-identities', out / 'genesis-identities.json', '--vr-hook-measurement', fresh,
-                   '--ureth-flags', ureth, '--fee-collector', FEE_COLLECTOR, '--out-root-deployment', out / 'vr-deployment.json',
+                   '--ureth-flags', certified_vector(ureth), '--fee-collector', FEE_COLLECTOR, '--out-root-deployment', out / 'vr-deployment.json',
                    '--utb-genesis', out / 'utb-genesis.cbor', '--utb-genesis-id', out / 'utb-genesis.id',
                    *(['--funded-accounts', out / 'dev-funded-accounts.json', '--dev-generation', generation] if a.dev_fund else []))
     print(verified.strip())

@@ -42,6 +42,28 @@ var CustodyABI = mustABI(`[
  {"type":"event","name":"CreditClaimed","anonymous":false,"inputs":[{"name":"creditor","type":"address","indexed":true},{"name":"to","type":"address","indexed":true},{"name":"amount","type":"uint256","indexed":false}]},
  {"type":"event","name":"Registered","anonymous":false,"inputs":[{"name":"id","type":"uint64","indexed":true},{"name":"owner","type":"address","indexed":true},{"name":"rootKeyHash","type":"bytes32","indexed":false},{"name":"withdrawal","type":"address","indexed":false}]}]`)
 
+// PosErrorsABI are the custody and election errors a leaving validator's transactions can meet (#1316): the maturity gates of
+// StakeCustody.mature and claim, and ElectionPolicy's refusals of a proof or a finalization. DecodeRevert names them.
+var PosErrorsABI = mustABI(`[
+ {"type":"error","name":"RecordsPending","inputs":[]},
+ {"type":"error","name":"LotUnknown","inputs":[]},
+ {"type":"error","name":"LotAlreadyReleased","inputs":[]},
+ {"type":"error","name":"LotStillReferenced","inputs":[]},
+ {"type":"error","name":"TermAnchorPending","inputs":[]},
+ {"type":"error","name":"RetirementNotImported","inputs":[]},
+ {"type":"error","name":"EvidenceHoldPending","inputs":[]},
+ {"type":"error","name":"RoundGateNotMet","inputs":[]},
+ {"type":"error","name":"EvidenceGateNotMet","inputs":[]},
+ {"type":"error","name":"TimeGateNotMet","inputs":[]},
+ {"type":"error","name":"InsufficientCredit","inputs":[]},
+ {"type":"error","name":"NotReserved","inputs":[]},
+ {"type":"error","name":"AlreadyPublished","inputs":[]},
+ {"type":"error","name":"CoverageLost","inputs":[]},
+ {"type":"error","name":"MissingProofs","inputs":[]},
+ {"type":"error","name":"SessionNotOpen","inputs":[]},
+ {"type":"error","name":"NotCovered","inputs":[{"name":"id","type":"uint64"}]},
+ {"type":"error","name":"NotMember","inputs":[{"name":"id","type":"uint64"}]}]`)
+
 // EvidenceABI is the Evidence view a key change reads (#1286): an identity excluded by evidence takes the exit path.
 var EvidenceABI = mustABI(`[
  {"type":"function","name":"excluded","stateMutability":"view","inputs":[{"name":"id","type":"uint64"}],"outputs":[{"name":"","type":"bool"}]}]`)

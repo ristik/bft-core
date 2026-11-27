@@ -434,3 +434,174 @@ class VRRecoverStage(unittest.TestCase):
         self.assertEqual(out[-6:], ['--tip-uc', '/state/tip.uc.cbor', '--tip-tr', '/state/tip.tr.cbor', '--trust-body-id', '0x' + 'ab'*32])
         self.assertIn('--q3-lane', out)
         self.assertEqual(entry[2], 'run', 'the cloned entry is not changed in place')
+
+    def test_the_late_joiner_runs_the_release_ureth_vector_and_its_exit_follows(self):
+        """#1321/#1316: the joiner's execution client is the container's (its own arguments, then ureth-flags.txt unchanged), and vr-joiner-exit
+        follows vr-late-joiner."""
+        import rehearse
+        import vr_late_joiner
+        names = [n for n, _ in rehearse.VR_STAGES]
+        self.assertEqual(names[names.index('vr-late-joiner') + 1], 'vr-joiner-exit')
+        self.assertTrue(hasattr(rehearse.Rehearsal, 'vr_joiner_exit'))
+        clone = ['/bin/sh', '-c', 'x', 'ureth', 'unicity-reth', 'node', '--datadir', '/state', '--log.file.max-files', '0',
+                 '--engine.persistence-threshold', '64', '--builder.gaslimit', '30000000', '--unicity.fee-collector', '0xfe', '--unicity.max-gas=9']
+        shipped = ['--unicity.max-gas=9', '--unicity.fee-collector=0xfe']
+        self.assertEqual(vr_late_joiner.release_ureth_entry(clone, shipped), clone[:10] + shipped,
+                         'a release without the builder gas limit makes the joiner run without it, as the container would')
+        self.assertEqual(vr_late_joiner.max_gap({10: 100, 11: 110, 12: 150, 13: 160}), (40, 11))
+        self.assertEqual(vr_late_joiner.max_gap({10: 100}), (0, None))
+
+
+# The execution client's arguments that are the node's own: its data directory, key, JWT and listeners, and the local RPC surface. Every
+# other argument binds it to the chain and must be the genesis ureths' (#1321).
+LOCAL_URETH_FLAGS = frozenset({'--chain', '--datadir', '--p2p-secret-key', '--authrpc.jwtsecret', '--authrpc.addr', '--authrpc.port',
+                               '--http.addr', '--http.port', '--http.api', '--addr', '--port'})
+URETH_SWITCHES = frozenset({'--http', '--ipcdisable', '--disable-discovery', '--unicity.archive-state-proofs', '--unicity.no-proof-source'})
+
+
+def ureth_flags(entry):
+    """{flag: value} of a `unicity-reth node ...` argument vector in either spelling (a switch maps to None)."""
+    args = [str(x) for x in entry]
+    args = args[args.index('node') + 1:]
+    out, i = {}, 0
+    while i < len(args):
+        name, eq, value = args[i].partition('=')
+        if not name.startswith('--'):
+            raise ValueError(f'stray ureth argument {args[i]!r}')
+        if name in out:
+            raise ValueError(f'ureth {name} given twice')
+        if eq or name in URETH_SWITCHES:
+            out[name] = value if eq else None
+        else:
+            out[name], i = args[i + 1], i + 1
+        i += 1
+    return out
+
+
+class JoinerUrethFlags(unittest.TestCase):
+    """#1321: the validator container's ureth runs the genesis ureths' vector, from the same source (vr_genesis.ureth_runtime_flags)."""
+    PROFILE = ['--unicity.network-id=3', '--unicity.chain-id=496562270', '--unicity.max-gas=180944254', '--txpool.max-tx-gas=60000000',
+               '--unicity.genesis-commitment=0x' + '4e'*32]
+    MAX_GAS = 180944254
+
+    def joiner_and_genesis(self, shipped):
+        import vr_genesis
+        images = {role:'sha256:' + '0'*64 for role in ('node', 'rpc', 'signer', 'guard')}
+        compose = generate.topology(Path('test'), 4, {'root':['r']*4, 'evm':['s']*4}, images, '', ureth_flags=self.PROFILE,
+                                    max_gas=self.MAX_GAS, vr_pos=True)
+        with tempfile.TemporaryDirectory() as d:
+            release = Path(d)
+            (release/'ureth-flags.txt').write_text(shipped(vr_genesis) + '\n')
+            with patch.object(validator, 'RELEASE', release), patch.object(validator, 'HOME', Path('/data')):
+                joiner = validator.ureth_command({'ports':[27652, 29252, 31452]}, 1)
+        return ureth_flags(joiner), {i: ureth_flags(compose['services'][f'ureth{i}']['entrypoint']) for i in range(1, 5)}
+
+    def test_the_joiner_runs_the_genesis_ureth_vector(self):
+        joiner, genesis = self.joiner_and_genesis(lambda g: ' '.join(g.ureth_runtime_flags(self.PROFILE, self.MAX_GAS)))
+        self.assertEqual(joiner['--builder.gaslimit'], str(self.MAX_GAS))
+        for i, flags in genesis.items():
+            self.assertEqual({k: v for k, v in joiner.items() if k not in LOCAL_URETH_FLAGS},
+                             {k: v for k, v in flags.items() if k not in LOCAL_URETH_FLAGS}, f'ureth{i}')
+            self.assertEqual(flags['--builder.gaslimit'], str(self.MAX_GAS))
+
+    def test_a_release_without_the_builder_gas_limit_differs(self):
+        """The release of tn-public-20261127b: the certified vector and the fee collector only. The comparison names the missing flags."""
+        joiner, genesis = self.joiner_and_genesis(lambda g: ' '.join(self.PROFILE) + f' --unicity.fee-collector={g.FEE_COLLECTOR}')
+        missing = {k for k in genesis[1].keys() - joiner.keys() if k not in LOCAL_URETH_FLAGS}
+        self.assertEqual(missing, {'--builder.gaslimit', '--engine.persistence-threshold'})
+
+    def test_verify_certifies_the_vector_without_the_runtime_flags(self):
+        """The pinned ubft's vr-genesis verify knows the --unicity.* and --txpool.* flags only: the shipped line minus the two runtime flags."""
+        import vr_genesis
+        shipped = ' '.join(vr_genesis.ureth_runtime_flags(self.PROFILE, self.MAX_GAS))
+        self.assertEqual(vr_genesis.certified_vector(shipped), ' '.join(self.PROFILE) + f' --unicity.fee-collector={vr_genesis.FEE_COLLECTOR}')
+        self.assertEqual(vr_genesis.certified_vector('--a=1 --builder.gaslimit 5 --engine.persistence-threshold=64 --b 2'), '--a=1 --b 2')
+
+    def test_the_generator_refuses_a_compose_that_does_not_run_the_shipped_vector(self):
+        import vr_genesis
+        images = {role:'sha256:' + '0'*64 for role in ('node', 'rpc', 'signer', 'guard')}
+        compose = generate.topology(Path('test'), 4, {'root':['r']*4, 'evm':['s']*4}, images, '', ureth_flags=self.PROFILE,
+                                    max_gas=self.MAX_GAS, vr_pos=True)
+        with tempfile.TemporaryDirectory() as d:
+            shipped = Path(d)/'ureth-flags.txt'
+            shipped.write_text(' '.join(vr_genesis.ureth_runtime_flags(self.PROFILE, self.MAX_GAS)) + '\n')
+            generate.check_shipped_ureth_flags(compose, shipped, 4)
+            shipped.write_text(' '.join(vr_genesis.ureth_runtime_flags(self.PROFILE, self.MAX_GAS + 1)) + '\n')
+            with self.assertRaisesRegex(RuntimeError, 'does not run the shipped ureth-flags.txt vector'):
+                generate.check_shipped_ureth_flags(compose, shipped, 4)
+
+
+class LeavingValidator(unittest.TestCase):
+    """#1316: once the identity left, the node container sends no election transactions and stops advancing its retired authority."""
+
+    def run_participate(self, *, status, publish_out, rounds=3):
+        halted = SimpleNamespace(n=0)
+
+        def wait(_):
+            halted.n += 1
+            return halted.n > rounds
+        calls = []
+
+        def command(*args, **kw):
+            calls.append(args)
+            return SimpleNamespace(returncode=0, stdout=publish_out, stderr='')
+
+        def rpc(url, method, params, evm=True):
+            if method == 'eth_getBlockByNumber':
+                return {'hash': '0xgen' if params[0] == '0x0' else '0xfin'}
+            if method == 'eth_call':
+                return '0x' + '11'*32
+            return {'activeEpoch': 5, 'switch': None}
+        with tempfile.TemporaryDirectory() as d, patch.object(validator, 'HOME', Path(d)), \
+                patch.object(validator, 'RELEASE', Path(d)), patch.object(validator, 'command', command), \
+                patch.object(validator, 'rpc', rpc), patch.object(validator, 'authority_status', return_value=status), \
+                patch.object(validator, 'advance') as advance, patch('builtins.print') as printed:
+            (Path(d)/'deployment.json').write_text(json.dumps({'election': '0xe1'}))
+            (Path(d)/'manifest.json').write_text(json.dumps({'genesis_hash': '0xgen'}))
+            (Path(d)/'join.json').write_text(json.dumps({'phase': 'activated'}))
+            (Path(d)/'shard-active.json').write_text(json.dumps({'rootEpoch': 4}))
+            validator.participate(SimpleNamespace(wait=wait))
+        return calls, advance, [c.args[0] for c in printed.call_args_list if c.args]
+
+    def test_a_retired_authority_is_not_advanced_again_and_said_once(self):
+        retired = {'retired': True, 'lineageEpoch': 5, 'rootEpoch': 4, 'sessionIssued': False}
+        gate = 'no election transactions: identity 5 requested retirement: it leaves at the next election'
+        calls, advance, said = self.run_participate(status=retired, publish_out=gate + '\n')
+        advance.assert_not_called()
+        self.assertEqual(len(calls), 3, 'pos-publish still runs each round (the gate is the chain state, read at the certified block)')
+        self.assertEqual(said.count(gate), 1, 'an unchanged gate is reported once')
+        self.assertEqual(sum('retired this authority' in s for s in said), 1, said)
+
+    def test_a_new_epoch_is_verified_once_more(self):
+        calls, advance, _ = self.run_participate(status={'retired': True, 'lineageEpoch': 4, 'rootEpoch': 4, 'sessionIssued': False},
+                                                 publish_out='', rounds=1)
+        advance.assert_called_once_with(5, root=validator.ROOT, member=None, retired_ok=True)
+
+    def test_a_member_still_advances(self):
+        calls, advance, _ = self.run_participate(status={'retired': False, 'lineageEpoch': 4, 'rootEpoch': 4, 'sessionIssued': True},
+                                                 publish_out='', rounds=1)
+        advance.assert_called_once()
+
+    def test_the_claim_waits_for_the_election_lock_keeps_its_log_and_says_the_containers_can_stop(self):
+        locks = []
+
+        @validator.contextlib.contextmanager
+        def lock(name, wait=False):
+            locks.append((name, wait))
+            yield
+        for rc in (0, 1):
+            with tempfile.TemporaryDirectory() as d, patch.object(validator, 'HOME', Path(d)), patch.object(validator, 'lock', lock), \
+                    patch.object(validator, 'ubft', return_value=SimpleNamespace(returncode=rc, stdout=f'attempt rc {rc}\n', stderr='')), \
+                    patch('builtins.print') as printed:
+                a = SimpleNamespace(yes=True, claim=True)
+                if rc:
+                    with self.assertRaises(validator.subprocess.CalledProcessError):
+                        validator.leave(a, {})
+                else:
+                    validator.leave(a, {})
+                logs = list((Path(d)/'exit-logs').iterdir())
+                self.assertEqual(len(logs), 1)
+                self.assertEqual(logs[0].read_text(), f'attempt rc {rc}\nrc={rc}\n')
+                stop = any(validator.STOP_CONTAINERS in str(c.args[0]) for c in printed.call_args_list if c.args)
+                self.assertEqual(stop, rc == 0, 'only a successful claim says the containers can be stopped')
+        self.assertIn(('.tx.lock', True), locks, 'the claim waits for an election transaction in flight instead of failing')

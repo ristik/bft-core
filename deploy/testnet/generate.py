@@ -255,6 +255,15 @@ def check_authorities_unchanged(boot, final, n):
             raise RuntimeError(f'authority{i} was started with another service definition than the final compose names (differs in {keys}): an authority is '
                                'never recreated, so everything it is started with must be known when it is first started')
 
+def check_shipped_ureth_flags(compose, path, n):
+    """#1321: every genesis ureth ends with exactly the chain-bound vector the release ships to later validators (ureth-flags.txt)."""
+    shipped = path.read_text().split()
+    for i in range(1, n+1):
+        entry = compose['services'][f'ureth{i}']['entrypoint']
+        if entry[-len(shipped):] != shipped:
+            raise RuntimeError(f'ureth{i} does not run the shipped ureth-flags.txt vector: {entry[-len(shipped):]} != {shipped}')
+
+
 def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, with_pos=False, rpc_bind=operator_rpc.DEFAULT_BIND, utb=None, utb_aggregator='integration', *,
              payout=FAUCET_PAYOUT, subnets=None, root_cpus=ROOT_CPUS, block_interval_ms=0, port_offset=0,
              vr_pos=False, vr_authority_follow=None, vr_paired_activation=None, captcha_secret_file='./faucet-secrets/hcaptcha-secret', public_p2p_ip=None):
@@ -335,7 +344,7 @@ def topology(out, n, ids, images, captcha, ureth_flags=(), max_gas=30000000, wit
             '--http','--http.addr',execution_bind,'--http.port','8545','--http.api','eth,net,web3,debug',   # the paired shard reads debug_getRawHeader for the parent registry witness
             *(['--unicity.archive-state-proofs'] if vr_pos else ['--rpc.eth-proof-window','64']), '--disable-discovery','--ipcdisable',
             '--log.file.max-files','0',   # no log file: the root filesystem is read-only (reth wants $HOME/.cache/reth/logs) and Docker's json-file driver already rotates stdout
-            '--engine.persistence-threshold','64','--builder.gaslimit',str(max_gas),'--unicity.fee-collector',FEE,*ureth_flags]),
+            *vr_genesis.ureth_runtime_flags(ureth_flags, max_gas)]),   # the vector ureth-flags.txt ships to every later validator (#1321)
             ['./validator%d/ureth:/state'%i,ureth_key.mount(i),'./validator%d/jwt:/jwt:ro'%i,network], memory='1536m',cpu=1.0,
             pod=f'pod{i}' if vr_pos else None)
         peers = root_boot + ''.join(',/dns4/shard%d/tcp/9000/p2p/%s'%(j,ids['evm'][j-1]) for j in range(1,n+1) if j!=i)
@@ -760,6 +769,7 @@ def main():
         if not vr_info: flags=[*flags,'--unicity.genesis-commitment='+genesis_commitment(json.loads((home/'genesis.json').read_text()))]
         final=immutable(topology(out,a.validators,{'root':roots,'evm':evms},records['images'],a.captcha_sitekey,flags,max_gas,bool(genesis),a.rpc_bind,**topology_options))
         check_authorities_unchanged(boot,final,a.validators)
+        if vr_info: check_shipped_ureth_flags(final,out/'network/ureth-flags.txt',a.validators)
         write(out/'compose.yaml',final)
         network_files = list((out/'network').glob('*.json'))
         if vr_info:

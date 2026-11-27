@@ -452,6 +452,18 @@ class SlotChanged(Exception):
     """`recover` switched the node slot: the node process restarts every service on the new slot."""
 
 
+def ureth_command(n, k):
+    """The execution client of slot k: its own data directory, key, listeners and JWT, then the release's chain-bound vector
+    (ureth-flags.txt: the certified --unicity.* flags, the builder's gas limit and the persistence threshold the genesis ureths run with,
+    #1321) unchanged."""
+    return ['unicity-reth', 'node', '--chain', RELEASE/'genesis.json', '--datadir', ureth_dir(k),
+            '--p2p-secret-key', HOME/'ureth-key/p2p-secret', '--disable-discovery', '--addr', '127.0.0.1', '--port', n['ports'][2],
+            '--ipcdisable', '--http', '--http.addr', '127.0.0.1', '--http.port', 18552, '--http.api', 'eth,net,debug',
+            '--unicity.archive-state-proofs', '--authrpc.addr', '127.0.0.1', '--authrpc.port', 18553,
+            '--authrpc.jwtsecret', HOME/'jwt/jwt.hex', '--log.file.max-files', 0,
+            *(RELEASE/'ureth-flags.txt').read_text().split()]
+
+
 def root_command(n, pins, k):
     d = auth_dir(k)
     utb = [*UTB, '--utb-genesis-id', pins['utb_genesis_id']]
@@ -523,12 +535,7 @@ def node(a, pins):
         private_rpc = ['--allow-private-http'] if pins.get('private_rehearsal') else []
         start('rpc', ['python3', '/opt/validator/validator_rpc.py', '--upstream', n['rpc'], '--listen-port', 18485,
                       *private_rpc])
-        start('ureth', ['unicity-reth', 'node', '--chain', RELEASE/'genesis.json', '--datadir', ureth_dir(k),
-              '--p2p-secret-key', HOME/'ureth-key/p2p-secret', '--disable-discovery', '--addr', '127.0.0.1', '--port', n['ports'][2],
-              '--ipcdisable', '--http', '--http.addr', '127.0.0.1', '--http.port', 18552, '--http.api', 'eth,net,debug',
-              '--unicity.archive-state-proofs', '--authrpc.addr', '127.0.0.1', '--authrpc.port', 18553,
-              '--authrpc.jwtsecret', HOME/'jwt/jwt.hex', '--log.file.max-files', 0,
-              *(RELEASE/'ureth-flags.txt').read_text().split()])
+        start('ureth', ureth_command(n, k))
         wait_for('execution', lambda: rpc(EXECUTION, 'eth_chainId', []), limit=50)
         root_args = root_command(n, pins, k)
         d = auth_dir(k)
@@ -642,6 +649,14 @@ def participate(halted, *, execution=RPC, root=ROOT, member=None):
     deployment = read(RELEASE/'deployment.json')
     manifest = RELEASE/'manifest.json' if member is None else HOME/'deployment-manifest.json'
     expected_genesis = read(manifest)['genesis_hash']
+    said = {}
+
+    def once(key, text):
+        # the loop polls every 5 s: a state that does not change is reported once
+        if text and said.get(key) != text:
+            said[key] = text
+            print(text, flush=True)
+
     while not halted.wait(5):
         try:
             journal_path = HOME/'join.json'
@@ -656,7 +671,16 @@ def participate(halted, *, execution=RPC, root=ROOT, member=None):
             if re.fullmatch(r'0x[0-9a-f]{64}', result) and int(result, 16):
                 local = ['--proof-member', member] if member is not None else []
                 with lock('.tx.lock'):
-                    command('handoff-ubft', 'validator', 'pos-publish', '--participate', '--result', result, *local)
+                    # #1316: pos-publish sends nothing for an identity that requested retirement or was excluded ("no election transactions")
+                    done = command('handoff-ubft', 'validator', 'pos-publish', '--participate', '--result', result, *local,
+                                   output=True, check=False)
+                text = (done.stdout + done.stderr).strip()
+                if done.returncode:
+                    raise RuntimeError(text or f'pos-publish exited with status {done.returncode}')
+                if 'no election transactions' in text:
+                    once('publish', text)
+                elif text:
+                    print(text, flush=True)
             view = rpc(root + '/api/v1/q3/status', '', {}, evm=False)
             if view.get('switch') and view['switch']['phase'] not in ('running', 'following'):
                 continue
@@ -664,14 +688,19 @@ def participate(halted, *, execution=RPC, root=ROOT, member=None):
             # while `recover` runs, the old authority is gone and the fresh one is enrolled and advanced by recover itself
             if view['activeEpoch'] > 1 and (member is not None or (active.exists() and not recovering())):
                 old = authority_status()
-                if (old['rootEpoch'] < view['activeEpoch'] or not old['sessionIssued'] or
+                if old.get('retired') and old.get('lineageEpoch', 0) >= view['activeEpoch']:
+                    # #1316: a verified activation retired the authority (the identity left the committee); nothing to advance until
+                    # the next epoch, whose activation it verifies once more
+                    once('retired', f'authority handoff: the verified activation of root epoch {old["lineageEpoch"]} retired this '
+                         'authority: the identity left the committee and signs nothing more')
+                elif (old['rootEpoch'] < view['activeEpoch'] or not old['sessionIssued'] or
                         not active.exists() or read(active)['rootEpoch'] < view['activeEpoch']):
-                    advance(view['activeEpoch'], root=root, member=member)
+                    advance(view['activeEpoch'], root=root, member=member, retired_ok=True)
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
             print(f'authority handoff: {error}', flush=True)
 
 
-def advance(target, *, root=ROOT, member=None):
+def advance(target, *, root=ROOT, member=None, retired_ok=False):
     with lock('.advance.lock'), tempfile.TemporaryDirectory(prefix='.activation-', dir=HOME) as temp:
         proofs = []
         for epoch in range(2, target + 1):
@@ -681,6 +710,8 @@ def advance(target, *, root=ROOT, member=None):
         d = auth_dir()
         advanced = json.loads(authority('advance-with-proof', '--client-socket', d/'client.sock',
                               '--out', d/'client.cred', *proofs, home=d, output=True).stdout)
+        if advanced['retired'] and retired_ok:
+            return   # the identity left the committee: participate() reports it once from the authority's status
         if advanced['rootEpoch'] != target or advanced['retired']:
             raise ValueError('verified activation did not admit this authority')
         journal(active_file(), 'activated', rootEpoch=target, shardEpoch=advanced['shardEpoch'],
@@ -857,11 +888,28 @@ def check_activated_conf(conf, info):
                          '`ubft-validator recover --yes` again to prepare another slot.')
 
 
+STOP_CONTAINERS = ('The bond is claimed and this identity has left: its node and authority containers can be stopped now '
+                   '(`docker stop <node> <authority>`). Keep the volume while you still want its keys and logs.')
+
+
 def leave(a, _pins):
     if not a.yes:
         raise ValueError('confirm retirement with exit --yes, or claim after maturity with exit --claim --yes')
-    with lock('.join.lock'), lock('.tx.lock'):
-        ubft('validator', 'claim' if a.claim else 'exit')
+    action = 'claim' if a.claim else 'exit'
+    # #1316: wait for the node's election participation to finish a transaction instead of failing on its lock (the first claim attempt
+    # after maturity on the public testnet met the exited node's own election transactions); each attempt keeps its own log
+    with lock('.join.lock'), lock('.tx.lock', wait=True):
+        done = ubft('validator', action, output=True, check=False, timeout=1800)
+    logs = HOME/'exit-logs'
+    logs.mkdir(mode=0o700, exist_ok=True)
+    stamp = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())
+    write(logs/f'{action}-{stamp}-{os.getpid()}.log', (done.stdout + done.stderr + f'rc={done.returncode}\n').encode())
+    print(done.stdout, end='', flush=True)
+    print(done.stderr, end='', file=sys.stderr, flush=True)
+    if done.returncode:
+        raise subprocess.CalledProcessError(done.returncode, ['ubft', 'validator', action])
+    if a.claim:
+        print(STOP_CONTAINERS, flush=True)
 
 
 def main():

@@ -192,8 +192,9 @@ class B1Layout(unittest.TestCase):
             cfg=generate.topology(out,3,{'root':['r%d'%i for i in range(3)],'evm':['e%d'%i for i in range(3)]},images,'captcha',['--unicity.network-id','3'],123456)
             for i in (1,2,3):
                 svc=cfg['services']
-                self.assertEqual(svc['ureth%d'%i]['entrypoint'][-2:],['--unicity.network-id','3'])
-                self.assertEqual(svc['ureth%d'%i]['entrypoint'][svc['ureth%d'%i]['entrypoint'].index('--builder.gaslimit')+1],'123456')
+                # #1321: the profile's vector, then the fee collector, the builder's gas limit and the persistence threshold (vr_genesis.ureth_runtime_flags)
+                self.assertEqual(svc['ureth%d'%i]['entrypoint'][-5:],['--unicity.network-id','3','--unicity.fee-collector='+generate.FEE,
+                                 '--builder.gaslimit=123456','--engine.persistence-threshold=64'])
                 shard=svc['shard%d'%i]['entrypoint']
                 self.assertEqual(shard[shard.index('--b1-profile')+1],'/network/b1-profile.json')
                 self.assertIn('--q3-lane',shard);self.assertNotIn('--registry-layout',shard)
@@ -2969,7 +2970,7 @@ class UrethKey(unittest.TestCase):
             self.assertNotIn('--p2p-secret-key-hex',entry)   # the key is never in the manifest
             self.assertEqual(entry[:2]+entry[3:6],['/bin/sh','-c','ureth','unicity-reth','node'],'the preflight runs first, then execs the client with its arguments')
             self.assertIn('-s /ureth-key/p2p-secret',entry[2]);self.assertIn('exec "$@"',entry[2])
-            self.assertEqual(entry[-2:],['--unicity.network-id','3'])
+            self.assertEqual(entry[-5:-2],['--unicity.network-id','3','--unicity.fee-collector='+generate.FEE])
         for name,svc in services.items():   # each service keeps its own key: no other service (nor another entity's ureth) mounts it
             mounts=[m for m in svc.get('volumes',[]) if 'ureth-key' in m]
             self.assertEqual(mounts,['./validator%s/ureth-key:/ureth-key:ro'%name[5:]] if name.startswith('ureth') else [],name)

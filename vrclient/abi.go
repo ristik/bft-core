@@ -164,7 +164,7 @@ func DecodeRevert(data []byte) *RevertError {
 	if len(data) < 4 {
 		return nil
 	}
-	for _, a := range []*abi.ABI{&VRABI, &PoaABI, &MultisigABI} {
+	for _, a := range []*abi.ABI{&VRABI, &PoaABI, &MultisigABI, &PosErrorsABI} {
 		for _, e := range a.Errors {
 			if !bytes.Equal(e.ID[:4], data[:4]) {
 				continue
@@ -213,6 +213,26 @@ func revertReason(poa bool, name string, vals []any) string {
 		return "the governance delay has not passed"
 	case name == "PreconditionFailed":
 		return "the change or output is not in the state this action needs"
+	case name == "RecordsPending":
+		return "custody has root records to apply, or an election is pending: try again after the next block"
+	case name == "LotStillReferenced":
+		return "a term still references the lot (the closure is not imported yet)"
+	case name == "TermAnchorPending":
+		return "a closed term of the lot is not anchored yet (`validator claim` anchors it)"
+	case name == "RetirementNotImported":
+		return "the retirement record is not imported yet"
+	case name == "EvidenceHoldPending":
+		return "accepted evidence holds the lot"
+	case name == "RoundGateNotMet":
+		return "the root progress has not passed the retirement hold yet"
+	case name == "EvidenceGateNotMet":
+		return "the root progress has not passed the evidence window yet"
+	case name == "TimeGateNotMet":
+		return "the certified UC time has not reached the retirement time floor yet"
+	case name == "AlreadyPublished":
+		return "another party published the candidate first"
+	case name == "NotCovered":
+		return "a frozen member is no longer eligible or covered (a retirement request or an exclusion): the result cannot be finalized"
 	}
 	return ""
 }
