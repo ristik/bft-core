@@ -457,7 +457,8 @@ advance_authority_from_local_root() (
   set -eo pipefail
   local target=$1 mode=$2 tip epoch work path
   local -a proofs=() args=()
-  [[ "$target" =~ ^[1-9][0-9]*$ ]] && (( target >= 2 ))
+  [[ "$target" =~ ^[1-9][0-9]*$ ]] || return 1
+  (( target >= 2 )) || return 1
   tip=$(ubft signing-authority status "${AUTH[@]}" | jq -er '.lineageEpoch')
   work=$(mktemp -d "$UBFT_HOME/activation.XXXXXXXX")
   trap 'rm -rf -- "$work"' EXIT
