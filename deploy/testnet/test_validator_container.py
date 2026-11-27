@@ -452,6 +452,20 @@ class VRRecoverStage(unittest.TestCase):
         self.assertEqual(vr_late_joiner.max_gap({10: 100}), (0, None))
 
 
+    def test_the_finalizer_stage_follows_the_join_and_counts_the_race(self):
+        """#1323: vr-finalizer runs after the joiner's stages; its summary counts each kind, the reverts and the gas of every transaction but
+        the first successful one of its kind."""
+        import rehearse
+        import vr_late_joiner
+        names = [n for n, _ in rehearse.VR_STAGES]
+        self.assertEqual(names[names.index('vr-joiner-exit') + 1], 'vr-finalizer')
+        self.assertTrue(hasattr(rehearse.Rehearsal, 'vr_finalizer'))
+        tx = lambda kind, status, gas: {'result': '0xr', 'kind': kind, 'status': status, 'gasUsed': gas}
+        out = vr_late_joiner.publication_summary([tx('finalizeCandidate', '0x1', 100), tx('finalizeCandidate', '0x0', 30),
+                                                  tx('finalizeCandidate', '0x0', 31), tx('VR.publish', '0x1', 900), tx('VR.publish', '0x1', 890)])
+        self.assertEqual(out['0xr'], {'finalizeCandidate': 3, 'finalizeReverted': 2, 'VR.publish': 2, 'publishReverted': 0,
+                                      'gas': 1951, 'wastedGas': 951})
+
 # The execution client's arguments that are the node's own: its data directory, key, JWT and listeners, and the local RPC surface. Every
 # other argument binds it to the chain and must be the genesis ureths' (#1321).
 LOCAL_URETH_FLAGS = frozenset({'--chain', '--datadir', '--p2p-secret-key', '--authrpc.jwtsecret', '--authrpc.addr', '--authrpc.port',
@@ -586,22 +600,127 @@ class LeavingValidator(unittest.TestCase):
         locks = []
 
         @validator.contextlib.contextmanager
-        def lock(name, wait=False):
-            locks.append((name, wait))
+        def lock(name, wait=False, waiting=None):
+            locks.append((name, wait, bool(waiting)))
             yield
-        for rc in (0, 1):
+
+        def stream(args, path, timeout):
+            Path(path).write_text(f'attempt rc {rc}\nrc={rc}\n')
+            return rc
+        for rc in (0, 1, 'timeout'):
             with tempfile.TemporaryDirectory() as d, patch.object(validator, 'HOME', Path(d)), patch.object(validator, 'lock', lock), \
-                    patch.object(validator, 'ubft', return_value=SimpleNamespace(returncode=rc, stdout=f'attempt rc {rc}\n', stderr='')), \
-                    patch('builtins.print') as printed:
+                    patch.object(validator, 'stream', side_effect=stream) as streamed, patch('builtins.print') as printed:
                 a = SimpleNamespace(yes=True, claim=True)
                 if rc:
-                    with self.assertRaises(validator.subprocess.CalledProcessError):
+                    with self.assertRaises(RuntimeError) as raised:
                         validator.leave(a, {})
+                    self.assertIn('exit-logs', str(raised.exception), 'a failed or timed-out claim names its log')
+                    if rc == 'timeout':
+                        self.assertIn('timed out', str(raised.exception))
                 else:
                     validator.leave(a, {})
+                self.assertEqual(streamed.call_args.args[0], ['ubft', 'validator', 'claim'])
                 logs = list((Path(d)/'exit-logs').iterdir())
                 self.assertEqual(len(logs), 1)
-                self.assertEqual(logs[0].read_text(), f'attempt rc {rc}\nrc={rc}\n')
                 stop = any(validator.STOP_CONTAINERS in str(c.args[0]) for c in printed.call_args_list if c.args)
                 self.assertEqual(stop, rc == 0, 'only a successful claim says the containers can be stopped')
-        self.assertIn(('.tx.lock', True), locks, 'the claim waits for an election transaction in flight instead of failing')
+        self.assertIn(('.tx.lock', True, True), locks, 'the claim waits for an election transaction in flight, and says so')
+
+    def test_the_claim_output_streams_into_its_log_and_a_timeout_is_logged(self):
+        """#1323: each line is printed and logged as it comes; a timeout kills the run and still leaves the log, ending rc=timeout."""
+        with tempfile.TemporaryDirectory() as d, patch.object(validator, 'HOME', Path(d)), patch('builtins.print') as printed:
+            log = Path(d)/'claim.log'
+            self.assertEqual(validator.stream(['sh', '-c', 'echo previewing; echo claimed 100 UCT >&2; exit 0'], log, timeout=30), 0)
+            self.assertEqual(log.read_text(), 'previewing\nclaimed 100 UCT\nrc=0\n')
+            self.assertEqual([c.args[0] for c in printed.call_args_list], ['previewing\n', 'claimed 100 UCT\n'])
+            self.assertEqual(validator.stream(['sh', '-c', 'exit 3'], log, timeout=30), 3)
+            self.assertEqual(log.read_text(), 'rc=3\n')
+            self.assertEqual(validator.stream(['sh', '-c', 'echo waiting for maturity; exec sleep 30'], log, timeout=0.5), 'timeout')
+            self.assertEqual(log.read_text(), 'waiting for maturity\nrc=timeout\n')
+
+    def test_a_claim_holding_the_lock_is_reported_once_not_as_errno_11(self):
+        """#1323: while `exit --claim` holds .tx.lock the participation loop skips the election step quietly (one line), and still advances."""
+        @validator.contextlib.contextmanager
+        def held(name, wait=False, waiting=None):
+            raise BlockingIOError(11, 'Resource temporarily unavailable')
+            yield
+        with patch.object(validator, 'lock', held):
+            calls, advance, said = self.run_participate(status={'retired': False, 'lineageEpoch': 4, 'rootEpoch': 4, 'sessionIssued': True},
+                                                        publish_out='', rounds=4)
+        self.assertEqual(calls, [], 'nothing is sent while the claim holds the lock')
+        self.assertFalse(any('Errno' in s for s in said), said)
+        self.assertEqual(sum('holds the transaction lock' in s for s in said), 1, said)
+        self.assertEqual(advance.call_count, 4, 'the authority is still advanced')
+
+    def test_an_unchanged_finalizer_turn_is_reported_once(self):
+        turn = 'result 11 is ready: identity 3 is finalizer rank 2 and finalizes from chain time 2026-11-27T10:00:00Z if no lower rank has by then'
+        _, _, said = self.run_participate(status={'retired': False, 'lineageEpoch': 5, 'rootEpoch': 5, 'sessionIssued': True},
+                                          publish_out=turn + '\n', rounds=4)
+        self.assertEqual(said.count(turn), 1, said)
+
+
+class JoinInOneRun(unittest.TestCase):
+    """#1323: `join` registers, bonds and delegates in one `validator apply`, and says so when an election passed its authority over."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        d = Path(self.dir.name)
+        self.patches = [patch.object(validator, 'HOME', d), patch.object(validator, 'RELEASE', d/'release'),
+                        patch.object(validator, 'CONFIG', d/'validator.json')]
+        for x in self.patches:
+            x.start()
+        (d/'release').mkdir()
+        (d/'release'/'vr-deployment.json').write_text(json.dumps({'networkWord': '0x' + 'aa'*32}))
+        (d/'release'/'manifest.json').write_text(json.dumps({'chain_id': 3}))
+        (d/'release'/'deployment.json').write_text(json.dumps({'election': '0xe1'}))
+        (d/'authority').mkdir()
+        (d/'authority'/'node-info.json').write_text(json.dumps({'nodeId': 'evm-node', 'sigKey': '0xab'}))
+        (d/'node-slot').write_text('1\n')
+        (d/'validator.json').write_text(json.dumps({'evmAuthority': {'socket': 'x'}, 'payee': '0xpay'}))
+        (d/'authority-scope.json').write_text(json.dumps({'rootEpoch': 3, 'shardEpoch': 4}))
+        (d/'join.json').write_text(json.dumps({'phase': 'applying'}))
+        self.home = d
+
+    def tearDown(self):
+        for x in self.patches:
+            x.stop()
+        self.dir.cleanup()
+
+    def test_apply_runs_once_with_the_pin_template(self):
+        calls = []
+
+        def ubft(*args, **kw):
+            calls.append(args)
+            if args[:2] == ('validator', 'apply'):
+                template = json.loads(Path(args[args.index('--pin-pos-policy') + 1]).read_text())
+                self.assertEqual(template, {'network': '0x' + 'aa'*32, 'chainId': 3, 'election': '0xe1'}, 'the template names no id')
+                cfg = json.loads((self.home/'validator.json').read_text())
+                (self.home/'validator.json').write_text(json.dumps({**cfg, 'id': 5}))
+            return SimpleNamespace(returncode=0, stdout='', stderr='')
+
+        class Stop(Exception):
+            pass
+        with patch.object(validator, 'ubft', ubft), patch.object(validator, 'authority_status', return_value={'enrollmentComplete': False}), \
+                patch.object(validator, 'wait_for', side_effect=Stop):
+            with self.assertRaises(Stop):
+                validator.join(SimpleNamespace(yes=True), {})
+        applies = [c for c in calls if c[:2] == ('validator', 'apply')]
+        self.assertEqual(len(applies), 1, 'register, bond and delegation in one run')
+        self.assertEqual(json.loads((self.home/'join.json').read_text()), {'phase': 'electing', 'id': 5})
+        self.assertFalse(any(c[:2] == ('signing-authority', 'pos-policy') for c in calls), 'apply pins the policy itself')
+
+    def test_a_scope_activated_without_this_node_names_recover(self):
+        def ubft(*args, **kw):
+            out = Path(args[args.index('--out') + 1])
+            out.write_text(json.dumps({'epoch': 4, 'validators': [{'nodeId': 'other', 'sigKey': '0xcd'}]}))
+            return SimpleNamespace(returncode=0, stdout='', stderr='')
+        info = {'nodeId': 'evm-node', 'sigKey': '0xAB'}
+        with patch.object(validator, 'ubft', ubft):
+            with self.assertRaises(RuntimeError) as raised:
+                validator.missed_scope(4, info)
+        self.assertIn('shard epoch 4', str(raised.exception))
+        self.assertIn('recover --yes', str(raised.exception))
+        self.assertTrue(validator.names_node({'validators': [{'nodeId': 'evm-node', 'sigKey': '0xab'}]}, info))
+        self.assertFalse(validator.names_node({'validators': [{'nodeId': 'evm-node', 'sigKey': '0xcd'}]}, info))
+        with patch.object(validator, 'ubft', return_value=SimpleNamespace(returncode=1, stdout='', stderr='unknown epoch')):
+            validator.missed_scope(4, info)   # not activated yet: nothing to say

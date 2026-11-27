@@ -62,8 +62,9 @@ request on, the node sends no election transactions for it: its proofs could
 not be used and its finalizations could only revert. The other members publish
 the results. After the maturity conditions in section 6 hold, run
 `docker exec unicity-node ubft-validator exit --claim --yes`. A claim waits
-for an election transaction the node has in flight, and each run keeps its
-output in `/data/exit-logs/`. After a successful claim the command says that
+for an election transaction the node has in flight and says so. It prints
+its progress as it runs, and each run keeps its output in `/data/exit-logs/`,
+including a run that timed out (`rc=timeout`) or was interrupted. After a successful claim the command says that
 the node and authority containers can be stopped. Keep the volume while you
 still want its keys and logs.
 
@@ -439,16 +440,14 @@ Use a fresh root signing key for every root history. Never bring a root key from
 
 ```bash
 ubft validator apply --dry-run
-ubft validator apply
-ID=$(jq -er '.id' validator.json)
 jq -n --arg network "$NETWORK_WORD" --argjson chainId "$CHAIN_ID" --arg election "$ELECTION" \
-  --argjson id "$ID" '{network:$network,chainId:$chainId,election:$election,ids:[$id]}' > authority/pos-policy.json
-ubft signing-authority pos-policy "${AUTH[@]}" --policy authority/pos-policy.json
+  '{network:$network,chainId:$chainId,election:$election}' > authority/pos-policy-template.json
+ubft validator apply --pin-pos-policy authority/pos-policy-template.json
 ```
 
-On PoS, apply registers the keys in VR and P85 custody, bonds the stake and admits the delegation. The default is one bond unit. To choose the amount or recipient, supply `--bond` in decimal base units and `--withdrawal` on the initial application. Keep the same settings on retries. A dry run previews the next transaction against the state currently visible. Read the receipts before treating an application as complete.
+On PoS, apply registers the keys in VR and P85 custody, admits the delegation and bonds the stake, all in one run. VR assigns the identity id at registration, and `--pin-pos-policy` pins the authority's P85 policy to that id just before the delegation possession. The delegation comes before the first bond, because the bond makes the identity eligible. An election reserved after the authority's scope was fixed but before the bond activates that shard epoch without you, and the authority then needs replacing (see [Authority loss](#authority-loss)). So start the authority and apply promptly, without a long gap, for example for funding. A retry pins the same policy again, which is a no-op. The template must name the release's election; apply refuses another before it sends anything. The default is one bond unit. To choose the amount or recipient, supply `--bond` in decimal base units and `--withdrawal` on the initial application. Keep the same settings on retries. A dry run previews the next transaction against the state currently visible. Read the receipts before treating an application as complete.
 
-Wait for a P85 election to reserve a result naming your identity. With the release that includes the per-validator proof command, submit your own assignment possession proof. Each frozen member submits one through its own authority. The relayer can then finalize P85 and publish in VR. A member with an unavailable authority can hold up that result until it expires. Keep the nodes running and follow the next attempt.
+Wait for a P85 election to reserve a result naming your identity. With the release that includes the per-validator proof command, submit your own assignment possession proof. Each frozen member submits one through its own authority. Any member can then finalize P85 and publish in VR. `pos-publish --participate` does it in a fixed order: the lowest frozen identity finalizes and publishes at once, and the member of rank k only k × 180 s of chain time after the block that accepted the last proof (at most 4 steps), if nobody has by then. The step covers the finalizer's two receipts and its node's lag behind the head. So one member pays for the two transactions, and the others take over only when it is down. A member with an unavailable authority can hold up that result until it expires. Keep the nodes running and follow the next attempt.
 
 **Parking after an expired result (PoS, #1303).** When the roots reject an expired result, ElectionPolicy parks the elected joiners that did not prove. For a published result, these are the joiners whose bit in the ordered ready bitmap is clear: the roots did not hold their handoff possession proof. For an unpublished result, these are the joiners without an on-chain assignment proof. The incumbents, the members of the committee in force, are never parked. A parked identity is skipped by elections for `2 × LIFETIME` (32,768 rounds of root progress, about 4.5 hours at the testnet's pace) from the rejection record, and is eligible again when that period ends. Nothing else changes: the identity stays bonded and delegated, and it can still request retirement and claim. There is no `rejoin` on PoS and no override. Fix the node and wait. Read `parkedUntil` and compare it with the SealRegistry's progress:
 
@@ -734,6 +733,7 @@ cat > "$HOME/ureth-wrapper/unicity-reth" <<'EOF'
 case " $* " in *" --builder.gaslimit"*) exec /usr/local/bin/unicity-reth "$@" ;; esac
 gas=$(sed -n 's/.*--unicity.max-gas=\([0-9][0-9]*\).*/\1/p' /data/release/ureth-flags.txt)
 if [ "$1" = node ] && [ -n "$gas" ]; then exec /usr/local/bin/unicity-reth "$@" --builder.gaslimit "$gas"; fi
+[ "$1" = node ] && echo "ureth-wrapper: no --unicity.max-gas= in /data/release/ureth-flags.txt; starting WITHOUT --builder.gaslimit" >&2
 exec /usr/local/bin/unicity-reth "$@"
 EOF
 chmod 0755 "$HOME/ureth-wrapper/unicity-reth"
