@@ -175,11 +175,10 @@ def public_files(run):
             yield str(Path(*parts)), digest(path)
 
 
-def sealing_sample(custody):
-    loaded = [row for row in custody.get('catchUpMeasurements', []) if row['calls'].startswith('loaded-')]
+def sealing_sample(windows, loaded):
     if not loaded:
         return None
-    seals = [row['observedMs'] for row in custody['windows']]
+    seals = [row['observedMs'] for row in windows]
     window_ms = 30_000
     peak_count = max(sum(start <= seal < start + window_ms for seal in seals) for start in seals)
     q = min(row['verifiedGaps'] for row in loaded)
@@ -192,6 +191,7 @@ def sealing_sample(custody):
         'proofMs': {str(p): percentile([row['proofMs'] for row in loaded], p) for p in (50, 95, 99)},
         'twiceObservedPeakMet': q * window_ms >= 2 * peak_count * p99,
         'allObservedBacklogsShrank': all(int(row['afterBacklog']) < int(row['beforeBacklog']) for row in loaded),
+        'advancesWithArrivals': sum(int(row['arrivedDuringCall']) > 0 for row in loaded),
     }
 
 
@@ -219,9 +219,19 @@ def main():
             graph['offline'] = read(offline[0])
         if (run / 'offline-load/custody-result.json').exists():
             graph['offlineSettlementLoad'] = read(run / 'offline-load/custody-result.json')
+        archive = run / 'offline-load/archive-result.json'
+        if archive.exists():
+            graph['offlineSettlementLoad'] = read(archive)
+            rows = [read(path) for path in archive.parent.glob('load-*.cost.json')]
+            graph['offlineSettlementLoad']['actualFeesWei'] = str(sum(int(row['paidFee']) for row in rows))
+            if 'offline' in graph:
+                graph['offlineSealingSample'] = sealing_sample(
+                    graph['offlineSettlementLoad']['windows'], graph['offline'].get('advanceCalls', []))
         if (run / 'custody-result.json').exists():
             graph['custody'] = read(run / 'custody-result.json')
-            graph['sealingSample'] = sealing_sample(graph['custody'])
+            loaded = [row for row in graph['custody'].get('catchUpMeasurements', [])
+                      if row['calls'].startswith('loaded-')]
+            graph['sealingSample'] = sealing_sample(graph['custody']['windows'], loaded)
         for name in ('race', 'same-evidence-comparison'):
             if (run / (name + '.json')).exists():
                 graph[name] = read(run / (name + '.json'))

@@ -6,9 +6,11 @@ here=$PWD/scripts/nb2-t7
 scratch=$(mktemp -d "$NB2_OUT/.driver.XXXXXX")
 driver_pid=
 archive_pid=
+load_pid=
 cleanup() {
   trap '' TERM HUP INT
   if [[ -n "$driver_pid" ]]; then kill -TERM "$driver_pid" 2>/dev/null || true; wait "$driver_pid" || true; fi
+  if [[ -n "$load_pid" ]]; then kill -TERM "$load_pid" 2>/dev/null || true; wait "$load_pid" || true; fi
   stop_archive
   rm -rf -- "$scratch"
 }
@@ -56,6 +58,7 @@ driver=( "$NB2_PLUGIN/node_modules/.bin/tsx" "$scratch/driver.ts" "$NB2_OUT" "$r
   "${NB2_ARTIFACTS:-$NB2_CONTRACTS/out}" "$here/create.py" "$scratch" )
 if [[ "${NB2_QUALIFY_OFFLINE:-0}" = 1 ]]; then
   openssl rand -hex 32 >"$scratch/relayer-key"
+  openssl rand -hex 32 >"$scratch/load-key"
   python3 "$here/probe-qualification.py" archive "$rpc" "$chain" "$(cat "$NB2_OUT/execution.pin")" \
     "$scratch/archive-url" >"$NB2_OUT/preferred-archive.log" 2>&1 &
   archive_pid=$!
@@ -66,8 +69,16 @@ if [[ "${NB2_QUALIFY_OFFLINE:-0}" = 1 ]]; then
   [[ -s "$scratch/offline-burn.private.json" ]]
   NB2_RESUME_STAGE=checkpoint run_driver "${driver[@]}"
   stop_archive
-  NB2_RESUME_STAGE=load run_driver "${driver[@]}"
-  NB2_RESUME_STAGE=settle run_driver "${driver[@]}"
+  if [[ "${NB2_OFFLINE_PEAK:-0}" = 1 ]]; then
+    NB2_RESUME_STAGE=load "${driver[@]}" &
+    load_pid=$!
+    NB2_RESUME_STAGE=settle run_driver "${driver[@]}"
+    wait "$load_pid"
+    load_pid=
+  else
+    NB2_RESUME_STAGE=load run_driver "${driver[@]}"
+    NB2_RESUME_STAGE=settle run_driver "${driver[@]}"
+  fi
 else
   run_driver "${driver[@]}"
 fi
