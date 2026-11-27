@@ -14,7 +14,7 @@ T6_BFT_REMOTE=${T6_BFT_REMOTE:-$(git -C "$SOURCE_ROOT" remote get-url origin)}
 T6_BFT_REF=${T6_BFT_REF:-t6/rehearsal-harness}
 # Match the checkout product's execution client in scripts/ci/lane-pins.json.
 # T6_URETH_ATTESTED may supply a build at the same pin.
-T6_URETH_COMMIT=${T6_URETH_COMMIT:-f37316516e0d586705587aa08ca12f359298cde2}
+T6_URETH_COMMIT=${T6_URETH_COMMIT:-c91535bf306738655d06db0389e44ab0df57014e}
 T6_URETH_REMOTE=${T6_URETH_REMOTE:-https://github.com/ristik/ureth.git}
 T6_CONTRACTS_COMMIT=${T6_CONTRACTS_COMMIT:-e7eb3216549b772a9e1df2b1214976d7dd9e6e62}
 # The four allocation contracts are rebuilt from their e7eb3216 source commit. The registry is not: the fresh-B1 registry (layout 3) is generated in code

@@ -1,6 +1,6 @@
 `custody-runtimes.json.gz` contains the deployed StakeCustody and CustodyGenesis
 bytecode from `alloc.json` produced by `script/vr-pos-genesis.sh` at
-unicity-pos-contracts `85950b441034c5a58242f5be94f9531dcb036954` (#1319: the `RecordKind`
+unicity-pos-contracts `9b02951640877d6b4054df2ab6fce307629d6e61` (#1319: the `RecordKind`
 enum gains `PoPMissed`, which moves the runtime's enum range check; the writer is unchanged). The two
 JSON fields are `custody` and `writer`. Their hashes match the reviewed PoS16
 genesis pins. The regression uses the authentic custody runtime because it

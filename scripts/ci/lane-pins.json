@@ -4,7 +4,7 @@
   "components": {
     "ureth": {
       "repository": "https://github.com/ristik/ureth.git",
-      "commit": "f37316516e0d586705587aa08ca12f359298cde2",
+      "commit": "c91535bf306738655d06db0389e44ab0df57014e",
       "package": "unicity-reth",
       "cargoArgs": [
         "build",
@@ -14,7 +14,7 @@
         "unicity-reth"
       ],
       "features": "default (jemalloc)",
-      "note": "ureth feat/1319-pop-missed head (f3731651, ureth#113, bft-core#1319): record kind 9 PoPMissed in records.rs, the SealRegistry runtime 0x93dae8b0 of contracts 85950b44 and its hook fixtures; repin to the merge commit before merging. Previous: ureth unicity/main at the merge of ureth#112 (dc6763ae, bft-core#1286; tree = caaf5df6): the contracts' #1286 hook fixtures (hook-ack/elect/recovery, vr-hook-pos) as testdata; the binary and crates/unicity/b1 are unchanged. Previous: ureth unicity/main at the merge of ureth#111 (00c059e8, bft-core#1297): the SealRegistry runtime 0x8b3105bf of contracts #99 (the post-term evidence views) and the hook fixtures of contracts 6f73846; 0x0100 unchanged. Previous: bft-core#1294 pairs the checkout with the imported-tip B1 verifier. Previous: ureth#107 (VT-06c) supplies parent-state VR fees and the genesis fee identity fields. Previous pin: ureth unicity/main at the merge of ureth#103 (b8a50547: VT-14 VR batch pins on #102, the VT-02 hook, and #101, VT-15: record kinds 6 to 8 and the SealRegistry pin 0xebbadc64, the runtime this bft-core genesis carries), which includes ureth#97: the protocol 6/7 bridge precompile 0x0105 removed, so engineapi/profile.go no longer requires it (bft-core#1139; a consensus change, a fresh network generation). Before: ureth vt15/lane-pin (7fdc5a32): the lane pin 10552af2 plus the VT-15 commit of ristik/ureth#101, kept off unicity/main while engineapi still required 0x0105. Before: ureth unicity/main at the merge of ureth#94 (10552af2: the snapshots of the resealed corpus) on ureth#93 (870c1d01, the native B1 precompile on the upstream seal rule, 7,200 gas per supplied seal signature, protocol 7, bft-core#920)",
+      "note": "ureth unicity/main at the merge of ureth#113 (c91535bf, bft-core#1319; it includes #114 5727b53f, the spec activation): record kind 9 PoPMissed in records.rs, the SealRegistry runtime 0x93dae8b0 of contracts 85950b44 and its hook fixtures. Previous: ureth unicity/main at the merge of ureth#112 (dc6763ae, bft-core#1286; tree = caaf5df6): the contracts' #1286 hook fixtures (hook-ack/elect/recovery, vr-hook-pos) as testdata; the binary and crates/unicity/b1 are unchanged. Previous: ureth unicity/main at the merge of ureth#111 (00c059e8, bft-core#1297): the SealRegistry runtime 0x8b3105bf of contracts #99 (the post-term evidence views) and the hook fixtures of contracts 6f73846; 0x0100 unchanged. Previous: bft-core#1294 pairs the checkout with the imported-tip B1 verifier. Previous: ureth#107 (VT-06c) supplies parent-state VR fees and the genesis fee identity fields. Previous pin: ureth unicity/main at the merge of ureth#103 (b8a50547: VT-14 VR batch pins on #102, the VT-02 hook, and #101, VT-15: record kinds 6 to 8 and the SealRegistry pin 0xebbadc64, the runtime this bft-core genesis carries), which includes ureth#97: the protocol 6/7 bridge precompile 0x0105 removed, so engineapi/profile.go no longer requires it (bft-core#1139; a consensus change, a fresh network generation). Before: ureth vt15/lane-pin (7fdc5a32): the lane pin 10552af2 plus the VT-15 commit of ristik/ureth#101, kept off unicity/main while engineapi still required 0x0105. Before: ureth unicity/main at the merge of ureth#94 (10552af2: the snapshots of the resealed corpus) on ureth#93 (870c1d01, the native B1 precompile on the upstream seal rule, 7,200 gas per supplied seal signature, protocol 7, bft-core#920)",
       "nativePrecompiles": {
         "unicity-b1-cert-batch-v2-tip": "0x0000000000000000000000000000000000000100",
         "unicity-b1-membership": "0x0000000000000000000000000000000000000102",
@@ -60,8 +60,8 @@
     },
     "contracts": {
       "repository": "https://github.com/ristik/unicity-pos-contracts.git",
-      "commit": "85950b441034c5a58242f5be94f9531dcb036954",
-      "note": "contracts feat/1319-certified-miss head (85950b44, bft-core#1319: record kind 9 PoPMissed in the SealRegistry, VR and custody; ElectionPolicy.parkMissed parks a certified incumbent); repin to the merge commit before merging",
+      "commit": "9b02951640877d6b4054df2ab6fce307629d6e61",
+      "note": "contracts main at the merge of contracts#105 (9b029516, bft-core#1319; its sources are 85950b44: record kind 9 PoPMissed in the SealRegistry, VR and custody; ElectionPolicy.parkMissed parks a certified incumbent)",
       "branch": "main"
     },
     "state-transition-sdk-js": {
