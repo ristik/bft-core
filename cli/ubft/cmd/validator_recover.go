@@ -167,8 +167,26 @@ func (ch *validatorChain) certifiedClient(ctx context.Context) (*vrclient.Client
 		return nil, 0, fmt.Errorf("%w: the RPC serves no finalized (certified) block", ErrValidator)
 	}
 	c := *ch.vr
-	c.Block, c.BlockHash = "", b.Hash.Hex()
+	c.Block, c.BlockHash, c.Canonical = "", b.Hash.Hex(), true
 	return &c, uint64(b.Number), nil
+}
+
+// latestSnapshot reads the state a key change decides from at one fresh block: the head's hash, named (EIP-1898, requireCanonical) in
+// every read of custody, the election and VR, so the custody generation, the delegation and VR's bindings are one block's and never a
+// pair that did not coexist (sol's round 3 on #1328).
+func (r *posKeyChangeRun) latestSnapshot(ctx context.Context) (posBindingState, error) {
+	var b struct {
+		Hash common.Hash `json:"hash"`
+	}
+	if err := r.ch.rpc.CallContext(ctx, &b, "eth_getBlockByNumber", "latest", false); err != nil {
+		return posBindingState{}, fmt.Errorf("%w: reading the head block: %w", ErrValidator, err)
+	}
+	if b.Hash == (common.Hash{}) {
+		return posBindingState{}, fmt.Errorf("%w: the RPC's head block has no hash", ErrValidator)
+	}
+	c := *r.ch.vr
+	c.Block, c.BlockHash, c.Canonical = "", b.Hash.Hex(), true
+	return readPosBindingState(ctx, &c, r.custody, r.election, r.id)
 }
 
 // readPosBindingState reads the state a key change decides from, through c (certified, or latest after a confirmed transaction).
@@ -247,7 +265,7 @@ func (r *posKeyChangeRun) run(ctx context.Context, w io.Writer) error {
 		st.Position.OpenLots, height, r.want.EvmNodeID)
 	// the certified state is the preflight (its refusals stand); the steps are decided from a fresh read of the latest state only: a step is
 	// skipped only when the latest state holds its words at custody's current generation, never because the certified view says so
-	latest, err := readPosBindingState(ctx, r.ch.vr, r.custody, r.election, r.id)
+	latest, err := r.latestSnapshot(ctx)
 	if err != nil {
 		return err
 	}
@@ -283,7 +301,7 @@ func (r *posKeyChangeRun) run(ctx context.Context, w io.Writer) error {
 	// authority (when asked; the pin may wait for the authority's verification), reads both contracts again, skips a pair that landed
 	// meanwhile, and builds the delegation from that read: signed (op 108) for custody's current generation and nonces only
 	admit := func() ([]step, error) {
-		now, err := readPosBindingState(ctx, r.ch.vr, r.custody, r.election, r.id)
+		now, err := r.latestSnapshot(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -301,7 +319,7 @@ func (r *posKeyChangeRun) run(ctx context.Context, w io.Writer) error {
 			}
 			fmt.Fprintf(w, "  pinned the new signing authority's P85 scope to identity %d (verified against VR's binding)\n", r.id)
 		}
-		if now, err = readPosBindingState(ctx, r.ch.vr, r.custody, r.election, r.id); err != nil {
+		if now, err = r.latestSnapshot(ctx); err != nil {
 			return nil, err
 		}
 		if _, err := planPosKeyChange(now, operator, r.want, r.evmOnly); err != nil {
@@ -344,7 +362,7 @@ func (r *posKeyChangeRun) run(ctx context.Context, w io.Writer) error {
 	// the receipts arrive in order: the binding's (when planned) first, then the delegation's
 	stagePending := plan.Stage
 	after := func(_ int, _ *vrclient.Receipt) ([]step, error) {
-		now, err := readPosBindingState(ctx, r.ch.vr, r.custody, r.election, r.id)
+		now, err := r.latestSnapshot(ctx)
 		if err != nil {
 			return nil, err
 		}

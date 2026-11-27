@@ -539,3 +539,35 @@ func TestValidatorRecoverAConfirmedPairSendsAndSignsNothing(t *testing.T) {
 	require.Equal(t, reads, len(f.src.seen), "the authority was not asked to pin or sign")
 	require.Contains(t, out, "nothing to do")
 }
+
+// sol's round 3 on #1328: the head moves between two reads of one state snapshot. Block 1 holds only the matching delegation, block 2
+// only the matching VR binding. The snapshot reads both contracts at one block hash, so recover never sees a "matching pair" that did not
+// coexist: it does not report "nothing to do", and it ends (if it succeeds) with both the binding and the delegation the new words.
+func TestValidatorRecoverReadsOneBlockPerSnapshot(t *testing.T) {
+	f := newRecoverFixture(t)
+	delegationCalls := 0
+	f.chain.With(func(c *vrfake.Chain) {
+		c.Pos.Delegations[[2]uint64{f.id, 1}] = &vrfake.Delegated{Binding: delegationOf(f.want), NextNonce: 2}
+		c.AfterCall = func(c *vrfake.Chain, to ethcommon.Address, data []byte) {
+			if to != c.Election || !bytes.Equal(data[:4], vrclient.PosElectionABI.Methods["delegation"].ID[:4]) {
+				return
+			}
+			if delegationCalls++; delegationCalls != 2 { // the certified preflight's read is the first; the latest snapshot's the second
+				return
+			}
+			c.MoveHeadLocked(func(c *vrfake.Chain) {
+				c.Pos.Delegations[[2]uint64{f.id, 1}] = &vrfake.Delegated{Binding: delegationOf(f.old), NextNonce: 3}
+				w := f.want
+				c.Identities[f.id].Staged = &w
+				c.KeyOwner[ethcrypto.Keccak256Hash(w.EvmKey)] = f.id
+			})
+		}
+	})
+	out, err := f.recover(t)
+	require.NotContains(t, out, "nothing to do", "a binding and a delegation of two blocks are no pair")
+	require.GreaterOrEqual(t, delegationCalls, 2, "the probe moved the head inside the snapshot")
+	if err == nil {
+		require.True(t, sameDelegation(f.delegation(), delegationOf(f.want)), out)
+		require.Equal(t, f.want.EvmKey, f.chain.Identity(f.id).Staged.EvmKey, out)
+	}
+}
