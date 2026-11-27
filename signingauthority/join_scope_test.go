@@ -184,6 +184,7 @@ func TestPendingJoinChecksAuthenticatedExecutionChain(t *testing.T) {
 			_, err = a.SignPosPoP(posRequest())
 			require.NoError(t, err)
 			before := a.Status()
+			beforeEnrollment := a.Enrollment()
 			result, err := a.AdvanceWithProof(t.Context(), bundleOf(t, f))
 			if tc.wantErr == nil {
 				require.NoError(t, err)
@@ -196,7 +197,7 @@ func TestPendingJoinChecksAuthenticatedExecutionChain(t *testing.T) {
 				require.ErrorIs(t, err, tc.wantErr)
 				before.Faulted = tc.wantErr == ErrStateUntrusted
 				require.Equal(t, before, a.Status())
-				require.Equal(t, enroll, a.Enrollment())
+				require.Equal(t, beforeEnrollment, a.Enrollment())
 				_, err = a.SignPosPoP(posRequest())
 				if before.Faulted {
 					require.ErrorIs(t, err, ErrStateUntrusted)
@@ -233,31 +234,34 @@ func TestPendingJoinRechecksPinBeforeLatchingProofFault(t *testing.T) {
 }
 
 func TestPendingJoinEnrollmentLatchesVerifiedPinContradiction(t *testing.T) {
-	f := newFixture(t, 1)
-	enroll := f.enroll
-	enroll.ShardConfHash = nil
-	a, err := New(enroll, trustStub{tb: f.tb}, WithPendingJoinScope(), WithPosSource(newFakePos(), posChain))
+	f := q3fixture.New(t, q3fixture.Options{Assignment: true, Params: map[string]string{"chain_id": "8"}})
+	conf := *f.Successor
+	enroll := Enrollment{AuthorityID: "joiner", NodeID: "fresh-joiner", NetworkID: conf.NetworkID,
+		PartitionID: conf.PartitionID, ShardID: conf.ShardID, ShardEpoch: conf.Epoch,
+		RootEpoch: PinRootEpoch(1), Profile: ProfileLegacyBCRv1}
+	a, err := New(enroll, currentTrust{base: f.Old}, WithLineage(f.Old, f.UTB),
+		WithPendingJoinScope(), WithPosSource(newFakePos(), posChain))
 	require.NoError(t, err)
 	t.Cleanup(a.Close)
 	require.NoError(t, a.SetPosPolicy(t.Context(), posPin()))
 	_, err = a.SignPosPoP(posRequest())
 	require.NoError(t, err)
 	before := a.Status()
-	conf := ownConf(t, a)
-	conf.PartitionParams = map[string]string{"chain_id": "8"}
+	beforeEnrollment := a.Enrollment()
+	conf.Validators = []*types.NodeInfo{{NodeID: enroll.NodeID, SigKey: mustPub(t, a), Stake: 1}}
 
 	conf.Epoch++
-	require.ErrorIs(t, a.CompleteEnrollment(conf), ErrContextMismatch)
+	require.ErrorIs(t, a.CompleteEnrollment(&conf), ErrContextMismatch)
 	conf.Epoch--
 	conf.Validators[0].NodeID = "other"
-	require.ErrorIs(t, a.CompleteEnrollment(conf), ErrContextMismatch)
+	require.ErrorIs(t, a.CompleteEnrollment(&conf), ErrContextMismatch)
 	conf.Validators[0].NodeID = enroll.NodeID
 	require.Equal(t, before, a.Status(), "check scope and membership before latching a contradiction")
 
-	require.ErrorIs(t, a.CompleteEnrollment(conf), ErrStateUntrusted)
+	require.ErrorIs(t, a.CompleteEnrollment(&conf), ErrStateUntrusted)
 	before.Faulted = true
 	require.Equal(t, before, a.Status())
-	require.Equal(t, enroll, a.Enrollment())
+	require.Equal(t, beforeEnrollment, a.Enrollment())
 	_, err = a.SignPosPoP(posRequest())
 	require.ErrorIs(t, err, ErrStateUntrusted)
 }
@@ -294,6 +298,7 @@ func TestPendingJoinChecksDeferredB1ProfileBeforePinning(t *testing.T) {
 			own.Epoch = a.Enrollment().ShardEpoch
 			own.Validators = []*types.NodeInfo{{NodeID: enroll.NodeID, SigKey: mustPub(t, a), Stake: 1}}
 			before = a.Status()
+			beforeEnrollment := a.Enrollment()
 			err = a.CompleteEnrollment(&own)
 			if tc.matches {
 				require.NoError(t, err)
@@ -302,7 +307,7 @@ func TestPendingJoinChecksDeferredB1ProfileBeforePinning(t *testing.T) {
 				require.ErrorIs(t, err, ErrContextMismatch)
 				require.ErrorContains(t, err, "differs from B1 profile")
 				require.Equal(t, before, a.Status())
-				require.Equal(t, enroll, a.Enrollment())
+				require.Equal(t, beforeEnrollment, a.Enrollment())
 			}
 		})
 	}
