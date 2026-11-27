@@ -14,6 +14,8 @@ type erc20Vector struct {
 	Held, Evidence, Verdict, Packet, Complete, ReturnProof     string
 }
 
+var erc20SemanticProfileHash = [32]byte(mustHex("99773bbdfde2fa77cf43e029b61086a7eb121adfe57097872fc6ea9f0497e4d9"))
+
 func TestERC20FlatReturnVectors(t *testing.T) {
 	h := func(b []byte) string { return "0x" + hex.EncodeToString(b) }
 	h32 := func(b [32]byte) string { return h(b[:]) }
@@ -44,6 +46,7 @@ func TestERC20FlatReturnVectors(t *testing.T) {
 		var salt [32]byte
 		copy(salt[12:], variant.token[:])
 		cfg := *world.Cfg
+		cfg.SemanticProfileHash = erc20SemanticProfileHash
 		cfg.ExecutionGenesis = variant.genesis
 		cfg.ERC20 = &ERC20Config{variant.token, generation, pins}
 		cfg.Asset, cfg.Ty, cfg.Aid = ERC20AssetIDs(cfg.ChainID, variant.token, cfg.ExecutionGenesis)
