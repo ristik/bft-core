@@ -22,11 +22,13 @@ import (
 )
 
 const (
-	// defaultFinalizerStep is the chain time between two finalizer ranks: the designated finalizer's finalizeCandidate and VR.publish are two
-	// receipts, about two 10 s blocks after it first polls the ready result.
-	defaultFinalizerStep = 30 * time.Second
-	// finalizerMaxRank bounds the delay: the members from this rank on share the last turn (8 steps).
-	finalizerMaxRank = 8
+	// defaultFinalizerStep is the chain time between two finalizer ranks. It must cover the designated finalizer's whole turn: its node sees
+	// the ready block only after the node's lag behind the head, then finalizeCandidate's receipt (seen after that lag again) and VR.publish.
+	// The #1323 lane measured 127 s from the ready block to the finalizer's VR.publish block (a member's node about 4 blocks behind, 10 s
+	// blocks); with a 30 s step the next ranks' turns came first and two of them sent.
+	defaultFinalizerStep = 180 * time.Second
+	// finalizerMaxRank bounds the delay: the members from this rank on share the last turn (4 steps, 12 minutes by default).
+	finalizerMaxRank = 4
 	// finalizerLogWindow is the block range the PoPAccepted logs are read in (the public gateway's eth_getLogs limit). A result whose proofs
 	// were not all accepted in it has been ready for longer than every turn: every member may finalize.
 	finalizerLogWindow = 10_000

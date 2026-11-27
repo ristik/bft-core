@@ -488,7 +488,9 @@ def vr_finalizer(r):
         extra = {state['index']: (state['identity'], Path(state['home']), Path(state['auth']))}
         pods = {state['index']: 1}
     report = {}
-    for name, step in (('before', '0s'), ('after', None)):
+    # 'after' names the default step (180 s since the second #1323 lane run) explicitly, so a run against an image built before it measures the
+    # same order
+    for name, step in (('before', '0s'), ('after', '180s')):
         rec.finalizer_step = step
         epoch = rec.root_view(1)['activeEpoch']
         first = int(r.call('eth_blockNumber'), 16)

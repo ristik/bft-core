@@ -48,7 +48,7 @@ func TestFinalizerDelayGrowsWithTheRankAndIsBounded(t *testing.T) {
 func TestPlanFinalizerTurnOrdersTheMembers(t *testing.T) {
 	const ready = 1_000
 	step := 30 * time.Second
-	for now := uint64(ready); now <= ready+uint64(finalizerMaxRank+2)*30; now += 5 {
+	for now := uint64(ready); now <= ready+uint64(finalizerMaxRank+2)*30; now += 5 { // a 30 s step
 		due := 0
 		for rank := 0; rank < 16; rank++ {
 			if planFinalizerTurn(rank, step, finalizerReadiness{Known: true, ReadyAt: ready, Now: now}).Due {
