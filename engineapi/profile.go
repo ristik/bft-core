@@ -28,11 +28,10 @@ standard eth_* namespace does: EIP-7910's eth_config reports the loaded spec's c
 next and last scheduled ones, and the pinned client implements it (EthConfigApi,
 crates/rpc/rpc-eth-api/src/helpers/config.rs). No new Engine method and no client divergence.
 
-What the profile pins is what this adapter can actually drive: the V3 Engine API, i.e. Cancun, from
-genesis, with nothing scheduled after it. Concretely, eth_config's `current` must be the fork
-activated at timestamp 0 with exactly Cancun's system contract, Cancun's blob schedule and Cancun's
-precompile set, and `next` and `last` must both be null. Anything else is refused, including a spec
-that is behind the profile (Shanghai only) as well as one ahead of it.
+The adapter pins the Cancun Engine API profile from genesis. The current entry must describe that
+profile exactly. A Unicity deployment can advertise a separate epoch-scoped interpreter change.
+It must keep the Engine API system contracts, blob schedule and fork ID and report the known Prague
+precompile set. Ordinary Ethereum timestamp forks are still refused.
 
 Which connection it reads, and what that does and does not establish. eth_config is NOT in the
 eth_* subset the Engine API specification requires on the authenticated port; the pinned client
@@ -75,7 +74,7 @@ var pinnedProfile = struct {
 }
 
 // PinnedProfileName is how diagnostics and doctor name the profile.
-const PinnedProfileName = "Cancun at genesis, nothing scheduled after"
+const PinnedProfileName = "Cancun at genesis, no timestamp forks"
 
 type blobScheduleJSON struct {
 	Target                uint64 `json:"target"`
@@ -87,12 +86,14 @@ type blobScheduleJSON struct {
 // a field that is absent from one that is zero: an absent activation time must not read as "at
 // genesis", for the same reason decodeBlockHeader refuses a missing hash.
 type forkConfigJSON struct {
-	ActivationTime  *uint64           `json:"activationTime"`
-	BlobSchedule    *blobScheduleJSON `json:"blobSchedule"`
-	ChainID         *quantity         `json:"chainId"`
-	ForkID          string            `json:"forkId"`
-	Precompiles     map[string]string `json:"precompiles"`
-	SystemContracts map[string]string `json:"systemContracts"`
+	ActivationRootEpoch *uint64           `json:"activationRootEpoch"`
+	NotBeforeUCTime     *uint64           `json:"notBeforeUcTime"`
+	ActivationTime      *uint64           `json:"activationTime"`
+	BlobSchedule        *blobScheduleJSON `json:"blobSchedule"`
+	ChainID             *quantity         `json:"chainId"`
+	ForkID              string            `json:"forkId"`
+	Precompiles         map[string]string `json:"precompiles"`
+	SystemContracts     map[string]string `json:"systemContracts"`
 }
 
 // ExecutionProfile is what CheckExecutionProfile validated, returned so a caller that reports it
@@ -167,23 +168,9 @@ func checkProfileWith(raw json.RawMessage, wantChainID uint64, extra map[string]
 		return ExecutionProfile{}, fmt.Errorf("engineapi: decoding eth_config: %w", err)
 	}
 
-	// next and last must be PRESENT and null. EIP-7910 reports "nothing scheduled" as null; a response
-	// that omits the keys has not said that, and treating absence as "nothing scheduled" would let an
-	// incomplete answer pass as the one this check exists to demand.
 	for _, key := range []string{"next", "last"} {
-		v, ok := top[key]
-		if !ok {
+		if _, ok := top[key]; !ok {
 			return ExecutionProfile{}, fmt.Errorf("engineapi: eth_config has no %q entry, so it does not say whether a fork is scheduled", key)
-		}
-		if !isJSONNull(v) {
-			var f forkConfigJSON
-			when := "an unreadable time"
-			if json.Unmarshal(v, &f) == nil && f.ActivationTime != nil {
-				when = fmt.Sprintf("timestamp %d", *f.ActivationTime)
-			}
-			return ExecutionProfile{}, fmt.Errorf("engineapi: execution client's chain spec schedules a fork at %s after its current one "+
-				"(eth_config %q is not null); the pinned profile is %s, because this adapter speaks only the V3 Engine API",
-				when, key, PinnedProfileName)
 		}
 	}
 
@@ -196,6 +183,9 @@ func checkProfileWith(raw json.RawMessage, wantChainID uint64, extra map[string]
 		return ExecutionProfile{}, fmt.Errorf("engineapi: decoding eth_config current fork: %w", err)
 	}
 
+	if cur.ActivationRootEpoch != nil || cur.NotBeforeUCTime != nil {
+		return ExecutionProfile{}, errors.New("engineapi: eth_config current fork must describe the fixed Engine API profile")
+	}
 	if cur.ChainID == nil {
 		return ExecutionProfile{}, errors.New("engineapi: eth_config current fork reports no chain id")
 	}
@@ -234,7 +224,84 @@ func checkProfileWith(raw json.RawMessage, wantChainID uint64, extra map[string]
 		return ExecutionProfile{}, fmt.Errorf("engineapi: execution client's precompiles differ from the pinned profile (%s): %s",
 			PinnedProfileName, d)
 	}
+	// The only supported interpreter transition is Cancun to Prague. It can either be
+	// scheduled (next and last identify the same fork) or already active.
+	next, last, active := top["next"], top["last"], top["unicityActive"]
+	var nextEpoch, nextTime uint64
+	for _, field := range []struct {
+		key string
+		raw json.RawMessage
+	}{{"next", next}, {"last", last}, {"unicityActive", active}} {
+		if isJSONNull(field.raw) {
+			continue
+		}
+		var f forkConfigJSON
+		err := json.Unmarshal(field.raw, &f)
+		if err != nil || f.ActivationRootEpoch == nil || len(extra) == 0 || f.ActivationTime != nil {
+			when := "an unreadable time"
+			if f.ActivationTime != nil {
+				when = fmt.Sprintf("timestamp %d", *f.ActivationTime)
+			}
+			return ExecutionProfile{}, fmt.Errorf("engineapi: execution client's chain spec schedules a fork at %s after its current one "+
+				"(eth_config %q is not null); the pinned profile is %s, because this adapter speaks only the V3 Engine API",
+				when, field.key, PinnedProfileName)
+		}
+		if err := checkEpochFork(f, cur, wantPrecompiles); err != nil {
+			return ExecutionProfile{}, fmt.Errorf("engineapi: eth_config %q: %w", field.key, err)
+		}
+		switch field.key {
+		case "next":
+			nextEpoch, nextTime = *f.ActivationRootEpoch, *f.NotBeforeUCTime
+		case "last":
+			if *f.ActivationRootEpoch != nextEpoch || *f.NotBeforeUCTime != nextTime {
+				return ExecutionProfile{}, errors.New("engineapi: eth_config next and last must report the same epoch fork")
+			}
+		case "unicityActive":
+			if nextEpoch != 0 {
+				return ExecutionProfile{}, errors.New("engineapi: eth_config reports both a scheduled and an active interpreter fork")
+			}
+		}
+	}
+	if nextEpoch != 0 && isJSONNull(last) {
+		return ExecutionProfile{}, errors.New("engineapi: eth_config next and last must report the same epoch fork")
+	}
 	return ExecutionProfile{ForkID: cur.ForkID}, nil
+}
+
+// checkEpochFork verifies the one known spec transition, with the same structural profile as
+// current. In particular a regular timestamp-scheduled Ethereum Prague profile cannot pass.
+func checkEpochFork(f, current forkConfigJSON, basePrecompiles map[string]string) error {
+	if *f.ActivationRootEpoch == 0 || f.NotBeforeUCTime == nil {
+		return errors.New("epoch fork requires a positive activation root epoch and a UC time bound")
+	}
+	if f.ChainID == nil || *f.ChainID != *current.ChainID || f.ForkID != current.ForkID ||
+		f.BlobSchedule == nil || *f.BlobSchedule != *current.BlobSchedule {
+		return errors.New("epoch fork changes the fixed Engine API profile")
+	}
+	if d := diffAddressSet(f.SystemContracts, current.SystemContracts); d != "" {
+		return fmt.Errorf("epoch fork changes system contracts: %s", d)
+	}
+	// EIP-2537 precompiles, in address order.
+	prague := []string{
+		"BLS12_G1ADD",
+		"BLS12_G1MSM",
+		"BLS12_G2ADD",
+		"BLS12_G2MSM",
+		"BLS12_PAIRING_CHECK",
+		"BLS12_MAP_FP_TO_G1",
+		"BLS12_MAP_FP2_TO_G2",
+	}
+	want := make(map[string]string, len(basePrecompiles)+len(prague))
+	for name, address := range basePrecompiles {
+		want[name] = address
+	}
+	for i, name := range prague {
+		want[name] = fmt.Sprintf("0x%040x", 0x0b+i)
+	}
+	if d := diffAddressSet(f.Precompiles, want); d != "" {
+		return fmt.Errorf("epoch fork precompiles differ: %s", d)
+	}
+	return nil
 }
 
 // diffAddressSet compares two name→address maps, addresses case-insensitively, and describes the
