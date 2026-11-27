@@ -165,8 +165,11 @@ func TestPendingJoinChecksAuthenticatedExecutionChain(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
 		profile, pin uint64
+		wantErr      error
 	}{
-		{"both match", 7, 7}, {"wrong b1 profile", 8, 7}, {"wrong P85 pin", 7, 8},
+		{"matches profile and pin", 7, 7, nil},
+		{"contradicts startup profile", 8, 7, ErrContextMismatch},
+		{"contradicts profile and verified pin", 8, 8, ErrStateUntrusted},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pin := posPin()
@@ -176,10 +179,13 @@ func TestPendingJoinChecksAuthenticatedExecutionChain(t *testing.T) {
 			a, err := New(enroll, currentTrust{base: f.Old}, WithLineage(f.Old, f.UTB),
 				WithPendingJoinScope(), WithPendingJoinChainID(tc.profile), WithPosSource(src, tc.pin))
 			require.NoError(t, err)
+			t.Cleanup(a.Close)
 			require.NoError(t, a.SetPosPolicy(t.Context(), pin))
+			_, err = a.SignPosPoP(posRequest())
+			require.NoError(t, err)
 			before := a.Status()
 			result, err := a.AdvanceWithProof(t.Context(), bundleOf(t, f))
-			if tc.profile == 7 && tc.pin == 7 {
+			if tc.wantErr == nil {
 				require.NoError(t, err)
 				require.True(t, result.Advanced)
 				require.NoError(t, a.SetPosPolicy(t.Context(), pin))
@@ -187,8 +193,116 @@ func TestPendingJoinChecksAuthenticatedExecutionChain(t *testing.T) {
 				other.ChainID = vrschema.U64(8)
 				require.ErrorIs(t, a.SetPosPolicy(t.Context(), other), ErrPosPolicyConflict)
 			} else {
-				require.ErrorIs(t, err, ErrContextMismatch)
+				require.ErrorIs(t, err, tc.wantErr)
+				before.Faulted = tc.wantErr == ErrStateUntrusted
 				require.Equal(t, before, a.Status())
+				require.Equal(t, enroll, a.Enrollment())
+				_, err = a.SignPosPoP(posRequest())
+				if before.Faulted {
+					require.ErrorIs(t, err, ErrStateUntrusted)
+				} else {
+					require.NoError(t, err)
+				}
+			}
+		})
+	}
+}
+
+func TestPendingJoinRechecksPinBeforeLatchingProofFault(t *testing.T) {
+	f := q3fixture.New(t, q3fixture.Options{Assignment: true, Params: map[string]string{"chain_id": "8"}})
+	conf := f.ShardConf
+	enroll := Enrollment{AuthorityID: "joiner", NodeID: "fresh-joiner", NetworkID: conf.NetworkID,
+		PartitionID: conf.PartitionID, ShardID: conf.ShardID, ShardEpoch: f.Successor.Epoch,
+		RootEpoch: PinRootEpoch(1), Profile: ProfileLegacyBCRv1}
+	var installPin func()
+	a, err := New(enroll, currentTrust{base: f.Old}, WithLineage(f.Old, f.UTB), WithPendingJoinScope(),
+		WithPosSource(newFakePos(), posChain), WithAdvanceHook(func() { installPin() }))
+	require.NoError(t, err)
+	t.Cleanup(a.Close)
+	installPin = func() { require.NoError(t, a.SetPosPolicy(t.Context(), posPin())) }
+	before := a.Status()
+	bundle := bundleOf(t, f)
+	_, err = a.AdvanceWithProof(t.Context(), bundle)
+	require.ErrorIs(t, err, ErrConflict)
+	require.Equal(t, before, a.Status())
+
+	_, err = a.AdvanceWithProof(t.Context(), bundle)
+	require.ErrorIs(t, err, ErrStateUntrusted)
+	before.Faulted = true
+	require.Equal(t, before, a.Status())
+}
+
+func TestPendingJoinEnrollmentLatchesVerifiedPinContradiction(t *testing.T) {
+	f := newFixture(t, 1)
+	enroll := f.enroll
+	enroll.ShardConfHash = nil
+	a, err := New(enroll, trustStub{tb: f.tb}, WithPendingJoinScope(), WithPosSource(newFakePos(), posChain))
+	require.NoError(t, err)
+	t.Cleanup(a.Close)
+	require.NoError(t, a.SetPosPolicy(t.Context(), posPin()))
+	_, err = a.SignPosPoP(posRequest())
+	require.NoError(t, err)
+	before := a.Status()
+	conf := ownConf(t, a)
+	conf.PartitionParams = map[string]string{"chain_id": "8"}
+
+	conf.Epoch++
+	require.ErrorIs(t, a.CompleteEnrollment(conf), ErrContextMismatch)
+	conf.Epoch--
+	conf.Validators[0].NodeID = "other"
+	require.ErrorIs(t, a.CompleteEnrollment(conf), ErrContextMismatch)
+	conf.Validators[0].NodeID = enroll.NodeID
+	require.Equal(t, before, a.Status(), "check scope and membership before latching a contradiction")
+
+	require.ErrorIs(t, a.CompleteEnrollment(conf), ErrStateUntrusted)
+	before.Faulted = true
+	require.Equal(t, before, a.Status())
+	require.Equal(t, enroll, a.Enrollment())
+	_, err = a.SignPosPoP(posRequest())
+	require.ErrorIs(t, err, ErrStateUntrusted)
+}
+
+func TestPendingJoinChecksDeferredB1ProfileBeforePinning(t *testing.T) {
+	for _, tc := range []struct {
+		name, chain string
+		matches     bool
+	}{
+		{"matching configuration", "7", true}, {"mismatching configuration", "8", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := q3fixture.New(t, q3fixture.Options{Assignment: true, Params: map[string]string{"chain_id": tc.chain}})
+			conf := f.ShardConf
+			enroll := Enrollment{AuthorityID: "joiner", NodeID: "fresh-joiner", NetworkID: conf.NetworkID,
+				PartitionID: conf.PartitionID, ShardID: conf.ShardID, ShardEpoch: f.Successor.Epoch,
+				RootEpoch: PinRootEpoch(1), Profile: ProfileLegacyBCRv1}
+			a, err := New(enroll, currentTrust{base: f.Old}, WithLineage(f.Old, f.UTB), WithPendingJoinScope())
+			require.NoError(t, err)
+			t.Cleanup(a.Close)
+			require.NoError(t, a.ProvisionPosSource(newFakePos(), posChain))
+			before := a.Status()
+			result, err := a.AdvanceWithProof(t.Context(), bundleOf(t, f))
+			if tc.matches {
+				require.NoError(t, err)
+				require.True(t, result.Advanced)
+			} else {
+				require.ErrorIs(t, err, ErrContextMismatch)
+				require.ErrorContains(t, err, "differs from B1 profile")
+				require.Equal(t, before, a.Status())
+			}
+
+			own := *f.Successor
+			own.Epoch = a.Enrollment().ShardEpoch
+			own.Validators = []*types.NodeInfo{{NodeID: enroll.NodeID, SigKey: mustPub(t, a), Stake: 1}}
+			before = a.Status()
+			err = a.CompleteEnrollment(&own)
+			if tc.matches {
+				require.NoError(t, err)
+				require.True(t, a.Enrollment().complete())
+			} else {
+				require.ErrorIs(t, err, ErrContextMismatch)
+				require.ErrorContains(t, err, "differs from B1 profile")
+				require.Equal(t, before, a.Status())
+				require.Equal(t, enroll, a.Enrollment())
 			}
 		})
 	}

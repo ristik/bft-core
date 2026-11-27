@@ -403,8 +403,8 @@ New has returned. This is the step that closes that gap, and it is deliberately 
     enrolled ShardConfHash. From then on it is immutable like every other enrollment field.
 
 Nothing is admitted before this succeeds: ReplaceSession and Authenticate refuse with
-ErrEnrollmentIncomplete. A refused completion changes nothing, so the operator can correct the
-configuration and try again.
+ErrEnrollmentIncomplete. A valid configuration naming this authority on a chain that contradicts
+its verified P85 pin latches a fault.
 */
 func (a *Authority) CompleteEnrollment(conf *types.PartitionDescriptionRecord) error {
 	a.mu.Lock()
@@ -437,11 +437,6 @@ func (a *Authority) CompleteEnrollment(conf *types.PartitionDescriptionRecord) e
 	case conf.Epoch != enroll.ShardEpoch:
 		return fmt.Errorf("%w: shard configuration is for shard epoch %d, this authority is enrolled for %d", ErrContextMismatch, conf.Epoch, enroll.ShardEpoch)
 	}
-	if a.pendingJoinScope {
-		if err := checkJoinChainID(conf, a.joinChainID, a.pos); err != nil {
-			return err
-		}
-	}
 	pub, err := publicKeyOf(a.signer)
 	if err != nil {
 		return err
@@ -460,6 +455,11 @@ func (a *Authority) CompleteEnrollment(conf *types.PartitionDescriptionRecord) e
 	if !bytes.Equal(named.SigKey, pub) {
 		given, own := sha256.Sum256(named.SigKey), sha256.Sum256(pub)
 		return fmt.Errorf("%w: shard configuration names node %s with signing key %x, this authority's key is %x", ErrContextMismatch, enroll.NodeID, given, own)
+	}
+	if a.pendingJoinScope {
+		if err := a.checkJoinChainIDLocked(conf); err != nil {
+			return err
+		}
 	}
 	hash, err := conf.Hash(gocrypto.SHA256)
 	if err != nil {

@@ -106,7 +106,7 @@ func (a *Authority) AdvanceWithProof(ctx context.Context, bundle []byte) (Advanc
 	}
 	enroll, lineage, trust, scope, retired, recovery := a.enroll.clone(), a.lineage, a.trust, a.scopeVersion, a.retired, a.recovery
 	pending := !enroll.complete() && a.pendingJoinScope
-	joinChainID, pos := a.joinChainID, a.pos
+	b1Chain, pos := a.posB1Chain, a.pos
 	pub, err := publicKeyOf(a.signer)
 	a.mu.Unlock()
 	if err != nil {
@@ -166,7 +166,7 @@ func (a *Authority) AdvanceWithProof(ctx context.Context, bundle []byte) (Advanc
 			return AdvanceResult{}, err
 		}
 		if pending {
-			pendingSuccessor, err = verifyPendingJoinSuccessor(lineage, next, step, enroll, pub, joinChainID, pos)
+			pendingSuccessor, err = verifyPendingJoinSuccessor(lineage, next, step, enroll)
 		} else {
 			successor, err = verifySuccessor(lineage, next, step, enroll, pub)
 		}
@@ -189,12 +189,19 @@ func (a *Authority) AdvanceWithProof(ctx context.Context, bundle []byte) (Advanc
 	if a.state != healthActive {
 		return AdvanceResult{}, fmt.Errorf("%w: this authority has latched faulted", ErrStateUntrusted)
 	}
-	if a.scopeVersion != scope || a.lineage != lineage || a.retired != retired || a.enroll.complete() != enroll.complete() || (pending && a.pos != pos) {
-		// Enrollment, a PoS pin or an operator-trusted advance landed meanwhile. Verify again against what is now held.
+	if a.scopeVersion != scope || a.lineage != lineage || a.retired != retired || a.enroll.complete() != enroll.complete() ||
+		(pending && (a.pos != pos || a.posB1Chain != b1Chain)) {
+		// Enrollment, provisioning or an operator-trusted advance landed meanwhile. Verify again against what is now held.
 		return AdvanceResult{}, fmt.Errorf("%w: the authority's scope changed while the proof was verified", ErrConflict)
 	}
-	if pendingSuccessor != nil && a.joinScopeProved && pendingSuccessor.shardEpoch != enroll.ShardEpoch {
-		return AdvanceResult{}, fmt.Errorf("%w: the pending join authority already proved possession for shard epoch %d", ErrContextMismatch, enroll.ShardEpoch)
+	if pendingSuccessor != nil {
+		pendingSuccessor.shardEpoch, err = a.pendingJoinEpochLocked(pendingSuccessor.conf, pub)
+		if err != nil {
+			return AdvanceResult{}, err
+		}
+		if a.joinScopeProved && pendingSuccessor.shardEpoch != enroll.ShardEpoch {
+			return AdvanceResult{}, fmt.Errorf("%w: the pending join authority already proved possession for shard epoch %d", ErrContextMismatch, enroll.ShardEpoch)
+		}
 	}
 	if successor != nil {
 		if a.rec.checkInvariants() != nil || a.generation == math.MaxUint64 || a.scopeVersion == math.MaxUint64 {
