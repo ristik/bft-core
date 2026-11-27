@@ -510,6 +510,13 @@ class JoinerUrethFlags(unittest.TestCase):
         missing = {k for k in genesis[1].keys() - joiner.keys() if k not in LOCAL_URETH_FLAGS}
         self.assertEqual(missing, {'--builder.gaslimit', '--engine.persistence-threshold'})
 
+    def test_verify_certifies_the_vector_without_the_runtime_flags(self):
+        """The pinned ubft's vr-genesis verify knows the --unicity.* and --txpool.* flags only: the shipped line minus the two runtime flags."""
+        import vr_genesis
+        shipped = ' '.join(vr_genesis.ureth_runtime_flags(self.PROFILE, self.MAX_GAS))
+        self.assertEqual(vr_genesis.certified_vector(shipped), ' '.join(self.PROFILE) + f' --unicity.fee-collector={vr_genesis.FEE_COLLECTOR}')
+        self.assertEqual(vr_genesis.certified_vector('--a=1 --builder.gaslimit 5 --engine.persistence-threshold=64 --b 2'), '--a=1 --b 2')
+
     def test_the_generator_refuses_a_compose_that_does_not_run_the_shipped_vector(self):
         import vr_genesis
         images = {role:'sha256:' + '0'*64 for role in ('node', 'rpc', 'signer', 'guard')}
