@@ -158,7 +158,7 @@ func TestVerifyIsolatedRefusals(t *testing.T) {
 		{"progress retagged", mut(func(rs []Record) { rs[2].Progress += 1 }), ErrRecordID},
 		{"data tampered", mut(func(rs []Record) { rs[2].Data = append([]byte(nil), rs[2].Data...); rs[2].Data[31] ^= 1 }), ErrRecordID},
 		{"payload width", mut(func(rs []Record) { rs[2].Data = rs[2].Data[:31]; rs[2] = rebuilt(rs[2]) }), ErrPayload},
-		{"kind", mut(func(rs []Record) { rs[2].Kind = Kind(9); rs[2] = rebuilt(rs[2]) }), ErrKind},
+		{"kind", mut(func(rs []Record) { rs[2].Kind = Kind(10); rs[2] = rebuilt(rs[2]) }), ErrKind},
 		{"time backwards", mut(func(rs []Record) { rs[2].UCTime = rs[1].UCTime - 1; rs[2] = rebuilt(rs[2]) }), ErrMonotonic},
 	}
 	require.NoError(t, Verify(good))

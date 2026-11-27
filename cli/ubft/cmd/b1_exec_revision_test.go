@@ -115,10 +115,19 @@ func TestTheGenerationsCannotBeMixedInVRVerify(t *testing.T) {
 		require.ErrorIs(t, err, ErrB1Profile)
 	})
 	t.Run("the current revision added by hand to the legacy profile, with the legacy genesis and PDR", func(t *testing.T) {
-		// the legacy profile names the registry runtime of its time; the current pin is set too, so the refusal is the V1 profile hash alone
+		// the legacy profile names the registry runtime and the VR build of its time; the current pins are set too (the runtime, and the
+		// current generation's VR hook measurement and prices: the legacy VR core is no reviewed build since #1319), so the refusal is the V1
+		// profile hash alone
+		raw, err := os.ReadFile(vrTestdata(t, "b1-profile.json"))
+		require.NoError(t, err)
+		var cur map[string]any
+		require.NoError(t, json.Unmarshal(raw, &cur))
 		p := writeProfileEdit(t, legacyTestdata("b1-profile.json"), func(m map[string]any) {
 			m["executionRevision"] = b1state.CurrentExecutionRevision
 			m["runtimeHash"] = b1registry.CodeHashHex
+			for _, k := range []string{"vrHookMeasurement", "hookRecordGas", "electGas", "hRecords", "systemGas", "maxGas"} {
+				m[k] = cur[k]
+			}
 		})
 		profile, file, err := readB1ProfileFile(p)
 		require.NoError(t, err)

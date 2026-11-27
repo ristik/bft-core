@@ -52,6 +52,10 @@ type RootState struct {
 	// StagedSchedule are the entries the staged primary's Accepted schedule changes append when its H commits (cleared with the staging:
 	// an Abort before H drops them).
 	StagedSchedule []vrschema.Activation
+	// Request is the committed handoff-PoP request of the current intent (#1319, control op 6), nil when none is held: a newer intent's
+	// request replaces it, a RejectResult consumes it, and the block end drops it once the backoff's epoch is another. It is encoded only
+	// while held (version 3), so a state without one keeps its version 2 encoding and digest.
+	Request *vrschema.PoPRequest
 }
 
 type activationWire struct {
@@ -160,6 +164,28 @@ type rootStateWire struct {
 	StagedSched    []activationWire
 }
 
+// rootStateWireV3 is version 2's fields followed by the held PoP request.
+type rootStateWireV3 struct {
+	_              struct{} `cbor:",toarray"`
+	Domain         string
+	Version        uint64
+	Backoff        hex.Bytes
+	OpenUCTime     uint64
+	Support        hex.Bytes
+	Acknowledged   hex.Bytes
+	PrepareUCTime  uint64
+	StagedBody     hex.Bytes
+	StagedResult   hex.Bytes
+	StagedBitmap   uint64
+	StagedSupport  hex.Bytes
+	StagedKSupport hex.Bytes
+	AttemptOpen    uint64
+	AttemptOpenUC  uint64
+	Schedule       []activationWire
+	StagedSched    []activationWire
+	Request        vrschema.PoPRequest
+}
+
 const rootStateDomain = "UNICITY_VR_ROOT_STATE"
 
 // GenesisRootState initializes the state at the genesis epoch with the genesis committee size (no open, no settle).
@@ -191,10 +217,20 @@ func (s RootState) Encode() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return types.Cbor.Marshal(rootStateWire{Domain: rootStateDomain, Version: 2, Backoff: b, OpenUCTime: s.OpenUCTime, Support: t, StagedSupport: st, StagedKSupport: sk,
+	w := rootStateWire{Domain: rootStateDomain, Version: 2, Backoff: b, OpenUCTime: s.OpenUCTime, Support: t, StagedSupport: st, StagedKSupport: sk,
 		Acknowledged: s.Acknowledged[:], PrepareUCTime: s.PrepareUCTime, StagedBody: s.StagedBody[:], StagedResult: s.StagedResult[:],
 		StagedBitmap: uint64(s.StagedBitmap), AttemptOpen: s.AttemptOpenRound, AttemptOpenUC: s.AttemptOpenUCTime,
-		Schedule: encodeActivations(s.Schedule), StagedSched: encodeActivations(s.StagedSchedule)})
+		Schedule: encodeActivations(s.Schedule), StagedSched: encodeActivations(s.StagedSchedule)}
+	if s.Request == nil {
+		return types.Cbor.Marshal(w)
+	}
+	if err := s.Request.Check(); err != nil {
+		return nil, errors.Join(ErrRootState, err)
+	}
+	return types.Cbor.Marshal(rootStateWireV3{Domain: w.Domain, Version: 3, Backoff: w.Backoff, OpenUCTime: w.OpenUCTime, Support: w.Support,
+		Acknowledged: w.Acknowledged, PrepareUCTime: w.PrepareUCTime, StagedBody: w.StagedBody, StagedResult: w.StagedResult,
+		StagedBitmap: w.StagedBitmap, StagedSupport: w.StagedSupport, StagedKSupport: w.StagedKSupport, AttemptOpen: w.AttemptOpen,
+		AttemptOpenUC: w.AttemptOpenUC, Schedule: w.Schedule, StagedSched: w.StagedSched, Request: *s.Request})
 }
 
 // Digest is SHA-256 of Encode.
@@ -223,8 +259,18 @@ func DecodeRootState(raw []byte) (RootState, error) {
 		}
 	}
 	var w rootStateWire
+	var request *vrschema.PoPRequest
 	if err := types.Cbor.Unmarshal(raw, &w); err != nil || w.Domain != rootStateDomain || w.Version != 2 {
-		return RootState{}, fmt.Errorf("%w: encoding", ErrRootState)
+		var w3 rootStateWireV3
+		if err := types.Cbor.Unmarshal(raw, &w3); err != nil || w3.Domain != rootStateDomain || w3.Version != 3 {
+			return RootState{}, fmt.Errorf("%w: encoding", ErrRootState)
+		}
+		w = rootStateWire{Domain: w3.Domain, Version: w3.Version, Backoff: w3.Backoff, OpenUCTime: w3.OpenUCTime, Support: w3.Support,
+			Acknowledged: w3.Acknowledged, PrepareUCTime: w3.PrepareUCTime, StagedBody: w3.StagedBody, StagedResult: w3.StagedResult,
+			StagedBitmap: w3.StagedBitmap, StagedSupport: w3.StagedSupport, StagedKSupport: w3.StagedKSupport, AttemptOpen: w3.AttemptOpen,
+			AttemptOpenUC: w3.AttemptOpenUC, Schedule: w3.Schedule, StagedSched: w3.StagedSched}
+		r := w3.Request
+		request = &r
 	}
 	var bw struct {
 		_       struct{} `cbor:",toarray"`
@@ -260,7 +306,7 @@ func DecodeRootState(raw []byte) (RootState, error) {
 	}
 	s := RootState{Schedule: sched, StagedSchedule: stagedSched, Backoff: bw.State, OpenUCTime: w.OpenUCTime, Support: t, Acknowledged: vrschema.Word(w.Acknowledged), PrepareUCTime: w.PrepareUCTime,
 		StagedBody: [32]byte(w.StagedBody), StagedResult: vrschema.Word(w.StagedResult), StagedBitmap: uint16(w.StagedBitmap), StagedSupport: staged, StagedKSupport: stagedK,
-		AttemptOpenRound: w.AttemptOpen, AttemptOpenUCTime: w.AttemptOpenUC}
+		AttemptOpenRound: w.AttemptOpen, AttemptOpenUCTime: w.AttemptOpenUC, Request: request}
 	again, err := s.Encode()
 	if err != nil || !bytes.Equal(again, raw) {
 		return RootState{}, fmt.Errorf("%w: not canonical", ErrRootState)
@@ -345,6 +391,24 @@ func (s RootState) EndBlock(epoch, round uint64, after vrschema.ControlState, co
 		s.OpenUCTime, s.PrepareUCTime = 0, 0
 	}
 	s.Backoff = b
+	if s.Request != nil && s.Request.Epoch != b.Epoch {
+		s.Request = nil // a request of an epoch that handed off: its predecessor committee no longer has authority
+	}
+	return s, nil
+}
+
+// ApplyPoPRequest is control op 6 (#1319, root-only, no record): the request of the derivable intent, once per intent. The executor has
+// checked that the intent is the derivable one and filled the request from it; here only the once rule and the shape are applied.
+func (s RootState) ApplyPoPRequest(r vrschema.PoPRequest) (RootState, error) {
+	if err := r.Check(); err != nil {
+		return s, err
+	}
+	if s.Request != nil && bytes.Equal(s.Request.Intent, r.Intent) {
+		return s, fmt.Errorf("%w: the intent's PoP request is already committed", vrschema.ErrPoPMiss)
+	}
+	r.Predecessor, r.ResultID, r.Intent = bytes.Clone(r.Predecessor), bytes.Clone(r.ResultID), bytes.Clone(r.Intent)
+	r.Roster = append([]uint64(nil), r.Roster...)
+	s.Request = &r
 	return s, nil
 }
 

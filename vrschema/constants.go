@@ -133,7 +133,7 @@ const (
 )
 
 // Record widths (bytes) of root-record kinds 1 to 8.
-var RecordWidths = [9]int{0, 32, 128, 288, 192, 96, 224, 128, 128}
+var RecordWidths = [10]int{0, 32, 128, 288, 192, 96, 224, 128, 128, 96}
 
 // MaxRet are the VR immutable return caps, ABI envelope included.
 const (
@@ -155,6 +155,11 @@ func ForceDeadline(maxElectionInterval uint64) uint64 { return maxElectionInterv
 
 // ParkPeriod is 2*LIFETIME.
 const ParkPeriod = 2 * Lifetime
+
+// PoPWindow is the handoff-PoP response window (#1319): a PoPRequest committed at root progress p has its cutoff at p + PoPWindow, and its
+// certified misses count only when that cutoff is at or before the result's expiresAtProgress, so the whole window lies within the
+// result's lifetime.
+const PoPWindow = Lifetime / 4
 
 // Constant is one row of the canonical constants table.
 type Constant struct {
@@ -203,12 +208,13 @@ func ConstantsTable() []Constant {
 		{"FORCE_DEADLINE", "maxElectionInterval + 2*LIFETIME", "rule", "VR"},
 		{"STALL_DEADLINE", "maxElectionInterval + 2*LIFETIME", "rule", "VR"},
 		{"PARK_PERIOD", d(ParkPeriod), "rule", "PoA"},
+		{"POP_WINDOW", d(PoPWindow), "rule", "roots"},
 		{"COMPOSER_POOL", d(ComposerPool), "rule", "PoA"},
 		{"COMPOSER_TRIALS", d(ComposerTrials), "rule", "PoA"},
 		{"MAX_HOLDERS", d(MaxHolders), "rule", "VR"},
 		{"MAX_ACTIVATIONS", d(MaxActivations), "rule", "VR"},
 		{"SUPPORT_TABLE", "16 x 64", "rule", "roots"},
-		{"RECORD_WIDTHS", "32/128/288/192/96/224/128/128", "schema", "all"},
+		{"RECORD_WIDTHS", "32/128/288/192/96/224/128/128/96", "schema", "all"},
 		{"RECORDS_PER_ROOT_BLOCK", d(RecordsPerRootBlock), "existing", "roots"},
 		{"MAX_RET", "elect 160, ready 5408, pending/notMine 96, adoption 96, void 0", "rule", "VR"},
 		{"METADATA_STATICCALL_GAS", d(MetadataStaticGas), "rule", "VR"},

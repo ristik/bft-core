@@ -2136,6 +2136,7 @@ func (x *ConsensusManager) processNewRoundEvent(ctx context.Context) {
 		x.orderRejection(ctx, block, parentRound)
 		x.orderSubmittedControl(ctx, block)
 		x.orderRetirements(ctx, block, parentRound)
+		x.orderPoPRequest(ctx, block)
 		x.orderHandoffView(ctx, block)
 	}
 	if size, err := encodedSize(proposalMsg); err != nil || size > abdrc.MaxProposalFrame-proposalSignatureRoom {

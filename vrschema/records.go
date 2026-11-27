@@ -2,7 +2,7 @@ package vrschema
 
 import "fmt"
 
-// Root-record payloads are the kind's exact ABI words (all static). Kinds 1 to 5 are unchanged from rootrecords; kinds 6 to 8 are new.
+// Root-record payloads are the kind's exact ABI words (all static). Kinds 1 to 5 are unchanged from rootrecords; kinds 6 to 9 are new.
 
 // RecordWordTypes are the frozen word types of every kind: "bytes32", "uint64", "uint8", "bool", "uint16" (bitmap of at most 16 bits).
 var RecordWordTypes = map[uint8][]string{
@@ -14,11 +14,12 @@ var RecordWordTypes = map[uint8][]string{
 	RecBoundary:         {"bytes32", "uint64", "uint64", "uint64", "uint64", "bool", "uint16"},
 	RecOutputRejected:   {"bytes32", "uint8", "uint64", "uint16"},
 	RecHolderRetirement: {"uint8", "uint64", "uint64", "bytes32"},
+	RecPoPMissed:        {"bytes32", "uint64", "uint16"},
 }
 
 // Gas pricing inputs of the import (ureth records.rs): the admission charge is 2000 + 16 * companionBytes + 1000 * entries, the
 // companion is at most 16384 bytes and 32 entries, and the execution bound IMPORT_EXECUTION_GAS is measured on 32 nine-word records.
-// Kinds 6 to 8 are at most 7 words, so neither bound moves. VR's own per-record work is HookRecordGas (design section 3.3.4), measured by
+// Kinds 6 to 9 are at most 7 words, so neither bound moves. VR's own per-record work is HookRecordGas (design section 3.3.4), measured by
 // VT-02.
 const (
 	ImportScanBaseGas  = 2_000
@@ -170,4 +171,37 @@ func DecodeHolderRetirement(data []byte) (HolderRetirement, error) {
 	h.Generation, _ = WordU64(wordAt(data, 2))
 	h.RefDigest = wordAt(data, 3)
 	return h, nil
+}
+
+// PoPMissed is record kind 9 (#1319): the members of a result's frozen roster whose handoff PoP miss a root quorum certified, bit i the i-th
+// roster member (ascending staking id: VR's member order). It sits between the result's Expired OutputRejected and its SessionClosed, at
+// their anchor, and only when a member is certified. deadline is the request's cutoff in root progress.
+type PoPMissed struct {
+	ResultID     Word   `json:"-"`
+	Deadline     uint64 `json:"deadline"`
+	MissedBitmap uint16 `json:"missedBitmap"`
+}
+
+// Encode is the 96-byte payload.
+func (m PoPMissed) Encode() []byte {
+	return words(m.ResultID, U64(m.Deadline), U64(uint64(m.MissedBitmap)))
+}
+
+// DecodePoPMissed is the strict decoder: a nonzero result id and a nonzero bitmap.
+func DecodePoPMissed(data []byte) (PoPMissed, error) {
+	var m PoPMissed
+	if err := CheckRecordPayload(RecPoPMissed, data); err != nil {
+		return m, err
+	}
+	m.ResultID = wordAt(data, 0)
+	m.Deadline, _ = WordU64(wordAt(data, 1))
+	bm, _ := WordU64(wordAt(data, 2))
+	m.MissedBitmap = uint16(bm)
+	switch {
+	case m.ResultID == (Word{}):
+		return m, fmt.Errorf("%w: zero result id", ErrRange)
+	case m.MissedBitmap == 0:
+		return m, fmt.Errorf("%w: an empty missed bitmap", ErrRange)
+	}
+	return m, nil
 }

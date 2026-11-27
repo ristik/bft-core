@@ -49,9 +49,27 @@ func (s State) AckBoundary(round, timestamp uint64, resultID, assignmentID [32]b
 // acknowledged result, is ErrResultResolved and projects nothing; a payload the schema refuses (reason outside 1..3, memberID outside
 // Invalid, readyBitmap outside Expired, a zero result id) is ErrPayload and projects nothing either.
 func (s State) RejectOutput(resultID [32]byte, reason uint8, memberID uint64, readyBitmap uint16, round, timestamp uint64) (State, []Record, error) {
+	return s.RejectOutputMissed(resultID, reason, memberID, readyBitmap, 0, 0, round, timestamp)
+}
+
+// RejectOutputMissed is RejectOutput with the certified handoff-PoP misses of an expiry (#1319): with a nonzero missedBitmap, a PoPMissed
+// (resultID, deadline, missedBitmap) is projected between the OutputRejected and the SessionClosed, at the same anchor. Misses outside an
+// Expired rejection are ErrPayload.
+func (s State) RejectOutputMissed(resultID [32]byte, reason uint8, memberID uint64, readyBitmap uint16, deadline uint64, missedBitmap uint16,
+	round, timestamp uint64) (State, []Record, error) {
 	payload := OutputRejectedPayload(resultID, reason, memberID, readyBitmap)
 	if err := checkPayload(KindOutputRejected, payload); err != nil {
 		return State{}, nil, err
+	}
+	var missed []byte
+	if missedBitmap != 0 {
+		if reason != RejectExpired {
+			return State{}, nil, fmt.Errorf("%w: certified misses outside an expiry", ErrPayload)
+		}
+		missed = PoPMissedPayload(resultID, deadline, missedBitmap)
+		if err := checkPayload(KindPoPMissed, missed); err != nil {
+			return State{}, nil, err
+		}
 	}
 	progress, err := s.Progress(round)
 	if err != nil {
@@ -65,11 +83,19 @@ func (s State) RejectOutput(resultID [32]byte, reason uint8, memberID uint64, re
 	if err != nil {
 		return State{}, nil, err
 	}
+	out := []Record{rej}
+	if missed != nil {
+		var m Record
+		if s, m, err = s.append(KindPoPMissed, missed, at); err != nil {
+			return State{}, nil, err
+		}
+		out = append(out, m)
+	}
 	s, closed, err := s.append(KindSessionClosed, resultID[:], at)
 	if err != nil {
 		return State{}, nil, err
 	}
-	return s, []Record{rej, closed}, nil
+	return s, append(out, closed), nil
 }
 
 func (s State) holderRetiredAt(holder uint8, id, generation uint64) (int, bool) {

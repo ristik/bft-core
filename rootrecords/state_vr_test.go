@@ -74,8 +74,8 @@ func TestFrozenRecordVectors(t *testing.T) {
 			width++
 		}
 	}
-	require.Equal(t, 25, decode)
-	require.Equal(t, 8, width)
+	require.Equal(t, 32, decode)
+	require.Equal(t, 9, width)
 }
 
 // primaryAcked is a state with one committed primary handoff from epoch 1 (H at round 100) to epoch 2 (first round 101).
@@ -270,11 +270,15 @@ func TestVerifyRefusesNonCanonicalNewKinds(t *testing.T) {
 	bad[5*32+31] = 2 // recovered = 2
 	_, err := l.Append(KindBoundary, bad, Anchor{1, 1})
 	require.ErrorIs(t, err, ErrPayload)
-	_, err = l.Append(Kind(9), make([]byte, 32), Anchor{1, 1})
+	_, err = l.Append(Kind(10), make([]byte, 32), Anchor{1, 1})
 	require.ErrorIs(t, err, ErrKind)
+	_, err = l.Append(KindPoPMissed, PoPMissedPayload(id32(1), 5, 0), Anchor{1, 1})
+	require.ErrorIs(t, err, ErrPayload, "an empty missed bitmap")
+	_, err = l.Append(KindPoPMissed, PoPMissedPayload([32]byte{}, 5, 1), Anchor{1, 1})
+	require.ErrorIs(t, err, ErrPayload, "a zero result id")
 }
 
-// vrschemaVerdict is the frozen reference's verdict on a payload: its width and word check, and for kinds 6 to 8 its strict decoder.
+// vrschemaVerdict is the frozen reference's verdict on a payload: its width and word check, and for kinds 6 to 9 its strict decoder.
 func vrschemaVerdict(kind Kind, data []byte) bool {
 	if err := vrschema.CheckRecordPayload(uint8(kind), data); err != nil {
 		return false
@@ -287,6 +291,8 @@ func vrschemaVerdict(kind Kind, data []byte) bool {
 		_, err = vrschema.DecodeOutputRejected(data)
 	case KindHolderRetirement:
 		_, err = vrschema.DecodeHolderRetirement(data)
+	case KindPoPMissed:
+		_, err = vrschema.DecodePoPMissed(data)
 	}
 	return err == nil
 }
@@ -323,6 +329,8 @@ func TestPayloadRulesAreVrschemas(t *testing.T) {
 			require.Equal(t, vrschema.OutputRejected{ResultID: id32(1), Reason: 3, MemberID: 4}.Encode(), OutputRejectedPayload(id32(1), 3, 4, 0))
 		case KindHolderRetirement:
 			require.Equal(t, vrschema.HolderRetirement{Holder: 7, ID: 1, Generation: 2, RefDigest: id32(9)}.Encode(), HolderRetirementPayload(7, 1, 2, id32(9)))
+		case KindPoPMissed:
+			require.Equal(t, vrschema.PoPMissed{ResultID: id32(1), Deadline: 7, MissedBitmap: 0x10}.Encode(), PoPMissedPayload(id32(1), 7, 0x10))
 		}
 	}
 	require.Greater(t, n, 10_000)
@@ -336,4 +344,37 @@ func TestPayloadRulesAreVrschemas(t *testing.T) {
 func wordOf(v uint64) (w [32]byte) {
 	copy(w[:], word(v))
 	return
+}
+
+// An Expired rejection with certified handoff-PoP misses (#1319) projects OutputRejected, PoPMissed and SessionClosed at one anchor, exactly
+// vrschema's projection; misses outside an expiry project nothing.
+func TestRejectOutputMissedProjectsTheMissBetweenThePair(t *testing.T) {
+	s := NewState(1, 1)
+	next, recs, err := s.RejectOutputMissed(id32(0xc1), vrschema.RejExpired, 0, 0b01111, 4_200, 0b10000, 50, 1_000)
+	require.NoError(t, err)
+	require.Equal(t, []Kind{KindOutputRejected, KindPoPMissed, KindSessionClosed}, kinds(recs))
+	require.Equal(t, recs[0].Progress, recs[1].Progress)
+	require.Equal(t, recs[1].Progress, recs[2].Progress)
+	m, err := vrschema.DecodePoPMissed(recs[1].Data)
+	require.NoError(t, err)
+	require.Equal(t, vrschema.PoPMissed{ResultID: id32(0xc1), Deadline: 4_200, MissedBitmap: 0b10000}, m)
+	require.NoError(t, Verify(recs))
+	three, err := vrschema.ProjectRejectResultMissed(recs[0].Data, vrschema.PoPMissed{Deadline: 4_200, MissedBitmap: 0b10000})
+	require.NoError(t, err)
+	require.Len(t, three, 3)
+	for i := range three {
+		require.Equal(t, recs[i].Data, three[i][1])
+	}
+	_, _, err = next.RejectOutputMissed(id32(0xc1), vrschema.RejExpired, 0, 0, 4_200, 1, 51, 1_000)
+	require.ErrorIs(t, err, ErrResultResolved)
+	before := s.Digest()
+	_, _, err = s.RejectOutputMissed(id32(0xc3), vrschema.RejInvalidated, 0, 0, 4_200, 1, 50, 1_000)
+	require.ErrorIs(t, err, ErrPayload)
+	require.Equal(t, before, s.Digest())
+	// no miss: the ordinary pair, byte for byte RejectOutput's
+	_, plain, err := s.RejectOutputMissed(id32(0xc1), vrschema.RejExpired, 0, 0b11, 0, 0, 50, 1_000)
+	require.NoError(t, err)
+	_, want, err := s.RejectOutput(id32(0xc1), vrschema.RejExpired, 0, 0b11, 50, 1_000)
+	require.NoError(t, err)
+	require.Equal(t, want, plain)
 }

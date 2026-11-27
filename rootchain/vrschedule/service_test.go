@@ -114,7 +114,11 @@ func TestTheViewsAssemblerAssembles(t *testing.T) {
 	var s *Service
 	for _, m := range w.Members {
 		if m.Root == who {
-			s = NewService(ServiceConfig{Self: who, Signer: m.RK.Signer, Send: func(m Message) { sent = append(sent, m) }})
+			s = NewService(ServiceConfig{Self: who, Signer: m.RK.Signer, Send: func(m Message) {
+				if m.Assembly != nil { // the peers' proofs it relays are counted by TestARetainedProofIsRelayedOnce
+					sent = append(sent, m)
+				}
+			}})
 		}
 	}
 	require.NotNil(t, s)
@@ -380,7 +384,13 @@ func TestSendRunsOutsideTheServicesLock(t *testing.T) {
 	sent := 0
 	for _, m := range w.Members {
 		if m.Root == who {
-			s = NewService(ServiceConfig{Self: who, Signer: m.RK.Signer, Send: func(Message) { _ = s.Members(); _, _ = s.Plan(); sent++ }})
+			s = NewService(ServiceConfig{Self: who, Signer: m.RK.Signer, Send: func(m Message) {
+				_ = s.Members()
+				_, _ = s.Plan()
+				if m.Assembly != nil {
+					sent++
+				}
+			}})
 		}
 	}
 	require.NotNil(t, s)
