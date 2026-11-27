@@ -1,6 +1,8 @@
 package nb2ref
 
 import (
+	"bytes"
+	"encoding/binary"
 	"encoding/hex"
 	"math/big"
 	"math/bits"
@@ -120,7 +122,24 @@ type Config struct {
 	VerifierCodeHash    [32]byte
 	K, B                uint64
 	Qmax                *big.Int
+	ERC20               *ERC20Config
 	wireVersion         uint64 // zero means legacy encoding for constructed configurations
+}
+
+// ERC20Config distinguishes the token and factory generation within a flat configuration.
+type ERC20Config struct {
+	Token            [20]byte
+	Generation, Pins [32]byte
+}
+
+// ERC20AssetIDs derives the asset tag, token type and coin in configuration order.
+func ERC20AssetIDs(chainID uint64, token [20]byte, executionGenesis [32]byte) (asset, ty, aid [32]byte) {
+	var chain [8]byte
+	binary.BigEndian.PutUint64(chain[:], chainID)
+	x := cat(chain[:], token[:], executionGenesis[:])
+	return HU([]byte("UNICITY/NB2/ERC20/ASSET/1/"), x),
+		HU([]byte("UNICITY/NB2/ERC20/TYPE/1/"), x),
+		HU([]byte("UNICITY/NB2/ERC20/COIN/1/"), x)
 }
 
 // ConfigArity is the arity of Γ.
@@ -136,12 +155,20 @@ func (c *Config) Bytes() []byte {
 }
 
 func (c *Config) bytesWithVersion(version uint64) []byte {
-	return CArr(
+	if c.ERC20 != nil {
+		version = 3
+	}
+	fields := [][]byte{
 		CBytes([]byte(domainConfig)), CUint(version), CUint(uint64(c.Network)),
 		CBytes(c.RootGenesis[:]), CBytes(c.ExecutionGenesis[:]), CUint(c.ChainID), CUint(uint64(c.EVMPartition)),
 		CBytes(c.EVMShard), CUint(uint64(c.AggregatorPartition)), CBytes(c.Vault[:]), CBytes(c.Asset[:]),
 		CBytes(c.Ty[:]), CBytes(c.Aid[:]), CBytes(c.SemanticProfileHash[:]), CBytes(c.Verifier[:]),
-		CBytes(c.VerifierCodeHash[:]), CUint(c.K), CUint(c.B), CAmount(c.Qmax))
+		CBytes(c.VerifierCodeHash[:]), CUint(c.K), CUint(c.B), CAmount(c.Qmax),
+	}
+	if e := c.ERC20; e != nil {
+		fields = append(fields, CBytes(e.Token[:]), CBytes(e.Generation[:]), CBytes(e.Pins[:]))
+	}
+	return CArr(fields...)
 }
 
 // Domain is D = H_U(Γ).
@@ -173,15 +200,19 @@ func DecodeConfig(b []byte, p Params) (*Config, error) {
 }
 
 func decodeConfig(b []byte, p Params, version uint64) (*Config, error) {
-	if len(b) > maxConfigBytes {
-		return nil, cfgErr(ConfigArity, ErrInputTooLarge)
+	arity, limit := ConfigArity, maxConfigBytes
+	if version == 3 {
+		arity, limit = 22, 480
+	}
+	if len(b) > limit {
+		return nil, cfgErr(arity, ErrInputTooLarge)
 	}
 	root, err := scanOne(b)
 	if err != nil {
-		return nil, cfgErr(ConfigArity, err)
+		return nil, cfgErr(arity, err)
 	}
-	if err := root.array(ConfigArity); err != nil {
-		return nil, cfgErr(ConfigArity, err)
+	if err := root.array(arity); err != nil {
+		return nil, cfgErr(arity, err)
 	}
 	k := root.kids
 	c := &Config{}
@@ -266,6 +297,18 @@ func decodeConfig(b []byte, p Params, version uint64) (*Config, error) {
 	}
 	if c.Qmax.Cmp(QmaxLimit) > 0 {
 		return nil, cfgErr(18, ErrIntRange)
+	}
+	if version == 3 {
+		e := &ERC20Config{}
+		for offset, field := range [][]byte{e.Token[:], e.Generation[:], e.Pins[:]} {
+			if err := k[19+offset].fixed(field); err != nil {
+				return nil, cfgErr(19+offset, err)
+			}
+			if bytes.Equal(field, make([]byte, len(field))) {
+				return nil, cfgErr(19+offset, ErrIntRange)
+			}
+		}
+		c.ERC20 = e
 	}
 	return c, nil
 }

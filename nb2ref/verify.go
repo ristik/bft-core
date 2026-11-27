@@ -400,7 +400,7 @@ func checkReturnAt(c *Config, d [32]byte, last *TransferTx, amount *big.Int) (*R
 			return nil, err
 		}
 	}
-	if r.Asset != AssetUCT {
+	if r.Asset != c.Asset {
 		if err := fail(ErrReturnAsset); err != nil {
 			return nil, err
 		}
